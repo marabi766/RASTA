@@ -12,8 +12,29 @@ export class RastaError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
   readonly details?: ErrorDetail[];
-  /** Never serialised to the client — for server-side logs only. */
+  /**
+   * Never serialised to the client — for server-side logs only, where
+   * operators diagnose from it. What it may carry (S-09, docs/06 § 6.7):
+   * **identifiers and amounts** — record and tenant ids, an endpoint, a
+   * wallet's requested and available balance, a state transition. What it
+   * must never carry: **credentials or keys** (tokens, passwords, an
+   * Idempotency-Key or anything derived from one), **personal data** (names,
+   * emails, phone numbers, national ids, addresses) or **client free text**
+   * (a reason, a note, a raw body). Nothing sanitises it: it is logged as
+   * written, so what goes in is the author's call.
+   */
   readonly internalContext?: Record<string, unknown>;
+  /**
+   * A 5xx whose message the client may see (S-09). Off by default: the
+   * exception filter answers every 5xx with a generic message, because a
+   * server-side message is written for operators and names records. Set only
+   * through {@link RastaError.internalClientSafe} (or the constructor option),
+   * for a message that is **author-written, fixed and input-free** and tells
+   * the client something it needs — that retrying is safe, say. Never derived
+   * from the message's content. No effect below 500: 4xx messages already
+   * reach the client.
+   */
+  readonly clientSafe: boolean;
 
   constructor(
     code: ErrorCode,
@@ -22,6 +43,8 @@ export class RastaError extends Error {
       details?: ErrorDetail[];
       internalContext?: Record<string, unknown>;
       cause?: unknown;
+      /** See {@link RastaError.clientSafe}. */
+      clientSafe?: boolean;
     },
   ) {
     super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
@@ -30,6 +53,7 @@ export class RastaError extends Error {
     this.status = ERROR_STATUS[code];
     this.details = options?.details;
     this.internalContext = options?.internalContext;
+    this.clientSafe = options?.clientSafe === true;
     Error.captureStackTrace?.(this, RastaError);
   }
 
@@ -197,6 +221,17 @@ export class RastaError extends Error {
 
   static internal(message: string, cause?: unknown): RastaError {
     return new RastaError(ERROR_CODES.INTERNAL_ERROR, message, { cause });
+  }
+
+  /**
+   * A 500 whose `message` reaches the client as written — the one exception to
+   * the generic 5xx answer (S-09). `message` must be a fixed string literal the
+   * author wrote for the client, with nothing interpolated: no id, no value,
+   * no input. Use it when the client needs to know something to act — "nothing
+   * was changed and it is safe to retry". Anything else is {@link internal}.
+   */
+  static internalClientSafe(message: string, cause?: unknown): RastaError {
+    return new RastaError(ERROR_CODES.INTERNAL_ERROR, message, { cause, clientSafe: true });
   }
 
   static notImplemented(what: string): RastaError {

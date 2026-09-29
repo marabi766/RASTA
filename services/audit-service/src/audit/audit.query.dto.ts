@@ -191,10 +191,10 @@ function refineWindow(
       // Names the configured ceiling, as ADR-053 § 10 requires. A message that
       // said only "window too large" would leave a client guessing at the
       // number, and guessing means retrying — which is the load the ceiling
-      // exists to prevent.
-      message:
-        `The query window must not exceed ${maxWindowDays} days ` +
-        `(AUDIT_MAX_QUERY_WINDOW_DAYS); this request covers ${days.toFixed(2)} days`,
+      // exists to prevent. The ceiling is configuration; the request's own
+      // width is derived from its input and is not repeated (S-09, docs/06
+      // § 6.7) — the client already knows what it sent.
+      message: `The query window must not exceed ${maxWindowDays} days (AUDIT_MAX_QUERY_WINDOW_DAYS)`,
     });
   }
 }

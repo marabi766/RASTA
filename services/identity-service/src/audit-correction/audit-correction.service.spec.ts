@@ -469,6 +469,8 @@ describe('AuditCorrectionService', () => {
         expect(error.message).toBe(
           'The correction could not be recorded; nothing was changed and it is safe to retry',
         );
+        // Opted in to reach the client past the generic 5xx answer (S-09).
+        expect((error as { clientSafe?: boolean }).clientSafe).toBe(true);
         expect(JSON.stringify(error)).not.toMatch(/P20|55P03|lock timeout|Transaction API/);
         expect(h.enqueueEvent).not.toHaveBeenCalled();
         expect(h.create).not.toHaveBeenCalled();
@@ -490,6 +492,7 @@ describe('AuditCorrectionService', () => {
       'The correction could not be recorded; nothing was changed and it is safe to retry',
     );
     expect(error.message).not.toContain('outbox_message');
+    expect((error as { clientSafe?: boolean }).clientSafe).toBe(true);
     expect(h.create).not.toHaveBeenCalled();
   });
 

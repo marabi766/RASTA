@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   RewardGrantError,
   RewardService,
+  grantFailureCodes,
   isPermanentGrantFailure,
   type GrantOutcome,
 } from '../reward/reward.service';
@@ -278,18 +279,21 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         service: SERVICE_NAME,
         outcome: permanent ? 'dead_lettered' : 'retried',
       });
-      const description = error instanceof Error ? error.message : String(error);
+      // Rule ids and error codes only, never an underlying message (S-09):
+      // this text reaches the log and `x-dlq-error`. A transient failure is
+      // rethrown whole, and `EventConsumer` logs it sanitised and bounded.
+      const failed = grantFailureCodes(error);
       if (!permanent) {
         this.logger.warn(
           `Reward grant failed for ${envelope.eventName} ${envelope.eventId}; ` +
-            `left unprocessed for redelivery: ${description}`,
+            `left unprocessed for redelivery: ${failed}`,
         );
         throw error;
       }
       throw new UnprocessableEventError(
         DLQ_REASONS.BUSINESS_RULE_VIOLATION,
         `A reward rule refused ${envelope.eventName} ${claim.sourceReference}; ` +
-          `replay once the rule is fixed: ${description}`,
+          `replay once the rule is fixed: ${failed}`,
       );
     }
   }

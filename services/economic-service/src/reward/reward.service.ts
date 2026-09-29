@@ -703,10 +703,11 @@ export class RewardGrantError extends Error {
     readonly outcomes: readonly GrantOutcome[],
     readonly failures: readonly RewardGrantFailure[],
   ) {
-    super(
-      `${failures.length} reward rule(s) failed to grant: ` +
-        failures.map(({ ruleId, error }) => `${ruleId} (${describeFailure(error)})`).join('; '),
-    );
+    // Rule ids and error codes only (S-09, review of #136): a transient
+    // failure is rethrown as this error, and `EventConsumer` repeats its
+    // message on every retry line and in `x-dlq-error`. The underlying errors
+    // stay in `failures`, a typed field nothing logs.
+    super(`${failures.length} reward rule(s) failed to grant: ${summariseFailures(failures)}`);
     this.name = 'RewardGrantError';
     this.permanent = failures.every(({ error }) => isPermanentGrantFailure(error));
   }
@@ -716,9 +717,33 @@ export function isPermanentGrantFailure(error: unknown): boolean {
   return error instanceof RastaError && PERMANENT_GRANT_FAILURES.has(error.code);
 }
 
-function describeFailure(error: unknown): string {
-  if (error instanceof RastaError) return `${error.code}: ${error.message}`;
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+/** How many failed rules a summary names before it only counts the rest. */
+const SUMMARY_MAX_RULES = 5;
+
+/**
+ * A grant failure in identifiers only (S-09): each failed rule's id and its
+ * error's code — a platform `ErrorCode`, or an error's class name — and never
+ * a message. An underlying message can be anything a driver or a downstream
+ * wrote, and this text reaches `x-dlq-error` and the log.
+ */
+export function grantFailureCodes(error: unknown): string {
+  return summariseFailures(error instanceof RewardGrantError ? error.failures : [{ error }]);
+}
+
+function summariseFailures(failures: readonly { ruleId?: string; error: unknown }[]): string {
+  const named = failures
+    .slice(0, SUMMARY_MAX_RULES)
+    .map(({ ruleId, error: cause }) =>
+      ruleId === undefined ? failureCode(cause) : `${ruleId} (${failureCode(cause)})`,
+    );
+  const more =
+    failures.length > SUMMARY_MAX_RULES ? `; and ${failures.length - SUMMARY_MAX_RULES} more` : '';
+  return `${named.join('; ')}${more}`;
+}
+
+function failureCode(error: unknown): string {
+  if (error instanceof RastaError) return error.code;
+  return error instanceof Error ? error.name : 'non-error value';
 }
 
 type RewardRuleRow = Prisma.RewardRuleGetPayload<Record<string, never>>;

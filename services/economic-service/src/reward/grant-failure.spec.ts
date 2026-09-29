@@ -61,15 +61,18 @@ describe('RewardGrantError', () => {
         { ruleId: 'RWR_B', error: blip },
       ],
     );
-    expect(error.message).toContain('RWR_A (BUSINESS_RULE_VIOLATION: refused)');
-    expect(error.message).toContain('RWR_B (Error: deadlock detected)');
+    // Codes only: the underlying messages stay in the typed field (S-09).
+    expect(error.message).toBe(
+      '2 reward rule(s) failed to grant: RWR_A (BUSINESS_RULE_VIOLATION); RWR_B (Error)',
+    );
+    expect(error.failures.map((failure) => failure.error)).toEqual([verdict, blip]);
     expect(error.outcomes).toEqual([granted]);
     expect(error.name).toBe('RewardGrantError');
   });
 
-  it('describes a failure that is not an Error', () => {
+  it('names a failure that is not an Error by kind, not by value', () => {
     expect(new RewardGrantError([], [{ ruleId: 'RWR_A', error: 42 }]).message).toContain(
-      'RWR_A (42)',
+      'RWR_A (non-error value)',
     );
   });
 });

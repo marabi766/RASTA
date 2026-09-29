@@ -15,6 +15,7 @@ import {
 import { dlqMessagesTotal } from '@rasta/observability';
 import { createSystemContext, runWithContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
+import { LOG_TEXT_MAX, safeLogText } from '../errors/safe-log-text';
 import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connection';
 
 /**
@@ -599,27 +600,21 @@ export function forwardedHeaders(headers: IHeaders | undefined): IHeaders {
 }
 
 /** The longest handler message a log line or `x-dlq-error` repeats, in characters. */
-export const HANDLER_MESSAGE_MAX = 200;
+export const HANDLER_MESSAGE_MAX = LOG_TEXT_MAX;
 
 /**
  * A handler's error message, fit for a log line and a header: `Name: message`
  * (the refusal's own message for {@link UnprocessableEventError}, whose
- * reason is stated beside it), with control characters, line and paragraph
- * separators and bidirectional overrides replaced by a space — so it cannot
- * forge a second log line or disguise itself — and cut to
+ * reason is stated beside it), through `safeLogText` — the rule the HTTP
+ * exception filter applies too: credentials scrubbed, control characters,
+ * line and paragraph separators and bidirectional overrides replaced by a
+ * space, so it cannot forge a second log line or disguise itself, and cut to
  * {@link HANDLER_MESSAGE_MAX} characters with an ellipsis. Persian text passes
  * through: the message is the service's own, and operators read it.
  */
 export function handlerMessage(error: unknown): string {
   const text = error instanceof UnprocessableEventError ? error.message : describe(error);
-  const flat = text
-    .replace(/[\p{Cc}\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/gu, ' ')
-    .replace(/ {2,}/g, ' ')
-    .trim();
-  const chars = Array.from(flat);
-  return chars.length > HANDLER_MESSAGE_MAX
-    ? `${chars.slice(0, HANDLER_MESSAGE_MAX - 1).join('')}…`
-    : flat;
+  return safeLogText(text, HANDLER_MESSAGE_MAX);
 }
 
 /**
