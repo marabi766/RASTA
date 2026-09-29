@@ -10,12 +10,14 @@ import type { RefundRequest } from '../src/payment/provider';
 
 /**
  * Two paths that returned money to the payer and kept it in the wallet
- * (PR #140 STEP 0, R2 and U6; ADR-064). Each test was written first and failed
- * on `main` before the fix beside it.
+ * (PR #140 STEP 0, R2 and U6; ADR-064). Each was reproduced by a failing test
+ * before its fix.
  *
  * R2: an operator refund asked the provider first and checked the balance
  *     after. A top-up already spent was refunded at the provider, the ledger
- *     then refused the reversal, and the wallet kept the credit.
+ *     then refused the reversal, and the wallet kept the credit. A check
+ *     before the provider call is not enough on its own (round 1 on #143): the
+ *     amount is held until the provider answers.
  *
  * U6: a provider refund that *threw* after a capture the ledger could not
  *     credit was treated as refused. A same-key retry then credited the
@@ -97,26 +99,39 @@ describe('payment outcomes that must not be guessed (real database)', () => {
     });
   }
 
-  describe('R2 — an operator refund of a top-up that has been spent', () => {
-    it('is refused before the provider is asked, and nothing moves', async () => {
+  const holdsOf = (walletId: string) =>
+    runUnscoped('the suite reads the holds on its wallet', () =>
+      prisma.client.walletHold.findMany({ where: { walletId, referenceType: 'PAYMENT_REFUND' } }),
+    );
+
+  const refundBy = (organizationId: string, intentId: string, reason = 'the suite refunds') =>
+    asActor({ organizationId }, () => payments.refund(intentId, reason));
+
+  /** A promise and the function that settles it. */
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => (resolve = settle));
+    return { promise, resolve };
+  }
+
+  describe('R2 — an operator refund holds the money until the provider answers', () => {
+    it('refuses a top-up that has been spent before the provider is asked, and moves nothing', async () => {
       const organizationId = `${org.a}-R2`;
       const { walletId, result } = await topUp(organizationId, 1_000n, `R2-${ulid()}`);
       expect(result.status).toBe('CAPTURED');
       await spend(organizationId, walletId, 600n);
       const refund = jest.spyOn(provider, 'refund');
 
-      await expect(
-        asActor({ organizationId }, () =>
-          payments.refund(result.paymentIntentId, 'the suite refunds a spent top-up'),
-        ),
-      ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE' });
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
+        code: 'INSUFFICIENT_BALANCE',
+      });
 
-      // The provider was never asked: the payer is not refunded while the
-      // wallet keeps the credit.
+      // The payer is not refunded while the wallet keeps the credit.
       expect(refund).not.toHaveBeenCalled();
       const [intent] = await intentsOf(organizationId);
-      expect(intent).toMatchObject({ status: 'CAPTURED', refundedAt: null });
+      expect(intent).toMatchObject({ status: 'CAPTURED', refundedAt: null, failureReason: null });
       expect(await provider.getStatus(intent!.providerReference!)).toBe('CAPTURED');
+      expect(await holdsOf(walletId)).toHaveLength(0);
       expect(await readBalances(prisma, walletId)).toMatchObject({
         ledger: 1_000n,
         available: 400n,
@@ -126,89 +141,275 @@ describe('payment outcomes that must not be guessed (real database)', () => {
       await cleanup(prisma, [organizationId]);
     });
 
-    it('still refunds a top-up the wallet can return', async () => {
-      const organizationId = `${org.a}-R2-OK`;
-      const { walletId, result } = await topUp(organizationId, 1_000n, `R2OK-${ulid()}`);
-      await spend(organizationId, walletId, 400n);
-      await expect(
-        asActor({ organizationId }, () => wiring.wallets.getById(walletId)),
-      ).resolves.toMatchObject({ availableBalanceMinor: 600n });
+    it('makes a spend during the provider call fail on the hold, not the reversal', async () => {
+      // Round 1 on #143, finding 1: the pre-check used to commit and release
+      // its locks, a spend then committed while the provider refunded, and
+      // the reversal was refused — payer refunded, wallet still credited.
+      const organizationId = `${org.a}-R2-SPEND`;
+      const { walletId, result } = await topUp(organizationId, 1_000n, `R2SPEND-${ulid()}`);
+      const real = provider.refund.bind(provider);
+      let spendDuringCall: unknown;
+      jest.spyOn(provider, 'refund').mockImplementationOnce(async (request: RefundRequest) => {
+        // The provider is being asked: the amount is already held.
+        expect(await readBalances(prisma, walletId)).toMatchObject({
+          available: 0n,
+          pending: 1_000n,
+        });
+        spendDuringCall = await spend(organizationId, walletId, 700n).catch((e: unknown) => e);
+        return real(request);
+      });
 
-      // 600 available cannot return 1 000; a second top-up makes it 1 100.
-      await topUp(organizationId, 500n, `R2OK-${ulid()}`);
-      const refunded = await asActor({ organizationId }, () =>
-        payments.refund(result.paymentIntentId, 'the suite refunds a covered top-up'),
-      );
-      expect(refunded.balances.availableBalanceMinor).toBe(100n);
+      const refunded = await refundBy(organizationId, result.paymentIntentId);
+
+      expect(spendDuringCall).toMatchObject({ code: 'INSUFFICIENT_BALANCE' });
+      expect(refunded.balances).toMatchObject({
+        ledgerBalanceMinor: 0n,
+        availableBalanceMinor: 0n,
+        pendingBalanceMinor: 0n,
+      });
+      expect((await intentsOf(organizationId))[0]).toMatchObject({
+        status: 'REFUNDED',
+        failureReason: null,
+      });
+      const [hold] = await holdsOf(walletId);
+      expect(hold).toMatchObject({ status: 'REFUNDED', reference: result.paymentIntentId });
       expect(
-        (await intentsOf(organizationId)).find((i) => i.id === result.paymentIntentId),
-      ).toMatchObject({ status: 'REFUNDED' });
+        await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED),
+      ).toHaveLength(0);
 
       await cleanup(prisma, [organizationId]);
     });
 
-    it('re-checks under the locks after the provider answers, and marks a refund it could not reverse', async () => {
-      // The window the pre-check cannot close without a hold (ADR-064; PR B):
-      // the wallet is spent between the check and the ledger write. The
-      // provider has refunded, so the row is marked and announced rather
-      // than left looking CAPTURED.
-      const organizationId = `${org.b}-R2-RACE`;
-      const { walletId, result } = await topUp(organizationId, 1_000n, `R2RACE-${ulid()}`);
-      const real = provider.refund.bind(provider);
-      jest.spyOn(provider, 'refund').mockImplementationOnce(async (request: RefundRequest) => {
-        const answer = await real(request);
-        await spend(organizationId, walletId, 700n);
-        return answer;
+    it('returns the held money when the provider declines, and a later refund still works', async () => {
+      const organizationId = `${org.a}-R2-DECLINE`;
+      const { walletId, result } = await topUp(organizationId, 500n, `R2DECL-${ulid()}`);
+      jest.spyOn(provider, 'refund').mockResolvedValueOnce({
+        outcome: 'FAILED',
+        providerReference: 'x',
+        failureCode: 'NOT_PERMITTED',
+        simulated: true,
       });
 
-      await expect(
-        asActor({ organizationId }, () =>
-          payments.refund(result.paymentIntentId, 'the suite races a spend'),
-        ),
-      ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE' });
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+      expect((await intentsOf(organizationId))[0]).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: null,
+      });
+      expect(await readBalances(prisma, walletId)).toMatchObject({
+        ledger: 500n,
+        available: 500n,
+        pending: 0n,
+      });
+      expect((await holdsOf(walletId)).map((hold) => hold.status)).toEqual(['REFUNDED']);
 
-      const [intent] = await intentsOf(organizationId);
-      expect(intent).toMatchObject({ status: 'CAPTURED', failureReason: 'REFUNDED_NOT_REVERSED' });
-      const [alert] = await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED);
-      expect(alert?.aggregateId).toBe(result.paymentIntentId);
-      expect((await readBalances(prisma, walletId)).ledger).toBe(1_000n);
-
-      // A second refund attempt does not ask the provider again or reverse
-      // what the wallet cannot return.
-      const refund = jest.spyOn(provider, 'refund');
-      refund.mockClear();
-      await expect(
-        asActor({ organizationId }, () =>
-          payments.refund(result.paymentIntentId, 'the suite retries the refund'),
-        ),
-      ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE' });
-      expect(refund).not.toHaveBeenCalled();
+      await refundBy(organizationId, result.paymentIntentId);
+      expect((await intentsOf(organizationId))[0]).toMatchObject({ status: 'REFUNDED' });
+      expect((await readBalances(prisma, walletId)).ledger).toBe(0n);
 
       await cleanup(prisma, [organizationId]);
     });
   });
 
-  describe('R2 — concurrency and tenancy', () => {
-    it('reverses a top-up once when two refunds race to it', async () => {
-      const organizationId = `${org.b}-R2-TWICE`;
-      const { walletId, result } = await topUp(organizationId, 800n, `R2TWICE-${ulid()}`);
+  describe('R2 — a refund whose outcome is not recorded is never lost or repeated', () => {
+    it('marks a lost provider response REFUND_UNKNOWN, keeps the hold, and refuses a second refund', async () => {
+      // Round 1 on #143, finding 2.
+      const organizationId = `${org.b}-R2-LOST`;
+      const { walletId, result } = await topUp(organizationId, 900n, `R2LOST-${ulid()}`);
+      loseRefundResponse();
 
-      const outcomes = await Promise.allSettled([
-        asActor({ organizationId }, () => payments.refund(result.paymentIntentId, 'first')),
-        asActor({ organizationId }, () => payments.refund(result.paymentIntentId, 'second')),
-      ]);
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toThrow(
+        'provider response lost',
+      );
 
-      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
-      const [refused] = outcomes.filter((o) => o.status === 'rejected');
-      expect((refused as PromiseRejectedResult).reason).toMatchObject({
-        code: 'INVALID_STATE_TRANSITION',
-      });
-      expect(await readBalances(prisma, walletId)).toMatchObject({ ledger: 0n, available: 0n });
       const [intent] = await intentsOf(organizationId);
-      expect(intent).toMatchObject({ status: 'REFUNDED', failureReason: null });
+      expect(intent).toMatchObject({ status: 'CAPTURED', failureReason: 'REFUND_UNKNOWN' });
+      expect(await provider.getStatus(intent!.providerReference!)).toBe('REFUNDED');
+      const [alert] = await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED);
+      expect(alert?.aggregateId).toBe(result.paymentIntentId);
+      expect((alert?.payload as { payload?: { reason?: string } })?.payload?.reason).toBe(
+        'PROVIDER_OUTCOME_UNKNOWN',
+      );
+      // The money stays held: it cannot be spent while the payer may have it.
+      expect(await readBalances(prisma, walletId)).toMatchObject({
+        ledger: 900n,
+        available: 0n,
+        pending: 900n,
+      });
+      expect((await holdsOf(walletId)).map((hold) => hold.status)).toEqual(['ACTIVE']);
+
+      const refund = jest.spyOn(provider, 'refund');
+      refund.mockClear();
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+      expect(refund).not.toHaveBeenCalled();
       expect(
         await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED),
-      ).toHaveLength(0);
+      ).toHaveLength(1);
+
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it('keeps REFUND_REQUESTED and the hold when even the unknown outcome cannot be recorded', async () => {
+      // A crash after the request is committed looks the same: marked, held,
+      // and refused on a second attempt.
+      const organizationId = `${org.b}-R2-CRASH`;
+      const { walletId, result } = await topUp(organizationId, 400n, `R2CRASH-${ulid()}`);
+      loseRefundResponse();
+      const enqueue = wiring.ledger.enqueue.bind(wiring.ledger);
+      jest.spyOn(wiring.ledger, 'enqueue').mockImplementation(async (tx, input) => {
+        if (input.eventName === ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED) {
+          throw new Error('outbox down');
+        }
+        return enqueue(tx, input);
+      });
+
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toThrow(
+        'provider response lost',
+      );
+      expect((await intentsOf(organizationId))[0]).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: 'REFUND_REQUESTED',
+      });
+      expect((await readBalances(prisma, walletId)).pending).toBe(400n);
+
+      const refund = jest.spyOn(provider, 'refund');
+      refund.mockClear();
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+      expect(refund).not.toHaveBeenCalled();
+
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it('marks a refund the ledger could not reverse, and a retry reverses it without the provider', async () => {
+      const organizationId = `${org.b}-R2-REVERSAL`;
+      const { walletId, result } = await topUp(organizationId, 1_000n, `R2REV-${ulid()}`);
+      jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
+
+      await expect(refundBy(organizationId, result.paymentIntentId)).rejects.toThrow(
+        'connection reset',
+      );
+      expect((await intentsOf(organizationId))[0]).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: 'REFUNDED_NOT_REVERSED',
+      });
+      const [alert] = await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED);
+      expect((alert?.payload as { payload?: { reason?: string } })?.payload?.reason).toBe(
+        'REVERSAL_FAILED',
+      );
+      // Held, so nothing can spend what the payer already has back.
+      expect(await readBalances(prisma, walletId)).toMatchObject({
+        ledger: 1_000n,
+        available: 0n,
+        pending: 1_000n,
+      });
+
+      const refund = jest.spyOn(provider, 'refund');
+      refund.mockClear();
+      await refundBy(organizationId, result.paymentIntentId, 'the suite retries the refund');
+      expect(refund).not.toHaveBeenCalled();
+      expect((await intentsOf(organizationId))[0]).toMatchObject({
+        status: 'REFUNDED',
+        failureReason: null,
+      });
+      expect(await readBalances(prisma, walletId)).toMatchObject({
+        ledger: 0n,
+        available: 0n,
+        pending: 0n,
+      });
+      expect((await holdsOf(walletId)).map((hold) => hold.status)).toEqual(['REFUNDED']);
+      expect(
+        await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED),
+      ).toHaveLength(1);
+
+      await cleanup(prisma, [organizationId]);
+    });
+
+    it.each(['REFUND_REQUESTED', 'REFUND_UNKNOWN', 'REFUNDED_NOT_REVERSED'])(
+      'answers a same-key top-up retry of an intent marked %s as unfinished, not CAPTURED',
+      async (marker) => {
+        // Round 1 on #143, finding 3. Each marker is produced for real by the
+        // tests above; here it is written directly so the retry is isolated.
+        const organizationId = `${org.c}-RESUME-${marker}`;
+        const key = `RESUME-${ulid()}`;
+        const { result } = await topUp(organizationId, 250n, key);
+        await runUnscoped('the suite marks the intent', () =>
+          prisma.client.paymentIntent.update({
+            where: { id: result.paymentIntentId },
+            data: { failureReason: marker },
+          }),
+        );
+
+        await expect(topUp(organizationId, 250n, key)).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+        });
+
+        await cleanup(prisma, [organizationId]);
+      },
+    );
+  });
+
+  describe('R2 — concurrency and tenancy', () => {
+    it('lets exactly one of two refunds that both passed the first read reach the provider', async () => {
+      // Barrier-controlled: both refunds read the intent as CAPTURED and
+      // both reach the intent's row lock before either takes it. The loser
+      // must be refused before the provider is asked; the winner's provider
+      // call waits for that refusal, so no ordering is left to chance.
+      const organizationId = `${org.c}-R2-RACE`;
+      const { walletId, result } = await topUp(organizationId, 800n, `R2RACE-${ulid()}`);
+
+      const internals = payments as unknown as {
+        lockIntent: (...args: unknown[]) => Promise<string | undefined>;
+      };
+      const lockIntent = internals.lockIntent.bind(payments);
+      const bothAtTheLock = deferred();
+      let arrived = 0;
+      jest.spyOn(internals, 'lockIntent').mockImplementation(async (...args: unknown[]) => {
+        if (arrived < 2) {
+          arrived += 1;
+          if (arrived === 2) bothAtTheLock.resolve();
+          await bothAtTheLock.promise;
+        }
+        return lockIntent(...args);
+      });
+
+      const refused = deferred();
+      const real = provider.refund.bind(provider);
+      const refund = jest
+        .spyOn(provider, 'refund')
+        .mockImplementation(async (request: RefundRequest) => {
+          // A second call means both got through: stop waiting, so the
+          // assertion below fails at once instead of the test hanging.
+          if (refund.mock.calls.length > 1) refused.resolve();
+          await refused.promise;
+          return real(request);
+        });
+      const attempt = () =>
+        refundBy(organizationId, result.paymentIntentId).catch((error: unknown) => {
+          refused.resolve();
+          throw error;
+        });
+
+      const outcomes = await Promise.allSettled([attempt(), attempt()]);
+
+      expect(arrived).toBe(2);
+      expect(refund).toHaveBeenCalledTimes(1);
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+      const [loser] = outcomes.filter((o) => o.status === 'rejected');
+      expect((loser as PromiseRejectedResult).reason).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        internalContext: { outcome: 'REFUND_REQUESTED' },
+      });
+      expect(await readBalances(prisma, walletId)).toMatchObject({ ledger: 0n, pending: 0n });
+      expect((await intentsOf(organizationId))[0]).toMatchObject({
+        status: 'REFUNDED',
+        failureReason: null,
+      });
+      expect(await holdsOf(walletId)).toHaveLength(1);
 
       await cleanup(prisma, [organizationId]);
     });
@@ -220,11 +421,9 @@ describe('payment outcomes that must not be guessed (real database)', () => {
       await asActor({ organizationId: other }, () => wiring.wallets.getOrOpen('IRR'));
       const refund = jest.spyOn(provider, 'refund');
 
-      await expect(
-        asActor({ organizationId: other }, () =>
-          payments.refund(result.paymentIntentId, 'a foreign tenant tries'),
-        ),
-      ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      await expect(refundBy(other, result.paymentIntentId)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
 
       expect(refund).not.toHaveBeenCalled();
       expect((await intentsOf(owner))[0]).toMatchObject({
@@ -232,6 +431,7 @@ describe('payment outcomes that must not be guessed (real database)', () => {
         failureReason: null,
       });
       expect((await readBalances(prisma, walletId)).ledger).toBe(300n);
+      expect(await holdsOf(walletId)).toHaveLength(0);
       expect(await eventsOf(other, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED)).toHaveLength(0);
 
       await cleanup(prisma, [owner, other]);

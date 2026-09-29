@@ -203,15 +203,18 @@ export const paymentCaptureUnreconciledPayload = z.object({
 });
 
 /**
- * The provider refunded a top-up and the ledger could not reverse it
- * (ADR-064, R2).
+ * An operator refund whose outcome the ledger could not record (ADR-064, R2).
  *
- * The balance is checked before the provider is asked, so this is reached
- * only when the wallet is spent between that check and the reversal, or when
- * the reversal write fails. The intent stays CAPTURED with `failure_reason =
- * REFUNDED_NOT_REVERSED`: the payer has the money back and the wallet still
- * holds the credit. A retry of the refund reverses it once the wallet can
- * return it, without asking the provider again; otherwise it needs a person.
+ * The refund holds the amount in escrow before the provider is asked, so the
+ * money cannot be spent while the answer is outstanding. Two outcomes leave
+ * the intent CAPTURED with that hold still in place:
+ *
+ *   `PROVIDER_OUTCOME_UNKNOWN` — the provider call failed without an answer.
+ *     The payer may have the money back. `failure_reason = REFUND_UNKNOWN`;
+ *     a second refund is refused until the provider's state is established.
+ *   `REVERSAL_FAILED` / `INSUFFICIENT_BALANCE` — the provider refunded and the
+ *     reversal could not be written. `failure_reason = REFUNDED_NOT_REVERSED`;
+ *     a retry of the refund reverses it without asking the provider again.
  *
  * Published in the transaction that records the failure reason. Codes only.
  */
@@ -223,7 +226,7 @@ export const paymentRefundUnreconciledPayload = z.object({
   currency,
   provider: z.string(),
   simulated: z.boolean(),
-  reason: z.enum(['INSUFFICIENT_BALANCE', 'REVERSAL_FAILED']),
+  reason: z.enum(['PROVIDER_OUTCOME_UNKNOWN', 'INSUFFICIENT_BALANCE', 'REVERSAL_FAILED']),
   detectedAt: z.string(),
 });
 

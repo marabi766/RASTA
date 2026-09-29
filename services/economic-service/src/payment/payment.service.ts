@@ -12,7 +12,7 @@ import {
   walletBalanceLimit,
   type LockedWallet,
 } from '../wallet/wallet.repository';
-import { assertSufficient, balancesFrom } from '../wallet/balances';
+import { assertSufficient } from '../wallet/balances';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
 import {
@@ -22,7 +22,7 @@ import {
 } from '../observability/metrics';
 import { PAYMENT_PROVIDER } from '../tokens';
 import { SERVICE_NAME } from '../config/env';
-import type { PaymentProvider } from './provider';
+import type { PaymentProvider, RefundResult } from './provider';
 import type { TopUpDto } from './dto';
 import { hashRequestBody } from '../shared/idempotency';
 import type { PaymentIntent } from '../generated/prisma';
@@ -413,7 +413,18 @@ export class PaymentService {
     if (intent.requestHash !== requestHash) {
       throw RastaError.idempotencyKeyReused();
     }
-    if (intent.status === 'CAPTURED') return this.capturedView(intent);
+    if (intent.status === 'CAPTURED') {
+      // Captured, and a refund of it not finished: answering CAPTURED would
+      // describe money that may already be back with the payer (round 1 on
+      // #143, finding 3).
+      if (intent.failureReason && UNFINISHED_REFUND.has(intent.failureReason)) {
+        throw RastaError.businessRule(
+          'A refund of this top-up has not finished; its outcome is being reconciled',
+          { paymentIntentId: intent.id, status: intent.status, outcome: intent.failureReason },
+        );
+      }
+      return this.capturedView(intent);
+    }
     // Refunded since: answering CAPTURED would describe money that went back
     // (round 3, M3). Terminal, and not replayable under this key.
     if (intent.status === 'REFUNDED') {
@@ -746,20 +757,36 @@ export class PaymentService {
    * happen — and the ledger shows both the top-up and its reversal, which is
    * what an auditor needs to see.
    *
-   * Refused with `INSUFFICIENT_BALANCE` when the money has since been spent,
-   * and **before the provider is asked** (ADR-064, R2). The check used to run
-   * after `provider.refund`: a spent top-up was returned to the payer, the
-   * ledger then refused the reversal, and the wallet kept the credit.
+   * ## Three steps, and why the money is held between them (ADR-064, R2)
    *
-   * The check runs under the intent's row lock and then the wallet's — the
-   * order `completeCapture` takes — and again under the same locks when the
-   * reversal is written, because the provider call between them holds no
-   * lock. A spend landing in that window is the one case the pre-check cannot
-   * close (a hold on the funds closes it; ADR-064, PR B). When it happens, or
-   * the reversal write fails, after the provider has refunded, the intent is
-   * marked `REFUNDED_NOT_REVERSED` and `PAYMENT_REFUND_UNRECONCILED` announces
-   * it in the same transaction. A retry then reverses it once the wallet can
-   * return the money, without asking the provider again.
+   * The balance used to be checked after `provider.refund`: a spent top-up
+   * was returned to the payer, the ledger then refused the reversal, and the
+   * wallet kept the value. Checking first is not enough on its own, because
+   * the provider call holds no lock and a spend can commit while it runs. So:
+   *
+   *   1. **Request** — under the intent's row lock and then the wallet's, the
+   *      amount is **held** in escrow through the ordinary hold path
+   *      (ADR-034; `placeHold` refuses `INSUFFICIENT_BALANCE`) and the intent
+   *      is marked `REFUND_REQUESTED`. A concurrent spend now fails on the
+   *      hold, not the reversal.
+   *   2. **Ask** the provider, outside any transaction.
+   *   3. **Record** — refunded: the hold is returned to the wallet and the
+   *      top-up reversed, in one transaction under the same locks, with the
+   *      balance checked again as a defence. Declined: the hold is returned
+   *      and the marker cleared.
+   *
+   * Anything that leaves the outcome unrecorded leaves the hold in place and
+   * the intent marked, so it is never lost and never repeated blindly:
+   *
+   *   - the provider call fails without an answer → `REFUND_UNKNOWN`, with
+   *     `PAYMENT_REFUND_UNRECONCILED` in the same transaction; a second refund
+   *     is refused until the provider's state is established (the reconciler
+   *     or a person, ADR-064);
+   *   - the provider refunded and step 3 failed → `REFUNDED_NOT_REVERSED`,
+   *     announced the same way; a retry performs step 3 alone, without asking
+   *     the provider again;
+   *   - a crash anywhere after step 1 → `REFUND_REQUESTED` with the hold,
+   *     which a second refund also refuses.
    */
   async refund(intentId: string, reason: string): Promise<RefundResultView> {
     const organizationId = getOrganizationId();
@@ -773,23 +800,49 @@ export class PaymentService {
       throw RastaError.invalidStateTransition('PaymentIntent', intent.status, 'REFUNDED');
     }
 
-    const current = await this.prisma.transaction(
-      async (tx) => (await this.refundableUnderLock(tx, intentId, organizationId)).intent,
-    );
-
-    // Refunded at the provider by an earlier attempt that could not reverse
-    // it: the provider is not asked twice, only the ledger is retried.
-    if (current.failureReason !== REFUNDED_NOT_REVERSED) {
-      const providerResult = await this.provider.refund({
-        paymentIntentId: intentId,
-        providerReference: current.providerReference ?? intentId,
-        amountMinor: current.amountMinor,
-        currency: current.currency,
-        idempotencyKey: `${current.idempotencyKey}:refund`,
-        reason,
+    // 1. Request: hold the money and mark the intent, together.
+    const requested = await this.prisma.transaction(async (tx) => {
+      const { intent: row, wallet } = await this.lockForRefund(tx, intentId, organizationId);
+      // Refunded at the provider by an earlier attempt that could not record
+      // it: the hold is still there, and only step 3 is retried.
+      if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, askProvider: false };
+      if (row.failureReason === REFUND_REQUESTED || row.failureReason === REFUND_UNKNOWN) {
+        throw refundUnresolved(intentId, row.failureReason);
+      }
+      await this.wallets.placeHold(tx, {
+        wallet,
+        amountMinor: row.amountMinor,
+        reference: intentId,
+        referenceType: REFUND_HOLD_REFERENCE_TYPE,
+        transactionId: topUpTransactionOf(row),
+        placedBy: actor,
       });
+      await tx.paymentIntent.update({
+        where: { id: intentId },
+        data: { failureReason: REFUND_REQUESTED },
+      });
+      return { row, askProvider: true };
+    });
+
+    // 2. Ask the provider.
+    if (requested.askProvider) {
+      let providerResult: RefundResult;
+      try {
+        providerResult = await this.provider.refund({
+          paymentIntentId: intentId,
+          providerReference: requested.row.providerReference ?? intentId,
+          amountMinor: requested.row.amountMinor,
+          currency: requested.row.currency,
+          idempotencyKey: `${requested.row.idempotencyKey}:refund`,
+          reason,
+        });
+      } catch (error) {
+        await this.markRefundUnresolved(requested.row, REFUND_UNKNOWN, 'PROVIDER_OUTCOME_UNKNOWN');
+        throw error;
+      }
 
       if (providerResult.outcome === 'FAILED') {
+        await this.releaseDeclinedRefund(requested.row, actor);
         throw RastaError.businessRule('The payment provider refused the refund', {
           intentId,
           code: failureCodeFrom(providerResult.failureCode, 'REFUND_DECLINED'),
@@ -797,19 +850,30 @@ export class PaymentService {
       }
     }
 
+    // 3. Record: return the hold and reverse the top-up, together.
     try {
       return await this.prisma.transaction(async (tx) => {
-        const { intent: locked, wallet } = await this.refundableUnderLock(
-          tx,
-          intentId,
-          organizationId,
-        );
+        const { intent: row, wallet } = await this.lockForRefund(tx, intentId, organizationId);
+        if (row.failureReason !== REFUND_REQUESTED && row.failureReason !== REFUNDED_NOT_REVERSED) {
+          throw RastaError.internal(`Payment intent ${intentId} lost its refund marker`);
+        }
+        const hold = await this.refundHoldOf(tx, wallet.id, intentId);
+        const returned = await this.wallets.refundHold(tx, {
+          wallet,
+          holdId: hold.id,
+          transactionId: topUpTransactionOf(row),
+          note: `Returned for the refund of payment ${intentId}`,
+          resolvedBy: actor,
+        });
+        if (!returned) throw RastaError.internal(`The refund hold of ${intentId} is not active`);
+        // A defence, not the guard: the hold already reserved this amount.
+        assertSufficient(wallet.id, returned.balances, row.amountMinor);
 
         const topUpJournal = await runUnscoped(
           'the top-up journal is found by the transaction it funded',
           () =>
             tx.journal.findFirst({
-              where: { transactionId: locked.transactionId ?? '', journalType: 'WALLET_TOP_UP' },
+              where: { transactionId: topUpTransactionOf(row), journalType: 'WALLET_TOP_UP' },
               select: { id: true },
             }),
         );
@@ -829,7 +893,7 @@ export class PaymentService {
         const refundedAt = new Date();
         await tx.paymentIntent.update({
           where: { id: intentId },
-          // Resolved: a stranded marker does not outlive its recovery.
+          // Resolved: the marker does not outlive the refund it described.
           data: { status: 'REFUNDED', refundedAt, failureReason: null },
         });
 
@@ -843,8 +907,8 @@ export class PaymentService {
         return {
           paymentIntentId: intentId,
           reversalJournalId: reversal.id,
-          amountMinor: locked.amountMinor,
-          currency: locked.currency,
+          amountMinor: row.amountMinor,
+          currency: row.currency,
           balances,
           provider: this.provider.name,
           simulated: this.provider.simulated,
@@ -852,16 +916,21 @@ export class PaymentService {
         };
       });
     } catch (error) {
-      await this.markRefundNotReversed(current, error);
+      const code = (error as { code?: string } | null)?.code;
+      await this.markRefundUnresolved(
+        requested.row,
+        REFUNDED_NOT_REVERSED,
+        code === 'INSUFFICIENT_BALANCE' ? 'INSUFFICIENT_BALANCE' : 'REVERSAL_FAILED',
+      );
       throw error;
     }
   }
 
   /**
-   * The intent, still CAPTURED, and its wallet, able to return the amount —
-   * under the intent's row lock and then the wallet's, held to COMMIT.
+   * The intent, still CAPTURED, and its wallet — under the intent's row lock
+   * and then the wallet's, the order `completeCapture` takes, held to COMMIT.
    */
-  private async refundableUnderLock(
+  private async lockForRefund(
     tx: ExtendedPrismaClient,
     intentId: string,
     organizationId: string,
@@ -874,38 +943,74 @@ export class PaymentService {
     const intent = await tx.paymentIntent.findUniqueOrThrow({ where: { id: intentId } });
     const [wallet] = await this.walletRepository.lock(tx, [intent.walletId]);
     if (!wallet) throw RastaError.internal('Wallet vanished while locking it');
-    assertSufficient(
-      wallet.id,
-      balancesFrom(wallet.availableBalanceMinor, wallet.pendingBalanceMinor),
-      intent.amountMinor,
-    );
     return { intent, wallet };
   }
 
+  /** The active hold a refund of this intent placed. */
+  private async refundHoldOf(tx: ExtendedPrismaClient, walletId: string, intentId: string) {
+    const hold = await this.walletRepository.findActiveHold(tx, walletId, intentId);
+    if (!hold || hold.referenceType !== REFUND_HOLD_REFERENCE_TYPE) {
+      throw RastaError.internal(`The refund hold of payment intent ${intentId} is missing`);
+    }
+    return hold;
+  }
+
   /**
-   * The provider refunded and the ledger did not reverse: record it and say
-   * so, together (ADR-064, R2).
+   * The provider declined: the held money goes back to the wallet and the
+   * intent is an ordinary CAPTURED top-up again.
    *
-   * Decided behind the intent's row lock, so a reversal whose COMMIT was
-   * still in flight is seen as REFUNDED and left alone. Marked once: a retry
-   * that fails the same way does not announce it again. When even this
-   * write fails, the original error still propagates and the log says why.
+   * Should this write fail, the intent keeps `REFUND_REQUESTED` and its hold
+   * — money kept safe, and a second refund refused — rather than anything
+   * being guessed.
    */
-  private async markRefundNotReversed(intent: PaymentIntent, cause: unknown): Promise<void> {
-    const reason =
-      (cause as { code?: string } | null)?.code === 'INSUFFICIENT_BALANCE'
-        ? 'INSUFFICIENT_BALANCE'
-        : 'REVERSAL_FAILED';
+  private async releaseDeclinedRefund(intent: PaymentIntent, actor: string): Promise<void> {
+    await this.prisma.transaction(async (tx) => {
+      const { intent: row, wallet } = await this.lockForRefund(
+        tx,
+        intent.id,
+        intent.organizationId,
+      );
+      if (row.failureReason !== REFUND_REQUESTED) return;
+      const hold = await this.refundHoldOf(tx, wallet.id, intent.id);
+      await this.wallets.refundHold(tx, {
+        wallet,
+        holdId: hold.id,
+        transactionId: topUpTransactionOf(row),
+        note: `Returned: the provider declined the refund of payment ${intent.id}`,
+        resolvedBy: actor,
+      });
+      await tx.paymentIntent.update({
+        where: { id: intent.id },
+        data: { failureReason: null },
+      });
+    });
+  }
+
+  /**
+   * A refund whose outcome the ledger could not record: marked and announced
+   * together (ADR-064, R2). The hold stays, so the money stays safe.
+   *
+   * Decided behind the intent's row lock, and only from `REFUND_REQUESTED`:
+   * a reversal whose COMMIT was in flight is seen as REFUNDED and left alone,
+   * and a retry that fails the same way does not announce it twice. When even
+   * this write fails, the intent keeps `REFUND_REQUESTED` and its hold, the
+   * original error still propagates, and the log says why.
+   */
+  private async markRefundUnresolved(
+    intent: PaymentIntent,
+    marker: typeof REFUND_UNKNOWN | typeof REFUNDED_NOT_REVERSED,
+    reason: 'PROVIDER_OUTCOME_UNKNOWN' | 'INSUFFICIENT_BALANCE' | 'REVERSAL_FAILED',
+  ): Promise<void> {
     try {
       const marked = await this.prisma.transaction(async (tx) => {
         const status = await this.lockIntent(tx, intent.id, intent.organizationId);
         if (status !== 'CAPTURED') return false;
         const row = await tx.paymentIntent.findUniqueOrThrow({ where: { id: intent.id } });
-        if (row.failureReason === REFUNDED_NOT_REVERSED) return false;
+        if (row.failureReason !== REFUND_REQUESTED) return false;
 
         await tx.paymentIntent.update({
           where: { id: intent.id },
-          data: { failureReason: REFUNDED_NOT_REVERSED },
+          data: { failureReason: marker },
         });
         await this.ledger.enqueue(tx, {
           eventName: ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED,
@@ -930,17 +1035,19 @@ export class PaymentService {
         service: SERVICE_NAME,
         provider: this.provider.name,
         simulated: String(this.provider.simulated),
-        outcome: REFUNDED_NOT_REVERSED,
+        outcome: marker,
       });
       this.logger.error(
-        `Payment intent ${intent.id} was refunded at the provider and the ledger could not ` +
-          `reverse it (${reason}); a retry of the refund reverses it once the wallet can ` +
-          'return the money, otherwise it needs a person',
+        marker === REFUND_UNKNOWN
+          ? `Payment intent ${intent.id}: the provider refund failed without an answer; the ` +
+              'amount stays held and a second refund is refused until the outcome is established'
+          : `Payment intent ${intent.id} was refunded at the provider and the ledger could not ` +
+              `reverse it (${reason}); the amount stays held and a retry of the refund reverses it`,
       );
     } catch (markError) {
       this.logger.error(
-        `Payment intent ${intent.id} was refunded at the provider, the ledger could not reverse ` +
-          `it (${reason}), and recording that failed too`,
+        `Payment intent ${intent.id}: a refund outcome (${reason}) could not be recorded; it ` +
+          'keeps REFUND_REQUESTED and its hold',
         markError instanceof Error ? markError.stack : String(markError),
       );
     }
@@ -998,6 +1105,49 @@ export const CAPTURED_REFUND_UNKNOWN = 'CAPTURED_REFUND_UNKNOWN';
  * refund reverses it or a person does.
  */
 export const REFUNDED_NOT_REVERSED = 'REFUNDED_NOT_REVERSED';
+
+/**
+ * The failure reason a CAPTURED intent keeps while an operator refund is in
+ * flight: the amount is held and the provider has been, or is about to be,
+ * asked (ADR-064, R2). Still present after a crash, which is the point — a
+ * second refund is refused rather than asking the provider again.
+ */
+export const REFUND_REQUESTED = 'REFUND_REQUESTED';
+
+/**
+ * The failure reason a CAPTURED intent keeps when the provider refund call
+ * failed without an answer (ADR-064, R2). The payer may have the money back;
+ * the amount stays held and nothing repeats the refund until the provider's
+ * state is established.
+ */
+export const REFUND_UNKNOWN = 'REFUND_UNKNOWN';
+
+/** The markers under which a CAPTURED intent's refund has not finished. */
+const UNFINISHED_REFUND: ReadonlySet<string> = new Set([
+  REFUND_REQUESTED,
+  REFUND_UNKNOWN,
+  REFUNDED_NOT_REVERSED,
+]);
+
+/** `wallet_hold.reference_type` of the hold an operator refund places. */
+export const REFUND_HOLD_REFERENCE_TYPE = 'PAYMENT_REFUND';
+
+/** A refund that has not finished, refused rather than repeated. */
+function refundUnresolved(intentId: string, marker: string): RastaError {
+  return RastaError.businessRule(
+    'A refund of this payment has not finished and its outcome is not known yet; it is ' +
+      'reconciled before another refund can be made',
+    { paymentIntentId: intentId, outcome: marker },
+  );
+}
+
+/** The top-up transaction a CAPTURED intent funded. */
+function topUpTransactionOf(intent: PaymentIntent): string {
+  if (!intent.transactionId) {
+    throw RastaError.internal(`Captured payment intent ${intent.id} has no transaction`);
+  }
+  return intent.transactionId;
+}
 
 /** The intent a capture is written for. */
 interface CaptureTarget {
