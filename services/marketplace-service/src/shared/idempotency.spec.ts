@@ -236,3 +236,62 @@ describe('IdempotencyStore.claim — who may proceed', () => {
     );
   });
 });
+
+/**
+ * Which failure frees the key (review of #141). The work's own failure does,
+ * so a corrected retry can run; a failure to record the response does not,
+ * because by then the work has committed — freeing the key there let a retry
+ * place a second order. The same fault against the real database and the real
+ * order route is `test/idempotency-claim-race.int-spec.ts`.
+ */
+describe('IdempotencyStore.execute — when the claim is released', () => {
+  function claimedStore(updateMany: jest.Mock) {
+    const idempotencyKey = {
+      create: jest.fn().mockResolvedValue({}),
+      updateMany,
+      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+    };
+    const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+    const store = new IdempotencyStore(prisma, {
+      MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
+    } as MarketplaceEnv);
+    return { store, idempotencyKey };
+  }
+
+  const asTenant = <T>(fn: () => Promise<T>) =>
+    runWithContext(
+      createSystemContext({ correlationId: 'unit-execute', organizationId: 'ORG-UNIT' }),
+      fn,
+    );
+
+  it('keeps the claim, and surfaces the error, when recording fails after the work committed', async () => {
+    const { store, idempotencyKey } = claimedStore(
+      jest.fn().mockRejectedValueOnce(new Error('connection reset while recording')),
+    );
+    const work = jest.fn().mockResolvedValue({ id: 'ORD_UNIT' });
+
+    await expect(
+      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
+    ).rejects.toThrow('connection reset while recording');
+    expect(work).toHaveBeenCalledTimes(1);
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('releases the claim when the work itself fails, so a corrected retry can run', async () => {
+    const { store, idempotencyKey } = claimedStore(jest.fn());
+    const work = jest.fn().mockRejectedValue(new Error('insufficient stock'));
+
+    await expect(
+      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
+    ).rejects.toThrow('insufficient stock');
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: 'ORG-UNIT',
+        endpoint: 'POST /v1/orders',
+        key: 'K',
+        state: 'IN_PROGRESS',
+      },
+    });
+    expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
+  });
+});

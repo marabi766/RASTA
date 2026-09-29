@@ -183,7 +183,8 @@ export class IdempotencyStore {
    * this write then failed, the money has moved and a retry would find
    * `IN_PROGRESS` and be refused — annoying, and safe. If it shared the
    * transaction, a failure here would roll back a settlement that had already
-   * succeeded, which is not.
+   * succeeded, which is not. "Safe" holds only because {@link execute} never
+   * releases the claim after this fails.
    */
   async complete(endpoint: string, key: string, status: number, body: unknown): Promise<void> {
     const organizationId = getOrganizationId();
@@ -246,14 +247,20 @@ export class IdempotencyStore {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
 
+    // Only a failure of `work` releases the claim. A failure to record the
+    // response comes after the work committed — the order exists — so the
+    // claim is kept and the error surfaces: retries meet the in-flight 409
+    // until the claim expires, rather than a freed key placing a second
+    // order (review of #141). The release used to cover both.
+    let result: T;
     try {
-      const result = await work();
-      await this.complete(endpoint, key, successStatus, result);
-      return { result, executed: true };
+      result = await work();
     } catch (error) {
       await this.release(endpoint, key);
       throw error;
     }
+    await this.complete(endpoint, key, successStatus, result);
+    return { result, executed: true };
   }
 
   /**

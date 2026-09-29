@@ -201,14 +201,20 @@ export class IdempotencyStore {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') return claim.body as T;
 
+    // Only a failure of `work` releases the claim. A failure to record the
+    // response comes after the work committed — the money has moved — so the
+    // claim is kept and the error surfaces: retries meet the in-flight 409
+    // until the claim expires, rather than a freed key executing the work a
+    // second time (review of #141). The release used to cover both.
+    let result: T;
     try {
-      const result = await work();
-      await this.complete(endpoint, key, successStatus, result);
-      return result;
+      result = await work();
     } catch (error) {
       await this.release(endpoint, key);
       throw error;
     }
+    await this.complete(endpoint, key, successStatus, result);
+    return result;
   }
 
   /**
