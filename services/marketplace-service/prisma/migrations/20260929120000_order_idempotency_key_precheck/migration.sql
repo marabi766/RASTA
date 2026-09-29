@@ -7,6 +7,16 @@
 -- (a multi-statement script runs as one implicit transaction).
 --
 -- It changes nothing: no row, no object.
+--
+-- IF IT FAILS (P3018, "… pairs hold more than one order …"), deploying again
+-- is not enough: Prisma keeps this migration's failed record, and every
+-- deploy is refused with P3009 until it is resolved. In order:
+--   1. list the duplicates (query in the HINT below);
+--   2. re-key all but the earliest order of each pair — never delete one;
+--   3. prisma migrate resolve --rolled-back 20260929120000_order_idempotency_key_precheck
+--   4. deploy.
+-- Exact commands: docs/runbooks/database-bootstrap.md#marketplace-order-key-index
+-- (sequence verified on a throwaway schema in PR #141).
 
 DO $$
 DECLARE
@@ -29,8 +39,10 @@ BEGIN
             ),
             HINT = 'List them with: SELECT organization_id, idempotency_key, array_agg(id) '
                    'FROM "order" GROUP BY 1, 2 HAVING count(*) > 1; — each is an order placed '
-                   'twice under one key. Settle which order each key belongs to (never by '
-                   'deleting a settled order), then deploy again.';
+                   'twice under one key. Re-key all but the earliest (never delete an order), '
+                   'then prisma migrate resolve --rolled-back '
+                   '20260929120000_order_idempotency_key_precheck, then deploy. Runbook: '
+                   'docs/runbooks/database-bootstrap.md#marketplace-order-key-index';
     END IF;
 END
 $$;

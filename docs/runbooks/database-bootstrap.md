@@ -114,6 +114,96 @@ pnpm --filter @rasta/asset-service exec prisma migrate resolve --rolled-back <mi
 
 **در Production هرگز `migrate reset` نزن.**
 
+<a id="marketplace-order-key-index"></a>
+
+### marketplace: شکست Migrationهای یکتایی کلید سفارش
+
+دو Migration پشت سر هم: `20260929120000_order_idempotency_key_precheck` (بررسی
+تکراری‌ها) و `20260929120100_order_idempotency_key_unique` (ساخت
+`uq_order_org_idempotency_key` با `CONCURRENTLY`).
+
+**«اصلاح کن و دوباره Deploy کن» کار نمی‌کند.** Prisma رکورد Migration شکست‌خورده
+را در `_prisma_migrations` نگه می‌دارد و تا Resolve نشود، هر `migrate deploy` با
+`P3009` رد می‌شود — حتی پس از رفع علت. ترتیب زیر، و فقط همین ترتیب.
+
+همه دستورها از ریشه Repository؛ اتصال همان است که `db:migrate` برمی‌دارد
+(`DATABASE_URL_MARKETPLACE_MIGRATOR` یا `DATABASE_URL_MARKETPLACE`):
+
+```bash
+PRISMA="pnpm --filter @rasta/marketplace-service exec node ../../scripts/prisma.mjs"
+```
+
+#### الف) Pre-check روی تکراری‌ها شکست خورد
+
+نشانه: `P3018` با پیام `… pairs hold more than one order, so uq_order_org_idempotency_key cannot be built`.
+چیزی ساخته نشده است.
+
+۱. تکراری‌ها را ببین — هر سطر سفارشی است که دوبار با یک کلید ثبت شده؛ یک رخداد
+کسب‌وکاری است و جدا بررسی می‌شود:
+
+```sql
+SELECT organization_id, idempotency_key, array_agg(id ORDER BY created_at, id)
+  FROM "order" GROUP BY 1, 2 HAVING count(*) > 1;
+```
+
+۲. کلید همه به‌جز قدیمی‌ترین سفارش هر جفت را با شناسهٔ خودش پسوند بزن. **هیچ سفارشی
+حذف نمی‌شود:**
+
+```sql
+UPDATE "order" AS o
+   SET idempotency_key = o.idempotency_key || '#duplicate-' || o.id
+  FROM (SELECT id, row_number() OVER (PARTITION BY organization_id, idempotency_key
+                                      ORDER BY created_at, id) AS n
+          FROM "order") AS ranked
+ WHERE ranked.id = o.id AND ranked.n > 1;
+```
+
+۳. رکورد شکست را Resolve کن، سپس Deploy:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20260929120000_order_idempotency_key_precheck
+pnpm --filter @rasta/marketplace-service db:migrate
+```
+
+#### ب) ساخت `CONCURRENTLY` شکست خورد
+
+نشانه: `P3018` روی `20260929120100_order_idempotency_key_unique`، مثلاً
+`could not create unique index "uq_order_org_idempotency_key"` (تکراری‌ای که پس از
+Pre-check رسید) یا لغو/Timeout. یک Index با وضعیت **INVALID** باقی می‌ماند که هیچ
+چیزی را تضمین نمی‌کند و نام را اشغال کرده است.
+
+۱. علت را رفع کن (برای تکراری: گام‌های ۱ و ۲ از «الف»).
+
+۲. Index نامعتبر را حذف کن — تنها، بیرون از تراکنش (`CONCURRENTLY` درون تراکنش
+اجرا نمی‌شود):
+
+```bash
+echo 'DROP INDEX CONCURRENTLY IF EXISTS "uq_order_org_idempotency_key";' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
+اگر این گام جا بیفتد، Deploy بعدی با `relation "uq_order_org_idempotency_key" already exists`
+شکست می‌خورد: Migration عمداً `IF NOT EXISTS` ندارد تا Index نامعتبر به‌جای Index
+واقعی پذیرفته نشود.
+
+۳. رکورد شکست را Resolve کن، سپس Deploy:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20260929120100_order_idempotency_key_unique
+pnpm --filter @rasta/marketplace-service db:migrate
+```
+
+۴. تأیید: `indisvalid` باید `true` باشد.
+
+```sql
+SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+ WHERE c.relname = 'uq_order_org_idempotency_key';
+```
+
+هر دو ترتیب در PR #141 روی یک Schema دور‌ریختنی اجرا و تأیید شده‌اند: شکست
+تحمیلی، `P3009` پیش از Resolve، `already exists` بدون Drop، و سپس Deploy موفق با
+Index معتبر و بدون از دست رفتن هیچ سفارشی.
+
 ---
 
 ## بازسازی کامل محیط توسعه
