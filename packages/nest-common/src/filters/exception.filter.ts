@@ -97,12 +97,40 @@ export class AllExceptionsFilter implements ExceptionFilter {
     logged?: LoggedError;
   } {
     if (isRastaError(exception)) {
+      // A server-side failure keeps its status and code, but its words stay
+      // with the server: a service writes those messages for operators, and
+      // they name records ("Approval <id> vanished …"). The client gets the
+      // generic text; the log gets the original, made safe.
+      if (exception.status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+        return {
+          status: exception.status,
+          code: exception.code,
+          message: GENERIC_SERVER_ERROR,
+          internalContext: {
+            ...exception.internalContext,
+            originalMessage: safeLogText(exception.message),
+          },
+        };
+      }
       return {
         status: exception.status,
         code: exception.code,
         message: exception.message,
         details: exception.details,
         internalContext: exception.internalContext,
+      };
+    }
+
+    // body-parser's refusals of a body it will not read. Nest passes these
+    // through untouched (only its SyntaxError becomes a 400, below), so
+    // without this they would land in the 500 branch. Matched by body-parser's
+    // own `type` and status, from an allowlist; the text is ours, because
+    // theirs can name what the client sent (`unsupported charset "…"`).
+    const refusal = bodyParserRefusal(exception);
+    if (refusal) {
+      return {
+        ...refusal,
+        logged: { ...loggableError(exception), message: refusal.message },
       };
     }
 
@@ -165,6 +193,45 @@ const MALFORMED_JSON_BODY = 'The request body is not valid JSON';
 /** What a client is told about any other request the framework could not read. */
 const MALFORMED_REQUEST = 'The request could not be read';
 
+/**
+ * body-parser's refusals this filter answers, by the `type` body-parser sets
+ * on its (`http-errors`) error. Any other type is not recognised here.
+ */
+const BODY_PARSER_REFUSALS: Readonly<
+  Record<string, { status: number; code: ErrorCode; message: string }>
+> = {
+  'entity.too.large': {
+    status: HttpStatus.PAYLOAD_TOO_LARGE,
+    code: ERROR_CODES.PAYLOAD_TOO_LARGE,
+    message: 'The request body is too large',
+  },
+  'charset.unsupported': {
+    status: HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+    code: ERROR_CODES.UNSUPPORTED_MEDIA_TYPE,
+    message: 'The request body is in a charset this service does not accept',
+  },
+  'encoding.unsupported': {
+    status: HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+    code: ERROR_CODES.UNSUPPORTED_MEDIA_TYPE,
+    message: 'The request body is in a content encoding this service does not accept',
+  },
+};
+
+function bodyParserRefusal(
+  exception: unknown,
+): { status: number; code: ErrorCode; message: string } | undefined {
+  if (!(exception instanceof Error)) return undefined;
+  const { type, status } = exception as { type?: unknown; status?: unknown };
+  if (
+    typeof type !== 'string' ||
+    !Object.prototype.hasOwnProperty.call(BODY_PARSER_REFUSALS, type)
+  ) {
+    return undefined;
+  }
+  const refusal = BODY_PARSER_REFUSALS[type];
+  return refusal && refusal.status === status ? refusal : undefined;
+}
+
 /** How deep a chain of `cause`s is followed into the log. */
 const MAX_CAUSE_DEPTH = 3;
 
@@ -213,6 +280,10 @@ export function httpStatusToCode(status: number): ErrorCode {
       return ERROR_CODES.NOT_FOUND;
     case HttpStatus.CONFLICT:
       return ERROR_CODES.CONFLICT;
+    case HttpStatus.PAYLOAD_TOO_LARGE:
+      return ERROR_CODES.PAYLOAD_TOO_LARGE;
+    case HttpStatus.UNSUPPORTED_MEDIA_TYPE:
+      return ERROR_CODES.UNSUPPORTED_MEDIA_TYPE;
     case HttpStatus.UNPROCESSABLE_ENTITY:
       return ERROR_CODES.BUSINESS_RULE_VIOLATION;
     case HttpStatus.TOO_MANY_REQUESTS:

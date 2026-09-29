@@ -146,6 +146,70 @@ describe('AllExceptionsFilter, a request the framework could not read (S-09)', (
   });
 });
 
+describe('AllExceptionsFilter, a RastaError of 5xx (S-09)', () => {
+  it('keeps its status and code, sends the generic text, logs the original made safe', () => {
+    const error = RastaError.internal(`Approval APR_01J vanished for ${SENTINEL}\nforged`);
+
+    const { status, body, lines } = run(error);
+
+    expect(status).toBe(500);
+    expect(body).toMatchObject({ code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' });
+    expect(JSON.stringify(body)).not.toContain('APR_01J');
+    expect(lines[0]?.level).toBe('error');
+    expect(lines[0]?.payload.internalContext?.originalMessage).toBe(
+      `Approval APR_01J vanished for ${SENTINEL} forged`,
+    );
+  });
+
+  it('an upstream failure: 503 and its code stay, its words do not reach the client', () => {
+    const { status, body, lines } = run(RastaError.upstreamUnavailable('fleet-service'));
+    expect(status).toBe(503);
+    expect(body).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      message: 'An unexpected error occurred',
+    });
+    // Its own context is kept for the operator, beside the original message.
+    expect(lines[0]?.payload.internalContext).toMatchObject({ service: 'fleet-service' });
+  });
+});
+
+describe('AllExceptionsFilter, body-parser refusals', () => {
+  /** What body-parser throws (an `http-errors` error): a status and a `type`. */
+  const bodyParserError = (status: number, type: string, message: string) =>
+    Object.assign(new Error(message), { status, statusCode: status, type, expose: true });
+
+  it.each([
+    [413, 'entity.too.large', 'PAYLOAD_TOO_LARGE', 'The request body is too large'],
+    [
+      415,
+      'charset.unsupported',
+      'UNSUPPORTED_MEDIA_TYPE',
+      'The request body is in a charset this service does not accept',
+    ],
+    [
+      415,
+      'encoding.unsupported',
+      'UNSUPPORTED_MEDIA_TYPE',
+      'The request body is in a content encoding this service does not accept',
+    ],
+  ])('%s %s: fixed text, never body-parser’s', (status, type, code, message) => {
+    const {
+      status: sent,
+      body,
+      lines,
+    } = run(bodyParserError(status, type, `unsupported "${SENTINEL}"`));
+    expect(sent).toBe(status);
+    expect(body).toMatchObject({ code, message });
+    expect(lines[0]?.level).toBe('debug');
+    expect(JSON.stringify([body, lines])).not.toContain('SENTINEL');
+  });
+
+  it('only the allowlisted types, and only at their own status', () => {
+    expect(run(bodyParserError(400, 'request.aborted', 'aborted')).status).toBe(500);
+    expect(run(bodyParserError(500, 'entity.too.large', 'odd')).status).toBe(500);
+  });
+});
+
 describe('AllExceptionsFilter, what stays as it was', () => {
   it('a 4xx HttpException other than a 400 keeps its message for the client', () => {
     const { status, body } = run(new HttpException('Slow down', HttpStatus.TOO_MANY_REQUESTS));

@@ -703,10 +703,11 @@ export class RewardGrantError extends Error {
     readonly outcomes: readonly GrantOutcome[],
     readonly failures: readonly RewardGrantFailure[],
   ) {
-    super(
-      `${failures.length} reward rule(s) failed to grant: ` +
-        failures.map(({ ruleId, error }) => `${ruleId} (${describeFailure(error)})`).join('; '),
-    );
+    // Rule ids and error codes only (S-09, review of #136): a transient
+    // failure is rethrown as this error, and `EventConsumer` repeats its
+    // message on every retry line and in `x-dlq-error`. The underlying errors
+    // stay in `failures`, a typed field nothing logs.
+    super(`${failures.length} reward rule(s) failed to grant: ${summariseFailures(failures)}`);
     this.name = 'RewardGrantError';
     this.permanent = failures.every(({ error }) => isPermanentGrantFailure(error));
   }
@@ -726,8 +727,10 @@ const SUMMARY_MAX_RULES = 5;
  * wrote, and this text reaches `x-dlq-error` and the log.
  */
 export function grantFailureCodes(error: unknown): string {
-  const failures: readonly { ruleId?: string; error: unknown }[] =
-    error instanceof RewardGrantError ? error.failures : [{ error }];
+  return summariseFailures(error instanceof RewardGrantError ? error.failures : [{ error }]);
+}
+
+function summariseFailures(failures: readonly { ruleId?: string; error: unknown }[]): string {
   const named = failures
     .slice(0, SUMMARY_MAX_RULES)
     .map(({ ruleId, error: cause }) =>
@@ -741,11 +744,6 @@ export function grantFailureCodes(error: unknown): string {
 function failureCode(error: unknown): string {
   if (error instanceof RastaError) return error.code;
   return error instanceof Error ? error.name : 'non-error value';
-}
-
-function describeFailure(error: unknown): string {
-  if (error instanceof RastaError) return `${error.code}: ${error.message}`;
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
 type RewardRuleRow = Prisma.RewardRuleGetPayload<Record<string, never>>;

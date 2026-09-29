@@ -59,9 +59,12 @@ export const preferenceInputSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['scopeKey'],
-        message: `A ${value.scope} preference needs the ${
-          value.scope === 'RULE' ? 'rule key' : 'category'
-        } it applies to`,
+        // Static text per branch, never the input's own value (S-09, docs/06
+        // § 6.7), even one the schema has already bounded.
+        message:
+          value.scope === 'RULE'
+            ? 'A RULE preference needs the rule key it applies to'
+            : 'A CATEGORY preference needs the category it applies to',
       });
       return;
     }

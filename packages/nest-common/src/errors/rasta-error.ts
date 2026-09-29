@@ -12,7 +12,17 @@ export class RastaError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
   readonly details?: ErrorDetail[];
-  /** Never serialised to the client — for server-side logs only. */
+  /**
+   * Never serialised to the client — for server-side logs only, where
+   * operators diagnose from it. What it may carry (S-09, docs/06 § 6.7):
+   * **identifiers and amounts** — record and tenant ids, an endpoint, a
+   * wallet's requested and available balance, a state transition. What it
+   * must never carry: **credentials or keys** (tokens, passwords, an
+   * Idempotency-Key or anything derived from one), **personal data** (names,
+   * emails, phone numbers, national ids, addresses) or **client free text**
+   * (a reason, a note, a raw body). Nothing sanitises it: it is logged as
+   * written, so what goes in is the author's call.
+   */
   readonly internalContext?: Record<string, unknown>;
 
   constructor(

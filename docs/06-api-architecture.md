@@ -174,16 +174,29 @@ Endpoint در Schema اعلام می‌شود. مرتب‌سازی آزاد رو
 `errorMap`، پیام Regex) باید متن ثابت باشد: **نویسندهٔ Schema هرگز مقدار ورودی را در پیام سفارشی نمی‌گذارد** — نه با
 `refine((v) => ({ message: … }))`، نه با `ctx.data` در `errorMap`، نه با `addIssue` در `superRefine`. پشتیبان فقط تکرار مقدارِ زیر
 مسیر همان Issue را، از سه نویسه به بالا، می‌گیرد و پیام را با پیام ثابت همان کد عوض می‌کند؛ مقدار میدان دیگر یا ورودی کوتاه‌تر را
-نمی‌گیرد. پاسخ هر 5xx پیام عمومی است — پیام خطای ناشناخته یا `HttpException` 5xx هرگز به کلاینت نمی‌رسد — و آن پیام فقط در Log
+نمی‌گیرد. پاسخ هر 5xx پیام عمومی است — پیام خطای ناشناخته، `HttpException` 5xx یا `RastaError` با وضعیت ۵۰۰ به بالا (وضعیت و
+`code` می‌مانند) هرگز به کلاینت نمی‌رسد — و آن پیام فقط در Log
 سرور، پاک‌سازی‌شده و حداکثر ۲۰۰ نویسه (`safeLogText`) ثبت می‌شود. درخواستی که Nest نتواند بخواند (بدنهٔ JSON نامعتبر، کدگذاری
 درصدی نادرست در مسیر) `400 VALIDATION_FAILED` با متن ثابت می‌گیرد («The request body is not valid JSON» یا «The request could
 not be read»)؛ متن Parser که بایت‌های کلاینت را نقل می‌کند نه به پاسخ می‌رسد نه به Log.
+
+**`internalContext` چه می‌تواند داشته باشد.** این زمینه هرگز به کلاینت نمی‌رسد و برای تشخیص اپراتور در Log سرور است؛ پس
+**شناسه و مبلغ** مجاز است — شناسهٔ رکورد و مستأجر، Endpoint، موجودی درخواستی و موجود کیف پول (`{walletId, requested,
+available}`)، گذار وضعیت — اما **هرگز**: اعتبارنامه یا کلید (توکن، گذرواژه، `Idempotency-Key` یا هر چیز مشتق از آن)، **دادهٔ
+شخصی** (نام، ایمیل، تلفن، کد ملی، نشانی) یا **متن آزاد کلاینت** (دلیل، یادداشت، بدنهٔ خام). چیزی آن را پاک‌سازی نمی‌کند؛
+همان‌طور که نوشته شده ثبت می‌شود و مسئولیتش با نویسنده است (توضیح `RastaError.internalContext`).
+
+**بدنه‌ای که سرویس نمی‌خواند.** بدنهٔ بزرگ‌تر از سقف (`entity.too.large` در body-parser) `413 PAYLOAD_TOO_LARGE` و
+Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`، `encoding.unsupported`) `415 UNSUPPORTED_MEDIA_TYPE`
+می‌گیرد، هر دو با متن ثابت؛ پیام body-parser که مقدار فرستاده‌شده را نام می‌برد به پاسخ و Log نمی‌رسد.
 
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 
 | وضعیت | کدهای نمونه                                                                                                      |
 | ----- | ---------------------------------------------------------------------------------------------------------------- |
 | 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                        |
+| 413   | `PAYLOAD_TOO_LARGE`                                                                                              |
+| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                         |
 | 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                            |
 | 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                        |
 | 404   | `NOT_FOUND`                                                                                                      |

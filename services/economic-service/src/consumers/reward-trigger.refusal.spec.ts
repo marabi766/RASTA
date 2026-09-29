@@ -77,8 +77,10 @@ describe('reward grant refusal (S-09)', () => {
         { ruleId: 'RWR_B', error: RastaError.ledgerUnbalanced('JNL_1', SENTINEL) },
       ],
     );
-    // The control: the error's own message carries the sentinel.
-    expect(refused.message).toContain(SENTINEL);
+    // The control: the underlying errors carry the sentinel, in the typed
+    // field nothing logs — not in the grant error's own message.
+    expect(String(refused.failures[0]?.error)).toContain(SENTINEL);
+    expect(refused.message).not.toContain(SENTINEL);
 
     const thrown = await failure(refused);
 

@@ -108,6 +108,48 @@ describe('a request Nest cannot parse (S-09, real app)', () => {
     expect(JSON.stringify(lines)).not.toContain('URI malformed');
   });
 
+  it('a body over the limit: 413 PAYLOAD_TOO_LARGE, not a 500', async () => {
+    const response = await fetch(`${base}/probe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: `${SENTINEL}${'x'.repeat(300 * 1024)}` }),
+    });
+    const text = await response.text();
+
+    expect(response.status).toBe(413);
+    expect(JSON.parse(text)).toMatchObject({
+      code: 'PAYLOAD_TOO_LARGE',
+      message: 'The request body is too large',
+    });
+    expect(text).not.toContain('SENTINEL');
+    expect(JSON.stringify(lines)).not.toContain('SENTINEL');
+  });
+
+  it.each([
+    [
+      'an unsupported charset',
+      { 'content-type': `application/json; charset=${SENTINEL.toLowerCase()}` },
+      'The request body is in a charset this service does not accept',
+    ],
+    [
+      'an unsupported content encoding',
+      { 'content-type': 'application/json', 'content-encoding': SENTINEL.toLowerCase() },
+      'The request body is in a content encoding this service does not accept',
+    ],
+  ])('%s: 415 UNSUPPORTED_MEDIA_TYPE, without echoing it', async (_case, headers, message) => {
+    const response = await fetch(`${base}/probe`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ok: true }),
+    });
+    const text = await response.text();
+
+    expect(response.status).toBe(415);
+    expect(JSON.parse(text)).toMatchObject({ code: 'UNSUPPORTED_MEDIA_TYPE', message });
+    expect(text.toLowerCase()).not.toContain('sentinel');
+    expect(JSON.stringify(lines).toLowerCase()).not.toContain('sentinel');
+  });
+
   it('a well-formed body still reaches the handler', async () => {
     const response = await fetch(`${base}/probe`, {
       method: 'POST',

@@ -13,6 +13,11 @@ export const ERROR_CODES = {
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   MALFORMED_REQUEST: 'MALFORMED_REQUEST',
 
+  // 413 / 415 — a body the server will not read: too large, or in a charset
+  // or content-encoding it does not accept
+  PAYLOAD_TOO_LARGE: 'PAYLOAD_TOO_LARGE',
+  UNSUPPORTED_MEDIA_TYPE: 'UNSUPPORTED_MEDIA_TYPE',
+
   // 401 / 403 — who you are, and what you may do
   UNAUTHENTICATED: 'UNAUTHENTICATED',
   TOKEN_EXPIRED: 'TOKEN_EXPIRED',
@@ -87,6 +92,8 @@ export type ApiError = z.infer<typeof apiErrorSchema>;
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
   MALFORMED_REQUEST: 400,
+  PAYLOAD_TOO_LARGE: 413,
+  UNSUPPORTED_MEDIA_TYPE: 415,
   UNAUTHENTICATED: 401,
   TOKEN_EXPIRED: 401,
   TOKEN_INVALID: 401,
