@@ -179,7 +179,11 @@ export class TenderService {
   async update(tenderId: string, dto: UpdateTenderDto): Promise<TenderView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
-    await withFinancialSpan(
+    // The response is read **inside** the transaction, while the tender row is
+    // still locked: read after the commit, a second edit could land in between
+    // and this one would report the other's fields and version (Codex review of
+    // #162). What a caller is told is the state their own change produced.
+    return withFinancialSpan(
       'construction.tender.update',
       () =>
         this.prisma.transaction(async (tx) => {
@@ -234,7 +238,8 @@ export class TenderService {
             );
           }
 
-          if (changed.length === 0) return;
+          // Nothing to write: the tender as it stands, at the version just checked.
+          if (changed.length === 0) return this.view(organizationId, tenderId, tx);
 
           const matched = await this.repository.updateTenderContent(
             tx,
@@ -259,11 +264,10 @@ export class TenderService {
             occurredAt: at,
           });
           tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'update' });
+          return this.view(organizationId, tenderId, tx);
         }),
       { 'rasta.tender.command': 'update' },
     );
-
-    return this.view(organizationId, tenderId);
   }
 
   /**
@@ -275,7 +279,9 @@ export class TenderService {
   async cancel(tenderId: string, dto: CancelTenderDto): Promise<TenderView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
-    await withFinancialSpan(
+    // Read inside the transaction, like `update`, so the answer is the state this
+    // cancellation produced.
+    const view = await withFinancialSpan(
       'construction.tender.cancel',
       () =>
         this.prisma.transaction(async (tx) => {
@@ -311,12 +317,13 @@ export class TenderService {
             },
             occurredAt: at,
           });
+          return this.view(organizationId, tenderId, tx);
         }),
       { 'rasta.tender.command': 'cancel' },
     );
     tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'cancel' });
 
-    return this.view(organizationId, tenderId);
+    return view;
   }
 
   // -- helpers ----------------------------------------------------------------

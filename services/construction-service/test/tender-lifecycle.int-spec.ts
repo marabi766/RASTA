@@ -1,5 +1,6 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { EventPublisher } from '../src/events/publisher';
+import { TenderRepository } from '../src/tender/tender.repository';
 import {
   PROJECT,
   approvedProject,
@@ -240,6 +241,66 @@ describe('tender lifecycle', () => {
         asAdmin(a, () => w.tenders.update(tender.id, { expectedVersion: 1, title: 'Third' })),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
       expect((await asAdmin(a, () => w.tenders.get(tender.id))).title).toBe('Second');
+    });
+
+    it('answers with the state its own change produced, even when a second edit follows at once', async () => {
+      // Codex review of #162: the answer used to be read after the commit, so a
+      // second edit landing in between made the first report the other's fields
+      // and version. Edit A is held right after its write (its row lock still
+      // held); edit B is started and queues behind that lock; A is released.
+      const { a, tender } = await withTender();
+      let release!: () => void;
+      let atGate!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const reached = new Promise<void>((resolve) => (atGate = resolve));
+      const original = EventPublisher.prototype.enqueue;
+      const spy = jest
+        .spyOn(EventPublisher.prototype, 'enqueue')
+        .mockImplementationOnce(async function (
+          this: EventPublisher,
+          ...args: Parameters<EventPublisher['enqueue']>
+        ) {
+          await original.apply(this, args);
+          atGate();
+          await gate;
+        } as unknown as EventPublisher['enqueue']);
+      try {
+        const editA = asAdmin(a, () =>
+          w.tenders.update(tender.id, { expectedVersion: 1, title: 'Edit A' }),
+        );
+        await reached;
+        const editB = asAdmin(a, () =>
+          w.tenders.update(tender.id, { expectedVersion: 2, title: 'Edit B' }),
+        );
+        release();
+        const [first, second] = await Promise.all([editA, editB]);
+
+        expect(first).toMatchObject({ version: 2, title: 'Edit A' });
+        expect(second).toMatchObject({ version: 3, title: 'Edit B' });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('reads the answer to an edit or a cancellation only through its own transaction', async () => {
+      const { a, tender } = await withTender();
+      const spy = jest.spyOn(TenderRepository.prototype, 'findTender');
+      try {
+        await asAdmin(a, () =>
+          w.tenders.update(tender.id, { expectedVersion: 1, title: 'Edited' }),
+        );
+        await asAdmin(a, () =>
+          w.tenders.update(tender.id, { expectedVersion: 2, title: 'Edited' }),
+        );
+        await asAdmin(a, () =>
+          w.tenders.cancel(tender.id, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
+        );
+        expect(spy).toHaveBeenCalled();
+        // Every read goes through a transaction's client; none through the pool's.
+        expect(spy.mock.calls.every((call) => call[1] !== w.prisma.client)).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('refuses an edit once cancelled', async () => {
