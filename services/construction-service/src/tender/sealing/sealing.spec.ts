@@ -3,6 +3,7 @@ import {
   MAX_CONTENT_BYTES,
   aeadDecrypt,
   aeadEncrypt,
+  ciphertextDigest,
   commitmentOf,
   generateTenderKeyPair,
   genesisReceipt,
@@ -15,6 +16,7 @@ import {
   type BidBinding,
   type ReceiptLink,
   type SealedBid,
+  type TrustedReceipts,
   type TenderKeyPair,
 } from './sealing';
 
@@ -56,8 +58,40 @@ beforeAll(async () => {
 const seal = (binding: BidBinding = BINDING, content: unknown = CONTENT) =>
   sealBid({ publicKeyPem: pair.publicKeyPem, binding, content });
 
-const open = (sealed: SealedBid, binding: BidBinding = BINDING, key: KeyObject = privateKey) =>
-  openBid({ privateKey: key, binding, sealed });
+/** A sealed bid and the binding it was sealed under (the default binding when omitted). */
+type Issued = SealedBid | { sealed: SealedBid; binding?: BidBinding };
+
+/**
+ * The receipts a tender would have issued, in order, for these bids, and the head
+ * the trusted copy would hold. Each bid is receipted under the binding it was
+ * sealed with.
+ */
+const receiptsOf = (bids: Issued[], tenderId = BINDING.tenderId): TrustedReceipts => {
+  const links: (ReceiptLink & { receipt: string })[] = [];
+  let previous = genesisReceipt(tenderId);
+  bids.forEach((issued, index) => {
+    const { sealed, binding } = 'sealed' in issued ? issued : { sealed: issued, binding: BINDING };
+    const link: ReceiptLink = {
+      bidId: (binding ?? BINDING).bidId,
+      revision: (binding ?? BINDING).revision,
+      receivedAt: new Date(Date.UTC(2026, 10, 1, 8, index, 0)),
+      ciphertextSha256: sealed.ciphertextSha256,
+      contentCommitment: sealed.contentCommitment,
+    };
+    const receipt = nextReceipt(tenderId, previous, link);
+    links.push({ ...link, receipt });
+    previous = receipt;
+  });
+  return { links, head: previous };
+};
+
+/** Opens `sealed`; unless told otherwise, against the receipts that were issued for it alone. */
+const open = (
+  sealed: SealedBid,
+  binding: BidBinding = BINDING,
+  key: KeyObject = privateKey,
+  receipts: TrustedReceipts = receiptsOf([{ sealed, binding }], binding.tenderId),
+) => openBid({ privateKey: key, binding, sealed, receipts });
 
 const flip = (bytes: Buffer, index = 0): Buffer => {
   const copy = Buffer.from(bytes);
@@ -176,32 +210,54 @@ describe('sealing and opening a bid', () => {
     expect(a.contentCommitment).not.toBe(b.contentCommitment);
   });
 
-  it('binds the sealed bytes to tender, bid, bidder, revision and key', () => {
+  it('binds the sealed bytes to bidder, and refuses a key id that is not the sealed one', () => {
     const sealed = seal();
-    const changes: Partial<BidBinding>[] = [
-      { tenderId: 'TND_B' },
-      { bidId: 'BID_2' },
-      { bidderOrganizationId: 'ORG_OTHER' },
-      { revision: 2 },
-    ];
-    for (const change of changes) {
-      expect(() => open(sealed, { ...BINDING, ...change })).toThrow(
-        expect.objectContaining({ code: 'TAMPERED' }),
-      );
-    }
+    expect(() => open(sealed, { ...BINDING, bidderOrganizationId: 'ORG_OTHER' })).toThrow(
+      expect.objectContaining({ code: 'TAMPERED' }),
+    );
     expect(() => open(sealed, { ...BINDING, keyId: 'TKY_2' })).toThrow(
       expect.objectContaining({ code: 'TAMPERED' }),
     );
   });
 
+  it('refuses another tender, another bid and another revision than the receipts are for', () => {
+    const sealed = seal();
+    const receipts = receiptsOf([sealed]);
+    // Another tender: its chain starts from another genesis.
+    expect(() => open(sealed, { ...BINDING, tenderId: 'TND_B' }, privateKey, receipts)).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+    );
+    // A bid the chain has no receipt for.
+    expect(() => open(sealed, { ...BINDING, bidId: 'BID_2' }, privateKey, receipts)).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+    );
+    // A revision that is not the receipted one.
+    expect(() => open(sealed, { ...BINDING, revision: 2 }, privateKey, receipts)).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+    );
+  });
+
   it.each(['nonce', 'ciphertext', 'tag', 'wrappedContentKey'] as const)(
-    'refuses a %s that was changed by one bit',
+    'refuses a %s changed by one bit: the recomputed digest is not the receipted one',
     (field) => {
       const sealed = seal();
       const tampered: SealedBid = { ...sealed, [field]: flip(sealed[field], 3) };
-      expect(() => open(tampered)).toThrow(expect.objectContaining({ code: 'TAMPERED' }));
+      expect(() => open(tampered, BINDING, privateKey, receiptsOf([sealed]))).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+      );
     },
   );
+
+  it('is not fooled by a tampered bid whose stored digest was rewritten to match', () => {
+    // The stored `ciphertextSha256` is data the same writer can change. Opening
+    // recomputes the digest from the bytes and compares it with the receipt.
+    const sealed = seal();
+    const tampered: SealedBid = { ...sealed, ciphertext: flip(sealed.ciphertext, 3) };
+    const rewritten: SealedBid = { ...tampered, ciphertextSha256: ciphertextDigest(tampered) };
+    expect(() => open(rewritten, BINDING, privateKey, receiptsOf([sealed]))).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+    );
+  });
 
   it('refuses a sealed bid of another version', () => {
     expect(() => open({ ...seal(), version: 2 })).toThrow(
@@ -209,17 +265,82 @@ describe('sealing and opening a bid', () => {
     );
   });
 
-  it('detects other content sealed with the public key under the old commitment', () => {
-    // The scenario the salt exists for: someone who holds the tender's PUBLIC key
-    // (which is not secret) replaces a bid by sealing other content and keeping
-    // the commitment recorded at submission.
+  it('refuses a substituted bid: same binding, other content, its own consistent digest and commitment', () => {
+    // Codex review of #163. Someone who can write the table (and holds the tender's
+    // public key, which is not secret) seals other content under the very same
+    // binding. The forgery is perfectly self-consistent — its own commitment, its
+    // own digest — and decrypts cleanly. Only the receipt the bidder was given
+    // can tell it from the bid.
     const original = seal();
+    const receipts = receiptsOf([original]);
     const forged = seal(BINDING, { ...CONTENT, priceMinor: '1' });
-    const swapped: SealedBid = { ...forged, contentCommitment: original.contentCommitment };
 
-    expect(() => open(swapped)).toThrow(expect.objectContaining({ code: 'COMMITMENT_MISMATCH' }));
-    // And the forgery is honest about itself when left alone.
-    expect(open(forged)).toMatchObject({ priceMinor: '1' });
+    expect(open(forged, BINDING, privateKey, receiptsOf([forged]))).toMatchObject({
+      priceMinor: '1',
+    });
+    expect(() => open(forged, BINDING, privateKey, receipts)).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+    );
+  });
+
+  it('refuses a substitution that also rebuilds the whole chain, against the trusted head', () => {
+    const original = seal();
+    const trusted = receiptsOf([original]);
+    const forged = seal(BINDING, { ...CONTENT, priceMinor: '1' });
+    const rebuilt = receiptsOf([forged]);
+
+    // The rebuilt chain is internally sound, and opens the forgery — until it is
+    // checked against the head held outside the database.
+    expect(() => open(forged, BINDING, privateKey, { ...rebuilt, head: trusted.head })).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+    );
+  });
+
+  it('refuses a bid opened against a chain that has been cut short', () => {
+    const [first, second] = [seal(), seal({ ...BINDING, bidId: 'BID_2' })];
+    const whole = receiptsOf([first, { sealed: second, binding: { ...BINDING, bidId: 'BID_2' } }]);
+    const cut = { links: whole.links.slice(0, 1), head: whole.head };
+    expect(() => open(first, BINDING, privateKey, cut)).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+    );
+  });
+
+  it('opens each bid of a longer chain against its own receipt, and only the newest revision', () => {
+    const one = seal();
+    const two = seal({ ...BINDING, bidId: 'BID_2', bidderOrganizationId: 'ORG_OTHER' });
+    const revised = seal({ ...BINDING, revision: 2 }, { ...CONTENT, priceMinor: '4100000000' });
+    const receipts = receiptsOf([
+      { sealed: one },
+      { sealed: two, binding: { ...BINDING, bidId: 'BID_2', bidderOrganizationId: 'ORG_OTHER' } },
+      { sealed: revised, binding: { ...BINDING, revision: 2 } },
+    ]);
+
+    expect(
+      open(
+        two,
+        { ...BINDING, bidId: 'BID_2', bidderOrganizationId: 'ORG_OTHER' },
+        privateKey,
+        receipts,
+      ),
+    ).toEqual(CONTENT);
+    expect(open(revised, { ...BINDING, revision: 2 }, privateKey, receipts)).toMatchObject({
+      priceMinor: '4100000000',
+    });
+    // Revision 1 of BID_1 is no longer the bid: its receipt is not the newest.
+    expect(() => open(one, BINDING, privateKey, receipts)).toThrow(
+      expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+    );
+  });
+
+  it('detects content that does not match the commitment the receipt recorded', () => {
+    // A bid whose recorded commitment was never the commitment of its content —
+    // a fault at submission, however it arose. The digest and the receipt agree
+    // with each other; the decrypted content does not agree with either.
+    const sealed = seal();
+    const wrongCommitment: SealedBid = { ...sealed, contentCommitment: 'ab'.repeat(32) };
+    expect(() => open(wrongCommitment, BINDING, privateKey, receiptsOf([wrongCommitment]))).toThrow(
+      expect.objectContaining({ code: 'COMMITMENT_MISMATCH' }),
+    );
   });
 
   it('publishes only two fixed-size digests, and they differ from seal to seal', () => {
@@ -255,6 +376,7 @@ describe('sealing and opening a bid', () => {
     const errors: unknown[] = [];
     for (const attempt of [
       () => open({ ...sealed, ciphertext: flip(sealed.ciphertext) }),
+      () => open(sealed, { ...BINDING, bidderOrganizationId: 'ORG_OTHER' }),
       () => open({ ...sealed, contentCommitment: '00'.repeat(32) }),
       () => seal(BINDING, { priceMinor: 12.5 }),
     ]) {
@@ -264,12 +386,13 @@ describe('sealing and opening a bid', () => {
         errors.push(error);
       }
     }
-    expect(errors).toHaveLength(3);
+    expect(errors).toHaveLength(4);
     const text = errors.map((error) => `${String(error)} ${JSON.stringify(error)}`).join(' ');
     for (const secret of [
       '4200000000',
       'Nine road projects',
       sealed.ciphertext.toString('base64'),
+      sealed.contentCommitment,
     ]) {
       expect(text).not.toContain(secret);
     }
@@ -300,7 +423,7 @@ describe('the receipt chain', () => {
       links.push({ ...link, receipt });
       previous = receipt;
     });
-    return links;
+    return { links, head: previous };
   }
 
   it('starts from a genesis of its own tender', () => {
@@ -308,9 +431,10 @@ describe('the receipt chain', () => {
     expect(genesisReceipt('TND_A')).not.toBe(genesisReceipt('TND_B'));
   });
 
-  it('verifies a chain issued in order, and the empty chain', () => {
-    expect(verifyReceiptChain('TND_A', chain())).toEqual({ ok: true });
-    expect(verifyReceiptChain('TND_A', [])).toEqual({ ok: true });
+  it('verifies a chain that ends at the trusted head, and the empty chain at genesis', () => {
+    const { links, head } = chain();
+    expect(verifyReceiptChain('TND_A', links, head)).toEqual({ ok: true });
+    expect(verifyReceiptChain('TND_A', [], genesisReceipt('TND_A'))).toEqual({ ok: true });
   });
 
   it.each([
@@ -320,25 +444,49 @@ describe('the receipt chain', () => {
     ['ciphertextSha256', { ciphertextSha256: 'ab'.repeat(32) }],
     ['contentCommitment', { contentCommitment: 'cd'.repeat(32) }],
   ])('finds an edited %s at the link it was edited in', (_field, change) => {
-    const links = chain();
+    const { links, head } = chain();
     links[1] = { ...links[1]!, ...change };
-    expect(verifyReceiptChain('TND_A', links)).toEqual({ ok: false, brokenAt: 1 });
+    expect(verifyReceiptChain('TND_A', links, head)).toEqual({
+      ok: false,
+      reason: 'LINK_BROKEN',
+      brokenAt: 1,
+    });
   });
 
   it('finds a removed link, a reordered pair, and a link spliced in from another tender', () => {
-    const links = chain();
-    expect(verifyReceiptChain('TND_A', [links[0]!, links[2]!])).toEqual({ ok: false, brokenAt: 1 });
-    expect(verifyReceiptChain('TND_A', [links[1]!, links[0]!, links[2]!])).toEqual({
+    const { links, head } = chain();
+    expect(verifyReceiptChain('TND_A', [links[0]!, links[2]!], head)).toEqual({
       ok: false,
+      reason: 'LINK_BROKEN',
+      brokenAt: 1,
+    });
+    expect(verifyReceiptChain('TND_A', [links[1]!, links[0]!, links[2]!], head)).toEqual({
+      ok: false,
+      reason: 'LINK_BROKEN',
       brokenAt: 0,
     });
-    expect(verifyReceiptChain('TND_B', chain('TND_A'))).toEqual({ ok: false, brokenAt: 0 });
+    expect(verifyReceiptChain('TND_B', chain('TND_A').links, head)).toEqual({
+      ok: false,
+      reason: 'LINK_BROKEN',
+      brokenAt: 0,
+    });
   });
 
-  it('cannot see a chain cut short on its own: the head is pinned by the audit copy, not here', () => {
-    // Stated so nobody relies on this function for what it does not do: dropping
-    // the newest receipts leaves a valid prefix. audit-service holds the head
-    // (BID_SUBMITTED carries every receipt), which is what closes that gap.
-    expect(verifyReceiptChain('TND_A', chain().slice(0, 2))).toEqual({ ok: true });
+  it('finds a chain cut short, extended or replaced, by the head it does not end at', () => {
+    const { links, head } = chain();
+    // Cut short: the newest receipts are gone, and what is left is perfectly sound.
+    expect(verifyReceiptChain('TND_A', links.slice(0, 2), head)).toEqual({
+      ok: false,
+      reason: 'HEAD_MISMATCH',
+    });
+    // Emptied.
+    expect(verifyReceiptChain('TND_A', [], head)).toEqual({ ok: false, reason: 'HEAD_MISMATCH' });
+    // Replaced by another sound chain: sound on its own, and not the one issued.
+    const other = chain();
+    expect(verifyReceiptChain('TND_A', other.links, other.head)).toEqual({ ok: true });
+    expect(verifyReceiptChain('TND_A', other.links, head)).toEqual({
+      ok: false,
+      reason: 'HEAD_MISMATCH',
+    });
   });
 });

@@ -7,7 +7,14 @@ import {
   type KeyContext,
   type WrappedKey,
 } from './key-provider';
-import { generateTenderKeyPair, openBid, privateKeyFromDer, sealBid } from './sealing';
+import {
+  generateTenderKeyPair,
+  genesisReceipt,
+  nextReceipt,
+  openBid,
+  privateKeyFromDer,
+  sealBid,
+} from './sealing';
 
 /**
  * The seam between a tender's private key and the KEK that keeps it (ADR-066
@@ -58,11 +65,26 @@ describe('EnvKekProvider', () => {
       content: { priceMinor: '1' },
     });
 
+    // The receipt the bidder was given, and the head the trusted copy holds.
+    const link = {
+      bidId: binding.bidId,
+      revision: binding.revision,
+      receivedAt: new Date('2026-11-01T08:00:00.000Z'),
+      ciphertextSha256: sealed.ciphertextSha256,
+      contentCommitment: sealed.contentCommitment,
+    };
+    const receipt = nextReceipt(binding.tenderId, genesisReceipt(binding.tenderId), link);
+
     const stored = provider.wrap(pair.privateKeyDer, CONTEXT);
     const recovered = provider.unwrap(stored, CONTEXT);
-    expect(openBid({ privateKey: privateKeyFromDer(recovered), binding, sealed })).toEqual({
-      priceMinor: '1',
-    });
+    expect(
+      openBid({
+        privateKey: privateKeyFromDer(recovered),
+        binding,
+        sealed,
+        receipts: { links: [{ ...link, receipt }], head: receipt },
+      }),
+    ).toEqual({ priceMinor: '1' });
   });
 
   it('binds a wrapped key to its tender and its key id', () => {

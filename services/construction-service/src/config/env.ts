@@ -8,7 +8,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
-import { isKekId, parseKekEntries } from '../tender/sealing/key-provider';
+import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -257,6 +257,27 @@ export const constructionEnvSchema = baseEnvSchema
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+  })
+  // The two key settings are one setting (Codex review of #163): keys with a
+  // CURRENT that is not among them — or a CURRENT with no keys — used to pass
+  // startup and fail only when a tender was first published. Judged together, here.
+  .superRefine((env, ctx) => {
+    try {
+      parseKekEntries(env.CONSTRUCTION_TENDER_KEKS);
+    } catch {
+      return; // malformed entries are already reported at their own field
+    }
+    try {
+      parseKekConfiguration(env.CONSTRUCTION_TENDER_KEKS, env.CONSTRUCTION_TENDER_KEK_CURRENT);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_TENDER_KEK_CURRENT'],
+        message:
+          'CONSTRUCTION_TENDER_KEK_CURRENT must name one of the ids in CONSTRUCTION_TENDER_KEKS, ' +
+          'and be set exactly when CONSTRUCTION_TENDER_KEKS is',
+      });
+    }
   });
 
 export type ConstructionEnv = z.infer<typeof constructionEnvSchema>;
