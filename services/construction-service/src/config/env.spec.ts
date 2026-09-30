@@ -208,3 +208,36 @@ describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
     expect(() => load({ CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: '-1' })).toThrow();
   });
 });
+
+describe('the tender key-encryption keys (ADR-066 § 2)', () => {
+  const KEK = Buffer.alloc(32, 9).toString('base64');
+
+  it('are unset by default: no tender can be published, and there is no default key', () => {
+    const env = load();
+    expect(env.CONSTRUCTION_TENDER_KEKS).toBeUndefined();
+    expect(env.CONSTRUCTION_TENDER_KEK_CURRENT).toBeUndefined();
+  });
+
+  it('accept well-formed id:base64 pairs', () => {
+    const env = load({
+      CONSTRUCTION_TENDER_KEKS: `v1:${KEK}`,
+      CONSTRUCTION_TENDER_KEK_CURRENT: 'v1',
+    });
+    expect(env.CONSTRUCTION_TENDER_KEKS).toBe(`v1:${KEK}`);
+  });
+
+  it('stop the service at startup when malformed, without repeating the value', () => {
+    const secret = Buffer.alloc(20, 3).toString('base64');
+    let message = '';
+    try {
+      load({ CONSTRUCTION_TENDER_KEKS: `v1:${secret}` });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/CONSTRUCTION_TENDER_KEKS/);
+    expect(message).not.toContain(secret);
+    expect(() => load({ CONSTRUCTION_TENDER_KEK_CURRENT: 'V 1' })).toThrow(
+      /CONSTRUCTION_TENDER_KEK_CURRENT/,
+    );
+  });
+});
