@@ -528,7 +528,9 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 `TENDER_AWARDED.amountMinor` تنها مبلغ برنده است و فقط پس از `EVALUATED` منتشر می‌شود (بازگشایی رخ داده)؛ CON-003 قرارداد را
 با کلید Idempotency `tenderId` می‌سازد. `BID_ACCESSED` و `BID_QUALIFIED`/`BID_DISQUALIFIED` رویدادهای **افزودهٔ CON-002** برای پوشش S-06
-هستند (نیازمند پذیرش مدیر پروژه در این PR).
+هستند. **هشت رویداد افزوده — `BID_ACCESSED`، `BID_QUALIFIED`، `BID_DISQUALIFIED`، `BIDS_OPENED`، `BID_REVISED`، `BID_WITHDRAWN`، `TENDER_CLOSED`،
+`TENDER_CANCELLED` — را مدیر پروژه با همین نام‌ها پذیرفت (2026-09-30).** `BID_ACCESSED` هرگز محتوای پیشنهاد حمل نمی‌کند: فقط
+شناسه‌ها، بازیگر، زمان و هدف بسته (`.strict()` هر فیلد دیگر را رد می‌کند).
 
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
