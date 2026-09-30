@@ -135,6 +135,7 @@ export { isRetryDelivery, originalDelivery } from './consumer/original-delivery'
 // Outbox ---------------------------------------------------------------------
 export {
   buildOutboxRow,
+  orderForPublish,
   OutboxRelay,
   renewalIntervalMs,
   renewalDeadlineMs,
