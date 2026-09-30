@@ -132,12 +132,13 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
         .send(body);
 
     // A holds K, as a first attempt still running would.
-    await expect(asTenant(() => store.claim(ENDPOINT, key, body))).resolves.toEqual({
-      kind: 'PROCEED',
-    });
+    const a = await asTenant(() => store.claim(ENDPOINT, key, body));
+    if (a.kind !== 'PROCEED') throw new Error('A should own K');
 
     // B's insert loses to A's row; A then fails and releases, before B reads.
-    const restore = betweenLostInsertAndRead(() => asTenant(() => store.release(ENDPOINT, key)));
+    const restore = betweenLostInsertAndRead(() =>
+      asTenant(() => store.release(ENDPOINT, key, a.token)),
+    );
     let b: request.Response;
     try {
       b = await place();
@@ -161,6 +162,53 @@ describe('an Idempotency-Key whose claim vanishes under a request (real database
     expect(c.status).toBe(201);
     expect(c.body.id).toBe(b.body.id);
     expect(await ordersUnder(key)).toBe(1);
+  });
+
+  it('A’s claim expires and is purged, B re-claims: A’s late complete and release change nothing', async () => {
+    const key = apiKey('race-token');
+    const body = { note: 'token' };
+    const rowOf = () =>
+      runUnscoped('the suite reads the key whose claim changed hands', () =>
+        harness.prisma.client.idempotencyKey.findUnique({
+          where: {
+            organizationId_endpoint_key: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
+          },
+        }),
+      );
+
+    const a = await asTenant(() => store.claim(ENDPOINT, key, body));
+    if (a.kind !== 'PROCEED') throw new Error('A should own K');
+
+    // A's claim expires and the purge removes it.
+    await runUnscoped('the suite expires the claim, as the clock would', () =>
+      harness.prisma.client.idempotencyKey.updateMany({
+        where: { organizationId: buyerOrg, endpoint: ENDPOINT, key },
+        // `ck_idempotency_expiry`: a row expires after it was created.
+        data: { createdAt: new Date(Date.now() - 60_000), expiresAt: new Date(Date.now() - 1000) },
+      }),
+    );
+    expect(await store.purgeExpired()).toBeGreaterThanOrEqual(1);
+    expect(await rowOf()).toBeNull();
+
+    // B claims the same key afresh, under a token of its own.
+    const b = await asTenant(() => store.claim(ENDPOINT, key, body));
+    if (b.kind !== 'PROCEED') throw new Error('B should own K');
+    expect(b.token).not.toBe(a.token);
+
+    // A, late, neither completes nor releases B's row — and neither throws.
+    await asTenant(() => store.complete(ENDPOINT, key, a.token, 201, { id: 'from-A' }));
+    expect(await rowOf()).toMatchObject({ state: 'IN_PROGRESS', responseStatus: null });
+    await asTenant(() => store.release(ENDPOINT, key, a.token));
+    expect(await rowOf()).toMatchObject({ state: 'IN_PROGRESS', claimToken: b.token });
+
+    // B completes normally, and A's later release still cannot take it back.
+    await asTenant(() => store.complete(ENDPOINT, key, b.token, 201, { id: 'from-B' }));
+    await asTenant(() => store.release(ENDPOINT, key, a.token));
+    expect(await rowOf()).toMatchObject({
+      state: 'COMPLETED',
+      responseStatus: 201,
+      responseBody: { id: 'from-B' },
+    });
   });
 
   it('the order commits and recording its response fails: the claim is kept, never a second order', async () => {

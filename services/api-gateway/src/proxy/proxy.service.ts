@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
-import { apiErrorSchema, type ApiError } from '@rasta/contracts';
+import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
 
 /**
@@ -58,6 +58,14 @@ const HOP_BY_HOP = new Set([
 
 /** Response headers that belong to the gateway's CORS policy, never an upstream's. */
 const CORS_HEADER_PREFIX = 'access-control-';
+
+/**
+ * `Retry-After` for a request refused by an open circuit: the breaker's
+ * remaining open time, rounded up to whole seconds and clamped to 1..3600.
+ */
+export function circuitRetryAfterSeconds(remainingMs: number): number {
+  return Math.min(3600, Math.max(1, Math.ceil(remainingMs / 1000)));
+}
 
 @Injectable()
 export class ProxyService {
@@ -214,10 +222,18 @@ export class ProxyService {
 
     const elapsed = Date.now() - circuit.openedAt;
     if (elapsed < this.options.resetAfterMs) {
-      throw RastaError.upstreamUnavailable(service, {
-        reason: 'circuit-open',
-        retryInMs: this.options.resetAfterMs - elapsed,
-      });
+      const remainingMs = this.options.resetAfterMs - elapsed;
+      // The wait is the typed field the exception filter sends as
+      // `Retry-After`, never read back out of `internalContext`.
+      throw new RastaError(
+        ERROR_CODES.UPSTREAM_UNAVAILABLE,
+        'A required service is temporarily unavailable',
+        {
+          internalContext: { service },
+          cause: { reason: 'circuit-open', retryInMs: remainingMs },
+          retryAfterSeconds: circuitRetryAfterSeconds(remainingMs),
+        },
+      );
     }
 
     // Half-open: let one request through to test whether it has recovered.

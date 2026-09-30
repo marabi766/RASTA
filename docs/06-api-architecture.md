@@ -68,14 +68,14 @@ Domain Services  :31xx    ◄── فقط از شبکه داخلی؛ NetworkPol
 
 ### پاسخ
 
-| Header                              | همیشه              | شرح                                                                                                                                   |
-| ----------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `X-Correlation-Id`                  | ✅                 | همان مقدار درخواست                                                                                                                    |
-| `X-Trace-Id`                        | ✅                 | Trace ID استاندارد W3C                                                                                                                |
-| `X-RateLimit-Limit/Remaining/Reset` | ✅                 | وضعیت محدودیت نرخ                                                                                                                     |
-| `ETag`                              | روی GET منبع منفرد | برای `If-Match`                                                                                                                       |
-| `Retry-After`                       | روی ۴۲۹ و ۴۰۹      | ثانیه، عدد صحیح. ۴۲۹ از محدودیت نرخ Gateway (§ ۶٫۹)؛ ۴۰۹ فقط برای کلید در حال پردازش (§ ۶٫۸)                                          |
-| Secure Headers                      | ✅                 | `Strict-Transport-Security`، `X-Content-Type-Options: nosniff`، `X-Frame-Options: DENY`، `Content-Security-Policy`، `Referrer-Policy` |
+| Header                              | همیشه              | شرح                                                                                                                                     |
+| ----------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Correlation-Id`                  | ✅                 | همان مقدار درخواست                                                                                                                      |
+| `X-Trace-Id`                        | ✅                 | Trace ID استاندارد W3C                                                                                                                  |
+| `X-RateLimit-Limit/Remaining/Reset` | ✅                 | وضعیت محدودیت نرخ؛ در CORS در `exposedHeaders` است تا اسکریپت مرورگر بتواند آن را بخواند                                                |
+| `ETag`                              | روی GET منبع منفرد | برای `If-Match`                                                                                                                         |
+| `Retry-After`                       | روی ۴۲۹، ۴۰۹ و ۵۰۳ | ثانیه، عدد صحیح. ۴۲۹ از محدودیت نرخ Gateway (§ ۶٫۹)؛ ۴۰۹ فقط برای کلید در حال پردازش (§ ۶٫۸)؛ ۵۰۳ وقتی Circuit Breaker باز است (§ ۶٫۱۲) |
+| Secure Headers                      | ✅                 | `Strict-Transport-Security`، `X-Content-Type-Options: nosniff`، `X-Frame-Options: DENY`، `Content-Security-Policy`، `Referrer-Policy`   |
 
 ---
 
@@ -604,6 +604,11 @@ X-Organization-Id: <optional; must MATCH the token's signed org_id>
 | Retry           | حداکثر ۲ بار، فقط روی خطای گذرا، با Exponential Backoff + Jitter |
 | Circuit Breaker | باز شدن پس از ۵ خطای متوالی؛ نیمه‌باز پس از ۳۰ ثانیه             |
 | Fallback        | Replica مرجع محلی، یا `UPSTREAM_UNAVAILABLE` صریح                |
+
+**`Retry-After` روی Circuit باز.** وقتی Circuit Breaker Gateway باز است، درخواست بدون
+تماس با سرویس با `503 UPSTREAM_UNAVAILABLE` رد می‌شود و `Retry-After` مدت باقی‌ماندهٔ
+باز بودن Circuit را می‌گوید: ثانیهٔ صحیح، رو به بالا گرد، محدود به ۱ تا ۳۶۰۰. مقدار از
+فیلد نوع‌دار `RastaError.retryAfterSeconds` می‌آید، نه از `internalContext`.
 
 **ناهمزمان (Kafka)** — پیش‌فرض. اگر ارتباطی می‌تواند رویداد باشد، رویداد است.
 
