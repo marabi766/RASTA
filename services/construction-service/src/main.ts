@@ -29,15 +29,9 @@ import { VersioningType } from '@nestjs/common';
 import { SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
+import { installGracefulShutdown } from '@rasta/nest-common';
 import { AppModule } from './app.module';
 import { buildConstructionOpenApiDocument } from './openapi/document';
-
-/** Set once the app exists; the one shutdown path closes it. */
-let application: NestExpressApplication | undefined;
-let shuttingDown = false;
-
-/** How long an in-flight sweeper batch and the consumer may take to stop before we give up. */
-const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -87,11 +81,15 @@ async function bootstrap(): Promise<void> {
     SwaggerModule.setup('docs', app, buildConstructionOpenApiDocument(app));
   }
 
-  // No `enableShutdownHooks()`: `shutdown` below is the only signal handler and
-  // closes the app itself, so Nest's hooks (the consumer, the sweeper's
-  // in-flight batch, the relay) finish before telemetry is flushed and the
-  // process exits — two competing paths let the exit cut a batch off.
-  application = app;
+  // The one shutdown path (`installGracefulShutdown`, @rasta/nest-common): close
+  // the app so Nest's hooks finish, flush telemetry, then exit 0 — or 1 if the
+  // close fails or outlasts SHUTDOWN_TIMEOUT_MS. No `enableShutdownHooks()`
+  // beside it: two competing paths let the exit cut an in-flight batch off.
+  installGracefulShutdown(app, {
+    serviceName: SERVICE_NAME,
+    timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+    afterClose: shutdownTelemetry,
+  });
 
   await app.listen(env.PORT, '0.0.0.0');
 
@@ -100,39 +98,6 @@ async function bootstrap(): Promise<void> {
       (allowsDeveloperTooling(env) ? ` — docs at http://localhost:${env.PORT}/docs` : ''),
   );
 }
-
-async function shutdown(signal: string): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.warn(`[${SERVICE_NAME}] received ${signal}, shutting down`);
-
-  // Bounded: a batch that never ends must not hold the process past its
-  // orchestrator's grace period.
-  const timedOut = Symbol('timeout');
-  let timer: NodeJS.Timeout | undefined;
-  const outcome = await Promise.race([
-    (application?.close() ?? Promise.resolve()).then(
-      () => 'closed' as const,
-      (error: unknown) => {
-        console.error(`[${SERVICE_NAME}] error while closing`, error);
-        return 'failed' as const;
-      },
-    ),
-    new Promise<typeof timedOut>((resolve) => {
-      timer = setTimeout(() => resolve(timedOut), SHUTDOWN_TIMEOUT_MS);
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
-  if (outcome === timedOut) {
-    console.error(`[${SERVICE_NAME}] shutdown timed out after ${SHUTDOWN_TIMEOUT_MS} ms`);
-  }
-
-  await shutdownTelemetry();
-  process.exit(outcome === 'closed' ? 0 : 1);
-}
-
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('SIGINT', () => void shutdown('SIGINT'));
 
 bootstrap().catch((error) => {
   console.error(`[${SERVICE_NAME}] failed to start`, error);

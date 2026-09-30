@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
   baseEnvSchema,
   databaseEnvSchema,
   kafkaEnvSchema,
@@ -212,6 +213,25 @@ describe('boolean flags in the shared schemas', () => {
  * service may run without one is decided by `kafkaConnection` (nest-common),
  * which refuses PLAINTEXT unless `kafkaPlaintextAllowed` (below).
  */
+describe('SHUTDOWN_TIMEOUT_MS', () => {
+  const base = { SERVICE_NAME: 'asset-service', PORT: '3103' } as NodeJS.ProcessEnv;
+  const load = (value?: string) =>
+    loadEnv(baseEnvSchema, value === undefined ? base : { ...base, SHUTDOWN_TIMEOUT_MS: value });
+
+  it('defaults to 25 s, under the 30 s Kubernetes grace period', () => {
+    expect(load().SHUTDOWN_TIMEOUT_MS).toBe(DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    expect(DEFAULT_SHUTDOWN_TIMEOUT_MS).toBe(25_000);
+  });
+
+  it('reads an explicit value', () => {
+    expect(load('10000').SHUTDOWN_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it.each(['0', '999', '120001', '-1', '2500.5', 'soon'])('refuses %p', (value) => {
+    expect(() => load(value)).toThrow(EnvValidationError);
+  });
+});
+
 describe('Kafka SASL credential', () => {
   const kafkaService = baseEnvSchema.merge(kafkaEnvSchema);
   const source = {
