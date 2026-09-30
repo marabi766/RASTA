@@ -9,8 +9,8 @@ import { createAssetSchema } from '../src/asset/dto';
 import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
 import { TimelineConsumer } from '../src/consumers/timeline.consumer';
-import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants } from './helpers';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { asActor, databaseUrl, id, newPrisma, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
 
 /**
@@ -861,6 +861,41 @@ describe('asset integrity', () => {
       // The ended assignment was applied last.
       expect((await statusOf(assetId)).status).toBe('ACTIVE');
     });
+
+    it('needs no second connection: a replay completes on a one-connection pool', async () => {
+      // Everything inside the refresh transaction must go through `tx`; a read
+      // through the pool from there would wait for a connection the open
+      // transaction holds, until the pool timeout (here 3 s).
+      const url = databaseUrl();
+      const tiny = new PrismaService(
+        `${url}${url.includes('?') ? '&' : '?'}connection_limit=1&pool_timeout=3`,
+      );
+      await tiny.onModuleInit();
+      try {
+        const tinyRepository = new AssetRepository(tiny);
+        const tinyConsumer = new TimelineConsumer(
+          null,
+          tinyRepository,
+          new AssetService(tinyRepository, undefined, clearingOwners()),
+          source({ activeAssignment: false, inMaintenance: true }),
+        );
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        const started = Date.now();
+
+        await asActor(manager(org.a), () =>
+          tinyConsumer.handle(
+            envelope('MAINTENANCE_STARTED', assetId, org.a),
+            retry('rasta.maintenance.v1'),
+          ),
+        );
+
+        expect(Date.now() - started).toBeLessThan(2500);
+        expect((await statusOf(assetId)).status).toBe('IN_MAINTENANCE');
+      } finally {
+        await tiny.onModuleDestroy();
+      }
+    }, 30_000);
 
     it('M5: an asset absent from the event’s organization is SOURCE_UNCONFIRMED on a retry — no marker, nothing written — and still a skip on the original topic', async () => {
       const assetId = await machine(org.a);

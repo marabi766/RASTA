@@ -365,8 +365,12 @@ export class FleetRepository {
   /** The machine's fence, if any, and whether it has expired by the database's clock. */
   async findTransferFence(
     assetId: string,
+    tx?: ExtendedPrismaClient,
   ): Promise<{ fenceId: string; organizationId: string; expired: boolean } | null> {
-    const rows = await this.client.$queryRaw<
+    // A caller inside a transaction passes it: reading through the pool from
+    // there needs a second connection, which a one-connection or saturated
+    // pool never grants while the transaction is open.
+    const rows = await (tx ?? this.client).$queryRaw<
       { fence_id: string; organization_id: string; expired: boolean }[]
     >`
       SELECT fence_id, organization_id, expires_at <= now() AS expired

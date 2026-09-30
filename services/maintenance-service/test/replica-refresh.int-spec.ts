@@ -4,8 +4,8 @@ import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import type { AssetSnapshot, AssetSnapshotSource } from '../src/consumers/replica-sources';
 import type { TransferRecordSource } from '../src/maintenance/transfer-record';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
-import type { PrismaService } from '../src/prisma/prisma.service';
-import { id, newPrisma, tenants } from './helpers';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { databaseUrl, id, newPrisma, tenants } from './helpers';
 
 /**
  * D-039 — a state event replayed on `<topic>.retry` never applies its payload:
@@ -378,6 +378,46 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
     await consumer.handle(event('ASSET_ACTIVATED', org.a, { assetId: other }), RETRY);
     expect(await fenceOwners(other)).toEqual([org.b]);
   });
+
+  it('a refresh needs no second connection: it completes on a one-connection pool, fence check included', async () => {
+    // Everything inside the refresh transaction must go through `tx`. A read
+    // through the pool from there would wait for a connection that the open
+    // transaction itself holds — until the pool timeout, here 3 s, and the
+    // replay would reach the DLQ unrefreshed.
+    const tiny = new PrismaService(
+      `${databaseUrl()}${databaseUrl().includes('?') ? '&' : '?'}connection_limit=1&pool_timeout=3`,
+    );
+    await tiny.onModuleInit();
+    try {
+      const tinyConsumer = new AssetSyncConsumer(
+        null,
+        new MaintenanceRepository(tiny),
+        assetSource,
+        transferRecords,
+      );
+      const assetId = id('AST');
+      await seed(assetId, org.a);
+      await place(assetId, org.a); // A's fence for the transfer that has since landed
+      truth(assetId, { owner: org.b, previousOwners: [org.a], status: 'ACTIVE' });
+      const started = Date.now();
+
+      await tinyConsumer.handle(
+        event('ASSET_TRANSFERRED', org.b, {
+          assetId,
+          fromOrganizationId: org.a,
+          toOrganizationId: org.b,
+          transferredAt: new Date().toISOString(),
+        }),
+        RETRY,
+      );
+
+      expect(Date.now() - started).toBeLessThan(2500);
+      expect(await replica(assetId)).toMatchObject({ organizationId: org.b, status: 'ACTIVE' });
+      expect(await fenceOwners(assetId)).toEqual([]);
+    } finally {
+      await tiny.onModuleDestroy();
+    }
+  }, 30_000);
 
   it('H4: a replay for a tenant that never owned the machine is SOURCE_UNCONFIRMED — no marker, the replica untouched', async () => {
     const assetId = id('AST');

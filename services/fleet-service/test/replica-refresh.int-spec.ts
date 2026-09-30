@@ -10,7 +10,7 @@ import type {
   MaintenanceStateSource,
 } from '../src/consumers/replica-sources';
 import type { TransferRecordSource } from '../src/fleet/transfer-record';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { asActor, cleanup, databaseUrl, id, newPrisma, tenants } from './helpers';
 
 /**
  * D-039 — a state event replayed on `<topic>.retry` never applies its payload:
@@ -521,6 +521,50 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
       expect(await fenceOwners(other)).toEqual([org.b]);
     });
   });
+
+  it('a refresh needs no second connection: it completes on a one-connection pool, fence check included', async () => {
+    // Everything inside the refresh transaction must go through `tx`. A read
+    // through the pool from there would wait for a connection that the open
+    // transaction itself holds — until the pool timeout, here 3 s, and the
+    // replay would reach the DLQ unrefreshed.
+    const tiny = new PrismaService(
+      `${databaseUrl()}${databaseUrl().includes('?') ? '&' : '?'}connection_limit=1&pool_timeout=3`,
+    );
+    await tiny.onModuleInit();
+    try {
+      const tinyRepository = new FleetRepository(tiny);
+      const tinyConsumer = new AssetSyncConsumer(
+        null,
+        tinyRepository,
+        assetSource,
+        maintenanceSource,
+        transferRecords,
+      );
+      const assetId = id('AST');
+      await consumer.handle(
+        event('ASSET_CREATED', org.a, { assetId, organizationId: org.a, status: 'ACTIVE' }),
+      );
+      await place(assetId, org.a); // A's fence for the transfer that has since landed
+      truth(assetId, { owner: org.b, previousOwners: [org.a], status: 'ACTIVE' });
+      const started = Date.now();
+
+      await tinyConsumer.handle(
+        event('ASSET_TRANSFERRED', org.b, {
+          assetId,
+          fromOrganizationId: org.a,
+          toOrganizationId: org.b,
+          transferredAt: new Date().toISOString(),
+        }),
+        RETRY,
+      );
+
+      expect(Date.now() - started).toBeLessThan(2500);
+      expect(await replica(assetId)).toMatchObject({ organizationId: org.b, status: 'ACTIVE' });
+      expect(await fenceOwners(assetId)).toEqual([]);
+    } finally {
+      await tiny.onModuleDestroy();
+    }
+  }, 30_000);
 
   describe('the source is asked as the event’s tenant (H4)', () => {
     async function blockedMachine(): Promise<string> {

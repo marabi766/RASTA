@@ -522,7 +522,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     assetId: string,
     currentOwner: string,
   ): Promise<void> {
-    const fence = await this.repository.findTransferFence(assetId);
+    const fence = await this.repository.findTransferFence(assetId, tx);
     if (!fence || fence.organizationId === currentOwner) return;
     const answer = await this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId);
     if (answer === 'RECORDED') {
