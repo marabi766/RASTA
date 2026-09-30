@@ -40,7 +40,7 @@ const require = createRequire(join(REPO_ROOT, 'package.json'));
  * Not a copy of the SQL and not a re-implementation: a test that restated the
  * upsert would keep passing while the shipped statement drifted.
  */
-const { allocateStreamSeqSql, buildOutboxRow } = require(
+const { allocateStreamSeqSql, buildOutboxRow, claimPendingSql } = require(
   join(REPO_ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
 );
 const { EVENT_HEADERS } = require(join(REPO_ROOT, 'packages', 'contracts', 'dist', 'index.js'));
@@ -842,5 +842,103 @@ test('supplier and fleet share no sequence for the same identifier — the negat
         0,
       );
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. The claim hands the relay one stream's rows in stream_seq order
+// ---------------------------------------------------------------------------
+
+test('two overlapping transactions on one stream: the claim returns seq 3 then seq 4 although created_at says the opposite', async () => {
+  await withOutbox('supplier', async ({ url }) => {
+    const a = rawClient('supplier', url);
+    const b = rawClient('supplier', url);
+    try {
+      await Promise.all([a.query('SELECT 1'), b.query('SELECT 1')]);
+      // A backfilled stream: the next allocation is 3.
+      await a.execute(
+        `INSERT INTO "outbox_stream_sequence" ("topic","partition_key","next_seq","published_seq")
+         VALUES ('${SUPPLIER_TOPIC}', 'SUP-1', 3, 0)`,
+      );
+
+      // T1 *started* first, so a transaction-start `now()` stamps it earlier —
+      // but T2 takes the counter lock first and so commits first with seq 3.
+      const T1_STARTED = new Date('2026-09-30T12:00:00.000Z');
+      const T2_STARTED = new Date('2026-09-30T12:00:00.010Z');
+
+      let t2Row;
+      let releaseT2;
+      const t2Held = new Promise((resolve) => {
+        releaseT2 = resolve;
+      });
+      const t2Done = b.transaction(async (tx) => {
+        t2Row = await produce(tx, {
+          topic: SUPPLIER_TOPIC,
+          partitionKey: 'SUP-1',
+          eventName: 'SUPPLIER_QUALIFIED',
+          aggregateId: 'T2',
+          occurredAt: T2_STARTED,
+        });
+        await t2Held;
+      });
+      t2Done.catch(() => {});
+      await waitFor(() => t2Row, 'T2 to allocate and hold the counter row lock');
+      assert.equal(t2Row.streamSeq, 3);
+
+      let t1Settled = false;
+      let t1Row;
+      const t1Done = a
+        .transaction((tx) =>
+          produce(tx, {
+            topic: SUPPLIER_TOPIC,
+            partitionKey: 'SUP-1',
+            eventName: 'SUPPLIER_SUSPENDED',
+            aggregateId: 'T1',
+            occurredAt: T1_STARTED,
+          }),
+        )
+        .then((row) => {
+          t1Row = row;
+          t1Settled = true;
+        });
+      t1Done.catch(() => {});
+      for (let i = 0; i < 200; i += 1) await new Promise(setImmediate);
+      assert.equal(t1Settled, false, 'T1 was not blocked behind T2 on the counter row');
+
+      releaseT2();
+      await t2Done;
+      await t1Done;
+      assert.equal(t1Row.streamSeq, 4, 'T1 waited, so it committed second with seq 4');
+
+      // The premise: ordering by the stored timestamp puts seq 4 first.
+      const byCreatedAt = await a.query(
+        `SELECT "stream_seq"::int AS seq FROM "outbox_message" ORDER BY "created_at", "id"`,
+      );
+      assert.deepEqual(
+        byCreatedAt.map((row) => row.seq),
+        [4, 3],
+        'the fixture no longer reproduces created_at order diverging from commit order',
+      );
+
+      // The shipped claim, both rows in one batch.
+      const claim = await claimPendingSql(a, {
+        limit: 10,
+        token: '00000000-0000-4000-8000-000000000018',
+        owner: 'b3-order-test',
+        leaseSeconds: 60,
+      });
+      assert.deepEqual(
+        claim.rows.map((row) => row.streamSeq),
+        [3, 4],
+        'the batch must be in stream (commit) order, not created_at order',
+      );
+      assert.deepEqual(
+        claim.rows.map((row) => row.aggregateId),
+        ['T2', 'T1'],
+      );
+    } finally {
+      await a.close();
+      await b.close();
+    }
   });
 });

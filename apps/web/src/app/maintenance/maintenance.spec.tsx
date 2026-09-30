@@ -126,6 +126,40 @@ describe('the maintenance list', () => {
     const { container } = render(<MaintenanceScreen result={page()} query={{}} />);
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  describe('the report form slot', () => {
+    const form = <p>فرم نمونهٔ ثبت درخواست</p>;
+
+    it('puts the form under its own heading, before the filters, when it is handed one', () => {
+      const { getByRole, getByText } = render(
+        <MaintenanceScreen result={page()} query={{}} reportForm={form} />,
+      );
+      const heading = getByRole('heading', { name: 'ثبت درخواست' });
+      expect(heading).toBeInTheDocument();
+      expect(getByText('فرم نمونهٔ ثبت درخواست')).toBeInTheDocument();
+      const filters = getByRole('heading', { name: 'پالایش' });
+      expect(heading.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+
+    it('shows nothing where it was not handed one — no empty section, no dead heading', () => {
+      const { queryByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+      expect(queryByRole('heading', { name: 'ثبت درخواست' })).toBeNull();
+    });
+
+    it('still lists the requests when the person cannot report one', () => {
+      const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+      expect(getByRole('link', { name: 'صدای غیرعادی موتور' })).toBeInTheDocument();
+    });
+
+    it('has no accessibility violations with the slot filled', async () => {
+      const { container } = render(
+        <MaintenanceScreen result={page()} query={{}} reportForm={form} />,
+      );
+      expect(await axe(container)).toHaveNoViolations();
+    });
+  });
 });
 
 const DETAIL: MaintenanceRequestDetail = {
@@ -206,6 +240,32 @@ describe('the maintenance request detail', () => {
       <RequestDetailScreen result={ok(preventive)} requestId="MREQ_1" />,
     );
     expect(getByText('ندارد — کار پیشگیرانه')).toBeInTheDocument();
+  });
+
+  describe('the confirmation after reporting', () => {
+    it('confirms a request that was just reported', () => {
+      const { getByText } = render(
+        <RequestDetailScreen result={ok()} requestId="MREQ_1" notice="created" />,
+      );
+      // A confirmation is `status`, which waits for a pause in the screen
+      // reader; only something the person must act on now is `alert`. Found by
+      // its words because the page carries other status regions (the badge).
+      expect(getByText(/درخواست ثبت شد/).closest('[role="status"]')).not.toBeNull();
+    });
+
+    it('says nothing when the page was opened without one', () => {
+      const { queryByText } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+      expect(queryByText(/درخواست ثبت شد/)).toBeNull();
+    });
+
+    it('never confirms anything on a page whose read failed', () => {
+      // `?created=1` can be typed by anybody; it must not put a confirmation
+      // in front of a request the viewer cannot read.
+      const { queryByText } = render(
+        <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" notice="created" />,
+      );
+      expect(queryByText(/درخواست ثبت شد/)).toBeNull();
+    });
   });
 
   it('answers a missing request the same way it answers somebody else’s', () => {
