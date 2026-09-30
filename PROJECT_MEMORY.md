@@ -2142,6 +2142,12 @@ HTTP (Gateway، توکن واقعی Keycloak)
 
 > نوشته‌شده در پایان دروازه انتشار فاز نگهداری (2026-08-28). هر ادعا شاهد دارد.
 
+> **به‌روز 2026-09-30 (#157، `fix/maintenance-request-idempotency`):** `POST /v1/maintenance-requests` اکنون
+> `Idempotency-Key` اختیاری را رعایت می‌کند — جدول مستأجری `idempotency_key` (Migration برگشت‌پذیر)، الگوی marketplace پس از
+> #147 (Claim/Complete/Release با Token هر Claim): همان کلید و بدنه از همان کاربر `201` اصلی را بازپخش می‌کند، حتی پس از
+> بسته شدن درخواست؛ بدنه یا کاربر دیگر `409 IDEMPOTENCY_KEY_REUSED`؛ درخواست هم‌زمان منتظر همان `201`؛ بی کلید، رفتار پیشین؛
+> `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` (۲۴). آزمون Integration: هم‌زمانی، بازپخش، بسته‌شده، استفادهٔ دوباره، مستأجرها، Fencing.
+
 | بُعد            | مقدار                                                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Service         | `maintenance-service` (`@rasta/maintenance-service`)                                                                     |

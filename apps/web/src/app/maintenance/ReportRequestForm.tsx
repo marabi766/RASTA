@@ -57,8 +57,10 @@ export function ReportRequestForm({
   csrfToken: string;
   /**
    * Minted for this render and bound to this session. A retry of the same form
-   * carries the same reference; whether maintenance-service dedupes on it is
-   * not something this form claims (it does not — see `server/submission.ts`).
+   * carries the same reference as its `Idempotency-Key`, which
+   * maintenance-service honours on create since #157: the same key and body
+   * answer the original 201 rather than raising the work again (see
+   * `server/submission.ts`).
    */
   submissionId: string;
   /** From `?assetId=`, when the person arrived from a machine's dossier. */
