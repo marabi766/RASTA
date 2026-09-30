@@ -4,7 +4,7 @@ import { currentSession } from '@/server/current-session';
 import { fetchDossier } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
 import { fetchCurrentUser } from '@/server/identity';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { DossierScreen } from './DossierScreen';
 import { UpdateAssetForm } from './UpdateAssetForm';
@@ -66,7 +66,7 @@ export default async function AssetDossierPage({
             <UpdateAssetForm
               assetId={id}
               csrfToken={session.csrfToken}
-              submissionId={newSubmissionId()}
+              submissionId={mintSubmissionId(session)}
               initialValues={{
                 name: result.data.asset.name,
                 assetTag: result.data.asset.assetTag ?? '',

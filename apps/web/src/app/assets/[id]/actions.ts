@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { parseUpdateAssetForm, updateAsset, updateAssetFormValues } from '@/server/asset-commands';
 
 import type { UpdateAssetFormState } from './form-state';
@@ -32,7 +32,12 @@ export async function submitUpdateAsset(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  // Bound to this session: a well-formed id this server never issued, another
+  // person's id, and an id from an earlier login are all refused here, before
+  // anything is sent.
+  if (!isBoundSubmissionId(submissionId, session)) {
+    return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  }
 
   const values = updateAssetFormValues(form);
   const parsed = parseUpdateAssetForm(values);

@@ -49,7 +49,11 @@ export function RegisterAssetForm({
   submissionId,
 }: {
   csrfToken: string;
-  /** Minted for this render; reused on a retry so a retry is not a second machine. */
+  /**
+   * Minted for this render and bound to this session. A retry of the same form
+   * carries the same reference; asset-service does not store it, so this form
+   * claims no more (see `server/submission.ts`).
+   */
   submissionId: string;
 }) {
   const [state, action, pending] = useActionState(submitRegisterAsset, IDLE_REGISTER_ASSET_FORM);

@@ -384,7 +384,7 @@ describe('writing', () => {
     manufactureYear: null,
   };
 
-  it('registers with a POST, the submission id as Idempotency-Key, and keeps only the id', async () => {
+  it('registers with a POST, the submission id in the Idempotency-Key header, and keeps only the id', async () => {
     const { impl, calls } = recording(201, { id: 'AST_1', serialNumber: 'SN-SECRET', extra: 1 });
 
     const result = await registerAsset(SESSION, REGISTER, 'sub_abc', impl);

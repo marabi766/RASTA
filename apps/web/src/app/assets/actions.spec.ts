@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId, newSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_REGISTER_ASSET_FORM } from './form-state';
@@ -10,8 +10,12 @@ import { IDLE_REGISTER_ASSET_FORM } from './form-state';
 /**
  * The `/assets` registration form's write path, from a posted form to a call
  * on the gateway. Mirrors `drivers/actions.spec.ts`: the order is the
- * assertion, each refusal proves nothing was called, and the double-submit
- * case proves a retry is one machine, not two.
+ * assertion, each refusal proves nothing was called, and a retry of one
+ * rendered form is shown to carry the same reference.
+ *
+ * It does **not** claim a retry is one machine: asset-service does not store
+ * the reference, so a duplicate is stopped only by its serial-number and
+ * asset-tag uniqueness, which a registration with neither does not have.
  */
 
 const currentSession = jest.fn();
@@ -25,6 +29,14 @@ jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }
 jest.mock('@/server/asset-commands', () => {
   const actual = jest.requireActual('@/server/asset-commands');
   return { ...actual, registerAsset: (...args: unknown[]) => registerAsset(...args) };
+});
+
+Object.assign(process.env, {
+  API_GATEWAY_URL: 'http://gateway.test:3000',
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+  WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -51,7 +63,8 @@ function formData(
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
   const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
   if (csrf !== null) form.set(CSRF_FIELD, csrf);
-  const submission = options.submission === undefined ? newSubmissionId() : options.submission;
+  const submission =
+    options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
   return form;
 }
@@ -93,13 +106,65 @@ describe('what is refused before anything is called', () => {
     expect(registerAsset).not.toHaveBeenCalled();
   });
 
-  it('refuses a submission id this server did not mint', async () => {
-    const state = await submitRegisterAsset(
-      IDLE_REGISTER_ASSET_FORM,
-      formData(VALID, { submission: 'chosen-by-the-client' }),
-    );
-    expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
+  it('refuses a submission id the client chose in the original, unbound format', async () => {
+    expect(
+      await submitRegisterAsset(
+        IDLE_REGISTER_ASSET_FORM,
+        formData(VALID, { submission: 'chosen-by-the-client' }),
+      ),
+    ).toEqual({
+      kind: 'REFUSED',
+      reason: 'SUBMISSION',
+    });
     expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses an id in the old random format, which only ever proved its own shape', async () => {
+    expect(
+      await submitRegisterAsset(
+        IDLE_REGISTER_ASSET_FORM,
+        formData(VALID, { submission: newSubmissionId() }),
+      ),
+    ).toEqual({
+      kind: 'REFUSED',
+      reason: 'SUBMISSION',
+    });
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a well-formed id this server never issued, and calls nothing', async () => {
+    // Right prefix, right length, right alphabet — and nobody's MAC. This is
+    // the case a shape check alone waves through.
+    for (const submission of [`sub_${'A'.repeat(38)}`, `sub_${'Zz9_-'.repeat(8)}ab`]) {
+      expect(
+        await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID, { submission })),
+      ).toEqual({
+        kind: 'REFUSED',
+        reason: 'SUBMISSION',
+      });
+    }
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses an id minted for somebody else, and one from an earlier login', async () => {
+    const theirs = mintSubmissionId({ ...SESSION, subject: 'someone-else' });
+    const earlier = mintSubmissionId({ ...SESSION, csrfToken: 'the-token-before-re-login' });
+    for (const submission of [theirs, earlier]) {
+      expect(
+        await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID, { submission })),
+      ).toEqual({
+        kind: 'REFUSED',
+        reason: 'SUBMISSION',
+      });
+    }
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('accepts an id this server minted for this session', async () => {
+    await expect(submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).rejects.toThrow(
+      /NEXT_REDIRECT/,
+    );
+    expect(registerAsset).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -114,7 +179,7 @@ describe('what the form itself catches', () => {
   });
 
   it('keeps what the person typed, and the submission id it came with', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     const state = await submitRegisterAsset(
       IDLE_REGISTER_ASSET_FORM,
       formData({ ...VALID, name: '', model: 'WA320', manufactureYear: '۱۴۰۲' }, { submission }),
@@ -146,7 +211,7 @@ describe('what reaches the service', () => {
   });
 
   it('sends the parsed request under the session, with Latin digits and no calendar change', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     await expect(
       submitRegisterAsset(
         IDLE_REGISTER_ASSET_FORM,
@@ -165,8 +230,10 @@ describe('what reaches the service', () => {
     expect(submissionId).toBe(submission);
   });
 
-  it('sends one submission twice under one reference — the double-submit case', async () => {
-    const submission = newSubmissionId();
+  it('carries the same reference when one rendered form is posted twice', async () => {
+    // A statement about what this action sends, not about what the service
+    // does with it (see `server/submission.ts`).
+    const submission = mintSubmissionId(SESSION);
     const form = () => formData(VALID, { submission });
 
     await expect(submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, form())).rejects.toThrow(

@@ -39,7 +39,12 @@ export function UpdateAssetForm({
 }: {
   assetId: string;
   csrfToken: string;
-  /** Minted for this render; reused on a retry so a retry is not a second edit. */
+  /**
+   * Minted for this render and bound to this session. A retry of the same form
+   * carries the same reference. An edit that sets fields to the values they
+   * already hold is harmless to repeat, which is a property of edits and not
+   * of this reference.
+   */
   submissionId: string;
   /** The machine's current record, as form text. */
   initialValues: UpdateAssetFormValues;
