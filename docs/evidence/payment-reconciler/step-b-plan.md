@@ -125,10 +125,17 @@ without its task:
 Every terminal write marks the task `DONE` **in the same transaction**. The terminal writes are:
 
 - step 3 `REFUNDED` (`:904`);
-- the declined release (`returnDeclinedHold` `:1038`);
-- the `CAPTURED_NOT_CREDITED`/`FAILED` paths.
+- the declined release (`returnDeclinedHold` `:1038`).
 
-So the request path and the sweeper always agree on whether work is left.
+**Correction (Codex on #161):** an earlier draft also listed the request path's `CAPTURED_NOT_CREDITED`/`FAILED` writes
+(`completeCapture`, `fail`). Those do not close a task, and need not: no request path reaches an intent with an open
+`UNCREDITED_REFUND` task (`resume` refuses `CAPTURED_REFUND_UNKNOWN`). That task is closed by the reconciler (B2), in the
+apply transaction that fails the intent or marks it `CAPTURED_NOT_CREDITED`, and by the operator path (B3).
+
+So the request path and the sweeper agree on whether work is left, **as long as every writer runs this code**. A B0
+instance still running during the deploy does not; B2's sweeper therefore also heals both directions each cycle (a marker
+with no open task, an open task whose marker is gone), so correctness does not depend on deploy order (Codex on #161, HIGH
+1).
 
 - **Why a grace period:** it keeps the sweeper away from a refund whose provider call is still in flight.
 - **The config refuses** `GRACE <= 2 × ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS`.
