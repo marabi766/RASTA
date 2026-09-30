@@ -19,8 +19,9 @@ import type { WebSession } from './session';
  *
  * Whether a repeat of it produces **one** record is entirely the receiving
  * service's decision, and services differ: a service that stores it makes a
- * retry one record — maintenance-service's create path does since #157, and
- * answers the same key and body with the original 201 for 24 hours; a service
+ * retry one record — maintenance-service's create path does since issue 157, and
+ * answers the same key and body with the original 201 while the key lives (24 hours by default,
+ * MAINTENANCE_IDEMPOTENCY_TTL_HOURS); a service
  * that ignores it relies on its own rules and a retry can be refused or, for
  * some writes, applied twice. So nothing in the portal may say "a retry is not
  * a second record" of a write whose service is not known to store it;

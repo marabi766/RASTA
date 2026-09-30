@@ -58,7 +58,7 @@ export function ReportRequestForm({
   /**
    * Minted for this render and bound to this session. A retry of the same form
    * carries the same reference as its `Idempotency-Key`, which
-   * maintenance-service honours on create since #157: the same key and body
+   * maintenance-service honours on create since issue 157: the same key and body
    * answer the original 201 rather than raising the work again (see
    * `server/submission.ts`).
    */
