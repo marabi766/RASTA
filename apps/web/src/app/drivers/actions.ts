@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { createDriver, createDriverFormValues, parseCreateDriverForm } from '@/server/drivers';
 
 import type { CreateDriverFormState } from './form-state';
@@ -28,7 +28,7 @@ export async function submitCreateDriver(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
   const values = createDriverFormValues(form);
   const parsed = parseCreateDriverForm(values);
