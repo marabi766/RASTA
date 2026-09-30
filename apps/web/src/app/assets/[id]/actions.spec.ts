@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, mintSubmissionId, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_UPDATE_ASSET_FORM } from './form-state';
@@ -49,6 +49,9 @@ const SESSION = {
 } satisfies WebSession;
 
 const ASSET_ID = 'AST_01J00000000000000000000000';
+/** The right length and alphabet, but not issued by `mintSubmissionId`. */
+const UNMINTED_ID = `sub_${'A'.repeat(38)}`;
+
 const VALID = { name: 'لودر کوماتسو', assetTag: 'AB-12', manufactureYear: '2019' };
 
 /** What the page does: bind the id the form does not collect. */
@@ -111,8 +114,8 @@ describe('what is refused before anything is called', () => {
     expect(updateAsset).not.toHaveBeenCalled();
   });
 
-  it('refuses an id in the old random format, which only ever proved its own shape', async () => {
-    expect(await submit(formData(VALID, { submission: newSubmissionId() }))).toEqual({
+  it('refuses a well-formed id this server never minted', async () => {
+    expect(await submit(formData(VALID, { submission: UNMINTED_ID }))).toEqual({
       kind: 'REFUSED',
       reason: 'SUBMISSION',
     });
