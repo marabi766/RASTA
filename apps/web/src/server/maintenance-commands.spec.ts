@@ -274,7 +274,7 @@ describe('writing a report', () => {
     severity: 'HIGH' as const,
   };
 
-  it('posts the body to the gateway with the submission id as Idempotency-Key', async () => {
+  it('posts the body to the gateway with the submission id in the Idempotency-Key header', async () => {
     const { impl, calls } = recording(201, { id: 'MRQ_1', title: 'ignored' });
 
     const result = await reportMaintenanceRequest(SESSION, REQUEST, 'sub_abc', impl);

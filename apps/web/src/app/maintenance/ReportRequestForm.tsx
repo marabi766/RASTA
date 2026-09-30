@@ -55,7 +55,11 @@ export function ReportRequestForm({
   initialAssetId = '',
 }: {
   csrfToken: string;
-  /** Minted for this render; reused on a retry so a retry is not a second request. */
+  /**
+   * Minted for this render and bound to this session. A retry of the same form
+   * carries the same reference; whether maintenance-service dedupes on it is
+   * not something this form claims (it does not — see `server/submission.ts`).
+   */
   submissionId: string;
   /** From `?assetId=`, when the person arrived from a machine's dossier. */
   initialAssetId?: string;

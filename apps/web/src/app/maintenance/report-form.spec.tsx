@@ -155,6 +155,24 @@ describe('the report form after an attempt', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  it('shows the duplicate-open-request refusal as a message and does not invent a link to it', () => {
+    // maintenance-service names the existing request only in `internalContext`,
+    // which the error filter logs and never sends, so the portal has no id to
+    // link to. A link built from anything else would be a guess; until the
+    // service sends the id, the message stands alone.
+    renderForm({
+      kind: 'INVALID',
+      submissionId: SUBMISSION,
+      values: VALUES,
+      fieldErrors: {},
+      message: 'این ماشین همین حالا یک درخواست باز از همین نوع دارد.',
+    });
+
+    const banner = screen.getByText('این ماشین همین حالا یک درخواست باز از همین نوع دارد.');
+    expect(banner.closest('[role="alert"]')).not.toBeNull();
+    expect(banner.closest('[role="alert"]')?.querySelector('a')).toBeNull();
+  });
+
   it('says a machine that is not visible is "not yours or not there", never which', async () => {
     const { container } = renderForm({
       kind: 'NOT_FOUND',

@@ -4,7 +4,7 @@ import { currentSession } from '@/server/current-session';
 import { fetchMaintenanceRequests, type MaintenanceRequestListQuery } from '@/server/maintenance';
 import { canReportMaintenance } from '@/server/maintenance-commands';
 import { fetchCurrentUser } from '@/server/identity';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { ReportRequestForm } from './ReportRequestForm';
@@ -73,7 +73,7 @@ export default async function MaintenancePage({
           canReport ? (
             <ReportRequestForm
               csrfToken={session.csrfToken}
-              submissionId={newSubmissionId()}
+              submissionId={mintSubmissionId(session)}
               initialAssetId={one(params.assetId)}
             />
           ) : undefined
