@@ -166,7 +166,7 @@ const LOCAL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
  * reader actually picked — UTC midnight is already the previous evening in
  * Tehran, which would silently move the date back by one.
  */
-function localDateToIso(raw: string, timeZone = DISPLAY_TIME_ZONE): string | null {
+export function localDateToIso(raw: string, timeZone = DISPLAY_TIME_ZONE): string | null {
   const match = LOCAL_DATE.exec(toLatinDigits(raw).trim());
   if (!match) return null;
   const [, year, month, day] = match;
