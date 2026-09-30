@@ -7,31 +7,6 @@
   },
   "servers": [],
   "paths": {
-    "/v1/tenders/{id}/criteria": {
-      "put": {
-        "operationId": "setTenderCriteria",
-        "x-step": "PR 4",
-        "summary": "Replace the DRAFT tender's evaluation criteria, from a template or an explicit list. Locked at publish (ADR-067).",
-        "parameters": [{ "$ref": "#/components/parameters/Id" }],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/SetCriteria" } }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The criteria",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/CriteriaList" } }
-            }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "422": { "$ref": "#/components/responses/BusinessRule" }
-        }
-      }
-    },
     "/v1/tenders/{id}/invitations": {
       "post": {
         "operationId": "inviteToTender",

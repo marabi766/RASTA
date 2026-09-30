@@ -537,6 +537,11 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `PROJECT_UPDATED`، برای پوشش S-06 از ویرایش پیش‌نویس) — **`TENDER_UPDATED` در فهرست هشت‌تایی نبود؛ مدیر پروژه آن را پذیرفت (2026-09-30) — فقط نام فیلدها، هرگز مقدارشان.**
 همه با `aggregateType = Tender` و کلید پارتیشن `tenderId`. بقیه هنوز تولید نمی‌شوند.
 
+**پیاده‌شده در CON-002 PR 4a (دو رویداد افزوده، منتظر پذیرش مدیر پروژه — برای پوشش S-06 از تغییر معیارها):**
+`TENDER_CRITERIA_SET` (`aggregateType = Tender`، کلید `tenderId`؛ `criteriaCount`، `totalWeightBp`، `templateId` یا `null`، `setBy`،
+`setAt`) و `CRITERIA_TEMPLATE_CREATED` (`aggregateType = CriteriaTemplate`، کلید `{organizationId}/{templateId}`؛ `version`،
+`criteriaCount`، `totalWeightBp`، `createdBy`، `createdAt`). هیچ‌کدام کد، برچسب یا متن معیار را حمل نمی‌کنند (`.strict()`).
+
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
 گزارش در پایگاه داده می‌مانند؛ ولی تا مالکیتشان در برابر `asset-service` سنجیده نشود، روی `rasta.construction.v1`

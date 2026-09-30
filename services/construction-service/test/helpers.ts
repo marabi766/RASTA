@@ -287,7 +287,18 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
   await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
-    await prisma.client.tenderCriterion.deleteMany({ where });
+    // A cancelled or published tender's criteria are frozen for every writer,
+    // this one included (threat C3), so the freeze is lifted for the length of
+    // one transaction — DDL is transactional, so a failure puts it back.
+    await prisma.client.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_criterion" DISABLE TRIGGER "tg_tender_criterion_freeze"',
+      );
+      await tx.tenderCriterion.deleteMany({ where });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_criterion" ENABLE TRIGGER "tg_tender_criterion_freeze"',
+      );
+    });
     await prisma.client.criteriaTemplate.deleteMany({ where });
     await prisma.client.tender.deleteMany({ where });
     await prisma.client.approval.deleteMany({ where });
