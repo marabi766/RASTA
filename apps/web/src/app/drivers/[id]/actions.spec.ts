@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import {
@@ -21,6 +21,14 @@ import {
  * three each get what is genuinely new about them: the id they act on comes
  * bound, not from the form, and each redirects to a different query flag.
  */
+
+Object.assign(process.env, {
+  API_GATEWAY_URL: 'http://gateway.test:3000',
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+  WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+});
 
 const currentSession = jest.fn();
 const updateDriver = jest.fn();
@@ -75,7 +83,8 @@ function formData(
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
   const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
   if (csrf !== null) form.set(CSRF_FIELD, csrf);
-  const submission = options.submission === undefined ? newSubmissionId() : options.submission;
+  const submission =
+    options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
   return form;
 }
@@ -131,6 +140,56 @@ describe('updating a driver — the full order of checks', () => {
     );
     expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
     expect(updateDriver).not.toHaveBeenCalled();
+  });
+
+  describe('every action on this page verifies the id against the session', () => {
+    const actionsUnderTest = [
+      {
+        name: 'update',
+        run: (form: FormData) => submitUpdateDriver(DRIVER_ID, IDLE_UPDATE_DRIVER_FORM, form),
+        service: updateDriver,
+      },
+      {
+        name: 'change status',
+        run: (form: FormData) => submitChangeStatus(DRIVER_ID, IDLE_CHANGE_STATUS_FORM, form),
+        service: changeDriverStatus,
+      },
+      {
+        name: 'assign',
+        run: (form: FormData) => submitAssign(DRIVER_ID, IDLE_ASSIGN_FORM, form),
+        service: createAssignment,
+      },
+      {
+        name: 'end assignment',
+        run: (form: FormData) =>
+          submitEndAssignment(DRIVER_ID, 'ASG_1', IDLE_END_ASSIGNMENT_FORM, form),
+        service: endAssignment,
+      },
+    ];
+
+    it.each(actionsUnderTest)(
+      'refuses every id that is not one this server minted for this session, and calls nothing ($name)',
+      async ({ run, service }) => {
+        const notMinted = [
+          // Right prefix, right length, right alphabet — and nobody's MAC: what
+          // a shape check alone waves through.
+          `sub_${'A'.repeat(38)}`,
+          `sub_${'Zz9_-'.repeat(8)}ab`,
+          // The original, unbound format.
+          `sub_${'B'.repeat(20)}`,
+          // Somebody else's, and one from an earlier login.
+          mintSubmissionId({ ...SESSION, subject: 'someone-else' }),
+          mintSubmissionId({ ...SESSION, csrfToken: 'the-token-before-re-login' }),
+        ];
+        for (const submission of notMinted) {
+          expect(await run(formData({}, { submission }))).toEqual({
+            kind: 'REFUSED',
+            reason: 'SUBMISSION',
+          });
+        }
+        expect(service).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('checks CSRF before the submission id', async () => {
@@ -233,7 +292,7 @@ describe('assigning to a machine', () => {
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     const form = () => formData(VALID, { submission });
 
     await expect(submitAssign(DRIVER_ID, IDLE_ASSIGN_FORM, form())).rejects.toThrow(

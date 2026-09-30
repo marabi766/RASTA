@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_USAGE_FORM } from './form-state';
@@ -20,6 +20,14 @@ import { IDLE_USAGE_FORM } from './form-state';
  * `fetch` in `server/write.spec.ts`, and against the running service in the
  * browser suite.
  */
+
+Object.assign(process.env, {
+  API_GATEWAY_URL: 'http://gateway.test:3000',
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+  WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+});
 
 const currentSession = jest.fn();
 const recordUsage = jest.fn();
@@ -66,7 +74,8 @@ function formData(
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
   const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
   if (csrf !== null) form.set(CSRF_FIELD, csrf);
-  const submission = options.submission === undefined ? newSubmissionId() : options.submission;
+  const submission =
+    options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
   return form;
 }
@@ -124,6 +133,27 @@ describe('what is refused before anything is called', () => {
     expect(recordUsage).not.toHaveBeenCalled();
   });
 
+  it('refuses every id that is not one this server minted for this session, and calls nothing', async () => {
+    const notMinted = [
+      // Right prefix, right length, right alphabet — and nobody's MAC: what a
+      // shape check alone waves through.
+      `sub_${'A'.repeat(38)}`,
+      `sub_${'Zz9_-'.repeat(8)}ab`,
+      // The original, unbound format.
+      `sub_${'B'.repeat(20)}`,
+      // Somebody else's, and one from an earlier login.
+      mintSubmissionId({ ...SESSION, subject: 'someone-else' }),
+      mintSubmissionId({ ...SESSION, csrfToken: 'the-token-before-re-login' }),
+    ];
+    for (const submission of notMinted) {
+      expect(await submitUsage(IDLE_USAGE_FORM, formData(VALID, { submission }))).toEqual({
+        kind: 'REFUSED',
+        reason: 'SUBMISSION',
+      });
+    }
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+
   it('refuses a form with no submission id at all', async () => {
     const state = await submitUsage(IDLE_USAGE_FORM, formData(VALID, { submission: null }));
 
@@ -155,7 +185,7 @@ describe('what the form itself catches', () => {
   });
 
   it('keeps the values and the submission id so the retry is the same submission', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     const state = await submitUsage(
       IDLE_USAGE_FORM,
       formData({ ...VALID, hours: 'abc' }, { submission }),
@@ -171,7 +201,7 @@ describe('what the form itself catches', () => {
 
 describe('what reaches the service', () => {
   it('sends the parsed request with the submission id as the client reference', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     await expect(submitUsage(IDLE_USAGE_FORM, formData(VALID, { submission }))).rejects.toThrow(
       /NEXT_REDIRECT/,
     );
@@ -197,7 +227,7 @@ describe('what reaches the service', () => {
     // that render, so fleet-service's `clientReference` dedupe returns the
     // original record for the second — and the portal's part of that promise
     // is exactly this: the same reference, never a fresh one.
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     const form = () => formData(VALID, { submission });
 
     await expect(submitUsage(IDLE_USAGE_FORM, form())).rejects.toThrow(/NEXT_REDIRECT/);
