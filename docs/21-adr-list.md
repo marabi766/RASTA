@@ -74,6 +74,9 @@
 | [060](adr/ADR-060-tenant-bound-roles.md)                                    | نقش به سازمان گره می‌خورد، نه به کاربر              | **Accepted** — implementation pending | بستن نقش‌های سراسری Realm؛ Q-63                              |
 | [061](adr/ADR-061-event-provenance.md)                                      | منشأ رویداد: ادعای ناشر، نه واقعیت                  | **Accepted**                          | مالک Topic، SASL/ACL؛ L2-03، L3-01، L4-01                    |
 | [063](adr/ADR-063-construction-lifecycles-and-approval-policy-ownership.md) | چرخهٔ CON-001 بی Temporal، مالکیت `approval_policy` | **Proposed**                          | CON-001؛ رابطه با `organization_policy`؛ Q-68 تا Q-73        |
+| [065](adr/ADR-065-tender-lifecycle-and-deadline-authority.md)               | چرخهٔ مناقصه/پیشنهاد و مرجع مهلت                    | **Proposed**                          | CON-002؛ Q-84، Q-85؛ D-044                                   |
+| [066](adr/ADR-066-bid-confidentiality.md)                                   | محرمانگی پیشنهاد: برنامه‌ای و افشاگر دستکاری        | **Proposed**                          | CON-002؛ Q-87؛ D-043                                         |
+| [067](adr/ADR-067-tender-evaluation-and-conflict-of-interest.md)            | ارزیابی از پیکربندی، برنده، تعارض منافع             | **Proposed**                          | CON-002؛ Q-88 تا Q-90                                        |
 
 ---
 
