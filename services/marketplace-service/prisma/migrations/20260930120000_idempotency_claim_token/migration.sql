@@ -6,10 +6,14 @@
 -- owner. The token is minted at claim and required by both; a mismatch is a
 -- logged no-op.
 --
--- Nullable: rows written before this live at most the retention window and are
--- never matched by a token (they simply expire), and old instances still
--- inserting without a token during a rolling deploy keep working. Metadata-only
--- change, no table rewrite.
+-- NOT rolling-deploy safe: an old instance's tokenless complete()/release() can
+-- still finish or free a new instance's claim. Drain every old marketplace
+-- instance before starting new ones; never run mixed versions
+-- (docs/runbooks/database-bootstrap.md#marketplace-idempotency-claim-token).
+--
+-- Nullable because rows written before this live at most the retention window
+-- and are never matched by a token (they simply expire), so no backfill is
+-- needed. Metadata-only change, no table rewrite.
 SET LOCAL lock_timeout = '3s';
 
 ALTER TABLE "idempotency_key" ADD COLUMN "claim_token" TEXT;
