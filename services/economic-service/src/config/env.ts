@@ -124,9 +124,10 @@ export const economicEnvSchema = baseEnvSchema
     ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(720).default(72),
 
     /**
-     * The deadline on every payment provider call, in milliseconds (ADR-064
-     * step B2). A call past it is an unknown outcome, which the reconciler
-     * resolves by asking; it never hangs a request.
+     * The deadline on the refund-side provider calls — `refund` and
+     * `getRefundStatus` — in milliseconds (ADR-064 step B2). A call past it is
+     * an unknown outcome, which the reconciler resolves by asking. Top-up
+     * calls get none until step C can recover them (Codex on #164, HIGH 1).
      */
     ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: z.coerce
       .number()
@@ -223,6 +224,20 @@ export const economicEnvSchema = baseEnvSchema
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS'],
         message: 'must exceed ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS by at least 5 seconds',
+      });
+    }
+    // The mock's fixed latency must fit inside the deadline, or every mock
+    // refund times out (Codex on #164, HIGH 1: the stated configuration was a
+    // 500 ms latency under a 100 ms timeout). The mock is the only provider,
+    // and it is what development and test run.
+    if (
+      env.ECONOMIC_PAYMENT_PROVIDER === 'mock' &&
+      env.ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS <= env.ECONOMIC_MOCK_PAYMENT_LATENCY_MS
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS'],
+        message: 'must exceed ECONOMIC_MOCK_PAYMENT_LATENCY_MS while the mock provider is bound',
       });
     }
     if (

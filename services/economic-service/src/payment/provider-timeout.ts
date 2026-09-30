@@ -25,21 +25,26 @@ export class ProviderCallTimeout extends Error {
 }
 
 /**
- * Puts a deadline on every call to the provider it wraps (ADR-064 step B2).
- *
- * There was none: a provider that hung held the request, and the reconciler's
- * grace period had nothing to be longer than
- * (`ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS` > 2 ×
- * `ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS`, checked at boot).
+ * Puts a deadline on the **refund-side** provider calls (ADR-064 step B2):
+ * `refund` and `getRefundStatus`.
  *
  * A call past its deadline is an **unknown** outcome: the provider may still
- * act on it. The callers already treat a thrown call that way — B0's refund
- * markers, `CAPTURED_REFUND_UNKNOWN` — and the reconciler then asks the
- * provider what happened. The timer is cleared as soon as the call settles.
+ * act on it. On the refund side that is recovered — B0's markers hold the
+ * money and the reconciler asks what happened — and the grace period has to
+ * be longer than the longest call (`ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS`
+ * > 2 × `ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS`, checked at boot).
+ *
+ * `authorize`, `capture` and `getStatus` pass through **without** a deadline
+ * (Codex on #164, HIGH 1; PM ruling). A timed-out authorize left the intent
+ * CREATED while the provider authorized it anyway, nothing recovered it, and
+ * its amount kept reserving the wallet's headroom. They get a deadline when
+ * step C builds recovery for stuck top-ups. The timer is cleared as soon as
+ * the call settles.
  */
 export class TimedPaymentProvider implements PaymentProvider {
   readonly name: string;
   readonly simulated: boolean;
+  readonly authoritativeAbsence: boolean;
 
   constructor(
     private readonly inner: PaymentProvider,
@@ -47,22 +52,26 @@ export class TimedPaymentProvider implements PaymentProvider {
   ) {
     this.name = inner.name;
     this.simulated = inner.simulated;
+    this.authoritativeAbsence = inner.authoritativeAbsence;
   }
 
+  /** No deadline until step C can recover a timed-out top-up. */
   authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
-    return this.within('authorize', () => this.inner.authorize(request));
+    return this.inner.authorize(request);
   }
 
+  /** No deadline until step C can recover a timed-out top-up. */
   capture(request: CaptureRequest): Promise<CaptureResult> {
-    return this.within('capture', () => this.inner.capture(request));
+    return this.inner.capture(request);
   }
 
   refund(request: RefundRequest): Promise<RefundResult> {
     return this.within('refund', () => this.inner.refund(request));
   }
 
+  /** Step C's question; no deadline yet, as nothing asks it. */
   getStatus(providerReference: string): Promise<ProviderPaymentStatus> {
-    return this.within('getStatus', () => this.inner.getStatus(providerReference));
+    return this.inner.getStatus(providerReference);
   }
 
   getRefundStatus(query: RefundStatusQuery): Promise<RefundStatusResult> {

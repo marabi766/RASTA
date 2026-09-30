@@ -157,16 +157,19 @@ export class PaymentReconciler {
   /** The provider's record of the exact attempt, or `UNREACHABLE`. Never throws. */
   private async ask(task: ClaimedTask, intent: PaymentIntent): Promise<ProviderRefundAnswer> {
     const refund = task.kind === 'REFUND';
-    const requestedAt = refund
-      ? await this.refundRequestedAt(intent)
-      : (intent.authorizedAt ?? undefined);
     try {
-      const answer = await this.provider.getRefundStatus({
+      const said = await this.provider.getRefundStatus({
         paymentIntentId: intent.id,
         providerReference: intent.providerReference ?? intent.id,
         idempotencyKey: `${intent.idempotencyKey}:${refund ? 'refund' : 'uncredited'}`,
-        ...(requestedAt ? { requestedAt } : {}),
       });
+      // "Never received" is evidence only from a provider that declares it
+      // can vouch for an absence (Codex on #164, HIGH 2). The mock cannot:
+      // its memory is one process's. Its NOT_FOUND is taken as unknown.
+      const answer =
+        said.refund === 'NOT_FOUND' && !this.provider.authoritativeAbsence
+          ? { ...said, authoritative: false }
+          : said;
       paymentProviderRefundStatusTotal.inc({
         service: SERVICE_NAME,
         provider: this.provider.name,
@@ -190,20 +193,6 @@ export class PaymentReconciler {
       );
       return 'UNREACHABLE';
     }
-  }
-
-  /** When the refund was asked for: its hold's `placed_at`, written before the provider call. */
-  private async refundRequestedAt(intent: PaymentIntent): Promise<Date | undefined> {
-    const hold = await this.prisma.client.walletHold.findFirst({
-      where: {
-        walletId: intent.walletId,
-        reference: intent.id,
-        referenceType: REFUND_HOLD_REFERENCE_TYPE,
-        status: 'ACTIVE',
-      },
-      select: { placedAt: true },
-    });
-    return hold?.placedAt;
   }
 
   private async apply(

@@ -17,7 +17,10 @@ import {
 } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
-import { PaymentReconciliationRepository } from './payment-reconciliation.repository';
+import {
+  PaymentReconciliationRepository,
+  type HealCursor,
+} from './payment-reconciliation.repository';
 import { PaymentReconciler, type ReconcileResult } from './payment-reconciler';
 
 export interface SweepOutcome {
@@ -56,6 +59,8 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
   private readonly logger = new Logger(PaymentReconciliationSweeper.name);
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<unknown>;
+  /** Where the next heal windows start: bounded work per sweep (Codex on #164). */
+  private healCursor: HealCursor = { missing: null, stale: null };
 
   constructor(
     private readonly tasks: PaymentReconciliationRepository,
@@ -101,7 +106,8 @@ export class PaymentReconciliationSweeper implements OnModuleInit, OnApplication
   /** One sweep. Public so a test, or an operator's tool, can drive it. */
   async runOnce(): Promise<SweepOutcome> {
     const batch = this.env.ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE;
-    const healed = await this.tasks.heal(batch);
+    const healed = await this.tasks.heal(batch, this.healCursor);
+    this.healCursor = healed.cursor;
     if (healed.opened > 0) {
       paymentReconciliationTotal.inc(
         { service: SERVICE_NAME, result: 'healed_opened' },

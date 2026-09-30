@@ -227,8 +227,7 @@ export class PaymentReconciliationRepository {
    *
    * A B0 instance still running during the deploy writes markers without
    * tasks and resolves intents without closing their tasks; the migration's
-   * backfill ran once and cannot see either. So every sweep, bounded by
-   * `limit` each way:
+   * backfill ran once and cannot see either. So every sweep:
    *
    *   - **a marker with no open task** gets one — due after the grace for an
    *     unknown outcome (a B0 provider call may still be running), at once
@@ -237,12 +236,20 @@ export class PaymentReconciliationRepository {
    *     `NOTHING_TO_RECONCILE`, with no money action — unless the refund's hold
    *     is still out, which is left for the claim path to escalate.
    *
+   * **Bounded work per sweep, whatever the backlog** (Codex on #164, MEDIUM):
+   * each direction examines one window of at most `limit` rows after its
+   * cursor, in `(created_at, id)` order — never "every candidate, then
+   * LIMIT". The next window starts where this one ended; a window shorter
+   * than `limit` reached the end, and the cursor starts over. The cursor
+   * lives in the sweeper (per process): a restart starts over, which is
+   * still bounded.
+   *
    * Correctness therefore does not depend on deploy order. A task under a
    * live lease is never touched.
    */
-  async heal(limit: number): Promise<{ opened: number; closed: number }> {
-    const missing = await runUnscoped(
-      'the payment reconciler looks for marked intents of every tenant that have no open task (ADR-064)',
+  async heal(limit: number, cursor: HealCursor): Promise<HealPass> {
+    const window = await runUnscoped(
+      'the payment reconciler examines a window of marked intents of every tenant (ADR-064)',
       () =>
         this.prisma.client.$queryRawUnsafe<
           {
@@ -251,25 +258,32 @@ export class PaymentReconciliationRepository {
             kind: PaymentReconciliationKind;
             unknown: boolean;
             correlationId: string;
+            createdAt: Date;
+            hasTask: boolean;
           }[]
         >(
           `SELECT pi.id,
                   pi.organization_id AS "organizationId",
                   CASE WHEN pi.status = 'AUTHORIZED' THEN 'UNCREDITED_REFUND' ELSE 'REFUND' END AS kind,
                   pi.failure_reason IN ('REFUND_REQUESTED', 'REFUND_UNKNOWN', 'CAPTURED_REFUND_UNKNOWN') AS unknown,
-                  COALESCE(NULLIF(btrim(pi.correlation_id), ''), 'PAYMENT_RECONCILER') AS "correlationId"
+                  COALESCE(NULLIF(btrim(pi.correlation_id), ''), 'PAYMENT_RECONCILER') AS "correlationId",
+                  pi.created_at AS "createdAt",
+                  EXISTS (SELECT 1 FROM payment_reconciliation_task t
+                           WHERE t.payment_intent_id = pi.id AND t.status <> 'DONE') AS "hasTask"
              FROM payment_intent pi
             WHERE ((pi.status = 'CAPTURED'
                     AND pi.failure_reason IN ('REFUND_REQUESTED', 'REFUND_UNKNOWN',
                                               'REFUNDED_NOT_REVERSED', 'REFUND_DECLINED_RELEASE_PENDING'))
                 OR (pi.status = 'AUTHORIZED' AND pi.failure_reason = 'CAPTURED_REFUND_UNKNOWN'))
-              AND NOT EXISTS (SELECT 1 FROM payment_reconciliation_task t
-                               WHERE t.payment_intent_id = pi.id AND t.status <> 'DONE')
+              AND (pi.created_at, pi.id) > ($2::timestamp, $3::text)
             ORDER BY pi.created_at, pi.id
             LIMIT $1`,
           limit,
+          cursor.missing?.createdAt ?? EPOCH,
+          cursor.missing?.id ?? '',
         ),
     );
+    const missing = window.filter((row) => !row.hasTask);
     let opened = 0;
     if (missing.length > 0) {
       opened = await runUnscoped(
@@ -295,40 +309,70 @@ export class PaymentReconciliationRepository {
           ),
       );
     }
+    const lastIntent = window[window.length - 1];
 
-    const closed = await runUnscoped(
-      'the payment reconciler closes open tasks of every tenant whose intent was settled without them (ADR-064)',
+    const [stale] = await runUnscoped(
+      'the payment reconciler examines a window of open tasks of every tenant and closes those settled without them (ADR-064)',
       () =>
-        this.prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task
-              SET status = 'DONE', done_at = now(), updated_at = now(),
-                  resolution = 'NOTHING_TO_RECONCILE', resolved_by = $2,
-                  last_outcome = 'MARKER_GONE', lease_until = NULL, lease_token = NULL
-            WHERE id IN (
-                  SELECT t.id
-                    FROM payment_reconciliation_task t
-                    JOIN payment_intent pi
-                      ON pi.organization_id = t.organization_id AND pi.id = t.payment_intent_id
-                   WHERE t.status <> 'DONE'
-                     AND (t.lease_until IS NULL OR t.lease_until <= now())
-                     AND NOT ((t.kind = 'REFUND' AND pi.status = 'CAPTURED'
-                               AND pi.failure_reason IN ('REFUND_REQUESTED', 'REFUND_UNKNOWN',
-                                                         'REFUNDED_NOT_REVERSED',
-                                                         'REFUND_DECLINED_RELEASE_PENDING'))
-                           OR (t.kind = 'UNCREDITED_REFUND' AND pi.status = 'AUTHORIZED'
-                               AND pi.failure_reason = 'CAPTURED_REFUND_UNKNOWN'))
-                     AND NOT EXISTS (SELECT 1 FROM wallet_hold h
-                                      WHERE h.wallet_id = pi.wallet_id AND h.reference = pi.id
-                                        AND h.reference_type = 'PAYMENT_REFUND'
-                                        AND h.status = 'ACTIVE')
-                   ORDER BY t.created_at, t.id
-                   LIMIT $1
-                     FOR UPDATE OF t SKIP LOCKED)`,
+        this.prisma.client.$queryRawUnsafe<
+          { examined: number; closed: number; lastCreatedAt: Date | null; lastId: string | null }[]
+        >(
+          `WITH win AS (
+                SELECT id, created_at FROM payment_reconciliation_task
+                 WHERE status <> 'DONE' AND (created_at, id) > ($2::timestamp, $3::text)
+                 ORDER BY created_at, id
+                 LIMIT $1),
+                closed AS (
+                UPDATE payment_reconciliation_task
+                   SET status = 'DONE', done_at = now(), updated_at = now(),
+                       resolution = 'NOTHING_TO_RECONCILE', resolved_by = $4,
+                       last_outcome = 'MARKER_GONE', lease_until = NULL, lease_token = NULL
+                 WHERE id IN (
+                       SELECT t.id
+                         FROM payment_reconciliation_task t
+                         JOIN win w ON w.id = t.id
+                         JOIN payment_intent pi
+                           ON pi.organization_id = t.organization_id AND pi.id = t.payment_intent_id
+                        WHERE t.status <> 'DONE'
+                          AND (t.lease_until IS NULL OR t.lease_until <= now())
+                          AND NOT ((t.kind = 'REFUND' AND pi.status = 'CAPTURED'
+                                    AND pi.failure_reason IN ('REFUND_REQUESTED', 'REFUND_UNKNOWN',
+                                                              'REFUNDED_NOT_REVERSED',
+                                                              'REFUND_DECLINED_RELEASE_PENDING'))
+                                OR (t.kind = 'UNCREDITED_REFUND' AND pi.status = 'AUTHORIZED'
+                                    AND pi.failure_reason = 'CAPTURED_REFUND_UNKNOWN'))
+                          AND NOT EXISTS (SELECT 1 FROM wallet_hold h
+                                           WHERE h.wallet_id = pi.wallet_id AND h.reference = pi.id
+                                             AND h.reference_type = 'PAYMENT_REFUND'
+                                             AND h.status = 'ACTIVE')
+                          FOR UPDATE OF t SKIP LOCKED)
+                RETURNING id)
+           SELECT (SELECT count(*) FROM win)::int AS examined,
+                  (SELECT count(*) FROM closed)::int AS closed,
+                  (SELECT created_at FROM win ORDER BY created_at DESC, id DESC LIMIT 1) AS "lastCreatedAt",
+                  (SELECT id FROM win ORDER BY created_at DESC, id DESC LIMIT 1) AS "lastId"`,
           limit,
+          cursor.stale?.createdAt ?? EPOCH,
+          cursor.stale?.id ?? '',
           PAYMENT_RECONCILER,
         ),
     );
-    return { opened, closed };
+
+    return {
+      opened,
+      closed: stale?.closed ?? 0,
+      cursor: {
+        // A full window may have more behind it; a short one reached the end.
+        missing:
+          window.length === limit && lastIntent
+            ? { createdAt: lastIntent.createdAt, id: lastIntent.id }
+            : null,
+        stale:
+          stale && stale.examined === limit && stale.lastCreatedAt && stale.lastId
+            ? { createdAt: stale.lastCreatedAt, id: stale.lastId }
+            : null,
+      },
+    };
   }
 
   /** Sampled for the gauges: what is waiting, what a person has, and for how long. */
@@ -355,6 +399,26 @@ export class PaymentReconciliationRepository {
       oldestDueAgeSeconds: Math.max(0, Number(row.oldest ?? 0)),
     };
   }
+}
+
+/** Before every row: where a heal window starts over. */
+const EPOCH = new Date(0);
+
+/** Where each heal direction's next window starts; null = from the beginning. */
+export interface HealCursor {
+  missing: HealPosition | null;
+  stale: HealPosition | null;
+}
+
+export interface HealPosition {
+  createdAt: Date;
+  id: string;
+}
+
+export interface HealPass {
+  opened: number;
+  closed: number;
+  cursor: HealCursor;
 }
 
 /** Who a task finished or escalated by the sweeper is attributed to. */

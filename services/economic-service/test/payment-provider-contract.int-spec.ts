@@ -44,6 +44,7 @@ import type {
 class SilentlyRefusingProvider implements PaymentProvider {
   readonly name = 'silent-test-double';
   readonly simulated = true;
+  readonly authoritativeAbsence = false;
 
   constructor(private readonly refuse: 'authorize' | 'capture' | 'refund') {}
 
@@ -90,6 +91,7 @@ class SilentlyRefusingProvider implements PaymentProvider {
 class LiveProvider implements PaymentProvider {
   readonly name = 'live-test-double';
   readonly simulated = false;
+  readonly authoritativeAbsence = false;
 
   async authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
     return {

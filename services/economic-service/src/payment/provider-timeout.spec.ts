@@ -14,6 +14,7 @@ describe('TimedPaymentProvider', () => {
   const hanging: PaymentProvider = {
     name: 'hanging',
     simulated: true,
+    authoritativeAbsence: false,
     authorize: never,
     capture: never,
     refund: never,
@@ -41,14 +42,58 @@ describe('TimedPaymentProvider', () => {
   });
 
   it.each([
-    ['authorize', (p: PaymentProvider) => p.authorize({} as never)],
-    ['capture', (p: PaymentProvider) => p.capture({} as never)],
     ['refund', (p: PaymentProvider) => p.refund({} as never)],
-    ['getStatus', (p: PaymentProvider) => p.getStatus('mock_X')],
     ['getRefundStatus', (p: PaymentProvider) => p.getRefundStatus({} as never)],
   ])('fails %s past its deadline with a closed code, never a guess', async (_name, call) => {
     const timed = new TimedPaymentProvider(hanging, 20);
     await expect(call(timed)).rejects.toMatchObject({ code: PROVIDER_TIMEOUT });
+  });
+
+  it('puts no deadline on the top-up calls until step C can recover them (Codex on #164, HIGH 1)', async () => {
+    // The stated configuration: mock latency 500 ms, timeout 100 ms. A
+    // timed-out authorize left the intent CREATED, the provider authorized
+    // it anyway, and nothing recovered it: its amount kept reserving the
+    // wallet's headroom. Authorize, capture and getStatus pass through.
+    const timed = new TimedPaymentProvider(new MockPaymentProvider(500), 100);
+    const auth = await timed.authorize({
+      paymentIntentId: 'PAY_SLOW_TOPUP',
+      organizationId: 'ORG-T',
+      amountMinor: 100n,
+      currency: 'IRR',
+      idempotencyKey: 'KEY-SLOW',
+    });
+    expect(auth.outcome).toBe('AUTHORIZED');
+    const capture = await timed.capture({
+      paymentIntentId: 'PAY_SLOW_TOPUP',
+      providerReference: auth.providerReference,
+      amountMinor: 100n,
+      currency: 'IRR',
+      idempotencyKey: 'KEY-SLOW',
+    });
+    expect(capture.outcome).toBe('CAPTURED');
+    expect(await timed.getStatus(auth.providerReference)).toBe('CAPTURED');
+
+    // The refund side keeps its deadline.
+    await expect(
+      timed.refund({
+        paymentIntentId: 'PAY_SLOW_TOPUP',
+        providerReference: auth.providerReference,
+        amountMinor: 100n,
+        currency: 'IRR',
+        idempotencyKey: 'KEY-SLOW:refund',
+        reason: 'the suite refunds',
+      }),
+    ).rejects.toMatchObject({ code: PROVIDER_TIMEOUT });
+  });
+
+  it('passes the absence capability through', () => {
+    expect(new TimedPaymentProvider(new MockPaymentProvider(), 1000).authoritativeAbsence).toBe(
+      false,
+    );
+    expect(
+      new TimedPaymentProvider({ ...hanging, authoritativeAbsence: true }, 1000)
+        .authoritativeAbsence,
+    ).toBe(true);
   });
 
   it('passes a provider failure through as it came', async () => {

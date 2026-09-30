@@ -13,6 +13,7 @@ import {
 import { PaymentService } from '../src/payment/payment.service';
 import { PaymentReconciler } from '../src/payment/payment-reconciler';
 import { PaymentReconciliationSweeper } from '../src/payment/payment-reconciliation.sweeper';
+import type { HealCursor } from '../src/payment/payment-reconciliation.repository';
 import { walletBalanceLimit } from '../src/wallet/wallet.repository';
 import { LedgerBalanceAudit } from '../src/wallet/balance-audit';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
@@ -32,6 +33,23 @@ import type { RefundRequest, RefundStatusQuery, RefundStatusResult } from '../sr
  * Tasks fall due after the grace period; a test that needs one now makes it
  * due directly, which is the only thing it writes to the queue by hand.
  */
+/**
+ * A provider that keeps durable records and vouches for their absence, as a
+ * real adapter may declare (`authoritativeAbsence`). The mock never does
+ * (Codex on #164, HIGH 2); this double stands in for one that can, so the
+ * decision table's NOT_FOUND branch is exercised as it will be used.
+ */
+class AbsenceVouchingProvider extends MockPaymentProvider {
+  override readonly authoritativeAbsence = true;
+
+  override async getRefundStatus(query: RefundStatusQuery): Promise<RefundStatusResult> {
+    const answer = await super.getRefundStatus(query);
+    return answer.refund === 'UNKNOWN'
+      ? { refund: 'NOT_FOUND', authoritative: true, simulated: true }
+      : answer;
+  }
+}
+
 describe('the payment reconciler (real database)', () => {
   let prisma: PrismaService;
   let wiring: Wiring;
@@ -236,8 +254,8 @@ describe('the payment reconciler (real database)', () => {
       expect(ask).toHaveBeenCalledWith(
         expect.objectContaining({
           paymentIntentId: made.intentId,
+          providerReference: `mock_${made.intentId}`,
           idempotencyKey: expect.stringMatching(/:refund$/),
-          requestedAt: expect.any(Date),
         }),
       );
       await expectRecordedRefund(made);
@@ -299,7 +317,7 @@ describe('the payment reconciler (real database)', () => {
       await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('ETIMEDOUT');
       await makeDue(made.intentId);
 
-      await sweeperWith().runOnce();
+      await sweeperWith({}, new AbsenceVouchingProvider()).runOnce();
 
       await expectReturnedHold(made, 600n);
       expect(await tasksOf(made.intentId)).toEqual([
@@ -319,6 +337,62 @@ describe('the payment reconciler (real database)', () => {
       await refundBy(organizationId, made.intentId);
       expect((await intentOf(made.intentId)).status).toBe('REFUNDED');
       expect(await deviations()).toEqual([]);
+    });
+
+    it('moves nothing when the mock never saw the attempt: it cannot vouch for an absence', async () => {
+      // Codex on #164, HIGH 2: an empty process-local memory is not evidence.
+      const organizationId = `${org.a}-MOCK-ABSENT`;
+      const made = await topUp(organizationId, 610n);
+      refundNeverArrives();
+      await expect(refundBy(organizationId, made.intentId)).rejects.toThrow('ETIMEDOUT');
+      await makeDue(made.intentId);
+
+      await sweeperWith().runOnce();
+
+      expect((await intentOf(made.intentId)).failureReason).toBe('REFUND_UNKNOWN');
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 610n });
+      expect(await tasksOf(made.intentId)).toEqual([
+        expect.objectContaining({
+          status: 'PENDING',
+          attempts: 1,
+          lastOutcome: 'PROVIDER_OUTCOME_UNKNOWN',
+        }),
+      ]);
+    });
+
+    it('keeps the hold when replica B is asked about a refund replica A made', async () => {
+      const organizationId = `${org.a}-REPLICAS`;
+      const made = await unknownButRefunded(organizationId, 620n); // refunded by `provider`
+      const replicaB = new MockPaymentProvider();
+
+      await sweeperWith({}, replicaB).runOnce();
+
+      expect(await intentOf(made.intentId)).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: 'REFUND_UNKNOWN',
+      });
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 620n });
+      expect(await reversalsOf(made.intentId)).toBe(0);
+      expect(await tasksOf(made.intentId)).toEqual([
+        expect.objectContaining({ lastOutcome: 'PROVIDER_OUTCOME_UNKNOWN' }),
+      ]);
+    });
+
+    it('does not act on a NOT_FOUND from a provider that never declared it can vouch', async () => {
+      const organizationId = `${org.a}-NO-CAPABILITY`;
+      const made = await unknownButRefunded(organizationId, 630n);
+      jest.spyOn(provider, 'getRefundStatus').mockResolvedValueOnce({
+        refund: 'NOT_FOUND',
+        authoritative: true,
+        simulated: true,
+      });
+
+      await sweeperWith().runOnce();
+
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 630n });
+      expect(await tasksOf(made.intentId)).toEqual([
+        expect.objectContaining({ lastOutcome: 'PROVIDER_NOT_FOUND_UNCERTAIN' }),
+      ]);
     });
 
     it('returns the hold when the provider says it declined', async () => {
@@ -576,7 +650,7 @@ describe('the payment reconciler (real database)', () => {
       const organizationId = `${org.c}-U6-NOT-REACHED`;
       const made = await uncreditable(organizationId, false);
 
-      await sweeperWith().runOnce();
+      await sweeperWith({}, new AbsenceVouchingProvider()).runOnce();
 
       expect(await intentOf(made.intentId)).toMatchObject({
         status: 'AUTHORIZED',
@@ -767,6 +841,80 @@ describe('the payment reconciler (real database)', () => {
       expect(ask).not.toHaveBeenCalled();
     });
 
+    /** The database clock, for a cursor that starts just before this test's rows. */
+    const dbNow = async () => {
+      const [row] = await runUnscoped('the suite reads the clock', () =>
+        prisma.client.$queryRawUnsafe<{ now: Date }[]>(`SELECT clock_timestamp() AS now`),
+      );
+      return row!.now;
+    };
+
+    it('examines a bounded window of marked intents per sweep, whatever the backlog (Codex on #164)', async () => {
+      const organizationId = `${org.b}-HEAL-WINDOW`;
+      const from = await dbNow();
+      // Three marked intents that have their tasks, then two B0 left without.
+      for (const index of [0, 1, 2]) await unknownButRefunded(`${organizationId}-H${index}`, 100n);
+      const missing: string[] = [];
+      for (const index of [0, 1]) {
+        const tenant = `${organizationId}-M${index}`;
+        const made = await topUp(tenant, 100n);
+        const b0 = jest.spyOn(wiring.paymentReconciliation, 'open').mockResolvedValue(undefined);
+        loseRefundResponse();
+        await expect(refundBy(tenant, made.intentId)).rejects.toThrow('lost');
+        b0.mockRestore();
+        missing.push(made.intentId);
+      }
+      const start = { createdAt: from, id: '' };
+      let cursor: HealCursor = { missing: start, stale: start };
+
+      // Window 1: H0, H1 — both have tasks. Nothing opened, however many are behind.
+      let pass = await wiring.paymentReconciliation.heal(2, cursor);
+      expect(pass.opened).toBe(0);
+      // Window 2: H2, M0.
+      cursor = pass.cursor;
+      pass = await wiring.paymentReconciliation.heal(2, cursor);
+      expect(pass.opened).toBe(1);
+      expect(await tasksOf(missing[0]!)).toHaveLength(1);
+      expect(await tasksOf(missing[1]!)).toHaveLength(0);
+      // Window 3: M1, then the end: the cursor starts over.
+      pass = await wiring.paymentReconciliation.heal(2, pass.cursor);
+      expect(pass.opened).toBe(1);
+      expect(await tasksOf(missing[1]!)).toHaveLength(1);
+      expect(pass.cursor.missing).toBeNull();
+    });
+
+    it('examines a bounded window of open tasks per sweep, closing the settled ones in it', async () => {
+      const organizationId = `${org.b}-HEAL-WINDOW-CLOSE`;
+      const from = await dbNow();
+      // Two open tasks still owed, then three whose intents B0 settled.
+      for (const index of [0, 1]) await unknownButRefunded(`${organizationId}-O${index}`, 100n);
+      const settled: string[] = [];
+      for (const index of [0, 1, 2]) {
+        const tenant = `${organizationId}-S${index}`;
+        const made = await topUp(tenant, 100n);
+        jest.spyOn(wiring.ledger, 'reverse').mockRejectedValueOnce(new Error('connection reset'));
+        await expect(refundBy(tenant, made.intentId)).rejects.toThrow('connection reset');
+        const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
+        await refundBy(tenant, made.intentId);
+        b0.mockRestore();
+        settled.push(made.intentId);
+      }
+      const start = { createdAt: from, id: '' };
+
+      let pass = await wiring.paymentReconciliation.heal(2, { missing: start, stale: start });
+      expect(pass.closed).toBe(0); // O0, O1: still owed
+      pass = await wiring.paymentReconciliation.heal(2, pass.cursor);
+      expect(pass.closed).toBe(2); // S0, S1
+      pass = await wiring.paymentReconciliation.heal(2, pass.cursor);
+      expect(pass.closed).toBe(1); // S2, then the end
+      expect(pass.cursor.stale).toBeNull();
+      for (const id of settled) {
+        expect(await tasksOf(id)).toEqual([
+          expect.objectContaining({ status: 'DONE', resolution: 'NOTHING_TO_RECONCILE' }),
+        ]);
+      }
+    });
+
     it('leaves a task alone whose refund hold outlived its marker: that is for a person', async () => {
       const organizationId = `${org.b}-HEAL-KEEP`;
       const made = await unknownButRefunded(organizationId, 370n);
@@ -868,7 +1016,9 @@ describe('the payment reconciler (real database)', () => {
       const b0 = jest.spyOn(wiring.paymentReconciliation, 'close').mockResolvedValue(0);
       await refundBy(organizationId, made.intentId);
       b0.mockRestore();
-      jest.spyOn(wiring.paymentReconciliation, 'heal').mockResolvedValue({ opened: 0, closed: 0 });
+      jest
+        .spyOn(wiring.paymentReconciliation, 'heal')
+        .mockResolvedValue({ opened: 0, closed: 0, cursor: { missing: null, stale: null } });
 
       const outcome = await sweeperWith().runOnce();
 

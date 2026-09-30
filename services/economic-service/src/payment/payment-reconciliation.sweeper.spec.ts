@@ -12,6 +12,8 @@ import type { PaymentReconciler, ReconcileResult } from './payment-reconciler';
  * failed task, tallies every result, and waits for a running sweep on
  * shutdown. The database side is `test/payment-reconciler.int-spec.ts`.
  */
+const NO_CURSOR = { missing: null, stale: null };
+
 describe('PaymentReconciliationSweeper', () => {
   const env: EconomicEnv = loadEconomicEnv({
     DATABASE_URL: 'postgresql://u:p@localhost:5432/rasta_economic?schema=public',
@@ -38,7 +40,7 @@ describe('PaymentReconciliationSweeper', () => {
   function build(results: (ReconcileResult | Error)[], backlogFails = false) {
     const claimed = results.map((_, index) => task(`T${index}`));
     const tasks = {
-      heal: jest.fn().mockResolvedValue({ opened: 0, closed: 0 }),
+      heal: jest.fn().mockResolvedValue({ opened: 0, closed: 0, cursor: NO_CURSOR }),
       claimDue: jest.fn().mockResolvedValue(claimed),
       backlog: backlogFails
         ? jest.fn().mockRejectedValue('database gone')
@@ -62,6 +64,25 @@ describe('PaymentReconciliationSweeper', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('carries the heal window from one sweep to the next (Codex on #164)', async () => {
+    const { sweeper, tasks } = build([]);
+    const next = {
+      missing: { createdAt: new Date('2026-09-30T10:00:00Z'), id: 'PAY_A' },
+      stale: null,
+    };
+    tasks.heal.mockResolvedValueOnce({ opened: 0, closed: 0, cursor: next });
+
+    await sweeper.runOnce();
+    await sweeper.runOnce();
+
+    expect(tasks.heal).toHaveBeenNthCalledWith(
+      1,
+      env.ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE,
+      NO_CURSOR,
+    );
+    expect(tasks.heal).toHaveBeenNthCalledWith(2, env.ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE, next);
   });
 
   it('tallies every result, and a task that throws does not stall the batch', async () => {
@@ -94,7 +115,7 @@ describe('PaymentReconciliationSweeper', () => {
 
   it('reports heals, and sweeps even when the backlog cannot be sampled', async () => {
     const { sweeper, tasks } = build([], true);
-    tasks.heal.mockResolvedValue({ opened: 2, closed: 3 });
+    tasks.heal.mockResolvedValue({ opened: 2, closed: 3, cursor: NO_CURSOR });
     await expect(sweeper.runOnce()).resolves.toMatchObject({
       claimed: 0,
       healedOpened: 2,

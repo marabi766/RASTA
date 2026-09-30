@@ -78,23 +78,15 @@ export class MockPaymentProvider implements PaymentProvider {
   private readonly refunds = new Map<string, RefundResult>();
 
   /**
-   * When this instance started. It can vouch for never having seen a refund
-   * attempt only if the attempt was requested since then: anything older may
-   * have happened before a restart wiped its memory (ADR-064 step B2).
-   *
-   * One instance is one provider. With several replicas each has its own
-   * memory, which already makes the mock inconsistent across them; its
-   * authoritative `NOT_FOUND` assumes the single-replica demo stack. A real
-   * adapter answers from the provider's own records.
+   * It cannot vouch for an absence (Codex on #164, HIGH 2). Its memory is one
+   * process's: lost on restart and not shared between replicas, so replica B
+   * would say "never seen" of a refund replica A made. An attempt it has no
+   * record of is therefore `UNKNOWN`, and the reconciler escalates rather
+   * than returning a hold on the strength of an empty map.
    */
-  private readonly bootedAt: Date;
+  readonly authoritativeAbsence: boolean = false;
 
-  constructor(
-    private readonly latencyMs = 0,
-    now: () => Date = () => new Date(),
-  ) {
-    this.bootedAt = now();
-  }
+  constructor(private readonly latencyMs = 0) {}
 
   async authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
     await this.delay();
@@ -211,10 +203,9 @@ export class MockPaymentProvider implements PaymentProvider {
   /**
    * What happened to one refund attempt, from this instance's memory.
    *
-   * It vouches for `REFUNDED` and `DECLINED`, which it remembers. For an
-   * attempt it has no record of, it vouches for `NOT_FOUND` only when the
-   * attempt was requested since it started — it would have seen it. An older
-   * one, or one whose time it is not told, is `UNKNOWN`: never assumed.
+   * It vouches for `REFUNDED` and `DECLINED`, which it remembers. An attempt
+   * it has no record of is `UNKNOWN`, never `NOT_FOUND`: see
+   * {@link authoritativeAbsence}.
    */
   async getRefundStatus(query: RefundStatusQuery): Promise<RefundStatusResult> {
     await this.delay();
@@ -229,9 +220,6 @@ export class MockPaymentProvider implements PaymentProvider {
         ...(known.failureCode ? { failureCode: known.failureCode } : {}),
         simulated: true,
       };
-    }
-    if (query.requestedAt && query.requestedAt.getTime() >= this.bootedAt.getTime()) {
-      return { refund: 'NOT_FOUND', authoritative: true, simulated: true };
     }
     return { refund: 'UNKNOWN', authoritative: false, simulated: true };
   }

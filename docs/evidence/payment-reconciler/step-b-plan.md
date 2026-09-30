@@ -46,13 +46,23 @@ GO, with these answers. Where they differ from the plan below, they win.
   - it closes an open task whose intent no longer carries its marker, as `NOTHING_TO_RECONCILE`, with no money action;
   - it leaves the task alone when the refund hold is still active, and the claim path escalates it as
     `HOLD_WITHOUT_MARKER`.
-- **New partial index.** Migration `20260930210000` adds `ix_payment_intent_unfinished_refund`, so the heal query reads
-  the unfinished intents only.
+- **Bounded heal windows (Codex on #164, MEDIUM).** Each direction examines one window of at most one batch after a
+  per-process cursor, in `(created_at, id)` order, and starts over at the end. The work per sweep is bounded whatever
+  the backlog. Migration `20260930210000` adds the two partial indexes the windows read:
+  `ix_payment_intent_unfinished_refund` and `ix_payment_reconciliation_open_window`.
 - **Resolution events.** `PAYMENT_RECONCILIATION_RESOLVED` is emitted for every reconciler finish, `NOTHING_TO_RECONCILE`
   included. The heal pass's closes emit none: the intent's own resolution already did.
 - **No jitter.** Backoff is `min(base · 2^attempts, max)`, without the jitter ADR-064 § 4 mentioned. The lease and `SKIP
 LOCKED` already keep sweepers apart.
-- **Mock limitation.** The mock's authoritative `NOT_FOUND` assumes a single replica.
+- **Absence needs a declared capability (Codex on #164, HIGH 2).** `PaymentProvider.authoritativeAbsence`:
+  - A `NOT_FOUND` is acted on only when the provider declares it.
+  - `MockPaymentProvider` declares `false`: its memory is one process's, so replica B would say "never seen" of a
+    refund replica A made. Its unseen attempts are `UNKNOWN`, and such a task backs off and escalates to the operator
+    (B3).
+  - The boot-time rule and `requestedAt` in § 2.4 are dropped.
+- **Refund-side calls only (Codex on #164, HIGH 1).** The provider timeout wraps `refund` and `getRefundStatus` only.
+  A timed-out `authorize` would leave a CREATED intent reserving the wallet's headroom that nothing recovers until step
+  C. The configuration also refuses a timeout at or below the mock's latency.
 - **New configuration defaults:**
   - interval 60 s, batch 20, lease 120 s;
   - backoff 60 s up to 3600 s;

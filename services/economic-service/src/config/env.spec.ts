@@ -173,6 +173,34 @@ describe('loadEconomicEnv', () => {
     ).toBe(31);
   });
 
+  it('refuses a provider timeout the mock’s own latency would exceed (Codex on #164, HIGH 1)', () => {
+    // The stated configuration: every mock call would time out.
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_MOCK_PAYMENT_LATENCY_MS: '500',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '100',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS/);
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'development',
+        ECONOMIC_MOCK_PAYMENT_LATENCY_MS: '500',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '500',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS/);
+    expect(
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_MOCK_PAYMENT_LATENCY_MS: '500',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '600',
+      }).ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS,
+    ).toBe(600);
+  });
+
   it('refuses a lease a provider call and its write could outlast', () => {
     expect(() =>
       loadEconomicEnv({

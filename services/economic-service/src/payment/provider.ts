@@ -99,21 +99,15 @@ export interface RefundStatusQuery {
   paymentIntentId: string;
   providerReference: string;
   idempotencyKey: string;
-  /**
-   * When this platform asked for the refund, where it knows: the refund
-   * hold's `placed_at`, or the intent's `authorized_at` for an uncredited
-   * capture. A real adapter ignores it; the mock uses it to decide whether it
-   * can vouch for having never seen the attempt.
-   */
-  requestedAt?: Date;
 }
 
 /**
  * The provider's own record of one refund attempt.
  *
  * `NOT_FOUND` means the provider never received the attempt. It is acted on
- * **only** when `authoritative` is true — the provider vouches for it — and is
- * otherwise no better than `UNKNOWN`. Never assume.
+ * **only** when `authoritative` is true **and** the provider declares
+ * {@link PaymentProvider.authoritativeAbsence}; otherwise it is no better than
+ * `UNKNOWN`. Never assume.
  */
 export interface RefundStatusResult {
   refund: 'REFUNDED' | 'DECLINED' | 'NOT_FOUND' | 'UNKNOWN';
@@ -138,6 +132,15 @@ export interface PaymentProvider {
    * which implementation it holds.
    */
   readonly simulated: boolean;
+  /**
+   * Whether this provider can vouch that it never received a refund attempt
+   * (ADR-064 § 3, Codex on #164). Only a provider whose records are durable
+   * and shared by every caller can: its "not found" is then evidence. The
+   * mock's memory is one process's — lost on restart, not shared between
+   * replicas — so it declares `false`, and the reconciler treats its every
+   * "not seen" as unknown.
+   */
+  readonly authoritativeAbsence: boolean;
 
   authorize(request: AuthorizeRequest): Promise<AuthorizeResult>;
   capture(request: CaptureRequest): Promise<CaptureResult>;

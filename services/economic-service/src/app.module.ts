@@ -175,8 +175,9 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     {
       provide: PAYMENT_PROVIDER,
       inject: [ENV],
-      // Every call under the deadline (ADR-064 step B2): a call past it is an
-      // unknown outcome for the reconciler, never a hung request.
+      // The refund-side calls under the deadline (ADR-064 step B2): a call
+      // past it is an unknown outcome for the reconciler. Top-up calls pass
+      // through until step C can recover them.
       useFactory: (env: EconomicEnv) =>
         new TimedPaymentProvider(
           new MockPaymentProvider(env.ECONOMIC_MOCK_PAYMENT_LATENCY_MS),
