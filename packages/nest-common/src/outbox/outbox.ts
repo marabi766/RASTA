@@ -87,10 +87,56 @@ export interface OutboxRow {
    * ADR-051 — the persisted `outbox_message.stream_seq`.
    *
    * `null` for every row written before B3 and for any producer not yet
-   * migrated. Nothing in the relay or the claim protocol reads it: selection,
-   * retry and acknowledgement are unchanged, and head-of-line claiming is B4.
+   * migrated. The relay reads it for one thing only: to publish one stream's
+   * rows of a single claimed batch in this order ({@link orderForPublish}).
+   * Selection, retry and acknowledgement are unchanged, and head-of-line
+   * claiming is B4.
    */
   streamSeq?: number | null;
+}
+
+/**
+ * Puts one claimed batch into the order it must reach Kafka in.
+ *
+ * The claim selects and returns rows by `created_at, id`. That decides *which*
+ * rows a batch holds, but `created_at` is not commit order: a service stamping
+ * the database's transaction-start `now()` gives the transaction that started
+ * first the earlier stamp even when it queued on the stream's counter row lock
+ * and committed second. `stream_seq` is allocated under that lock, so it is
+ * commit order, and within one stream it is the order to publish in (ADR-051 § R4).
+ *
+ * Each stream's sequenced rows are re-sorted by `stream_seq` **within the
+ * positions that stream already occupied**. Nothing moves across streams, and a
+ * row with no `stream_seq` (written before B3, or by a producer not yet
+ * migrated) stays exactly where the claim put it — so a batch with no
+ * inversion comes back identical, and the change is confined to the rows that
+ * were wrong.
+ *
+ * Batch scope only. A stream whose earlier row is not in this batch — leased by
+ * another relay, in backoff, being retried — is untouched by this: that is
+ * head-of-line claiming, ADR-051 B4.
+ */
+export function orderForPublish(rows: readonly OutboxRow[]): OutboxRow[] {
+  const positionsByStream = new Map<string, number[]>();
+  rows.forEach((row, index) => {
+    if (row.streamSeq === null || row.streamSeq === undefined) return;
+    const stream = `${row.topic}\u0000${row.partitionKey}`;
+    const positions = positionsByStream.get(stream);
+    if (positions) positions.push(index);
+    else positionsByStream.set(stream, [index]);
+  });
+
+  const ordered = [...rows];
+  for (const positions of positionsByStream.values()) {
+    if (positions.length < 2) continue;
+    const bySeq = positions
+      .map((position) => rows[position] as OutboxRow)
+      .sort((a, b) => (a.streamSeq as number) - (b.streamSeq as number));
+    positions.forEach((position, i) => {
+      ordered[position] = bySeq[i] as OutboxRow;
+    });
+  }
+  return ordered;
 }
 
 export interface BuildOutboxOptions {
@@ -489,7 +535,11 @@ export class OutboxRelay {
     }
   }
 
-  private async publishBatch(rows: readonly OutboxRow[], token: string): Promise<number> {
+  private async publishBatch(claimed: readonly OutboxRow[], token: string): Promise<number> {
+    // Whatever order the store returned, one stream's rows go out in stream_seq
+    // order. Done here as well as in the shared claim so a store with its own
+    // claim cannot silently lose the property.
+    const rows = orderForPublish(claimed);
     const ids = rows.map((row) => row.id);
     for (const id of ids) this.state.set(id, 'IN_FLIGHT');
 

@@ -400,6 +400,11 @@ Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v
 [`docs/api/construction-service.tender.planned.openapi.json`](api/construction-service.tender.planned.openapi.json) (طرح، نه رفتار امروز).
 **وابستگی:** فقط `SUPPLIER_QUALIFIED`/`SUPPLIER_SUSPENDED` از COM-005 (که هنوز `IN_PROGRESS` است).
 
+**CON-002 PR 2 (هستهٔ مناقصه).** `Tender` Aggregate جدا با ماشین حالت پایگاه داده (هفت حالت، همه در enum؛ فقط `DRAFT` و `CANCELLED` قابل‌دسترس):
+`POST /v1/projects/{id}/tenders` (فقط زیر پروژهٔ `APPROVED`)، `GET /v1/tenders[/{id}]`، `PATCH /v1/tenders/{id}` (فقط `DRAFT`) و
+`POST /v1/tenders/{id}/cancel`. نقش‌ها همان نقش‌های پروژه‌اند (Q-69). پروژه‌ای که مناقصهٔ تمام‌نشده دارد لغو نمی‌شود (`422`).
+انتشار، پیشنهاد، ارزیابی و انتخاب گام‌های بعدی‌اند.
+
 **هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد، ارزیابی و انتخاب — CON-002؛ قرارداد — CON-003؛
 تحلیل ناوگان؛ هیچ Consumer رویدادی.
 

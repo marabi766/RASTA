@@ -99,10 +99,11 @@ describe('the schema keeps history from being erased', () => {
 });
 
 describe('the schema models nothing CON-001 has not decided', () => {
-  it('has no tender, bid or evaluation model', () => {
-    // Tenders are CON-002.
+  it('has the tender model of CON-002 PR 2 and no bid or evaluation model yet', () => {
+    // Bids and evaluation arrive with their own steps (ADR-065 to ADR-067); each
+    // adds its model here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()];
-    expect(names.filter((name) => /Tender|Bid|Evaluation/i.test(name))).toEqual([]);
+    expect(names.filter((name) => /Tender|Bid|Evaluation/i.test(name))).toEqual(['Tender']);
   });
 
   it('stores no document reference', () => {

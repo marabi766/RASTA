@@ -7,104 +7,6 @@
   },
   "servers": [],
   "paths": {
-    "/v1/projects/{projectId}/tenders": {
-      "post": {
-        "operationId": "createTender",
-        "x-step": "PR 2",
-        "summary": "Create a DRAFT tender under an APPROVED project of the caller's organization.",
-        "parameters": [
-          { "$ref": "#/components/parameters/ProjectId" },
-          { "$ref": "#/components/parameters/IdempotencyKey" }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/CreateTender" } }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Created",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
-            }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "422": { "$ref": "#/components/responses/BusinessRule" }
-        }
-      }
-    },
-    "/v1/tenders": {
-      "get": {
-        "operationId": "listTenders",
-        "x-step": "PR 2",
-        "summary": "The caller's organization's tenders (owner side), newest first, cursor-paged.",
-        "parameters": [
-          {
-            "name": "status",
-            "in": "query",
-            "required": false,
-            "schema": { "$ref": "#/components/schemas/TenderStatus" }
-          },
-          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "A page",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/TenderPage" } }
-            }
-          }
-        }
-      }
-    },
-    "/v1/tenders/{id}": {
-      "get": {
-        "operationId": "getTender",
-        "x-step": "PR 2",
-        "summary": "One tender of the caller's organization. Another organization's tender is 404.",
-        "parameters": [{ "$ref": "#/components/parameters/Id" }],
-        "responses": {
-          "200": {
-            "description": "The tender",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
-            }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" }
-        }
-      },
-      "patch": {
-        "operationId": "updateTender",
-        "x-step": "PR 2",
-        "summary": "Change a DRAFT tender. Names only the changed fields on the event.",
-        "parameters": [{ "$ref": "#/components/parameters/Id" }],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": { "schema": { "$ref": "#/components/schemas/UpdateTender" } }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The tender",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
-            }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "422": { "$ref": "#/components/responses/BusinessRule" }
-        }
-      }
-    },
     "/v1/tenders/{id}/criteria": {
       "put": {
         "operationId": "setTenderCriteria",
@@ -163,26 +65,6 @@
         "summary": "DRAFT to PUBLISHED. Needs procurementNature, criteria summing to 10000 bp, and a future bidClosingAt after bidOpeningAt. Generates the tender key pair. Publishes TENDER_PUBLISHED.",
         "parameters": [{ "$ref": "#/components/parameters/Id" }],
         "requestBody": { "$ref": "#/components/requestBodies/ExpectedVersion" },
-        "responses": {
-          "200": {
-            "description": "The tender",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
-            }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "422": { "$ref": "#/components/responses/BusinessRule" }
-        }
-      }
-    },
-    "/v1/tenders/{id}/cancel": {
-      "post": {
-        "operationId": "cancelTender",
-        "x-step": "PR 2 (from DRAFT); PR 4, 7, 8, 9, 10 extend the source states",
-        "summary": "Cancel from any state before AWARDED. A reason is required. Before opening, the tender key is never unwrapped.",
-        "parameters": [{ "$ref": "#/components/parameters/Id" }],
-        "requestBody": { "$ref": "#/components/requestBodies/Reason" },
         "responses": {
           "200": {
             "description": "The tender",
