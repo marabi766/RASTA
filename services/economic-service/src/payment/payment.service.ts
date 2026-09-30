@@ -785,6 +785,9 @@ export class PaymentService {
    *   - the provider refunded and step 3 failed → `REFUNDED_NOT_REVERSED`,
    *     announced the same way; a retry performs step 3 alone, without asking
    *     the provider again;
+   *   - the provider declined and returning the hold failed →
+   *     `REFUND_DECLINED_RELEASE_PENDING`, announced the same way; a retry
+   *     only returns the hold, and the provider is never asked again;
    *   - a crash anywhere after step 1 → `REFUND_REQUESTED` with the hold,
    *     which a second refund also refuses.
    */
@@ -805,7 +808,14 @@ export class PaymentService {
       const { intent: row, wallet } = await this.lockForRefund(tx, intentId, organizationId);
       // Refunded at the provider by an earlier attempt that could not record
       // it: the hold is still there, and only step 3 is retried.
-      if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, askProvider: false };
+      if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
+      // Declined by the provider, and the held amount not yet returned: this
+      // call returns it and does nothing else — the decline is known, so the
+      // provider is never asked again (round 2 on #143, finding 1).
+      if (row.failureReason === REFUND_DECLINED_RELEASE_PENDING) {
+        await this.returnDeclinedHold(tx, row, wallet, actor);
+        return { row, next: 'RELEASED' as const };
+      }
       if (row.failureReason === REFUND_REQUESTED || row.failureReason === REFUND_UNKNOWN) {
         throw refundUnresolved(intentId, row.failureReason);
       }
@@ -821,11 +831,19 @@ export class PaymentService {
         where: { id: intentId },
         data: { failureReason: REFUND_REQUESTED },
       });
-      return { row, askProvider: true };
+      return { row, next: 'ASK' as const };
     });
 
+    if (requested.next === 'RELEASED') {
+      throw RastaError.businessRule(
+        'The payment provider declined the earlier refund of this payment; its held amount ' +
+          'has now been returned to the wallet',
+        { paymentIntentId: intentId, outcome: 'REFUND_DECLINED' },
+      );
+    }
+
     // 2. Ask the provider.
-    if (requested.askProvider) {
+    if (requested.next === 'ASK') {
       let providerResult: RefundResult;
       try {
         providerResult = await this.provider.refund({
@@ -842,7 +860,21 @@ export class PaymentService {
       }
 
       if (providerResult.outcome === 'FAILED') {
-        await this.releaseDeclinedRefund(requested.row, actor);
+        // The decline is known. Should returning the hold fail, that fact is
+        // recorded rather than lost: without it the intent would sit in
+        // REFUND_REQUESTED, every later refund refused, and nothing announced.
+        await this.releaseDeclinedRefund(requested.row, actor).catch(async (error: unknown) => {
+          this.logger.error(
+            `Payment intent ${intentId}: the provider declined the refund and returning the ` +
+              'held amount failed',
+            error instanceof Error ? error.stack : String(error),
+          );
+          await this.markRefundUnresolved(
+            requested.row,
+            REFUND_DECLINED_RELEASE_PENDING,
+            'PROVIDER_DECLINED_RELEASE_PENDING',
+          );
+        });
         throw RastaError.businessRule('The payment provider refused the refund', {
           intentId,
           code: failureCodeFrom(providerResult.failureCode, 'REFUND_DECLINED'),
@@ -971,18 +1003,38 @@ export class PaymentService {
         intent.organizationId,
       );
       if (row.failureReason !== REFUND_REQUESTED) return;
-      const hold = await this.refundHoldOf(tx, wallet.id, intent.id);
+      await this.returnDeclinedHold(tx, row, wallet, actor);
+    });
+  }
+
+  /**
+   * Returns the held amount of a declined refund to the wallet and clears the
+   * marker. The caller holds the intent's and the wallet's locks.
+   *
+   * Idempotent: a hold already returned is not returned again (`refundHold`
+   * answers `null` for a hold that is no longer ACTIVE, and refuses a
+   * concurrent second resolution), so a retry after an ambiguous failure
+   * moves nothing twice.
+   */
+  private async returnDeclinedHold(
+    tx: ExtendedPrismaClient,
+    intent: PaymentIntent,
+    wallet: LockedWallet,
+    actor: string,
+  ): Promise<void> {
+    const hold = await this.walletRepository.findActiveHold(tx, wallet.id, intent.id);
+    if (hold && hold.referenceType === REFUND_HOLD_REFERENCE_TYPE) {
       await this.wallets.refundHold(tx, {
         wallet,
         holdId: hold.id,
-        transactionId: topUpTransactionOf(row),
+        transactionId: topUpTransactionOf(intent),
         note: `Returned: the provider declined the refund of payment ${intent.id}`,
         resolvedBy: actor,
       });
-      await tx.paymentIntent.update({
-        where: { id: intent.id },
-        data: { failureReason: null },
-      });
+    }
+    await tx.paymentIntent.update({
+      where: { id: intent.id },
+      data: { failureReason: null },
     });
   }
 
@@ -998,8 +1050,13 @@ export class PaymentService {
    */
   private async markRefundUnresolved(
     intent: PaymentIntent,
-    marker: typeof REFUND_UNKNOWN | typeof REFUNDED_NOT_REVERSED,
-    reason: 'PROVIDER_OUTCOME_UNKNOWN' | 'INSUFFICIENT_BALANCE' | 'REVERSAL_FAILED',
+    marker:
+      typeof REFUND_UNKNOWN | typeof REFUNDED_NOT_REVERSED | typeof REFUND_DECLINED_RELEASE_PENDING,
+    reason:
+      | 'PROVIDER_OUTCOME_UNKNOWN'
+      | 'PROVIDER_DECLINED_RELEASE_PENDING'
+      | 'INSUFFICIENT_BALANCE'
+      | 'REVERSAL_FAILED',
   ): Promise<void> {
     try {
       const marked = await this.prisma.transaction(async (tx) => {
@@ -1037,13 +1094,7 @@ export class PaymentService {
         simulated: String(this.provider.simulated),
         outcome: marker,
       });
-      this.logger.error(
-        marker === REFUND_UNKNOWN
-          ? `Payment intent ${intent.id}: the provider refund failed without an answer; the ` +
-              'amount stays held and a second refund is refused until the outcome is established'
-          : `Payment intent ${intent.id} was refunded at the provider and the ledger could not ` +
-              `reverse it (${reason}); the amount stays held and a retry of the refund reverses it`,
-      );
+      this.logger.error(UNRESOLVED_REFUND_LOG[marker](intent.id, reason));
     } catch (markError) {
       this.logger.error(
         `Payment intent ${intent.id}: a refund outcome (${reason}) could not be recorded; it ` +
@@ -1122,12 +1173,34 @@ export const REFUND_REQUESTED = 'REFUND_REQUESTED';
  */
 export const REFUND_UNKNOWN = 'REFUND_UNKNOWN';
 
+/**
+ * The failure reason a CAPTURED intent keeps when the provider **declined**
+ * the refund and returning the held amount failed (round 2 on #143, finding
+ * 1). The decline is known: a later refund call, or the reconciler, only
+ * returns the hold — the provider is never asked again for this attempt.
+ */
+export const REFUND_DECLINED_RELEASE_PENDING = 'REFUND_DECLINED_RELEASE_PENDING';
+
 /** The markers under which a CAPTURED intent's refund has not finished. */
 const UNFINISHED_REFUND: ReadonlySet<string> = new Set([
   REFUND_REQUESTED,
   REFUND_UNKNOWN,
   REFUNDED_NOT_REVERSED,
+  REFUND_DECLINED_RELEASE_PENDING,
 ]);
+
+/** What the log says when each unresolved refund marker is recorded. */
+const UNRESOLVED_REFUND_LOG: Record<string, (intentId: string, reason: string) => string> = {
+  [REFUND_UNKNOWN]: (id) =>
+    `Payment intent ${id}: the provider refund failed without an answer; the amount stays ` +
+    'held and a second refund is refused until the outcome is established',
+  [REFUNDED_NOT_REVERSED]: (id, reason) =>
+    `Payment intent ${id} was refunded at the provider and the ledger could not reverse it ` +
+    `(${reason}); the amount stays held and a retry of the refund reverses it`,
+  [REFUND_DECLINED_RELEASE_PENDING]: (id) =>
+    `Payment intent ${id}: the provider declined the refund and the held amount could not be ` +
+    'returned; a retry of the refund returns it without asking the provider',
+};
 
 /** `wallet_hold.reference_type` of the hold an operator refund places. */
 export const REFUND_HOLD_REFERENCE_TYPE = 'PAYMENT_REFUND';

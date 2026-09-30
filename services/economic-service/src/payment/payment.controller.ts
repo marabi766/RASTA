@@ -52,7 +52,14 @@ export class PaymentController {
 
   @Get(':id')
   @Roles('SYSTEM_ADMIN', 'UNION_ADMIN', 'ORGANIZATION_ADMIN')
-  @ApiOperation({ summary: 'One payment intent' })
+  @ApiOperation({
+    summary: 'One payment intent — its current state',
+    description:
+      'The authoritative current state, unlike a replayed top-up response, which is the ' +
+      'historical one (docs/06 § 6.8). A CAPTURED intent whose refund has not finished says ' +
+      'so in `failureReason`: `REFUND_REQUESTED`, `REFUND_UNKNOWN`, `REFUNDED_NOT_REVERSED` ' +
+      'or `REFUND_DECLINED_RELEASE_PENDING` (ADR-064).',
+  })
   async get(@Param('id') id: string) {
     assertNotAuditor();
     const row = await this.payments.get(id);

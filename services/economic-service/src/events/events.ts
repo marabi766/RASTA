@@ -212,6 +212,10 @@ export const paymentCaptureUnreconciledPayload = z.object({
  *   `PROVIDER_OUTCOME_UNKNOWN` — the provider call failed without an answer.
  *     The payer may have the money back. `failure_reason = REFUND_UNKNOWN`;
  *     a second refund is refused until the provider's state is established.
+ *   `PROVIDER_DECLINED_RELEASE_PENDING` — the provider declined, and returning
+ *     the held amount failed. `failure_reason =
+ *     REFUND_DECLINED_RELEASE_PENDING`; a retry of the refund returns the hold
+ *     and never asks the provider again.
  *   `REVERSAL_FAILED` / `INSUFFICIENT_BALANCE` — the provider refunded and the
  *     reversal could not be written. `failure_reason = REFUNDED_NOT_REVERSED`;
  *     a retry of the refund reverses it without asking the provider again.
@@ -226,7 +230,12 @@ export const paymentRefundUnreconciledPayload = z.object({
   currency,
   provider: z.string(),
   simulated: z.boolean(),
-  reason: z.enum(['PROVIDER_OUTCOME_UNKNOWN', 'INSUFFICIENT_BALANCE', 'REVERSAL_FAILED']),
+  reason: z.enum([
+    'PROVIDER_OUTCOME_UNKNOWN',
+    'PROVIDER_DECLINED_RELEASE_PENDING',
+    'INSUFFICIENT_BALANCE',
+    'REVERSAL_FAILED',
+  ]),
   detectedAt: z.string(),
 });
 
