@@ -39,8 +39,11 @@ export class FleetRepository {
     return this.prisma.client;
   }
 
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.prisma.transaction(fn);
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.prisma.transaction(fn, options);
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
@@ -421,20 +424,17 @@ export class FleetRepository {
   }
 
   /**
-   * Removes the fences of every organization but `ownerId` on the machine
-   * (D-039). A fence exists while its organization owns the machine; once
-   * asset-service says another organization does, the transfer landed and the
-   * fence is moot — and, the transfer being recorded, fence resolution would
-   * otherwise keep it for ever.
+   * Removes one fence, in the caller's transaction and under its
+   * {@link lockAssetRef}. The caller has established that asset-service records
+   * the transfer the fence was placed for (D-039).
    */
-  async dropTransferFencesNotOwnedBy(
+  async deleteTransferFence(
     tx: ExtendedPrismaClient,
     assetId: string,
-    ownerId: string,
+    fenceId: string,
   ): Promise<number> {
     return tx.$executeRaw`
-      DELETE FROM asset_transfer_fence
-      WHERE asset_id = ${assetId} AND organization_id <> ${ownerId}`;
+      DELETE FROM asset_transfer_fence WHERE asset_id = ${assetId} AND fence_id = ${fenceId}`;
   }
 
   /** The transfer landed: whatever the previous owner fenced is moot. */

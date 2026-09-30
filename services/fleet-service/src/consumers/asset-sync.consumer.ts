@@ -10,6 +10,10 @@ import {
   type EventHandler,
 } from '@rasta/nest-common';
 import {
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  type TransferRecordSource,
+} from '../fleet/transfer-record';
+import {
   UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
   UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
   type AssetSnapshotSource,
@@ -289,6 +293,13 @@ function withoutStateFields(patch: AssetRefPatch): AssetRefPatch {
   return rest;
 }
 
+/**
+ * A refresh holds the asset's lock across up to four short exchanges with the
+ * owners (each bounded by its own deadline), so its transaction is given room.
+ * Replays are rare operator actions; original deliveries for that asset wait.
+ */
+const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
+
 const CONSUMER_NAME = 'fleet-service.asset-sync';
 
 /** Who ended an assignment nobody ended by hand; the same value as elsewhere. */
@@ -319,6 +330,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     /** Read on a `.retry` delivery only; without them a replay is refused (fail closed, D-039). */
     private readonly assetSource: AssetSnapshotSource = UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
     private readonly maintenanceSource: MaintenanceStateSource = UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
+    /** Whether a stale fence's transfer was recorded (ADR-062 § 3b); read under the lock. */
+    private readonly transferRecords: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -390,19 +403,17 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery
     // on `.retry` may be older than events applied since. A state event on it
-    // does not apply its payload: the replica is refreshed from the services
-    // that own the state — asset-service for the machine, maintenance-service
-    // for the in-maintenance flag. Read before the transaction so no
-    // connection is held across HTTP; no answer throws (retry, then DLQ) and
-    // the stale payload is never applied.
-    const refresh =
-      delivery !== undefined && isRetryDelivery(delivery) && STATE_EVENTS.has(envelope.eventName)
-        ? await this.readAuthoritativeState(
-            envelope,
-            assetId,
-            existing?.organizationId ?? organizationId,
-          )
-        : undefined;
+    // does not apply its payload: inside the transaction, under the same
+    // per-asset lock the original deliveries take, the replica is refreshed
+    // from the services that own the state — asset-service for the machine,
+    // maintenance-service for the in-maintenance flag — and written from that.
+    // Read and write under one lock, so no newer event can commit in between
+    // and be overwritten. The source is asked as the EVENT's tenant, never the
+    // replica's. No answer throws (rolling the marker back: retry, then DLQ)
+    // and the stale payload is never applied.
+    const replayed =
+      delivery !== undefined && isRetryDelivery(delivery) && STATE_EVENTS.has(envelope.eventName);
+    const eventTenant = envelope.tenantId ?? organizationId;
 
     const now = new Date();
     // The producer's clock, for ordering. An unreadable timestamp falls back to
@@ -412,85 +423,111 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
     let skipped = false;
 
-    await this.repository.transaction(async (tx: ExtendedPrismaClient) => {
-      // The idempotency marker and the effect commit together, so a crash
-      // between them cannot leave the event marked handled with nothing to
-      // show for it. A redelivery finds the marker and stops here.
-      const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
-      if (!fresh) {
-        this.logger.debug(`${envelope.eventName} ${envelope.eventId} already applied`);
-        return;
-      }
+    await this.repository.transaction(
+      async (tx: ExtendedPrismaClient) => {
+        // The idempotency marker and the effect commit together, so a crash
+        // between them cannot leave the event marked handled with nothing to
+        // show for it. A redelivery finds the marker and stops here.
+        const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
+        if (!fresh) {
+          this.logger.debug(`${envelope.eventName} ${envelope.eventId} already applied`);
+          return;
+        }
 
-      // Locked and re-read inside the transaction: the safety projections add
-      // to what the row already holds, and two events for one machine handled
-      // at once must not each build on a copy that lacks the other's change.
-      await this.repository.lockAssetRef(tx, assetId);
-      const current = await this.repository.findAssetRef(assetId, tx);
+        // Locked and re-read inside the transaction: the safety projections add
+        // to what the row already holds, and two events for one machine handled
+        // at once must not each build on a copy that lacks the other's change.
+        await this.repository.lockAssetRef(tx, assetId);
+        const current = await this.repository.findAssetRef(assetId, tx);
 
-      // An insurance event from the previous owner's tenant, consumed after the
-      // transfer, is applied to the row as it now stands, under its current
-      // owner: the policy is the vehicle's, not the organization's (docs/24
-      // Q-66). The tenant below comes from the row, never from such an event.
-      let patch = projection.patch(payload, current, now, occurredAt);
-      if (refresh) {
-        // The replica fields come from the owners; what stays of the payload's
-        // patch is the safety part, which has its own order-insensitive rules
-        // (a repair completion still resolves an older inspection failure).
-        patch = { ...withoutStateFields(patch), ...refresh.patch };
-      }
+        // An insurance event from the previous owner's tenant, consumed after the
+        // transfer, is applied to the row as it now stands, under its current
+        // owner: the policy is the vehicle's, not the organization's (docs/24
+        // Q-66). The tenant below comes from the row, never from such an event.
+        let patch = projection.patch(payload, current, now, occurredAt);
+        const refresh = replayed
+          ? await this.readAuthoritativeState(envelope, assetId, eventTenant)
+          : undefined;
+        if (refresh) {
+          // The replica fields come from the owners. What stays of the payload's
+          // patch is the safety part, which has its own order-insensitive rules
+          // (a repair completion still resolves an older inspection failure) —
+          // but only for a tenant that still owns the machine: an event from a
+          // previous owner is good for the owner change alone.
+          patch = refresh.viaTransfer
+            ? refresh.patch
+            : { ...withoutStateFields(patch), ...refresh.patch };
+        }
 
-      // Narrowed rather than asserted: the guard above already established
-      // that one of these is present, and spelling it out here keeps that true
-      // if the guard is ever edited.
-      const tenant = patch.organizationId ?? current?.organizationId ?? organizationId;
-      if (!tenant) {
-        skipped = true;
-        return;
-      }
+        // Narrowed rather than asserted: the guard above already established
+        // that one of these is present, and spelling it out here keeps that true
+        // if the guard is ever edited.
+        const tenant = patch.organizationId ?? current?.organizationId ?? organizationId;
+        if (!tenant) {
+          skipped = true;
+          return;
+        }
 
-      await this.repository.upsertAssetRef(tx, {
-        // The patch first, then the resolved values — never the other way
-        // round. A patch key present but undefined (an ASSET_CREATED whose
-        // payload omits the organization, with the tenant only on the
-        // envelope) would otherwise overwrite the value resolved above with
-        // `undefined`, and the row would be written with no organization.
-        ...patch,
-        id: assetId,
-        // An existing row keeps its organization unless the event explicitly
-        // moves it, which only a transfer does.
-        organizationId: tenant,
-        sourceEvent: envelope.eventName,
-      });
+        await this.repository.upsertAssetRef(tx, {
+          // The patch first, then the resolved values — never the other way
+          // round. A patch key present but undefined (an ASSET_CREATED whose
+          // payload omits the organization, with the tenant only on the
+          // envelope) would otherwise overwrite the value resolved above with
+          // `undefined`, and the row would be written with no organization.
+          ...patch,
+          id: assetId,
+          // An existing row keeps its organization unless the event explicitly
+          // moves it, which only a transfer does.
+          organizationId: tenant,
+          sourceEvent: envelope.eventName,
+        });
 
-      if (refresh) {
-        // The snapshot shows the machine under another owner than the replica
-        // had: the same owner change ASSET_TRANSFERRED would have made. Only
-        // then — a replayed transfer the replica already reflects must not end
-        // the new owner's assignments.
-        const previousOwner = current?.organizationId;
-        if (previousOwner && previousOwner !== refresh.organizationId) {
+        if (refresh) {
+          // The snapshot shows the machine under another owner than the replica
+          // had: the same owner change ASSET_TRANSFERRED would have made. Only
+          // then — a replayed transfer the replica already reflects must not end
+          // the new owner's assignments.
+          const previousOwner = current?.organizationId;
+          if (previousOwner && previousOwner !== refresh.organizationId) {
+            await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
+          }
+          await this.settleStaleFence(tx, assetId, refresh.organizationId);
+        } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
           await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
-          await this.repository.dropTransferFences(tx, assetId, previousOwner);
+          // The fence the previous owner placed to clear this transfer
+          // (ADR-062). The replica now names the new owner, which refuses the
+          // previous one from here on; left in place, the fence would refuse the
+          // new owner until it expired.
+          const previousOwner = payload.fromOrganizationId;
+          if (typeof previousOwner === 'string' && previousOwner.length > 0) {
+            await this.repository.dropTransferFences(tx, assetId, previousOwner);
+          }
         }
-        // A fence held by an organization that no longer owns the machine is
-        // moot however the replica came to know (the transfer is recorded, so
-        // fence resolution would keep it for ever).
-        await this.repository.dropTransferFencesNotOwnedBy(tx, assetId, refresh.organizationId);
-      } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
-        await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
-        // The fence the previous owner placed to clear this transfer
-        // (ADR-062). The replica now names the new owner, which refuses the
-        // previous one from here on; left in place, the fence would refuse the
-        // new owner until it expired.
-        const previousOwner = payload.fromOrganizationId;
-        if (typeof previousOwner === 'string' && previousOwner.length > 0) {
-          await this.repository.dropTransferFences(tx, assetId, previousOwner);
-        }
-      }
-    });
+      },
+      replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
+    );
 
     return skipped ? 'SKIPPED' : undefined;
+  }
+
+  /**
+   * Lifts the fence of an organization that no longer owns the machine — and
+   * only that: never the current owner's (ADR-062), and only when asset-service
+   * records the transfer that organization made. A fence for a transfer still
+   * committing, or one nobody recorded, is left to its own expiry. At most one
+   * fence stands on a machine. Runs under the asset's lock.
+   */
+  private async settleStaleFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    currentOwner: string,
+  ): Promise<void> {
+    const fence = await this.repository.findTransferFence(assetId);
+    if (!fence || fence.organizationId === currentOwner) return;
+    const answer = await this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId);
+    if (answer === 'RECORDED') {
+      await this.repository.deleteTransferFence(tx, assetId, fence.fenceId);
+    }
   }
 
   /**
@@ -507,7 +544,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     envelope: EventEnvelope,
     assetId: string,
     organizationId: string | undefined,
-  ): Promise<{ organizationId: string; patch: AssetRefPatch }> {
+  ): Promise<{ organizationId: string; viaTransfer: boolean; patch: AssetRefPatch }> {
     if (!organizationId) {
       throw new UnprocessableEventError(
         DLQ_REASONS.SOURCE_UNCONFIRMED,
@@ -521,11 +558,15 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         `asset-service does not confirm ${envelope.eventName} ${envelope.eventId} for the organization it names`,
       );
     }
-    const inMaintenance = MAINTENANCE_EVENTS.has(envelope.eventName)
-      ? await this.maintenanceSource.inMaintenance(snapshot.organizationId, assetId)
-      : undefined;
+    // Asked of the machine's current owner; skipped for an event whose tenant
+    // no longer owns the machine, which is good for the owner change alone.
+    const inMaintenance =
+      MAINTENANCE_EVENTS.has(envelope.eventName) && !snapshot.viaTransfer
+        ? await this.maintenanceSource.inMaintenance(snapshot.organizationId, assetId)
+        : undefined;
     return {
       organizationId: snapshot.organizationId,
+      viaTransfer: snapshot.viaTransfer,
       patch: {
         organizationId: snapshot.organizationId,
         name: snapshot.name,

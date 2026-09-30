@@ -40,8 +40,11 @@ export class MaintenanceRepository {
     return this.prisma.client;
   }
 
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.prisma.transaction(fn);
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.prisma.transaction(fn, options);
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
@@ -589,19 +592,32 @@ export class MaintenanceRepository {
   }
 
   /**
-   * Removes the fences of every organization but `ownerId` on the machine
-   * (D-039): once asset-service says another organization owns it, the
-   * transfer landed and the fence is moot — and, the transfer being recorded,
-   * fence resolution would otherwise keep it for ever.
+   * Removes one fence, in the caller's transaction and under its locks. The
+   * caller has established that asset-service records the transfer the fence
+   * was placed for (D-039).
    */
-  async dropTransferFencesNotOwnedBy(
+  async deleteTransferFence(
     tx: ExtendedPrismaClient,
     assetId: string,
-    ownerId: string,
+    fenceId: string,
   ): Promise<number> {
     return tx.$executeRaw`
-      DELETE FROM asset_transfer_fence
-      WHERE asset_id = ${assetId} AND organization_id <> ${ownerId}`;
+      DELETE FROM asset_transfer_fence WHERE asset_id = ${assetId} AND fence_id = ${fenceId}`;
+  }
+
+  /**
+   * Serializes the writers of one machine's replica row, so what a refresh
+   * reads is still the newest when it writes (D-039). Its own key: the work
+   * lock is the one a new request takes, and is always taken after this.
+   */
+  async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
+    await runUnscoped(
+      'serializes concurrent replica writers for one asset; the replica row is platform-wide',
+      async () => {
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`asset_ref:${assetId}`}, 0))`;
+        await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
+      },
+    );
   }
 
   /** Whether a repair is in progress on the machine, in the caller's organization. Scoped. */

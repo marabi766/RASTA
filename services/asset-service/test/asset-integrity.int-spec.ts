@@ -824,6 +824,76 @@ describe('asset integrity', () => {
       expect(markers[0]!.n).toBe(0);
     });
 
+    it('H3: a newer original-topic event that arrives while the owners are being asked waits, and is applied after — the retry cannot move the status back', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      // At the moment the retry reads fleet-service, the assignment is open.
+      let release!: () => void;
+      let entered!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => (entered = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const held = {
+        read: jest.fn(async () => {
+          entered();
+          await released;
+          return { activeAssignment: true, inMaintenance: false };
+        }),
+      };
+
+      const replay = asActor(manager(org.a), () =>
+        new TimelineConsumer(null, repository, assets, held).handle(
+          envelope('ASSET_ASSIGNED', assetId, org.a),
+          retry('rasta.fleet.v1'),
+        ),
+      );
+      await enteredPromise; // the retry holds the asset lock and waits on the owners
+      const newer = asActor(manager(org.a), () =>
+        // The original ASSIGNMENT_ENDED, in order, on the original topic.
+        consumer.handle(
+          envelope('ASSIGNMENT_ENDED', assetId, org.a),
+          Object.freeze({ topic: 'rasta.fleet.v1', partition: 0 }),
+        ),
+      );
+      await waitForBlocked(1); // queued behind the lock
+      release();
+      await Promise.all([replay, newer]);
+
+      // The ended assignment was applied last.
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+    });
+
+    it('M5: an asset absent from the event’s organization is SOURCE_UNCONFIRMED on a retry — no marker, nothing written — and still a skip on the original topic', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const foreign = envelope('MAINTENANCE_STARTED', assetId, org.b);
+
+      await expect(
+        asActor(manager(org.b), () =>
+          replayer({ activeAssignment: false, inMaintenance: true }).handle(
+            foreign,
+            retry('rasta.maintenance.v1'),
+          ),
+        ),
+      ).rejects.toMatchObject({ reason: 'SOURCE_UNCONFIRMED' });
+
+      const markers = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM processed_event WHERE event_id = $1`,
+        foreign.eventId,
+      );
+      expect(markers[0]!.n).toBe(0);
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      expect(await entries(assetId)).not.toContain('MAINTENANCE_STARTED');
+
+      await expect(
+        asActor(manager(org.b), () =>
+          consumer.handle(
+            envelope('MAINTENANCE_STARTED', assetId, org.b),
+            Object.freeze({ topic: 'rasta.maintenance.v1', partition: 0 }),
+          ),
+        ),
+      ).resolves.toBe('SKIPPED');
+    });
+
     it('leaves a delivery on the original topic exactly as before', async () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');

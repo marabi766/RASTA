@@ -171,8 +171,13 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
 
     {
       provide: AssetSyncConsumer,
-      inject: [ENV, LOGGER, FleetRepository],
-      useFactory: (env: FleetEnv, logger: Logger, repository: FleetRepository) =>
+      inject: [ENV, LOGGER, FleetRepository, TRANSFER_RECORD_SOURCE],
+      useFactory: (
+        env: FleetEnv,
+        logger: Logger,
+        repository: FleetRepository,
+        transferRecords: TransferRecordSource,
+      ) =>
         new AssetSyncConsumer(
           (handler) =>
             new EventConsumer(
@@ -211,6 +216,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
             timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
             tokens: internalTokens(env),
           }),
+          transferRecords,
         ),
     },
 

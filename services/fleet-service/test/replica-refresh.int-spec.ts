@@ -9,6 +9,7 @@ import type {
   AssetSnapshotSource,
   MaintenanceStateSource,
 } from '../src/consumers/replica-sources';
+import type { TransferRecordSource } from '../src/fleet/transfer-record';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
 
 /**
@@ -58,9 +59,53 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
         type: t.type,
         assetTag: t.assetTag,
         transferGeneration: t.previousOwners.length,
+        viaTransfer: organizationId !== t.owner,
       };
     },
   };
+  /**
+   * asset-service's record of transfers, as the fence check asks it: a fence is
+   * RECORDED when its organization is a previous owner of the machine.
+   */
+  const transferRecords: TransferRecordSource = {
+    async resolve(organizationId, assetId) {
+      const t = truths.get(assetId);
+      if (!t || !t.reachable) throw RastaError.upstreamUnavailable('asset-service');
+      return t.previousOwners.includes(organizationId) ? 'RECORDED' : 'NOT_RECORDED';
+    },
+  };
+
+  /** Holds the next source call in flight until released, to interleave a newer delivery. */
+  let gate: { entered: Promise<void>; release: () => void } | undefined;
+  function holdSource(): NonNullable<typeof gate> {
+    let release!: () => void;
+    let entered!: () => void;
+    gate = {
+      entered: new Promise<void>((resolve) => (entered = resolve)),
+      release: () => release(),
+    };
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const original = assetSource.snapshot.bind(assetSource);
+    assetSource.snapshot = async (organizationId, assetId) => {
+      assetSource.snapshot = original;
+      entered();
+      await released;
+      return original(organizationId, assetId);
+    };
+    return gate;
+  }
+
+  async function waitForBlocked(n: number): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+      );
+      if (rows[0]!.n >= n) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`fewer than ${n} sessions ever blocked`);
+  }
   const maintenanceSource: MaintenanceStateSource = {
     async inMaintenance(_organizationId, assetId) {
       const t = truths.get(assetId);
@@ -140,9 +185,11 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
     ).map((row) => row.organization_id);
 
   const place = (assetId: string, organizationId: string) =>
-    repository.transaction((tx) =>
-      repository.placeTransferFence(tx, assetId, organizationId, id('TRF'), 3600),
-    );
+    // As the clearance does: the per-asset lock first, then the fence.
+    repository.transaction(async (tx) => {
+      await repository.lockAssetRef(tx, assetId);
+      return repository.placeTransferFence(tx, assetId, organizationId, id('TRF'), 3600);
+    });
 
   const replica = (assetId: string) => repository.findAssetRef(assetId);
 
@@ -153,7 +200,13 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
     assignments = new AssignmentService(repository);
-    consumer = new AssetSyncConsumer(null, repository, assetSource, maintenanceSource);
+    consumer = new AssetSyncConsumer(
+      null,
+      repository,
+      assetSource,
+      maintenanceSource,
+      transferRecords,
+    );
     await cleanup(prisma, [org.a, org.b]);
   });
 
@@ -391,5 +444,128 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
 
     expect(asked).toEqual([]);
     expect((await replica(assetId))?.inspectionBlockedReason).not.toBeNull();
+  });
+
+  describe('read and write under the asset’s lock (interleavings)', () => {
+    it('H1: a newer original-topic event that arrives while the source call is in flight waits, and is applied after — never overwritten by the older snapshot', async () => {
+      const assetId = id('AST');
+      await consumer.handle(
+        event('ASSET_CREATED', org.a, { assetId, organizationId: org.a, status: 'ACTIVE' }),
+      );
+      // The source, at the moment the retry reads it, says ACTIVE.
+      truth(assetId, { owner: org.a, status: 'ACTIVE' });
+      const held = holdSource();
+
+      const retry = consumer.handle(
+        event('ASSET_ACTIVATED', org.a, { assetId, organizationId: org.a }),
+        RETRY,
+      );
+      await held.entered; // the retry holds the lock and is waiting on the source
+      const newer = consumer.handle(
+        event('ASSET_STATUS_CHANGED', org.a, {
+          assetId,
+          organizationId: org.a,
+          newStatus: 'OUT_OF_SERVICE',
+        }),
+        ORIGINAL,
+      );
+      await waitForBlocked(1); // the newer delivery is queued behind the lock
+      expect((await replica(assetId))?.status).toBe('ACTIVE');
+      held.release();
+      await Promise.all([retry, newer]);
+
+      // The newer event was applied last: the older snapshot did not overwrite it.
+      expect((await replica(assetId))?.status).toBe('OUT_OF_SERVICE');
+    });
+
+    it('H2: a fence B places while the retry reads owner A waits for the retry, and survives it', async () => {
+      const assetId = id('AST');
+      await consumer.handle(
+        event('ASSET_CREATED', org.a, { assetId, organizationId: org.a, status: 'ACTIVE' }),
+      );
+      truth(assetId, { owner: org.a, status: 'ACTIVE' });
+      const held = holdSource();
+
+      const retry = consumer.handle(
+        event('ASSET_ACTIVATED', org.a, { assetId, organizationId: org.a }),
+        RETRY,
+      );
+      await held.entered;
+      const placing = place(assetId, org.b);
+      await waitForBlocked(1);
+      held.release();
+      await Promise.all([retry, placing]);
+
+      expect(await fenceOwners(assetId)).toEqual([org.b]);
+    });
+
+    it('H2: never deletes the current owner’s fence, nor a fence whose transfer is not recorded', async () => {
+      const assetId = id('AST');
+      await consumer.handle(
+        event('ASSET_CREATED', org.a, { assetId, organizationId: org.a, status: 'ACTIVE' }),
+      );
+      // A owns the machine and holds the fence of a transfer still committing.
+      await place(assetId, org.a);
+      truth(assetId, { owner: org.a, previousOwners: [] });
+      await consumer.handle(event('ASSET_ACTIVATED', org.a, { assetId }), RETRY);
+      expect(await fenceOwners(assetId)).toEqual([org.a]);
+
+      // B's fence with A as the owner: B made no recorded transfer, so it stays.
+      const other = id('AST');
+      await consumer.handle(
+        event('ASSET_CREATED', org.a, { assetId: other, organizationId: org.a, status: 'ACTIVE' }),
+      );
+      await place(other, org.b);
+      truth(other, { owner: org.a, previousOwners: [] });
+      await consumer.handle(event('ASSET_ACTIVATED', org.a, { assetId: other }), RETRY);
+      expect(await fenceOwners(other)).toEqual([org.b]);
+    });
+  });
+
+  describe('the source is asked as the event’s tenant (H4)', () => {
+    async function blockedMachine(): Promise<string> {
+      const assetId = id('AST');
+      // B owns it, has an inspection block and a machine in the workshop.
+      await consumer.handle(
+        event('ASSET_CREATED', org.b, { assetId, organizationId: org.b, status: 'ACTIVE' }),
+      );
+      await consumer.handle(event('INSPECTION_FAILED', org.b, { assetId }));
+      return assetId;
+    }
+
+    it('a replay for a tenant that never owned the machine is SOURCE_UNCONFIRMED: no marker, B’s block untouched', async () => {
+      const assetId = await blockedMachine();
+      truth(assetId, { owner: org.b, previousOwners: [], inMaintenance: false });
+      const replay = event('MAINTENANCE_COMPLETED', org.a, { assetId }, 'maintenance-service');
+      const before = await replica(assetId);
+
+      await expect(consumer.handle(replay, MAINTENANCE_RETRY)).rejects.toMatchObject({
+        reason: 'SOURCE_UNCONFIRMED',
+      });
+
+      expect(await markers(replay.eventId)).toBe(0);
+      const after = await replica(assetId);
+      expect(after?.inspectionBlockedReason).toBe(before?.inspectionBlockedReason);
+      expect(after?.inspectionBlockedAt).toEqual(before?.inspectionBlockedAt);
+      expect(after?.inMaintenance).toBe(before?.inMaintenance);
+    });
+
+    it('a replay for a previous owner is good for the owner change only: B’s inspection block and flag are untouched', async () => {
+      const assetId = await blockedMachine();
+      truth(assetId, { owner: org.b, previousOwners: [org.a], inMaintenance: true });
+      const before = await replica(assetId);
+
+      await consumer.handle(
+        event('MAINTENANCE_COMPLETED', org.a, { assetId }, 'maintenance-service'),
+        MAINTENANCE_RETRY,
+      );
+
+      const after = await replica(assetId);
+      expect(after?.organizationId).toBe(org.b);
+      expect(after?.inspectionBlockedReason).toBe(before?.inspectionBlockedReason);
+      expect(after?.inspectionBlockedAt).toEqual(before?.inspectionBlockedAt);
+      // Not refreshed from maintenance-service either: the tenant no longer owns the machine.
+      expect(after?.inMaintenance).toBe(before?.inMaintenance);
+    });
   });
 });

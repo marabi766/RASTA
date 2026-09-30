@@ -1,6 +1,7 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
+  UnprocessableEventError,
   isRetryDelivery,
   type EventConsumer,
   type EventDelivery,
@@ -99,6 +100,13 @@ const CONSUMER_NAME = 'asset-service.timeline';
  */
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
+/**
+ * A refresh holds the asset's lock across two short exchanges with the owners
+ * of its work (each bounded by its own deadline), so its transaction is given
+ * room. Replays are rare operator actions; other deliveries for that asset wait.
+ */
+const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
+
 @Injectable()
 export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TimelineConsumer.name);
@@ -162,81 +170,95 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
     const payload = parsed.data as Record<string, unknown>;
     const assetId = payload.assetId as string;
 
+    // D-039: a delivery on `<topic>.retry` may be older than events applied
+    // since (the two are separate streams). Its status is not taken from the
+    // payload: under the asset's exclusive lock — the one every delivery takes,
+    // so no newer event can commit between the read and the write — it is
+    // derived from what fleet-service and maintenance-service say now. No
+    // answer from either throws (rolling the marker back: retry, then DLQ). An
+    // asset absent from the event's organization is a refusal, not a skip:
+    // SOURCE_UNCONFIRMED. The dossier entry is a fact and is written as usual.
+    const replayed = delivery !== undefined && isRetryDelivery(delivery);
+    const unconfirmed = () =>
+      new UnprocessableEventError(
+        DLQ_REASONS.SOURCE_UNCONFIRMED,
+        `${envelope.eventName} ${envelope.eventId} names an asset that does not belong to the organization it names`,
+      );
+
     const asset = await this.repository.findById(assetId);
     if (!asset) {
+      if (replayed) throw unconfirmed();
       // Read in the event's tenant. Nothing there means one of two things,
       // and they are not equally harmless, so they are told apart.
       await this.skipped(envelope, assetId);
       return 'SKIPPED';
     }
 
-    // D-039: a delivery on `<topic>.retry` may be older than events applied
-    // since (the two are separate streams), so its status is not taken from
-    // the payload. It is derived from what fleet-service and
-    // maintenance-service say now, read before the transaction so no
-    // connection is held across HTTP. No answer from either throws: the event
-    // is retried and then dead-lettered, and never applied from its payload.
-    // The dossier entry below is a fact and is written as usual.
-    const replayed = delivery !== undefined && isRetryDelivery(delivery);
-    let status: AssetStatus | undefined = projection.status;
-    if (projection.status && replayed) {
-      status = statusFromWorkState(await this.workState.read(asset.organizationId, assetId));
-    }
-
-    const appended = await this.repository.transaction(async (tx) => {
-      // The asset row is locked first, and the lock also checks that the asset
-      // still belongs to the organization read above. A transfer committed in
-      // between would otherwise get an entry filed under the previous owner.
-      // The lock is exclusive when a status change follows, so the change does
-      // not have to upgrade a shared lock that another consumer also holds.
-      const locked = await this.repository.lockAsset(
-        tx,
-        assetId,
-        asset.organizationId,
-        projection.status ? 'EXCLUSIVE' : 'SHARE',
-      );
-      if (!locked) {
-        await this.skipped(envelope, assetId);
-        return false;
-      }
-
-      // The idempotency ledger, the entry and the status change commit
-      // together (AGENTS.md A-09). If the marker committed alone, a crash
-      // before the status change would lose it for good: the redelivery
-      // finds the marker and skips (audit L4-03).
-      const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
-      if (!fresh) return false;
-
-      await this.assets.appendTimeline(tx, {
-        assetId,
-        organizationId: asset.organizationId,
-        eventName: envelope.eventName,
-        sourceEventId: envelope.eventId,
-        sourceService: envelope.producer,
-        category: projection.category,
-        title: projection.title,
-        description: describePayload(payload),
-        amountMinor: readAmount(payload, projection.amountField),
-        detail: payload,
-        occurredAt: new Date(envelope.occurredAt),
-      });
-
-      // The history is a record of what happened, and it survives a status
-      // change that is illegal from the asset's current state: that case is
-      // logged and ignored, not thrown. A conflict with a concurrent write
-      // does throw, so everything above rolls back and the redelivery is
-      // judged again.
-      if (status && !(replayed && status === locked.status)) {
-        await this.assets.applyEventStatusChange(
+    const appended = await this.repository.transaction(
+      async (tx) => {
+        // The asset row is locked first, and the lock also checks that the asset
+        // still belongs to the organization read above. A transfer committed in
+        // between would otherwise get an entry filed under the previous owner.
+        // The lock is exclusive when a status change follows, so the change does
+        // not have to upgrade a shared lock that another consumer also holds.
+        const locked = await this.repository.lockAsset(
           tx,
           assetId,
-          status,
-          `${envelope.eventName} از ${envelope.producer}`,
+          asset.organizationId,
+          projection.status ? 'EXCLUSIVE' : 'SHARE',
         );
-      }
+        if (!locked) {
+          if (replayed) throw unconfirmed();
+          await this.skipped(envelope, assetId);
+          return false;
+        }
 
-      return true;
-    });
+        // The idempotency ledger, the entry and the status change commit
+        // together (AGENTS.md A-09). If the marker committed alone, a crash
+        // before the status change would lose it for good: the redelivery
+        // finds the marker and skips (audit L4-03).
+        const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
+        if (!fresh) return false;
+
+        // Read under the lock just taken; the network is bounded by the client's
+        // deadline. On the original topic the payload's status stands.
+        const status: AssetStatus | undefined =
+          projection.status && replayed
+            ? statusFromWorkState(await this.workState.read(asset.organizationId, assetId))
+            : projection.status;
+
+        await this.assets.appendTimeline(tx, {
+          assetId,
+          organizationId: asset.organizationId,
+          eventName: envelope.eventName,
+          sourceEventId: envelope.eventId,
+          sourceService: envelope.producer,
+          category: projection.category,
+          title: projection.title,
+          description: describePayload(payload),
+          amountMinor: readAmount(payload, projection.amountField),
+          detail: payload,
+          occurredAt: new Date(envelope.occurredAt),
+        });
+
+        // The history is a record of what happened, and it survives a status
+        // change that is illegal from the asset's current state: that case is
+        // logged and ignored, not thrown. A conflict with a concurrent write
+        // does throw, so everything above rolls back and the redelivery is
+        // judged again.
+        if (status && !(replayed && status === locked.status)) {
+          await this.assets.applyEventStatusChange(
+            tx,
+            assetId,
+            status,
+            `${envelope.eventName} از ${envelope.producer}`,
+          );
+        }
+
+        return true;
+      },
+      replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
+    );
 
     if (!appended) return 'SKIPPED';
   }

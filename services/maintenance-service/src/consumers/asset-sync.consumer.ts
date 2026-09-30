@@ -7,7 +7,15 @@ import {
   type EventDelivery,
   type EventHandler,
 } from '@rasta/nest-common';
-import { UNCONFIGURED_ASSET_SNAPSHOT_SOURCE, type AssetSnapshotSource } from './replica-sources';
+import {
+  UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+  type TransferRecordSource,
+} from '../maintenance/transfer-record';
+import {
+  UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
+  type AssetSnapshot,
+  type AssetSnapshotSource,
+} from './replica-sources';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
 import {
   CONSUMED_EVENTS,
@@ -88,6 +96,13 @@ const PROJECTIONS: Record<ConsumedEventName, Projection | null> = {
   },
 };
 
+/**
+ * A refresh holds the asset's locks across up to three short exchanges with
+ * asset-service (each bounded by its own deadline), so its transaction is given
+ * room. Replays are rare operator actions; other deliveries for that asset wait.
+ */
+const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
+
 const CONSUMER_NAME = 'maintenance-service.asset-sync';
 
 /**
@@ -109,6 +124,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly repository: MaintenanceRepository,
     /** Read on a `.retry` delivery only; without one a replay is refused (fail closed, D-039). */
     private readonly assetSource: AssetSnapshotSource = UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
+    /** Whether a stale fence's transfer was recorded (ADR-062 § 3b); read under the lock. */
+    private readonly transferRecords: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -171,86 +188,122 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery
     // on `.retry` may be older than events applied since. It does not apply its
-    // payload: the replica is refreshed from asset-service, which owns the
-    // state. Read before the transaction so no connection is held across HTTP;
-    // no answer throws (retry, then DLQ) and the stale payload is never applied.
-    const snapshot =
-      delivery !== undefined && isRetryDelivery(delivery)
-        ? await this.assetSource.snapshot(existing?.organizationId ?? organizationId ?? '', assetId)
-        : undefined;
-    if (snapshot === null) {
-      throw new UnprocessableEventError(
-        DLQ_REASONS.SOURCE_UNCONFIRMED,
-        `asset-service does not confirm ${envelope.eventName} ${envelope.eventId} for the organization it names`,
-      );
-    }
-    // A snapshot showing another owner than the replica had is the owner change
-    // ASSET_TRANSFERRED would have made.
-    const ownerChanged =
-      snapshot !== undefined &&
-      existing !== null &&
-      existing !== undefined &&
-      existing.organizationId !== snapshot.organizationId;
+    // payload: inside the transaction, under the same per-asset lock every
+    // delivery takes, the replica is refreshed from asset-service, which owns
+    // the state, and written from that. Read and write under one lock, so no
+    // newer event can commit in between and be overwritten. The source is asked
+    // as the EVENT's tenant, never the replica's. No answer throws (rolling the
+    // marker back: retry, then DLQ) and the stale payload is never applied.
+    const replayed = delivery !== undefined && isRetryDelivery(delivery);
+    const eventTenant = envelope.tenantId ?? organizationId;
 
-    const patch: AssetRefPatch = snapshot
-      ? {
-          organizationId: snapshot.organizationId,
-          name: snapshot.name,
-          assetType: snapshot.type,
-          assetTag: snapshot.assetTag,
-          status: snapshot.status,
+    await this.repository.transaction(
+      async (tx: ExtendedPrismaClient) => {
+        const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
+        if (!fresh) {
+          this.logger.debug(`${envelope.eventName} ${envelope.eventId} already applied`);
+          return;
         }
-      : projection.patch(payload);
-    // Narrowed rather than asserted: the guard above already established that
-    // one of these is present, and spelling it out here keeps that true if the
-    // guard is ever edited.
-    const tenant = patch.organizationId ?? existing?.organizationId ?? organizationId;
-    if (!tenant) return 'SKIPPED';
 
-    await this.repository.transaction(async (tx: ExtendedPrismaClient) => {
-      const fresh = await this.repository.markEventProcessed(tx, envelope.eventId, CONSUMER_NAME);
-      if (!fresh) {
-        this.logger.debug(`${envelope.eventName} ${envelope.eventId} already applied`);
-        return;
-      }
+        // The replica row's writers, one at a time; the work lock below stays
+        // the one a new request takes. This order everywhere.
+        await this.repository.lockAssetRef(tx, assetId);
+        const current = await this.repository.findAssetRef(assetId, tx);
 
-      const transfer = snapshot
-        ? ownerChanged
-        : envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED;
-      if (transfer || snapshot) {
-        // Exclusive, against the shared lock a new request takes (ADR-062).
-        // Without it, a request could read the owner before this commits and
-        // the fence after, and pass both.
-        await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
-      }
+        let snapshot: AssetSnapshot | undefined;
+        if (replayed) {
+          // Before asking: fences are placed and released under this lock, so
+          // the fence check below reads what the snapshot was taken against.
+          await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
+          if (!eventTenant) {
+            throw new UnprocessableEventError(
+              DLQ_REASONS.SOURCE_UNCONFIRMED,
+              `${envelope.eventName} ${envelope.eventId} names no organization to ask asset-service for`,
+            );
+          }
+          const answer = await this.assetSource.snapshot(eventTenant, assetId);
+          if (!answer) {
+            throw new UnprocessableEventError(
+              DLQ_REASONS.SOURCE_UNCONFIRMED,
+              `asset-service does not confirm ${envelope.eventName} ${envelope.eventId} for the organization it names`,
+            );
+          }
+          snapshot = answer;
+        }
+        // A snapshot showing another owner than the replica had is the owner
+        // change ASSET_TRANSFERRED would have made.
+        const ownerChanged =
+          snapshot !== undefined && !!current && current.organizationId !== snapshot.organizationId;
 
-      await this.repository.upsertAssetRef(tx, {
-        // The patch first, then the resolved values — never the other way
-        // round. A patch key present but undefined (an ASSET_CREATED whose
-        // payload omits the organization, with the tenant only on the
-        // envelope) would otherwise overwrite the value resolved above with
-        // `undefined`, and the row would be written with no organization. That
-        // bug was real in fleet-service and was caught by an integration test,
-        // not a unit test.
-        ...patch,
-        id: assetId,
-        // An existing row keeps its organization unless the event explicitly
-        // moves it, which only a transfer does.
-        organizationId: tenant,
-        sourceEvent: envelope.eventName,
-      });
+        const patch: AssetRefPatch = snapshot
+          ? {
+              organizationId: snapshot.organizationId,
+              name: snapshot.name,
+              assetType: snapshot.type,
+              assetTag: snapshot.assetTag,
+              status: snapshot.status,
+            }
+          : projection.patch(payload);
+        // Narrowed rather than asserted: the guard above already established
+        // that one of these is present, and spelling it out here keeps that
+        // true if the guard is ever edited.
+        const tenant = patch.organizationId ?? current?.organizationId ?? organizationId;
+        if (!tenant) return;
 
-      const previousOwner = snapshot ? existing?.organizationId : str(payload.fromOrganizationId);
-      if (transfer && previousOwner) {
-        await this.settleTransfer(tx, assetId, previousOwner);
-      }
-      if (snapshot) {
-        // A fence held by an organization that no longer owns the machine is
-        // moot however the replica came to know (the transfer is recorded, so
-        // fence resolution would keep it for ever).
-        await this.repository.dropTransferFencesNotOwnedBy(tx, assetId, snapshot.organizationId);
-      }
-    });
+        const transfer = snapshot
+          ? ownerChanged
+          : envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED;
+        if (transfer || snapshot) {
+          // Exclusive, against the shared lock a new request takes (ADR-062).
+          // Without it, a request could read the owner before this commits and
+          // the fence after, and pass both.
+          await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
+        }
+
+        await this.repository.upsertAssetRef(tx, {
+          // The patch first, then the resolved values — never the other way
+          // round. A patch key present but undefined (an ASSET_CREATED whose
+          // payload omits the organization, with the tenant only on the
+          // envelope) would otherwise overwrite the value resolved above with
+          // `undefined`, and the row would be written with no organization.
+          // That bug was real in fleet-service and was caught by an
+          // integration test, not a unit test.
+          ...patch,
+          id: assetId,
+          // An existing row keeps its organization unless the event explicitly
+          // moves it, which only a transfer does.
+          organizationId: tenant,
+          sourceEvent: envelope.eventName,
+        });
+
+        const previousOwner = snapshot ? current?.organizationId : str(payload.fromOrganizationId);
+        if (transfer && previousOwner) {
+          await this.settleTransfer(tx, assetId, previousOwner, !snapshot);
+        }
+        if (snapshot) await this.settleStaleFence(tx, assetId, snapshot.organizationId);
+      },
+      replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
+    );
+  }
+
+  /**
+   * Lifts the fence of an organization that no longer owns the machine — and
+   * only that: never the current owner's (ADR-062), and only when asset-service
+   * records the transfer that organization made. A fence for a transfer still
+   * committing, or one nobody recorded, is left to its own expiry. At most one
+   * fence stands on a machine. Runs under the asset's locks.
+   */
+  private async settleStaleFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    currentOwner: string,
+  ): Promise<void> {
+    const fence = await this.repository.findTransferFence(assetId);
+    if (!fence || fence.organizationId === currentOwner) return;
+    const answer = await this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId);
+    if (answer === 'RECORDED') {
+      await this.repository.deleteTransferFence(tx, assetId, fence.fenceId);
+    }
   }
 
   /**
@@ -269,8 +322,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     tx: ExtendedPrismaClient,
     assetId: string,
     previousOwner: string,
+    dropFence: boolean,
   ): Promise<void> {
-    await this.repository.dropTransferFences(tx, assetId, previousOwner);
+    // A refresh drops a fence only through settleStaleFence, which checks that
+    // the transfer is recorded.
+    if (dropFence) await this.repository.dropTransferFences(tx, assetId, previousOwner);
 
     const open = await this.repository.countOpenWork(tx, assetId, previousOwner);
     if (open.openRequests > 0 || open.openRepairOrders > 0) {

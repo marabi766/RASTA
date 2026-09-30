@@ -25,6 +25,14 @@ export interface AssetSnapshot {
   readonly type: string;
   readonly assetTag: string | null;
   readonly transferGeneration: number;
+  /**
+   * The organization asked no longer owns the machine: asset-service answered
+   * it with the recorded transfer, and this is the current owner's snapshot,
+   * fetched by following that transfer. Such an event is good for the owner
+   * change only — nothing it says may take effect for a tenant that no longer
+   * owns the machine.
+   */
+  readonly viaTransfer: boolean;
 }
 
 export interface AssetSnapshotSource {
@@ -84,11 +92,12 @@ export class AssetSnapshotClient implements AssetSnapshotSource {
     // At most one hop: the previous owner is told who owns the machine now,
     // and that owner is asked. A second `transferred` is no answer.
     const first = await this.ask(organizationId, assetId);
-    if (first === null || !first.transferred) return first;
+    if (first === null) return null;
+    if (!first.transferred) return { ...first, viaTransfer: false };
     const second = await this.ask(first.organizationId, assetId);
     if (second === null) return null;
     if (second.transferred) throw RastaError.upstreamUnavailable(ASSET_SERVICE);
-    return second;
+    return { ...second, viaTransfer: true };
   }
 
   private async ask(

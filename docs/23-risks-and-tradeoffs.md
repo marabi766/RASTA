@@ -862,7 +862,10 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را
   با Topic اصلی ثبت و پروژه می‌کند. Consumerهای حالت‌ساز (Replica دارایی در fleet و maintenance، پرچم `inMaintenance`، وضعیت asset از رویدادهای fleet/maintenance) روی
   تحویل `.retry` بار را اعمال نمی‌کنند و از سرویس مالک تازه می‌شوند (خواندن داخلی احرازشده؛ در نبود پاسخ: خطا ⇐ DLQ)؛
-  `notification-service` منبع را Topic اصلی ثبت می‌کند. گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
+  `notification-service` منبع را Topic اصلی ثبت می‌کند. خواندن از مالک و نوشتن Replica زیر همان قفل هر-دارایی انجام می‌شود که تحویل‌های اصلی هم می‌گیرند (تحویل اصلیِ هم‌زمان صبر می‌کند)؛
+  مالک با Tenant خود رویداد پرسیده می‌شود (۴۰۴ ⇐ `SOURCE_UNCONFIRMED` پیش از هر اثر)؛ Fence فقط با تأیید انتقال ثبت‌شده و فقط
+  برای سازمانی که دیگر مالک نیست حذف می‌شود. باقی‌ماندهٔ پذیرفته: رویداد اصلیِ قدیمی‌تر از تصویر که هنوز در راه است بار قدیمی‌ترش را
+  پس از تازه‌سازی اعمال می‌کند و رویداد بعدیِ همان جریان آن را درست می‌کند (شرح: replay-dlq.md). گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
   `kafka-credentials.sh`، و `check:kafka-credential-scope` فقط همان را مجاز می‌داند). بخش (۲) — ابزار بازپخش — باز است
   (`feat/dlq-replay-tool`).
 - **ثبت‌شده:** 2026-09-28

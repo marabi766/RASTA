@@ -216,8 +216,13 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
 
     {
       provide: AssetSyncConsumer,
-      inject: [ENV, LOGGER, MaintenanceRepository],
-      useFactory: (env: MaintenanceEnv, logger: Logger, repository: MaintenanceRepository) =>
+      inject: [ENV, LOGGER, MaintenanceRepository, TRANSFER_RECORD_SOURCE],
+      useFactory: (
+        env: MaintenanceEnv,
+        logger: Logger,
+        repository: MaintenanceRepository,
+        transferRecords: TransferRecordSource,
+      ) =>
         new AssetSyncConsumer(
           (handler) =>
             new EventConsumer(
@@ -248,6 +253,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
               env.INTERNAL_TOKEN_TTL_SECONDS,
             ),
           }),
+          transferRecords,
         ),
     },
 
