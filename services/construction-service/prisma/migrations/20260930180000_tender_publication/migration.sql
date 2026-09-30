@@ -38,13 +38,11 @@ CREATE TABLE "tender_key" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ux_tender_invitation_org" ON "tender_invitation"("tender_id", "invited_organization_id");
+CREATE UNIQUE INDEX "ux_tender_invitation_org" ON "tender_invitation"("organization_id", "tender_id", "invited_organization_id");
 
--- CreateIndex
-CREATE INDEX "ix_tender_invitation_org_tender" ON "tender_invitation"("organization_id", "tender_id");
-
--- CreateIndex
-CREATE INDEX "ix_tender_invitation_invited" ON "tender_invitation"("invited_organization_id", "tender_id");
+-- No index on the invited organization yet: the bidder's view of the tenders it is
+-- invited to (a cross-tenant path) arrives with the bid step, with the query that
+-- justifies it. The unique index above already serves the owner's list.
 
 -- CreateIndex
 CREATE UNIQUE INDEX "tender_key_key_id_key" ON "tender_key"("key_id");

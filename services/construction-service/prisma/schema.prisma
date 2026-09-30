@@ -535,9 +535,7 @@ model TenderInvitation {
   invitedAt DateTime @map("invited_at")
   invitedBy String   @map("invited_by")
 
-  @@unique([tenderId, invitedOrganizationId], map: "ux_tender_invitation_org")
-  @@index([organizationId, tenderId], map: "ix_tender_invitation_org_tender")
-  @@index([invitedOrganizationId, tenderId], map: "ix_tender_invitation_invited")
+  @@unique([organizationId, tenderId, invitedOrganizationId], map: "ux_tender_invitation_org")
   @@map("tender_invitation")
 }
 
