@@ -1094,6 +1094,29 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
 
+      - name: Organization coverage gate
+        # organization-service carried a 70% threshold in `jest.config.js` that
+        # nothing evaluated twice over: the config's `collectCoverageFrom`
+        # resolved to `src/src/**` under `rootDir: 'src'`, so `--coverage`
+        # reported 0% over passing tests, and no job here ran jest with
+        # `--coverage` at all. Both are fixed together — a gate that measures
+        # nothing, or that nothing runs, is documentation.
+        #
+        # Both projects in one run, like every gate above: unit alone measures
+        # about 52% statements and 45% branches, because the repository, the
+        # outbox store and the controller are exercised only by the integration
+        # suites against a real PostgreSQL. A unit-only number would fail a gate
+        # that the service passes.
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/organization-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
