@@ -421,6 +421,152 @@ export function replayMessage(decision, replayId, REPLAY_HEADERS) {
   };
 }
 
+/** `producerVersion` of every replay record: the version of these rules. */
+export const REPLAY_TOOL_VERSION = '1.0.0';
+
+/**
+ * The platform's record of one executed replay: a `REPLAY_EXECUTED` on
+ * `rasta.ops.replay.v1` (contracts `ops-replay.ts`), published after the
+ * replay landed on `.retry` at `landed` (`{ partition, offset }`). Ids and
+ * positions only — never the replayed payload. Keyed by the report id, so one
+ * run's records sit on one partition, in order.
+ *
+ * The envelope and payload are checked against the contracts before anything
+ * is sent: a record audit-service would refuse is a failure here, not later.
+ */
+export function replayExecutedRecord(
+  decision,
+  { reportId, operator, landed, eventId, occurredAt },
+  contracts,
+) {
+  const { summary } = decision;
+  const tenantId = summary.tenantId ?? undefined;
+  const payload = {
+    reportId,
+    operator,
+    replayedEvent: {
+      eventId: summary.eventId,
+      eventName: summary.eventName,
+      ...(tenantId === undefined ? {} : { tenantId }),
+    },
+    dlq: { topic: summary.dlq, partition: summary.dlqPartition, offset: summary.dlqOffset },
+    target: { topic: summary.target, partition: landed.partition, offset: String(landed.offset) },
+    stale: summary.stale,
+  };
+  const envelope = {
+    eventId,
+    eventName: contracts.REPLAY_EXECUTED,
+    eventVersion: contracts.REPLAY_EXECUTED_VERSION,
+    occurredAt,
+    producer: contracts.OPS_REPLAY_PRODUCER,
+    producerVersion: REPLAY_TOOL_VERSION,
+    aggregateType: contracts.REPLAY_RUN_AGGREGATE,
+    aggregateId: reportId,
+    ...(tenantId === undefined ? {} : { tenantId }),
+    correlationId: reportId,
+    causationId: summary.eventId,
+    actor: { type: 'USER', id: operator },
+    payload,
+  };
+  const checkedPayload = contracts.replayExecutedPayloadSchemaV1.safeParse(payload);
+  const checkedEnvelope = contracts.eventEnvelopeSchema.safeParse(envelope);
+  if (!checkedPayload.success || !checkedEnvelope.success) {
+    const issues = [
+      ...(checkedPayload.success ? [] : checkedPayload.error.issues),
+      ...(checkedEnvelope.success ? [] : checkedEnvelope.error.issues),
+    ].map((issue) => `${issue.path.join('.') || '(root)'} ${issue.code}`);
+    throw new Error(`the replay record breaks its contract: ${issues.join(', ')}`);
+  }
+  const { EVENT_HEADERS } = contracts;
+  const headers = {
+    [EVENT_HEADERS.eventId]: envelope.eventId,
+    [EVENT_HEADERS.eventName]: envelope.eventName,
+    [EVENT_HEADERS.eventVersion]: String(envelope.eventVersion),
+    [EVENT_HEADERS.correlationId]: envelope.correlationId,
+    [EVENT_HEADERS.causationId]: envelope.causationId,
+    [EVENT_HEADERS.producer]: envelope.producer,
+    ...(tenantId === undefined ? {} : { [EVENT_HEADERS.tenantId]: tenantId }),
+  };
+  return { key: reportId, value: JSON.stringify(envelope), headers };
+}
+
+/**
+ * `--execute` once every check has passed: for each decision, in order, the
+ * replay to its `.retry` and then its record on `rasta.ops.replay.v1` — both
+ * through `send(topic, message)`, which resolves `{ partition, offset }` once
+ * the broker has it (acks=-1) and rejects otherwise.
+ *
+ * Stops at the first failure of either. A replay that failed wrote nothing, and
+ * no record is sent for it. A record that failed after its replay landed is the
+ * one outcome that leaves the platform unaware of a replay that happened: the
+ * replay is not undone (it cannot be), the report line says so in `auditError`,
+ * `stderr` says so in capitals, and the run exits non-zero.
+ */
+export async function executeReplays(
+  decisions,
+  { reportId, operator, send, newEventId, now, report, warn, contracts },
+) {
+  const replayId = `${reportId}/${operator}`;
+  let written = 0;
+  let recorded = 0;
+  for (const decision of decisions) {
+    let landed;
+    try {
+      landed = await send(
+        decision.summary.target,
+        replayMessage(decision, replayId, contracts.REPLAY_HEADERS),
+      );
+    } catch (error) {
+      report(reportLine(reportId, 'execute', decision, { replayId, error: error.message }));
+      return { written, recorded, failed: true };
+    }
+    written += 1;
+    const replayedAt = now();
+    const line = {
+      replayId,
+      replayPartition: landed.partition,
+      replayOffset: String(landed.offset),
+      replayedAt,
+    };
+    let auditEventId;
+    try {
+      auditEventId = newEventId();
+      const record = replayExecutedRecord(
+        decision,
+        { reportId, operator, landed, eventId: auditEventId, occurredAt: replayedAt },
+        contracts,
+      );
+      const audited = await send(contracts.OPS_REPLAY_TOPIC, record);
+      recorded += 1;
+      report(
+        reportLine(reportId, 'execute', decision, {
+          ...line,
+          auditEventId,
+          auditPartition: audited.partition,
+          auditOffset: String(audited.offset),
+        }),
+      );
+    } catch (error) {
+      report(
+        reportLine(reportId, 'execute', decision, {
+          ...line,
+          auditEventId: auditEventId ?? null,
+          auditError: error.message,
+        }),
+      );
+      warn(
+        `REPLAYED BUT NOT RECORDED: ${decision.summary.eventId} landed on ` +
+          `${decision.summary.target}/${landed.partition}@${landed.offset}, and its ` +
+          `${contracts.REPLAY_EXECUTED} record was not written to ${contracts.OPS_REPLAY_TOPIC} ` +
+          `(${error.message}). The replay stands; the platform audit does not know of it. ` +
+          `Record it before anything else (runbook: docs/runbooks/replay-dlq.md, step 3). Stopped here.`,
+      );
+      return { written, recorded, failed: true };
+    }
+  }
+  return { written, recorded, failed: false };
+}
+
 /** One report line: ids, names, reasons and offsets — never a payload. */
 export function reportLine(reportId, mode, decision, extra = {}) {
   return {

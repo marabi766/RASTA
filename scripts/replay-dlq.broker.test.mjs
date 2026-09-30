@@ -50,6 +50,8 @@ const { EventConsumer, UnprocessableEventError, kafkaConnectionFor } = nestCommo
 
 const ORIGINAL = 'rasta.fleet.v1';
 const RETRY = 'rasta.fleet.v1.retry';
+/** The replay record: one REPLAY_EXECUTED per executed replay, written by the tool. */
+const OPS_REPLAY = 'rasta.ops.replay.v1';
 const DLQ = 'rasta.maintenance.v1.dlq';
 const OPERATOR = 'replay-itest';
 /** Records may be deleted only on a broker declared throwaway (CI's fresh one). */
@@ -263,9 +265,22 @@ async function deadLetters(since) {
     .filter((d) => Object.values(ids).includes(d.eventId));
 }
 let dlqStart;
+let opsReplayStart;
+
+/** This run's replay records, by report id. */
+async function replayRecords(reportId) {
+  return (await readSince('itest-observer', OPS_REPLAY, opsReplayStart))
+    .filter((m) => m.key?.toString() === reportId)
+    .map((m) => ({
+      key: m.key.toString(),
+      headers: m.headers,
+      body: JSON.parse(m.value.toString()),
+    }));
+}
 
 before(async () => {
   dlqStart = await endOffsets(DLQ);
+  opsReplayStart = await endOffsets(OPS_REPLAY);
 
   consumer = new EventConsumer(
     {
@@ -504,6 +519,30 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     }
     // The publisher, as the relay set it — not the consumer that dead-lettered it.
     assert.equal(message.headers[EVENT_HEADERS.producer].toString(), 'fleet-service');
+
+    // And, after it landed, its one record on rasta.ops.replay.v1 — keyed by
+    // the run, stating where it moved and under what verdict, no payload.
+    assert.equal(result.summary.recorded, 1);
+    const [line] = result.records;
+    const records = await replayRecords(result.summary.reportId);
+    assert.equal(records.length, 1);
+    const [{ body, headers }] = records;
+    assert.equal(body.eventName, 'REPLAY_EXECUTED');
+    assert.equal(body.producer, 'ops-replay');
+    assert.equal(body.eventId, line.auditEventId);
+    assert.equal(body.tenantId, TENANT);
+    assert.equal(body.correlationId, result.summary.reportId);
+    assert.deepEqual(body.actor, { type: 'USER', id: OPERATOR });
+    assert.deepEqual(body.payload, {
+      reportId: result.summary.reportId,
+      operator: OPERATOR,
+      replayedEvent: { eventId: ids.replayable, eventName: 'USAGE_RECORDED', tenantId: TENANT },
+      dlq: { topic: DLQ, partition: line.dlqPartition, offset: line.dlqOffset },
+      target: { topic: RETRY, partition: line.replayPartition, offset: line.replayOffset },
+      stale: false,
+    });
+    assert.ok(!JSON.stringify(body).includes(`replay-itest-${run}`), 'no replayed payload');
+    assert.equal(headers[EVENT_HEADERS.producer].toString(), 'ops-replay');
   });
 
   test('an unsequenced event replays under the key its dead letter kept', async () => {
@@ -588,6 +627,16 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
         deliveries.filter((d) => d.eventId === ids.again && d.topic === RETRY).length >
         deliveredBefore,
     );
+  });
+
+  test('a refused or dry-run selection records nothing on rasta.ops.replay.v1', async () => {
+    const dry = replay(['--event-id', ids.replayable]);
+    const refused = replay(['--event-id', ids.financial, '--execute', '--expect-count', '1']);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.equal(refused.status, 1);
+    for (const result of [dry, refused]) {
+      assert.deepEqual(await replayRecords(result.summary.reportId), []);
+    }
   });
 
   test('nothing the tool wrote reached the original topic', async () => {

@@ -15,6 +15,7 @@ import {
 import { TOPIC_PRODUCERS } from './topic-producers';
 import { TOPIC_CONSUMERS } from './topic-consumers';
 import { NEVER_AUTO_REPLAY_TOPICS } from './envelope';
+import { OPS_REPLAY_TOPIC } from './ops-replay';
 
 /**
  * RUN-006: the broker's ACLs, derived from the topology contracts. Each test
@@ -102,7 +103,7 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
     );
   });
 
-  it('lets ops-replay read every replayable subscribed topic — for the staleness check — and write none', () => {
+  it('lets ops-replay read every replayable subscribed topic — for the staleness check — and write none of them', () => {
     const subscribed = new Set(Object.values(TOPIC_CONSUMERS).flatMap((c) => [...c.subscribes]));
     const reads = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'READ' })
       .filter((acl) => acl.resourceType === 'TOPIC' && !DEAD_LETTERS.includes(acl.resourceName))
@@ -116,10 +117,17 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
     // A never-replayed topic the contracts do not declare would exclude nothing.
     for (const name of NEVER_AUTO_REPLAY_TOPICS)
       expect(Object.keys(TOPIC_PRODUCERS)).toContain(name);
-    // Its WRITE is the .retry twins alone: never an original, never a dead letter.
-    for (const acl of where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' })) {
-      expect(acl.resourceName.endsWith('.retry')).toBe(true);
-    }
+    // Its WRITE is the .retry twins and its own replay record alone: never
+    // another original, never a dead letter.
+    const writes = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' })
+      .map((acl) => acl.resourceName)
+      .sort();
+    expect(writes).toEqual(
+      [
+        OPS_REPLAY_TOPIC,
+        ...DECLARED_TOPICS.filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t)).map((t) => `${t}.retry`),
+      ].sort(),
+    );
     // And its groups stay in its own namespace.
     expect(
       where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceType: 'GROUP' }).map((acl) => [
@@ -128,6 +136,23 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
         acl.operation,
       ]),
     ).toEqual([[`${OPS_REPLAY_PRINCIPAL}.`, 'PREFIXED', 'READ']]);
+  });
+
+  it('lets ops-replay alone write its replay record, rasta.ops.replay.v1, which audit-service reads', () => {
+    expect(
+      principalsOf(where(acls, { resourceName: OPS_REPLAY_TOPIC, operation: 'WRITE' })),
+    ).toEqual([OPS_REPLAY_PRINCIPAL]);
+    expect(
+      principalsOf(where(acls, { resourceName: OPS_REPLAY_TOPIC, operation: 'READ' })).filter(
+        (p) => p !== DEVELOPMENT_PRINCIPALS.observer && p !== OPS_REPLAY_PRINCIPAL,
+      ),
+    ).toEqual(['audit-service']);
+    // And it still writes no original but that one, and not the economic stream's .retry.
+    const writes = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' }).map(
+      (acl) => acl.resourceName,
+    );
+    expect(writes.filter((t) => !t.endsWith('.retry'))).toEqual([OPS_REPLAY_TOPIC]);
+    expect(writes).not.toContain('rasta.economic.v1.retry');
   });
 
   it('grants groups only by prefix, and only within the principal’s own namespace (tools only describe)', () => {
@@ -154,10 +179,12 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
   });
 
   it('never lets a service write a topic it does not own, or read one it does not subscribe to', () => {
-    const services = new Set([
-      ...Object.values(TOPIC_PRODUCERS).flat(),
-      ...Object.keys(TOPIC_CONSUMERS),
-    ]);
+    // ops-replay's .retry writes are its own rule, stated above.
+    const services = new Set(
+      [...Object.values(TOPIC_PRODUCERS).flat(), ...Object.keys(TOPIC_CONSUMERS)].filter(
+        (name) => name !== OPS_REPLAY_PRINCIPAL,
+      ),
+    );
     for (const acl of acls.filter((a) => services.has(a.principal) && a.resourceType === 'TOPIC')) {
       if (acl.operation === 'WRITE') {
         const owned = Object.entries(TOPIC_PRODUCERS)

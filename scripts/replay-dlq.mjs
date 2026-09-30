@@ -11,7 +11,11 @@
  * A dry-run by default: it reads, decides and reports, and writes nothing.
  * `--execute` writes only when the selection is exactly what `--expect-count`
  * says and every record in it is replayable; then one at a time (acks=-1,
- * idempotent), in dead-letter order, stopping at the first failure.
+ * idempotent), in dead-letter order, stopping at the first failure — each
+ * replay, once it has landed on `.retry`, followed by its `REPLAY_EXECUTED`
+ * record on `rasta.ops.replay.v1`, which audit-service keeps. A record that
+ * cannot be written after its replay landed is reported loudly and the run
+ * exits non-zero; the replay itself stands.
  *
  * Environment: KAFKA_BROKERS, KAFKA_SASL_PASSWORD_OPS_REPLAY (development:
  * infrastructure/docker/kafka/bootstrap.env; a deployment: its secret store),
@@ -31,12 +35,12 @@ import {
   SCAN_LIMIT,
   UsageError,
   assess,
+  executeReplays,
   executionProblems,
   headerStrings,
   operatorFrom,
   parseArgs,
   parseTopics,
-  replayMessage,
   reportLine,
   staleFrom,
   stalenessProbe,
@@ -292,41 +296,41 @@ try {
       report({ reportId, mode, summary: true, written: 0, refused: problems });
       exitCode = 1;
     } else {
-      const replayId = `${reportId}/${operator}`;
       const producer = kafka.producer({
         idempotent: true,
         maxInFlightRequests: 1,
         allowAutoTopicCreation: false,
       });
       await producer.connect();
-      let written = 0;
+      let outcome;
       try {
-        for (const decision of decisions) {
-          try {
-            const [result] = await producer.send({
-              topic: decision.summary.target,
-              acks: -1,
-              messages: [replayMessage(decision, replayId, contracts.REPLAY_HEADERS)],
-            });
-            written += 1;
-            report(
-              reportLine(reportId, mode, decision, {
-                replayId,
-                replayPartition: result?.partition ?? null,
-                replayOffset: result?.baseOffset ?? null,
-                replayedAt: new Date().toISOString(),
-              }),
-            );
-          } catch (error) {
-            report(reportLine(reportId, mode, decision, { replayId, error: error.message }));
-            exitCode = 1;
-            break;
-          }
-        }
+        outcome = await executeReplays(decisions, {
+          reportId,
+          operator,
+          contracts,
+          report,
+          send: async (topic, message) => {
+            const [result] = await producer.send({ topic, acks: -1, messages: [message] });
+            if (!result) throw new Error(`${topic}: the broker returned no position`);
+            return { partition: result.partition, offset: result.baseOffset };
+          },
+          newEventId: () => randomUUID(),
+          now: () => new Date().toISOString(),
+          warn: (text) => process.stderr.write(`replay-dlq: ${text}\n`),
+        });
       } finally {
         await producer.disconnect().catch(() => undefined);
       }
-      report({ reportId, mode, summary: true, replayId, written, expected: options.expectCount });
+      if (outcome.failed) exitCode = 1;
+      report({
+        reportId,
+        mode,
+        summary: true,
+        replayId: `${reportId}/${operator}`,
+        written: outcome.written,
+        recorded: outcome.recorded,
+        expected: options.expectCount,
+      });
     }
   }
 } catch (error) {

@@ -871,8 +871,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   در بازتاب Keycloak ساختن دوبارهٔ وضعیت فعلی). **دور ۲:** آزمون Retention رکورد پاک می‌کند، پس فقط روی Broker دورانداختنی
   (`REPLAY_TEST_DISPOSABLE_BROKER=1`) و فقط وقتی هر رکورد بازه مال همان اجرا باشد اجرا می‌شود؛ در CI Job جدای «Broker
   authorisation» با Broker تازه (آزمون بازپخش اول، سپس ACL). حضور Header با بدنهٔ خام پیش از پیش‌فرض‌های Schema سنجیده می‌شود.
-  **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر
-  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است — و تشخیص «قبلاً بازپخش شده» همان‌جا.
+  **به‌روز 2026-09-30 — رکورد ممیزی پلتفرم ساخته شد (`feat/ops-replay-audit`):** Topic `rasta.ops.replay.v1` (+ `.retry`)،
+  ناشر فقط `ops-replay` (WRITE تازه فقط همان‌جا)، مصرف‌کننده audit-service با گروه `audit-service.ops-replay`؛ یک
+  `REPLAY_EXECUTED` برای هر رویداد **پس از** نشستن روی `.retry` (شناسهٔ گزارش، اپراتور، DLQ/Partition/Offset، `.retry`/
+  Partition/Offset، شناسه و نام رویداد، حکم کهنگی — هرگز Payload)، فقط‌الحاقی در `audit_event` زیر مستأجرِ رویداد یا پلتفرمی.
+  شکست نوشتن رکورد پس از نشستن بازپخش: گزارش و `stderr` بلند، توقف و کد خروج ۱؛ بازپخش پس گرفته نمی‌شود.
+  **آنچه باز می‌ماند:** تشخیص «قبلاً بازپخش شده» پیش از ارسال (پایه‌اش همین رکوردها).
 - **اولویت:** متوسط
 - **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را

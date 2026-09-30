@@ -1,6 +1,7 @@
 import { TOPIC_PRODUCERS, RETRY_TOPIC_SUFFIX } from './topic-producers';
 import { CONSUMER_GROUP_SEPARATOR, TOPIC_CONSUMERS } from './topic-consumers';
 import { AUDIT_TRAIL_TOPIC, NEVER_AUTO_REPLAY_TOPICS } from './envelope';
+import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
 
 /**
  * The broker's principals and ACLs, derived from the topology contracts
@@ -64,9 +65,11 @@ export const BROKER_ADMIN_PRINCIPAL = 'admin';
 /**
  * The operator's replay tool: the only writer of `.retry`, the only reader of
  * `.dlq`, and a reader (never a writer) of every subscribed topic, for the
- * staleness check (docs/runbooks/replay-dlq.md).
+ * staleness check (docs/runbooks/replay-dlq.md). Its one original topic is its
+ * own record of what it replayed, `rasta.ops.replay.v1`, declared in
+ * `TOPIC_PRODUCERS` like any producer's.
  */
-export const OPS_REPLAY_PRINCIPAL = 'ops-replay';
+export const OPS_REPLAY_PRINCIPAL = OPS_REPLAY_PRODUCER;
 
 /** Principals that exist only where no real data does: compose and CI. */
 export const DEVELOPMENT_PRINCIPALS = Object.freeze({
@@ -231,7 +234,8 @@ export function brokerTopics(): BrokerTopic[] {
     out.set(name, { name, kind });
   };
   for (const name of declaredTopics()) {
-    add(name, name === AUDIT_TRAIL_TOPIC ? 'audit-trail' : 'stream');
+    // Evidence, retained as such: the explicit audit trail and the replay record.
+    add(name, name === AUDIT_TRAIL_TOPIC || name === OPS_REPLAY_TOPIC ? 'audit-trail' : 'stream');
     add(`${name}${RETRY_TOPIC_SUFFIX}`, 'retry');
   }
   for (const [, { deadLetterTopic }] of consumers()) add(deadLetterTopic, 'dead-letter');

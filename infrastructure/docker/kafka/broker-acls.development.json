@@ -275,6 +275,20 @@
     {
       "principal": "audit-service",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.organization.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -710,6 +724,20 @@
       "principal": "itest-observer",
       "resourceType": "TOPIC",
       "resourceName": "rasta.notification.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -1244,6 +1272,27 @@
       "resourceName": "rasta.notification.v1",
       "patternType": "LITERAL",
       "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.ops.replay.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
     },
     {
       "principal": "ops-replay",

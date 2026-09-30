@@ -1,4 +1,9 @@
-import { AUDIT_TRAIL_TOPIC, TOPIC_PRODUCERS, type DeclaredTopic } from '@rasta/contracts';
+import {
+  AUDIT_TRAIL_TOPIC,
+  OPS_REPLAY_TOPIC,
+  TOPIC_PRODUCERS,
+  type DeclaredTopic,
+} from '@rasta/contracts';
 
 /**
  * Who produces what this service records — read from the platform's one
@@ -26,8 +31,15 @@ import { AUDIT_TRAIL_TOPIC, TOPIC_PRODUCERS, type DeclaredTopic } from '@rasta/c
 
 type TopicProducerMap = typeof TOPIC_PRODUCERS;
 
-/** A domain topic: every declared topic except the explicit audit trail. */
-export type AuditDomainTopic = Exclude<DeclaredTopic, typeof AUDIT_TRAIL_TOPIC>;
+/**
+ * A domain topic: every declared topic except the two read by a validating
+ * consumer of their own — the explicit audit trail (path B) and the replay
+ * record (`OpsReplayConsumer`).
+ */
+export type AuditDomainTopic = Exclude<
+  DeclaredTopic,
+  typeof AUDIT_TRAIL_TOPIC | typeof OPS_REPLAY_TOPIC
+>;
 
 type DomainTopicOwner = TopicProducerMap[AuditDomainTopic][number];
 
@@ -53,7 +65,10 @@ export const AUDIT_DOMAIN_TOPIC_OWNERS: readonly Readonly<{
   owner: DomainTopicOwner;
 }>[] = Object.freeze(
   (Object.keys(TOPIC_PRODUCERS) as DeclaredTopic[])
-    .filter((topic): topic is AuditDomainTopic => topic !== AUDIT_TRAIL_TOPIC)
+    .filter(
+      (topic): topic is AuditDomainTopic =>
+        topic !== AUDIT_TRAIL_TOPIC && topic !== OPS_REPLAY_TOPIC,
+    )
     .map((topic) => {
       const producers: readonly DomainTopicOwner[] = TOPIC_PRODUCERS[topic];
       const [owner] = producers;
@@ -76,7 +91,14 @@ export const AUDIT_DOMAIN_TOPIC_OWNERS: readonly Readonly<{
  */
 export const AUDIT_TRAIL_PRODUCERS = TOPIC_PRODUCERS[AUDIT_TRAIL_TOPIC];
 
-export type AuditSourceService = DomainTopicOwner | (typeof AUDIT_TRAIL_PRODUCERS)[number];
+/**
+ * The replay record: `ops-replay`, the operator's replay tool, alone
+ * (`TOPIC_PRODUCERS`' declaration for `rasta.ops.replay.v1`).
+ */
+export const OPS_REPLAY_PRODUCERS = TOPIC_PRODUCERS[OPS_REPLAY_TOPIC];
+
+export type AuditSourceService =
+  DomainTopicOwner | (typeof AUDIT_TRAIL_PRODUCERS)[number] | (typeof OPS_REPLAY_PRODUCERS)[number];
 
 /**
  * The `source_service` label for a row whose producer claim does not match
@@ -87,11 +109,12 @@ export const AUDIT_UNKNOWN_SOURCE_SERVICE = 'unknown';
 
 export type AuditSourceServiceLabel = AuditSourceService | typeof AUDIT_UNKNOWN_SOURCE_SERVICE;
 
-/** Every known producer, deduplicated, in topology order. Eleven today. */
+/** Every known producer, deduplicated, in topology order. */
 export const AUDIT_SOURCE_SERVICES: readonly AuditSourceService[] = Object.freeze([
   ...new Set<AuditSourceService>([
     ...AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.owner),
     ...AUDIT_TRAIL_PRODUCERS,
+    ...OPS_REPLAY_PRODUCERS,
   ]),
 ]);
 
@@ -106,6 +129,8 @@ const OWNER_BY_TOPIC: ReadonlyMap<string, AuditSourceService> = new Map(
 );
 
 const TRAIL_PRODUCERS: ReadonlySet<string> = new Set(AUDIT_TRAIL_PRODUCERS);
+
+const REPLAY_PRODUCERS: ReadonlySet<string> = new Set(OPS_REPLAY_PRODUCERS);
 
 const KNOWN_SOURCE_SERVICES: ReadonlySet<string> = new Set(AUDIT_SOURCE_SERVICES);
 
@@ -137,12 +162,21 @@ export function trailSourceServiceLabel(producer: string): AuditSourceServiceLab
 
 /**
  * The topics a known producer contributes rows from: the domain topics it owns,
- * and the trail topic if it is a trail producer. What zero-seeding reads.
+ * the trail topic if it is a trail producer, and the replay record if it is the
+ * replay tool. What zero-seeding reads.
  */
 export function sourceTopicsOf(service: AuditSourceService): readonly string[] {
   const topics: string[] = AUDIT_DOMAIN_TOPIC_OWNERS.filter((entry) => entry.owner === service).map(
     (entry) => entry.topic,
   );
   if (TRAIL_PRODUCERS.has(service)) topics.push(AUDIT_TRAIL_TOPIC);
+  if (REPLAY_PRODUCERS.has(service)) topics.push(OPS_REPLAY_TOPIC);
   return Object.freeze(topics);
+}
+
+/** Replay-record label: the replay tool's name, otherwise `unknown`. */
+export function replaySourceServiceLabel(producer: string): AuditSourceServiceLabel {
+  return REPLAY_PRODUCERS.has(producer)
+    ? (producer as AuditSourceService)
+    : AUDIT_UNKNOWN_SOURCE_SERVICE;
 }

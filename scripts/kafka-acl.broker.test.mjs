@@ -355,6 +355,25 @@ describe('5. dead-letter and retry topics', () => {
     );
   });
 
+  test('ops-replay alone writes its replay record, rasta.ops.replay.v1, and still no original of anyone else', async () => {
+    assert.equal(await refusal(() => produce('ops-replay', 'rasta.ops.replay.v1')), 'ALLOWED');
+    // Not the services — the audit-service that reads it least of all.
+    for (const principal of ['audit-service', 'fleet-service', 'identity-service']) {
+      assert.equal(
+        await refusal(() => produce(principal, 'rasta.ops.replay.v1')),
+        'TOPIC_AUTHORIZATION_FAILED',
+        principal,
+      );
+    }
+    for (const topic of ['rasta.fleet.v1', 'rasta.audit.trail.v1', 'rasta.economic.v1.retry']) {
+      assert.equal(
+        await refusal(() => produce('ops-replay', topic)),
+        'TOPIC_AUTHORIZATION_FAILED',
+        topic,
+      );
+    }
+  });
+
   test('ops-replay may neither read the economic stream nor write its .retry — it never replays it', async () => {
     assert.equal(
       await consume('ops-replay', `ops-replay.acl-economic-${run}`, 'rasta.economic.v1'),

@@ -7,11 +7,14 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_CEILING,
   UsageError,
+  OPERATOR_PATTERN,
   assess,
+  executeReplays,
   executionProblems,
   operatorFrom,
   parseArgs,
   parseTopics,
+  replayExecutedRecord,
   replayMessage,
   reportLine,
   staleFrom,
@@ -440,5 +443,163 @@ test('a report line carries ids, names, reasons and offsets — never the payloa
       stale: false,
       dlqOffset: '12',
     },
+  );
+});
+
+// ------------------------------------------------------------------ the replay record
+
+const REPORT = 'rpl-0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b';
+const replayable = (body = envelope()) =>
+  withStaleness(assess(deadLetter(body), context), false, []);
+
+test('the operator rule is the contract’s', () => {
+  assert.equal(OPERATOR_PATTERN.source, contracts.REPLAY_OPERATOR_PATTERN.source);
+});
+
+test('a replay record states the run, the operator, the event, both positions and the verdict — no payload', () => {
+  const record = replayExecutedRecord(
+    replayable(),
+    {
+      reportId: REPORT,
+      operator: 'ops.alice',
+      landed: { partition: 1, offset: '40' },
+      eventId: 'EVT_RECORD_1',
+      occurredAt: '2026-09-30T08:00:00.000Z',
+    },
+    contracts,
+  );
+  assert.equal(record.key, REPORT);
+  const body = JSON.parse(record.value);
+  assert.equal(contracts.eventEnvelopeSchema.safeParse(body).success, true);
+  assert.equal(contracts.replayExecutedPayloadSchemaV1.safeParse(body.payload).success, true);
+  assert.deepEqual(
+    {
+      eventName: body.eventName,
+      producer: body.producer,
+      tenantId: body.tenantId,
+      correlationId: body.correlationId,
+      causationId: body.causationId,
+      actor: body.actor,
+    },
+    {
+      eventName: 'REPLAY_EXECUTED',
+      producer: 'ops-replay',
+      tenantId: 'ORG_1',
+      correlationId: REPORT,
+      causationId: 'EVT_1',
+      actor: { type: 'USER', id: 'ops.alice' },
+    },
+  );
+  assert.deepEqual(body.payload, {
+    reportId: REPORT,
+    operator: 'ops.alice',
+    replayedEvent: { eventId: 'EVT_1', eventName: 'USAGE_RECORDED', tenantId: 'ORG_1' },
+    dlq: { topic: DLQ, partition: 0, offset: '12' },
+    target: { topic: 'rasta.fleet.v1.retry', partition: 1, offset: '40' },
+    stale: false,
+  });
+  assert.ok(!record.value.includes('the tool never reads'), 'no payload of the replayed event');
+  assert.equal(record.headers[contracts.EVENT_HEADERS.tenantId], 'ORG_1');
+  assert.equal(record.headers[contracts.EVENT_HEADERS.producer], 'ops-replay');
+});
+
+test('the record of an event with no tenant has none either: a platform record', () => {
+  const record = replayExecutedRecord(
+    replayable(envelope({ tenantId: undefined })),
+    {
+      reportId: REPORT,
+      operator: 'ops.alice',
+      landed: { partition: 0, offset: '1' },
+      eventId: 'EVT_RECORD_2',
+      occurredAt: '2026-09-30T08:00:00.000Z',
+    },
+    contracts,
+  );
+  const body = JSON.parse(record.value);
+  assert.equal(body.tenantId, undefined);
+  assert.equal(body.payload.replayedEvent.tenantId, undefined);
+  assert.equal(record.headers[contracts.EVENT_HEADERS.tenantId], undefined);
+});
+
+/** A broker stand-in: records every send, and fails the ones `fails` names. */
+function fakeBroker(fails = () => false) {
+  const sent = [];
+  const offsets = new Map();
+  const send = async (topic, message) => {
+    if (fails(topic, sent)) throw new Error(`${topic} refused (injected)`);
+    const offset = offsets.get(topic) ?? 0;
+    offsets.set(topic, offset + 1);
+    sent.push({ topic, message });
+    return { partition: 0, offset: String(offset) };
+  };
+  return { sent, send };
+}
+
+function run(decisions, broker) {
+  const lines = [];
+  const warnings = [];
+  let ids = 0;
+  return executeReplays(decisions, {
+    reportId: REPORT,
+    operator: 'ops.alice',
+    contracts,
+    send: broker.send,
+    newEventId: () => `EVT_RECORD_${(ids += 1)}`,
+    now: () => '2026-09-30T08:00:00.000Z',
+    report: (line) => lines.push(line),
+    warn: (text) => warnings.push(text),
+  }).then((outcome) => ({ outcome, lines, warnings }));
+}
+
+const two = () => [replayable(), replayable(envelope({ eventId: 'EVT_2', streamKey: 'AST_2' }))];
+
+test('each replay is recorded after it lands on .retry, one record per event, never before', async () => {
+  const broker = fakeBroker();
+  const { outcome, lines, warnings } = await run(two(), broker);
+  assert.deepEqual(outcome, { written: 2, recorded: 2, failed: false });
+  assert.deepEqual(
+    broker.sent.map((s) => s.topic),
+    ['rasta.fleet.v1.retry', 'rasta.ops.replay.v1', 'rasta.fleet.v1.retry', 'rasta.ops.replay.v1'],
+  );
+  const records = broker.sent
+    .filter((s) => s.topic === 'rasta.ops.replay.v1')
+    .map((s) => JSON.parse(s.message.value).payload.replayedEvent.eventId);
+  assert.deepEqual(records, ['EVT_1', 'EVT_2']);
+  assert.deepEqual(
+    lines.map((l) => [l.eventId, l.replayOffset, l.auditEventId, l.auditOffset]),
+    [
+      ['EVT_1', '0', 'EVT_RECORD_1', '0'],
+      ['EVT_2', '1', 'EVT_RECORD_2', '1'],
+    ],
+  );
+  assert.deepEqual(warnings, []);
+});
+
+test('a replay that fails writes no record, and stops the run', async () => {
+  const broker = fakeBroker((topic) => topic === 'rasta.fleet.v1.retry');
+  const { outcome, lines } = await run(two(), broker);
+  assert.deepEqual(outcome, { written: 0, recorded: 0, failed: true });
+  assert.deepEqual(broker.sent, []);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0].error, /refused \(injected\)/);
+});
+
+test('a record that fails after its replay landed is said loudly, stops the run, and fails it', async () => {
+  const broker = fakeBroker((topic) => topic === 'rasta.ops.replay.v1');
+  const { outcome, lines, warnings } = await run(two(), broker);
+  // The first replay landed and stays landed; the second is never attempted.
+  assert.deepEqual(outcome, { written: 1, recorded: 0, failed: true });
+  assert.deepEqual(
+    broker.sent.map((s) => s.topic),
+    ['rasta.fleet.v1.retry'],
+  );
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].eventId, 'EVT_1');
+  assert.equal(lines[0].replayOffset, '0');
+  assert.match(lines[0].auditError, /rasta\.ops\.replay\.v1 refused/);
+  assert.equal(warnings.length, 1);
+  assert.match(
+    warnings[0],
+    /^REPLAYED BUT NOT RECORDED: EVT_1 landed on rasta\.fleet\.v1\.retry\/0@0/,
   );
 });
