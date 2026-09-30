@@ -417,6 +417,13 @@ Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v
 `POST/GET /v1/tenders/{id}/invitations` (فقط `RESTRICTED`؛ خود کارفرما دعوت نمی‌شود). دروازهٔ موافقت `tender.publication` (بسته در نبود سیاست، Q-84)
 گام ۱۱ است.
 
+**CON-002 PR 5 (وضعیت پیمانکار).** مدل خواندنی از رویدادهای supplier-service روی `rasta.supplier.v1` (گروه
+`construction-service.supplier-standing`): `SUPPLIER_QUALIFIED` فقط وقتی `CONTRACTING` در `qualifiedFor` باشد،
+`SUPPLIER_SUSPENDED`/`SUPPLIER_REINSTATED` به‌ازای شناسهٔ دورهٔ تعلیق. هر نوشتن جابه‌جاپذیر و تکرارپذیر است (بیشینهٔ زمان تأیید؛
+پر شدن هر نیمهٔ دوره حداکثر یک بار)، پس ترتیب و بازپخش پاسخ را عوض نمی‌کند. سازمانِ ناشناخته **واجد شرایط نیست** (بستهٔ
+شکست‌پذیر)؛ محتوای نامعتبر یا شناسهٔ دوره‌ای از سازمان دیگر به صف مرده می‌رود. وابستگی COM-005 فقط
+`SUPPLIER_QUALIFIED`/`SUSPENDED` است (تصمیم ۳). مصرف‌کننده: گام ۶ (پیشنهاد).
+
 **هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد، ارزیابی و انتخاب — CON-002؛ قرارداد — CON-003؛
 تحلیل ناوگان؛ هیچ Consumer رویدادی.
 

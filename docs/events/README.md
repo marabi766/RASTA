@@ -489,6 +489,11 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > همین سرویس می‌مانند و مصرف‌کننده از API (با مجوز خودش) می‌خواندشان (بازبینی Codex روی #119، یافتهٔ ۴). `PROJECT_CREATED`
 > به‌جای `location` فقط `hasArea` دارد. `estimate` با نام `estimatedCostMinor` (رشتهٔ ریالی، یا `null`) می‌آید.
 > تحویل مرتب میان Replicaهای Relay تضمین **نمی‌شود** (D-027، ADR-051 B4).
+>
+> **مصرف (CON-002 PR 5).** `construction-service` از `rasta.supplier.v1` فقط `SUPPLIER_QUALIFIED` (وقتی `qualifiedFor`
+> شامل `CONTRACTING` باشد)، `SUPPLIER_SUSPENDED` و `SUPPLIER_REINSTATED` را می‌خواند (گروه
+> `construction-service.supplier-standing`، صف مرده `rasta.construction.v1.dlq`) و از `rasta.organization.v1` فقط
+> `ORGANIZATION_MOVED` را. پیاده‌سازی مدل خواندنی: جابه‌جاپذیر و تکرارپذیر؛ سازمانِ ناشناخته واجد شرایط نیست.
 
 | رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                                                                            |
 | -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

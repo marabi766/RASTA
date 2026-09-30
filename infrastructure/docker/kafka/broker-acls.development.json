@@ -336,6 +336,20 @@
       "operation": "READ"
     },
     {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
       "principal": "document-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.document.v1",

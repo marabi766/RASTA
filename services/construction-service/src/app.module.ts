@@ -50,6 +50,11 @@ import {
   OrganizationMovedConsumer,
   organizationMovesConsumerFactory,
 } from './events/organization-moved.consumer';
+import {
+  SupplierStandingConsumer,
+  supplierStandingConsumerFactory,
+} from './events/supplier-standing.consumer';
+import { ContractorStandingRepository } from './tender/contractor-standing.repository';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
 import { ApprovalController } from './approval/approval.controller';
@@ -199,6 +204,21 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         ),
     },
 
+    ContractorStandingRepository,
+    {
+      provide: SupplierStandingConsumer,
+      inject: [ENV, LOGGER, ContractorStandingRepository],
+      useFactory: (env: ConstructionEnv, logger: Logger, standing: ContractorStandingRepository) =>
+        new SupplierStandingConsumer(
+          supplierStandingConsumerFactory(
+            kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-supplier-standing`),
+            logger,
+          ),
+          standing,
+          logger,
+        ),
+    },
+
     {
       provide: InternalTokenService,
       inject: [ENV],
@@ -270,6 +290,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly relay: OutboxRelay,
     private readonly moves: OrganizationMovedConsumer,
+    private readonly standing: SupplierStandingConsumer,
     private readonly sweeper: PolicyReconciliationSweeper,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly store: PrismaOutboxStore,
@@ -288,6 +309,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // (`EventConsumer` never auto-creates topics), not leave a service that
     // looks healthy and never hears a move.
     await this.moves.start();
+    await this.standing.start();
     this.sweeper.start();
     this.relay.start();
 
@@ -324,6 +346,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     await this.moves.stop();
+    await this.standing.stop();
     await this.sweeper.stop();
     await this.relay.stop();
   }
