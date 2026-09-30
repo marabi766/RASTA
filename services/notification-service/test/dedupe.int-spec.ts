@@ -269,6 +269,38 @@ describe('semantic deduplication against PostgreSQL', () => {
     expect(rows.dedupe).toHaveLength(2);
   });
 
+  it('treats a DUE_SOON replayed on .retry after a newer OVERDUE as stale, under the original topic (D-039)', async () => {
+    const organizationId = organization();
+    const scheduleId = `SCH_${ulid()}`;
+
+    // The newer state is applied first on the original topic; the older
+    // DUE_SOON had failed and is replayed afterwards on the retry twin.
+    await expect(
+      deliver(
+        w,
+        maintenanceDue({ organizationId, scheduleId, state: 'OVERDUE', streamSeq: 11 }),
+        MAINTENANCE_TOPIC,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      deliver(
+        w,
+        maintenanceDue({ organizationId, scheduleId, state: 'DUE_SOON', streamSeq: 10 }),
+        `${MAINTENANCE_TOPIC}.retry`,
+      ),
+    ).resolves.toBe('SKIPPED');
+
+    const rows = await rowsFor(w.prisma, organizationId);
+    expect(rows.intents.map((intent) => [intent.sourceTopic, intent.status])).toEqual(
+      expect.arrayContaining([
+        [MAINTENANCE_TOPIC, 'PENDING'],
+        [MAINTENANCE_TOPIC, 'DISCARDED'],
+      ]),
+    );
+    expect(rows.intents.every((intent) => intent.sourceTopic === MAINTENANCE_TOPIC)).toBe(true);
+    expect(rows.intents.filter((intent) => intent.status === 'PENDING')).toHaveLength(1);
+  });
+
   it('preserves source provenance and correlation on the intent', async () => {
     const organizationId = organization();
     const envelope = insuranceExpiring({

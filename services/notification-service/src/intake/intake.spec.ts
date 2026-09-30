@@ -36,6 +36,15 @@ describe('intake decision', () => {
     });
   });
 
+  it('names the original topic as the source of a record replayed on <topic>.retry (D-039)', () => {
+    const decision = decideIntake(
+      envelope({ streamKey: 'POL_1', streamSeq: 42 }),
+      Object.freeze({ topic: 'rasta.insurance.v1.retry', partition: 1 }),
+    );
+    if (decision.kind !== 'INTENT') throw new Error('expected an intent');
+    expect(decision.intent.sourceTopic).toBe('rasta.insurance.v1');
+  });
+
   it('describes a full intent for a supported event', () => {
     const source = envelope({ streamKey: 'POL_1', streamSeq: 42 });
     const decision = decideIntake(source, delivery);

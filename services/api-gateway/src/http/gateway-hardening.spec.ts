@@ -3,6 +3,7 @@ import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ExpressAdapter } from '@nestjs/platform-express';
 import {
+  AllExceptionsFilter,
   InternalTokenService,
   RastaError,
   runWithContext,
@@ -78,7 +79,10 @@ function recordingLimiter() {
   return { limiter, keys };
 }
 
-function proxyTo(upstream: Upstream): ProxyService {
+function proxyTo(
+  upstream: Upstream,
+  options = { timeoutMs: 2000, failureThreshold: 100, resetAfterMs: 1000 },
+): ProxyService {
   const every = [
     'IDENTITY',
     'ORGANIZATION',
@@ -103,7 +107,7 @@ function proxyTo(upstream: Upstream): ProxyService {
   return new ProxyService(
     urls,
     new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
-    { timeoutMs: 2000, failureThreshold: 100, resetAfterMs: 1000 },
+    options,
   );
 }
 
@@ -669,6 +673,133 @@ describe('Retry-After from the owning service reaches the caller', () => {
 
       expect(response.status).toBe(409);
       expect(response.headers['retry-after']).toBeUndefined();
+    } finally {
+      await gateway.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Circuit open — 503 with Retry-After
+// ---------------------------------------------------------------------------
+
+describe('an open circuit answers 503 with Retry-After from the breaker’s remaining time', () => {
+  let upstream: Upstream;
+  beforeEach(async () => (upstream = await startUpstream()));
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await upstream.close();
+  });
+
+  const request = {
+    service: 'identity' as const,
+    method: 'GET',
+    path: '/v1/users/me',
+    query: '',
+    headers: {},
+    body: undefined,
+  };
+
+  /** Opens the circuit at t=0 with one upstream failure, then is refused at `at` ms. */
+  async function refusedAt(resetAfterMs: number, at: number): Promise<RastaError> {
+    upstream.respond = (res) => {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('boom');
+    };
+    const proxy = proxyTo(upstream, { timeoutMs: 2000, failureThreshold: 1, resetAfterMs });
+    const forward = () => runWithContext(userContext, () => proxy.forward(request));
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    await expect(forward()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(proxy.circuitStates().identity?.open).toBe(true);
+    clock.mockReturnValue(1_000_000 + at);
+    return forward().then(
+      () => {
+        throw new Error('the open circuit let the request through');
+      },
+      (error: unknown) => error as RastaError,
+    );
+  }
+
+  it('is the remaining open time, rounded up to whole seconds', async () => {
+    const error = await refusedAt(30_000, 10_500); // 19.5 s left
+    expect(error.code).toBe('UPSTREAM_UNAVAILABLE');
+    expect(error.retryAfterSeconds).toBe(20);
+    expect(upstream.received).toHaveLength(1); // the refusal never reached the service
+  });
+
+  it('is at least 1 when under a second remains', async () => {
+    expect((await refusedAt(30_000, 29_999)).retryAfterSeconds).toBe(1);
+  });
+
+  it('is at most 3600', async () => {
+    expect((await refusedAt(2 * 3_600_000, 1_000)).retryAfterSeconds).toBe(3600);
+  });
+
+  it('reaches the client as the Retry-After header, and nothing else of the context does', async () => {
+    const error = await refusedAt(30_000, 10_500);
+    const headers: Record<string, string> = {};
+    const response = {
+      status: () => response,
+      json: () => response,
+      setHeader: (name: string, value: string) => {
+        headers[name] = value;
+      },
+    };
+    const logger = { error: jest.fn(), warn: jest.fn(), debug: jest.fn() };
+    new AllExceptionsFilter(logger as never).catch(error, {
+      switchToHttp: () => ({ getResponse: () => response }),
+    } as never);
+
+    expect(headers).toEqual({ 'Retry-After': '20' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// X-RateLimit-* are readable by a browser
+// ---------------------------------------------------------------------------
+
+describe('X-RateLimit-* are exposed to an allowed origin', () => {
+  let upstream: Upstream;
+  beforeEach(async () => (upstream = await startUpstream()));
+  afterEach(async () => upstream.close());
+
+  const origin = 'https://app.rasta.example';
+  const RATE_LIMIT = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'];
+  const exposed = (headers: Record<string, unknown>): string[] =>
+    String(headers['access-control-expose-headers']).toLowerCase().split(',');
+
+  it('lists them on a cross-origin response that carries them', async () => {
+    const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
+    try {
+      const response = await gateway.send('/v1/users/me', { origin });
+
+      expect(response.status).toBe(200);
+      // The headers are on the response…
+      for (const name of RATE_LIMIT) expect(response.headers[name]).toBeDefined();
+      // …and the browser is told the calling script may read them.
+      expect(response.headers['access-control-allow-origin']).toBe(origin);
+      expect(exposed(response.headers)).toEqual(expect.arrayContaining(RATE_LIMIT));
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it('a preflight is answered for the origin', async () => {
+    const gateway = await startGateway({ upstream, context: userContext, corsOrigins: [origin] });
+    try {
+      const preflight = await gateway.send(
+        '/v1/users/me',
+        {
+          origin,
+          'access-control-request-method': 'GET',
+          'access-control-request-headers': 'authorization',
+        },
+        'OPTIONS',
+      );
+
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers['access-control-allow-origin']).toBe(origin);
+      expect(corsOptions([origin]).exposedHeaders).toEqual(expect.arrayContaining(RATE_LIMIT));
     } finally {
       await gateway.close();
     }

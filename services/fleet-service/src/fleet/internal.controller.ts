@@ -2,6 +2,11 @@ import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nest
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { AllowService, zodPipe } from '@rasta/nest-common';
 import {
+  AssetWorkStateService,
+  WORK_STATE_CALLER,
+  type AssignmentStateView,
+} from './asset-work-state';
+import {
   SOURCE_FACT_CALLER,
   UsageFactService,
   usageRecordIdParamSchema,
@@ -55,7 +60,27 @@ export class FleetInternalController {
 @ApiTags('fleet-internal')
 @Controller({ path: 'internal/assets', version: '1' })
 export class FleetTransferClearanceController {
-  constructor(private readonly clearance: TransferClearanceService) {}
+  constructor(
+    private readonly clearance: TransferClearanceService,
+    private readonly workState: AssetWorkStateService,
+  ) {}
+
+  @Get(':assetId/assignment-state')
+  @AllowService(WORK_STATE_CALLER)
+  @ApiParam({ name: 'assetId', schema: { type: 'string', maxLength: 64 } })
+  @ApiOperation({
+    summary: 'Whether a machine has an open assignment (internal)',
+    description:
+      'Reserved for `asset-service`’s service token; every other service and every user token ' +
+      'is refused. The organization is the one signed into the token; an assignment in ' +
+      'another organization is not seen. Read by asset-service when a replayed ' +
+      '`ASSET_ASSIGNED` / `ASSIGNMENT_ENDED` must not be applied from its payload (D-039).',
+  })
+  assignmentState(
+    @Param('assetId', zodPipe(assetIdParamSchema)) assetId: string,
+  ): Promise<AssignmentStateView> {
+    return this.workState.assignmentState(assetId);
+  }
 
   @Post(':assetId/transfer-clearance')
   @HttpCode(200)
