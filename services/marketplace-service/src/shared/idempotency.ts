@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../shared/prisma-errors';
@@ -74,6 +74,8 @@ function inFlight(endpoint: string): RastaError {
  */
 @Injectable()
 export class IdempotencyStore {
+  private readonly logger = new Logger(IdempotencyStore.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(ENV) private readonly env: MarketplaceEnv,
@@ -88,7 +90,9 @@ export class IdempotencyStore {
    * Reserves the key, or reports what to do instead.
    *
    * Returns:
-   *   `{ kind: 'PROCEED' }`  — the caller owns the key and should do the work
+   *   `{ kind: 'PROCEED', token }` — the caller owns the key and should do the
+   *                          work; `token` is its claim, which `complete` and
+   *                          `release` require
    *   `{ kind: 'REPLAY' }`   — a stored response to return unchanged
    *
    * and throws for the two conflict cases, because they are errors rather than
@@ -98,7 +102,9 @@ export class IdempotencyStore {
     endpoint: string,
     key: string,
     body: unknown,
-  ): Promise<{ kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown }> {
+  ): Promise<
+    { kind: 'PROCEED'; token: string } | { kind: 'REPLAY'; status: number; body: unknown }
+  > {
     const requestHash = this.hash(body);
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
       const outcome = await this.claimOnce(endpoint, key, requestHash);
@@ -129,7 +135,9 @@ export class IdempotencyStore {
     key: string,
     requestHash: string,
   ): Promise<
-    { kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown } | typeof RETRY_CLAIM
+    | { kind: 'PROCEED'; token: string }
+    | { kind: 'REPLAY'; status: number; body: unknown }
+    | typeof RETRY_CLAIM
   > {
     const organizationId = getOrganizationId();
     const now = new Date();
@@ -137,11 +145,20 @@ export class IdempotencyStore {
       now.getTime() + this.env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
     );
 
+    const token = randomUUID();
     try {
       await this.prisma.client.idempotencyKey.create({
-        data: { key, organizationId, endpoint, requestHash, state: 'IN_PROGRESS', expiresAt },
+        data: {
+          key,
+          organizationId,
+          endpoint,
+          requestHash,
+          claimToken: token,
+          state: 'IN_PROGRESS',
+          expiresAt,
+        },
       });
-      return { kind: 'PROCEED' };
+      return { kind: 'PROCEED', token };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
     }
@@ -178,6 +195,11 @@ export class IdempotencyStore {
   /**
    * Records the response so a retry can replay it.
    *
+   * Matches only the row this claim's `token` was minted for. A claim that
+   * expired, was purged and was re-taken by another request leaves that
+   * request's row untouched: the late completion is a logged no-op, never an
+   * error (the work has committed, and failing here would not undo it).
+   *
    * Deliberately **not** inside the caller's transaction. Recording the
    * response is not part of the financial effect: if the effect committed and
    * this write then failed, the money has moved and a retry would find
@@ -186,12 +208,19 @@ export class IdempotencyStore {
    * succeeded, which is not. "Safe" holds only because {@link execute} never
    * releases the claim after this fails.
    */
-  async complete(endpoint: string, key: string, status: number, body: unknown): Promise<void> {
+  async complete(
+    endpoint: string,
+    key: string,
+    token: string,
+    status: number,
+    body: unknown,
+  ): Promise<void> {
     const organizationId = getOrganizationId();
-    await this.prisma.client.idempotencyKey.updateMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+    const { count } = await this.prisma.client.idempotencyKey.updateMany({
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
       data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
     });
+    if (count === 0) this.logLostClaim('complete', endpoint);
   }
 
   /**
@@ -199,14 +228,23 @@ export class IdempotencyStore {
    *
    * A failed attempt must not block a corrected retry: a settlement refused
    * for insufficient balance should be retryable once the wallet is topped up,
-   * with the same key. Only `IN_PROGRESS` rows are removed, so a completed
-   * response is never dropped.
+   * with the same key. Only this claim's own `IN_PROGRESS` row is removed, so
+   * a completed response is never dropped and a successor's claim is never
+   * freed by the request that lost it.
    */
-  async release(endpoint: string, key: string): Promise<void> {
+  async release(endpoint: string, key: string, token: string): Promise<void> {
     const organizationId = getOrganizationId();
-    await this.prisma.client.idempotencyKey.deleteMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+    const { count } = await this.prisma.client.idempotencyKey.deleteMany({
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
     });
+    if (count === 0) this.logLostClaim('release', endpoint);
+  }
+
+  /** Nothing of the key or token in the log (S-09): the endpoint locates it. */
+  private logLostClaim(operation: 'complete' | 'release', endpoint: string): void {
+    this.logger.warn(
+      `idempotency ${operation} matched no in-progress row for this claim (expired, purged or already finished); left untouched: ${endpoint}`,
+    );
   }
 
   /**
@@ -256,10 +294,10 @@ export class IdempotencyStore {
     try {
       result = await work();
     } catch (error) {
-      await this.release(endpoint, key);
+      await this.release(endpoint, key, claim.token);
       throw error;
     }
-    await this.complete(endpoint, key, successStatus, result);
+    await this.complete(endpoint, key, claim.token, successStatus, result);
     return { result, executed: true };
   }
 
