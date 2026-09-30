@@ -27,6 +27,13 @@ export const needTransitionsTotal = new Counter({
   registers: [registry],
 });
 
+export const tenderTransitionsTotal = new Counter({
+  name: 'rasta_construction_tender_transitions_total',
+  help: 'Tender lifecycle commands that committed, by command',
+  labelNames: ['service', 'command'] as const,
+  registers: [registry],
+});
+
 /**
  * Compare-and-set losses: a command refused because the row changed under it.
  *

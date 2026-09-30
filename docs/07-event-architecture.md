@@ -444,6 +444,7 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `PAYMENT_COMPLETED`            | economic | marketplace · maintenance · contract · notification |
 | `PAYMENT_FAILED`               | economic | marketplace (جبران) · notification                  |
 | `PAYMENT_CAPTURE_UNRECONCILED` | economic | audit · (هشدار عملیات)                              |
+| `PAYMENT_REFUND_UNRECONCILED`  | economic | audit · (هشدار عملیات)                              |
 | `COMMISSION_APPLIED`           | economic | analytics (**درآمد پلتفرم**) · audit                |
 | `REWARD_GRANTED`               | economic | notification · analytics                            |
 | `REWARD_LEVEL_CHANGED`         | economic | notification                                        |

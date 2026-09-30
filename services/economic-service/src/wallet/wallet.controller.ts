@@ -125,7 +125,10 @@ export class WalletController {
       '**No real money moves.** The provider is a deterministic simulation (ADR-024); the ' +
       'response says so on every call. Requires an `Idempotency-Key`: a retry returns the ' +
       'first response and does not charge again. The wallet is credited only on capture, ' +
-      'never on authorisation, so a failed capture leaves no balance to claw back.',
+      'never on authorisation, so a failed capture leaves no balance to claw back. ' +
+      'A replayed response is the **historical** one: a top-up captured and since refunded, ' +
+      'or whose refund is unfinished, still replays `CAPTURED`. The current state is ' +
+      '`GET /v1/payment-intents/{id}` — its `status` and `failureReason` (docs/06 § 6.8).',
   })
   async topUp(
     @Param('id') id: string,

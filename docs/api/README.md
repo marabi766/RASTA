@@ -18,6 +18,10 @@ docs/api/
 
 **چرا Commit می‌شوند؟** تا تغییر شکننده در Diff یک PR دیده شود، نه پس از استقرار در Production.
 
+**استثنا — قرارداد طرح‌شده.** `construction-service.tender.planned.openapi.json` (CON-002) قرارداد **طراحی** است، نه رفتار امروز: با
+کنترلر تولید نمی‌شود و آزمون همگامی (`document.spec.ts`، `openapi.int-spec.ts`) آن را نمی‌خواند. هر ردیف `x-step` دارد؛ وقتی PR آن گام
+پیاده شد، همان مسیرها به `construction-service.openapi.json` تولیدشده منتقل و از فایل طرح حذف می‌شوند؛ با پایان CON-002 این فایل حذف می‌شود.
+
 ## تولید
 
 ```bash

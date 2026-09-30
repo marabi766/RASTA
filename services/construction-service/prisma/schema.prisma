@@ -98,6 +98,7 @@ model Project {
   needs           ProjectNeed[]
   approvals       Approval[]
   progressReports ProgressReport[]
+  tenders         Tender[]
 
   /// The composite target of `project_need`'s tenant-bound foreign key, and
   /// the index every tenant-scoped id lookup and listing uses.
@@ -424,6 +425,83 @@ model ProgressReport {
   @@unique([organizationId, projectId, submissionSequence], map: "ux_progress_submission_sequence")
   @@index([organizationId, projectId, status, id], map: "ix_progress_org_project_status")
   @@map("progress_report")
+}
+
+// ---------------------------------------------------------------------------
+// Tender (CON-002, ADR-065)
+// ---------------------------------------------------------------------------
+
+/// `src/tender/tender.state-machine.ts`. The whole lifecycle is declared now so
+/// later steps add commands, not enum values; PR 2 reaches DRAFT and CANCELLED.
+enum TenderStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+  EVALUATING
+  EVALUATED
+  AWARDED
+  CANCELLED
+}
+
+/// `docs/03`. Chosen by the owner before publishing; the platform never
+/// defaults it and draws no legal conclusion from it (Q-03).
+enum ProcurementNature {
+  FORMAL_TENDER
+  INQUIRY
+  RFP
+  MARKETPLACE_DEAL
+}
+
+/// Q-84 (2).
+enum TenderVisibility {
+  PUBLIC
+  RESTRICTED
+}
+
+/// A tender is its own aggregate (`docs/03` § 3.3, ADR-065): it references its
+/// project by the (organization, project) pair, like a need, and shares no lock
+/// with it except while being created. `organizationId` is the owner
+/// (the organization tendering); bidders are other tenants and arrive with bids.
+model Tender {
+  id String @id
+
+  organizationId String @map("organization_id")
+  projectId      String @map("project_id")
+
+  project Project @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  title       String
+  scopeOfWork String @map("scope_of_work")
+
+  /// Null until chosen; required from PUBLISHED on (`ck_tender_published_complete`).
+  procurementNature ProcurementNature? @map("procurement_nature")
+  visibility        TenderVisibility?
+
+  /// The bidding window is [bid_opening_at, bid_closing_at), UTC (ADR-065 § 2).
+  bidOpeningAt DateTime? @map("bid_opening_at") @db.Timestamptz(3)
+  bidClosingAt DateTime? @map("bid_closing_at") @db.Timestamptz(3)
+
+  status           TenderStatus @default(DRAFT)
+  /// Prose for the record; never on an event. Required for CANCELLED.
+  statusReason     String?      @map("status_reason")
+  /// A closed code that is safe on an event (`OWNER_REQUEST`, `NO_QUALIFIED_BID`).
+  statusReasonCode String?      @map("status_reason_code")
+  statusChangedAt  DateTime     @map("status_changed_at")
+  statusChangedBy  String       @map("status_changed_by")
+
+  createdAt            DateTime @map("created_at")
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+  updatedAt            DateTime @map("updated_at")
+  updatedBy            String   @map("updated_by")
+
+  /// The compare-and-set token. Every change matches on it and increments it.
+  version Int @default(1)
+
+  @@unique([organizationId, id], map: "ux_tender_org_id")
+  @@index([organizationId, status, id], map: "ix_tender_org_status")
+  @@index([organizationId, projectId, status], map: "ix_tender_org_project_status")
+  @@map("tender")
 }
 
 // ---------------------------------------------------------------------------
