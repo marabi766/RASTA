@@ -11,6 +11,7 @@ import {
   ORGANIZATION_MOVES_CONSUMER,
   ORGANIZATION_MOVES_TOPICS,
   OrganizationMovedConsumer,
+  organizationMovesConsumerFactory,
 } from './organization-moved.consumer';
 
 const envelope = (eventName: string, payload: unknown): EventEnvelope =>
@@ -101,6 +102,53 @@ describe('the ORGANIZATION_MOVED consumer', () => {
     await consumer.start();
     expect(started.handler).toBeInstanceOf(Function);
     await consumer.stop();
+  });
+
+  // D-039: the shared EventConsumer subscribes each topic with its `.retry`
+  // twin. Driven through the real one with a fake kafkajs consumer, so it is
+  // what the module builds that is checked, not a copy of its options.
+  it('subscribes rasta.organization.v1.retry, and handles a delivery from it', async () => {
+    const subscribed: string[] = [];
+    let eachMessage: ((message: unknown) => Promise<void>) | undefined;
+    const fake = {
+      connect: async () => undefined,
+      disconnect: async () => undefined,
+      subscribe: async ({ topic }: { topic: string }) => void subscribed.push(topic),
+      run: async (config: { eachMessage: (message: unknown) => Promise<void> }) => {
+        eachMessage = config.eachMessage;
+      },
+    };
+    const { reconfirmAll } = build();
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+    const factory = organizationMovesConsumerFactory(
+      { brokers: ['localhost:9092'], clientId: 'construction-service-organization-moves' },
+      logger,
+    );
+    const consumer = new OrganizationMovedConsumer(
+      (handler) => {
+        const real = factory(handler);
+        (real as unknown as { kafka: { consumer: () => unknown } }).kafka = {
+          consumer: () => fake,
+        };
+        return real;
+      },
+      { reconfirmAll } as unknown as PolicySuspensionService,
+      logger,
+    );
+
+    await consumer.start();
+    expect(subscribed).toEqual(['rasta.organization.v1', 'rasta.organization.v1.retry']);
+
+    const replay = envelope('ORGANIZATION_MOVED', { organizationId: 'ORG_M' });
+    await eachMessage!({
+      topic: 'rasta.organization.v1.retry',
+      partition: 0,
+      message: { value: Buffer.from(JSON.stringify(replay)), headers: {}, offset: '7', key: null },
+    });
+    expect(reconfirmAll).toHaveBeenCalledTimes(1);
+    expect(reconfirmAll).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: 'EVT_1', movedOrganizationId: 'ORG_M' }),
+    );
   });
 
   it('is declared in TOPIC_CONSUMERS exactly as the module builds it', () => {

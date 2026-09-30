@@ -1,7 +1,8 @@
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
+  EventConsumer,
   UnprocessableEventError,
-  type EventConsumer,
+  kafkaConnection,
   type EventHandler,
   type HandlerOutcome,
 } from '@rasta/nest-common';
@@ -28,6 +29,33 @@ export const ORGANIZATION_MOVED = 'ORGANIZATION_MOVED';
 const movedPayload = z.object({ organizationId: z.string().min(1) });
 
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
+
+/**
+ * The shared `EventConsumer` for this stream — the only subscription there is.
+ * It subscribes each declared topic together with its `.retry` twin (D-039), so
+ * a replay from the dead-letter topic reaches `handle` like any delivery; there
+ * is no subscription of this service's own for it.
+ */
+export function organizationMovesConsumerFactory(
+  connection: ReturnType<typeof kafkaConnection>,
+  logger: Pick<Logger, 'info' | 'warn' | 'error'>,
+): EventConsumerFactory {
+  return (handler) =>
+    new EventConsumer(
+      {
+        ...connection,
+        groupId: ORGANIZATION_MOVES_CONSUMER,
+        topics: [...ORGANIZATION_MOVES_TOPICS],
+        deadLetterTopic: CONSTRUCTION_DEAD_LETTER_TOPIC,
+      },
+      handler,
+      {
+        log: (m) => logger.info(m),
+        warn: (m) => logger.warn(m),
+        error: (m, trace) => logger.error({ err: trace }, m),
+      },
+    );
+}
 
 /**
  * Reacts to an organization being moved in the hierarchy (Q-83): asks whether

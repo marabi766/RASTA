@@ -10,7 +10,6 @@ import {
   AllExceptionsFilter,
   AuthGuard,
   AUTH_OPTIONS,
-  EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
@@ -46,10 +45,8 @@ import { ApprovalService } from './approval/approval.service';
 import { PolicyService } from './approval/policy.service';
 import { PolicySuspensionService } from './approval/policy-suspension.service';
 import {
-  CONSTRUCTION_DEAD_LETTER_TOPIC,
-  ORGANIZATION_MOVES_CONSUMER,
-  ORGANIZATION_MOVES_TOPICS,
   OrganizationMovedConsumer,
+  organizationMovesConsumerFactory,
 } from './events/organization-moved.consumer';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
@@ -142,21 +139,10 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
       inject: [ENV, LOGGER, PolicySuspensionService],
       useFactory: (env: ConstructionEnv, logger: Logger, suspension: PolicySuspensionService) =>
         new OrganizationMovedConsumer(
-          (handler) =>
-            new EventConsumer(
-              {
-                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-organization-moves`),
-                groupId: ORGANIZATION_MOVES_CONSUMER,
-                topics: [...ORGANIZATION_MOVES_TOPICS],
-                deadLetterTopic: CONSTRUCTION_DEAD_LETTER_TOPIC,
-              },
-              handler,
-              {
-                log: (m) => logger.info(m),
-                warn: (m) => logger.warn(m),
-                error: (m, trace) => logger.error({ err: trace }, m),
-              },
-            ),
+          organizationMovesConsumerFactory(
+            kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-organization-moves`),
+            logger,
+          ),
           suspension,
           logger,
         ),
