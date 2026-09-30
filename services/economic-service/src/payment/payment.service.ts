@@ -828,6 +828,13 @@ export class PaymentService {
       // Refunded at the provider by an earlier attempt that could not record
       // it: the hold is still there, and only step 3 is retried.
       if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
+      // No automatic way out of these two yet. An aged REFUND_REQUESTED or a
+      // REFUND_UNKNOWN keeps its hold (money safe, never lost or credited
+      // twice) and every later refund is refused here, because nothing asks
+      // the provider what happened. Asking it, escalating and resolving under
+      // the intent and wallet locks is ADR-064 step B, NOT implemented yet.
+      // Until it ships, an operator resolves them with the provider's answer:
+      // docs/runbooks/payment-refund-stuck.md.
       if (row.failureReason === REFUND_REQUESTED || row.failureReason === REFUND_UNKNOWN) {
         throw refundUnresolved(intentId, row.failureReason);
       }
