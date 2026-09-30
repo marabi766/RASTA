@@ -23,8 +23,10 @@ import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
  *     It also READs every topic a consumer subscribes to — the only topics a
  *     dead letter can have come from — so a dry-run can tell a stale event
  *     (a newer one exists for its stream key), except the topics in
- *     `NEVER_AUTO_REPLAY_TOPICS`, which it never replays; its groups are confined to
- *     `ops-replay.*` like any principal's, and it WRITEs no original topic.
+ *     `NEVER_AUTO_REPLAY_TOPICS`, which it never replays; its groups, and the
+ *     transactional ids that make each replay and its record one Kafka
+ *     transaction, are confined to
+ *     `ops-replay.*` like any principal's, and it WRITEs no original topic but its own record.
  *   - Development only (compose and CI, never a deployment): `itest-observer`,
  *     which reads what tests assert on; `kafka-ui` and `kafka-exporter`, which
  *     describe (and, for the UI, browse) the platform's topics and groups.
@@ -47,7 +49,7 @@ import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
 export const BROKER_PROFILES = ['deployment', 'development'] as const;
 export type BrokerProfile = (typeof BROKER_PROFILES)[number];
 
-export type AclResourceType = 'TOPIC' | 'GROUP' | 'CLUSTER';
+export type AclResourceType = 'TOPIC' | 'GROUP' | 'CLUSTER' | 'TRANSACTIONAL_ID';
 export type AclPatternType = 'LITERAL' | 'PREFIXED';
 export type AclOperation = 'READ' | 'WRITE' | 'DESCRIBE';
 
@@ -163,6 +165,16 @@ export function brokerAcls(profile: BrokerProfile): AclBinding[] {
     if (!NEVER_AUTO_REPLAY_TOPICS.has(name)) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');
   }
   allow(OPS_REPLAY_PRINCIPAL, 'GROUP', groupNamespace(OPS_REPLAY_PRINCIPAL), 'READ', 'PREFIXED');
+  // Each replay and its REPLAY_EXECUTED record are one Kafka transaction
+  // (round 1 on #166): its transactional ids, like its groups, are its own
+  // namespace — and no other principal holds any transactional id.
+  allow(
+    OPS_REPLAY_PRINCIPAL,
+    'TRANSACTIONAL_ID',
+    groupNamespace(OPS_REPLAY_PRINCIPAL),
+    'WRITE',
+    'PREFIXED',
+  );
 
   if (profile === 'development') {
     const { observer, ui, exporter } = DEVELOPMENT_PRINCIPALS;

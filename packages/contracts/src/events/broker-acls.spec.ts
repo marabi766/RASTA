@@ -119,7 +119,11 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
       expect(Object.keys(TOPIC_PRODUCERS)).toContain(name);
     // Its WRITE is the .retry twins and its own replay record alone: never
     // another original, never a dead letter.
-    const writes = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' })
+    const writes = where(acls, {
+      principal: OPS_REPLAY_PRINCIPAL,
+      operation: 'WRITE',
+      resourceType: 'TOPIC',
+    })
       .map((acl) => acl.resourceName)
       .sort();
     expect(writes).toEqual(
@@ -148,11 +152,25 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
       ),
     ).toEqual(['audit-service']);
     // And it still writes no original but that one, and not the economic stream's .retry.
-    const writes = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' }).map(
-      (acl) => acl.resourceName,
-    );
+    const writes = where(acls, {
+      principal: OPS_REPLAY_PRINCIPAL,
+      operation: 'WRITE',
+      resourceType: 'TOPIC',
+    }).map((acl) => acl.resourceName);
     expect(writes.filter((t) => !t.endsWith('.retry'))).toEqual([OPS_REPLAY_TOPIC]);
     expect(writes).not.toContain('rasta.economic.v1.retry');
+  });
+
+  it('lets ops-replay alone hold a transactional id, only under ops-replay.', () => {
+    // One Kafka transaction per replay and its record (round 1 on #166).
+    expect(
+      where(acls, { resourceType: 'TRANSACTIONAL_ID' }).map((acl) => [
+        acl.principal,
+        acl.resourceName,
+        acl.patternType,
+        acl.operation,
+      ]),
+    ).toEqual([[OPS_REPLAY_PRINCIPAL, `${OPS_REPLAY_PRINCIPAL}.`, 'PREFIXED', 'WRITE']]);
   });
 
   it('grants groups only by prefix, and only within the principal’s own namespace (tools only describe)', () => {

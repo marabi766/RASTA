@@ -117,6 +117,30 @@ async function produce(principal, topic, options = {}) {
 }
 
 /**
+ * One committed transaction under `transactionalId`, writing a marker to
+ * `topic`. `retries` lets the allowed case wait out a transaction coordinator
+ * that a fresh broker loads on first use; kafkajs refuses an idempotent
+ * producer without at least one, and an authorization error is never retried.
+ */
+async function transact(principal, transactionalId, topic, retries = 1) {
+  const producer = await connected(
+    client(principal, { retry: { retries, initialRetryTime: 300 } }).producer({
+      transactionalId,
+      idempotent: true,
+      maxInFlightRequests: 1,
+      allowAutoTopicCreation: false,
+    }),
+  );
+  const transaction = await producer.transaction();
+  await transaction.send({
+    topic,
+    acks: -1,
+    messages: [{ key: run, value: JSON.stringify({ aclTest: run }) }],
+  });
+  await transaction.commit();
+}
+
+/**
  * What stopped a call: the broker's error type (`TOPIC_AUTHORIZATION_FAILED`)
  * when kafkajs carries one anywhere down its wrapping chain, else the kafkajs
  * error's name. kafkajs wraps a protocol error in a non-retriable one.
@@ -370,6 +394,37 @@ describe('5. dead-letter and retry topics', () => {
         await refusal(() => produce('ops-replay', topic)),
         'TOPIC_AUTHORIZATION_FAILED',
         topic,
+      );
+    }
+  });
+
+  test('ops-replay alone uses transactional ids, and only its own: ops-replay.*', async () => {
+    // Each replay and its REPLAY_EXECUTED record are one transaction (round 1 on #166).
+    assert.equal(
+      await refusal(() =>
+        transact('ops-replay', `ops-replay.acl-${run}`, 'rasta.fleet.v1.retry', 10),
+      ),
+      'ALLOWED',
+    );
+    for (const [principal, transactionalId, topic] of [
+      ['ops-replay', `fleet-service.acl-${run}`, 'rasta.fleet.v1.retry'],
+      ['fleet-service', `fleet-service.acl-${run}`, 'rasta.fleet.v1'],
+      ['fleet-service', `ops-replay.acl-other-${run}`, 'rasta.fleet.v1'],
+    ]) {
+      // The control: the admin, a super user, runs the same transactional id,
+      // so its coordinator is known to be up and the refusal below is the
+      // ACL's alone. kafkajs reports TRANSACTIONAL_ID_AUTHORIZATION_FAILED on
+      // FindCoordinator as "coordinator not found", as it does for groups (§ 4).
+      assert.equal(
+        await refusal(() => transact(spec.admin, transactionalId, topic, 10)),
+        'ALLOWED',
+        `admin control as ${transactionalId}`,
+      );
+      assert.ok(
+        ['TRANSACTIONAL_ID_AUTHORIZATION_FAILED', 'KafkaJSGroupCoordinatorNotFound'].includes(
+          await refusal(() => transact(principal, transactionalId, topic)),
+        ),
+        `${principal} as ${transactionalId} must be refused`,
       );
     }
   });

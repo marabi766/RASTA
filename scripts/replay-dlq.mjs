@@ -12,10 +12,10 @@
  * `--execute` writes only when the selection is exactly what `--expect-count`
  * says and every record in it is replayable; then one at a time (acks=-1,
  * idempotent), in dead-letter order, stopping at the first failure — each
- * replay, once it has landed on `.retry`, followed by its `REPLAY_EXECUTED`
- * record on `rasta.ops.replay.v1`, which audit-service keeps. A record that
- * cannot be written after its replay landed is reported loudly and the run
- * exits non-zero; the replay itself stands.
+ * replay and its `REPLAY_EXECUTED` record on `rasta.ops.replay.v1` (which
+ * audit-service keeps) in one Kafka transaction, id `ops-replay.<reportId>`:
+ * both are committed, or neither is visible to any (read-committed)
+ * consumer.
  *
  * Environment: KAFKA_BROKERS, KAFKA_SASL_PASSWORD_OPS_REPLAY (development:
  * infrastructure/docker/kafka/bootstrap.env; a deployment: its secret store),
@@ -296,10 +296,15 @@ try {
       report({ reportId, mode, summary: true, written: 0, refused: problems });
       exitCode = 1;
     } else {
+      // One transaction per replay and its record (round 1 on #166): the
+      // transactional id is the run's, in ops-replay's own namespace — the
+      // only transactional ids the broker lets it, or anyone, use.
       const producer = kafka.producer({
+        transactionalId: `ops-replay.${reportId}`,
         idempotent: true,
         maxInFlightRequests: 1,
         allowAutoTopicCreation: false,
+        transactionTimeout: 30_000,
       });
       await producer.connect();
       let outcome;
@@ -309,10 +314,17 @@ try {
           operator,
           contracts,
           report,
-          send: async (topic, message) => {
-            const [result] = await producer.send({ topic, acks: -1, messages: [message] });
-            if (!result) throw new Error(`${topic}: the broker returned no position`);
-            return { partition: result.partition, offset: result.baseOffset };
+          beginTransaction: async () => {
+            const transaction = await producer.transaction();
+            return {
+              send: async (topic, message) => {
+                const [result] = await transaction.send({ topic, acks: -1, messages: [message] });
+                if (!result) throw new Error(`${topic}: the broker returned no position`);
+                return { partition: result.partition, offset: result.baseOffset };
+              },
+              commit: () => transaction.commit(),
+              abort: () => transaction.abort(),
+            };
           },
           newEventId: () => randomUUID(),
           now: () => new Date().toISOString(),

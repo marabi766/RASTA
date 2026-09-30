@@ -648,6 +648,134 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
   });
 });
 
+describe('one Kafka transaction per replay and its record (round 1 on #166)', () => {
+  /** The kinds of this run's markers on `topic` since `since`, as a read-committed consumer sees them. */
+  async function markerKinds(topic, since) {
+    return (await readSince('itest-observer', topic, since)).flatMap((m) => {
+      try {
+        const body = JSON.parse(m.value?.toString() ?? '');
+        return body.payload?.marker === `txn-${run}` ? [body.payload.kind] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  /** A transactional producer as ops-replay, under its own namespace. */
+  async function transactional(transactionalId) {
+    return connected(
+      new Kafka({
+        ...connectionFor('ops-replay', env, read),
+        clientId: `replay-itest-txn-${run}`,
+        logLevel: logLevel.NOTHING,
+        retry: { retries: 5, initialRetryTime: 300 },
+      }).producer({ transactionalId, idempotent: true, maxInFlightRequests: 1 }),
+    );
+  }
+
+  // A valid envelope for a tenant the test's consumer skips, so a committed
+  // one on .retry is neither applied nor dead-lettered.
+  const marker = (kind) => ({
+    key: `txn-${run}`,
+    value: JSON.stringify(
+      envelope(`EVT_TXN_${kind}_${run}`, null, {
+        tenantId: `ORG_TXN_${run}`,
+        payload: { marker: `txn-${run}`, kind },
+      }),
+    ),
+  });
+
+  /**
+   * A committed transaction after the one under test, on the same partitions:
+   * a read-committed reader that reaches it has read past the aborted offsets,
+   * which a tail of aborted records alone would never let it do.
+   */
+  async function sentinel(kind) {
+    const producer = await transactional(`ops-replay.itest-sentinel-${kind}-${run}`);
+    const transaction = await producer.transaction();
+    await transaction.send({ topic: RETRY, acks: -1, messages: [marker(`${kind}-sentinel`)] });
+    await transaction.send({ topic: OPS_REPLAY, acks: -1, messages: [marker(`${kind}-sentinel`)] });
+    await transaction.commit();
+  }
+
+  test('an aborted transaction leaves neither the replay nor its record visible', async () => {
+    const retryBefore = await endOffsets(RETRY);
+    const recordsBefore = await endOffsets(OPS_REPLAY);
+    const producer = await transactional(`ops-replay.itest-abort-${run}`);
+    const transaction = await producer.transaction();
+    await transaction.send({ topic: RETRY, acks: -1, messages: [marker('aborted')] });
+    await transaction.send({ topic: OPS_REPLAY, acks: -1, messages: [marker('aborted')] });
+    await transaction.abort();
+    await sentinel('aborted');
+
+    assert.deepEqual(await markerKinds(RETRY, retryBefore), ['aborted-sentinel']);
+    assert.deepEqual(await markerKinds(OPS_REPLAY, recordsBefore), ['aborted-sentinel']);
+  });
+
+  test('a process killed between the replay and its record leaves nothing committed', async () => {
+    const retryBefore = await endOffsets(RETRY);
+    const recordsBefore = await endOffsets(OPS_REPLAY);
+    const transactionalId = `ops-replay.itest-kill-${run}`;
+    // A separate process, as ops-replay: the .retry send lands inside the
+    // transaction, then the process is killed before its record is sent.
+    const child = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `
+          import kafkajs from 'kafkajs';
+          import { readFileSync } from 'node:fs';
+          import { connectionFor } from ${JSON.stringify(resolve(ROOT, 'scripts/kafka-acl-lib.mjs'))};
+          const kafka = new kafkajs.Kafka({
+            ...connectionFor('ops-replay', process.env, (path) => readFileSync(path, 'utf8')),
+            logLevel: kafkajs.logLevel.NOTHING,
+            retry: { retries: 5, initialRetryTime: 300 },
+          });
+          const producer = kafka.producer({
+            transactionalId: ${JSON.stringify(transactionalId)},
+            idempotent: true,
+            maxInFlightRequests: 1,
+          });
+          await producer.connect();
+          const transaction = await producer.transaction();
+          await transaction.send({
+            topic: ${JSON.stringify(RETRY)},
+            acks: -1,
+            messages: [${JSON.stringify(marker('killed'))}],
+          });
+          process.stdout.write('SENT\\n');
+          process.kill(process.pid, 'SIGKILL');
+        `,
+      ],
+      {
+        cwd: ROOT,
+        env: {
+          PATH: process.env.PATH,
+          KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
+          KAFKA_SSL_CA_FILE: CA,
+          KAFKA_SASL_PASSWORD_OPS_REPLAY: process.env.KAFKA_SASL_PASSWORD_OPS_REPLAY,
+        },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    assert.equal(child.signal, 'SIGKILL', child.stderr);
+    assert.match(child.stdout, /SENT/, 'the replay was sent before the kill');
+
+    // The next producer with the id fences the dead one and its open
+    // transaction is aborted — as the tool's next run under a new id, or the
+    // coordinator's timeout, would leave it: never committed.
+    const successor = await transactional(transactionalId);
+    const transaction = await successor.transaction();
+    await transaction.abort();
+    await sentinel('killed');
+
+    assert.deepEqual(await markerKinds(RETRY, retryBefore), ['killed-sentinel']);
+    assert.deepEqual(await markerKinds(OPS_REPLAY, recordsBefore), ['killed-sentinel']);
+  });
+});
+
 describe('retention past the original offset (Codex round 1 on #144, H1)', () => {
   test('a newer record for the key that retention took leaves staleness unknown, never "not stale"', async (t) => {
     if (!DISPOSABLE_BROKER) {

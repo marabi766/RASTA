@@ -321,6 +321,13 @@ export function assess(record, { dlq, topology, topics, contracts }) {
   // says which partition key the publisher used.
   if (!key) return refuse('UNSEQUENCED_NO_KEY');
 
+  // Its REPLAY_EXECUTED record must be writable before anything is sent
+  // (round 1 on #166): the same schema, with this run's values stood in, so
+  // an event id past 128 characters — which the envelope allows and the
+  // record does not — is refused here by name, never discovered mid-run.
+  const unrecordable = recordProblem(summary, contracts);
+  if (unrecordable) return refuse(`UNRECORDABLE:${unrecordable}`);
+
   const restored = {};
   for (const [field, name] of Object.entries(EVENT_HEADERS)) {
     if (field === 'producer') continue;
@@ -333,6 +340,36 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     refusal: null,
     message: { key, value: record.value, headers: restored },
   };
+}
+
+/** A report id and operator of the right shape, standing in for the run's own. */
+const RECORD_PROBE = Object.freeze({
+  reportId: 'rpl-00000000-0000-4000-8000-000000000000',
+  operator: 'probe',
+});
+
+/**
+ * The first field of this dead letter the `REPLAY_EXECUTED` v1 payload would
+ * refuse, as its schema path (`replayedEvent.eventId`), or `null` when a
+ * record can be written for it. The target position is not known yet and is
+ * stood in by `0`; the run's report id and operator are checked on their own.
+ */
+export function recordProblem(summary, contracts) {
+  const probe = contracts.replayExecutedPayloadSchemaV1.safeParse({
+    ...RECORD_PROBE,
+    replayedEvent: {
+      eventId: summary.eventId,
+      eventName: summary.eventName,
+      ...(summary.tenantId === null || summary.tenantId === undefined
+        ? {}
+        : { tenantId: summary.tenantId }),
+    },
+    dlq: { topic: summary.dlq, partition: summary.dlqPartition, offset: summary.dlqOffset },
+    target: { topic: summary.target, partition: 0, offset: '0' },
+    stale: false,
+  });
+  if (probe.success) return null;
+  return probe.error.issues[0].path.join('.') || '(root)';
 }
 
 /**
@@ -491,80 +528,88 @@ export function replayExecutedRecord(
 }
 
 /**
- * `--execute` once every check has passed: for each decision, in order, the
- * replay to its `.retry` and then its record on `rasta.ops.replay.v1` — both
- * through `send(topic, message)`, which resolves `{ partition, offset }` once
- * the broker has it (acks=-1) and rejects otherwise.
+ * `--execute` once every check has passed: for each decision, in order, one
+ * Kafka transaction holding the replay to its `.retry` **and** its
+ * `REPLAY_EXECUTED` record on `rasta.ops.replay.v1` (round 1 on #166).
  *
- * Stops at the first failure of either. A replay that failed wrote nothing, and
- * no record is sent for it. A record that failed after its replay landed is the
- * one outcome that leaves the platform unaware of a replay that happened: the
- * replay is not undone (it cannot be), the report line says so in `auditError`,
- * `stderr` says so in capitals, and the run exits non-zero.
+ * `beginTransaction()` opens one (a transactional producer, id
+ * `ops-replay.<reportId>`); its `send(topic, message)` resolves
+ * `{ partition, offset }`, and `commit()` / `abort()` end it. Consumers read
+ * committed only (kafkajs' default, and `EventConsumer`'s), so the pair is
+ * seen together or not at all: a failure before the commit — of either send,
+ * of building the record, or the process being killed — leaves neither
+ * record visible (an open transaction is aborted by its coordinator, or
+ * fenced by the next producer with the same id).
+ *
+ * Stops at the first failure and fails the run. A commit whose answer was
+ * lost is the one outcome the tool cannot know: the pair is either committed
+ * or not — never one without the other — and the report says to look for the
+ * replay id.
  */
 export async function executeReplays(
   decisions,
-  { reportId, operator, send, newEventId, now, report, warn, contracts },
+  { reportId, operator, beginTransaction, newEventId, now, report, warn, contracts },
 ) {
   const replayId = `${reportId}/${operator}`;
   let written = 0;
-  let recorded = 0;
   for (const decision of decisions) {
-    let landed;
+    let transaction;
+    let line = { replayId };
     try {
-      landed = await send(
+      transaction = await beginTransaction();
+      const landed = await transaction.send(
         decision.summary.target,
         replayMessage(decision, replayId, contracts.REPLAY_HEADERS),
       );
-    } catch (error) {
-      report(reportLine(reportId, 'execute', decision, { replayId, error: error.message }));
-      return { written, recorded, failed: true };
-    }
-    written += 1;
-    const replayedAt = now();
-    const line = {
-      replayId,
-      replayPartition: landed.partition,
-      replayOffset: String(landed.offset),
-      replayedAt,
-    };
-    let auditEventId;
-    try {
-      auditEventId = newEventId();
+      const replayedAt = now();
+      const auditEventId = newEventId();
+      line = {
+        replayId,
+        replayPartition: landed.partition,
+        replayOffset: String(landed.offset),
+        replayedAt,
+        auditEventId,
+      };
       const record = replayExecutedRecord(
         decision,
         { reportId, operator, landed, eventId: auditEventId, occurredAt: replayedAt },
         contracts,
       );
-      const audited = await send(contracts.OPS_REPLAY_TOPIC, record);
-      recorded += 1;
+      const audited = await transaction.send(contracts.OPS_REPLAY_TOPIC, record);
+      line = { ...line, auditPartition: audited.partition, auditOffset: String(audited.offset) };
+    } catch (error) {
+      await transaction?.abort().catch(() => undefined);
       report(
         reportLine(reportId, 'execute', decision, {
           ...line,
-          auditEventId,
-          auditPartition: audited.partition,
-          auditOffset: String(audited.offset),
+          error: error.message,
+          committed: false,
         }),
       );
+      return { written, recorded: written, failed: true };
+    }
+    try {
+      await transaction.commit();
     } catch (error) {
       report(
         reportLine(reportId, 'execute', decision, {
           ...line,
-          auditEventId: auditEventId ?? null,
-          auditError: error.message,
+          error: error.message,
+          committed: 'UNKNOWN',
         }),
       );
       warn(
-        `REPLAYED BUT NOT RECORDED: ${decision.summary.eventId} landed on ` +
-          `${decision.summary.target}/${landed.partition}@${landed.offset}, and its ` +
-          `${contracts.REPLAY_EXECUTED} record was not written to ${contracts.OPS_REPLAY_TOPIC} ` +
-          `(${error.message}). The replay stands; the platform audit does not know of it. ` +
-          `Record it before anything else (runbook: docs/runbooks/replay-dlq.md, step 3). Stopped here.`,
+        `COMMIT OUTCOME UNKNOWN for ${decision.summary.eventId} (${error.message}): its replay and ` +
+          `its ${contracts.REPLAY_EXECUTED} record are both committed or both not. Look for ` +
+          `x-replay-id ${replayId} on ${decision.summary.target} before running again ` +
+          '(runbook: docs/runbooks/replay-dlq.md, step 3). Stopped here.',
       );
-      return { written, recorded, failed: true };
+      return { written, recorded: written, failed: true };
     }
+    written += 1;
+    report(reportLine(reportId, 'execute', decision, { ...line, committed: true }));
   }
-  return { written, recorded, failed: false };
+  return { written, recorded: written, failed: false };
 }
 
 /** One report line: ids, names, reasons and offsets — never a payload. */

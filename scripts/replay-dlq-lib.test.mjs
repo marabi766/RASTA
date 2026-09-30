@@ -14,6 +14,7 @@ import {
   operatorFrom,
   parseArgs,
   parseTopics,
+  recordProblem,
   replayExecutedRecord,
   replayMessage,
   reportLine,
@@ -521,18 +522,35 @@ test('the record of an event with no tenant has none either: a platform record',
   assert.equal(record.headers[contracts.EVENT_HEADERS.tenantId], undefined);
 });
 
-/** A broker stand-in: records every send, and fails the ones `fails` names. */
-function fakeBroker(fails = () => false) {
-  const sent = [];
+/**
+ * A transactional broker stand-in: a transaction's sends become visible only
+ * when it commits, as they do to a read-committed consumer. `fail(topic)` may
+ * throw from a send, `failCommit` from the commit.
+ */
+function fakeBroker({ fail = () => false, failCommit = false } = {}) {
+  const committed = [];
+  const aborted = [];
   const offsets = new Map();
-  const send = async (topic, message) => {
-    if (fails(topic, sent)) throw new Error(`${topic} refused (injected)`);
-    const offset = offsets.get(topic) ?? 0;
-    offsets.set(topic, offset + 1);
-    sent.push({ topic, message });
-    return { partition: 0, offset: String(offset) };
+  const beginTransaction = async () => {
+    const pending = [];
+    return {
+      send: async (topic, message) => {
+        if (fail(topic)) throw new Error(`${topic} refused (injected)`);
+        const offset = offsets.get(topic) ?? 0;
+        offsets.set(topic, offset + 1);
+        pending.push({ topic, message });
+        return { partition: 0, offset: String(offset) };
+      },
+      commit: async () => {
+        if (failCommit) throw new Error('EndTxn answer lost (injected)');
+        committed.push(...pending);
+      },
+      abort: async () => {
+        aborted.push(...pending);
+      },
+    };
   };
-  return { sent, send };
+  return { committed, aborted, beginTransaction };
 }
 
 function run(decisions, broker) {
@@ -543,7 +561,7 @@ function run(decisions, broker) {
     reportId: REPORT,
     operator: 'ops.alice',
     contracts,
-    send: broker.send,
+    beginTransaction: broker.beginTransaction,
     newEventId: () => `EVT_RECORD_${(ids += 1)}`,
     now: () => '2026-09-30T08:00:00.000Z',
     report: (line) => lines.push(line),
@@ -553,53 +571,82 @@ function run(decisions, broker) {
 
 const two = () => [replayable(), replayable(envelope({ eventId: 'EVT_2', streamKey: 'AST_2' }))];
 
-test('each replay is recorded after it lands on .retry, one record per event, never before', async () => {
+test('each replay and its record commit together, one transaction per event, record after replay', async () => {
   const broker = fakeBroker();
   const { outcome, lines, warnings } = await run(two(), broker);
   assert.deepEqual(outcome, { written: 2, recorded: 2, failed: false });
   assert.deepEqual(
-    broker.sent.map((s) => s.topic),
+    broker.committed.map((s) => s.topic),
     ['rasta.fleet.v1.retry', 'rasta.ops.replay.v1', 'rasta.fleet.v1.retry', 'rasta.ops.replay.v1'],
   );
-  const records = broker.sent
+  const records = broker.committed
     .filter((s) => s.topic === 'rasta.ops.replay.v1')
-    .map((s) => JSON.parse(s.message.value).payload.replayedEvent.eventId);
-  assert.deepEqual(records, ['EVT_1', 'EVT_2']);
+    .map((s) => JSON.parse(s.message.value).payload);
   assert.deepEqual(
-    lines.map((l) => [l.eventId, l.replayOffset, l.auditEventId, l.auditOffset]),
+    records.map((p) => [p.replayedEvent.eventId, p.target.offset]),
     [
-      ['EVT_1', '0', 'EVT_RECORD_1', '0'],
-      ['EVT_2', '1', 'EVT_RECORD_2', '1'],
+      ['EVT_1', '0'],
+      ['EVT_2', '1'],
+    ],
+  );
+  assert.deepEqual(
+    lines.map((l) => [l.eventId, l.replayOffset, l.auditEventId, l.auditOffset, l.committed]),
+    [
+      ['EVT_1', '0', 'EVT_RECORD_1', '0', true],
+      ['EVT_2', '1', 'EVT_RECORD_2', '1', true],
     ],
   );
   assert.deepEqual(warnings, []);
 });
 
-test('a replay that fails writes no record, and stops the run', async () => {
-  const broker = fakeBroker((topic) => topic === 'rasta.fleet.v1.retry');
+test('a replay that fails aborts its transaction: nothing committed, the run stops and fails', async () => {
+  const broker = fakeBroker({ fail: (topic) => topic === 'rasta.fleet.v1.retry' });
   const { outcome, lines } = await run(two(), broker);
   assert.deepEqual(outcome, { written: 0, recorded: 0, failed: true });
-  assert.deepEqual(broker.sent, []);
+  assert.deepEqual(broker.committed, []);
   assert.equal(lines.length, 1);
+  assert.equal(lines[0].committed, false);
   assert.match(lines[0].error, /refused \(injected\)/);
 });
 
-test('a record that fails after its replay landed is said loudly, stops the run, and fails it', async () => {
-  const broker = fakeBroker((topic) => topic === 'rasta.ops.replay.v1');
-  const { outcome, lines, warnings } = await run(two(), broker);
-  // The first replay landed and stays landed; the second is never attempted.
-  assert.deepEqual(outcome, { written: 1, recorded: 0, failed: true });
+test('a failure — or a kill — between the replay and its record leaves neither committed', async () => {
+  // The .retry send succeeded inside the transaction; the record's did not.
+  // The replay is aborted with it: no replay without its REPLAY_EXECUTED.
+  const broker = fakeBroker({ fail: (topic) => topic === 'rasta.ops.replay.v1' });
+  const { outcome, lines } = await run(two(), broker);
+  assert.deepEqual(outcome, { written: 0, recorded: 0, failed: true });
+  assert.deepEqual(broker.committed, []);
   assert.deepEqual(
-    broker.sent.map((s) => s.topic),
+    broker.aborted.map((s) => s.topic),
     ['rasta.fleet.v1.retry'],
   );
   assert.equal(lines.length, 1);
-  assert.equal(lines[0].eventId, 'EVT_1');
-  assert.equal(lines[0].replayOffset, '0');
-  assert.match(lines[0].auditError, /rasta\.ops\.replay\.v1 refused/);
-  assert.equal(warnings.length, 1);
-  assert.match(
-    warnings[0],
-    /^REPLAYED BUT NOT RECORDED: EVT_1 landed on rasta\.fleet\.v1\.retry\/0@0/,
+  assert.deepEqual(
+    [lines[0].eventId, lines[0].replayOffset, lines[0].committed],
+    ['EVT_1', '0', false],
   );
+});
+
+test('a commit whose answer is lost is reported as unknown, loudly, and fails the run', async () => {
+  const broker = fakeBroker({ failCommit: true });
+  const { outcome, lines, warnings } = await run(two(), broker);
+  assert.deepEqual(outcome, { written: 0, recorded: 0, failed: true });
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].committed, 'UNKNOWN');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^COMMIT OUTCOME UNKNOWN for EVT_1 .*both committed or both not/);
+});
+
+test('an event its record cannot state is refused by name before anything is sent', () => {
+  // The envelope allows any event id; REPLAY_EXECUTED's replayedEvent.eventId
+  // allows 128 characters (round 1 on #166).
+  const long = 'E'.repeat(129);
+  const decision = assess(deadLetter(envelope({ eventId: long })), context);
+  assert.equal(decision.verdict, 'REFUSED');
+  assert.equal(decision.refusal, 'UNRECORDABLE:replayedEvent.eventId');
+  assert.equal(
+    assess(deadLetter(envelope({ eventId: 'E'.repeat(128) })), context).verdict,
+    'REPLAYABLE',
+  );
+  assert.equal(recordProblem(replayable().summary, contracts), null);
 });

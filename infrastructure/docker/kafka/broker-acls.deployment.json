@@ -872,6 +872,13 @@
       "operation": "READ"
     },
     {
+      "principal": "ops-replay",
+      "resourceType": "TRANSACTIONAL_ID",
+      "resourceName": "ops-replay.",
+      "patternType": "PREFIXED",
+      "operation": "WRITE"
+    },
+    {
       "principal": "organization-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.organization.v1",
