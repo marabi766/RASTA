@@ -326,6 +326,16 @@ export function assertNotServiceCaller(): void {
   }
 }
 
+/** The row-level half of tenant isolation for a tender (its owner's organization). */
+export function assertOwnTender(
+  tender: { id: string; organizationId: string },
+  organizationId: string,
+): void {
+  if (tender.organizationId !== organizationId) {
+    throw RastaError.notFound('Tender', tender.id);
+  }
+}
+
 /**
  * The row-level half of tenant isolation: `404` for any project that is not
  * the caller's organization's, whatever query produced it.

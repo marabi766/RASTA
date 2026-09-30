@@ -93,7 +93,7 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 | ------------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `ORGANIZATION_CREATED`         | **همه (Replica مرجع)** · economic (کیف پول) | `organizationId`, `name`, `type`, `parentId`                                                                      |
 | `ORGANIZATION_UPDATED`         | همه (Replica مرجع)                          | `organizationId`, `changes`                                                                                       |
-| `ORGANIZATION_MOVED`           | analytics · audit                           | `organizationId`, `fromParentId`, `toParentId`                                                                    |
+| `ORGANIZATION_MOVED`           | analytics · audit · construction (Q-83)     | `organizationId`, `fromParentId`, `toParentId`                                                                    |
 | `ORGANIZATION_DEACTIVATED`     | identity (ابطال عضویت) · همه                | `organizationId`, `reason`                                                                                        |
 | `ORGANIZATION_POLICY_CHANGED`  | audit                                       | `organizationId`, `policyKey`, `value`                                                                            |
 | `ORGANIZATION_CONTACT_CHANGED` | audit                                       | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
@@ -505,6 +505,38 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `submittedBy`, `submittedAt` — **بدون `assetsUsed`** (پایین‌تر)                             |
 | `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                              |
 
+**رویدادهای مناقصه — CON-002 (طرح، 2026-09-30؛ هنوز تولید نمی‌شوند).** ردیف‌های `TENDER_*`/`BID_*`/`BIDS_EVALUATED` جدول
+بالا **طرح**‌اند و با این جدول (ADR-065/066/067) جایگزین می‌شوند: `aggregateType = Tender`، **کلید پارتیشن `tenderId`**
+(`docs/07` § ۷٫۴)، مالک Topic و ACL تولیدکننده بی‌تغییر. **هیچ Payloadی محتوا، قیمت پیشنهادی، رمزنوشته یا متن آزاد
+حمل نمی‌کند** (`.strict()`)؛ `matrix`/`justification`/`amount` کاتالوگ نیز به‌جایشان شناسه و شمار و `hasJustification` می‌آیند. بازیگر
+در لفافه است؛ پس شناسهٔ پیمانکار روی Topic دیدنی است و فقط `audit-service` آن را می‌خواند (D-044).
+
+| رویداد                               | مصرف‌کنندگان                                               | Payload کلیدی                                                                                                                                         |
+| ------------------------------------ | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TENDER_CREATED`                     | audit                                                      | `tenderId`, `projectId`, `organizationId`, `procurementNature` (یا `null` تا انتشار), `createdBy`, `createdAt`                                        |
+| `TENDER_PUBLISHED`                   | audit · notification (پیمانکاران) · search                 | `tenderId`, `organizationId`, `visibility`, `bidOpeningAt`, `bidClosingAt`, `criteriaCount`, `publishedBy`, `publishedAt`                             |
+| `TENDER_CLOSED`                      | audit · notification                                       | `tenderId`, `organizationId`, `bidCount`, `closedAt`, `closedBy` (بازیگر سیستم برای جاروکننده)                                                        |
+| `BID_SUBMITTED`                      | audit (مهر زمانی و رسید)                                   | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `revision`, `receivedAt`, `contentCommitment`, `receipt`                               |
+| `BID_REVISED`                        | audit                                                      | همان `BID_SUBMITTED` با `revision` بالاتر                                                                                                             |
+| `BID_WITHDRAWN`                      | audit                                                      | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `withdrawnAt`                                                                          |
+| `BIDS_OPENED`                        | audit · notification                                       | `tenderId`, `organizationId`, `bidCount`, `openedBy`, `openedAt`                                                                                      |
+| `BID_ACCESSED`                       | audit                                                      | `bidId`, `tenderId`, `organizationId`, `accessorOrganizationId`, `purpose` (بسته), `outcome`, `accessedAt`                                            |
+| `BID_QUALIFIED` / `BID_DISQUALIFIED` | audit                                                      | `bidId`, `tenderId`, `organizationId`, `reasonCode` (بسته، فقط رد), `decidedBy`, `decidedAt`                                                          |
+| `BIDS_EVALUATED`                     | audit · analytics                                          | `tenderId`, `organizationId`, `evaluatedBidCount`, `evaluatedBy`, `evaluatedAt`                                                                       |
+| `TENDER_AWARDED`                     | **contract (پیش‌نویس، CON-003)** · notification · supplier | `tenderId`, `projectId`, `organizationId`, `winningBidId`, `winnerOrganizationId`, `amountMinor` (رشته)، `hasJustification`, `awardedBy`, `awardedAt` |
+| `TENDER_CANCELLED`                   | audit · notification                                       | `tenderId`, `organizationId`, `from`, `reasonCode` (بسته، مثل `NO_QUALIFIED_BID`), `cancelledBy`, `cancelledAt`                                       |
+
+`TENDER_AWARDED.amountMinor` تنها مبلغ برنده است و فقط پس از `EVALUATED` منتشر می‌شود (بازگشایی رخ داده)؛ CON-003 قرارداد را
+با کلید Idempotency `tenderId` می‌سازد. `BID_ACCESSED` و `BID_QUALIFIED`/`BID_DISQUALIFIED` رویدادهای **افزودهٔ CON-002** برای پوشش S-06
+هستند. **هشت رویداد افزوده — `BID_ACCESSED`، `BID_QUALIFIED`، `BID_DISQUALIFIED`، `BIDS_OPENED`، `BID_REVISED`، `BID_WITHDRAWN`، `TENDER_CLOSED`،
+`TENDER_CANCELLED` — را مدیر پروژه با همین نام‌ها پذیرفت (2026-09-30).** `BID_ACCESSED` هرگز محتوای پیشنهاد حمل نمی‌کند: فقط
+شناسه‌ها، بازیگر، زمان و هدف بسته (`.strict()` هر فیلد دیگر را رد می‌کند).
+
+**پیاده‌شده در CON-002 PR 2:** `TENDER_CREATED` و `TENDER_CANCELLED` (`from` وضعیت پیشین، `reasonCode` از مجموعهٔ بستهٔ
+`OWNER_REQUEST | NO_QUALIFIED_BID`؛ دلیل نوشتاری فقط در پایگاه داده) و **`TENDER_UPDATED`** (`changedFields[]`، فقط نام فیلدها؛ مثل
+`PROJECT_UPDATED`، برای پوشش S-06 از ویرایش پیش‌نویس) — **`TENDER_UPDATED` در فهرست هشت‌تایی نبود؛ مدیر پروژه آن را پذیرفت (2026-09-30) — فقط نام فیلدها، هرگز مقدارشان.**
+همه با `aggregateType = Tender` و کلید پارتیشن `tenderId`. بقیه هنوز تولید نمی‌شوند.
+
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
 گزارش در پایگاه داده می‌مانند؛ ولی تا مالکیتشان در برابر `asset-service` سنجیده نشود، روی `rasta.construction.v1`
@@ -535,15 +567,16 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `ApprovalPolicy` هستند، نه پروژه، و کلیدشان `{organizationId}/{workflowKey}` است: همهٔ نسخه‌های سیاست یک گردش‌کار
 یک جریان‌اند.
 
-| رویداد                                  | مصرف‌کنندگان | Payload کلیدی                                                                                                                                         |
-| --------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`APPROVAL_POLICY_CREATED`**           | audit        | `policyId`, `organizationId`, `authorOrganizationId`, `authorRole`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt` |
-| **`APPROVAL_POLICY_SUBMITTED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `submittedBy`, `submittedAt`                                                            |
-| **`APPROVAL_POLICY_REJECTED`**          | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `rejectedBy`, `rejectedAt`                                                              |
-| **`APPROVAL_POLICY_ACTIVATED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`                                         |
-| **`APPROVAL_POLICY_RETIRED`**           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                                                                |
-| **`PROJECT_PROGRESS_REPORT_DRAFTED`**   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                                                                   |
-| **`PROJECT_PROGRESS_REPORT_DISCARDED`** | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                                                               |
+| رویداد                                  | مصرف‌کنندگان | Payload کلیدی                                                                                                                                                                                                                                                |
+| --------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`APPROVAL_POLICY_CREATED`**           | audit        | `policyId`, `organizationId`, `authorOrganizationId`, `authorRole`, `workflowKey`, `policyVersion`, `stepCount`, `isSample`, `createdBy`, `createdAt`                                                                                                        |
+| **`APPROVAL_POLICY_SUBMITTED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `submittedBy`, `submittedAt`                                                                                                                                                                   |
+| **`APPROVAL_POLICY_REJECTED`**          | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `rejectedBy`, `rejectedAt`                                                                                                                                                                     |
+| **`APPROVAL_POLICY_ACTIVATED`**         | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredPolicyId`, `activatedBy`, `activatedAt`                                                                                                                                                |
+| **`APPROVAL_POLICY_RETIRED`**           | audit        | `policyId`, `organizationId`, `workflowKey`, `policyVersion`, `retiredBy`, `retiredAt`                                                                                                                                                                       |
+| **`APPROVAL_POLICY_SUSPENDED`**         | audit        | `policyId`, `organizationId`, `authorOrganizationId`, `workflowKey`, `policyVersion`, `fromStatus`, `reason` (`ORGANIZATION_MOVED` \| `ROUND_OPENING_RECHECK`), `causeEventId` and `movedOrganizationId` (null for the latter), `suspendedBy`, `suspendedAt` |
+| **`PROJECT_PROGRESS_REPORT_DRAFTED`**   | audit        | `projectId`, `reportId`, `organizationId`, `draftedBy`, `draftedAt`                                                                                                                                                                                          |
+| **`PROJECT_PROGRESS_REPORT_DISCARDED`** | audit        | `projectId`, `reportId`, `organizationId`, `discardedBy`, `discardedAt`                                                                                                                                                                                      |
 
 **دو رویداد گام تأیید پلتفرم** (نام‌ها پذیرفته‌شده به‌دست مدیر پروژه، 2026-09-26؛ همان الگوی Aggregate + فعل گذشته). Q-70 بند ۷ (تصمیم مالک، 2026-09-26) گام تأیید پلتفرم را
 افزود: `APPROVAL_POLICY_SUBMITTED` (`DRAFT → PENDING_PLATFORM_APPROVAL`) و `APPROVAL_POLICY_REJECTED`

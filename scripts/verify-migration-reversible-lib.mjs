@@ -920,10 +920,12 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'policy_reconciliation_task',
       'processed_event',
       'progress_report',
       'project',
       'project_need',
+      'tender',
     ],
     triggers: [],
     constraints: [
@@ -958,6 +960,17 @@ export const EXPECTED = {
       'ck_policy_rejection_complete',
       'ck_policy_activation_complete',
       'ck_policy_retirement_complete',
+      // 20260930130000_policy_suspension (Q-83): a suspension names who, when
+      // and why, exactly when the policy is SUSPENDED.
+      'ck_policy_suspension_complete',
+      // 20260930150000_policy_reconciliation_task (Q-83, D-041): a task's
+      // lease is a time and its token or neither, DONE names when, and the
+      // task is bound to its policy's tenant.
+      'ck_reconciliation_text_not_blank',
+      'ck_reconciliation_attempts_nonneg',
+      'ck_reconciliation_done_complete',
+      'ck_reconciliation_lease_pair',
+      'policy_reconciliation_task_organization_id_policy_id_fkey',
       'ck_step_authority_not_oversight',
       'ck_step_amount_range',
       'ck_approval_decision_complete',
@@ -972,6 +985,17 @@ export const EXPECTED = {
       'approval_organization_id_policy_id_fkey',
       'approval_policy_step_organization_id_policy_id_fkey',
       'progress_report_organization_id_project_id_fkey',
+      // 20260930160000_tender_core (CON-002 PR 2, ADR-065): a tender is bound to
+      // its project's tenant, names who acted, has a real bidding window, is
+      // never published on a default, and a cancellation says why.
+      'tender_organization_id_project_id_fkey',
+      'ck_tender_text_not_blank',
+      'ck_tender_actor_recorded',
+      'ck_tender_version_positive',
+      'ck_tender_timestamps_ordered',
+      'ck_tender_window_ordered',
+      'ck_tender_published_complete',
+      'ck_tender_cancellation_has_reason',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

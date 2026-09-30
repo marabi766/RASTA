@@ -19,10 +19,13 @@ export const dynamic = 'force-dynamic';
 
 export default async function MaintenanceRequestPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
@@ -43,7 +46,11 @@ export default async function MaintenanceRequestPage({
       }
       sidebar={<Sidebar items={PORTAL_NAV} currentHref="/maintenance" />}
     >
-      <RequestDetailScreen result={result} requestId={id} />
+      <RequestDetailScreen
+        result={result}
+        requestId={id}
+        notice={query.created === '1' ? 'created' : undefined}
+      />
     </AppShell>
   );
 }
