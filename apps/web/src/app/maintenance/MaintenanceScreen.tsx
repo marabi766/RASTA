@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import {
   Button,
   ButtonLink,
@@ -48,6 +49,12 @@ import type {
 export interface MaintenanceScreenProps {
   readonly result: ReadResult<MaintenanceRequestPage>;
   readonly query: MaintenanceRequestListQuery;
+  /**
+   * The report form, when this person may use it. The screen stays a pure
+   * function of what the server read: whether to offer the form is decided by
+   * the page (a role check, fail-closed) and arrives here already built.
+   */
+  readonly reportForm?: ReactNode;
 }
 
 /** Rebuilds this screen's URL with one value changed. */
@@ -213,7 +220,7 @@ function RequestRows({
   );
 }
 
-export function MaintenanceScreen({ result, query }: MaintenanceScreenProps) {
+export function MaintenanceScreen({ result, query, reportForm }: MaintenanceScreenProps) {
   const filtered = Boolean(query.status || query.type || query.severity);
 
   return (
@@ -222,6 +229,12 @@ export function MaintenanceScreen({ result, query }: MaintenanceScreenProps) {
         title="نگهداری و تعمیرات"
         description="درخواست‌های تعمیر ثبت‌شده برای دارایی‌های سازمان فعال شما."
       />
+
+      {reportForm ? (
+        <Section headingId="report-request" title="ثبت درخواست">
+          {reportForm}
+        </Section>
+      ) : null}
 
       <Section headingId="filters" title="پالایش">
         <Filters query={query} />

@@ -409,7 +409,7 @@ const DEFECTS = {
     problems: [COHORT_INPUT_PROBLEM.accounting, COHORT_INPUT_PROBLEM.binding],
   },
   bom: {
-    make: () => cohort({ 8: `﻿${reportText(8)}` }),
+    make: () => cohort({ 8: `\uFEFF${reportText(8)}` }),
     problems: [COHORT_INPUT_PROBLEM.accounting, COHORT_INPUT_PROBLEM.binding],
   },
   duplicate: {

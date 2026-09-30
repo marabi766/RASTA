@@ -24,6 +24,8 @@ import type { ConstructionEventName } from './events';
 
 export const AGGREGATE_TYPE = 'Project';
 export const POLICY_AGGREGATE_TYPE = 'ApprovalPolicy';
+/** A tender is its own aggregate (`docs/03` § 3.3, ADR-065), keyed by `tenderId`. */
+export const TENDER_AGGREGATE_TYPE = 'Tender';
 
 export const AGGREGATE_OF = {
   PROJECT_CREATED: AGGREGATE_TYPE,
@@ -44,14 +46,19 @@ export const AGGREGATE_OF = {
   APPROVAL_POLICY_CREATED: POLICY_AGGREGATE_TYPE,
   APPROVAL_POLICY_ACTIVATED: POLICY_AGGREGATE_TYPE,
   APPROVAL_POLICY_RETIRED: POLICY_AGGREGATE_TYPE,
+  APPROVAL_POLICY_SUSPENDED: POLICY_AGGREGATE_TYPE,
   APPROVAL_POLICY_SUBMITTED: POLICY_AGGREGATE_TYPE,
   APPROVAL_POLICY_REJECTED: POLICY_AGGREGATE_TYPE,
+  TENDER_CREATED: TENDER_AGGREGATE_TYPE,
+  TENDER_UPDATED: TENDER_AGGREGATE_TYPE,
+  TENDER_CANCELLED: TENDER_AGGREGATE_TYPE,
 } as const satisfies Record<ConstructionEventName, string>;
 
 const POLICY_EVENTS: readonly ConstructionEventName[] = [
   'APPROVAL_POLICY_CREATED',
   'APPROVAL_POLICY_ACTIVATED',
   'APPROVAL_POLICY_RETIRED',
+  'APPROVAL_POLICY_SUSPENDED',
   'APPROVAL_POLICY_SUBMITTED',
   'APPROVAL_POLICY_REJECTED',
 ];
@@ -67,8 +74,26 @@ export interface PartitionDecision {
  */
 export function resolvePartitionKey(
   eventName: ConstructionEventName,
-  payload: { projectId?: string; organizationId?: string; workflowKey?: string },
+  payload: {
+    projectId?: string;
+    tenderId?: string;
+    organizationId?: string;
+    workflowKey?: string;
+  },
 ): PartitionDecision {
+  if (AGGREGATE_OF[eventName] === TENDER_AGGREGATE_TYPE) {
+    // A tender's whole lifecycle — and, in later steps, its bids and its
+    // evaluation — is one ordered stream (`docs/07` § 7.4, ADR-065 § 5).
+    if (!payload.tenderId) {
+      throw new Error(`${eventName} carries no tenderId to partition by`);
+    }
+    return {
+      key: payload.tenderId,
+      reason:
+        `${eventName} is keyed by the tender it concerns: the tender is its own ` +
+        'aggregate and its lifecycle is one stream (docs/03 § 3.3, ADR-065)',
+    };
+  }
   if (POLICY_EVENTS.includes(eventName)) {
     // A policy's events are ordered with the other versions of the same
     // (organization, workflow key): activating version 2 retires version 1,

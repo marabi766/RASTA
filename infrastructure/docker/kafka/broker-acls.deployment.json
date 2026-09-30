@@ -299,10 +299,38 @@
     },
     {
       "principal": "construction-service",
+      "resourceType": "GROUP",
+      "resourceName": "construction-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "construction-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.construction.v1",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "document-service",
@@ -594,6 +622,13 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.asset.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.audit.trail.v1.retry",
       "patternType": "LITERAL",
       "operation": "WRITE"
@@ -601,7 +636,21 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.audit.trail.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -615,6 +664,13 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.document.v1.retry",
       "patternType": "LITERAL",
       "operation": "WRITE"
@@ -622,16 +678,16 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
-      "resourceName": "rasta.economic.v1.dlq",
+      "resourceName": "rasta.document.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
-      "resourceName": "rasta.economic.v1.retry",
+      "resourceName": "rasta.economic.v1.dlq",
       "patternType": "LITERAL",
-      "operation": "WRITE"
+      "operation": "READ"
     },
     {
       "principal": "ops-replay",
@@ -650,6 +706,13 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.fleet.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.identity.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -664,9 +727,23 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.identity.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.insurance.v1.retry",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "ops-replay",
@@ -685,9 +762,23 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.maintenance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.marketplace.v1.retry",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.marketplace.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "ops-replay",
@@ -706,9 +797,23 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.notification.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.organization.v1.retry",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "ops-replay",
@@ -723,6 +828,13 @@
       "resourceName": "rasta.supplier.v1.retry",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.supplier.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "organization-service",

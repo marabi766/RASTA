@@ -141,6 +141,7 @@ export class EventPublisher {
 export const ID_PREFIX = {
   project: ID_PREFIXES.project,
   need: 'PND',
+  tender: ID_PREFIXES.tender,
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

@@ -177,6 +177,10 @@ export const policyViewSchema = z
     rejectionReason: z.string().nullable(),
     retiredAt: z.string().nullable(),
     retiredBy: z.string().nullable(),
+    /** Q-83: set when the policy was suspended by an ORGANIZATION_MOVED. */
+    suspendedAt: z.string().nullable(),
+    suspendedBy: z.string().nullable(),
+    suspensionReason: z.string().nullable(),
     version: z.number().int(),
   })
   .strict();

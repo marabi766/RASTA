@@ -43,19 +43,33 @@ import { ExecutionService } from './project/execution.service';
 import { ApprovalRepository } from './approval/approval.repository';
 import { ApprovalService } from './approval/approval.service';
 import { PolicyService } from './approval/policy.service';
+import { PolicySuspensionService } from './approval/policy-suspension.service';
+import { PolicyReconciliationRepository } from './approval/policy-reconciliation.repository';
+import { PolicyReconciliationSweeper } from './approval/policy-reconciliation.sweeper';
+import {
+  OrganizationMovedConsumer,
+  organizationMovesConsumerFactory,
+} from './events/organization-moved.consumer';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
 import { ApprovalController } from './approval/approval.controller';
 import { ProgressService } from './progress/progress.service';
+import { TenderRepository } from './tender/tender.repository';
+import { TenderService } from './tender/tender.service';
+import { TenderController } from './tender/tender.controller';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
+import {
+  policyReconciliationBacklog,
+  policyReconciliationOldestDueAgeSeconds,
+} from './observability/metrics';
 import { ENV, LOGGER } from './tokens';
 import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
 
 /**
  * construction-service wiring (CON-001).
  *
- * ## No external boundary, no consumer, no workflow — by decision
+ * ## One consumer, no workflow — by decision
  *
  * `docs/04` § 4.12 lists supplier, fleet and document as dependencies and
  * Temporal for tender deadlines. None is wired here: CON-001 PR 1 needs none of
@@ -65,7 +79,12 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
  * The consumed events (`SUPPLIER_QUALIFIED`, `CONTRACT_SIGNED`, `ASSET_*`,
  * `AVAILABILITY_CHANGED`) all feed CON-002 or the fleet analysis. A handler
  * that consumed them and did nothing would write a `processed_event` row that
- * looks like work done (ADR-032). The table exists for the first real one.
+ * looks like work done (ADR-032).
+ *
+ * The one consumer is `ORGANIZATION_MOVED` (Q-83): an approval policy a union
+ * wrote must stop governing an organization that left the union's subtree. It
+ * writes no `processed_event` row either, by design — see
+ * `OrganizationMovedConsumer`.
  */
 @Module({
   controllers: [
@@ -73,6 +92,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ProjectLifecycleController,
     PolicyController,
     ApprovalController,
+    TenderController,
     HealthController,
     MetricsController,
   ],
@@ -114,14 +134,49 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ProjectAccess,
     IdempotencyStore,
     ProjectRepository,
+    TenderRepository,
     ProjectService,
+    TenderService,
     NeedService,
     ApprovalRepository,
     ApprovalService,
     PolicyService,
     OrganizationDirectory,
+    PolicyReconciliationRepository,
+    PolicySuspensionService,
+    {
+      provide: PolicyReconciliationSweeper,
+      inject: [PolicyReconciliationRepository, PolicySuspensionService, OrganizationDirectory, ENV],
+      useFactory: (
+        repository: PolicyReconciliationRepository,
+        suspension: PolicySuspensionService,
+        directory: OrganizationDirectory,
+        env: ConstructionEnv,
+      ) =>
+        new PolicyReconciliationSweeper(repository, suspension, directory, {
+          intervalMs: env.CONSTRUCTION_RECONCILE_INTERVAL_MS,
+          batchSize: env.CONSTRUCTION_RECONCILE_BATCH_SIZE,
+          leaseSeconds: env.CONSTRUCTION_RECONCILE_LEASE_SECONDS,
+          backoffSeconds: env.CONSTRUCTION_RECONCILE_BACKOFF_SECONDS,
+          backoffMaxSeconds: env.CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS,
+        }),
+    },
     ExecutionService,
     ProgressService,
+
+    {
+      provide: OrganizationMovedConsumer,
+      inject: [ENV, LOGGER, PolicySuspensionService],
+      useFactory: (env: ConstructionEnv, logger: Logger, suspension: PolicySuspensionService) =>
+        new OrganizationMovedConsumer(
+          organizationMovesConsumerFactory(
+            kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-organization-moves`),
+            logger,
+          ),
+          suspension,
+          logger,
+        ),
+    },
 
     {
       provide: InternalTokenService,
@@ -193,6 +248,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   constructor(
     private readonly relay: OutboxRelay,
+    private readonly moves: OrganizationMovedConsumer,
+    private readonly sweeper: PolicyReconciliationSweeper,
+    private readonly reconciliations: PolicyReconciliationRepository,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
   ) {}
@@ -204,7 +262,12 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     consumer.apply(RequestContextMiddleware).forRoutes('*');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // The consumer first: a topic it cannot subscribe to must stop the boot
+    // (`EventConsumer` never auto-creates topics), not leave a service that
+    // looks healthy and never hears a move.
+    await this.moves.start();
+    this.sweeper.start();
     this.relay.start();
 
     const sample = async () => {
@@ -214,6 +277,14 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         outboxPendingAgeSeconds.set(
           { service: SERVICE_NAME },
           await this.store.oldestPendingAgeSeconds(),
+        );
+        // The queue behind ORGANIZATION_MOVED, from the database (docs/23
+        // D-041): alert when the oldest due task keeps ageing.
+        const backlog = await this.reconciliations.backlog();
+        policyReconciliationBacklog.set({ service: SERVICE_NAME }, backlog.open);
+        policyReconciliationOldestDueAgeSeconds.set(
+          { service: SERVICE_NAME },
+          backlog.oldestDueAgeSeconds,
         );
         // Expired idempotency records are unusable by definition; removing
         // them keeps the table bounded (docs/06 § 6.8).
@@ -231,6 +302,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
+    await this.moves.stop();
+    await this.sweeper.stop();
     await this.relay.stop();
   }
 }
