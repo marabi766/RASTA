@@ -390,12 +390,14 @@ describe('evaluation criteria', () => {
       await w.prisma.client.$executeRawUnsafe(
         `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
            "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
-           "bid_closing_at" = '2026-11-30T20:30:00Z' WHERE "id" = '${tenderId}'`,
+           "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
+         WHERE "id" = '${tenderId}'`,
       );
     }
     async function unpublishRaw(tenderId: string) {
       await w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "status" = 'DRAFT' WHERE "id" = '${tenderId}'`,
+        `UPDATE "tender" SET "status" = 'DRAFT', "published_at" = NULL, "published_by" = NULL
+         WHERE "id" = '${tenderId}'`,
       );
     }
 

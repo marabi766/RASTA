@@ -81,7 +81,10 @@ export class PublicationService {
     const keyId = newId(ID_PREFIX.tenderKey);
     const { publicKeyPem, wrapped } = await this.makeKey(tenderId, keyId);
 
-    await withFinancialSpan(
+    // The answer is read inside the transaction, with the tender still locked
+    // (the defect Codex found in #162): what the caller is told is the state
+    // their own publication produced.
+    const view = await withFinancialSpan(
       'construction.tender.publish',
       () =>
         this.prisma.transaction(async (tx) => {
@@ -151,12 +154,13 @@ export class PublicationService {
             },
             occurredAt: at,
           });
+          return this.view(organizationId, tenderId, tx);
         }),
       { 'rasta.tender.command': 'publish' },
     );
     tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'publish' });
 
-    return this.view(organizationId, tenderId);
+    return view;
   }
 
   // -- invitations ------------------------------------------------------------
@@ -263,17 +267,25 @@ export class PublicationService {
   ): Promise<{ publicKeyPem: string; wrapped: WrappedKey }> {
     const pair = await generateTenderKeyPair();
     try {
-      return { publicKeyPem: pair.publicKeyPem, wrapped: this.keys.wrap(pair.privateKeyDer, { tenderId, keyId }) };
+      return {
+        publicKeyPem: pair.publicKeyPem,
+        wrapped: this.keys.wrap(pair.privateKeyDer, { tenderId, keyId }),
+      };
     } catch (error) {
-      if (error instanceof SealingError) throw RastaError.upstreamUnavailable('tender-key-provider');
+      if (error instanceof SealingError)
+        throw RastaError.upstreamUnavailable('tender-key-provider');
       throw error;
     } finally {
       pair.privateKeyDer.fill(0);
     }
   }
 
-  private async view(organizationId: string, tenderId: string): Promise<TenderView> {
-    const row = await this.tenders.findTender(tenderId);
+  private async view(
+    organizationId: string,
+    tenderId: string,
+    client: ExtendedPrismaClient,
+  ): Promise<TenderView> {
+    const row = await this.tenders.findTender(tenderId, client);
     if (!row) throw RastaError.notFound('Tender', tenderId);
     assertOwnTender(row, organizationId);
     return toTenderView(row);

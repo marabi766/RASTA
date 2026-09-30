@@ -36,14 +36,14 @@ export class PublicationController {
   @ApiOperation({
     summary: 'Publish a tender (DRAFT → PUBLISHED)',
     description:
-      '`expectedVersion` must equal the tender\'s current `version`; otherwise 409 ' +
+      "`expectedVersion` must equal the tender's current `version`; otherwise 409 " +
       'OPTIMISTIC_LOCK_FAILED. Refused with 422 (BUSINESS_RULE_VIOLATION), naming every reason ' +
       'in the message, unless: the procurement nature and the visibility are chosen (never ' +
       'defaulted, Q-03); the bidding window is set, at least ' +
       'CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS long (default 0) and not already closed by the ' +
       'database clock; the criteria exist and their weights sum to exactly 10000 basis points; ' +
       'a RESTRICTED tender has at least one invitation. The criteria are frozen from this moment. ' +
-      'Makes the tender\'s key pair, wrapping its private half with the key-encryption key ' +
+      "Makes the tender's key pair, wrapping its private half with the key-encryption key " +
       '(ADR-066); without one configured nothing is published and the answer is 503. Publishes ' +
       `TENDER_PUBLISHED. The approval gate arrives in a later step. ${TENANT_NOTE} ${ROLES_NOTE}`,
   })

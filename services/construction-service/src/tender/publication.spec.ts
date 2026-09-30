@@ -85,7 +85,12 @@ describe('publicationRefusals', () => {
         totalWeightBp: 5_000,
         invitationCount: 0,
       }),
-    ).toEqual(['NATURE_REQUIRED', 'WINDOW_REQUIRED', 'CRITERIA_WEIGHTS_INCOMPLETE', 'INVITATION_REQUIRED']);
+    ).toEqual([
+      'NATURE_REQUIRED',
+      'WINDOW_REQUIRED',
+      'CRITERIA_WEIGHTS_INCOMPLETE',
+      'INVITATION_REQUIRED',
+    ]);
   });
 
   it('only ever names codes from the closed set', () => {

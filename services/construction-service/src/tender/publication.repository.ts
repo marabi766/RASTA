@@ -81,9 +81,11 @@ export class PublicationRepository {
         keyId: input.keyId,
         publicKeyPem: input.publicKeyPem,
         kekId: input.wrapped.kekId,
-        wrapNonce: input.wrapped.nonce,
-        wrappedPrivateKey: input.wrapped.ciphertext,
-        wrapTag: input.wrapped.tag,
+        // Copied into plain `Uint8Array`s: Prisma's `Bytes` wants one backed by an
+        // `ArrayBuffer`, which a Node `Buffer` (possibly pooled) does not promise.
+        wrapNonce: new Uint8Array(input.wrapped.nonce),
+        wrappedPrivateKey: new Uint8Array(input.wrapped.ciphertext),
+        wrapTag: new Uint8Array(input.wrapped.tag),
         createdAt: input.at,
         createdBy: input.actor,
       },

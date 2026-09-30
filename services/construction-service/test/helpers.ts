@@ -335,9 +335,7 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
       );
       // A tender key is never deleted by the service (`tg_tender_key_guard`);
       // a suite's own keys are removed the same way, for one transaction.
-      await tx.$executeRawUnsafe(
-        'ALTER TABLE "tender_key" DISABLE TRIGGER "tg_tender_key_guard"',
-      );
+      await tx.$executeRawUnsafe('ALTER TABLE "tender_key" DISABLE TRIGGER "tg_tender_key_guard"');
       await tx.tenderKey.deleteMany({ where });
       await tx.$executeRawUnsafe('ALTER TABLE "tender_key" ENABLE TRIGGER "tg_tender_key_guard"');
     });

@@ -7,52 +7,6 @@
   },
   "servers": [],
   "paths": {
-    "/v1/tenders/{id}/invitations": {
-      "post": {
-        "operationId": "inviteToTender",
-        "x-step": "PR 4",
-        "summary": "Invite an organization to a restricted tender (DRAFT or PUBLISHED).",
-        "parameters": [{ "$ref": "#/components/parameters/Id" }],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["organizationId"],
-                "properties": { "organizationId": { "type": "string" } }
-              }
-            }
-          }
-        },
-        "responses": {
-          "204": { "description": "Invited" },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "422": { "$ref": "#/components/responses/BusinessRule" }
-        }
-      }
-    },
-    "/v1/tenders/{id}/publish": {
-      "post": {
-        "operationId": "publishTender",
-        "x-step": "PR 4",
-        "summary": "DRAFT to PUBLISHED. Needs procurementNature, criteria summing to 10000 bp, and a future bidClosingAt after bidOpeningAt. Generates the tender key pair. Publishes TENDER_PUBLISHED.",
-        "parameters": [{ "$ref": "#/components/parameters/Id" }],
-        "requestBody": { "$ref": "#/components/requestBodies/ExpectedVersion" },
-        "responses": {
-          "200": {
-            "description": "The tender",
-            "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
-            }
-          },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "422": { "$ref": "#/components/responses/BusinessRule" }
-        }
-      }
-    },
     "/v1/tenders/{id}/close": {
       "post": {
         "operationId": "closeTender",
