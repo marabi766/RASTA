@@ -73,6 +73,12 @@ now + grace`) در همان تراکنشی که ساخته می‌شود، و ه
 آشتی (§ ۸) منتقل می‌کند و آشتی‌دهنده (گام C) `REFUND_REQUESTED` و `REFUND_UNKNOWN` را با `getStatus` حل می‌کند و
 `REFUND_DECLINED_RELEASE_PENDING` را فقط با برگرداندن Hold.
 
+**کیف پول `FROZEN`** (تصمیم مدیر پروژه، بازبینی دور ۲ #143): از کیف پول منجمد پولی بیرون نمی‌رود. بازپرداخت با
+`422 BUSINESS_RULE_VIOLATION` رد می‌شود، پیش از هر Hold یا فراخوانی Provider و بی Hold باقی‌مانده، و Intent پس از فعال‌شدن
+دوبارهٔ کیف پول بازپرداخت‌پذیر می‌ماند. معکوس‌کردنِ بدهکار پس از بازپرداخت Provider (`REFUNDED_NOT_REVERSED`) هم با مبلغ
+Hold‌شده منتظر می‌ماند؛ فقط برگرداندن Hold یک ردِ Provider (`REFUND_DECLINED_RELEASE_PENDING`) که پول را به کیف پول
+برمی‌گرداند مجاز است.
+
 `MockPaymentProvider` بازپرداخت را با کلید Idempotency (و مرجع) Dedupe می‌کند و بازپرداخت دوم یک مرجع با کلید دیگر را
 `ALREADY_REFUNDED` رد می‌کند، تا فراخوانی دوم در تست دیدنی باشد.
 
