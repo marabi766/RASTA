@@ -273,6 +273,9 @@ construction پاسخ را در همان تراکنش دامنه ثبت می‌�
 `REFUND_UNKNOWN`، `REFUNDED_NOT_REVERSED` یا `REFUND_DECLINED_RELEASE_PENDING`.
 فراخوانی که باید بداند پول کجاست، Intent را می‌خواند، نه بازپخش را.
 
+**بازپرداخت از کیف پول `FROZEN`** با `422 BUSINESS_RULE_VIOLATION` رد می‌شود، پیش از هر Hold یا فراخوانی Provider؛ از کیف
+پول منجمد پولی بیرون نمی‌رود و Intent پس از فعال‌شدن دوبارهٔ کیف پول بازپرداخت‌پذیر می‌ماند (تصمیم مدیر پروژه، ADR-064).
+
 ---
 
 ## ۶٫۹ Rate Limiting

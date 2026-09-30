@@ -806,9 +806,6 @@ export class PaymentService {
     // 1. Request: hold the money and mark the intent, together.
     const requested = await this.prisma.transaction(async (tx) => {
       const { intent: row, wallet } = await this.lockForRefund(tx, intentId, organizationId);
-      // Refunded at the provider by an earlier attempt that could not record
-      // it: the hold is still there, and only step 3 is retried.
-      if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
       // Declined by the provider, and the held amount not yet returned: this
       // call returns it and does nothing else — the decline is known, so the
       // provider is never asked again (round 2 on #143, finding 1).
@@ -816,6 +813,21 @@ export class PaymentService {
         await this.returnDeclinedHold(tx, row, wallet, actor);
         return { row, next: 'RELEASED' as const };
       }
+      // No money leaves a frozen wallet (PM ruling, round 2 on #143). Refused
+      // before any hold or provider call; the intent stays refundable once the
+      // wallet is active again. Returning a declined refund's hold, above,
+      // moves money back *into* the wallet and is still allowed. A reversal
+      // still owed after the provider refunded waits too, with its amount
+      // held, so nothing can spend it meanwhile.
+      if (wallet.status !== 'ACTIVE') {
+        throw RastaError.businessRule(
+          'This wallet is not active; a refund cannot take money out of it until it is',
+          { paymentIntentId: intentId, walletId: wallet.id, walletStatus: wallet.status },
+        );
+      }
+      // Refunded at the provider by an earlier attempt that could not record
+      // it: the hold is still there, and only step 3 is retried.
+      if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
       if (row.failureReason === REFUND_REQUESTED || row.failureReason === REFUND_UNKNOWN) {
         throw refundUnresolved(intentId, row.failureReason);
       }
