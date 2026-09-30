@@ -2,8 +2,12 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchMaintenanceRequests, type MaintenanceRequestListQuery } from '@/server/maintenance';
+import { canReportMaintenance } from '@/server/maintenance-commands';
+import { fetchCurrentUser } from '@/server/identity';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { MaintenanceScreen } from './MaintenanceScreen';
+import { ReportRequestForm } from './ReportRequestForm';
 
 /**
  * The `/maintenance` route (docs/16 § 16.6).
@@ -37,7 +41,16 @@ export default async function MaintenancePage({
     cursor: one(params.cursor),
   };
 
-  const result = await fetchMaintenanceRequests(session, query);
+  const [result, currentUser] = await Promise.all([
+    fetchMaintenanceRequests(session, query),
+    fetchCurrentUser(session),
+  ]);
+
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
+  // read shows no form rather than one that might not work, and
+  // maintenance-service decides again on every submit.
+  const canReport =
+    currentUser.kind === 'USER' && canReportMaintenance(currentUser.user.effectiveRoles);
 
   return (
     <AppShell
@@ -53,7 +66,19 @@ export default async function MaintenancePage({
       }
       sidebar={<Sidebar items={PORTAL_NAV} currentHref="/maintenance" />}
     >
-      <MaintenanceScreen result={result} query={query} />
+      <MaintenanceScreen
+        result={result}
+        query={query}
+        reportForm={
+          canReport ? (
+            <ReportRequestForm
+              csrfToken={session.csrfToken}
+              submissionId={mintSubmissionId(session)}
+              initialAssetId={one(params.assetId)}
+            />
+          ) : undefined
+        }
+      />
     </AppShell>
   );
 }

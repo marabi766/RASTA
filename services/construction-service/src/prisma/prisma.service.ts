@@ -21,6 +21,7 @@ export const TENANT_SCOPED_MODELS = [
   'PolicyReconciliationTask',
   'Approval',
   'ProgressReport',
+  'Tender',
 ] as const;
 
 /**

@@ -1,4 +1,5 @@
 import {
+  Alert,
   EmptyState,
   ErrorState,
   Grid,
@@ -43,6 +44,13 @@ import type {
 export interface RequestDetailScreenProps {
   readonly result: ReadResult<MaintenanceRequestDetail>;
   readonly requestId: string;
+  /**
+   * Set by the write that sent the person here (`?created=1`). Display only:
+   * the query is attacker-controllable, so it can at worst put a harmless
+   * confirmation on a page the viewer is already allowed to read — and it is
+   * not rendered at all when the read failed.
+   */
+  readonly notice?: 'created';
 }
 
 interface Milestone {
@@ -115,7 +123,7 @@ function RepairOrderCard({ order }: { order: RepairOrderSummary }) {
   );
 }
 
-export function RequestDetailScreen({ result, requestId }: RequestDetailScreenProps) {
+export function RequestDetailScreen({ result, requestId, notice }: RequestDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
       <>
@@ -167,6 +175,10 @@ export function RequestDetailScreen({ result, requestId }: RequestDetailScreenPr
         title={request.title}
         description={`${maintenanceTypeLabel(request.type)} — گزارش‌شده در ${formatJalaliDateLong(request.reportedAt)}`}
       />
+
+      {notice === 'created' ? (
+        <Alert tone="success">درخواست ثبت شد. کار از همین صفحه دنبال می‌شود.</Alert>
+      ) : null}
 
       <Section headingId="identity" title="شناسنامه">
         <Grid columns={2}>

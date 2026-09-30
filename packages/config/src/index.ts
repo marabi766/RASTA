@@ -2,6 +2,7 @@ export {
   NODE_ENVS,
   LOG_LEVELS,
   baseEnvSchema,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
   booleanEnv,
   queryBoolean,
   queryBooleanDefault,

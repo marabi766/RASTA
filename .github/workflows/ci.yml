@@ -105,6 +105,7 @@ jobs:
           pnpm run test:kafka-credential-scope
           pnpm run check:kafka-credential-scope
           pnpm run test:kafka-outbox-tables
+          pnpm run test:replay-dlq-lib
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
@@ -1424,17 +1425,65 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+  # ---------------------------------------------------------------------------
+  # Broker authorisation, on a broker of its own.
+  #
+  # RUN-006's broker tests and the DLQ replay tool's, apart from every other
+  # suite: a fresh broker, which nothing but these tests writes, declared
+  # throwaway (REPLAY_TEST_DISPOSABLE_BROKER), so the replay test may delete
+  # the records retention would — only records it wrote itself, which it
+  # checks before deleting any (round 2 on #144). Their allowed writes are
+  # marker records on real topics; no other suite runs here to read them.
+  # ---------------------------------------------------------------------------
+  broker-authorisation:
+    name: Broker authorisation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: quality
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start the authenticated Kafka broker
+        # The same bootstrap as the integration job (ci-up.sh): SASL_SSL,
+        # every platform topic, the generated development ACLs. It writes no
+        # record, so every record on it is the tests' own.
+        run: bash infrastructure/docker/kafka/ci-up.sh
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+
       - name: Broker authorisation, asked of the broker
-        # RUN-006: the generated ACLs observed on the live broker — only a
-        # topic's owner writes it, a service reads what it subscribes to under
-        # its own group namespace, dead-letter and retry topics, refused
+        # The DLQ replay tool first, as ops-replay, on real dead letters a
+        # real EventConsumer writes (docs/runbooks/replay-dlq.md): dry-run by
+        # default, every refusal, a replay consumed from .retry with only the
+        # platform headers and its key, never the original topic, and a
+        # staleness retention has made unknowable — the admin deletes records
+        # from one rasta.fleet.v1 partition, as retention would, once it has
+        # checked each one is this run's (first, so no other test has written
+        # there). It loads @rasta/contracts and @rasta/nest-common from dist.
+        # Then RUN-006: the generated ACLs observed on the live broker — only
+        # a topic's owner writes it, a service reads what it subscribes to
+        # under its own group namespace, dead-letter and retry topics, refused
         # credentials and PLAINTEXT, no topic creation, and the idempotent
-        # producer on WRITE alone. Refuses to run without the bootstrap's
-        # environment rather than skip. Last in the job: its allowed writes
-        # are marker records on real topics, which no suite above should read.
+        # producer on WRITE alone. Both refuse to run without the bootstrap's
+        # environment rather than skip.
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
           eval "${kafka_credentials}"
+          pnpm exec turbo run build --filter=@rasta/nest-common
+          REPLAY_TEST_DISPOSABLE_BROKER=1 pnpm run test:replay-dlq-broker
           pnpm run test:kafka-acl-broker
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets

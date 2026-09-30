@@ -67,6 +67,9 @@ export class MockPaymentProvider implements PaymentProvider {
    */
   private readonly states = new Map<string, ProviderPaymentStatus>();
 
+  /** Refund answers already given, by reference and idempotency key. */
+  private readonly refunds = new Map<string, RefundResult>();
+
   constructor(private readonly latencyMs = 0) {}
 
   async authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
@@ -129,21 +132,48 @@ export class MockPaymentProvider implements PaymentProvider {
     return { outcome: 'CAPTURED', providerReference: request.providerReference, simulated: true };
   }
 
+  /**
+   * Refunds, deduplicated by idempotency key as a real provider would.
+   *
+   * A repeated call with the same key and reference answers what the first
+   * one answered and changes nothing, so a retry is safe and a second call is
+   * still observable to a test. A refund under a *different* key of a
+   * reference already refunded is refused as `ALREADY_REFUNDED`: money goes
+   * back once (ADR-064).
+   */
   async refund(request: RefundRequest): Promise<RefundResult> {
     await this.delay();
 
+    const dedupeKey = `${request.providerReference}\u0000${request.idempotencyKey}`;
+    const replayed = this.refunds.get(dedupeKey);
+    if (replayed) return replayed;
+
     const failure = directive(request.providerReference, 'fail-refund');
+    let result: RefundResult;
     if (failure) {
-      return {
+      result = {
         outcome: 'FAILED',
         providerReference: request.providerReference,
         failureCode: failure,
         simulated: true,
       };
+    } else if (this.states.get(request.providerReference) === 'REFUNDED') {
+      result = {
+        outcome: 'FAILED',
+        providerReference: request.providerReference,
+        failureCode: ALREADY_REFUNDED,
+        simulated: true,
+      };
+    } else {
+      this.states.set(request.providerReference, 'REFUNDED');
+      result = {
+        outcome: 'REFUNDED',
+        providerReference: request.providerReference,
+        simulated: true,
+      };
     }
-
-    this.states.set(request.providerReference, 'REFUNDED');
-    return { outcome: 'REFUNDED', providerReference: request.providerReference, simulated: true };
+    this.refunds.set(dedupeKey, result);
+    return result;
   }
 
   async getStatus(providerReference: string): Promise<ProviderPaymentStatus> {
@@ -215,6 +245,9 @@ export const MOCK_DIRECTIVE_CODES = [
   'NOT_PERMITTED',
   'PROVIDER_UNAVAILABLE',
 ] as const;
+
+/** The code a second refund of one reference, under another key, fails with. */
+export const ALREADY_REFUNDED = 'ALREADY_REFUNDED';
 
 /** The code a directive outside the closed set fails with, in place of its own. */
 export const UNSUPPORTED = 'UNSUPPORTED_DIRECTIVE';
