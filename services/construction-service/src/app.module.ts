@@ -54,6 +54,9 @@ import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
 import { ApprovalController } from './approval/approval.controller';
 import { ProgressService } from './progress/progress.service';
+import { TenderRepository } from './tender/tender.repository';
+import { TenderService } from './tender/tender.service';
+import { TenderController } from './tender/tender.controller';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import {
@@ -89,6 +92,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ProjectLifecycleController,
     PolicyController,
     ApprovalController,
+    TenderController,
     HealthController,
     MetricsController,
   ],
@@ -130,7 +134,9 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ProjectAccess,
     IdempotencyStore,
     ProjectRepository,
+    TenderRepository,
     ProjectService,
+    TenderService,
     NeedService,
     ApprovalRepository,
     ApprovalService,

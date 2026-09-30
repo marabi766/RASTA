@@ -52,13 +52,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
-import {
-  assertB1Definitions,
-  assertB1Inert,
-  assertB1Objects,
-  B1_INDEXES,
-  B1_OUTBOX_COLUMNS,
-} from './verify-outbox-b1-lib.mjs';
+import { assertB1Definitions, assertB1Inert, assertB1Objects } from './verify-outbox-b1-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 /**
@@ -278,7 +272,6 @@ function verify(service) {
       throw new Error(`${MIGRATIONS[i]}/down.sql is missing — the migration is not reversible`);
     }
   }
-  const migrationDir = migrationDirs[0];
 
   const envKey = `DATABASE_URL_${service.toUpperCase()}`;
   const baseUrl = process.env[envKey] ?? process.env.DATABASE_URL;

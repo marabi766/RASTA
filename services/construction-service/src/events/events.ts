@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PROJECT_STATES } from '../project/project.state-machine';
 import { WORKFLOW_KEYS } from '../approval/approval.state-machine';
+import { CANCELLATION_CODES, TENDER_STATES } from '../tender/tender.state-machine';
 
 /**
  * Events published by construction-service, on `rasta.construction.v1`.
@@ -67,6 +68,13 @@ export const CONSTRUCTION_EVENTS = {
   APPROVAL_POLICY_REJECTED: 'APPROVAL_POLICY_REJECTED',
   PROJECT_PROGRESS_REPORT_DRAFTED: 'PROJECT_PROGRESS_REPORT_DRAFTED',
   PROJECT_PROGRESS_REPORT_DISCARDED: 'PROJECT_PROGRESS_REPORT_DISCARDED',
+  // CON-002 (ADR-065). `TENDER_CREATED` is a catalogue event; `TENDER_CANCELLED`
+  // was accepted by the project manager (2026-09-30); `TENDER_UPDATED` follows
+  // the `PROJECT_UPDATED` precedent (a DRAFT edit is a state change audit must
+  // hear about, S-06) and is flagged for acceptance in the PR.
+  TENDER_CREATED: 'TENDER_CREATED',
+  TENDER_UPDATED: 'TENDER_UPDATED',
+  TENDER_CANCELLED: 'TENDER_CANCELLED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -381,6 +389,53 @@ export const progressReportDiscardedPayload = z
   })
   .strict();
 
+// ---------------------------------------------------------------------------
+// CON-002 — tenders (ADR-065). Keyed by `tenderId`, about a `Tender`.
+//
+// **No payload carries a title, the scope of work, a stated reason, a bid, a
+// price or any free text.** They stay in this service's database; a consumer
+// asks the API under its own authorization.
+// ---------------------------------------------------------------------------
+
+const tenderState = z.enum(TENDER_STATES);
+const procurementNature = z.enum(['FORMAL_TENDER', 'INQUIRY', 'RFP', 'MARKETPLACE_DEAL']);
+
+const tenderIdentity = {
+  tenderId: identifier,
+  projectId: identifier,
+  organizationId: identifier,
+};
+
+export const tenderCreatedPayload = z
+  .object({
+    ...tenderIdentity,
+    /** Null until the owner chooses it; the platform never defaults it (Q-03). */
+    procurementNature: procurementNature.nullable(),
+    createdBy: identifier,
+    createdAt: isoTimestamp,
+  })
+  .strict();
+
+export const tenderUpdatedPayload = z
+  .object({
+    ...tenderIdentity,
+    changedFields,
+    updatedBy: identifier,
+    updatedAt: isoTimestamp,
+  })
+  .strict();
+
+/** The stated reason is prose and stays in the database; the code is a closed set. */
+export const tenderCancelledPayload = z
+  .object({
+    ...tenderIdentity,
+    from: tenderState,
+    reasonCode: z.enum(CANCELLATION_CODES),
+    cancelledBy: identifier,
+    cancelledAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -403,6 +458,9 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
   PROJECT_PROGRESS_REPORT_DRAFTED: progressReportDraftedPayload,
   PROJECT_PROGRESS_REPORT_DISCARDED: progressReportDiscardedPayload,
+  TENDER_CREATED: tenderCreatedPayload,
+  TENDER_UPDATED: tenderUpdatedPayload,
+  TENDER_CANCELLED: tenderCancelledPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<
