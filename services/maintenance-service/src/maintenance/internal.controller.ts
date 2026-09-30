@@ -2,6 +2,11 @@ import { Body, Controller, Delete, Get, HttpCode, Param, Post, Req } from '@nest
 import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { AllowService, zodPipe } from '@rasta/nest-common';
 import {
+  AssetWorkStateService,
+  WORK_STATE_CALLERS,
+  type MaintenanceStateView,
+} from './asset-work-state';
+import {
   MaintenanceFactService,
   SOURCE_FACT_CALLER,
   requestIdParamSchema,
@@ -55,7 +60,27 @@ export class MaintenanceInternalController {
 @ApiTags('maintenance-internal')
 @Controller({ path: 'internal/assets', version: '1' })
 export class MaintenanceTransferClearanceController {
-  constructor(private readonly clearance: TransferClearanceService) {}
+  constructor(
+    private readonly clearance: TransferClearanceService,
+    private readonly workState: AssetWorkStateService,
+  ) {}
+
+  @Get(':assetId/maintenance-state')
+  @AllowService(...WORK_STATE_CALLERS)
+  @ApiParam({ name: 'assetId', schema: { type: 'string', maxLength: 64 } })
+  @ApiOperation({
+    summary: 'Whether a repair is in progress on a machine (internal)',
+    description:
+      'Reserved for `fleet-service` and `asset-service` service tokens; every other service and ' +
+      'every user token is refused. The organization is the one signed into the token; a repair ' +
+      'in another organization is not seen. Read when a replayed `MAINTENANCE_STARTED` / ' +
+      '`MAINTENANCE_COMPLETED` must not be applied from its payload (D-039).',
+  })
+  maintenanceState(
+    @Param('assetId', zodPipe(assetIdParamSchema)) assetId: string,
+  ): Promise<MaintenanceStateView> {
+    return this.workState.maintenanceState(assetId);
+  }
 
   @Post(':assetId/transfer-clearance')
   @HttpCode(200)

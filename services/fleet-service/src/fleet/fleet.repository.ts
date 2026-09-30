@@ -4,7 +4,6 @@ import {
   buildOutboxRow,
   runUnscoped,
   type OutboxMessageInput,
-  type SourcePositions,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
@@ -262,6 +261,11 @@ export class FleetRepository {
   // Usage
   // -------------------------------------------------------------------------
 
+  /** Whether an assignment is open on the machine, in the caller's organization. Scoped. */
+  async hasActiveAssignment(assetId: string): Promise<boolean> {
+    return (await this.client.assignment.count({ where: { assetId, endedAt: null } })) > 0;
+  }
+
   async findUsageById(id: string) {
     return this.client.usageRecord.findFirst({ where: { id } });
   }
@@ -414,6 +418,23 @@ export class FleetRepository {
         DELETE FROM asset_transfer_fence
         WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
     });
+  }
+
+  /**
+   * Removes the fences of every organization but `ownerId` on the machine
+   * (D-039). A fence exists while its organization owns the machine; once
+   * asset-service says another organization does, the transfer landed and the
+   * fence is moot — and, the transfer being recorded, fence resolution would
+   * otherwise keep it for ever.
+   */
+  async dropTransferFencesNotOwnedBy(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    ownerId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id <> ${ownerId}`;
   }
 
   /** The transfer landed: whatever the previous owner fenced is moot. */
@@ -670,8 +691,6 @@ export class FleetRepository {
       insuranceLapsedCoverages?: string[];
       insuranceLapsedAt?: Date | null;
       insuranceCover?: InsuranceCover;
-      /** Per producer, where the last state-setting event stood (D-039). */
-      sourcePositions?: SourcePositions;
       sourceEvent: string;
     },
   ) {

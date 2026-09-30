@@ -47,15 +47,3 @@ export const transferClearanceTotal = new Counter({
   labelNames: ['service', 'owner', 'outcome'] as const,
   registers: [registry],
 });
-
-/**
- * Events older than the state already applied, whose status change was
- * skipped: a replay from `<topic>.retry` after a newer event (D-039). Their
- * dossier entry is still written. `event` is the closed set of projected names.
- */
-export const staleStateEventsTotal = new Counter({
-  name: 'rasta_asset_stale_state_events_total',
-  help: 'Events whose status change was skipped because a newer event had already set the state',
-  labelNames: ['service', 'event'] as const,
-  registers: [registry],
-});

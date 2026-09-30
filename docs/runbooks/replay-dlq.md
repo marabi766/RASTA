@@ -162,14 +162,17 @@ Idempotency مصرف‌کننده‌ها (`processed_event`) پیام **تکرا
 > `audit-service` و `notification-service` بازپخش را با همان Topic اصلی ثبت می‌کنند (`originalDelivery` در
 > `@rasta/nest-common`). هیچ دور زدنی با اعتبار یک سرویس مجاز نیست.
 >
-> **بازپخش ترتیب را حفظ نمی‌کند — و Consumerهای حالت‌ساز از آن محافظت می‌شوند.** `<topic>` و `<topic>.retry` دو جریان جدا هستند،
-> پس رویداد بازپخش‌شده می‌تواند پس از رویداد جدیدتری برسد که پیش‌تر اعمال شده. Replicaهای وضعیت (`asset_ref` در fleet و
-> maintenance، وضعیت دارایی در asset-service از رویدادهای fleet/maintenance) موقعیت آخرین رویداد اعمال‌شده را به‌ازای هر ناشر
-> نگه می‌دارند (`streamSeq`، وگرنه `occurredAt` و شناسهٔ رویداد): رویداد قدیمی‌تر **بی‌اثر** است (علامت `processed_event`
-> می‌خورد، لاگ می‌شود و `rasta_{fleet,maintenance,asset}_stale_state_events_total` بالا می‌رود؛ ورودی پرونده/Timeline
-> دارایی‌ها همچنان ثبت می‌شود). رویدادهای ایمنی fleet (بازرسی/بیمه) و Consumerهای افزودنی (audit، supplier، usage) یا
-> ترتیب‌ناپذیرند یا فقط واقعیت می‌افزایند؛ economic و identity حالت را از مالک/پایگاه می‌خوانند. پس بازپخش در برابر «وضعیت
-> کهنه» امن است، اما هنوز مالِ ابزار و اپراتور است که علت را پیش از بازپخش رفع کند.
+> **بازپخش ترتیب را حفظ نمی‌کند — پس رویداد حالت‌ساز در `.retry` بار خود را اعمال نمی‌کند، از مالک تازه می‌شود.** `<topic>` و
+> `<topic>.retry` دو جریان جدا هستند و رویداد بازپخش‌شده می‌تواند پس از رویدادهای جدیدتر برسد. پس Consumerی که _حالت_ نگه می‌دارد،
+> روی تحویل `.retry` بار را اعمال **نمی‌کند** و وضعیت فعلی را از سرویس مالک می‌خواند (REST داخلی احرازشده، ADR-061 § ۴؛ Tenant از
+> توکن امضاشده): Replica دارایی در fleet و maintenance از `GET /v1/internal/assets/:id/snapshot` در asset-service (مالک فعلی
+> تصویر کامل می‌گیرد؛ مالک _پیشین_ فقط `transferred: true` و مالک فعلی؛ دیگران همان ۴۰۴ دارایی ناموجود)، پرچم `inMaintenance` در
+> fleet از `…/maintenance-state` در maintenance، و وضعیت دارایی در asset-service (رویدادهای `ASSET_ASSIGNED`،
+> `ASSIGNMENT_ENDED`، `MAINTENANCE_STARTED`، `MAINTENANCE_COMPLETED`) از `…/assignment-state` در fleet و `…/maintenance-state`،
+> فقط از راه جدول انتقال مجاز. تغییر مالک در تصویر همان مسیر `ASSET_TRANSFERRED` را می‌رود (پایان تخصیص‌ها، رها کردن Fence)، و Fence
+> سازمانی که دیگر مالک نیست همیشه حذف می‌شود. **بسته‌شده در شکست:** پاسخ احرازشده‌ای نیامد ⇐ خطا ⇐ تلاش دوباره ⇐ DLQ؛ بار کهنه هرگز
+> اعمال نمی‌شود. تحویل روی Topic اصلی همان رفتار پیشین را دارد. Consumerهای افزودنی (audit، supplier، usage) و رویدادهای ایمنی fleet
+> (بازرسی/بیمه) تغییری ندارند؛ economic و identity حالت را از مالک/پایگاه می‌خوانند. ورودی پرونده/Timeline دارایی همچنان ثبت می‌شود.
 
 وقتی ابزار ساخته شد، دو قاعده‌اش همین‌اند: اول همیشه `--dry-run`، و هدف همیشه `<topic>.retry`، نه `<topic>`.
 

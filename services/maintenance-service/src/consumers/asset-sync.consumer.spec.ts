@@ -44,9 +44,6 @@ function harness(
       calls.push('upsert');
       upserts.push(data);
     },
-    async lockAssetRef(): Promise<void> {
-      // The replica-row lock (D-039); not part of the ordering these tests pin.
-    },
     async lockAssetForWork(_tx: unknown, assetId: string, mode: string): Promise<void> {
       calls.push(`lock:${assetId}:${mode}`);
     },

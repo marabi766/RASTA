@@ -172,7 +172,6 @@ describe('asset integrity', () => {
     );
     for (const table of [
       'asset_timeline_entry',
-      'asset_event_position',
       'insurance_claim',
       'insurance_policy',
       'technical_inspection',
@@ -710,20 +709,14 @@ describe('asset integrity', () => {
   // L4-03 — the consumer's marker and its effects
   // ---------------------------------------------------------------------------
 
-  describe('a status event replayed after a newer one (D-039)', () => {
-    const sequenced = (
-      eventName: string,
-      assetId: string,
-      streamSeq: number,
-      occurredAt: string,
-    ): EventEnvelope => ({
-      ...envelope(eventName, assetId, org.a),
-      occurredAt,
-      streamSeq,
-      streamKey: assetId,
+  describe('a status event replayed on .retry (D-039)', () => {
+    const retry = (topic: string) => Object.freeze({ topic: `${topic}.retry`, partition: 0 });
+    const source = (state: { activeAssignment: boolean; inMaintenance: boolean }) => ({
+      read: jest.fn(async () => state),
     });
-
-    const timelineNames = async (assetId: string) =>
+    const replayer = (state: { activeAssignment: boolean; inMaintenance: boolean }) =>
+      new TimelineConsumer(null, repository, assets, source(state));
+    const entries = async (assetId: string) =>
       (
         await prisma.client.$queryRawUnsafe<{ event_name: string }[]>(
           `SELECT event_name FROM asset_timeline_entry WHERE asset_id = $1`,
@@ -731,74 +724,121 @@ describe('asset integrity', () => {
         )
       ).map((row) => row.event_name);
 
-    it('keeps the dossier entry of the older MAINTENANCE_STARTED but does not set the status back', async () => {
-      const assetId = await machine(org.a);
-      await setStatus(assetId, 'IN_MAINTENANCE');
-      const started = sequenced('MAINTENANCE_STARTED', assetId, 5, '2026-09-29T10:00:00.000Z');
-      const completed = sequenced('MAINTENANCE_COMPLETED', assetId, 6, '2026-09-29T11:00:00.000Z');
-
-      // STARTED failed and went to the dead-letter topic; COMPLETED was applied.
-      await asActor(manager(org.a), () => consumer.handle(completed));
-      expect((await statusOf(assetId)).status).toBe('ACTIVE');
-
-      // The replay of STARTED arrives on `.retry`, afterwards.
-      await expect(
-        asActor(manager(org.a), () => consumer.handle(started)),
-      ).resolves.toBeUndefined();
-
-      expect((await statusOf(assetId)).status).toBe('ACTIVE');
-      expect(await timelineNames(assetId)).toEqual(
-        expect.arrayContaining(['MAINTENANCE_STARTED', 'MAINTENANCE_COMPLETED']),
-      );
-      const statusEvents = (await outboxFor(assetId)).filter(
-        (e) => e.eventName === ASSET_EVENTS.ASSET_STATUS_CHANGED,
-      );
-      expect(statusEvents).toHaveLength(1);
-      expect(await markerExists(started.eventId)).toBe(true);
-    });
-
-    it('applies an event at an equal or later position, and a redelivery changes nothing', async () => {
+    it('does not apply a stale MAINTENANCE_STARTED: the status follows what the owners say now', async () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
-      const started = sequenced('MAINTENANCE_STARTED', assetId, 7, '2026-09-29T10:00:00.000Z');
-      await asActor(manager(org.a), () => consumer.handle(started));
-      expect((await statusOf(assetId)).status).toBe('IN_MAINTENANCE');
+      // The repair started and completed since; the STARTED that failed is replayed.
+      const state = { activeAssignment: false, inMaintenance: false };
 
-      // The same position under another event id is not older: it applies.
-      const twin = {
-        ...sequenced('MAINTENANCE_COMPLETED', assetId, 7, '2026-09-29T10:00:00.000Z'),
-      };
-      await asActor(manager(org.a), () => consumer.handle(twin));
-      expect((await statusOf(assetId)).status).toBe('ACTIVE');
-
-      await expect(asActor(manager(org.a), () => consumer.handle(started))).resolves.toBe(
-        'SKIPPED',
-      );
-      expect((await statusOf(assetId)).status).toBe('ACTIVE');
-    });
-
-    it('shows the stored positions to the owning organization only', async () => {
-      const assetId = await machine(org.a);
-      await setStatus(assetId, 'IN_MAINTENANCE');
       await asActor(manager(org.a), () =>
-        consumer.handle(sequenced('MAINTENANCE_COMPLETED', assetId, 3, '2026-09-29T10:00:00.000Z')),
+        replayer(state).handle(
+          envelope('MAINTENANCE_STARTED', assetId, org.a),
+          retry('rasta.maintenance.v1'),
+        ),
       );
 
-      const read = (organizationId: string) =>
-        asActor(manager(organizationId), () =>
-          repository.transaction((tx) => repository.readEventPositions(tx, assetId)),
-        );
-      expect(Object.keys(await read(org.a))).toEqual(['maintenance-service']);
-      expect(await read(org.b)).toEqual({});
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      // The dossier entry is a fact and is written.
+      expect(await entries(assetId)).toContain('MAINTENANCE_STARTED');
     });
 
-    const markerExists = async (eventId: string) =>
-      (
-        await prisma.client.$queryRawUnsafe<{ n: number }[]>(
-          `SELECT count(*)::int AS n FROM processed_event WHERE event_id = $1`,
-          eventId,
-        )
-      )[0]!.n > 0;
+    it('catches the status up for a genuinely failed MAINTENANCE_STARTED or ASSET_ASSIGNED', async () => {
+      const inRepair = await machine(org.a);
+      await setStatus(inRepair, 'ACTIVE');
+      await asActor(manager(org.a), () =>
+        replayer({ activeAssignment: false, inMaintenance: true }).handle(
+          envelope('MAINTENANCE_STARTED', inRepair, org.a),
+          retry('rasta.maintenance.v1'),
+        ),
+      );
+      expect((await statusOf(inRepair)).status).toBe('IN_MAINTENANCE');
+
+      const assigned = await machine(org.a);
+      await setStatus(assigned, 'ACTIVE');
+      await asActor(manager(org.a), () =>
+        replayer({ activeAssignment: true, inMaintenance: false }).handle(
+          envelope('ASSET_ASSIGNED', assigned, org.a),
+          retry('rasta.fleet.v1'),
+        ),
+      );
+      expect((await statusOf(assigned)).status).toBe('ASSIGNED');
+
+      // And the release that failed is replayed once the assignment has ended.
+      await asActor(manager(org.a), () =>
+        replayer({ activeAssignment: false, inMaintenance: false }).handle(
+          envelope('ASSIGNMENT_ENDED', assigned, org.a),
+          retry('rasta.fleet.v1'),
+        ),
+      );
+      expect((await statusOf(assigned)).status).toBe('ACTIVE');
+    });
+
+    it('never forces a transition the table forbids', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'DECOMMISSIONED');
+
+      await asActor(manager(org.a), () =>
+        replayer({ activeAssignment: false, inMaintenance: true }).handle(
+          envelope('MAINTENANCE_STARTED', assetId, org.a),
+          retry('rasta.maintenance.v1'),
+        ),
+      );
+
+      expect((await statusOf(assetId)).status).toBe('DECOMMISSIONED');
+    });
+
+    it('fails closed: with either owner unreachable nothing is applied and no marker is left', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const event = envelope('MAINTENANCE_STARTED', assetId, org.a);
+      const unreachable = {
+        read: jest.fn(async () => {
+          throw new Error('maintenance-service unreachable');
+        }),
+      };
+
+      await expect(
+        asActor(manager(org.a), () =>
+          new TimelineConsumer(null, repository, assets, unreachable).handle(
+            event,
+            retry('rasta.maintenance.v1'),
+          ),
+        ),
+      ).rejects.toThrow(/unreachable/);
+      // A consumer built without its peers refuses the replay too.
+      await expect(
+        asActor(manager(org.a), () =>
+          new TimelineConsumer(null, repository, assets).handle(
+            event,
+            retry('rasta.maintenance.v1'),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      expect(await entries(assetId)).not.toContain('MAINTENANCE_STARTED');
+      const markers = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM processed_event WHERE event_id = $1`,
+        event.eventId,
+      );
+      expect(markers[0]!.n).toBe(0);
+    });
+
+    it('leaves a delivery on the original topic exactly as before', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const reads = source({ activeAssignment: false, inMaintenance: false });
+
+      await asActor(manager(org.a), () =>
+        new TimelineConsumer(null, repository, assets, reads).handle(
+          envelope('MAINTENANCE_STARTED', assetId, org.a),
+          Object.freeze({ topic: 'rasta.maintenance.v1', partition: 0 }),
+        ),
+      );
+
+      expect(reads.read).not.toHaveBeenCalled();
+      expect((await statusOf(assetId)).status).toBe('IN_MAINTENANCE');
+    });
   });
 
   describe('the timeline consumer (audit L4-03)', () => {

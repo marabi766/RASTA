@@ -160,15 +160,3 @@ export const transferFenceResolutionsTotal = new Counter({
   labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });
-
-/**
- * Events older than the state already applied, which changed nothing: a replay
- * from `<topic>.retry` after a newer event (D-039). The event is still marked
- * processed. `event` is the closed set of consumed event names.
- */
-export const staleStateEventsTotal = new Counter({
-  name: 'rasta_maintenance_stale_state_events_total',
-  help: 'Events skipped because a newer event had already set the state they describe',
-  labelNames: ['service', 'event'] as const,
-  registers: [registry],
-});

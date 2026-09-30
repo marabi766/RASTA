@@ -60,6 +60,8 @@ import {
 import { MaintenanceFactService } from './maintenance/source-fact';
 import { RepairOrderController } from './maintenance/repair-order.controller';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
+import { AssetSnapshotClient } from './consumers/replica-sources';
+import { AssetWorkStateService } from './maintenance/asset-work-state';
 import { UsageConsumer } from './consumers/usage.consumer';
 import { requestsAwaitingApproval, requestsOpenTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -149,6 +151,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     ScheduleService,
     RequestService,
     MaintenanceFactService,
+    AssetWorkStateService,
     TransferClearanceService,
     // One monotonic clock for the clearance bound, read by the arrival
     // middleware and the service alike (ADR-062 § 2); a test replaces it.
@@ -233,6 +236,18 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
               },
             ),
           repository,
+          // D-039: a `.retry` delivery refreshes the replica from asset-service
+          // instead of applying the replayed payload.
+          new AssetSnapshotClient({
+            from: SERVICE_NAME,
+            baseUrl: env.ASSET_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: new InternalTokenService(
+              env.INTERNAL_TOKEN_SECRET,
+              env.INTERNAL_TOKEN_ISSUER,
+              env.INTERNAL_TOKEN_TTL_SECONDS,
+            ),
+          }),
         ),
     },
 

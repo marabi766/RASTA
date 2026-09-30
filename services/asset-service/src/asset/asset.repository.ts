@@ -2,10 +2,8 @@ import { Injectable } from '@nestjs/common';
 import {
   allocateStreamSeqSql,
   buildOutboxRow,
-  readSourcePositions,
   runUnscoped,
   type OutboxMessageInput,
-  type SourcePositions,
 } from '@rasta/nest-common';
 import { canonicalIdentifier } from './identifier';
 import { resolvePartitionKey } from './routing';
@@ -598,31 +596,6 @@ export class AssetRepository {
    * Called inside the handler's transaction so the marker and the effect
    * commit together.
    */
-  /**
-   * Where each producer's last status-setting event stood for one asset
-   * (D-039). Called under the asset row's exclusive lock, in the event's
-   * tenant, so the read-decide-write below has one writer.
-   */
-  async readEventPositions(tx: ExtendedPrismaClient, assetId: string): Promise<SourcePositions> {
-    const row = await tx.assetEventPosition.findFirst({ where: { assetId } });
-    return readSourcePositions(row?.positions);
-  }
-
-  async writeEventPositions(
-    tx: ExtendedPrismaClient,
-    assetId: string,
-    organizationId: string,
-    positions: SourcePositions,
-  ): Promise<void> {
-    const updated = await tx.assetEventPosition.updateMany({
-      where: { assetId },
-      data: { positions, updatedAt: new Date() },
-    });
-    if (updated.count === 0) {
-      await tx.assetEventPosition.create({ data: { assetId, organizationId, positions } });
-    }
-  }
-
   async markEventProcessed(
     tx: ExtendedPrismaClient,
     eventId: string,

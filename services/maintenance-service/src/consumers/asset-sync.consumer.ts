@@ -2,12 +2,12 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
-  isOlderThanApplied,
-  readSourcePositions,
-  sourcePositionOf,
+  isRetryDelivery,
   type EventConsumer,
+  type EventDelivery,
   type EventHandler,
 } from '@rasta/nest-common';
+import { UNCONFIGURED_ASSET_SNAPSHOT_SOURCE, type AssetSnapshotSource } from './replica-sources';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
 import {
   CONSUMED_EVENTS,
@@ -17,7 +17,7 @@ import {
 } from '../maintenance/events';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
-import { staleStateEventsTotal, transferOpenWorkTotal } from '../observability/metrics';
+import { transferOpenWorkTotal } from '../observability/metrics';
 
 /**
  * Keeps maintenance's picture of the machines accurate.
@@ -107,6 +107,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly consumerFactory: EventConsumerFactory | null,
     private readonly repository: MaintenanceRepository,
+    /** Read on a `.retry` delivery only; without one a replay is refused (fail closed, D-039). */
+    private readonly assetSource: AssetSnapshotSource = UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -114,7 +116,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('Asset sync consumer disabled — no Kafka broker configured');
       return;
     }
-    this.consumer = this.consumerFactory((envelope) => this.handle(envelope));
+    this.consumer = this.consumerFactory((envelope, delivery) => this.handle(envelope, delivery));
     await this.consumer.start();
   }
 
@@ -123,7 +125,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Handles one event. Exposed so a test can drive it without a broker. */
-  async handle(envelope: EventEnvelope): Promise<void | 'SKIPPED'> {
+  async handle(envelope: EventEnvelope, delivery?: EventDelivery): Promise<void | 'SKIPPED'> {
     const projection = PROJECTIONS[envelope.eventName as ConsumedEventName];
     // `rasta.asset.v1` carries far more than this service cares about — every
     // location update, every document attachment, every inspection. Ignoring
@@ -167,7 +169,38 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       return 'SKIPPED';
     }
 
-    const patch = projection.patch(payload);
+    // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery
+    // on `.retry` may be older than events applied since. It does not apply its
+    // payload: the replica is refreshed from asset-service, which owns the
+    // state. Read before the transaction so no connection is held across HTTP;
+    // no answer throws (retry, then DLQ) and the stale payload is never applied.
+    const snapshot =
+      delivery !== undefined && isRetryDelivery(delivery)
+        ? await this.assetSource.snapshot(existing?.organizationId ?? organizationId ?? '', assetId)
+        : undefined;
+    if (snapshot === null) {
+      throw new UnprocessableEventError(
+        DLQ_REASONS.SOURCE_UNCONFIRMED,
+        `asset-service does not confirm ${envelope.eventName} ${envelope.eventId} for the organization it names`,
+      );
+    }
+    // A snapshot showing another owner than the replica had is the owner change
+    // ASSET_TRANSFERRED would have made.
+    const ownerChanged =
+      snapshot !== undefined &&
+      existing !== null &&
+      existing !== undefined &&
+      existing.organizationId !== snapshot.organizationId;
+
+    const patch: AssetRefPatch = snapshot
+      ? {
+          organizationId: snapshot.organizationId,
+          name: snapshot.name,
+          assetType: snapshot.type,
+          assetTag: snapshot.assetTag,
+          status: snapshot.status,
+        }
+      : projection.patch(payload);
     // Narrowed rather than asserted: the guard above already established that
     // one of these is present, and spelling it out here keeps that true if the
     // guard is ever edited.
@@ -181,29 +214,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      const transfer = envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED;
-      if (transfer) {
+      const transfer = snapshot
+        ? ownerChanged
+        : envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED;
+      if (transfer || snapshot) {
         // Exclusive, against the shared lock a new request takes (ADR-062).
         // Without it, a request could read the owner before this commits and
         // the fence after, and pass both.
         await this.repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
-      }
-
-      // D-039: `<topic>` and `<topic>.retry` are separate streams, so a replay
-      // can arrive after a newer event. One older than the event that last set
-      // this machine's replica must not set it back; it is marked processed
-      // (above) and does nothing else.
-      await this.repository.lockAssetRef(tx, assetId);
-      const current = await this.repository.findAssetRef(assetId, tx);
-      const position = sourcePositionOf(envelope);
-      const positions = readSourcePositions(current?.sourcePositions);
-      if (isOlderThanApplied(positions[envelope.producer], position)) {
-        staleStateEventsTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
-        this.logger.warn(
-          `${envelope.eventName} ${envelope.eventId} is older than the state already applied ` +
-            `to ${assetId}; state unchanged`,
-        );
-        return;
       }
 
       await this.repository.upsertAssetRef(tx, {
@@ -220,12 +238,17 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // moves it, which only a transfer does.
         organizationId: tenant,
         sourceEvent: envelope.eventName,
-        sourcePositions: { ...positions, [envelope.producer]: position },
       });
 
-      const previousOwner = str(payload.fromOrganizationId);
+      const previousOwner = snapshot ? existing?.organizationId : str(payload.fromOrganizationId);
       if (transfer && previousOwner) {
         await this.settleTransfer(tx, assetId, previousOwner);
+      }
+      if (snapshot) {
+        // A fence held by an organization that no longer owns the machine is
+        // moot however the replica came to know (the transfer is recorded, so
+        // fence resolution would keep it for ever).
+        await this.repository.dropTransferFencesNotOwnedBy(tx, assetId, snapshot.organizationId);
       }
     });
   }

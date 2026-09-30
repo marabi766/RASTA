@@ -4,7 +4,6 @@ import {
   buildOutboxRow,
   runUnscoped,
   type OutboxMessageInput,
-  type SourcePositions,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { MaintenanceEventName } from './events';
@@ -589,6 +588,27 @@ export class MaintenanceRepository {
     return rows.length > 0;
   }
 
+  /**
+   * Removes the fences of every organization but `ownerId` on the machine
+   * (D-039): once asset-service says another organization owns it, the
+   * transfer landed and the fence is moot — and, the transfer being recorded,
+   * fence resolution would otherwise keep it for ever.
+   */
+  async dropTransferFencesNotOwnedBy(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    ownerId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence
+      WHERE asset_id = ${assetId} AND organization_id <> ${ownerId}`;
+  }
+
+  /** Whether a repair is in progress on the machine, in the caller's organization. Scoped. */
+  async hasRepairInProgress(assetId: string): Promise<boolean> {
+    return (await this.client.repairOrder.count({ where: { assetId, status: 'IN_PROGRESS' } })) > 0;
+  }
+
   /** The transfer landed: whatever the previous owner fenced is moot. */
   async dropTransferFences(
     tx: ExtendedPrismaClient,
@@ -638,21 +658,6 @@ export class MaintenanceRepository {
   // Reference replicas
   // -------------------------------------------------------------------------
 
-  /**
-   * Serializes the writers of one machine's replica row, so the position read
-   * before an event is applied is still the newest when it is written (D-039).
-   * Its own key: the work lock above is the one requests take.
-   */
-  async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
-    await runUnscoped(
-      'serializes concurrent replica writers for one asset; the replica row is platform-wide',
-      async () => {
-        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`asset_ref:${assetId}`}, 0))`;
-        await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
-      },
-    );
-  }
-
   async findAssetRef(id: string, tx?: ExtendedPrismaClient) {
     return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
       (tx ?? this.client).assetRef.findFirst({ where: { id } }),
@@ -682,8 +687,6 @@ export class MaintenanceRepository {
       assetType?: string | null;
       assetTag?: string | null;
       status?: string;
-      /** Per producer, where the last state-setting event stood (D-039). */
-      sourcePositions?: SourcePositions;
       sourceEvent: string;
     },
   ) {

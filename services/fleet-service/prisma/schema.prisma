@@ -390,12 +390,6 @@ model AssetRef {
   /// Recorded policy windows per coverage, one per policy (`INSURANCE_RECORDED`).
   insuranceCover           Json      @default("{}") @map("insurance_cover")
 
-  /// Where in each producer's stream the last state-setting event was applied
-  /// (`{ "<producer>": { seq, streamKey, at, eventId } }`). An older event, e.g.
-  /// one replayed from `<topic>.retry`, must not regress `status` or
-  /// `inMaintenance` (D-039). Read and written under `lockAssetRef`.
-  sourcePositions Json @default("{}") @map("source_positions")
-
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")
 

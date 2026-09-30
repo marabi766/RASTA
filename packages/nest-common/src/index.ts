@@ -50,6 +50,8 @@ export {
 
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
+export { internalGet } from './auth/internal-get';
+export type { InternalGetOptions, InternalGetResult } from './auth/internal-get';
 export type {
   UserClaims,
   ServiceClaims,
@@ -128,13 +130,7 @@ export type {
   HandlerOutcome,
   ConsumerLogger,
 } from './consumer/event-consumer';
-export {
-  isOlderThanApplied,
-  originalDelivery,
-  readSourcePositions,
-  sourcePositionOf,
-} from './consumer/source-position';
-export type { SourcePosition, SourcePositions } from './consumer/source-position';
+export { isRetryDelivery, originalDelivery } from './consumer/original-delivery';
 
 // Outbox ---------------------------------------------------------------------
 export {

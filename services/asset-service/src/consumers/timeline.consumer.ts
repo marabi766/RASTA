@@ -1,15 +1,20 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
-  isOlderThanApplied,
-  sourcePositionOf,
+  isRetryDelivery,
   type EventConsumer,
+  type EventDelivery,
   type EventHandler,
 } from '@rasta/nest-common';
+import {
+  UNCONFIGURED_WORK_STATE_SOURCE,
+  statusFromWorkState,
+  type AssetWorkStateSource,
+} from './work-state';
 import { AssetRepository } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
 import { SERVICE_NAME } from '../config/env';
-import { staleStateEventsTotal, timelineEventsSkippedTotal } from '../observability/metrics';
+import { timelineEventsSkippedTotal } from '../observability/metrics';
 import { CONSUMED_EVENT_CATEGORY, timelineSourceSchema } from '../asset/events';
 import type { AssetStatus } from '../asset/lifecycle';
 
@@ -103,6 +108,8 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly consumerFactory: EventConsumerFactory | null,
     private readonly repository: AssetRepository,
     private readonly assets: AssetService,
+    /** Read on a `.retry` delivery only; without one a replay is refused (fail closed). */
+    private readonly workState: AssetWorkStateSource = UNCONFIGURED_WORK_STATE_SOURCE,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -112,7 +119,7 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('Timeline consumer disabled — no Kafka broker configured');
       return;
     }
-    this.consumer = this.consumerFactory((envelope) => this.handle(envelope));
+    this.consumer = this.consumerFactory((envelope, delivery) => this.handle(envelope, delivery));
     await this.consumer.start();
   }
 
@@ -127,7 +134,7 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
    * hand-built envelope — the projection rules are worth testing without a
    * broker in the loop.
    */
-  async handle(envelope: EventEnvelope): Promise<void | 'SKIPPED'> {
+  async handle(envelope: EventEnvelope, delivery?: EventDelivery): Promise<void | 'SKIPPED'> {
     const projection = PROJECTIONS[envelope.eventName];
     // Topics carry more than this service cares about. Ignoring the rest is
     // normal operation, not an error.
@@ -161,6 +168,19 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
       // and they are not equally harmless, so they are told apart.
       await this.skipped(envelope, assetId);
       return 'SKIPPED';
+    }
+
+    // D-039: a delivery on `<topic>.retry` may be older than events applied
+    // since (the two are separate streams), so its status is not taken from
+    // the payload. It is derived from what fleet-service and
+    // maintenance-service say now, read before the transaction so no
+    // connection is held across HTTP. No answer from either throws: the event
+    // is retried and then dead-lettered, and never applied from its payload.
+    // The dossier entry below is a fact and is written as usual.
+    const replayed = delivery !== undefined && isRetryDelivery(delivery);
+    let status: AssetStatus | undefined = projection.status;
+    if (projection.status && replayed) {
+      status = statusFromWorkState(await this.workState.read(asset.organizationId, assetId));
     }
 
     const appended = await this.repository.transaction(async (tx) => {
@@ -206,32 +226,13 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
       // logged and ignored, not thrown. A conflict with a concurrent write
       // does throw, so everything above rolls back and the redelivery is
       // judged again.
-      if (projection.status) {
-        // An event older than the one that last set this asset's status — a
-        // replay from `<topic>.retry` after a newer event was applied — keeps
-        // its dossier entry (a fact) but must not move the status back
-        // (D-039). The position is per producer: the topics are separate
-        // streams, and the sequence is only comparable within one.
-        const position = sourcePositionOf(envelope);
-        const positions = await this.repository.readEventPositions(tx, assetId);
-        if (isOlderThanApplied(positions[envelope.producer], position)) {
-          staleStateEventsTotal.inc({ service: SERVICE_NAME, event: envelope.eventName });
-          this.logger.warn(
-            `${envelope.eventName} ${envelope.eventId} is older than the status already set ` +
-              `for ${assetId}; dossier entry kept, status unchanged`,
-          );
-          return true;
-        }
+      if (status && !(replayed && status === locked.status)) {
         await this.assets.applyEventStatusChange(
           tx,
           assetId,
-          projection.status,
+          status,
           `${envelope.eventName} از ${envelope.producer}`,
         );
-        await this.repository.writeEventPositions(tx, assetId, asset.organizationId, {
-          ...positions,
-          [envelope.producer]: position,
-        });
       }
 
       return true;

@@ -45,9 +45,11 @@ import {
 } from './asset/transfer-clearance';
 import { AssetController } from './asset/asset.controller';
 import { AssetInternalController, TransferRecordService } from './asset/transfer-record';
+import { AssetSnapshotService } from './asset/asset-snapshot';
 import { InsuranceService } from './insurance/insurance.service';
 import { ClaimService } from './insurance/claim.service';
 import { TimelineConsumer } from './consumers/timeline.consumer';
+import { AssetWorkStateClient } from './consumers/work-state';
 import { HealthController, MetricsController } from './health/health.controller';
 import { loadAssetEnv, SERVICE_NAME, type AssetEnv } from './config/env';
 
@@ -65,6 +67,14 @@ export const LOGGER = Symbol('ASSET_LOGGER');
  * topic costs nothing, and the alternative is editing this list on every
  * service launch.
  */
+/** A minting `InternalTokenService`, from the secret the guard verifies with. */
+const internalTokens = (env: AssetEnv): InternalTokenService =>
+  new InternalTokenService(
+    env.INTERNAL_TOKEN_SECRET,
+    env.INTERNAL_TOKEN_ISSUER,
+    env.INTERNAL_TOKEN_TTL_SECONDS,
+  );
+
 const CONSUMED_TOPICS = [
   'rasta.fleet.v1',
   'rasta.maintenance.v1',
@@ -140,6 +150,7 @@ const CONSUMED_TOPICS = [
     },
     AssetService,
     TransferRecordService,
+    AssetSnapshotService,
 
     {
       provide: InsuranceService,
@@ -188,6 +199,21 @@ const CONSUMED_TOPICS = [
             ),
           repository,
           assets,
+          // D-039: a `.retry` delivery derives the status from what the owners
+          // of a machine's work say now, not from the replayed payload.
+          new AssetWorkStateClient({
+            from: SERVICE_NAME,
+            fleet: {
+              baseUrl: env.FLEET_SERVICE_URL,
+              timeoutMs: env.ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS,
+              tokens: internalTokens(env),
+            },
+            maintenance: {
+              baseUrl: env.MAINTENANCE_SERVICE_URL,
+              timeoutMs: env.ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS,
+              tokens: internalTokens(env),
+            },
+          }),
         ),
     },
 

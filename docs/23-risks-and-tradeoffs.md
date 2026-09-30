@@ -860,9 +860,9 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **اولویت:** متوسط
 - **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را
-  با Topic اصلی ثبت و پروژه می‌کند. Replicaهای وضعیت (fleet، maintenance، وضعیت asset از رویداد دیگران) موقعیت آخرین رویداد
-  اعمال‌شده را نگه می‌دارند و رویداد قدیمی‌تر بازپخش‌شده را بی‌اثر می‌کنند؛ `notification-service` منبع را Topic اصلی ثبت می‌کند.
-  گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
+  با Topic اصلی ثبت و پروژه می‌کند. Consumerهای حالت‌ساز (Replica دارایی در fleet و maintenance، پرچم `inMaintenance`، وضعیت asset از رویدادهای fleet/maintenance) روی
+  تحویل `.retry` بار را اعمال نمی‌کنند و از سرویس مالک تازه می‌شوند (خواندن داخلی احرازشده؛ در نبود پاسخ: خطا ⇐ DLQ)؛
+  `notification-service` منبع را Topic اصلی ثبت می‌کند. گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
   `kafka-credentials.sh`، و `check:kafka-credential-scope` فقط همان را مجاز می‌داند). بخش (۲) — ابزار بازپخش — باز است
   (`feat/dlq-replay-tool`).
 - **ثبت‌شده:** 2026-09-28

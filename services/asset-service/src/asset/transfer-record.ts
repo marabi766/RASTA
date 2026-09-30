@@ -9,6 +9,11 @@ import {
   zodPipe,
 } from '@rasta/nest-common';
 import { AssetRepository } from './asset.repository';
+import {
+  AssetSnapshotService,
+  SNAPSHOT_CALLERS,
+  type AssetSnapshotResponse,
+} from './asset-snapshot';
 
 /**
  * Whether a transfer was recorded, for the owners of a machine's work who hold
@@ -86,7 +91,28 @@ export class TransferRecordService {
 @ApiTags('asset-internal')
 @Controller({ path: 'internal/assets', version: '1' })
 export class AssetInternalController {
-  constructor(private readonly records: TransferRecordService) {}
+  constructor(
+    private readonly records: TransferRecordService,
+    private readonly snapshots: AssetSnapshotService,
+  ) {}
+
+  @Get(':assetId/snapshot')
+  @AllowService(...SNAPSHOT_CALLERS)
+  @ApiParam({ name: 'assetId', schema: { type: 'string', maxLength: 64 } })
+  @ApiOperation({
+    summary: 'The asset as asset-service records it now, for a replica (internal)',
+    description:
+      'Reserved for fleet-service and maintenance-service service tokens; every other service ' +
+      'and every user token is refused. The organization is the one signed into the token. ' +
+      'The current owner gets the owner, status, name, type and tag; a previous owner recorded ' +
+      'in the asset’s transfers gets only `transferred: true`, the current owner and the ' +
+      'transfer generation; any other organization gets the `404` of an asset that does not exist.',
+  })
+  snapshot(
+    @Param('assetId', zodPipe(assetIdParamSchema)) assetId: string,
+  ): Promise<AssetSnapshotResponse> {
+    return this.snapshots.snapshot(assetId);
+  }
 
   @Get(':assetId/transfers/:transferId')
   @AllowService(...TRANSFER_RECORD_CALLERS)
