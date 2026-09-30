@@ -8,7 +8,9 @@ import type { CorsOptions } from '@nestjs/common/interfaces/external/cors-option
  * to the script even though it arrived. `retry-after` is on it because the
  * platform promises it on the in-flight idempotency `409` (docs/06 § 6.8) and
  * on a rate-limit `429`: a browser client that cannot read the header cannot
- * keep that promise's other half and wait.
+ * keep that promise's other half and wait. The three `x-ratelimit-*` headers
+ * are on it for the same reason: docs/06 says every response carries them, and
+ * a script that cannot read them cannot pace itself before the `429`.
  *
  * These are the only `Access-Control-*` headers a caller receives: the proxy
  * drops an upstream service's own (`ProxyService.responseHeaders`), which would
@@ -26,7 +28,16 @@ export function corsOptions(origins: string[]): CorsOptions {
       'idempotency-key',
       'if-match',
     ],
-    exposedHeaders: ['x-correlation-id', 'x-request-id', 'x-trace-id', 'etag', 'retry-after'],
+    exposedHeaders: [
+      'x-correlation-id',
+      'x-request-id',
+      'x-trace-id',
+      'etag',
+      'retry-after',
+      'x-ratelimit-limit',
+      'x-ratelimit-remaining',
+      'x-ratelimit-reset',
+    ],
     maxAge: 600,
   };
 }

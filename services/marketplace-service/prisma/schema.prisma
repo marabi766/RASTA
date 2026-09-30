@@ -547,6 +547,11 @@ model IdempotencyKey {
   /// response.
   requestHash String @map("request_hash")
 
+  /// Minted at claim; `complete` and `release` match on it, so a request whose
+  /// claim expired and was re-taken cannot finish or free its successor's row.
+  /// Null only on rows written before the column existed.
+  claimToken String? @map("claim_token")
+
   responseStatus Int?  @map("response_status")
   responseBody   Json? @map("response_body")
   state          IdempotencyState
