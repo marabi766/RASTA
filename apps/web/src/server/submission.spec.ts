@@ -1,64 +1,18 @@
-/**
- * @jest-environment node
- */
-import {
-  isBoundSubmissionId,
-  isSubmissionId,
-  mintSubmissionId,
-  newSubmissionId,
-} from './submission';
+import { isBoundSubmissionId, mintSubmissionId } from './submission';
 import type { WebSession } from './session';
 
 /**
- * The submission id: a per-render reference, sent back with its form.
+ * The submission id: a per-render reference, sent back with its form, bound to
+ * the session it was issued for.
  *
- * What is asserted here is its *shape*, its uniqueness, and — for the bound
- * kind — that only this server can issue one and only to the session it was
- * issued for. Whether a repeated id produces one record is the receiving
- * service's decision (`usage-records` stores it; maintenance-service's create
- * does not), so it is proven per service, in `write.spec.ts` against a real
- * fetch and in the browser suite, never here.
+ * What is asserted here is that only this server can issue one and only to the
+ * session it was issued for. Whether a repeated id produces one record is the
+ * receiving service's decision (`usage-records` and, since issue 157,
+ * maintenance-service's create store it; asset-service's create does not), so
+ * it is proven per service, in
+ * `write.spec.ts` against a real fetch and in the browser suite, never here.
  */
 describe('submission ids', () => {
-  it('mints a fresh id every time', () => {
-    const ids = new Set(Array.from({ length: 200 }, () => newSubmissionId()));
-    expect(ids.size).toBe(200);
-  });
-
-  it('accepts what it mints', () => {
-    for (let index = 0; index < 20; index += 1) {
-      expect(isSubmissionId(newSubmissionId())).toBe(true);
-    }
-  });
-
-  it('fits inside what a service stores as a client reference (8..128)', () => {
-    const id = newSubmissionId();
-    expect(id.length).toBeGreaterThanOrEqual(8);
-    expect(id.length).toBeLessThanOrEqual(128);
-  });
-
-  it('refuses an id a client chose for itself', () => {
-    // A caller-chosen reference could be short enough to collide on purpose,
-    // which would hand somebody else's record back to them.
-    expect(isSubmissionId('sub_aaa')).toBe(false);
-    expect(isSubmissionId('sub_')).toBe(false);
-    expect(isSubmissionId('nope')).toBe(false);
-    expect(isSubmissionId(`sub_${'a'.repeat(200)}`)).toBe(false);
-  });
-
-  it('refuses a value that is not a string', () => {
-    expect(isSubmissionId(undefined)).toBe(false);
-    expect(isSubmissionId(null)).toBe(false);
-    expect(isSubmissionId(42)).toBe(false);
-  });
-
-  it('refuses characters outside base64url, including a path separator', () => {
-    expect(isSubmissionId('sub_aaaaaaaaaaaaaaaaaa/.')).toBe(false);
-    expect(isSubmissionId('sub_aaaaaaaaaaaaaaaaaa+=')).toBe(false);
-  });
-});
-
-describe('submission ids bound to a session', () => {
   const SESSION: WebSession = {
     subject: 'USR_1',
     username: 'operator',
@@ -109,12 +63,9 @@ describe('submission ids bound to a session', () => {
   });
 
   it('refuses an id a client chose for itself in the original, unbound format', () => {
-    expect(isBoundSubmissionId(newSubmissionId(), SESSION)).toBe(false);
+    // The removed shape-only format: twenty characters after the prefix.
+    expect(isBoundSubmissionId(`sub_${'B'.repeat(20)}`, SESSION)).toBe(false);
     expect(isBoundSubmissionId('chosen-by-the-client', SESSION)).toBe(false);
-  });
-
-  it('is not accepted by the shape-only check, so the two kinds cannot be swapped', () => {
-    expect(isSubmissionId(mintSubmissionId(SESSION))).toBe(false);
   });
 
   it('refuses another person’s id', () => {

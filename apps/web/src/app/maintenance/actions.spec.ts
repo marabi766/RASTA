@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, mintSubmissionId, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_REPORT_REQUEST_FORM } from './form-state';
@@ -13,9 +13,10 @@ import { IDLE_REPORT_REQUEST_FORM } from './form-state';
  * each refusal proves nothing was called, and a retry of one rendered form is
  * shown to carry the same reference.
  *
- * It does **not** claim a retry is one request: maintenance-service's create
- * path does not store the reference, so a duplicate is stopped only by its
- * open-request rule. That is a property of the service, not of this action.
+ * It does **not** claim a retry is one request: that maintenance-service's
+ * create path answers a repeated key with the original 201 (issue 157) is a
+ * property of the service, proven in its own integration tests, not of this
+ * action.
  */
 
 const currentSession = jest.fn();
@@ -126,7 +127,7 @@ describe('what is refused before anything is called', () => {
   it('refuses an id in the old random format, which only ever proved its own shape', async () => {
     const state = await submitReportRequest(
       IDLE_REPORT_REQUEST_FORM,
-      formData(VALID, { submission: newSubmissionId() }),
+      formData(VALID, { submission: `sub_${'B'.repeat(20)}` }),
     );
     expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
     expect(reportMaintenanceRequest).not.toHaveBeenCalled();
