@@ -5,6 +5,7 @@ import {
   cleanup,
   newOrganizationId,
   outboxFor,
+  outboxStream,
   wire,
   type Wiring,
 } from './helpers';
@@ -236,36 +237,173 @@ describe('need lifecycle', () => {
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
   });
 
-  it('serialises a need submission with a concurrent project cancellation', async () => {
-    // Both lock the project row. Whichever commits first decides; the other
-    // either succeeds on the state it then sees or is refused — never both
-    // applied against a state neither saw.
-    const a = org();
-    const project = await newProject(a);
-    const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Drains', description: 'Two' }),
-    );
+  describe('a need submission against a concurrent project cancellation', () => {
+    // Both commands lock the project row (`ProjectRepository.lockProject`), read
+    // the project's status under that lock, and write their event in the same
+    // transaction, so exactly one order happens and the second command decides
+    // on the state the first left. These tests force each order with barriers
+    // instead of hoping a race lands on it.
+    //
+    // They assert on the project's stream (`outboxStream`), not on `createdAt`:
+    // `createdAt` is when a transaction *started*, and a command that started
+    // first can still take the lock second.
 
-    const [submit, cancel] = await Promise.allSettled([
-      asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 })),
-      asAdmin(a, () =>
-        w.projects.cancel(project.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
-      ),
-    ]);
+    const REASON = 'Funding was withdrawn';
 
-    expect(cancel.status).toBe('fulfilled');
-    const rows = await outboxFor(w.prisma, a);
-    const order = rows.map((row) => row.eventName);
-    if (submit.status === 'fulfilled') {
-      expect(order.indexOf('PROJECT_NEED_SUBMITTED')).toBeLessThan(
-        order.indexOf('PROJECT_STATUS_CHANGED'),
-      );
-    } else {
-      expect(submit.reason).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
-      expect(order).not.toContain('PROJECT_NEED_SUBMITTED');
+    /** Holds the next `lockProject` call until `release()`; `reached` settles when it is made. */
+    function holdNextLock(): { reached: Promise<void>; release: () => void } {
+      const original = w.repository.lockProject.bind(w.repository);
+      let signal!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => (signal = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      jest.spyOn(w.repository, 'lockProject').mockImplementationOnce(async (...args) => {
+        signal();
+        await gate;
+        return original(...args);
+      });
+      return { reached, release };
     }
-    // One stream, dense, in commit order.
-    expect(rows.map((row) => row.streamSeq)).toEqual(rows.map((_, index) => BigInt(index + 1)));
+
+    /** Postgres `now()` has millisecond resolution here; make two transactions' starts differ. */
+    const later = () => new Promise((resolve) => setTimeout(resolve, 15));
+
+    const setup = async () => {
+      const a = org();
+      const project = await newProject(a);
+      const need = await asAdmin(a, () =>
+        w.needs.add(project.id, { title: 'Drains', description: 'Two' }),
+      );
+      const submit = () =>
+        asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+      const cancel = () =>
+        asAdmin(a, () => w.projects.cancel(project.id, { expectedVersion: 1, reason: REASON }));
+      return { a, project, submit, cancel };
+    };
+
+    afterEach(() => jest.restoreAllMocks());
+
+    it('lets a submission that took the lock first commit, though the cancellation started earlier', async () => {
+      const { a, project, submit, cancel } = await setup();
+
+      // The cancellation opens its transaction (and takes its `now()`) first,
+      // then waits; the submission starts later, locks, and commits before the
+      // cancellation ever asks for the lock.
+      const hold = holdNextLock();
+      const cancelled = cancel();
+      await hold.reached;
+      await later();
+      await submit();
+      hold.release();
+      await cancelled;
+
+      const stream = await outboxStream(w.prisma, a, project.id);
+      expect(stream.map((row) => row.eventName)).toEqual([
+        'PROJECT_CREATED',
+        'PROJECT_NEED_ADDED',
+        'PROJECT_NEED_SUBMITTED',
+        'PROJECT_STATUS_CHANGED',
+      ]);
+      expect(stream.map((row) => row.streamSeq)).toEqual([1n, 2n, 3n, 4n]);
+
+      // What went wrong when this was asserted on `createdAt`: the cancellation
+      // started first, so its row is *stamped* earlier although it committed last.
+      const byStart = (await outboxFor(w.prisma, a)).map((row) => row.eventName);
+      expect(byStart.indexOf('PROJECT_STATUS_CHANGED')).toBeLessThan(
+        byStart.indexOf('PROJECT_NEED_SUBMITTED'),
+      );
+
+      // The submission was decided while the project was still DRAFT.
+      const detail = await asAdmin(a, () => w.projects.get(project.id));
+      expect(detail.status).toBe('CANCELLED');
+      expect(detail.needsSummary).toEqual({ draft: 0, submitted: 1, withdrawn: 0 });
+    });
+
+    it('refuses a submission that took the lock after the cancellation committed', async () => {
+      const { a, project, submit, cancel } = await setup();
+
+      // The submission opens its transaction first and waits; the cancellation
+      // starts later and commits first. The submission then sees CANCELLED.
+      const hold = holdNextLock();
+      const submitted = submit();
+      await hold.reached;
+      await later();
+      await cancel();
+      hold.release();
+
+      await expect(submitted).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+
+      const stream = await outboxStream(w.prisma, a, project.id);
+      expect(stream.map((row) => row.eventName)).toEqual([
+        'PROJECT_CREATED',
+        'PROJECT_NEED_ADDED',
+        'PROJECT_STATUS_CHANGED',
+      ]);
+      const detail = await asAdmin(a, () => w.projects.get(project.id));
+      expect(detail).toMatchObject({
+        status: 'CANCELLED',
+        needsSummary: { draft: 1, submitted: 0, withdrawn: 0 },
+      });
+    });
+
+    it('makes a cancellation wait for a submission that holds the project lock', async () => {
+      const { a, project, submit, cancel } = await setup();
+
+      // The submission takes the lock and stops just before its write.
+      const original = w.repository.updateNeed.bind(w.repository);
+      let reached!: () => void;
+      let release!: () => void;
+      const atWrite = new Promise<void>((resolve) => (reached = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      jest.spyOn(w.repository, 'updateNeed').mockImplementationOnce(async (...args) => {
+        reached();
+        await gate;
+        return original(...args);
+      });
+      const submitted = submit();
+      await atWrite;
+
+      const cancelled = cancel();
+      const settledEarly = await Promise.race([
+        cancelled.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 300)),
+      ]);
+      expect(settledEarly).toBe(false);
+
+      release();
+      await submitted;
+      await cancelled;
+
+      const stream = await outboxStream(w.prisma, a, project.id);
+      expect(stream.map((row) => row.eventName)).toEqual([
+        'PROJECT_CREATED',
+        'PROJECT_NEED_ADDED',
+        'PROJECT_NEED_SUBMITTED',
+        'PROJECT_STATUS_CHANGED',
+      ]);
+    });
+
+    it('applies exactly one order when both are simply started together', async () => {
+      const { a, project, submit, cancel } = await setup();
+
+      const [submitted, cancelled] = await Promise.allSettled([submit(), cancel()]);
+
+      expect(cancelled.status).toBe('fulfilled');
+      const stream = await outboxStream(w.prisma, a, project.id);
+      const names = stream.map((row) => row.eventName);
+      if (submitted.status === 'fulfilled') {
+        expect(names.indexOf('PROJECT_NEED_SUBMITTED')).toBeLessThan(
+          names.indexOf('PROJECT_STATUS_CHANGED'),
+        );
+      } else {
+        expect(submitted.reason).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+        expect(names).not.toContain('PROJECT_NEED_SUBMITTED');
+      }
+      // One stream, dense, in commit order.
+      expect(stream.map((row) => row.streamSeq)).toEqual(
+        stream.map((_, index) => BigInt(index + 1)),
+      );
+    });
   });
 
   it('answers 404 for a need that is not on this project', async () => {

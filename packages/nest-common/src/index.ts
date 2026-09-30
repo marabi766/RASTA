@@ -172,3 +172,17 @@ export type {
   ClaimOptions,
   OutboxTxRunner,
 } from './outbox/outbox-sql';
+
+// Lifecycle ------------------------------------------------------------------
+export {
+  installGracefulShutdown,
+  DEFAULT_AFTER_CLOSE_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_SIGNALS,
+} from './lifecycle/graceful-shutdown';
+export type {
+  GracefulShutdown,
+  GracefulShutdownOptions,
+  ShutdownLogger,
+  ShutdownSignalSource,
+  ShutdownTarget,
+} from './lifecycle/graceful-shutdown';

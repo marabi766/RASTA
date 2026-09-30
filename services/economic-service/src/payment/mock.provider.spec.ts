@@ -1,4 +1,5 @@
 import {
+  ALREADY_REFUNDED,
   MOCK_DIRECTIVE_CODES,
   MockPaymentProvider,
   UNSUPPORTED,
@@ -143,6 +144,34 @@ describe('refund', () => {
   it('refunds a captured payment', async () => {
     const result = await provider.refund(refundRequest);
     expect(result.outcome).toBe('REFUNDED');
+  });
+
+  it('answers a repeated refund with the same key as the first time, and moves nothing again', async () => {
+    const fresh = new MockPaymentProvider();
+    const request = { ...refundRequest, providerReference: 'mock_PAY_DEDUPE' };
+    expect(await fresh.refund(request)).toMatchObject({ outcome: 'REFUNDED' });
+    expect(await fresh.refund(request)).toMatchObject({ outcome: 'REFUNDED' });
+    expect(await fresh.getStatus('mock_PAY_DEDUPE')).toBe('REFUNDED');
+  });
+
+  it('refuses a second refund of one reference under another key', async () => {
+    const fresh = new MockPaymentProvider();
+    const request = { ...refundRequest, providerReference: 'mock_PAY_TWICE' };
+    expect((await fresh.refund(request)).outcome).toBe('REFUNDED');
+    expect(await fresh.refund({ ...request, idempotencyKey: 'another-key:refund' })).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: ALREADY_REFUNDED,
+    });
+  });
+
+  it('replays a refused refund as refused', async () => {
+    const fresh = new MockPaymentProvider();
+    const request = { ...refundRequest, providerReference: 'mock_PAY_2_fail-refund:NOT_PERMITTED' };
+    expect((await fresh.refund(request)).outcome).toBe('FAILED');
+    expect(await fresh.refund(request)).toMatchObject({
+      outcome: 'FAILED',
+      failureCode: 'NOT_PERMITTED',
+    });
   });
 
   it('fails when the reference carries a refund directive', async () => {
