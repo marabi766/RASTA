@@ -2,9 +2,13 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
+import { canManageAssets } from '@/server/asset-commands';
+import { fetchCurrentUser } from '@/server/identity';
+import { newSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
+import { RegisterAssetForm } from './RegisterAssetForm';
 
 /**
  * The `/assets` route.
@@ -41,7 +45,15 @@ export default async function AssetsPage({
     cursor: one(params.cursor),
   };
 
-  const result = await fetchAssets(session, query);
+  const [result, currentUser] = await Promise.all([
+    fetchAssets(session, query),
+    fetchCurrentUser(session),
+  ]);
+
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
+  // read shows no form rather than one that might not work, and asset-service
+  // decides again on every submit.
+  const manage = currentUser.kind === 'USER' && canManageAssets(currentUser.user.effectiveRoles);
 
   return (
     <AppShell
@@ -57,7 +69,15 @@ export default async function AssetsPage({
       }
       sidebar={<Sidebar items={PORTAL_NAV} currentHref="/assets" />}
     >
-      <AssetsScreen result={result} query={query} />
+      <AssetsScreen
+        result={result}
+        query={query}
+        registerForm={
+          manage ? (
+            <RegisterAssetForm csrfToken={session.csrfToken} submissionId={newSubmissionId()} />
+          ) : undefined
+        }
+      />
     </AppShell>
   );
 }

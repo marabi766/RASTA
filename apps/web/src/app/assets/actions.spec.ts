@@ -1,0 +1,260 @@
+/**
+ * @jest-environment node
+ */
+import { CSRF_FIELD } from '@/server/csrf';
+import { SUBMISSION_FIELD, newSubmissionId } from '@/server/submission';
+import type { WebSession } from '@/server/session';
+
+import { IDLE_REGISTER_ASSET_FORM } from './form-state';
+
+/**
+ * The `/assets` registration form's write path, from a posted form to a call
+ * on the gateway. Mirrors `drivers/actions.spec.ts`: the order is the
+ * assertion, each refusal proves nothing was called, and the double-submit
+ * case proves a retry is one machine, not two.
+ */
+
+const currentSession = jest.fn();
+const registerAsset = jest.fn();
+const redirect = jest.fn((url: string) => {
+  throw new Error(`NEXT_REDIRECT:${url}`);
+});
+
+jest.mock('@/server/current-session', () => ({ currentSession: () => currentSession() }));
+jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+jest.mock('@/server/asset-commands', () => {
+  const actual = jest.requireActual('@/server/asset-commands');
+  return { ...actual, registerAsset: (...args: unknown[]) => registerAsset(...args) };
+});
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { submitRegisterAsset } = require('./actions') as typeof import('./actions');
+
+const SESSION = {
+  subject: 'user-1',
+  username: 'manager',
+  organizationId: 'ORG-DEH-0001',
+  accessToken: 'access-token-value',
+  accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
+  refreshToken: 'refresh-token-value',
+  csrfToken: 'csrf-token-for-this-session',
+  issuedAt: 1_900_000_000,
+} satisfies WebSession;
+
+const VALID = { name: 'لودر کوماتسو', type: 'LOADER' };
+
+function formData(
+  fields: Record<string, string>,
+  options: { csrf?: string | null; submission?: string | null } = {},
+): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.set(key, value);
+  const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
+  if (csrf !== null) form.set(CSRF_FIELD, csrf);
+  const submission = options.submission === undefined ? newSubmissionId() : options.submission;
+  if (submission !== null) form.set(SUBMISSION_FIELD, submission);
+  return form;
+}
+
+beforeEach(() => {
+  currentSession.mockResolvedValue(SESSION);
+  registerAsset.mockResolvedValue({
+    kind: 'CREATED',
+    data: { id: 'AST_1' },
+    correlationId: 'corr-sample',
+  });
+  redirect.mockClear();
+  registerAsset.mockClear();
+});
+
+describe('what is refused before anything is called', () => {
+  it('refuses a post with no session', async () => {
+    currentSession.mockResolvedValue(null);
+    const state = await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID));
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'NO_SESSION' });
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a post with no CSRF token, and calls nothing', async () => {
+    const state = await submitRegisterAsset(
+      IDLE_REGISTER_ASSET_FORM,
+      formData(VALID, { csrf: null }),
+    );
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'CSRF' });
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a token from another session', async () => {
+    const state = await submitRegisterAsset(
+      IDLE_REGISTER_ASSET_FORM,
+      formData(VALID, { csrf: 'someone-elses' }),
+    );
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'CSRF' });
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a submission id this server did not mint', async () => {
+    const state = await submitRegisterAsset(
+      IDLE_REGISTER_ASSET_FORM,
+      formData(VALID, { submission: 'chosen-by-the-client' }),
+    );
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+});
+
+describe('what the form itself catches', () => {
+  it('does not call the service for a form missing required fields', async () => {
+    const state = await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData({ name: '' }));
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { name: expect.any(String), type: 'نوع ماشین را انتخاب کنید' },
+    });
+    expect(registerAsset).not.toHaveBeenCalled();
+  });
+
+  it('keeps what the person typed, and the submission id it came with', async () => {
+    const submission = newSubmissionId();
+    const state = await submitRegisterAsset(
+      IDLE_REGISTER_ASSET_FORM,
+      formData({ ...VALID, name: '', model: 'WA320', manufactureYear: '۱۴۰۲' }, { submission }),
+    );
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      submissionId: submission,
+      values: { type: 'LOADER', model: 'WA320', manufactureYear: '۱۴۰۲' },
+    });
+  });
+});
+
+describe('what reaches the service', () => {
+  it('redirects to the new machine after a successful write', async () => {
+    await expect(submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).rejects.toThrow(
+      /NEXT_REDIRECT/,
+    );
+    expect(redirect).toHaveBeenCalledWith('/assets/AST_1?created=1');
+  });
+
+  it('percent-encodes the id it redirects to', async () => {
+    registerAsset.mockResolvedValue({
+      kind: 'CREATED',
+      data: { id: 'a/b?c' },
+      correlationId: 'corr-sample',
+    });
+    await expect(submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).rejects.toThrow();
+    expect(redirect).toHaveBeenCalledWith('/assets/a%2Fb%3Fc?created=1');
+  });
+
+  it('sends the parsed request under the session, with Latin digits and no calendar change', async () => {
+    const submission = newSubmissionId();
+    await expect(
+      submitRegisterAsset(
+        IDLE_REGISTER_ASSET_FORM,
+        formData({ ...VALID, manufactureYear: '۱۴۰۲', siteName: 'انبار' }, { submission }),
+      ),
+    ).rejects.toThrow();
+
+    const [session, request, submissionId] = registerAsset.mock.calls[0];
+    expect(session).toBe(SESSION);
+    expect(JSON.parse(JSON.stringify(request))).toEqual({
+      name: 'لودر کوماتسو',
+      type: 'LOADER',
+      manufactureYear: 1402,
+      location: { siteName: 'انبار' },
+    });
+    expect(submissionId).toBe(submission);
+  });
+
+  it('sends one submission twice under one reference — the double-submit case', async () => {
+    const submission = newSubmissionId();
+    const form = () => formData(VALID, { submission });
+
+    await expect(submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, form())).rejects.toThrow(
+      /NEXT_REDIRECT/,
+    );
+    await expect(submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, form())).rejects.toThrow(
+      /NEXT_REDIRECT/,
+    );
+
+    expect(registerAsset.mock.calls.map((args) => args[2])).toEqual([submission, submission]);
+  });
+});
+
+describe('what the service refuses', () => {
+  it('returns the service field errors with the values still in hand', async () => {
+    registerAsset.mockResolvedValue({
+      kind: 'INVALID',
+      fieldErrors: { name: 'نام را کوتاه‌تر کنید' },
+      message: null,
+      correlationId: 'corr-sample',
+    });
+
+    const state = await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID));
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { name: 'نام را کوتاه‌تر کنید' },
+      values: { type: 'LOADER' },
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('returns the duplicate refusal as the form message', async () => {
+    registerAsset.mockResolvedValue({
+      kind: 'INVALID',
+      fieldErrors: {},
+      message: 'ماشینی با این شمارهٔ سریال یا شمارهٔ دارایی پیش‌تر ثبت شده است',
+      correlationId: 'corr-sample',
+    });
+
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toMatchObject({
+      kind: 'INVALID',
+      message: 'ماشینی با این شمارهٔ سریال یا شمارهٔ دارایی پیش‌تر ثبت شده است',
+    });
+  });
+
+  it('reports a forbidden write with its correlation id', async () => {
+    registerAsset.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'corr-sample' });
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
+      kind: 'FORBIDDEN',
+      correlationId: 'corr-sample',
+    });
+  });
+
+  it('reports a sent-but-unconfirmed write as UNCONFIRMED, never as a failure', async () => {
+    // The service may have registered the machine; "nothing was saved" would
+    // invite a retry that reports a duplicate.
+    registerAsset.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('reports an outage with its status and correlation id', async () => {
+    registerAsset.mockResolvedValue({
+      kind: 'UNAVAILABLE',
+      status: 503,
+      correlationId: 'corr-sample',
+    });
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
+      kind: 'FAILED',
+      status: 503,
+      correlationId: 'corr-sample',
+    });
+  });
+
+  it('never puts a token in what the page renders', async () => {
+    registerAsset.mockResolvedValue({
+      kind: 'UNAVAILABLE',
+      status: 503,
+      correlationId: 'corr-sample',
+    });
+    const text = JSON.stringify(
+      await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID)),
+    );
+    expect(text).not.toContain(SESSION.accessToken);
+    expect(text).not.toContain(SESSION.refreshToken);
+    expect(text).not.toContain(SESSION.csrfToken);
+  });
+});

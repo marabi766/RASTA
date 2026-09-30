@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import {
   Alert,
   ButtonLink,
@@ -41,7 +42,24 @@ import type { AssetDossier, ReadResult } from '@/server/assets';
 export interface DossierScreenProps {
   readonly result: ReadResult<AssetDossier>;
   readonly assetId: string;
+  /**
+   * The edit form, when this person may use it. Built by the page from the
+   * read this screen renders, so its pre-filled values are the ones on show.
+   */
+  readonly editForm?: ReactNode;
+  /**
+   * Set by the write that sent the person here (`?created=1`, `?updated=1`).
+   * Display only: the query is attacker-controllable, so it can at worst put a
+   * harmless confirmation on a page the viewer is already allowed to read —
+   * and it is not rendered at all when the read failed.
+   */
+  readonly notice?: 'created' | 'updated';
 }
+
+const NOTICES = {
+  created: 'ماشین ثبت شد.',
+  updated: 'مشخصات ماشین ذخیره شد.',
+} as const;
 
 function Compliance({ dossier }: { dossier: AssetDossier }) {
   const { compliance } = dossier;
@@ -121,7 +139,7 @@ function expiryWording(days: number): string {
   return `${toPersianDigits(String(Math.abs(days)))} روز از انقضا گذشته`;
 }
 
-export function DossierScreen({ result, assetId }: DossierScreenProps) {
+export function DossierScreen({ result, assetId, editForm, notice }: DossierScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
       <>
@@ -172,6 +190,8 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
         title={asset.name}
         description={`${assetTypeLabel(asset.type)} — ${result.data.organizationName ?? 'سازمان نامشخص'}`}
       />
+
+      {notice ? <Alert tone="success">{NOTICES[notice]}</Alert> : null}
 
       <Section headingId="identity" title="شناسنامه">
         <Grid columns={2}>
@@ -280,6 +300,12 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
           </ol>
         )}
       </Section>
+
+      {editForm ? (
+        <Section headingId="edit-asset" title="ویرایش مشخصات">
+          {editForm}
+        </Section>
+      ) : null}
     </>
   );
 }
