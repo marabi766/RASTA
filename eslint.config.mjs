@@ -1,6 +1,7 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
+import globals from 'globals';
 
 /**
  * Root ESLint flat config for the Rasta monorepo.
@@ -51,6 +52,25 @@ const base = tseslint.config(
           ],
         },
       ],
+    },
+  },
+  {
+    // Root `scripts/` — CI checkers, verifiers and campaign tooling, plain Node
+    // ESM run by `node scripts/x.mjs` or `node --test`. They are not services:
+    // there is no bundler, no DOM, and no structured logger to reach for.
+    //
+    // Node globals are declared so `no-undef` still catches a real typo
+    // instead of drowning in `process`/`Buffer`/`URL`.
+    //
+    // `no-console` exists to keep service output on the structured logger
+    // (AGENTS.md § 3). A CLI's stdout/stderr *is* its interface — a checker
+    // prints its verdict, CI captures it, a human reads it — so `log`, `info`,
+    // `warn` and `error` are allowed here. `debug`, `trace`, `dir` and the rest
+    // stay errors: they are leftovers, not output.
+    files: ['scripts/**/*.{js,mjs,cjs}'],
+    languageOptions: { globals: { ...globals.node } },
+    rules: {
+      'no-console': ['error', { allow: ['log', 'info', 'warn', 'error'] }],
     },
   },
   {
