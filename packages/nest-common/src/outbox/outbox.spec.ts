@@ -353,3 +353,109 @@ describe('OutboxRelay', () => {
     expect(publish).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-051 — publish order inside one claimed batch
+//
+// The claim selects by `created_at, id`, and `created_at` is not commit order:
+// a service that stamps the database's transaction-start `now()` (construction,
+// supplier) gives the transaction that *started* first the earlier stamp even
+// when it waited on the stream's counter lock and so committed second with the
+// higher `stream_seq`. `stream_seq` is commit order, so within one batch it
+// decides the order of one stream's rows. Nothing here is cross-batch: that is
+// head-of-line claiming, B4.
+// ---------------------------------------------------------------------------
+
+describe('publish order inside a claimed batch', () => {
+  const T0 = Date.UTC(2026, 8, 30, 12, 0, 0, 0);
+
+  function seqRow(
+    id: string,
+    partitionKey: string,
+    streamSeq: number | null,
+    createdAtMs: number,
+  ): OutboxRow {
+    return {
+      ...makeRow(id),
+      partitionKey,
+      streamSeq,
+      createdAt: new Date(T0 + createdAtMs),
+    };
+  }
+
+  async function publishedOrder(claimed: OutboxRow[]): Promise<string[]> {
+    const store = new FakeStore();
+    store.pending = claimed;
+    const publish = jest.fn(async (_rows: readonly OutboxRow[]) => undefined);
+    await new OutboxRelay({ store, publisher: { publish } }).tick();
+    return publish.mock.calls.flatMap(([rows]) => rows.map((row) => row.id));
+  }
+
+  it('publishes by stream_seq when created_at order disagrees', async () => {
+    // T1 started first (earlier created_at) but committed second: seq 4.
+    const order = await publishedOrder([
+      seqRow('seq4', 'ASSET_1', 4, 0),
+      seqRow('seq3', 'ASSET_1', 3, 5),
+    ]);
+    expect(order).toEqual(['seq3', 'seq4']);
+  });
+
+  it('orders a same-millisecond tie by stream_seq, not by the random id', async () => {
+    // ULIDs minted within one millisecond sort randomly, so `id` breaks the tie
+    // the wrong way here on purpose.
+    const order = await publishedOrder([
+      seqRow('a-seq2', 'ASSET_1', 2, 0),
+      seqRow('b-seq1', 'ASSET_1', 1, 0),
+    ]);
+    expect(order).toEqual(['b-seq1', 'a-seq2']);
+  });
+
+  it('leaves rows without a stream_seq exactly where the claim put them', async () => {
+    const order = await publishedOrder([
+      seqRow('legacy-1', 'ASSET_1', null, 0),
+      seqRow('seq2', 'ASSET_1', 2, 1),
+      seqRow('legacy-2', 'ASSET_1', null, 2),
+      seqRow('seq1', 'ASSET_1', 1, 3),
+      seqRow('legacy-3', 'ASSET_2', null, 4),
+    ]);
+    expect(order).toEqual(['legacy-1', 'seq1', 'legacy-2', 'seq2', 'legacy-3']);
+  });
+
+  it('keeps two interleaved keys independent and does not reorder across keys', async () => {
+    const order = await publishedOrder([
+      seqRow('a4', 'ASSET_A', 4, 0),
+      seqRow('b2', 'ASSET_B', 2, 1),
+      seqRow('a3', 'ASSET_A', 3, 2),
+      seqRow('b1', 'ASSET_B', 1, 3),
+    ]);
+    // Each key's rows swap within the positions that key already held.
+    expect(order).toEqual(['a3', 'b1', 'a4', 'b2']);
+  });
+
+  it('never mixes streams that share a key on different topics', async () => {
+    const otherTopic = { ...seqRow('t2-seq1', 'ASSET_1', 1, 0), topic: 'rasta.maintenance.v1' };
+    const order = await publishedOrder([otherTopic, seqRow('t1-seq2', 'ASSET_1', 2, 1)]);
+    expect(order).toEqual(['t2-seq1', 't1-seq2']);
+  });
+
+  it('is the identity when the claim already agrees with stream_seq', async () => {
+    const claimed = [
+      seqRow('s1', 'ASSET_1', 1, 0),
+      seqRow('s2', 'ASSET_1', 2, 1),
+      seqRow('s3', 'ASSET_1', 3, 2),
+    ];
+    expect(await publishedOrder(claimed)).toEqual(['s1', 's2', 's3']);
+  });
+
+  it('publishes the per-row fallback in stream_seq order too', async () => {
+    const store = new FakeStore();
+    store.pending = [seqRow('seq4', 'ASSET_1', 4, 0), seqRow('seq3', 'ASSET_1', 3, 1)];
+    const singles: string[] = [];
+    const publish = jest.fn(async (rows: readonly OutboxRow[]) => {
+      if (rows.length > 1) throw new Error('batch rejected');
+      singles.push(rows[0]!.id);
+    });
+    await new OutboxRelay({ store, publisher: { publish } }).tick();
+    expect(singles).toEqual(['seq3', 'seq4']);
+  });
+});
