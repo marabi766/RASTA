@@ -1,8 +1,42 @@
 # Durable payment reconciler, step B — STEP 0 plan
 
 > Branch `fix/economic-payment-reconciler-b`, cut from `fix/economic-refund-safety` @ `3a0a5d0` (#143, B0, queued). I will
-> merge `main` in once #143 lands and never rebase. ADR-064; D-035; Q-81; Q-82. **This is a plan only; nothing is
-> implemented.** Only `MockPaymentProvider` exists; no bank connection is claimed (ADR-024).
+> merge `main` in once #143 lands and never rebase. ADR-064; D-035; Q-81; Q-82. **B1 (the task table) is implemented on this
+> branch; B2 and B3 are not.** Only `MockPaymentProvider` exists; no bank connection is claimed (ADR-024).
+
+## 0. Rulings (PM, on this plan)
+
+GO, with these answers. Where they differ from the plan below, they win.
+
+- **Q-B1 — agreed.** The stuck top-up intents (U1–U5, U7, U8) are step C.
+- **Q-B2 — agreed.** The markers stay in `failure_reason`. ADR-064 § 8 is amended in place (on #140).
+- **Q-B3 — build four-eyes in B.**
+  - `resolve` creates a `PENDING_APPROVAL` resolution.
+  - A second `SYSTEM_ADMIN` approves or rejects it. That person is neither the proposer nor the intent's creator.
+  - Only an approval runs the apply function.
+  - Both actors and the evidence go on the event and in the audit record.
+  - `ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES` defaults to `true`. The config refuses `false` unless `NODE_ENV`
+    is `development` or `test`.
+  - `requeue` stays single-actor.
+- **Split into three PRs, not two:**
+  - **B1:** the table, the wiring and its tests.
+  - **B2:** the sweeper and the provider query.
+  - **B3:** the operator path with four-eyes.
+
+  Each PR ships with:
+  - its failing tests first;
+  - economic unit and integration tests;
+  - coverage at or above the thresholds;
+  - the E2E critical path;
+  - the migration verifier.
+
+**What B1 changed from § 2.1** (on this branch):
+
+- `evidence_reference` is not in B1's table. B3 adds what four-eyes needs.
+- `ESCALATED` implies `escalated_at` rather than the other way round, so a task resolved after escalation keeps the time as
+  history.
+- The foreign key is composite, `(organization_id, payment_intent_id)`, as in #148.
+- Backfilled rows are `PRT_<intent id>`.
 
 `file:line` references are to `services/economic-service/src/payment/payment.service.ts` at `3a0a5d0` unless another
 file is named.
@@ -205,9 +239,7 @@ Authorisation follows Q-82's provisional answers:
 
 - **Roles:** from `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES`, default `SYSTEM_ADMIN` only.
 - **Creator excluded:** the resolver may not be the intent's `created_by`.
-- **Four-eyes:** `ECONOMIC_PAYMENT_RECONCILIATION_FOUR_EYES`, default `false`. If it is switched on, a `resolve` stays
-  pending until a second, different resolver confirms it. This is documented but not built unless you want it now; see Q
-  below.
+- **Four-eyes:** built in B3, on by default. See § 0 (Q-B3) and ADR-064 § 6.
 
 Body:
 

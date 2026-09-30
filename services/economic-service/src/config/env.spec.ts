@@ -120,6 +120,21 @@ describe('loadEconomicEnv', () => {
     );
   });
 
+  it('gives a refund in flight a bounded grace before its reconciliation task is due', () => {
+    // ADR-064 step B1: long enough to stay clear of a provider call still
+    // running, short enough that a stranded refund is looked at the same day.
+    expect(loadEconomicEnv(base).ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS).toBe(300);
+    expect(
+      loadEconomicEnv({ ...base, ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS: '600' })
+        .ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS,
+    ).toBe(600);
+    for (const value of ['0', '29', '86401', '1.5']) {
+      expect(() =>
+        loadEconomicEnv({ ...base, ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS: value }),
+      ).toThrow(EnvValidationError);
+    }
+  });
+
   it('refuses to start without the identity provider or the internal secret', () => {
     // Validated once, at startup, and loudly: a service that boots without
     // these discovers it on the first request, which turns a deployment error
