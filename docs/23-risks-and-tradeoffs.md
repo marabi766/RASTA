@@ -878,6 +878,22 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **رفع:** (۱) `EventConsumer` هر Topic مشترک را همراه `.retry` آن Subscribe کند (بررسی ناشر § ۲ همان‌جا اجرا می‌شود)؛
   (۲) ابزار بازپخش با `ops-replay`: خواندن از DLQ، `--dry-run` پیش‌فرض، نوشتن فقط روی `<topic>.retry`، و هرگز خودکار
   برای رویداد مالی. تصمیم و مالک با مدیر پروژه.
+- **به‌روز 2026-09-29 — نیمهٔ (۲) ساخته شد (`feat/dlq-replay-tool`):** `scripts/replay-dlq.mjs` فقط به نام `ops-replay`،
+  Dry-run پیش‌فرض، انتخاب صریح و محدود (حداکثر ۱۰۰)، `--execute` فقط با `--expect-count` برابر و همه-یا-هیچ؛ مقصد فقط
+  `<Topic مبدأ>.retry` (از `.retry` دقیقاً یک پسوند حذف)؛ فقط `EVENT_HEADERS` به‌همراه `x-replay-id` (`x-producer` از پاکت)؛ کلید = `streamKey` یا کلید نگه‌داشتهٔ DLQ (بی هر دو رد)؛
+  `NEVER_AUTO_REPLAY` و دلیل‌های بی‌علاج رد؛ کهنگی با خواندن Topic مبدأ (READ تازهٔ `ops-replay` فقط در گروه‌های
+  `ops-replay.`) و رد مگر `--allow-stale <eventId>`. `scripts/replay-dlq.broker.test.mjs` در CI همین را روی Broker احرازشده
+  با یک Consumer آزمونی روی `.retry` نشان می‌دهد. نیمهٔ (۱) با #145 رسید (`EventConsumer` `.retry` را می‌خواند؛ DLQ کلید را نگه می‌دارد، D-040) — «وضعیت» پایین.
+  **به‌روز 2026-09-30 (بازبینی دور ۱ #144):** Retention گذشته از Offset اصلی ← کهنگی `UNKNOWN` (نه «کهنه نیست»)؛ READ
+  `ops-replay` بی Topicهای `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`)، و WRITE روی `.retry` آن‌ها هم برداشته شد (کمترین
+  امتیاز، تصمیم مدیر پروژه)؛ پیام آن Topic هر نامی داشته باشد رد می‌شود؛
+  کلید فقط کلید نگه‌داشته (رویداد دارای `streamKey` بی کلید ← `KEY_UNVERIFIABLE`)؛ Header و بدنه در حضور هم باید بخوانند.
+  بازپخش **عمداً حداقل یک‌بار** است (تصمیم مدیر پروژه): بی دفتر بازپخش؛ ایمنی از Idempotency هر Handler (`processed_event`، یا
+  در بازتاب Keycloak ساختن دوبارهٔ وضعیت فعلی). **دور ۲:** آزمون Retention رکورد پاک می‌کند، پس فقط روی Broker دورانداختنی
+  (`REPLAY_TEST_DISPOSABLE_BROKER=1`) و فقط وقتی هر رکورد بازه مال همان اجرا باشد اجرا می‌شود؛ در CI Job جدای «Broker
+  authorisation» با Broker تازه (آزمون بازپخش اول، سپس ACL). حضور Header با بدنهٔ خام پیش از پیش‌فرض‌های Schema سنجیده می‌شود.
+  **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر
+  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است — و تشخیص «قبلاً بازپخش شده» همان‌جا.
 - **اولویت:** متوسط
 - **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را
@@ -887,9 +903,9 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   مالک با Tenant خود رویداد پرسیده می‌شود (۴۰۴ ⇐ `SOURCE_UNCONFIRMED` پیش از هر اثر)؛ Fence فقط با تأیید انتقال ثبت‌شده و فقط
   برای سازمانی که دیگر مالک نیست حذف می‌شود. باقی‌ماندهٔ پذیرفته: رویداد اصلیِ قدیمی‌تر از تصویر که هنوز در راه است بار قدیمی‌ترش را
   پس از تازه‌سازی اعمال می‌کند و رویداد بعدیِ همان جریان آن را درست می‌کند (شرح: replay-dlq.md). گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
-  `kafka-credentials.sh`، و `check:kafka-credential-scope` فقط همان را مجاز می‌داند). بخش (۲) — ابزار بازپخش — باز است
-  (`feat/dlq-replay-tool`).
-- **ثبت‌شده:** 2026-09-28
+  `kafka-credentials.sh`، و `check:kafka-credential-scope` فقط همان را مجاز می‌داند). بخش (۲) — ابزار بازپخش — `scripts/replay-dlq.mjs`
+  (بالا، `feat/dlq-replay-tool`).
+- **ثبت‌شده:** 2026-09-28 · **به‌روز:** 2026-09-30
 
 > **باقی‌ماندهٔ پذیرفتهٔ RUN-006 در CI (کنار D-039؛ بدهی نیست، تصمیم مدیر پروژه در بازبینی دور ۲ #131).** اعتبارهای
 > Kafka در CI یک‌بارمصرف‌اند و در دو پوشهٔ خصوصی می‌مانند (سرویس‌ها و observer؛ و جدا admin، ops-replay و ابزارها)؛ هیچ
