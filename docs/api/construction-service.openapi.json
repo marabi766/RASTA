@@ -4401,7 +4401,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -4496,6 +4497,18 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "suspendedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspendedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspensionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "version": {
                       "type": "integer"
                     }
@@ -4523,6 +4536,9 @@
                     "rejectionReason",
                     "retiredAt",
                     "retiredBy",
+                    "suspendedAt",
+                    "suspendedBy",
+                    "suspensionReason",
                     "version"
                   ],
                   "additionalProperties": false
@@ -4751,7 +4767,14 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["DRAFT", "PENDING_PLATFORM_APPROVAL", "ACTIVE", "REJECTED", "RETIRED"]
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
             }
           }
         ],
@@ -4795,7 +4818,8 @@
                               "PENDING_PLATFORM_APPROVAL",
                               "ACTIVE",
                               "REJECTED",
-                              "RETIRED"
+                              "RETIRED",
+                              "SUSPENDED"
                             ]
                           },
                           "label": {
@@ -4890,6 +4914,18 @@
                             "type": "string",
                             "nullable": true
                           },
+                          "suspendedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "suspendedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "suspensionReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
                           "version": {
                             "type": "integer"
                           }
@@ -4917,6 +4953,9 @@
                           "rejectionReason",
                           "retiredAt",
                           "retiredBy",
+                          "suspendedAt",
+                          "suspendedBy",
+                          "suspensionReason",
                           "version"
                         ],
                         "additionalProperties": false
@@ -5026,7 +5065,14 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["DRAFT", "PENDING_PLATFORM_APPROVAL", "ACTIVE", "REJECTED", "RETIRED"]
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
             }
           }
         ],
@@ -5070,7 +5116,8 @@
                               "PENDING_PLATFORM_APPROVAL",
                               "ACTIVE",
                               "REJECTED",
-                              "RETIRED"
+                              "RETIRED",
+                              "SUSPENDED"
                             ]
                           },
                           "label": {
@@ -5165,6 +5212,18 @@
                             "type": "string",
                             "nullable": true
                           },
+                          "suspendedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "suspendedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "suspensionReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
                           "version": {
                             "type": "integer"
                           }
@@ -5192,6 +5251,9 @@
                           "rejectionReason",
                           "retiredAt",
                           "retiredBy",
+                          "suspendedAt",
+                          "suspendedBy",
+                          "suspensionReason",
                           "version"
                         ],
                         "additionalProperties": false
@@ -5310,7 +5372,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -5405,6 +5468,18 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "suspendedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspendedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspensionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "version": {
                       "type": "integer"
                     }
@@ -5432,6 +5507,9 @@
                     "rejectionReason",
                     "retiredAt",
                     "retiredBy",
+                    "suspendedAt",
+                    "suspendedBy",
+                    "suspensionReason",
                     "version"
                   ],
                   "additionalProperties": false
@@ -5548,7 +5626,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -5643,6 +5722,18 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "suspendedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspendedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspensionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "version": {
                       "type": "integer"
                     }
@@ -5670,6 +5761,9 @@
                     "rejectionReason",
                     "retiredAt",
                     "retiredBy",
+                    "suspendedAt",
+                    "suspendedBy",
+                    "suspensionReason",
                     "version"
                   ],
                   "additionalProperties": false
@@ -5845,7 +5939,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -5940,6 +6035,18 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "suspendedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspendedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspensionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "version": {
                       "type": "integer"
                     }
@@ -5967,6 +6074,9 @@
                     "rejectionReason",
                     "retiredAt",
                     "retiredBy",
+                    "suspendedAt",
+                    "suspendedBy",
+                    "suspensionReason",
                     "version"
                   ],
                   "additionalProperties": false
@@ -6142,7 +6252,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -6237,6 +6348,18 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "suspendedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspendedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspensionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "version": {
                       "type": "integer"
                     }
@@ -6264,6 +6387,9 @@
                     "rejectionReason",
                     "retiredAt",
                     "retiredBy",
+                    "suspendedAt",
+                    "suspendedBy",
+                    "suspensionReason",
                     "version"
                   ],
                   "additionalProperties": false
@@ -6424,7 +6550,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -6519,6 +6646,18 @@
                       "type": "string",
                       "nullable": true
                     },
+                    "suspendedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspendedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "suspensionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
                     "version": {
                       "type": "integer"
                     }
@@ -6546,6 +6685,9 @@
                     "rejectionReason",
                     "retiredAt",
                     "retiredBy",
+                    "suspendedAt",
+                    "suspendedBy",
+                    "suspensionReason",
                     "version"
                   ],
                   "additionalProperties": false
