@@ -8,6 +8,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { isKekId, parseKekEntries } from '../tender/sealing/key-provider';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -208,6 +209,39 @@ export const constructionEnvSchema = baseEnvSchema
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
     CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
+
+    /**
+     * The key-encryption keys that wrap each tender's private key (ADR-066 § 2):
+     * `id:base64,id:base64`, each key 32 random bytes. A **secret**: it comes from
+     * the deployment's secret store, never from a file in the repository, and no
+     * message here repeats it. Unset means no tender can be published (the seal
+     * fails closed, `KEY_UNAVAILABLE`); there is no default key. The platform
+     * operator who can read this and the database can open a bid (D-043).
+     */
+    CONSTRUCTION_TENDER_KEKS: z
+      .string()
+      .optional()
+      .refine(
+        (value) => {
+          try {
+            parseKekEntries(value);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            'CONSTRUCTION_TENDER_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+        },
+      ),
+    /** The id in `CONSTRUCTION_TENDER_KEKS` that wraps new tender keys; older ones only unwrap. */
+    CONSTRUCTION_TENDER_KEK_CURRENT: z
+      .string()
+      .optional()
+      .refine((value) => value === undefined || value === '' || isKekId(value), {
+        message: 'CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)',
+      }),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
