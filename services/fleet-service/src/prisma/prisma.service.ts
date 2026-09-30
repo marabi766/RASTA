@@ -87,7 +87,13 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * outbox insert to share one transaction, and that is the whole reason the
    * platform does not lose or invent events (ADR-021).
    */
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient));
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.client.$transaction(
+      (tx) => fn(tx as ExtendedPrismaClient),
+      options?.timeoutMs === undefined ? undefined : { timeout: options.timeoutMs },
+    );
   }
 }

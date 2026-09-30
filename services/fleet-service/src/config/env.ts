@@ -26,6 +26,13 @@ export const fleetEnvSchema = baseEnvSchema
      */
     ASSET_SERVICE_URL: httpUrlSchema,
 
+    /**
+     * maintenance-service, asked whether a repair is in progress when a
+     * replayed `MAINTENANCE_STARTED` / `MAINTENANCE_COMPLETED` refreshes the
+     * replica's in-maintenance flag (D-039). Required, like the asset one.
+     */
+    MAINTENANCE_SERVICE_URL: httpUrlSchema,
+
     /** One such question, body included. A timeout refuses the assignment. */
     ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce
       .number()
