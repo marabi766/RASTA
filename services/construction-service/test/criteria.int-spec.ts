@@ -8,6 +8,7 @@ import {
   cleanup,
   newOrganizationId,
   outboxFor,
+  untilASessionWaitsOnALock,
   wire,
   type Wiring,
 } from './helpers';
@@ -333,6 +334,8 @@ describe('evaluation criteria', () => {
         const setB = asAdmin(a, () =>
           w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: WHOLE }),
         );
+        // Not assumed: set B is shown to be waiting on the row lock set A holds.
+        await untilASessionWaitsOnALock(w.prisma);
         release();
         const [first, second] = await Promise.all([setA, setB]);
 
@@ -501,10 +504,10 @@ describe('evaluation criteria', () => {
       await insertCriterion(a, tender.id, {});
       // PostgreSQL names the key's columns in a unique violation, not the index.
       await expect(insertCriterion(a, tender.id, { position: '2' })).rejects.toThrow(
-        /\(tender_id, code\)/,
+        /\(organization_id, tender_id, code\)/,
       );
       await expect(insertCriterion(a, tender.id, { code: `'D'` })).rejects.toThrow(
-        /\(tender_id, \\?"position\\?"\)/,
+        /\(organization_id, tender_id, \\?"position\\?"\)/,
       );
       await expect(insertCriterion(b, tender.id, { code: `'E'`, position: '5' })).rejects.toThrow(
         /tender_criterion_organization_id_tender_id_fkey/,

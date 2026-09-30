@@ -49,10 +49,10 @@ CREATE UNIQUE INDEX "ux_criteria_template_label_version" ON "criteria_template"(
 CREATE INDEX "ix_criteria_template_org_id" ON "criteria_template"("organization_id", "id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ux_tender_criterion_code" ON "tender_criterion"("tender_id", "code");
+CREATE UNIQUE INDEX "ux_tender_criterion_code" ON "tender_criterion"("organization_id", "tender_id", "code");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ux_tender_criterion_position" ON "tender_criterion"("tender_id", "position");
+CREATE UNIQUE INDEX "ux_tender_criterion_position" ON "tender_criterion"("organization_id", "tender_id", "position");
 
 -- CreateIndex
 CREATE INDEX "ix_tender_criterion_org_tender" ON "tender_criterion"("organization_id", "tender_id");

@@ -620,8 +620,8 @@ model TenderCriterion {
   createdAt DateTime @map("created_at")
   createdBy String   @map("created_by")
 
-  @@unique([tenderId, code], map: "ux_tender_criterion_code")
-  @@unique([tenderId, position], map: "ux_tender_criterion_position")
+  @@unique([organizationId, tenderId, code], map: "ux_tender_criterion_code")
+  @@unique([organizationId, tenderId, position], map: "ux_tender_criterion_position")
   @@index([organizationId, tenderId], map: "ix_tender_criterion_org_tender")
   @@map("tender_criterion")
 }
