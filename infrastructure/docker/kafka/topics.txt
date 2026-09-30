@@ -7,6 +7,7 @@ rasta.audit.trail.v1 audit-trail
 rasta.audit.trail.v1.retry retry
 rasta.audit.v1.dlq dead-letter
 rasta.construction.v1 stream
+rasta.construction.v1.dlq dead-letter
 rasta.construction.v1.retry retry
 rasta.document.v1 stream
 rasta.document.v1.retry retry

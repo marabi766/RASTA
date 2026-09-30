@@ -76,6 +76,8 @@ function assertEntryRange(minEntries, maxEntries) {
 
 const strictUtf8 = () => new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
+// Control characters are exactly what this pattern exists to reject in a path.
+// eslint-disable-next-line no-control-regex
 const MANIFEST_CONTROL = /[\u0000-\u0009\u000B-\u001F\u007F]/;
 // `#` comments, quoting, `scheme:` URLs (two or more letters) and Windows
 // drive-relative `C:name`, whose base would be a per-drive working directory.

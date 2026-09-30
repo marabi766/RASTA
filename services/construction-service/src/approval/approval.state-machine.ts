@@ -15,6 +15,14 @@ import { RastaError } from '@rasta/nest-common';
  *                                                                       RETIRED
  * ```
  *
+ * An ACTIVE or PENDING_PLATFORM_APPROVAL policy is also SUSPENDED — by the
+ * system, never by a person — when
+ * organization-service says the union that wrote it no longer governs the
+ * organization it was written for (ORGANIZATION_MOVED, Q-83). SUSPENDED is
+ * terminal: a suspended policy never governs and is never reactivated, and a
+ * move back does not revive it; a new version goes through the normal write,
+ * submit and approve flow. Q-83's answers are provisional, the owner's call.
+ *
  * A union administrator (for its own organization or one beneath it) or the
  * platform administrator writes a policy; only a platform administrator puts
  * it in force. A DRAFT, PENDING or REJECTED policy never governs a project.
@@ -46,15 +54,18 @@ export const POLICY_STATES = [
   'ACTIVE',
   'REJECTED',
   'RETIRED',
+  'SUSPENDED',
 ] as const;
 export type PolicyStateName = (typeof POLICY_STATES)[number];
 
 export const POLICY_TRANSITIONS: Readonly<Record<PolicyStateName, readonly PolicyStateName[]>> = {
   DRAFT: ['PENDING_PLATFORM_APPROVAL'],
-  PENDING_PLATFORM_APPROVAL: ['ACTIVE', 'REJECTED'],
-  ACTIVE: ['RETIRED'],
+  PENDING_PLATFORM_APPROVAL: ['ACTIVE', 'REJECTED', 'SUSPENDED'],
+  ACTIVE: ['RETIRED', 'SUSPENDED'],
   REJECTED: [],
   RETIRED: [],
+  // Never reactivated (Q-83, provisional): a new version is written instead.
+  SUSPENDED: [],
 } as const;
 
 /** The only state in which a policy governs a project. */

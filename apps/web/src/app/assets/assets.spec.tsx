@@ -158,6 +158,22 @@ const DOSSIER: AssetDossier = {
 };
 
 describe('the electronic dossier', () => {
+  it('links to the report form with this machine already filled in', () => {
+    const { getByRole } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+    expect(getByRole('link', { name: 'ثبت درخواست نگهداری' })).toHaveAttribute(
+      'href',
+      '/maintenance?assetId=AST_1#report-request',
+    );
+  });
+
+  it('percent-encodes the machine id in that link', () => {
+    const { getByRole } = render(<DossierScreen result={ok()} assetId="AST/1 x" />);
+    expect(getByRole('link', { name: 'ثبت درخواست نگهداری' })).toHaveAttribute(
+      'href',
+      '/maintenance?assetId=AST%2F1%20x#report-request',
+    );
+  });
+
   const ok = (data: AssetDossier = DOSSIER): ReadResult<AssetDossier> => ({ kind: 'OK', data });
 
   it('lists every reason the asset cannot be dispatched', () => {

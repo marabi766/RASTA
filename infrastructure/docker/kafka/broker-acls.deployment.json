@@ -299,10 +299,38 @@
     },
     {
       "principal": "construction-service",
+      "resourceType": "GROUP",
+      "resourceName": "construction-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "construction-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.construction.v1",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "document-service",
@@ -616,6 +644,13 @@
       "principal": "ops-replay",
       "resourceType": "TOPIC",
       "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
     },

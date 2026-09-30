@@ -10,6 +10,13 @@ import { IdempotencyStore } from '../src/shared/idempotency';
 import { ApprovalRepository } from '../src/approval/approval.repository';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
+import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
+import { PolicyReconciliationRepository } from '../src/approval/policy-reconciliation.repository';
+import {
+  PolicyReconciliationSweeper,
+  type SweeperOptions,
+} from '../src/approval/policy-reconciliation.sweeper';
+import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
@@ -59,6 +66,15 @@ export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv
   });
 }
 
+/** A sweep big enough to drain what one suite queued, and a retry that is quick. */
+const TEST_SWEEPER: SweeperOptions = {
+  intervalMs: 60_000,
+  batchSize: 500,
+  leaseSeconds: 120,
+  backoffSeconds: 30,
+  backoffMaxSeconds: 900,
+};
+
 export interface Wiring {
   prisma: PrismaService;
   env: ConstructionEnv;
@@ -72,6 +88,14 @@ export interface Wiring {
   hierarchy: FakeHierarchy;
   execution: ExecutionService;
   progress: ProgressService;
+  /** Q-83: policies follow an ORGANIZATION_MOVED. */
+  suspension: PolicySuspensionService;
+  reconciliations: PolicyReconciliationRepository;
+  /** The sweeper, driven by `runOnce()`; it never ticks in these suites. */
+  sweeper: PolicyReconciliationSweeper;
+  sweeperWith(overrides?: Partial<SweeperOptions>): PolicyReconciliationSweeper;
+  /** The consumer's handler, without a broker: `moves.handle(envelope)`. */
+  moves: OrganizationMovedConsumer;
   close(): Promise<void>;
 }
 
@@ -96,6 +120,13 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     env,
     approvalRepository,
   );
+  const reconciliations = new PolicyReconciliationRepository(prisma);
+  const suspension = new PolicySuspensionService(
+    prisma,
+    approvalRepository,
+    events,
+    reconciliations,
+  );
   const approvals = new ApprovalService(
     prisma,
     approvalRepository,
@@ -105,12 +136,32 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     access,
     env,
     hierarchy as unknown as OrganizationDirectory,
+    suspension,
   );
+  /** A sweeper over this wiring's hierarchy; `sweeperWith` for other options. */
+  const sweeperWith = (overrides: Partial<SweeperOptions> = {}) =>
+    new PolicyReconciliationSweeper(
+      reconciliations,
+      suspension,
+      hierarchy as unknown as OrganizationDirectory,
+      { ...TEST_SWEEPER, ...overrides },
+    );
   return {
     prisma,
     env,
     repository,
     projects,
+    suspension,
+    reconciliations,
+    sweeper: sweeperWith(),
+    sweeperWith,
+    moves: new OrganizationMovedConsumer(
+      () => {
+        throw new Error('the integration suites call handle() and never subscribe');
+      },
+      suspension,
+      { info: () => undefined, warn: () => undefined, debug: () => undefined },
+    ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
     approvalRepository,
     approvals,
@@ -216,6 +267,7 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
     await prisma.client.approval.deleteMany({ where });
     await prisma.client.progressReport.deleteMany({ where });
+    await prisma.client.policyReconciliationTask.deleteMany({ where });
     await prisma.client.approvalPolicyStep.deleteMany({ where });
     await prisma.client.approvalPolicy.deleteMany({ where });
     await prisma.client.projectNeed.deleteMany({ where });
@@ -225,12 +277,39 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   });
 }
 
-/** Every outbox row one organization produced, oldest first. */
+/**
+ * Every outbox row one organization produced, by `createdAt`.
+ *
+ * `createdAt` is the instant the producing transaction *started* (`now()`,
+ * `src/shared/clock.ts`), taken before it waits for the project lock. For
+ * commands that ran one after another that is commit order; for commands that
+ * ran concurrently it is not. Use `outboxStream` when the order of two
+ * concurrent commands is what is being asserted.
+ */
 export async function outboxFor(prisma: PrismaService, organizationId: string) {
   return runUnscoped('the outbox carries its own tenant column', () =>
     prisma.client.outboxMessage.findMany({
       where: { organizationId },
       orderBy: [{ createdAt: 'asc' }, { streamSeq: 'asc' }],
+    }),
+  );
+}
+
+/**
+ * One project's event stream in stream order — the order the events were
+ * allocated, under the project's lock, and so the order they committed in
+ * (ADR-051 B3; `EventPublisher`). This is the order a consumer of the topic
+ * relies on; wall-clock `createdAt` is not.
+ */
+export async function outboxStream(
+  prisma: PrismaService,
+  organizationId: string,
+  projectId: string,
+) {
+  return runUnscoped('the outbox carries its own tenant column', () =>
+    prisma.client.outboxMessage.findMany({
+      where: { organizationId, partitionKey: projectId },
+      orderBy: { streamSeq: 'asc' },
     }),
   );
 }

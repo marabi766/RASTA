@@ -1,0 +1,893 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "construction-service — tender surface (PLANNED, CON-002)",
+    "version": "0.0.0-planned",
+    "description": "DESIGN CONTRACT, not current behaviour. Nothing here is implemented until the PR named in x-step lands; each slice then moves into docs/api/construction-service.openapi.json, which is generated from the real controllers and checked byte for byte. Money is a rial bigint as a string. Times are UTC ISO 8601 with Z. Every route needs a bearer token; roles come from configuration (docs/24 Q-84..Q-90), never from the route. Bid content is never returned before the tender's openedAt (ADR-066). Design: ADR-065, ADR-066, ADR-067."
+  },
+  "servers": [],
+  "paths": {
+    "/v1/projects/{projectId}/tenders": {
+      "post": {
+        "operationId": "createTender",
+        "x-step": "PR 2",
+        "summary": "Create a DRAFT tender under an APPROVED project of the caller's organization.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectId" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/CreateTender" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders": {
+      "get": {
+        "operationId": "listTenders",
+        "x-step": "PR 2",
+        "summary": "The caller's organization's tenders (owner side), newest first, cursor-paged.",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": { "$ref": "#/components/schemas/TenderStatus" }
+          },
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/TenderPage" } }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenders/{id}": {
+      "get": {
+        "operationId": "getTender",
+        "x-step": "PR 2",
+        "summary": "One tender of the caller's organization. Another organization's tender is 404.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "operationId": "updateTender",
+        "x-step": "PR 2",
+        "summary": "Change a DRAFT tender. Names only the changed fields on the event.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/UpdateTender" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/criteria": {
+      "put": {
+        "operationId": "setTenderCriteria",
+        "x-step": "PR 4",
+        "summary": "Replace the DRAFT tender's evaluation criteria, from a template or an explicit list. Locked at publish (ADR-067).",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/SetCriteria" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The criteria",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/CriteriaList" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/invitations": {
+      "post": {
+        "operationId": "inviteToTender",
+        "x-step": "PR 4",
+        "summary": "Invite an organization to a restricted tender (DRAFT or PUBLISHED).",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["organizationId"],
+                "properties": { "organizationId": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Invited" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/publish": {
+      "post": {
+        "operationId": "publishTender",
+        "x-step": "PR 4",
+        "summary": "DRAFT to PUBLISHED. Needs procurementNature, criteria summing to 10000 bp, and a future bidClosingAt after bidOpeningAt. Generates the tender key pair. Publishes TENDER_PUBLISHED.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": { "$ref": "#/components/requestBodies/ExpectedVersion" },
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/cancel": {
+      "post": {
+        "operationId": "cancelTender",
+        "x-step": "PR 2 (from DRAFT); PR 4, 7, 8, 9, 10 extend the source states",
+        "summary": "Cancel from any state before AWARDED. A reason is required. Before opening, the tender key is never unwrapped.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": { "$ref": "#/components/requestBodies/Reason" },
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/close": {
+      "post": {
+        "operationId": "closeTender",
+        "x-step": "PR 7",
+        "summary": "PUBLISHED to CLOSED. 422 before bidClosingAt by the database clock. Idempotent. The sweeper calls the same command as the system actor.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/open-bids": {
+      "post": {
+        "operationId": "openBids",
+        "x-step": "PR 8",
+        "summary": "CLOSED to EVALUATING. The explicit, audited opening: verifies the receipt chain, sets openedAt, marks every SUBMITTED bid OPENED. Refuses on a broken chain, or if the caller belongs to a bidding organization.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": { "$ref": "#/components/requestBodies/ExpectedVersion" },
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/bids": {
+      "post": {
+        "operationId": "submitBid",
+        "x-step": "PR 6",
+        "summary": "Bidder side. Submit the caller's organization's one bid. Refused with 422 at or after bidClosingAt by the database clock. Returns a receipt, never content. Idempotency-Key is required (docs/06 section 6.8).",
+        "parameters": [
+          { "$ref": "#/components/parameters/Id" },
+          { "$ref": "#/components/parameters/IdempotencyKeyRequired" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/BidContent" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Received",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BidReceipt" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      },
+      "get": {
+        "operationId": "listBids",
+        "x-step": "PR 8",
+        "summary": "Owner side. Before openedAt: count and receipt times only. After: the bids with content, each read audited.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "The bids",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BidList" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/bids/mine": {
+      "get": {
+        "operationId": "getMyBid",
+        "x-step": "PR 6",
+        "summary": "Bidder side. The caller's own receipt, revision and status; content only after openedAt.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "The receipt",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BidReceipt" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/bids/{bidId}": {
+      "put": {
+        "operationId": "reviseBid",
+        "x-step": "PR 6",
+        "summary": "Bidder side. Replace the bid before the deadline (revision + 1).",
+        "parameters": [
+          { "$ref": "#/components/parameters/Id" },
+          { "name": "bidId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/BidContent" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Received",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BidReceipt" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/bids/{bidId}/withdraw": {
+      "post": {
+        "operationId": "withdrawBid",
+        "x-step": "PR 6",
+        "summary": "Bidder side. Withdraw before the deadline; terminal. Serialised against close by the tender row lock.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Id" },
+          { "name": "bidId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/ExpectedVersion" },
+        "responses": {
+          "200": {
+            "description": "Withdrawn",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BidReceipt" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/open-tenders": {
+      "get": {
+        "operationId": "listOpenTenders",
+        "x-step": "PR 6",
+        "summary": "Bidder side. PUBLISHED tenders the caller's organization may bid on: public, or invited. Public fields only.",
+        "responses": {
+          "200": {
+            "description": "A page",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/OpenTenderPage" } }
+            }
+          }
+        }
+      }
+    },
+    "/v1/open-tenders/{id}": {
+      "get": {
+        "operationId": "getOpenTender",
+        "x-step": "PR 6",
+        "summary": "Bidder side. One such tender, with its frozen criteria. Anything else is 404.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/OpenTender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/evaluations": {
+      "post": {
+        "operationId": "recordEvaluation",
+        "x-step": "PR 9",
+        "summary": "EVALUATING only. Append one evaluator's scores (a new revision) and the qualification decision for one bid.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/RecordEvaluation" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/EvaluationMatrix" } }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/evaluate": {
+      "post": {
+        "operationId": "evaluateBids",
+        "x-step": "PR 9",
+        "summary": "EVALUATING to EVALUATED. 422 unless every QUALIFIED bid is fully scored. The matrix is then immutable; ties are shown, never broken.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": { "$ref": "#/components/requestBodies/ExpectedVersion" },
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/evaluation-matrix": {
+      "get": {
+        "operationId": "getEvaluationMatrix",
+        "x-step": "PR 9",
+        "summary": "Owner side. Criteria by bid, integer weighted totals, and the ranking.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "The matrix",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/EvaluationMatrix" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/award": {
+      "post": {
+        "operationId": "awardTender",
+        "x-step": "PR 10",
+        "summary": "EVALUATED to AWARDED. Picks one QUALIFIED bid; a choice other than rank 1, or among a tie, needs a justification. Exactly one of two concurrent awards succeeds. Publishes TENDER_AWARDED.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Award" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The tender",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Tender" } }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/BusinessRule" }
+        }
+      }
+    },
+    "/v1/tenders/{id}/bid-access-log": {
+      "get": {
+        "operationId": "listBidAccessLog",
+        "x-step": "PR 8",
+        "summary": "Owner side. The append-only record of every read of this tender's bids, refused reads included.",
+        "parameters": [{ "$ref": "#/components/parameters/Id" }],
+        "responses": {
+          "200": {
+            "description": "A page",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/AccessLogPage" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" } },
+    "parameters": {
+      "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+      "ProjectId": {
+        "name": "projectId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 255 }
+      },
+      "IdempotencyKeyRequired": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "requestBodies": {
+      "ExpectedVersion": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expectedVersion"],
+              "properties": { "expectedVersion": { "type": "integer", "minimum": 1 } }
+            }
+          }
+        }
+      },
+      "Reason": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expectedVersion", "reason"],
+              "properties": {
+                "expectedVersion": { "type": "integer", "minimum": 1 },
+                "reason": { "type": "string", "minLength": 8, "maxLength": 500 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "NotFound": {
+        "description": "Not found, or not the caller's to know about (404, never 403)"
+      },
+      "Forbidden": {
+        "description": "The caller is known to see the tender but may not do this (FORBIDDEN, INSUFFICIENT_ROLE)"
+      },
+      "Conflict": {
+        "description": "OPTIMISTIC_LOCK_FAILED, IDEMPOTENCY_KEY_REUSED or an in-flight CONFLICT"
+      },
+      "BusinessRule": {
+        "description": "BUSINESS_RULE_VIOLATION or INVALID_STATE_TRANSITION, with a closed reason code"
+      }
+    },
+    "schemas": {
+      "TenderStatus": {
+        "type": "string",
+        "enum": ["DRAFT", "PUBLISHED", "CLOSED", "EVALUATING", "EVALUATED", "AWARDED", "CANCELLED"]
+      },
+      "BidStatus": {
+        "type": "string",
+        "enum": [
+          "SUBMITTED",
+          "WITHDRAWN",
+          "OPENED",
+          "QUALIFIED",
+          "DISQUALIFIED",
+          "AWARDED",
+          "NOT_AWARDED"
+        ]
+      },
+      "ProcurementNature": {
+        "type": "string",
+        "enum": ["FORMAL_TENDER", "INQUIRY", "RFP", "MARKETPLACE_DEAL"]
+      },
+      "CreateTender": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "scopeOfWork"],
+        "properties": {
+          "title": { "type": "string", "minLength": 2, "maxLength": 200 },
+          "scopeOfWork": { "type": "string", "maxLength": 20000 },
+          "procurementNature": { "$ref": "#/components/schemas/ProcurementNature" },
+          "visibility": { "type": "string", "enum": ["PUBLIC", "RESTRICTED"] },
+          "bidOpeningAt": { "type": "string", "format": "date-time" },
+          "bidClosingAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "UpdateTender": {
+        "allOf": [
+          { "$ref": "#/components/schemas/CreateTender" },
+          {
+            "type": "object",
+            "required": ["expectedVersion"],
+            "properties": { "expectedVersion": { "type": "integer", "minimum": 1 } }
+          }
+        ]
+      },
+      "Tender": {
+        "type": "object",
+        "required": [
+          "id",
+          "organizationId",
+          "projectId",
+          "status",
+          "version",
+          "title",
+          "visibility",
+          "bidOpeningAt",
+          "bidClosingAt",
+          "openedAt",
+          "createdAt",
+          "createdBy"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "organizationId": { "type": "string" },
+          "projectId": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/TenderStatus" },
+          "statusReasonCode": { "type": "string", "nullable": true },
+          "version": { "type": "integer" },
+          "title": { "type": "string" },
+          "scopeOfWork": { "type": "string" },
+          "procurementNature": {
+            "allOf": [{ "$ref": "#/components/schemas/ProcurementNature" }],
+            "nullable": true
+          },
+          "visibility": { "type": "string", "enum": ["PUBLIC", "RESTRICTED"] },
+          "bidOpeningAt": { "type": "string", "format": "date-time", "nullable": true },
+          "bidClosingAt": { "type": "string", "format": "date-time", "nullable": true },
+          "openedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "bidCount": {
+            "type": "integer",
+            "description": "Receipts, without identity or content before openedAt."
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "createdBy": { "type": "string" }
+        }
+      },
+      "TenderPage": {
+        "type": "object",
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Tender" } },
+          "nextCursor": { "type": "string", "nullable": true }
+        }
+      },
+      "Criterion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "label", "weightBp", "scoringMethod", "maxScore"],
+        "properties": {
+          "code": { "type": "string", "maxLength": 64 },
+          "label": { "type": "string", "maxLength": 200 },
+          "weightBp": { "type": "integer", "minimum": 1, "maximum": 10000 },
+          "scoringMethod": { "type": "string", "enum": ["MANUAL_SCORE", "PASS_FAIL"] },
+          "maxScore": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "SetCriteria": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion"],
+        "properties": {
+          "expectedVersion": { "type": "integer", "minimum": 1 },
+          "templateId": { "type": "string" },
+          "criteria": { "type": "array", "items": { "$ref": "#/components/schemas/Criterion" } }
+        }
+      },
+      "CriteriaList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Criterion" } }
+        }
+      },
+      "BidContent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["priceMinor", "criterionResponses"],
+        "properties": {
+          "priceMinor": { "type": "string", "pattern": "^[0-9]{1,19}$" },
+          "durationDays": { "type": "integer", "minimum": 1 },
+          "note": { "type": "string", "maxLength": 5000 },
+          "criterionResponses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "response"],
+              "properties": {
+                "code": { "type": "string" },
+                "response": { "type": "string", "maxLength": 5000 }
+              }
+            }
+          }
+        }
+      },
+      "BidReceipt": {
+        "type": "object",
+        "required": [
+          "bidId",
+          "tenderId",
+          "status",
+          "revision",
+          "receivedAt",
+          "contentCommitment",
+          "receipt"
+        ],
+        "properties": {
+          "bidId": { "type": "string" },
+          "tenderId": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/BidStatus" },
+          "revision": { "type": "integer" },
+          "receivedAt": { "type": "string", "format": "date-time" },
+          "contentCommitment": {
+            "type": "string",
+            "description": "hex SHA-256 over salt and canonical content; verified at opening."
+          },
+          "receipt": {
+            "type": "string",
+            "description": "hex SHA-256, chained per tender; also held by audit-service."
+          },
+          "content": {
+            "allOf": [{ "$ref": "#/components/schemas/BidContent" }],
+            "nullable": true,
+            "description": "Null until the tender's openedAt."
+          }
+        }
+      },
+      "BidList": {
+        "type": "object",
+        "required": ["items", "bidCount"],
+        "properties": {
+          "bidCount": { "type": "integer" },
+          "items": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                { "$ref": "#/components/schemas/BidReceipt" },
+                {
+                  "type": "object",
+                  "properties": {
+                    "bidderOrganizationId": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Null before openedAt (Q-85)."
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "OpenTender": {
+        "type": "object",
+        "required": ["id", "title", "bidOpeningAt", "bidClosingAt", "criteria"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "scopeOfWork": { "type": "string" },
+          "procurementNature": { "$ref": "#/components/schemas/ProcurementNature" },
+          "bidOpeningAt": { "type": "string", "format": "date-time" },
+          "bidClosingAt": { "type": "string", "format": "date-time" },
+          "criteria": { "type": "array", "items": { "$ref": "#/components/schemas/Criterion" } }
+        }
+      },
+      "OpenTenderPage": {
+        "type": "object",
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/OpenTender" } },
+          "nextCursor": { "type": "string", "nullable": true }
+        }
+      },
+      "RecordEvaluation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bidId"],
+        "properties": {
+          "bidId": { "type": "string" },
+          "qualification": { "type": "string", "enum": ["QUALIFIED", "DISQUALIFIED"] },
+          "disqualificationCode": {
+            "type": "string",
+            "description": "A closed code, required with DISQUALIFIED."
+          },
+          "note": { "type": "string", "maxLength": 2000 },
+          "scores": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "score"],
+              "properties": {
+                "code": { "type": "string" },
+                "score": { "type": "integer", "minimum": 0, "description": "Score x 100." },
+                "rationale": { "type": "string", "maxLength": 2000 }
+              }
+            }
+          }
+        }
+      },
+      "EvaluationMatrix": {
+        "type": "object",
+        "required": ["criteria", "rows", "ranking"],
+        "properties": {
+          "criteria": { "type": "array", "items": { "$ref": "#/components/schemas/Criterion" } },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["bidId", "qualification", "cells", "totalUnits"],
+              "properties": {
+                "bidId": { "type": "string" },
+                "qualification": { "type": "string", "nullable": true },
+                "cells": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "code": { "type": "string" },
+                      "score": { "type": "integer" },
+                      "revision": { "type": "integer" }
+                    }
+                  }
+                },
+                "totalUnits": {
+                  "type": "string",
+                  "description": "Sum of weightBp x score, an exact integer as a string."
+                }
+              }
+            }
+          },
+          "ranking": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "bidId": { "type": "string" },
+                "rank": { "type": "integer" },
+                "tied": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      },
+      "Award": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expectedVersion", "bidId"],
+        "properties": {
+          "expectedVersion": { "type": "integer", "minimum": 1 },
+          "bidId": { "type": "string" },
+          "justification": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 2000,
+            "description": "Required when the bid is not rank 1 or is tied."
+          }
+        }
+      },
+      "AccessLogPage": {
+        "type": "object",
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "bidId",
+                "accessorOrganizationId",
+                "actor",
+                "purpose",
+                "outcome",
+                "accessedAt"
+              ],
+              "properties": {
+                "bidId": { "type": "string", "nullable": true },
+                "accessorOrganizationId": { "type": "string" },
+                "actor": { "type": "string" },
+                "purpose": { "type": "string" },
+                "outcome": { "type": "string", "enum": ["ALLOWED", "REFUSED"] },
+                "accessedAt": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "nextCursor": { "type": "string", "nullable": true }
+        }
+      }
+    }
+  },
+  "security": [{ "bearer": [] }]
+}
