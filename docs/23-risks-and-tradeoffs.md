@@ -864,7 +864,8 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `ops-replay.`) و رد مگر `--allow-stale <eventId>`. `scripts/replay-dlq.broker.test.mjs` در CI همین را روی Broker احرازشده
   با یک Consumer آزمونی روی `.retry` نشان می‌دهد. نیمهٔ (۱) با #145 رسید (`EventConsumer` `.retry` را می‌خواند؛ DLQ کلید را نگه می‌دارد، D-040) — «وضعیت» پایین.
   **به‌روز 2026-09-30 (بازبینی دور ۱ #144):** Retention گذشته از Offset اصلی ← کهنگی `UNKNOWN` (نه «کهنه نیست»)؛ READ
-  `ops-replay` بی Topicهای `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`)، و پیام آن Topic هر نامی داشته باشد رد می‌شود؛
+  `ops-replay` بی Topicهای `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`)، و WRITE روی `.retry` آن‌ها هم برداشته شد (کمترین
+  امتیاز، تصمیم مدیر پروژه)؛ پیام آن Topic هر نامی داشته باشد رد می‌شود؛
   کلید فقط کلید نگه‌داشته (رویداد دارای `streamKey` بی کلید ← `KEY_UNVERIFIABLE`)؛ Header و بدنه در حضور هم باید بخوانند.
   بازپخش **عمداً حداقل یک‌بار** است (تصمیم مدیر پروژه): بی دفتر بازپخش، ایمنی از `processed_event` مصرف‌کننده.
   **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر

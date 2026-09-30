@@ -2810,7 +2810,7 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   **به‌روزرسانی 2026-09-28 (RUN-006، PR A #128 + PR B `chore/kafka-sasl-acl-broker`):** Broker توسعه و CI **احراز و
   مجوزدهی می‌کند** — SASL_SSL با SCRAM-SHA-512، یک Principal برای هر سرویس، `allow.everyone.if.no.acl.found=false`، و
   ACLهای تولیدشده از `TOPIC_PRODUCERS` و `TOPIC_CONSUMERS` در دو پروفایل: `broker-acls.development.json` (Compose و CI؛
-  ۱۶ Principal، ۱۷۹ Binding از 2026-09-30 — ۱۶۷ پیش از READ کهنگی `ops-replay`، بی `rasta.economic.v1`) و `broker-acls.deployment.json` (۱۳ Principal، ۱۱۹ Binding، پیش‌تر ۱۰۷ — بی `itest-observer`، Kafka UI
+  ۱۶ Principal، ۱۷۸ Binding از 2026-09-30 — ۱۶۷ پیش از READ کهنگی `ops-replay`، بی READ `rasta.economic.v1` و WRITE `.retry` آن) و `broker-acls.deployment.json` (۱۳ Principal، ۱۱۸ Binding، پیش‌تر ۱۰۷ — بی `itest-observer`، Kafka UI
   و Exporter). اعمال‌کننده (`pnpm kafka:acl:apply:dev` ← `kafka-acl.mjs apply --profile …`) و Broker بی پروفایل صریح اجرا
   نمی‌شوند. فهرست Topicهای Bootstrap (`topics.txt`، ۳۴ Topic، شامل `rasta.audit.trail.v1.retry`) هم تولیدی است و آزمون
   قرارداد-به-Bootstrap برابری‌اش را با قراردادها و ACLها نگه می‌دارد. فقط مالک روی Topicش می‌نویسد؛ Consumer فقط

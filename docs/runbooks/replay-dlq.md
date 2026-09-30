@@ -127,7 +127,8 @@ docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
 
 **چه کسی.** فقط Principal `ops-replay` (RUN-006، ADR-061 § ۳): تنها Principalی که Topicهای `.retry` را **می‌نویسد** و DLQ
 سرویس‌های دیگر را **می‌خواند**، زیر گروه‌های `ops-replay.`؛ و برای بررسی کهنگی، Topicهای مبدأ مشترک را فقط **می‌خواند**
-(همان گروه‌ها) — جز `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`) که هرگز بازپخشش نمی‌کند و پس نمی‌خواندش. نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی
+(همان گروه‌ها) — جز `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`) که هرگز بازپخشش نمی‌کند، پس نه آن را می‌خواند و نه
+روی `.retry` آن می‌نویسد (هیچ Principalی نمی‌نویسد). نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی
 Topic او نمی‌نشیند. گذرواژه: `KAFKA_SASL_PASSWORD_OPS_REPLAY` — در توسعه از `infrastructure/docker/kafka/bootstrap.env`
 (پیش‌فرض‌ها در `bootstrap.env.example`)، **هرگز** از `.env` مشترکی که هر سرویس می‌خواند (`pnpm infra:up` و
 `pnpm check:kafka-credential-scope` آن را در `.env` رد می‌کنند)؛ در استقرار از Secret Store اپراتور. چرخش:

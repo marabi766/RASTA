@@ -1080,13 +1080,6 @@
     {
       "principal": "ops-replay",
       "resourceType": "TOPIC",
-      "resourceName": "rasta.economic.v1.retry",
-      "patternType": "LITERAL",
-      "operation": "WRITE"
-    },
-    {
-      "principal": "ops-replay",
-      "resourceType": "TOPIC",
       "resourceName": "rasta.fleet.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"

@@ -355,9 +355,13 @@ describe('5. dead-letter and retry topics', () => {
     );
   });
 
-  test('ops-replay may not read the economic stream, which it never replays', async () => {
+  test('ops-replay may neither read the economic stream nor write its .retry — it never replays it', async () => {
     assert.equal(
       await consume('ops-replay', `ops-replay.acl-economic-${run}`, 'rasta.economic.v1'),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+    assert.equal(
+      await refusal(() => produce('ops-replay', 'rasta.economic.v1.retry')),
       'TOPIC_AUTHORIZATION_FAILED',
     );
   });

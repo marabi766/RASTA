@@ -70,7 +70,7 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
     }
   });
 
-  it('lets only ops-replay write a retry topic', () => {
+  it('lets only ops-replay write a retry topic, and nobody that of a never-replayed topic', () => {
     const writers = principalsOf(
       acls.filter((acl) => acl.operation === 'WRITE' && acl.resourceName.endsWith('.retry')),
     );
@@ -82,8 +82,13 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
           resourceName: `${topic}.retry`,
           operation: 'WRITE',
         }),
-      ).toHaveLength(1);
+      ).toHaveLength(NEVER_AUTO_REPLAY_TOPICS.has(topic) ? 0 : 1);
     }
+    // Least privilege (PM, round 1 on #144): the tool never replays the
+    // economic stream, so ops-replay may not write its .retry either.
+    expect(where(acls, { resourceName: 'rasta.economic.v1.retry', operation: 'WRITE' })).toEqual(
+      [],
+    );
   });
 
   it('lets only ops-replay (and, in development, the test observer) read a dead-letter topic', () => {

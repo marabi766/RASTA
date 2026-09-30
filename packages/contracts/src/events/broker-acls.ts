@@ -16,7 +16,9 @@ import { AUDIT_TRAIL_TOPIC, NEVER_AUTO_REPLAY_TOPICS } from './envelope';
  *     the consumer groups `<service>.*`; WRITE on its own dead-letter topic.
  *     (READ and WRITE imply DESCRIBE on the broker.)
  *   - `ops-replay`, the operator's replay tool (docs/runbooks/replay-dlq.md):
- *     the only writer of `.retry` topics and the only reader of `.dlq` ones.
+ *     the only writer of `.retry` topics — except those of
+ *     `NEVER_AUTO_REPLAY_TOPICS`, which nobody writes — and the only reader of
+ *     `.dlq` ones.
  *     It also READs every topic a consumer subscribes to — the only topics a
  *     dead letter can have come from — so a dry-run can tell a stale event
  *     (a newer one exists for its stream key), except the topics in
@@ -148,8 +150,11 @@ export function brokerAcls(profile: BrokerProfile): AclBinding[] {
 
   // The operator's replay: dead letters out, retries in — and a look at the
   // original topic, to tell whether a newer event exists for the stream key.
-  // Not at a topic whose dead letters it never replays (the economic stream).
-  for (const name of declaredTopics()) topic(OPS_REPLAY_PRINCIPAL, retry(name), 'WRITE');
+  // Neither, for a topic whose dead letters it never replays (the economic
+  // stream): no READ of it and no WRITE of its `.retry`.
+  for (const name of declaredTopics()) {
+    if (!NEVER_AUTO_REPLAY_TOPICS.has(name)) topic(OPS_REPLAY_PRINCIPAL, retry(name), 'WRITE');
+  }
   for (const name of deadLetters) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');
   for (const name of subscribedTopics) {
     if (!NEVER_AUTO_REPLAY_TOPICS.has(name)) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');

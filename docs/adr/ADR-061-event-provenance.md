@@ -88,8 +88,8 @@ PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose هم�
   Volume داکر (`kafka-tls`) می‌مانند و هرگز Commit نمی‌شوند؛ فقط گواهی عمومی CA به مسیر git-ignoredِ
   `infrastructure/docker/kafka/.tls/ca.pem` کپی می‌شود تا سرویس‌ها و آزمون‌های روی میزبان به آن اعتماد کنند.
 - **Principalها.** یکی برای هر سرویس، به نام `SERVICE_NAME` آن، با گذرواژهٔ `KAFKA_SASL_PASSWORD_<SERVICE>`؛ `admin`
-  فقط برای Bootstrap (ساخت Topic و اعمال ACL) و هرگز در یک سرویس؛ `ops-replay`، **تنها** نویسندهٔ Topicهای `.retry` و
-  **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)، و — برای بررسی کهنگی ابزار بازپخش
+  فقط برای Bootstrap (ساخت Topic و اعمال ACL) و هرگز در یک سرویس؛ `ops-replay`، **تنها** نویسندهٔ Topicهای `.retry` (جز
+  `.retry` Topicهای `NEVER_AUTO_REPLAY_TOPICS` که هیچ‌کس نمی‌نویسد؛ اصلاحیهٔ 2026-09-30) و **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)، و — برای بررسی کهنگی ابزار بازپخش
   (اصلاحیهٔ 2026-09-29، ADR-051 § R6) — خوانندهٔ هر Topic مشترک جز `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`، که
   هرگز بازپخش نمی‌شود؛ اصلاحیهٔ 2026-09-30، بازبینی دور ۱ #144)، فقط زیر گروه‌های `ops-replay.` و هرگز نویسندهٔ آن؛ و سه Principal فقط-توسعه که فقط در پروفایل
   `development` هستند: `itest-observer` (فقط `READ` روی همهٔ Topicها زیر گروه‌های `itest-observer.` برای
