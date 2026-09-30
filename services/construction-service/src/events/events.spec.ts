@@ -152,10 +152,33 @@ Object.assign(VALID, {
     cancelledBy: 'USR_1',
     cancelledAt: AT,
   },
+  TENDER_CRITERIA_SET: {
+    ...TENDER,
+    criteriaCount: 3,
+    totalWeightBp: 10_000,
+    templateId: null,
+    setBy: 'USR_1',
+    setAt: AT,
+  },
+  CRITERIA_TEMPLATE_CREATED: {
+    templateId: 'CTP_1',
+    organizationId: 'ORG_A',
+    version: 2,
+    criteriaCount: 3,
+    totalWeightBp: 9_000,
+    createdBy: 'USR_1',
+    createdAt: AT,
+  },
 });
 
 const NAMES = Object.values(CONSTRUCTION_EVENTS);
-const TENDER_EVENTS = ['TENDER_CREATED', 'TENDER_UPDATED', 'TENDER_CANCELLED'];
+const TENDER_EVENTS = [
+  'TENDER_CREATED',
+  'TENDER_UPDATED',
+  'TENDER_CANCELLED',
+  'TENDER_CRITERIA_SET',
+];
+const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
   'APPROVAL_POLICY_CREATED',
   'APPROVAL_POLICY_ACTIVATED',
@@ -165,7 +188,10 @@ const POLICY_EVENTS = [
   'APPROVAL_POLICY_REJECTED',
 ];
 const PROJECT_EVENTS = NAMES.filter(
-  (name) => !POLICY_EVENTS.includes(name) && !TENDER_EVENTS.includes(name),
+  (name) =>
+    !POLICY_EVENTS.includes(name) &&
+    !TENDER_EVENTS.includes(name) &&
+    !TEMPLATE_EVENTS.includes(name),
 );
 
 describe('the construction event catalogue', () => {
@@ -180,6 +206,7 @@ describe('the construction event catalogue', () => {
       'APPROVAL_POLICY_SUSPENDED',
       'APPROVAL_REJECTED',
       'APPROVAL_REQUESTED',
+      'CRITERIA_TEMPLATE_CREATED',
       'PROJECT_COMPLETED',
       'PROJECT_CREATED',
       'PROJECT_NEED_ADDED',
@@ -194,6 +221,7 @@ describe('the construction event catalogue', () => {
       'PROJECT_UPDATED',
       'TENDER_CANCELLED',
       'TENDER_CREATED',
+      'TENDER_CRITERIA_SET',
       'TENDER_UPDATED',
     ]);
     expect(Object.keys(CONSTRUCTION_EVENT_SCHEMAS).sort()).toEqual([...NAMES].sort());
@@ -362,6 +390,41 @@ describe('routing (docs/07 § 7.7)', () => {
       expect(decision.key).not.toBe('PRJ_01');
     },
   );
+
+  it('keys a template event by (organization, template) and refuses to route it without a template', () => {
+    const payload = validateConstructionPayload(
+      'CRITERIA_TEMPLATE_CREATED',
+      VALID.CRITERIA_TEMPLATE_CREATED,
+    );
+    expect(AGGREGATE_OF.CRITERIA_TEMPLATE_CREATED).toBe('CriteriaTemplate');
+    expect(resolvePartitionKey('CRITERIA_TEMPLATE_CREATED', payload).key).toBe('ORG_A/CTP_1');
+    expect(() =>
+      resolvePartitionKey('CRITERIA_TEMPLATE_CREATED', { organizationId: 'ORG_A' }),
+    ).toThrow(/no templateId/);
+  });
+
+  it.each([
+    ['CRITERIA_TEMPLATE_CREATED', { label: 'Roads' }],
+    ['CRITERIA_TEMPLATE_CREATED', { criteria: [{ code: 'PRICE' }] }],
+    ['TENDER_CRITERIA_SET', { criteria: [{ code: 'PRICE' }] }],
+    ['TENDER_CRITERIA_SET', { codes: ['PRICE'] }],
+  ] as [ConstructionEventName, Record<string, unknown>][])(
+    'never carries a criterion’s text or code: %s (%j)',
+    (name, extra) => {
+      expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...extra })).toThrow();
+    },
+  );
+
+  it('refuses a criteria total above the whole, and none at all', () => {
+    for (const totalWeightBp of [10_001, 0]) {
+      expect(() =>
+        validateConstructionPayload('TENDER_CRITERIA_SET', {
+          ...VALID.TENDER_CRITERIA_SET!,
+          totalWeightBp,
+        }),
+      ).toThrow();
+    }
+  });
 
   it('refuses to route a tender event with no tenderId', () => {
     expect(() =>

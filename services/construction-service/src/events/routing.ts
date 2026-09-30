@@ -26,6 +26,8 @@ export const AGGREGATE_TYPE = 'Project';
 export const POLICY_AGGREGATE_TYPE = 'ApprovalPolicy';
 /** A tender is its own aggregate (`docs/03` § 3.3, ADR-065), keyed by `tenderId`. */
 export const TENDER_AGGREGATE_TYPE = 'Tender';
+/** A criteria template is its own small aggregate, keyed by `{organizationId}/{templateId}`. */
+export const TEMPLATE_AGGREGATE_TYPE = 'CriteriaTemplate';
 
 export const AGGREGATE_OF = {
   PROJECT_CREATED: AGGREGATE_TYPE,
@@ -52,6 +54,8 @@ export const AGGREGATE_OF = {
   TENDER_CREATED: TENDER_AGGREGATE_TYPE,
   TENDER_UPDATED: TENDER_AGGREGATE_TYPE,
   TENDER_CANCELLED: TENDER_AGGREGATE_TYPE,
+  TENDER_CRITERIA_SET: TENDER_AGGREGATE_TYPE,
+  CRITERIA_TEMPLATE_CREATED: TEMPLATE_AGGREGATE_TYPE,
 } as const satisfies Record<ConstructionEventName, string>;
 
 const POLICY_EVENTS: readonly ConstructionEventName[] = [
@@ -77,10 +81,23 @@ export function resolvePartitionKey(
   payload: {
     projectId?: string;
     tenderId?: string;
+    /** Null on `TENDER_CRITERIA_SET` written out rather than copied; only a template event keys by it. */
+    templateId?: string | null;
     organizationId?: string;
     workflowKey?: string;
   },
 ): PartitionDecision {
+  if (AGGREGATE_OF[eventName] === TEMPLATE_AGGREGATE_TYPE) {
+    if (!payload.templateId || !payload.organizationId) {
+      throw new Error(`${eventName} carries no templateId to partition by`);
+    }
+    return {
+      key: `${payload.organizationId}/${payload.templateId}`,
+      reason:
+        `${eventName} is keyed by (organization, template): a template is immutable and ` +
+        'belongs to no tender (docs/07 § 7.7)',
+    };
+  }
   if (AGGREGATE_OF[eventName] === TENDER_AGGREGATE_TYPE) {
     // A tender's whole lifecycle — and, in later steps, its bids and its
     // evaluation — is one ordered stream (`docs/07` § 7.4, ADR-065 § 5).

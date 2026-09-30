@@ -10,6 +10,8 @@ import { IdempotencyStore } from '../src/shared/idempotency';
 import { ApprovalRepository } from '../src/approval/approval.repository';
 import { TenderRepository } from '../src/tender/tender.repository';
 import { TenderService } from '../src/tender/tender.service';
+import { CriteriaRepository } from '../src/tender/criteria.repository';
+import { CriteriaService } from '../src/tender/criteria.service';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
 import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
@@ -85,6 +87,8 @@ export interface Wiring {
   needs: NeedService;
   tenderRepository: TenderRepository;
   tenders: TenderService;
+  criteriaRepository: CriteriaRepository;
+  criteria: CriteriaService;
   approvalRepository: ApprovalRepository;
   approvals: ApprovalService;
   policies: PolicyService;
@@ -116,6 +120,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const idempotency = new IdempotencyStore(prisma, env);
   const approvalRepository = new ApprovalRepository(prisma);
   const tenderRepository = new TenderRepository(prisma);
+  const criteriaRepository = new CriteriaRepository(prisma);
   const projects = new ProjectService(
     prisma,
     repository,
@@ -171,6 +176,15 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
     tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
+    criteriaRepository,
+    criteria: new CriteriaService(
+      prisma,
+      criteriaRepository,
+      tenderRepository,
+      events,
+      access,
+      idempotency,
+    ),
     approvalRepository,
     approvals,
     policies: new PolicyService(
@@ -273,6 +287,8 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
   await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
+    await prisma.client.tenderCriterion.deleteMany({ where });
+    await prisma.client.criteriaTemplate.deleteMany({ where });
     await prisma.client.tender.deleteMany({ where });
     await prisma.client.approval.deleteMany({ where });
     await prisma.client.progressReport.deleteMany({ where });

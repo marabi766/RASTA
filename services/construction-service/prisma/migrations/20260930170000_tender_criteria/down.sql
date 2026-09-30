@@ -1,0 +1,24 @@
+-- =============================================================================
+-- Reverse of `migration.sql` (CON-002 PR 4a).
+--
+-- Drops the freeze trigger and its function, both tables (indexes, CHECKs and the
+-- tenant-bound foreign key go with them) and the enum, which cannot be dropped
+-- while a column uses it.
+--
+-- **This destroys every criteria template and every tender's criteria this
+-- service has stored.** Events already published from the outbox have left;
+-- audit-service keeps its own copy of what it received.
+--
+-- The `_prisma_migrations` row is removed last so the forward migration can be
+-- re-applied.
+-- =============================================================================
+
+DROP TRIGGER IF EXISTS "tg_tender_criterion_freeze" ON "tender_criterion";
+DROP FUNCTION IF EXISTS "tender_criterion_freeze"();
+
+DROP TABLE IF EXISTS "tender_criterion";
+DROP TABLE IF EXISTS "criteria_template";
+
+DROP TYPE IF EXISTS "ScoringMethod";
+
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260930170000_tender_criteria';

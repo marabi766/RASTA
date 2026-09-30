@@ -22,6 +22,8 @@ export const TENANT_SCOPED_MODELS = [
   'Approval',
   'ProgressReport',
   'Tender',
+  'CriteriaTemplate',
+  'TenderCriterion',
 ] as const;
 
 /**
