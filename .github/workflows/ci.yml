@@ -411,24 +411,39 @@ jobs:
         run: |
           pnpm --filter @rasta/identity-service run db:migrate
           pnpm --filter @rasta/fleet-service run db:migrate
+          pnpm --filter @rasta/organization-service run db:migrate
+          pnpm --filter @rasta/asset-service run db:migrate
+          pnpm --filter @rasta/maintenance-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
 
-      - name: Seed the live user, asset reference and assignment
+      - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
         # fleet, and holds AST-SEED-0001 through ASG-SEED-0001.
+        #
+        # The seeds hold **two tenants** on purpose (ORG-DEH-0001 and
+        # ORG-DEH-0002, each with a machine, a driver and a schedule; the
+        # other's rows "must be invisible"), which is what the browser suite's
+        # tenant-isolation scenarios (`e2e/tenant-isolation.spec.ts`) read
+        # through the real services.
         run: |
           # Through turbo, not `pnpm --filter … run db:seed`: the seed imports
           # @rasta/config, which is not built yet at this point in the job, and
           # turbo's db:seed builds it first (dependsOn ^build, db:generate).
-          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service
+          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service --filter=@rasta/organization-service --filter=@rasta/asset-service --filter=@rasta/maintenance-service
         env:
           # Demo seeds refuse to run without both (packages/config seed-guard).
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
 
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
@@ -439,6 +454,9 @@ jobs:
           --filter=@rasta/api-gateway...
           --filter=@rasta/identity-service...
           --filter=@rasta/fleet-service...
+          --filter=@rasta/organization-service...
+          --filter=@rasta/asset-service...
+          --filter=@rasta/maintenance-service...
 
       - name: Wait for Keycloak to import the realm
         run: |
@@ -454,7 +472,7 @@ jobs:
           docker logs rasta-web-e2e-keycloak
           exit 1
 
-      - name: Start identity, fleet and api-gateway
+      - name: Start identity, fleet, organization, asset, maintenance and api-gateway
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
@@ -506,6 +524,33 @@ jobs:
             DATABASE_URL=postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/fleet.log 2>&1 & )
 
+          # organization, asset and maintenance: the browser suite's tenant-isolation
+          # and accessibility scenarios read the asset and maintenance screens
+          # and the organization page through the real services. Each gets its
+          # own SASL principal, as in production; asset-service and
+          # maintenance-service connect to the broker at boot, so they would
+          # not start without it.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service organization-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/organization-service && \
+            PORT=3102 SERVICE_NAME=organization-service \
+            DATABASE_URL=postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/organization.log 2>&1 & )
+
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service asset-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/asset-service && \
+            PORT=3103 SERVICE_NAME=asset-service \
+            DATABASE_URL=postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/asset.log 2>&1 & )
+
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service maintenance-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/maintenance-service && \
+            PORT=3105 SERVICE_NAME=maintenance-service \
+            DATABASE_URL=postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/maintenance.log 2>&1 & )
+
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
             node dist/main.js > /tmp/rasta-web-e2e-logs/gateway.log 2>&1 & )
@@ -515,18 +560,29 @@ jobs:
               http://localhost:3101/health/ready || true)"
             fleet="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3104/health/ready || true)"
+            organization="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3102/health/ready || true)"
+            asset="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3103/health/ready || true)"
+            maintenance="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3105/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/usage-records || true)"
-            if [ "$identity" = "200" ] && [ "$fleet" = "200" ] && [ "$gateway" = "401" ]; then
+            if [ "$identity" = "200" ] && [ "$fleet" = "200" ] \
+               && [ "$organization" = "200" ] && [ "$asset" = "200" ] \
+               && [ "$maintenance" = "200" ] && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
+          cat /tmp/rasta-web-e2e-logs/organization.log
+          cat /tmp/rasta-web-e2e-logs/asset.log
+          cat /tmp/rasta-web-e2e-logs/maintenance.log
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
@@ -564,6 +620,12 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/identity.log || true
           echo '--- fleet-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/fleet.log || true
+          echo '--- organization-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/organization.log || true
+          echo '--- asset-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/asset.log || true
+          echo '--- maintenance-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/maintenance.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
           echo '--- keycloak ---'

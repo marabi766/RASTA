@@ -22,7 +22,31 @@ import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session
  * -> fleet write path without making Keycloak's own HTML part of the test.
  */
 
-const OPERATOR_USERNAME = 'operator.one';
+/**
+ * The people the live-stack scenarios can sign in as, by what they are *for*.
+ *
+ * Every one is a user in the throwaway development realm
+ * (`infrastructure/docker/keycloak/rasta-realm.json`), which is also where the
+ * password and the expected claims are read from — one source of truth, so a
+ * scenario cannot drift from the realm it runs against.
+ *
+ * - `operator` — `operator.one`, ORG-DEH-0001; holds the assignment the usage
+ *   scenario writes against.
+ * - `orgAdmin` — `dehyari.admin`, ORG-DEH-0001; may manage assets, drivers and
+ *   members of that organization.
+ * - `orgAdminB` — `dehyari.admin.b`, ORG-DEH-0002: **the other tenant**. The
+ *   seeds give it a machine, a driver and a schedule of its own, so a
+ *   scenario can show that what it owns is invisible to `orgAdmin` and the
+ *   reverse.
+ */
+export const LIVE_PERSONAS = {
+  operator: 'operator.one',
+  orgAdmin: 'dehyari.admin',
+  orgAdminB: 'dehyari.admin.b',
+} as const;
+
+export type LivePersona = keyof typeof LIVE_PERSONAS;
+
 const PORTAL_ORIGIN = 'http://localhost:3200';
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
 
@@ -32,13 +56,6 @@ const tokenResponseSchema = z.object({
   expires_in: z.number().int().positive(),
 });
 
-const tokenClaimsSchema = z.object({
-  sub: z.string().min(1),
-  preferred_username: z.string().min(1),
-  org_id: z.literal('ORG-DEH-0001'),
-  rasta_uid: z.literal('USR-SEED-OPERATOR'),
-});
-
 interface RealmCredential {
   readonly type?: string;
   readonly value?: string;
@@ -46,6 +63,7 @@ interface RealmCredential {
 
 interface RealmUser {
   readonly username?: string;
+  readonly attributes?: Readonly<Record<string, readonly string[]>>;
   readonly credentials?: readonly RealmCredential[];
 }
 
@@ -64,21 +82,33 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-/** Reads the throwaway fixture password from its one source of truth. */
-function operatorPassword(): string {
-  const realmPath = resolve(__dirname, '../../../infrastructure/docker/keycloak/rasta-realm.json');
-  const realm = JSON.parse(readFileSync(realmPath, 'utf8')) as RealmExport;
-  const credential = realm.users
-    ?.find((user) => user.username === OPERATOR_USERNAME)
-    ?.credentials?.find((entry) => entry.type === 'password');
-
-  if (!credential?.value) {
-    throw new Error(`No password for ${OPERATOR_USERNAME} in the Keycloak realm fixture`);
-  }
-  return credential.value;
+interface Fixture {
+  readonly username: string;
+  readonly password: string;
+  /** The organization and platform user the realm says this person is. */
+  readonly organizationId: string;
+  readonly userId: string;
 }
 
-async function operatorTokens(): Promise<z.infer<typeof tokenResponseSchema>> {
+/** Reads the throwaway fixture from its one source of truth. */
+function fixtureFor(persona: LivePersona): Fixture {
+  const username = LIVE_PERSONAS[persona];
+  const realmPath = resolve(__dirname, '../../../infrastructure/docker/keycloak/rasta-realm.json');
+  const realm = JSON.parse(readFileSync(realmPath, 'utf8')) as RealmExport;
+  const user = realm.users?.find((entry) => entry.username === username);
+
+  const password = user?.credentials?.find((entry) => entry.type === 'password')?.value;
+  const organizationId = user?.attributes?.active_organization_id?.[0];
+  const userId = user?.attributes?.rasta_user_id?.[0];
+
+  if (!password) throw new Error(`No password for ${username} in the Keycloak realm fixture`);
+  if (!organizationId || !userId) {
+    throw new Error(`No organization or platform user id for ${username} in the realm fixture`);
+  }
+  return { username, password, organizationId, userId };
+}
+
+async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponseSchema>> {
   const issuer = requiredEnv('OIDC_ISSUER_URL').replace(/\/+$/, '');
   const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
     method: 'POST',
@@ -86,8 +116,8 @@ async function operatorTokens(): Promise<z.infer<typeof tokenResponseSchema>> {
     body: new URLSearchParams({
       grant_type: 'password',
       client_id: requiredEnv('OIDC_CLIENT_ID'),
-      username: OPERATOR_USERNAME,
-      password: operatorPassword(),
+      username: fixture.username,
+      password: fixture.password,
       scope: 'openid',
     }),
   });
@@ -100,9 +130,30 @@ async function operatorTokens(): Promise<z.infer<typeof tokenResponseSchema>> {
   return tokenResponseSchema.parse(await response.json());
 }
 
-export async function installLiveSession(context: BrowserContext): Promise<LiveSession> {
-  const tokens = await operatorTokens();
-  const claims = tokenClaimsSchema.parse(decodeJwt(tokens.access_token));
+/**
+ * Signs `persona` in by putting the same sealed cookie the portal's own OIDC
+ * flow would set into `context`. Defaults to the operator the usage scenario
+ * was written for.
+ *
+ * The token's own claims are checked against the realm fixture before the
+ * session is sealed: a scenario that thinks it is acting as organization B
+ * while holding organization A's token would pass a tenant-isolation check for
+ * the wrong reason, so this refuses to proceed rather than trust the login.
+ */
+export async function installLiveSession(
+  context: BrowserContext,
+  persona: LivePersona = 'operator',
+): Promise<LiveSession> {
+  const fixture = fixtureFor(persona);
+  const tokens = await tokensFor(fixture);
+  const claims = z
+    .object({
+      sub: z.string().min(1),
+      preferred_username: z.literal(fixture.username),
+      org_id: z.literal(fixture.organizationId),
+      rasta_uid: z.literal(fixture.userId),
+    })
+    .parse(decodeJwt(tokens.access_token));
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + tokens.expires_in;
 
