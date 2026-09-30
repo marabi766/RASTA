@@ -1,6 +1,6 @@
 import { TOPIC_PRODUCERS, RETRY_TOPIC_SUFFIX } from './topic-producers';
 import { CONSUMER_GROUP_SEPARATOR, TOPIC_CONSUMERS } from './topic-consumers';
-import { AUDIT_TRAIL_TOPIC } from './envelope';
+import { AUDIT_TRAIL_TOPIC, NEVER_AUTO_REPLAY_TOPICS } from './envelope';
 
 /**
  * The broker's principals and ACLs, derived from the topology contracts
@@ -19,7 +19,8 @@ import { AUDIT_TRAIL_TOPIC } from './envelope';
  *     the only writer of `.retry` topics and the only reader of `.dlq` ones.
  *     It also READs every topic a consumer subscribes to — the only topics a
  *     dead letter can have come from — so a dry-run can tell a stale event
- *     (a newer one exists for its stream key); its groups are confined to
+ *     (a newer one exists for its stream key), except the topics in
+ *     `NEVER_AUTO_REPLAY_TOPICS`, which it never replays; its groups are confined to
  *     `ops-replay.*` like any principal's, and it WRITEs no original topic.
  *   - Development only (compose and CI, never a deployment): `itest-observer`,
  *     which reads what tests assert on; `kafka-ui` and `kafka-exporter`, which
@@ -147,9 +148,12 @@ export function brokerAcls(profile: BrokerProfile): AclBinding[] {
 
   // The operator's replay: dead letters out, retries in — and a look at the
   // original topic, to tell whether a newer event exists for the stream key.
+  // Not at a topic whose dead letters it never replays (the economic stream).
   for (const name of declaredTopics()) topic(OPS_REPLAY_PRINCIPAL, retry(name), 'WRITE');
   for (const name of deadLetters) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');
-  for (const name of subscribedTopics) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');
+  for (const name of subscribedTopics) {
+    if (!NEVER_AUTO_REPLAY_TOPICS.has(name)) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');
+  }
   allow(OPS_REPLAY_PRINCIPAL, 'GROUP', groupNamespace(OPS_REPLAY_PRINCIPAL), 'READ', 'PREFIXED');
 
   if (profile === 'development') {

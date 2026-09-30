@@ -1371,7 +1371,9 @@ jobs:
         # producer on WRITE alone. Then the DLQ replay tool, as ops-replay,
         # on real dead letters a real EventConsumer writes: dry-run by
         # default, every refusal, a replay consumed from .retry with only the
-        # platform headers and its key, never the original topic.
+        # platform headers and its key, never the original topic, and a
+        # staleness retention has made unknowable (the broker admin deletes
+        # records from one rasta.fleet.v1 partition, as retention would).
         # Both refuse to run without the bootstrap's environment rather than
         # skip. Last in the job: their allowed writes are marker records on
         # real topics, which no suite above should read.

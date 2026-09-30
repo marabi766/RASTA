@@ -8,8 +8,8 @@
  * `.retry` twin (#145). Its handler rejects the events this run names, so the
  * dead letters are the real ones `EventConsumer.deadLetter` writes: the
  * original body, the platform headers with `x-producer` overwritten by the
- * consumer, the `x-dlq-*` headers, and the kept key. The one exception is a
- * keyless dead letter, written by hand to stand for one dead-lettered before
+ * consumer, the `x-dlq-*` headers, and the kept key. The one exception is two
+ * keyless dead letters, written by hand to stand for ones dead-lettered before
  * #145 kept keys.
  *
  * The tool runs as a child process whose environment holds **only**
@@ -18,9 +18,11 @@
  * read off the wire by the observer (key, body, headers).
  *
  * It needs fleet-service, maintenance-service, itest-observer and ops-replay's
- * passwords and refuses to run rather than skip without them. It writes marker
- * records on real topics: run it where no other maintenance-service consumer
- * is reading rasta.fleet.v1 — CI runs it last.
+ * passwords, and the broker admin's — which deletes records from one
+ * rasta.fleet.v1 partition, as retention would, for the last test — and
+ * refuses to run rather than skip without them. It writes marker records on
+ * real topics: run it where no other maintenance-service consumer is reading
+ * rasta.fleet.v1 — CI runs it last.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,7 +40,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const contracts = require(resolve(ROOT, 'packages/contracts/dist/index.js'));
 const nestCommon = require(resolve(ROOT, 'packages/nest-common/dist/index.js'));
-const { EVENT_HEADERS, DLQ_HEADERS, DLQ_REASONS, REPLAY_HEADERS } = contracts;
+const { EVENT_HEADERS, DLQ_HEADERS, DLQ_REASONS, REPLAY_HEADERS, BROKER_ADMIN_PRINCIPAL } =
+  contracts;
 const { EventConsumer, UnprocessableEventError, kafkaConnectionFor } = nestCommon;
 
 const ORIGINAL = 'rasta.fleet.v1';
@@ -53,7 +56,13 @@ const CA =
     : resolve(ROOT, 'infrastructure/docker/kafka/.tls/ca.pem');
 const env = { ...process.env, KAFKA_SSL_CA_FILE: CA, KAFKA_SSL: 'true' };
 const read = (path) => readFileSync(path, 'utf8');
-const PRINCIPALS = ['fleet-service', 'maintenance-service', 'itest-observer', 'ops-replay'];
+const PRINCIPALS = [
+  'fleet-service',
+  'maintenance-service',
+  'itest-observer',
+  'ops-replay',
+  BROKER_ADMIN_PRINCIPAL,
+];
 const missing = PRINCIPALS.map(passwordVariable).filter((variable) => !process.env[variable]);
 if (missing.length > 0) {
   throw new Error(
@@ -199,11 +208,15 @@ const ids = {
   unconfirmed: `EVT_RPL_UNCONF_${run}`,
   again: `EVT_RPL_AGAIN_${run}`,
   keyless: `EVT_RPL_KEYLESS_${run}`,
+  keylessSequenced: `EVT_RPL_KEYLESS_SEQ_${run}`,
+  expired: `EVT_RPL_EXPIRED_${run}`,
+  expiredNewer: `EVT_RPL_EXPIRED_NEWER_${run}`,
 };
 const keys = {
   replayable: `AST_OK_${run}`,
   stale: `AST_STALE_${run}`,
   again: `AST_AGAIN_${run}`,
+  expired: `AST_EXPIRED_${run}`,
 };
 /** The events the consumer rejects on their first delivery from the original topic, and why. */
 const REJECT_ON_ORIGINAL = new Map([
@@ -213,6 +226,7 @@ const REJECT_ON_ORIGINAL = new Map([
   [ids.financial, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
   [ids.unconfirmed, DLQ_REASONS.SOURCE_UNCONFIRMED],
   [ids.again, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
+  [ids.expired, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
 ]);
 /** Rejected once more when replayed, so it is dead-lettered from `.retry`. */
 const REJECT_ONCE_ON_RETRY = new Set([ids.again]);
@@ -324,10 +338,13 @@ before(async () => {
   }
   // A newer event on the stale one's stream, after it.
   await publish(envelope(ids.newer, keys.stale));
+  // And one whose newer event retention will take (the last test).
+  await publish(envelope(ids.expired, keys.expired));
+  await publish(envelope(ids.expiredNewer, keys.expired));
   originalEnds = await endOffsets(ORIGINAL);
 
   let seen = [];
-  await eventually('the six real dead letters', async () => {
+  await eventually('the real dead letters', async () => {
     seen = await deadLetters(dlqStart);
     return REJECT_ON_ORIGINAL.size === seen.length;
   }).catch((error) => {
@@ -337,32 +354,34 @@ before(async () => {
     );
   });
 
-  // One dead letter from before #145 kept keys: written by hand, keyless,
-  // as maintenance-service's consumer wrote them then.
-  const unsequencedOld = envelope(ids.keyless, null);
+  // Two dead letters from before #145 kept keys: written by hand, keyless,
+  // as maintenance-service's consumer wrote them then — one unsequenced, one
+  // sequenced (whose stream key proves nothing about the original's key).
   const maintenance = await connected(
     kafka('maintenance-service').producer({ idempotent: true, maxInFlightRequests: 1 }),
   );
+  const old = [envelope(ids.keyless, null), envelope(ids.keylessSequenced, `AST_OLD_${run}`)];
   await maintenance.send({
     topic: DLQ,
     acks: -1,
-    messages: [
-      {
-        value: JSON.stringify(unsequencedOld),
-        headers: {
-          [EVENT_HEADERS.eventId]: unsequencedOld.eventId,
-          [EVENT_HEADERS.eventName]: unsequencedOld.eventName,
-          [EVENT_HEADERS.eventVersion]: '1',
-          [EVENT_HEADERS.correlationId]: unsequencedOld.correlationId,
-          [EVENT_HEADERS.tenantId]: unsequencedOld.tenantId,
-          [EVENT_HEADERS.producer]: 'maintenance-service',
-          [DLQ_HEADERS.reason]: DLQ_REASONS.BUSINESS_RULE_VIOLATION,
-          [DLQ_HEADERS.originalTopic]: ORIGINAL,
-          [DLQ_HEADERS.originalPartition]: '0',
-          [DLQ_HEADERS.originalOffset]: '0',
-        },
+    messages: old.map((body) => ({
+      value: JSON.stringify(body),
+      headers: {
+        [EVENT_HEADERS.eventId]: body.eventId,
+        [EVENT_HEADERS.eventName]: body.eventName,
+        [EVENT_HEADERS.eventVersion]: '1',
+        [EVENT_HEADERS.correlationId]: body.correlationId,
+        [EVENT_HEADERS.tenantId]: body.tenantId,
+        ...(body.streamSeq === undefined
+          ? {}
+          : { [EVENT_HEADERS.streamSeq]: String(body.streamSeq) }),
+        [EVENT_HEADERS.producer]: 'maintenance-service',
+        [DLQ_HEADERS.reason]: DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+        [DLQ_HEADERS.originalTopic]: ORIGINAL,
+        [DLQ_HEADERS.originalPartition]: '0',
+        [DLQ_HEADERS.originalOffset]: '0',
       },
-    ],
+    })),
   });
 }, 240_000);
 
@@ -379,6 +398,7 @@ describe('the dead letters are the real ones (#145)', () => {
     assert.equal(replayable.originalTopic, ORIGINAL);
     assert.notEqual(replayable.producer, 'fleet-service');
     assert.equal(dead.find((d) => d.eventId === ids.keyless).key, null);
+    assert.equal(dead.find((d) => d.eventId === ids.keylessSequenced).key, null);
   });
 });
 
@@ -393,6 +413,7 @@ describe('a dry-run decides every record and writes nothing', () => {
         ids.financial,
         ids.unconfirmed,
         ids.keyless,
+        ids.keylessSequenced,
       ].flatMap((id) => ['--event-id', id]),
     );
     assert.equal(result.status, 0, result.stderr);
@@ -406,7 +427,8 @@ describe('a dry-run decides every record and writes nothing', () => {
     assert.deepEqual(verdict[ids.financial], ['REFUSED', 'NEVER_AUTO_REPLAY', null]);
     assert.deepEqual(verdict[ids.unconfirmed], ['REFUSED', 'REASON_NOT_REPLAYABLE', null]);
     assert.deepEqual(verdict[ids.keyless], ['REFUSED', 'UNSEQUENCED_NO_KEY', null]);
-    assert.deepEqual([result.summary.selected, result.summary.replayable], [6, 2]);
+    assert.deepEqual(verdict[ids.keylessSequenced], ['REFUSED', 'KEY_UNVERIFIABLE', null]);
+    assert.deepEqual([result.summary.selected, result.summary.replayable], [7, 2]);
     assert.ok(!JSON.stringify(result.records).includes(`replay-itest-${run}`), 'no payload');
     assert.deepEqual(await endOffsets(RETRY), retryBefore);
   });
@@ -568,5 +590,34 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
       since.filter((m) => m.headers?.[REPLAY_HEADERS.replayId] !== undefined),
       [],
     );
+  });
+});
+
+describe('retention past the original offset (Codex round 1 on #144, H1)', () => {
+  test('a newer record for the key that retention took leaves staleness unknown, never "not stale"', async () => {
+    const before = replay(['--event-id', ids.expired]);
+    assert.equal(before.status, 0, before.stderr);
+    const [line] = before.records;
+    assert.deepEqual([line.stale, line.refusal], [true, 'STALE']);
+
+    // Retention, as the broker applies it: the partition's start moves past
+    // the original, and the newer record for the key goes with it.
+    const partition = Number(line.originalPartition);
+    const admin = await connected(kafka(BROKER_ADMIN_PRINCIPAL).admin());
+    const { high } = (await admin.fetchTopicOffsets(ORIGINAL)).find(
+      (o) => o.partition === partition,
+    );
+    assert.ok(BigInt(high) > BigInt(line.originalOffset) + 1n, 'the newer record follows it');
+    await admin.deleteTopicRecords({ topic: ORIGINAL, partitions: [{ partition, offset: high }] });
+
+    const after = replay(['--event-id', ids.expired]);
+    assert.equal(after.status, 0, after.stderr);
+    assert.deepEqual(
+      [after.records[0].verdict, after.records[0].stale, after.records[0].refusal],
+      ['REFUSED', 'UNKNOWN', 'STALENESS_UNKNOWN'],
+    );
+    const refused = replay(['--event-id', ids.expired, '--execute', '--expect-count', '1']);
+    assert.equal(refused.status, 1);
+    assert.ok(!deliveredFrom(ids.expired, RETRY));
   });
 });

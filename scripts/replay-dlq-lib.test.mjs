@@ -50,14 +50,24 @@ function envelope(overrides = {}) {
   };
 }
 
-/** A dead letter as EventConsumer writes one: the original body, platform and x-dlq-* headers, no key. */
-function deadLetter(body = envelope(), headerOverrides = {}, { key = null } = {}) {
+/**
+ * A dead letter as EventConsumer writes one (#145): the original body, platform
+ * and x-dlq-* headers, and the original key — the stream key, unless `key` says
+ * otherwise (`null`: dead-lettered with no key).
+ */
+function deadLetter(
+  body = envelope(),
+  headerOverrides = {},
+  { key = body.streamKey ?? null } = {},
+) {
   const headers = {
     [EVENT_HEADERS.eventId]: Buffer.from(body.eventId),
     [EVENT_HEADERS.eventName]: Buffer.from(body.eventName),
     [EVENT_HEADERS.eventVersion]: Buffer.from(String(body.eventVersion)),
     [EVENT_HEADERS.correlationId]: Buffer.from(body.correlationId),
-    [EVENT_HEADERS.tenantId]: Buffer.from(body.tenantId),
+    [EVENT_HEADERS.tenantId]: body.tenantId === undefined ? undefined : Buffer.from(body.tenantId),
+    [EVENT_HEADERS.streamSeq]:
+      body.streamSeq === undefined ? undefined : Buffer.from(String(body.streamSeq)),
     // As EventConsumer.deadLetter writes it (#145): the consumer's client id,
     // not the original publisher.
     [EVENT_HEADERS.producer]: Buffer.from('maintenance-service'),
@@ -206,6 +216,18 @@ const refusals = [
     deadLetter(envelope(), { [EVENT_HEADERS.tenantId]: Buffer.from('ORG_OTHER') }),
     `HEADER_BODY_MISMATCH:${EVENT_HEADERS.tenantId}`,
   ],
+  [
+    'a platform header whose body field is absent (x-tenant-id, no tenantId)',
+    deadLetter(envelope({ tenantId: undefined }), {
+      [EVENT_HEADERS.tenantId]: Buffer.from('ORG_1'),
+    }),
+    `HEADER_BODY_MISMATCH:${EVENT_HEADERS.tenantId}`,
+  ],
+  [
+    'a body field whose platform header is absent (causationId, no x-causation-id)',
+    deadLetter(envelope({ causationId: 'EVT_0' })),
+    `HEADER_BODY_MISMATCH:${EVENT_HEADERS.causationId}`,
+  ],
   ...[
     DLQ_REASONS.PRODUCER_NOT_ALLOWED,
     DLQ_REASONS.SOURCE_UNCONFIRMED,
@@ -226,6 +248,11 @@ const refusals = [
     'an unsequenced event dead-lettered before the key was kept (#145): no key to replay it with',
     deadLetter(envelope({ streamKey: undefined, streamSeq: undefined })),
     'UNSEQUENCED_NO_KEY',
+  ],
+  [
+    'a sequenced event dead-lettered with no key: its stream key is not proof of the original key',
+    deadLetter(envelope(), {}, { key: null }),
+    'KEY_UNVERIFIABLE',
   ],
   [
     'a dead letter from `<topic>.retry.retry`: exactly one suffix is stripped',
@@ -268,7 +295,7 @@ test('an unsequenced event is replayed under the key the dead letter kept (#145)
 });
 
 test('a sequenced dead letter that kept its key replays under it', () => {
-  const decision = assess(deadLetter(envelope(), {}, { key: 'AST_1' }), context);
+  const decision = assess(deadLetter(), context);
   assert.equal(decision.verdict, 'REPLAYABLE', decision.refusal);
   assert.equal(decision.message.key, 'AST_1');
 });
@@ -281,6 +308,28 @@ test('every NEVER_AUTO_REPLAY event is refused — there is no override', () => 
       eventName,
     );
   }
+});
+
+test('the economic stream is refused by source topic, whatever the event is called', () => {
+  const dlq = 'rasta.audit.v1.dlq';
+  const audit = {
+    dlq,
+    topology: topologyOf(dlq, { topics, consumers: contracts.TOPIC_CONSUMERS }),
+    topics,
+    contracts,
+  };
+  assert.ok(contracts.NEVER_AUTO_REPLAY_TOPICS.has('rasta.economic.v1'));
+  for (const original of ['rasta.economic.v1', 'rasta.economic.v1.retry']) {
+    const decision = assess(
+      deadLetter(envelope({ eventName: 'A_NAME_THE_LIST_HAS_NOT_CAUGHT_UP_WITH' }), {
+        [DLQ_HEADERS.originalTopic]: Buffer.from(original),
+      }),
+      audit,
+    );
+    assert.equal(decision.refusal, 'NEVER_AUTO_REPLAY', original);
+  }
+  // The same consumer's dead letter from another stream is not.
+  assert.equal(assess(deadLetter(), audit).verdict, 'REPLAYABLE');
 });
 
 test('a dead letter from a .retry topic goes back to that .retry, and its staleness is unknown', () => {
@@ -299,19 +348,40 @@ test('stale when a newer record for the same stream key follows the original off
   const decision = assess(deadLetter(), context);
   const probe = stalenessProbe(decision, contracts.RETRY_TOPIC_SUFFIX);
   assert.deepEqual(probe, { topic: 'rasta.fleet.v1', partition: 1, after: 41n, key: 'AST_1' });
+  const low = 0n;
   assert.equal(
-    staleFrom(probe, { incomplete: false, records: [{ offset: '42', key: 'AST_2' }] }),
+    staleFrom(probe, { low, incomplete: false, records: [{ offset: '42', key: 'AST_2' }] }),
     false,
   );
   assert.equal(
-    staleFrom(probe, { incomplete: false, records: [{ offset: '41', key: 'AST_1' }] }),
+    staleFrom(probe, { low, incomplete: false, records: [{ offset: '41', key: 'AST_1' }] }),
     false,
   );
   assert.equal(
-    staleFrom(probe, { incomplete: false, records: [{ offset: '43', key: 'AST_1' }] }),
+    staleFrom(probe, { low, incomplete: false, records: [{ offset: '43', key: 'AST_1' }] }),
     true,
   );
-  assert.equal(staleFrom(probe, { incomplete: true, records: [] }), 'UNKNOWN');
+  assert.equal(staleFrom(probe, { low, incomplete: true, records: [] }), 'UNKNOWN');
+});
+
+test('retention past the original offset makes staleness unknown, never "not stale"', () => {
+  const probe = stalenessProbe(assess(deadLetter(), context), contracts.RETRY_TOPIC_SUFFIX);
+  // Offset 42, just after the original 41, is still there: the whole tail was seen.
+  assert.equal(staleFrom(probe, { low: 42n, incomplete: false, records: [] }), false);
+  // Retention took 42 (streams keep 7 days, dead letters 30): a newer record
+  // for the key may have gone with it.
+  assert.equal(staleFrom(probe, { low: 43n, incomplete: false, records: [] }), 'UNKNOWN');
+  assert.equal(
+    staleFrom(probe, { low: 50n, incomplete: false, records: [{ offset: '60', key: 'AST_2' }] }),
+    'UNKNOWN',
+  );
+  // A newer record that survived is still proof.
+  assert.equal(
+    staleFrom(probe, { low: 50n, incomplete: false, records: [{ offset: '60', key: 'AST_1' }] }),
+    true,
+  );
+  // And a scan that does not say where the partition starts proves nothing.
+  assert.equal(staleFrom(probe, { incomplete: false, records: [] }), 'UNKNOWN');
 });
 
 test('a stale or unknowably stale record is refused unless --allow-stale names it', () => {

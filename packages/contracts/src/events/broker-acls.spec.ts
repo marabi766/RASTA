@@ -14,6 +14,7 @@ import {
 } from './broker-acls';
 import { TOPIC_PRODUCERS } from './topic-producers';
 import { TOPIC_CONSUMERS } from './topic-consumers';
+import { NEVER_AUTO_REPLAY_TOPICS } from './envelope';
 
 /**
  * RUN-006: the broker's ACLs, derived from the topology contracts. Each test
@@ -96,13 +97,20 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
     );
   });
 
-  it('lets ops-replay read every subscribed topic — for the staleness check — and write none', () => {
+  it('lets ops-replay read every replayable subscribed topic — for the staleness check — and write none', () => {
     const subscribed = new Set(Object.values(TOPIC_CONSUMERS).flatMap((c) => [...c.subscribes]));
     const reads = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'READ' })
       .filter((acl) => acl.resourceType === 'TOPIC' && !DEAD_LETTERS.includes(acl.resourceName))
       .map((acl) => acl.resourceName)
       .sort();
-    expect(reads).toEqual([...subscribed].sort());
+    expect(reads).toEqual([...subscribed].filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t)).sort());
+    // audit-service subscribes to the economic stream, yet the tool never
+    // replays it: no READ there (Codex round 1 on #144, H2).
+    expect(subscribed.has('rasta.economic.v1')).toBe(true);
+    expect(reads).not.toContain('rasta.economic.v1');
+    // A never-replayed topic the contracts do not declare would exclude nothing.
+    for (const name of NEVER_AUTO_REPLAY_TOPICS)
+      expect(Object.keys(TOPIC_PRODUCERS)).toContain(name);
     // Its WRITE is the .retry twins alone: never an original, never a dead letter.
     for (const acl of where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'WRITE' })) {
       expect(acl.resourceName.endsWith('.retry')).toBe(true);

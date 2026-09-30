@@ -9,20 +9,28 @@
  *   - it came from a topic the dead-letter topic's own consumer subscribes to,
  *     and it goes to that topic's `.retry` twin — never the original topic,
  *     never computed from the dead-letter topic's name;
- *   - its body is a valid envelope, and every platform header it carries
- *     agrees with that body (a disagreement is refused, not repaired);
+ *   - its body is a valid envelope, and its platform headers agree with that
+ *     body — on presence as on value: a header whose field the body lacks, or
+ *     a field whose header is missing, is a disagreement too (refused, not
+ *     repaired);
  *   - its reason is one a replay can change (`PRODUCER_NOT_ALLOWED`,
  *     `SOURCE_UNCONFIRMED` and `BACKFILL_REQUIRED` are not: the same claim gets
  *     the same answer);
- *   - it is not a `NEVER_AUTO_REPLAY` event — money is replayed by the
- *     runbook's manual procedure, and this tool has no override for it;
- *   - it has a message key: the envelope's stream key, or else the key the
- *     dead letter kept from the original (D-040, #145); a dead letter with
- *     neither — an unsequenced event dead-lettered before #145 — is refused,
- *     with no guessing from `aggregateId`; a kept key that is not the stream
- *     key is refused;
+ *   - it is not a `NEVER_AUTO_REPLAY` event, nor from a
+ *     `NEVER_AUTO_REPLAY_TOPICS` topic (or its `.retry`) whatever its name —
+ *     money is replayed by the runbook's manual procedure, and this tool has
+ *     no override for it;
+ *   - it kept its message key (D-040, #145), and the replay goes out under
+ *     that key, never one inferred: a sequenced event's kept key must be its
+ *     stream key (`KEY_MISMATCH`), and one dead-lettered without a key is
+ *     refused (`KEY_UNVERIFIABLE`: before #145, or published without one —
+ *     the two cannot be told apart without the original record); an
+ *     unsequenced event with no kept key is refused (`UNSEQUENCED_NO_KEY`),
+ *     with no guessing from `aggregateId`;
  *   - it is not stale — no newer event for the same stream key on the original
- *     topic — unless the operator names it with `--allow-stale <eventId>`.
+ *     topic — unless the operator names it with `--allow-stale <eventId>`;
+ *     staleness that cannot be known (a `.retry` original, a partial read, or
+ *     retention past the original offset) needs the same.
  *
  * What is replayed: the original body, byte for byte, under that key, with
  * only the platform headers (`EVENT_HEADERS`) — each as the original publisher
@@ -222,10 +230,11 @@ const HEADER_FIELDS = {
  *
  * `record`: `{ partition, offset, key, value, headers }` as kafkajs gives it.
  * `contracts`: `{ EVENT_HEADERS, DLQ_HEADERS, DLQ_REASONS, NEVER_AUTO_REPLAY,
- *  eventEnvelopeSchema, RETRY_TOPIC_SUFFIX }`.
+ *  NEVER_AUTO_REPLAY_TOPICS, eventEnvelopeSchema, RETRY_TOPIC_SUFFIX }`.
  */
 export function assess(record, { dlq, topology, topics, contracts }) {
-  const { EVENT_HEADERS, DLQ_HEADERS, DLQ_REASONS, NEVER_AUTO_REPLAY } = contracts;
+  const { EVENT_HEADERS, DLQ_HEADERS, DLQ_REASONS, NEVER_AUTO_REPLAY, NEVER_AUTO_REPLAY_TOPICS } =
+    contracts;
   const headers = headerStrings(record.headers);
   const summary = {
     dlq,
@@ -253,6 +262,8 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     ? summary.originalTopic.slice(0, -suffix.length)
     : summary.originalTopic;
   if (!topology.subscribes.has(base)) return refuse('ORIGINAL_TOPIC_NOT_SUBSCRIBED');
+  // By source topic, whatever event it names: the economic stream is never replayed.
+  if (NEVER_AUTO_REPLAY_TOPICS.has(base)) return refuse('NEVER_AUTO_REPLAY');
   const target = `${base}${suffix}`;
   if (topics.get(target) !== 'retry') return refuse('UNKNOWN_RETRY_TOPIC');
   summary.target = target;
@@ -278,7 +289,11 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     if (field === 'producer') continue;
     const header = headers[name];
     const body = envelope[HEADER_FIELDS[field]];
-    if (header !== undefined && body !== undefined && header !== String(body)) {
+    // The relay writes a header exactly when the body has the field (an empty
+    // one included, as absent), so the two agree on presence as on value.
+    const bodyPresent = body !== undefined && body !== null && body !== '';
+    if ((header !== undefined) !== bodyPresent) return refuse(`HEADER_BODY_MISMATCH:${name}`);
+    if (header !== undefined && header !== String(body)) {
       return refuse(`HEADER_BODY_MISMATCH:${name}`);
     }
   }
@@ -289,15 +304,19 @@ export function assess(record, { dlq, topology, topics, contracts }) {
   ];
   if (unfixable.includes(summary.reason)) return refuse('REASON_NOT_REPLAYABLE');
   if (NEVER_AUTO_REPLAY.has(envelope.eventName)) return refuse('NEVER_AUTO_REPLAY');
-  const kept = summary.key;
-  if (envelope.streamKey && kept !== null && kept !== envelope.streamKey) {
-    return refuse('KEY_MISMATCH');
+  // The replay goes out under the key the dead letter kept (#145), never one
+  // inferred: a record published without a key sits on a partition that
+  // `streamKey` does not name.
+  const key = summary.key;
+  if (envelope.streamKey) {
+    // Dead-lettered with no key: before #145, or published without one —
+    // which, without reading the original record, cannot be told apart.
+    if (key === null) return refuse('KEY_UNVERIFIABLE');
+    if (key !== envelope.streamKey) return refuse('KEY_MISMATCH');
   }
-  const key = envelope.streamKey ?? kept;
   // Unsequenced and dead-lettered before the key was kept (#145): nothing
   // says which partition key the publisher used.
   if (!key) return refuse('UNSEQUENCED_NO_KEY');
-  summary.key = key;
 
   const restored = {};
   for (const [field, name] of Object.entries(EVENT_HEADERS)) {
@@ -341,13 +360,18 @@ export function stalenessProbe(assessment, suffix) {
 /**
  * Staleness from a scan of the original partition: `true` when a record with
  * the same key sits after the original offset, `false` when the scan saw the
- * whole tail without one, `'UNKNOWN'` when it could not.
+ * whole tail without one, `'UNKNOWN'` when it could not — read in part, or
+ * retention already took records after the original (the partition's low
+ * watermark `scan.low` is past it: streams keep 7 days, dead letters 30).
  */
 export function staleFrom(probe, scan) {
   if (!probe || !scan || scan.incomplete) return 'UNKNOWN';
-  return scan.records.some(
+  const newer = scan.records.some(
     (record) => BigInt(record.offset) > probe.after && record.key === probe.key,
   );
+  if (newer) return true;
+  if (typeof scan.low !== 'bigint' || scan.low > probe.after + 1n) return 'UNKNOWN';
+  return false;
 }
 
 /** The final verdict: a stale, or unknowably stale, record needs `--allow-stale <eventId>`. */

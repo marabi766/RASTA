@@ -354,6 +354,13 @@ describe('5. dead-letter and retry topics', () => {
       'TOPIC_AUTHORIZATION_FAILED',
     );
   });
+
+  test('ops-replay may not read the economic stream, which it never replays', async () => {
+    assert.equal(
+      await consume('ops-replay', `ops-replay.acl-economic-${run}`, 'rasta.economic.v1'),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+  });
 });
 
 describe('6. authentication', () => {

@@ -90,7 +90,8 @@ PLAINTEXT می‌ماند» بالا جایگزین می‌شود: Compose هم�
 - **Principalها.** یکی برای هر سرویس، به نام `SERVICE_NAME` آن، با گذرواژهٔ `KAFKA_SASL_PASSWORD_<SERVICE>`؛ `admin`
   فقط برای Bootstrap (ساخت Topic و اعمال ACL) و هرگز در یک سرویس؛ `ops-replay`، **تنها** نویسندهٔ Topicهای `.retry` و
   **تنها** خوانندهٔ DLQها بیرون از مالکشان (`docs/runbooks/replay-dlq.md`)، و — برای بررسی کهنگی ابزار بازپخش
-  (اصلاحیهٔ 2026-09-29، ADR-051 § R6) — خوانندهٔ هر Topic مشترک، فقط زیر گروه‌های `ops-replay.` و هرگز نویسندهٔ آن؛ و سه Principal فقط-توسعه که فقط در پروفایل
+  (اصلاحیهٔ 2026-09-29، ADR-051 § R6) — خوانندهٔ هر Topic مشترک جز `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`، که
+  هرگز بازپخش نمی‌شود؛ اصلاحیهٔ 2026-09-30، بازبینی دور ۱ #144)، فقط زیر گروه‌های `ops-replay.` و هرگز نویسندهٔ آن؛ و سه Principal فقط-توسعه که فقط در پروفایل
   `development` هستند: `itest-observer` (فقط `READ` روی همهٔ Topicها زیر گروه‌های `itest-observer.` برای
   آزمون‌ها، هرگز `WRITE`)، `kafka-ui` و `kafka-exporter`.
 - **اعتبارها فقط به صاحبشان.** (بازبینی‌های دور ۱ و ۲ #131) گذرواژهٔ `admin`، `ops-replay` و `itest-observer` هرگز در

@@ -127,7 +127,7 @@ docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
 
 **چه کسی.** فقط Principal `ops-replay` (RUN-006، ADR-061 § ۳): تنها Principalی که Topicهای `.retry` را **می‌نویسد** و DLQ
 سرویس‌های دیگر را **می‌خواند**، زیر گروه‌های `ops-replay.`؛ و برای بررسی کهنگی، Topicهای مبدأ مشترک را فقط **می‌خواند**
-(همان گروه‌ها). نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی
+(همان گروه‌ها) — جز `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`) که هرگز بازپخشش نمی‌کند و پس نمی‌خواندش. نه روی Topic اصلی می‌نویسد، نه روی DLQ؛ Topic اصلی فقط مال ناشر است، پس پیام بازپخش‌شده هرگز به نام ناشر روی
 Topic او نمی‌نشیند. گذرواژه: `KAFKA_SASL_PASSWORD_OPS_REPLAY` — در توسعه از `infrastructure/docker/kafka/bootstrap.env`
 (پیش‌فرض‌ها در `bootstrap.env.example`)، **هرگز** از `.env` مشترکی که هر سرویس می‌خواند (`pnpm infra:up` و
 `pnpm check:kafka-credential-scope` آن را در `.env` رد می‌کنند)؛ در استقرار از Secret Store اپراتور. چرخش:
@@ -200,16 +200,23 @@ REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dl
   مال اوست؛ هرگز Topic اصلی. پیامی که **از** `.retry` دوباره DLQ شده (`x-dlq-original-topic` = `<topic>.retry`) با حذف **دقیقاً
   یک** پسوند `.retry` به همان `<topic>.retry` برمی‌گردد (`.retry.retry` رد می‌شود).
 - **بدنه بایت‌به‌بایت**، با **فقط** Headerهای پلتفرم (`EVENT_HEADERS`) و مهر `x-replay-id: <reportId>/<operator>` — هیچ Header
-  `x-dlq-*`. Header پلتفرمی که با بدنه نخواند رد می‌شود، اصلاح نمی‌شود — جز `x-producer`: پیام DLQ آن را عمداً با نام مصرف‌کننده‌ای
+  `x-dlq-*`. Header پلتفرمی که با بدنه نخواند رد می‌شود، اصلاح نمی‌شود (`HEADER_BODY_MISMATCH:<name>`) — هم در مقدار و هم در
+  **حضور**: Header بی فیلد متناظر در بدنه (مثلاً `x-tenant-id` بی `tenantId`)، یا فیلد بدنه بی Header، هم ناهمخوانی است؛ Relay
+  هر Header را دقیقاً وقتی می‌نویسد که فیلدش هست — جز `x-producer`: پیام DLQ آن را عمداً با نام مصرف‌کننده‌ای
   که DLQ کرد می‌نویسد، پس ابزار آن را نه مقایسه و نه کپی می‌کند و از `producer` پاکت بازمی‌سازد، همان‌طور که Relay گذاشته بود.
-- **کلید پیام:** `streamKey` پاکت، وگرنه کلیدی که پیام DLQ از اصل نگه داشته (D-040، #145). کلید نگه‌داشته‌ای که با `streamKey`
-  نخواند `KEY_MISMATCH` است. پیام بی `streamKey` و **بی کلید** — رویداد بی Sequence که پیش از #145 DLQ شده —
-  `UNSEQUENCED_NO_KEY` رد می‌شود؛ هیچ حدسی از `aggregateId`.
-- **رد می‌شوند:** `NEVER_AUTO_REPLAY` (همهٔ رویدادهای economic و `ORDER_RECEIPT_CONFIRMED`، `STATEMENT_APPROVED`) — بی هیچ
-  Override؛ و دلیل‌هایی که بازپخش عوضشان نمی‌کند: `PRODUCER_NOT_ALLOWED`، `SOURCE_UNCONFIRMED`، `BACKFILL_REQUIRED`.
+- **کلید پیام:** همیشه کلیدی که پیام DLQ از اصل نگه داشته (D-040، #145)، هرگز کلید استنتاج‌شده. رویداد دارای `streamKey`:
+  کلید نگه‌داشته باید همان باشد (`KEY_MISMATCH`)، و اگر پیام DLQ **بی کلید** است `KEY_UNVERIFIABLE` رد می‌شود — پیش از #145
+  DLQ شده، یا اصلاً بی کلید منتشر شده (پس روی پارتیشن دیگری است)، و بی خواندن رکورد اصلی این دو از هم جدا نمی‌شوند. پیام بی
+  `streamKey` و **بی کلید** — رویداد بی Sequence که پیش از #145 DLQ شده — `UNSEQUENCED_NO_KEY` رد می‌شود؛ هیچ حدسی از
+  `aggregateId`.
+- **رد می‌شوند:** `NEVER_AUTO_REPLAY` (همهٔ رویدادهای economic و `ORDER_RECEIPT_CONFIRMED`، `STATEMENT_APPROVED`)، و هر پیامی
+  از Topic مبدأ `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1` یا `.retry` آن) **هر نامی داشته باشد** — بی هیچ Override؛ و
+  دلیل‌هایی که بازپخش عوضشان نمی‌کند: `PRODUCER_NOT_ALLOWED`، `SOURCE_UNCONFIRMED`، `BACKFILL_REQUIRED`.
 - **کهنگی (ADR-051 § R6):** Dry-run Topic مبدأ را از پس از Offset اصلی می‌خواند؛ اگر رویداد تازه‌تری با همان کلید جریان هست
   `stale: true`، و اگر نمی‌تواند ببیند (مبدأ `.retry` — `ops-replay` آن را نمی‌خواند و Offset آن با Topic اصلی مقایسه‌پذیر
-  نیست —، یا بی موقعیت) `UNKNOWN`. `--execute` چنین رکوردی را رد می‌کند مگر
+  نیست —، بی موقعیت، خواندن ناقص، یا **Retention از Offset اصلی گذشته**: Low Watermark پارتیشن بعد از `Offset اصلی + ۱` است؛
+  Streamها ۷ روز و DLQها ۳۰ روز نگه داشته می‌شوند، پس رویداد تازه‌تر ممکن است پاک شده باشد و «ندیدم» یعنی «نمی‌دانم»، نه «کهنه
+  نیست») `UNKNOWN`. `--execute` چنین رکوردی را رد می‌کند مگر
   `--allow-stale <eventId>` آن را **نام ببرد**. Idempotency مصرف‌کننده (`processed_event`) فقط تکرار را بی‌اثر می‌کند، نه کهنه را.
 - **همه یا هیچ:** اجرا فقط وقتی می‌نویسد که **همهٔ** رکوردهای انتخاب قابل‌بازپخش باشند و تعدادشان دقیقاً `--expect-count` باشد؛
   انتخابی که ردشده دارد تنگ‌تر می‌شود، نیمه‌بازپخش نمی‌شود. سپس یکی‌یکی (`acks=-1`، Producer Idempotent)، به ترتیب DLQ، و
@@ -217,8 +224,15 @@ REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dl
 - **بازپخش به همهٔ مشترکان می‌رسد:** `<topic>.retry` را هر مصرف‌کنندهٔ آن Topic می‌خواند (D-039، #145)، نه فقط آن که DLQ کرد؛
   برای بقیه تکراری است و `processed_event` آن را بی‌اثر می‌کند. رویداد حالت‌ساز بار خود را اعمال نمی‌کند و از مالک تازه می‌شود
   (بالا).
+- **حداقل یک‌بار، عمداً (تصمیم مدیر پروژه، بازبینی دور ۱ #144):** ابزار دفتر «بازپخش‌شده» ندارد؛ اجرای دوبارهٔ همان انتخاب
+  دوباره منتشر می‌کند. ایمنی از قرارداد مصرف‌کننده است: Handler شناسهٔ `envelope.eventId` را در همان تراکنش اثر در
+  `processed_event` ثبت می‌کند (`EventConsumer`)، پس نسخهٔ دوم بی‌اثر است. **Ack مبهم** — `send` خطا داد یا فرایند میان ارسال و
+  گزارش مرد، و معلوم نیست رکورد روی `.retry` نشست — را این‌طور بازیاب: گزارش (`--report`) را ببین؛ رکوردهای بی `replayOffset`
+  را با همان انتخاب دوباره اجرا کن (Dry-run، سپس `--execute`). اجرای دوباره **به همین دلیل** امن است، نه چون ابزار تکرار را
+  می‌شناسد. تشخیص «قبلاً بازپخش شده» جای Topic ممیزی `rasta.ops.replay.v1` است (پایین).
 - **ممیزی:** هر رکورد بازپخش‌شده `x-replay-id` دارد و گزارش نگه داشته می‌شود. رکورد ممیزی پلتفرم برای هر بازپخش (Topic
-  `rasta.ops.replay.v1`، ناشر فقط `ops-replay`، مصرف‌کننده audit-service) کار بعدی است.
+  `rasta.ops.replay.v1`، ناشر فقط `ops-replay`، مصرف‌کننده audit-service: یک `REPLAY_EXECUTED` برای هر رویداد، پس از نشستن
+  روی `.retry`، با شناسهٔ اجرا/گزارش) کار بعدی است — و همان‌جا ابزار می‌تواند پیش از ارسال ببیند رویدادی قبلاً بازپخش شده است.
 
 **رویداد مالی:** ⛔ ابزار این رویدادها را **همیشه** رد می‌کند (`NEVER_AUTO_REPLAY`). اثرشان فقط دستی و از مسیر عادی سرویس
 مالک:

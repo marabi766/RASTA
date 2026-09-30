@@ -289,6 +289,16 @@ export const NEVER_AUTO_REPLAY = new Set([
   'TRANSACTION_STATUS_CHANGED',
 ]);
 
+/**
+ * Source topics whose dead letters are never replayed, whatever event they
+ * name: refused by the topic they came from (or its `.retry` twin), not only
+ * by their name, so an event the list above has not caught up with is still
+ * refused (Codex round 1 on #144, M3). The broker derives ops-replay's READ
+ * grant from the subscribed topics minus these (`broker-acls.ts`): the tool
+ * never replays them, so it has no reason to read them.
+ */
+export const NEVER_AUTO_REPLAY_TOPICS: ReadonlySet<string> = new Set(['rasta.economic.v1']);
+
 export function isAutoReplayable(eventName: string): boolean {
   return !NEVER_AUTO_REPLAY.has(eventName);
 }

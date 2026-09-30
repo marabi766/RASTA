@@ -240,9 +240,13 @@ async function staleness(assessments) {
   }
   const scans = new Map();
   for (const [id, group] of probes) {
-    const { high } = await bounds(group.topic, group.partition);
-    const scan = await readPartition(group.topic, group.partition, group.from, high);
+    const { low, high } = await bounds(group.topic, group.partition);
+    // Retention may have taken the start of the tail: read what is left, and
+    // let `staleFrom` see how much is missing.
+    const from = group.from > low ? group.from : low;
+    const scan = await readPartition(group.topic, group.partition, from, high);
     scans.set(id, {
+      low,
       incomplete: scan.incomplete,
       records: scan.records.map((r) => ({
         offset: r.offset,

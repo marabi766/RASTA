@@ -863,8 +863,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `NEVER_AUTO_REPLAY` و دلیل‌های بی‌علاج رد؛ کهنگی با خواندن Topic مبدأ (READ تازهٔ `ops-replay` فقط در گروه‌های
   `ops-replay.`) و رد مگر `--allow-stale <eventId>`. `scripts/replay-dlq.broker.test.mjs` در CI همین را روی Broker احرازشده
   با یک Consumer آزمونی روی `.retry` نشان می‌دهد. نیمهٔ (۱) با #145 رسید (`EventConsumer` `.retry` را می‌خواند؛ DLQ کلید را نگه می‌دارد، D-040) — «وضعیت» پایین.
+  **به‌روز 2026-09-30 (بازبینی دور ۱ #144):** Retention گذشته از Offset اصلی ← کهنگی `UNKNOWN` (نه «کهنه نیست»)؛ READ
+  `ops-replay` بی Topicهای `NEVER_AUTO_REPLAY_TOPICS` (`rasta.economic.v1`)، و پیام آن Topic هر نامی داشته باشد رد می‌شود؛
+  کلید فقط کلید نگه‌داشته (رویداد دارای `streamKey` بی کلید ← `KEY_UNVERIFIABLE`)؛ Header و بدنه در حضور هم باید بخوانند.
+  بازپخش **عمداً حداقل یک‌بار** است (تصمیم مدیر پروژه): بی دفتر بازپخش، ایمنی از `processed_event` مصرف‌کننده.
   **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر
-  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است.
+  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است — و تشخیص «قبلاً بازپخش شده» همان‌جا.
 - **اولویت:** متوسط
 - **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را
@@ -876,7 +880,7 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   پس از تازه‌سازی اعمال می‌کند و رویداد بعدیِ همان جریان آن را درست می‌کند (شرح: replay-dlq.md). گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
   `kafka-credentials.sh`، و `check:kafka-credential-scope` فقط همان را مجاز می‌داند). بخش (۲) — ابزار بازپخش — `scripts/replay-dlq.mjs`
   (بالا، `feat/dlq-replay-tool`).
-- **ثبت‌شده:** 2026-09-28 · **به‌روز:** 2026-09-29
+- **ثبت‌شده:** 2026-09-28 · **به‌روز:** 2026-09-30
 
 > **باقی‌ماندهٔ پذیرفتهٔ RUN-006 در CI (کنار D-039؛ بدهی نیست، تصمیم مدیر پروژه در بازبینی دور ۲ #131).** اعتبارهای
 > Kafka در CI یک‌بارمصرف‌اند و در دو پوشهٔ خصوصی می‌مانند (سرویس‌ها و observer؛ و جدا admin، ops-replay و ابزارها)؛ هیچ

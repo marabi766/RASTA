@@ -71,6 +71,7 @@ export {
   DLQ_REASONS,
   REPLAY_HEADERS,
   NEVER_AUTO_REPLAY,
+  NEVER_AUTO_REPLAY_TOPICS,
   isAutoReplayable,
   MAX_STREAM_SEQ,
   toStreamSeq,
