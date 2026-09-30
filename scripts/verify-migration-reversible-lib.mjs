@@ -827,10 +827,14 @@ export const EXPECTED = {
       'tender',
       'criteria_template',
       'tender_criterion',
+      'tender_invitation',
+      'tender_key',
     ],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
-    triggers: ['tg_tender_criterion_freeze'],
-    functions: ['tender_criterion_freeze'],
+    // 20260930180000_tender_publication: a tender's key is never deleted and its
+    // public half never changes.
+    triggers: ['tg_tender_criterion_freeze', 'tg_tender_key_guard'],
+    functions: ['tender_criterion_freeze', 'tender_key_guard'],
     constraints: [
       'ck_project_text_not_blank',
       'ck_project_actor_recorded',
@@ -910,6 +914,15 @@ export const EXPECTED = {
       'ck_criterion_position_positive',
       'ck_criterion_max_score',
       'ck_criterion_actor_recorded',
+      // 20260930180000_tender_publication (CON-002 PR 4b, ADR-065, ADR-066 § 2).
+      'ck_tender_publication_complete',
+      'ck_tender_published_after_created',
+      'tender_invitation_organization_id_tender_id_fkey',
+      'ck_invitation_not_self',
+      'ck_invitation_text_not_blank',
+      'tender_key_organization_id_tender_id_fkey',
+      'ck_tender_key_wrap_shape',
+      'ck_tender_key_text_not_blank',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

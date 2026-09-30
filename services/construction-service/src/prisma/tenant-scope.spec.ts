@@ -105,6 +105,8 @@ describe('the schema models nothing CON-001 has not decided', () => {
     const names = [...models(SCHEMA).keys()];
     expect(names.filter((name) => /Tender|Bid|Evaluation/i.test(name))).toEqual([
       'Tender',
+      'TenderInvitation',
+      'TenderKey',
       'TenderCriterion',
     ]);
   });

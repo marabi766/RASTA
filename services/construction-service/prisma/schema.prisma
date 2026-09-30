@@ -498,7 +498,16 @@ model Tender {
   /// The compare-and-set token. Every change matches on it and increments it.
   version Int @default(1)
 
-  criteria TenderCriterion[]
+  /// When and by whom it was published (ADR-065 § 1); both or neither, and present from PUBLISHED on.
+  publishedAt DateTime? @map("published_at")
+  publishedBy String?   @map("published_by")
+
+  criteria    TenderCriterion[]
+  invitations TenderInvitation[]
+  /// At most one (`tender_key.tender_id` is its primary key); a list because the
+  /// relation is keyed by the (organization, tender) pair, which Prisma cannot
+  /// see is unique.
+  keys        TenderKey[]
 
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
@@ -509,6 +518,54 @@ model Tender {
 // ---------------------------------------------------------------------------
 // Evaluation criteria — data, never code (ADR-067 § 1)
 // ---------------------------------------------------------------------------
+
+/// An organization invited to bid on a RESTRICTED tender (Q-84 (2), ADR-065 § 4).
+/// The invited organization is not validated against organization-service: the
+/// invitation names an identifier, exactly as an approval step names its authority
+/// (Q-70 (8)). A bidder sees a restricted tender only through a row here.
+model TenderInvitation {
+  id String @id
+
+  organizationId        String @map("organization_id")
+  tenderId              String @map("tender_id")
+  invitedOrganizationId String @map("invited_organization_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  invitedAt DateTime @map("invited_at")
+  invitedBy String   @map("invited_by")
+
+  @@unique([tenderId, invitedOrganizationId], map: "ux_tender_invitation_org")
+  @@index([organizationId, tenderId], map: "ix_tender_invitation_org_tender")
+  @@index([invitedOrganizationId, tenderId], map: "ix_tender_invitation_invited")
+  @@map("tender_invitation")
+}
+
+/// The tender's key pair, made at publication (ADR-066 § 2): the public key seals
+/// bids, the private key exists only wrapped by a KEK from the key provider and
+/// is never unwrapped before the tender is opened. The identity of the key and
+/// its public half never change (a trigger); only the wrapping may be renewed
+/// when a KEK is rotated.
+model TenderKey {
+  tenderId       String @id @map("tender_id")
+  organizationId String @map("organization_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  keyId        String @unique @map("key_id")
+  publicKeyPem String @map("public_key_pem")
+
+  kekId             String @map("kek_id")
+  wrapNonce         Bytes  @map("wrap_nonce")
+  wrappedPrivateKey Bytes  @map("wrapped_private_key")
+  wrapTag           Bytes  @map("wrap_tag")
+
+  createdAt DateTime @map("created_at")
+  createdBy String   @map("created_by")
+
+  @@index([organizationId, tenderId], map: "ix_tender_key_org_tender")
+  @@map("tender_key")
+}
 
 /// The scoring methods the code implements (a closed set; ADR-067 § 1, Q-88).
 /// The weights and the maximum score are data; a new method is code and an ADR.

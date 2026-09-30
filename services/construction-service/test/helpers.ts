@@ -1,4 +1,5 @@
 import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -12,6 +13,9 @@ import { TenderRepository } from '../src/tender/tender.repository';
 import { TenderService } from '../src/tender/tender.service';
 import { CriteriaRepository } from '../src/tender/criteria.repository';
 import { CriteriaService } from '../src/tender/criteria.service';
+import { PublicationRepository } from '../src/tender/publication.repository';
+import { PublicationService } from '../src/tender/publication.service';
+import { EnvKekProvider } from '../src/tender/sealing/key-provider';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
 import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
@@ -52,9 +56,19 @@ export function databaseUrl(): string {
   return url;
 }
 
+/**
+ * A key-encryption key minted for this test process only (ADR-066 § 2). Random,
+ * never written down: a fixed string assigned to a `KEK` is indistinguishable
+ * from a real one to a secret scanner (AGENTS.md S-01).
+ */
+export const TEST_KEK = randomBytes(32).toString('base64');
+export const TEST_KEK_ID = 'itest-1';
+
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {
   return loadConstructionEnv({
     ...process.env,
+    CONSTRUCTION_TENDER_KEKS: `${TEST_KEK_ID}:${TEST_KEK}`,
+    CONSTRUCTION_TENDER_KEK_CURRENT: TEST_KEK_ID,
     DATABASE_URL: databaseUrl(),
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
     // Never used by these suites: they call the domain with an explicit
@@ -87,6 +101,10 @@ export interface Wiring {
   needs: NeedService;
   tenderRepository: TenderRepository;
   tenders: TenderService;
+  publicationRepository: PublicationRepository;
+  /** The provider the wiring publishes with; a test asks it to unwrap what publishing stored. */
+  keys: EnvKekProvider;
+  publication: PublicationService;
   criteriaRepository: CriteriaRepository;
   criteria: CriteriaService;
   approvalRepository: ApprovalRepository;
@@ -121,6 +139,11 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const approvalRepository = new ApprovalRepository(prisma);
   const tenderRepository = new TenderRepository(prisma);
   const criteriaRepository = new CriteriaRepository(prisma);
+  const publicationRepository = new PublicationRepository(prisma);
+  const keys = new EnvKekProvider(
+    env.CONSTRUCTION_TENDER_KEKS,
+    env.CONSTRUCTION_TENDER_KEK_CURRENT,
+  );
   const projects = new ProjectService(
     prisma,
     repository,
@@ -176,6 +199,18 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
     tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
+    publicationRepository,
+    keys,
+    publication: new PublicationService(
+      prisma,
+      tenderRepository,
+      criteriaRepository,
+      publicationRepository,
+      events,
+      access,
+      env,
+      keys,
+    ),
     criteriaRepository,
     criteria: new CriteriaService(
       prisma,
@@ -298,7 +333,15 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_criterion" ENABLE TRIGGER "tg_tender_criterion_freeze"',
       );
+      // A tender key is never deleted by the service (`tg_tender_key_guard`);
+      // a suite's own keys are removed the same way, for one transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_key" DISABLE TRIGGER "tg_tender_key_guard"',
+      );
+      await tx.tenderKey.deleteMany({ where });
+      await tx.$executeRawUnsafe('ALTER TABLE "tender_key" ENABLE TRIGGER "tg_tender_key_guard"');
     });
+    await prisma.client.tenderInvitation.deleteMany({ where });
     await prisma.client.criteriaTemplate.deleteMany({ where });
     await prisma.client.tender.deleteMany({ where });
     await prisma.client.approval.deleteMany({ where });
