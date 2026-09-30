@@ -188,7 +188,11 @@ export function commitmentOf(salt: Buffer, canonicalContent: string): string {
   return sha256Hex(lengthPrefixed('rasta.bid.commitment.v1', salt, canonicalContent));
 }
 
-function ciphertextDigest(
+/**
+ * The digest a receipt commits to for the stored bytes. Recomputed from them,
+ * never read from the stored `ciphertextSha256`, when a bid is opened.
+ */
+export function ciphertextDigest(
   parts: Pick<SealedBid, 'keyId' | 'nonce' | 'ciphertext' | 'tag' | 'wrappedContentKey'>,
 ): string {
   return sha256Hex(
@@ -255,22 +259,73 @@ export function sealBid(input: {
   }
 }
 
+/** Two hex digests equal, in constant time. */
+function sameDigest(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
 /**
- * Opens a sealed bid with the tender's private key.
+ * What the caller must hold to open a bid: the tender's receipts, in the order
+ * they were issued, and the **head** — the newest receipt — as kept somewhere the
+ * service's own database cannot rewrite (audit-service holds every receipt,
+ * ADR-066 § 3). Without them there is nothing to check a stored bid against, and
+ * a stored bid is exactly what an operator could have replaced.
+ */
+export interface TrustedReceipts {
+  readonly links: readonly (ReceiptLink & { readonly receipt: string })[];
+  readonly head: string;
+}
+
+/**
+ * Opens a sealed bid with the tender's private key — **only** against the receipts
+ * that were issued when it was submitted (Codex review of #163).
  *
- * Fails `TAMPERED` if the ciphertext, its tag, the binding or the key do not
- * verify, and `COMMITMENT_MISMATCH` if it decrypts but the content is not the
- * content committed to at submission — for example because someone with the
- * public key sealed other content and kept the old commitment.
+ * Opening compares the bid with what the bidder was given, not with what the
+ * database now says about itself. In order, before any decryption:
+ *
+ *   1. the receipt chain verifies, link by link, and ends at the trusted head
+ *      (`RECEIPT_CHAIN_BROKEN`: an edited, removed, reordered, spliced or
+ *      truncated chain, or one that ends somewhere the trusted copy does not);
+ *   2. the bid has a receipt, and the newest one it has is for this revision
+ *      (`RECEIPT_MISMATCH`: a stale or invented revision);
+ *   3. the digest **recomputed** from the stored ciphertext, tag, nonce, wrapped
+ *      key and key id equals the receipted one, and so does the stored
+ *      commitment (`RECEIPT_MISMATCH`: a substituted bid — whether re-sealed with
+ *      the public key or altered byte by byte — even one whose own stored digest
+ *      and commitment were rewritten to match).
+ *
+ * Then it decrypts (`TAMPERED` if the tag, the binding or the key do not verify)
+ * and checks the decrypted content against the receipted commitment
+ * (`COMMITMENT_MISMATCH`).
  */
 export function openBid(input: {
   privateKey: KeyObject;
   binding: BidBinding;
   sealed: SealedBid;
+  receipts: TrustedReceipts;
 }): unknown {
-  const { sealed, binding } = input;
+  const { sealed, binding, receipts } = input;
   if (sealed.version !== SEAL_VERSION || sealed.keyId !== binding.keyId) {
     throw new SealingError('TAMPERED');
+  }
+
+  const verdict = verifyReceiptChain(binding.tenderId, receipts.links, receipts.head);
+  if (!verdict.ok) throw new SealingError('RECEIPT_CHAIN_BROKEN');
+
+  const receiptsOfBid = receipts.links.filter((link) => link.bidId === binding.bidId);
+  const receipted = receiptsOfBid[receiptsOfBid.length - 1];
+  if (!receipted || receipted.revision !== binding.revision) {
+    throw new SealingError('RECEIPT_MISMATCH');
+  }
+  const recomputedDigest = ciphertextDigest(sealed);
+  if (
+    !sameDigest(recomputedDigest, receipted.ciphertextSha256) ||
+    !sameDigest(sealed.ciphertextSha256, receipted.ciphertextSha256) ||
+    !sameDigest(sealed.contentCommitment, receipted.contentCommitment)
+  ) {
+    throw new SealingError('RECEIPT_MISMATCH');
   }
 
   let contentKey: Buffer;
@@ -307,10 +362,11 @@ export function openBid(input: {
       throw new SealingError('TAMPERED');
     }
     const salt = Buffer.from(parsed.salt, 'base64');
-    const recomputed = Buffer.from(commitmentOf(salt, canonicalize(parsed.content)), 'hex');
-    const committed = Buffer.from(sealed.contentCommitment, 'hex');
+    const recomputed = commitmentOf(salt, canonicalize(parsed.content));
     salt.fill(0);
-    if (recomputed.length !== committed.length || !timingSafeEqual(recomputed, committed)) {
+    // Against the receipted commitment, which is the bidder's copy — never the
+    // stored one alone.
+    if (!sameDigest(recomputed, receipted.contentCommitment)) {
       throw new SealingError('COMMITMENT_MISMATCH');
     }
     return parsed.content;
@@ -353,24 +409,37 @@ export function nextReceipt(tenderId: string, previous: string, link: ReceiptLin
   );
 }
 
-export type ChainVerdict = { ok: true } | { ok: false; brokenAt: number };
+export type ChainVerdict =
+  | { ok: true }
+  /** The link at `brokenAt` does not follow from the one before it. */
+  | { ok: false; reason: 'LINK_BROKEN'; brokenAt: number }
+  /** Every link verifies, but the chain does not end at the trusted head. */
+  | { ok: false; reason: 'HEAD_MISMATCH' };
 
 /**
- * Walks a tender's receipts in the order they were issued. `brokenAt` is the
- * index of the first link that does not follow from the one before it — a link
- * that was edited, removed, reordered or spliced in from elsewhere.
+ * Walks a tender's receipts in the order they were issued and checks where they
+ * end. `LINK_BROKEN` names the first link that does not follow from the one
+ * before it — one that was edited, removed, reordered or spliced in from
+ * elsewhere. `HEAD_MISMATCH` is a chain that is internally sound but is not the
+ * chain that was issued: cut short, extended, or replaced whole.
+ *
+ * `trustedHead` is **required**. A chain checked against nothing but itself
+ * proves only that it is self-consistent, and a consistent forgery is one call
+ * away for anyone who can write the table. The head is the newest receipt as
+ * held outside this service's database (audit-service, from `BID_SUBMITTED`); an
+ * empty chain's head is {@link genesisReceipt}.
  */
 export function verifyReceiptChain(
   tenderId: string,
   links: readonly (ReceiptLink & { readonly receipt: string })[],
+  trustedHead: string,
 ): ChainVerdict {
   let previous = genesisReceipt(tenderId);
   for (const [index, link] of links.entries()) {
-    const expected = nextReceipt(tenderId, previous, link);
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(link.receipt, 'utf8');
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, brokenAt: index };
+    if (!sameDigest(nextReceipt(tenderId, previous, link), link.receipt)) {
+      return { ok: false, reason: 'LINK_BROKEN', brokenAt: index };
+    }
     previous = link.receipt;
   }
-  return { ok: true };
+  return sameDigest(previous, trustedHead) ? { ok: true } : { ok: false, reason: 'HEAD_MISMATCH' };
 }

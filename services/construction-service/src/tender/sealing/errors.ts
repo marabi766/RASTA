@@ -12,6 +12,10 @@ export const SEALING_ERROR_CODES = [
   'TAMPERED',
   /** Decrypted, but the content no longer matches the commitment made at submission. */
   'COMMITMENT_MISMATCH',
+  /** The tender's receipts do not verify, or do not end at the trusted head (ADR-066 § 3). */
+  'RECEIPT_CHAIN_BROKEN',
+  /** The stored bid is not the one the receipts were issued for: substituted, or a stale revision. */
+  'RECEIPT_MISMATCH',
   /** The content cannot be sealed: not canonicalisable, or too large. */
   'INVALID_CONTENT',
   /** The KEK configuration is malformed. */
@@ -24,6 +28,8 @@ const MESSAGES: Record<SealingErrorCode, string> = {
   KEY_UNAVAILABLE: 'The key needed for this operation is not available',
   TAMPERED: 'The sealed data does not verify',
   COMMITMENT_MISMATCH: 'The content does not match the commitment made when it was submitted',
+  RECEIPT_CHAIN_BROKEN: 'The receipts of this tender do not verify against the trusted head',
+  RECEIPT_MISMATCH: 'The stored bid is not the one its receipt was issued for',
   INVALID_CONTENT: 'The content cannot be sealed',
   INVALID_CONFIGURATION: 'The tender key configuration is not valid',
 };
