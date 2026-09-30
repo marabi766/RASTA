@@ -32,6 +32,7 @@
     "check:service-boundaries": "node scripts/check-service-boundaries.mjs",
     "kafka:acl:generate": "pnpm --filter @rasta/contracts build && node scripts/kafka-acl-generate.mjs",
     "test:kafka-acl-lib": "node --test scripts/kafka-acl-lib.test.mjs",
+    "test:retry-replay": "pnpm --dir services/audit-service run test:retry-replay",
     "test:kafka-credential-scope": "node --test scripts/check-kafka-credential-scope.test.mjs",
     "test:kafka-outbox-tables": "node --test scripts/kafka-outbox-tables.test.mjs",
     "test:replay-dlq-lib": "pnpm --filter @rasta/contracts build && node --test scripts/replay-dlq-lib.test.mjs",

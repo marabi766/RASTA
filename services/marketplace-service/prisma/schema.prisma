@@ -238,7 +238,9 @@ model Order {
   /// Filled once economic-service reports a completed settlement.
   economicSettlementId String? @map("economic_settlement_id")
 
-  /// Mirrors the `Idempotency-Key` of the creating request, for tracing.
+  /// The `Idempotency-Key` of the creating request. Unique per organization
+  /// (`uq_order_org_idempotency_key`): one key places at most one order, even
+  /// after its idempotency record is gone (review of #141).
   idempotencyKey String @map("idempotency_key")
   correlationId  String @map("correlation_id")
 
@@ -281,6 +283,7 @@ model Order {
   @@index([organizationId, status], map: "ix_order_org_status")
   @@index([supplierOrganizationId, status], map: "ix_order_supplier_status")
   @@index([organizationId, createdAt], map: "ix_order_org_created")
+  @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
   @@map("order")
 }
 

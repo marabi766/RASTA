@@ -1095,6 +1095,29 @@ jobs:
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
 
+      - name: Organization coverage gate
+        # organization-service carried a 70% threshold in `jest.config.js` that
+        # nothing evaluated twice over: the config's `collectCoverageFrom`
+        # resolved to `src/src/**` under `rootDir: 'src'`, so `--coverage`
+        # reported 0% over passing tests, and no job here ran jest with
+        # `--coverage` at all. Both are fixed together — a gate that measures
+        # nothing, or that nothing runs, is documentation.
+        #
+        # Both projects in one run, like every gate above: unit alone measures
+        # about 52% statements and 45% branches, because the repository, the
+        # outbox store and the controller are exercised only by the integration
+        # suites against a real PostgreSQL. A unit-only number would fail a gate
+        # that the service passes.
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/organization-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
@@ -1316,6 +1339,29 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+
+      - name: Retry replay, published as ops-replay
+        # D-039: a record the operator's replay principal publishes on
+        # `<topic>.retry` is consumed like the original — applied once,
+        # a forged producer dead-lettered with the message key kept. Only
+        # ops-replay may write a `.retry` topic (RUN-006), so this is the one
+        # step that gets its password (`kafka-credentials.sh replay`: the
+        # `tests` scope plus ops-replay's), and it runs only the specs tagged
+        # [retry-replay]. No other step's scope changes; `check:kafka-credential-scope`
+        # allows exactly this step to take it. It fails, rather than skips,
+        # without the credential.
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh replay)"
+          eval "${kafka_credentials}"
+          pnpm run test:retry-replay
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          RETRY_REPLAY_REQUIRED: 'true'
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
       - name: Broker authorisation, asked of the broker
         # RUN-006: the generated ACLs observed on the live broker — only a

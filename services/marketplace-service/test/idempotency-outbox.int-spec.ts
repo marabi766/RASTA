@@ -206,10 +206,15 @@ describe('idempotency and outbox (real database)', () => {
       ).rejects.toThrow(expect.objectContaining({ code: 'CONFLICT' }));
     });
 
-    it('treats an expired key as a fresh one rather than replaying stale work', async () => {
+    it('treats an expired key as a fresh claim, never a stale replay — and one key places one order', async () => {
       // The TTL is what stops the table growing without bound. Once a key has
-      // expired, the same key is a new request: replaying a week-old response
+      // expired, the same key is a new claim: replaying a week-old response
       // to it would answer a question nobody asked.
+      //
+      // For an order, though, the key has already placed one in this
+      // organization, and `uq_order_org_idempotency_key` (review of #141)
+      // refuses a second. So the fresh attempt is a conflict, not a new order —
+      // before the index, this test expected a second order here.
       const { offerId } = await publishOffer(wiring, org.supplier);
       const idempotencyKey = key('expired');
       const body = { lines: [{ offerId, quantity: 1 }] };
@@ -233,14 +238,30 @@ describe('idempotency and outbox (real database)', () => {
         }),
       );
 
-      const second = await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
-        ),
+      let placed = 0;
+      const second = asBuyer(() =>
+        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () => {
+          placed += 1;
+          return wiring.orders.place(body, idempotencyKey);
+        }),
       );
 
-      // A genuinely new order, not the old one handed back.
-      expect(second.id).not.toBe(first.id);
+      // Not the old response handed back: the work ran again (a fresh claim)…
+      await expect(second).rejects.toMatchObject({
+        code: 'CONFLICT',
+        message: 'An order has already been placed with this Idempotency-Key',
+      });
+      expect(placed).toBe(1);
+      // …and was refused, so the order is still the first one, alone, and the
+      // fresh claim was released rather than left in flight.
+      const [orders, claims] = await runUnscoped('the suite reads what the key left', () =>
+        Promise.all([
+          prisma.client.order.findMany({ where: { idempotencyKey }, select: { id: true } }),
+          prisma.client.idempotencyKey.count({ where: { key: idempotencyKey } }),
+        ]),
+      );
+      expect(orders).toEqual([{ id: first.id }]);
+      expect(claims).toBe(0);
     });
 
     it('replays with the status the first call returned', async () => {

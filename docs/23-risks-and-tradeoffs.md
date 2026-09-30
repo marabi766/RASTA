@@ -759,21 +759,31 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   آن تأمین‌کننده بنشاند. بررسی ناشر فقط «هم‌خوانی» است، نه احراز.
 - **کاهش امروز (بازبینی Codex روی #126، تصمیم مدیر پروژه):** Consumer **به‌طور پیش‌فرض خاموش است** و بسته شکست می‌خورد:
   `SUPPLIER_PERFORMANCE_CONSUMER_ENABLED` پیش‌فرض `false` است و با `false` هیچ اشتراکی ساخته و هیچ چیزی ثبت نمی‌شود؛
-  `true` در راه‌اندازی رد می‌شود مگر کلاینت Kafka برای احراز در Broker پیکربندی شده باشد — و چون چنین پیکربندی‌ای هنوز
-  روی `main` نیست (RUN-006)، امروز بی‌قیدوشرط رد می‌شود (`brokerConnectionIsAuthenticated`). هیچ امتیازی هم محاسبه یا
-  منتشر نمی‌شود.
+  `true` در راه‌اندازی رد می‌شود مگر کلاینت Kafka با اعتبار خود سرویس در Broker احراز شود
+  (`brokerConnectionIsAuthenticated`؛ از 2026-09-29 برآوردنی است — پایین). هیچ امتیازی هم محاسبه یا منتشر نمی‌شود.
 - **رفع:** یکی از دو راه، پیش از روشن‌کردن Consumer: (۱) **RUN-006** — SASL/SCRAM و ACL هر Topic، و خواندن پیکربندی آن در
   `brokerConnectionIsAuthenticated`؛ یا (۲) **پرسیدن از منبع** — یک Endpoint داخلی خواندنی در marketplace (مثل
   `GET /v1/internal/orders/{id}` با توکن داخلی و مستأجر امضاشده، ADR-035) و تأیید هر واقعیت پیش از شمردن. پیگیری را مدیر
   پروژه ثبت می‌کند.
 - **اولویت:** متوسط — شرط روشن‌کردن Consumer
-- **ثبت‌شده:** 2026-09-26 · **به‌روز:** 2026-09-27 (بازبینی Codex روی #126، یافتهٔ ۱)
+- **ثبت‌شده:** 2026-09-26 · **به‌روز:** 2026-09-27 (بازبینی Codex روی #126، یافتهٔ ۱)؛ 2026-09-29 (Gate برآوردنی است)
 - **شاهد RUN-006 برای راه (۱) — 2026-09-28:** Broker احرازشدهٔ CI و Compose (RUN-006 PR B) اکنون فقط به
   `marketplace-service` اجازهٔ نوشتن روی `rasta.marketplace.v1` می‌دهد، و `scripts/kafka-acl.broker.test.mjs` در CI رد
   نوشتن `supplier-service`، `economic-service` و `ops-replay` روی آن را از خود Broker نشان می‌دهد. شرط برداشتن Gate
   **SASL به‌همراه ACL هر Topic** است، **نه SASL به‌تنهایی**: با SASL بی ACL هر Principal احرازشده‌ای می‌تواند روی همین
-  Topic بنویسد و «احراز» همان «هم‌خوانی» می‌ماند. تغییر `brokerConnectionIsAuthenticated` (در
-  `services/supplier-service/src/config/env.ts`) با مالک supplier-service است و در این PR نیست.
+  Topic بنویسد و «احراز» همان «هم‌خوانی» می‌ماند.
+- **Gate برآوردنی است — 2026-09-29 (`feat/supplier-gate-on-authenticated-broker`):** `brokerConnectionIsAuthenticated`
+  (`services/supplier-service/src/config/env.ts`) دقیقاً وقتی `true` است که supplier-service **با اعتبار SASL خودش**
+  (نام کاربری همان `SERVICE_NAME`) و **روی TLS** (`KAFKA_SSL=true`) وصل شود و انصراف PLAINTEXT
+  (`KAFKA_ALLOW_PLAINTEXT`) تنظیم **نشده** باشد — آن انصراف حتی کنار اعتبار و TLS هم رد می‌شود. آنچه بر آن تکیه دارد: Broker
+  هر کلاینت را با SASL/SCRAM روی TLS احراز می‌کند و **تنها** Principal دارای `WRITE` روی `rasta.marketplace.v1`،
+  `marketplace-service` است (RUN-006، #128/#131؛ `scripts/kafka-acl.broker.test.mjs`)، پس بررسی ناشر در `EventConsumer`
+  (ADR-061 § ۲) با Broker هم‌خوان است نه با ادعای پاکت. `test/performance-consumer-gate.int-spec.ts` همین را روی Broker
+  احرازشده نشان می‌دهد: `AppModule` واقعی با Consumer روشن بالا می‌آید، به نام supplier-service به گروهش می‌پیوندد و
+  واقعیتی را که marketplace-service منتشر کرده ثبت می‌کند؛ و با انصراف PLAINTEXT راه‌اندازی رد می‌شود.
+  **`SUPPLIER_PERFORMANCE_CONSUMER_ENABLED` پیش‌فرض `false` می‌ماند:** روشن‌کردن تصمیم استقرار است. **آنچه باز می‌ماند:**
+  پرسیدن از منبع (§ ۴) هنوز انجام نمی‌شود — ناشرِ احرازشده می‌تواند با باگ یا اعتبار نشت‌کرده واقعیت نادرست بنویسد؛ راه (۲)
+  بالا هنوز ارزش دارد.
 
 ### D-037 · Projector کیکلوک ایمیل، نام و هر صفت غیرپلتفرمی را «بخوان-بنویس» می‌کند — ایمیل شناسهٔ ورود است
 
@@ -852,10 +862,20 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `<Topic مبدأ>.retry`؛ فقط `EVENT_HEADERS` به‌همراه `x-replay-id`؛ کلید = `streamKey` (بی Sequence رد، تا D-040)؛
   `NEVER_AUTO_REPLAY` و دلیل‌های بی‌علاج رد؛ کهنگی با خواندن Topic مبدأ (READ تازهٔ `ops-replay` فقط در گروه‌های
   `ops-replay.`) و رد مگر `--allow-stale <eventId>`. `scripts/replay-dlq.broker.test.mjs` در CI همین را روی Broker احرازشده
-  با یک Consumer آزمونی روی `.retry` نشان می‌دهد. **آنچه باز می‌ماند — نیمهٔ (۱):** `EventConsumer` هنوز `.retry` را نمی‌خواند
-  (کار بعدی کارگر سرور در `packages/nest-common`)، پس تا آن زمان بازپخش به هیچ سرویسی نمی‌رسد؛ و رکورد ممیزی پلتفرم برای هر
-  بازپخش (Topic `rasta.ops.replay.v1`، مصرف‌کننده audit-service) PR بعدی است.
+  با یک Consumer آزمونی روی `.retry` نشان می‌دهد. نیمهٔ (۱) با #145 رسید (`EventConsumer` `.retry` را می‌خواند؛ DLQ کلید را نگه می‌دارد، D-040) — «وضعیت» پایین.
+  **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر
+  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است.
 - **اولویت:** متوسط
+- **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
+  Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را
+  با Topic اصلی ثبت و پروژه می‌کند. Consumerهای حالت‌ساز (Replica دارایی در fleet و maintenance، پرچم `inMaintenance`، وضعیت asset از رویدادهای fleet/maintenance) روی
+  تحویل `.retry` بار را اعمال نمی‌کنند و از سرویس مالک تازه می‌شوند (خواندن داخلی احرازشده؛ در نبود پاسخ: خطا ⇐ DLQ)؛
+  `notification-service` منبع را Topic اصلی ثبت می‌کند. خواندن از مالک و نوشتن Replica زیر همان قفل هر-دارایی انجام می‌شود که تحویل‌های اصلی هم می‌گیرند (تحویل اصلیِ هم‌زمان صبر می‌کند)؛
+  مالک با Tenant خود رویداد پرسیده می‌شود (۴۰۴ ⇐ `SOURCE_UNCONFIRMED` پیش از هر اثر)؛ Fence فقط با تأیید انتقال ثبت‌شده و فقط
+  برای سازمانی که دیگر مالک نیست حذف می‌شود. باقی‌ماندهٔ پذیرفته: رویداد اصلیِ قدیمی‌تر از تصویر که هنوز در راه است بار قدیمی‌ترش را
+  پس از تازه‌سازی اعمال می‌کند و رویداد بعدیِ همان جریان آن را درست می‌کند (شرح: replay-dlq.md). گام CI «Retry replay, published as ops-replay» تنها گامی است که گذرواژهٔ `ops-replay` را می‌گیرد (دامنهٔ `replay` در
+  `kafka-credentials.sh`، و `check:kafka-credential-scope` فقط همان را مجاز می‌داند). بخش (۲) — ابزار بازپخش — `scripts/replay-dlq.mjs`
+  (بالا، `feat/dlq-replay-tool`).
 - **ثبت‌شده:** 2026-09-28 · **به‌روز:** 2026-09-29
 
 > **باقی‌ماندهٔ پذیرفتهٔ RUN-006 در CI (کنار D-039؛ بدهی نیست، تصمیم مدیر پروژه در بازبینی دور ۲ #131).** اعتبارهای
@@ -880,6 +900,8 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **رفع:** `deadLetter()` کلید پیام اصلی (`message.key`) را بر پیام DLQ بگذارد — کنار Headerهای موجود — و آزمون آن را سنجاق
   کند؛ پیش از ساخت ابزار بازپخش یا همراه آن.
 - **اولویت:** متوسط
+- **وضعیت:** رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `deadLetter()` کلید اصلی را نگه می‌دارد (بی‌کلید
+  اگر اصلی بی‌کلید بود) و آزمون واحد و یکپارچهٔ `audit-service` آن را سنجاق می‌کنند. رکوردهای DLQ پیش از این تغییر بی‌کلیدند.
 - **ثبت‌شده:** 2026-09-28 (#135)
 
 ## ۲۳٫۶ ثبت بدهی معماری

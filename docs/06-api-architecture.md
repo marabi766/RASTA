@@ -74,7 +74,7 @@ Domain Services  :31xx    ◄── فقط از شبکه داخلی؛ NetworkPol
 | `X-Trace-Id`                        | ✅                 | Trace ID استاندارد W3C                                                                                                                |
 | `X-RateLimit-Limit/Remaining/Reset` | ✅                 | وضعیت محدودیت نرخ                                                                                                                     |
 | `ETag`                              | روی GET منبع منفرد | برای `If-Match`                                                                                                                       |
-| `Retry-After`                       | روی ۴۲۹ و ۵۰۳      | ثانیه                                                                                                                                 |
+| `Retry-After`                       | روی ۴۲۹ و ۴۰۹      | ثانیه، عدد صحیح. ۴۲۹ از محدودیت نرخ Gateway (§ ۶٫۹)؛ ۴۰۹ فقط برای کلید در حال پردازش (§ ۶٫۸)                                          |
 | Secure Headers                      | ✅                 | `Strict-Transport-Security`، `X-Content-Type-Options: nosniff`، `X-Frame-Options: DENY`، `Content-Security-Policy`، `Referrer-Policy` |
 
 ---
@@ -234,6 +234,25 @@ Idempotency-Key: 01JBQ8Z4K7M2N5P8R1T3V6X9Y2
 | بدون کلید روی Endpoint اجباری | `400 VALIDATION_FAILED`               |
 
 نگهداشت کلید: **۲۴ ساعت**. تطبیق بدنه با SHA-256 بدنه نرمال‌شده (کلیدهای مرتب، فضای خالی حذف).
+
+**`Retry-After` دقیقاً چه زمانی فرستاده می‌شود.** فقط روی ۴۰۹ کلید در حال پردازش
+(`CONFLICT`)، با مقدار `1`، در economic، marketplace و construction؛ نه روی
+`IDEMPOTENCY_KEY_REUSED`، چون صبر آن را حل نمی‌کند. مدت انتظار فقط Header است و
+در بدنه خطا نمی‌آید. سرویس آن را با فیلد نوع‌دار `RastaError.retryAfterSeconds`
+می‌گوید و `AllExceptionsFilter` فقط از همین فیلد Header می‌سازد: عدد صحیح (رو به
+بالا گرد می‌شود)، محدود به ۱ تا ۳۶۰۰ ثانیه؛ مقداری که عدد متناهی نباشد اصلاً فرستاده
+نمی‌شود. هیچ چیز از `internalContext` — که فقط در Log سرور می‌ماند (§ ۶٫۷) —
+هرگز Header نمی‌شود. Gateway این Header را مانند بقیهٔ Headerهای پاسخ سرویس
+عبور می‌دهد و در CORS در `exposedHeaders` است تا اسکریپت مرورگر بتواند آن را بخواند.
+
+**شکست ثبت پاسخ، کلید را آزاد نمی‌کند.** کلید فقط وقتی آزاد می‌شود که خود کار
+شکست بخورد. اگر کار Commit شده باشد و ثبت پاسخ پس از آن شکست بخورد، خطا به
+فراخوان می‌رسد و کلید «در حال پردازش» می‌ماند: تکرار درخواست تا انقضای کلید
+`409 CONFLICT` + `Retry-After` می‌گیرد، نه اجرای دوباره (economic و marketplace؛
+construction پاسخ را در همان تراکنش دامنه ثبت می‌کند). در marketplace، یک کلید
+در هر سازمان **حداکثر یک سفارش** می‌سازد (`uq_order_org_idempotency_key`)، حتی
+پس از انقضا یا از دست رفتن رکورد کلید؛ سفارش دوم با همان کلید `409 CONFLICT`
+است، بدون `Retry-After`، چون صبر آن را حل نمی‌کند.
 
 **شناسهٔ منبع جزء هویت درخواست است.** کلید زیر الگوی مسیر ذخیره می‌شود
 (`POST /v1/orders/:id/cancel`)، پس روی مسیری که بر یک منبع مشخص عمل می‌کند،

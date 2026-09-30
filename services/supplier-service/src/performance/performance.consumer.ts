@@ -32,8 +32,9 @@ export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 /** Logged at startup while the consumer is off — which is the default. */
 export const PERFORMANCE_CONSUMER_DISABLED =
   'Performance consumer not started: SUPPLIER_PERFORMANCE_CONSUMER_ENABLED is false (the default). ' +
-  'It records append-only facts in the tenant a marketplace event names, and stays off until the ' +
-  'broker authenticates producers (ADR-061 § 3, RUN-006; docs/23 D-036).';
+  'It records append-only facts in the tenant a marketplace event names; enabling it is a ' +
+  'deployment decision, allowed only over this service’s own SASL credential and TLS to a broker ' +
+  'that enforces per-topic ACLs (ADR-061 § 3, RUN-006; docs/23 D-036).';
 
 /**
  * The broker-facing half, or `null` — no subscription at all — unless the flag

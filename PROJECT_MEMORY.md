@@ -2805,7 +2805,7 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   `projectId`، Payload بی متن آزاد) و `audit-service` آن را مصرف می‌کند. کلید مشترک هم‌Partition‌کردن است، نه ترتیب
   تضمین‌شده (D-027، ADR-051 B4).
   **به‌روزرسانی 2026-09-27:** `supplier-service` مصرف‌کنندهٔ `rasta.marketplace.v1` است (Consumer `supplier-service.performance`،
-  ADR-052 گام ۵، #126) — شش رویداد، فقط ثبت واقعیت عملکرد، **پیش‌فرض خاموش** تا احراز Broker (RUN-006، D-036). ۴۹ Topic از قبل در Kafka ساخته شده
+  ADR-052 گام ۵، #126) — شش رویداد، فقط ثبت واقعیت عملکرد، **پیش‌فرض خاموش**؛ از 2026-09-29 روشن‌کردنش ممکن است ولی فقط روی اعتبار SASL خود سرویس و TLS، بی انصراف PLAINTEXT (`brokerConnectionIsAuthenticated`، RUN-006، D-036) — روشن‌کردن تصمیم استقرار است. ۴۹ Topic از قبل در Kafka ساخته شده
   (`infrastructure/docker/kafka/create-topics.sh`) — بقیه خالی منتظرند.
   **به‌روزرسانی 2026-09-28 (RUN-006، PR A #128 + PR B `chore/kafka-sasl-acl-broker`):** Broker توسعه و CI **احراز و
   مجوزدهی می‌کند** — SASL_SSL با SCRAM-SHA-512، یک Principal برای هر سرویس، `allow.everyone.if.no.acl.found=false`، و

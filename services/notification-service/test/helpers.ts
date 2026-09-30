@@ -174,6 +174,7 @@ export function maintenanceDue(input: {
   state?: string;
   eventId?: string;
   correlationId?: string;
+  streamSeq?: number;
 }): EventEnvelope {
   return {
     eventId: input.eventId ?? ulid(),
@@ -186,6 +187,9 @@ export function maintenanceDue(input: {
     aggregateId: input.scheduleId,
     tenantId: input.organizationId,
     correlationId: input.correlationId ?? `COR_${ulid()}`,
+    ...(input.streamSeq !== undefined
+      ? { streamSeq: input.streamSeq, streamKey: input.scheduleId }
+      : {}),
     payload: {
       scheduleId: input.scheduleId,
       assetId: input.assetId ?? `AST_${ulid()}`,

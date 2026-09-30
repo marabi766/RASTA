@@ -22,7 +22,12 @@ export {
 export type { RequestContext, AuthType } from './context/request-context';
 
 // Errors ---------------------------------------------------------------------
-export { RastaError, isRastaError } from './errors/rasta-error';
+export {
+  RastaError,
+  isRastaError,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+} from './errors/rasta-error';
 
 // Decorators -----------------------------------------------------------------
 export {
@@ -45,6 +50,8 @@ export {
 
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
+export { internalGet } from './auth/internal-get';
+export type { InternalGetOptions, InternalGetResult } from './auth/internal-get';
 export type {
   UserClaims,
   ServiceClaims,
@@ -123,6 +130,7 @@ export type {
   HandlerOutcome,
   ConsumerLogger,
 } from './consumer/event-consumer';
+export { isRetryDelivery, originalDelivery } from './consumer/original-delivery';
 
 // Outbox ---------------------------------------------------------------------
 export {

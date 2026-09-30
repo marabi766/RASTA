@@ -19,6 +19,7 @@ import {
   ordersCreatedTotal,
   remindersRecordedTotal,
 } from '../observability/metrics';
+import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
 import { OrderRepository, type LockedOrderRow } from './order.repository';
 import { assertTransition } from './state-machine';
 import { availableOrderActions } from './order-actions';
@@ -37,6 +38,22 @@ import type {
 import type { OrderStatus } from '../generated/prisma';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** One Idempotency-Key, at most one order per organization (review of #141). */
+const ORDER_KEY_INDEX = 'uq_order_org_idempotency_key';
+
+/**
+ * Whether a unique violation's target is that index. The driver names either
+ * the index or its columns, depending on how it reports the violation.
+ */
+function isOrderKeyIndex(target: string | undefined): boolean {
+  return (
+    target !== undefined &&
+    (target === ORDER_KEY_INDEX ||
+      target.includes('idempotency_key') ||
+      target.includes('idempotencyKey'))
+  );
+}
 
 /**
  * The order aggregate's behaviour.
@@ -86,117 +103,135 @@ export class OrderService {
     const buyerOrganizationId = getOrganizationId();
     const actor = context.userId ?? context.callerService ?? SERVICE_NAME;
 
-    const order = await this.prisma.transaction(async (tx) => {
-      const locked = await this.repository.lockOffers(
-        tx,
-        dto.lines.map((line) => line.offerId),
-      );
+    let order: OrderView;
+    try {
+      order = await this.prisma.transaction(async (tx) => {
+        const locked = await this.repository.lockOffers(
+          tx,
+          dto.lines.map((line) => line.offerId),
+        );
 
-      const offers = new Map<string, PriceableOffer>(
-        locked.map((row) => [
-          row.id,
-          {
-            id: row.id,
-            organizationId: row.organization_id,
-            productId: row.product_id,
-            unitPriceMinor: row.unit_price_minor,
-            currency: row.currency,
-            availableQuantity: row.available_quantity,
-            minimumQuantity: row.minimum_quantity,
-            version: row.version,
-            status: row.status,
-            leadTimeDays: row.lead_time_days,
+        const offers = new Map<string, PriceableOffer>(
+          locked.map((row) => [
+            row.id,
+            {
+              id: row.id,
+              organizationId: row.organization_id,
+              productId: row.product_id,
+              unitPriceMinor: row.unit_price_minor,
+              currency: row.currency,
+              availableQuantity: row.available_quantity,
+              minimumQuantity: row.minimum_quantity,
+              version: row.version,
+              status: row.status,
+              leadTimeDays: row.lead_time_days,
+            },
+          ]),
+        );
+
+        const priced = priceOrder(dto.lines, offers);
+
+        if (priced.supplierOrganizationId === buyerOrganizationId) {
+          // The database refuses it too, but a CHECK violation reaches the
+          // caller as an internal error; this reaches them as what it is.
+          throw RastaError.businessRule('An organization cannot order from itself');
+        }
+
+        const orderId = newId(ID_PREFIX.order);
+
+        // The supplier's committed delivery date (ADR-052 § 1-a), fixed now
+        // from the slowest lead time among the offers just priced. One instant
+        // for the stored column and the event payload below, so the two can
+        // never disagree about when "now" was.
+        const createdAt = new Date();
+        const promisedDeliveryAt = new Date(createdAt.getTime() + priced.maxLeadTimeDays * DAY_MS);
+
+        // Product names are copied onto the line so a completed order still
+        // reads correctly after the product is renamed. Read across the tenant
+        // boundary because the products belong to the supplier.
+        const productNames = await runUnscoped(
+          'a line snapshots the supplier product name it was bought under',
+          () =>
+            tx.product.findMany({
+              where: { id: { in: priced.lines.map((line) => line.productId) } },
+              select: { id: true, name: true },
+            }),
+        );
+        const nameOf = new Map(productNames.map((row) => [row.id, row.name]));
+
+        await tx.order.create({
+          data: {
+            id: orderId,
+            organizationId: buyerOrganizationId,
+            supplierOrganizationId: priced.supplierOrganizationId,
+            placedBy: actor,
+            status: 'PENDING',
+            totalAmountMinor: priced.totalAmountMinor,
+            currency: priced.currency,
+            idempotencyKey,
+            correlationId: context.correlationId,
+            createdBy: actor,
+            promisedDeliveryAt,
+            lines: {
+              create: priced.lines.map((line) => ({
+                id: newId(ID_PREFIX.orderLine),
+                organizationId: buyerOrganizationId,
+                offerId: line.offerId,
+                productId: line.productId,
+                unitPriceMinor: line.unitPriceMinor,
+                quantity: line.quantity,
+                lineTotalMinor: line.lineTotalMinor,
+                currency: line.currency,
+                offerVersion: line.offerVersion,
+                productName: nameOf.get(line.productId) ?? line.productId,
+              })),
+            },
           },
-        ]),
-      );
+        });
 
-      const priced = priceOrder(dto.lines, offers);
+        await this.repository.consumeAvailability(tx, priced.lines);
 
-      if (priced.supplierOrganizationId === buyerOrganizationId) {
-        // The database refuses it too, but a CHECK violation reaches the
-        // caller as an internal error; this reaches them as what it is.
-        throw RastaError.businessRule('An organization cannot order from itself');
-      }
-
-      const orderId = newId(ID_PREFIX.order);
-
-      // The supplier's committed delivery date (ADR-052 § 1-a), fixed now
-      // from the slowest lead time among the offers just priced. One instant
-      // for the stored column and the event payload below, so the two can
-      // never disagree about when "now" was.
-      const createdAt = new Date();
-      const promisedDeliveryAt = new Date(createdAt.getTime() + priced.maxLeadTimeDays * DAY_MS);
-
-      // Product names are copied onto the line so a completed order still
-      // reads correctly after the product is renamed. Read across the tenant
-      // boundary because the products belong to the supplier.
-      const productNames = await runUnscoped(
-        'a line snapshots the supplier product name it was bought under',
-        () =>
-          tx.product.findMany({
-            where: { id: { in: priced.lines.map((line) => line.productId) } },
-            select: { id: true, name: true },
-          }),
-      );
-      const nameOf = new Map(productNames.map((row) => [row.id, row.name]));
-
-      await tx.order.create({
-        data: {
-          id: orderId,
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_CREATED,
+          aggregateId: orderId,
           organizationId: buyerOrganizationId,
-          supplierOrganizationId: priced.supplierOrganizationId,
-          placedBy: actor,
-          status: 'PENDING',
-          totalAmountMinor: priced.totalAmountMinor,
-          currency: priced.currency,
-          idempotencyKey,
-          correlationId: context.correlationId,
-          createdBy: actor,
-          promisedDeliveryAt,
-          lines: {
-            create: priced.lines.map((line) => ({
-              id: newId(ID_PREFIX.orderLine),
-              organizationId: buyerOrganizationId,
+          payload: {
+            orderId,
+            buyerOrganizationId,
+            supplierOrganizationId: priced.supplierOrganizationId,
+            totalAmountMinor: priced.totalAmountMinor.toString(),
+            currency: priced.currency,
+            lines: priced.lines.map((line) => ({
               offerId: line.offerId,
               productId: line.productId,
-              unitPriceMinor: line.unitPriceMinor,
               quantity: line.quantity,
-              lineTotalMinor: line.lineTotalMinor,
-              currency: line.currency,
+              unitPriceMinor: line.unitPriceMinor.toString(),
+              lineTotalMinor: line.lineTotalMinor.toString(),
               offerVersion: line.offerVersion,
-              productName: nameOf.get(line.productId) ?? line.productId,
             })),
+            createdAt: createdAt.toISOString(),
+            promisedDeliveryAt: promisedDeliveryAt.toISOString(),
           },
-        },
+        });
+
+        return this.load(tx, orderId);
       });
-
-      await this.repository.consumeAvailability(tx, priced.lines);
-
-      await this.events.enqueue(tx, {
-        eventName: MARKETPLACE_EVENTS.ORDER_CREATED,
-        aggregateId: orderId,
-        organizationId: buyerOrganizationId,
-        payload: {
-          orderId,
-          buyerOrganizationId,
-          supplierOrganizationId: priced.supplierOrganizationId,
-          totalAmountMinor: priced.totalAmountMinor.toString(),
-          currency: priced.currency,
-          lines: priced.lines.map((line) => ({
-            offerId: line.offerId,
-            productId: line.productId,
-            quantity: line.quantity,
-            unitPriceMinor: line.unitPriceMinor.toString(),
-            lineTotalMinor: line.lineTotalMinor.toString(),
-            offerVersion: line.offerVersion,
-          })),
-          createdAt: createdAt.toISOString(),
-          promisedDeliveryAt: promisedDeliveryAt.toISOString(),
-        },
-      });
-
-      return this.load(tx, orderId);
-    });
+    } catch (error) {
+      // The key already placed an order in this organization, and its
+      // idempotency record — which would have replayed that order — is gone:
+      // released after the order committed, or purged after it expired. The
+      // index refuses a second order; the caller learns it as a conflict, not
+      // a 500, and without Retry-After, because waiting will not change it.
+      if (isUniqueViolation(error) && isOrderKeyIndex(violatedConstraint(error))) {
+        throw new RastaError(
+          'CONFLICT',
+          'An order has already been placed with this Idempotency-Key',
+          // The index, never the key (S-09).
+          { internalContext: { constraint: ORDER_KEY_INDEX } },
+        );
+      }
+      throw error;
+    }
 
     ordersCreatedTotal.inc({ service: SERVICE_NAME });
     return order;
