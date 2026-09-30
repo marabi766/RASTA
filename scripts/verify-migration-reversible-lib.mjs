@@ -824,6 +824,7 @@ export const EXPECTED = {
       'progress_report',
       'project',
       'project_need',
+      'tender',
     ],
     triggers: [],
     constraints: [
@@ -883,6 +884,17 @@ export const EXPECTED = {
       'approval_organization_id_policy_id_fkey',
       'approval_policy_step_organization_id_policy_id_fkey',
       'progress_report_organization_id_project_id_fkey',
+      // 20260930160000_tender_core (CON-002 PR 2, ADR-065): a tender is bound to
+      // its project's tenant, names who acted, has a real bidding window, is
+      // never published on a default, and a cancellation says why.
+      'tender_organization_id_project_id_fkey',
+      'ck_tender_text_not_blank',
+      'ck_tender_actor_recorded',
+      'ck_tender_version_positive',
+      'ck_tender_timestamps_ordered',
+      'ck_tender_window_ordered',
+      'ck_tender_published_complete',
+      'ck_tender_cancellation_has_reason',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',
