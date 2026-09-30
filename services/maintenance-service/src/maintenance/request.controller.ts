@@ -1,8 +1,9 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RequestService } from './request.service';
 import { RepairOrderService } from './repair-order.service';
+import { IdempotencyStore, optionalIdempotencyKey } from './idempotency';
 import {
   approveRequestSchema,
   assignWorkshopSchema,
@@ -25,12 +26,16 @@ import {
  * cost, and it is the only place in this service that produces the event
  * economic-service will one day settle behind (ADR-028).
  */
+/** The route template an Idempotency-Key is stored under (#157). */
+export const CREATE_REQUEST_ENDPOINT = 'POST /v1/maintenance-requests';
+
 @ApiTags('maintenance-requests')
 @Controller({ path: 'maintenance-requests', version: '1' })
 export class RequestController {
   constructor(
     private readonly requests: RequestService,
     private readonly repairOrders: RepairOrderService,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   // ---- Reads --------------------------------------------------------------
@@ -72,10 +77,29 @@ export class RequestController {
       'refused with 422 — the duplicate-report control the product document requires — and the ' +
       'rule is enforced by a partial unique index, so a concurrent duplicate is refused the ' +
       'same way as a sequential one. Set `outOfServiceAt` when the machine stopped being usable ' +
-      'before anyone could look at it; downtime is measured from there, not from the repair.',
+      'before anyone could look at it; downtime is measured from there, not from the repair. ' +
+      'An optional `Idempotency-Key` makes a retry safe (#157): the same key with the same ' +
+      'body from the same user answers the original 201 without raising the work again — even ' +
+      'if that request has since been closed — for 24 hours by default; the same key with a ' +
+      'different body answers 409 IDEMPOTENCY_KEY_REUSED.',
   })
-  create(@Body(zodPipe(createRequestSchema)) dto: CreateRequestDto) {
-    return this.requests.create(dto);
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description:
+      'Optional, 8 to 255 characters. Scoped to the organization: the same key in two ' +
+      'organizations is two requests.',
+  })
+  async create(
+    @Body(zodPipe(createRequestSchema)) dto: CreateRequestDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const key = optionalIdempotencyKey(idempotencyKey);
+    if (key === undefined) return this.requests.create(dto);
+    const { result } = await this.idempotency.execute(CREATE_REQUEST_ENDPOINT, key, dto, 201, () =>
+      this.requests.create(dto),
+    );
+    return result;
   }
 
   @Post(':id/assign')

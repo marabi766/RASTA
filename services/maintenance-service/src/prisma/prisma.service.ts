@@ -28,6 +28,7 @@ export const TENANT_SCOPED_MODELS = [
   'PartUsage',
   'LaborEntry',
   'MaintenanceCost',
+  'IdempotencyKey',
 ] as const;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;

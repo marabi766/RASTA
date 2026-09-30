@@ -637,6 +637,40 @@ model AssetTransferRelease {
 /// the counter backwards. Re-anchoring the affected schedule
 /// (`lastServicedHourMeter`) is the supported repair, rather than rewriting a
 /// history that other services also hold.
+/// Idempotency-Key on `POST /v1/maintenance-requests` (#157, docs/06 § 6.8).
+/// One row per tenant, endpoint and key: claimed before the work runs,
+/// completed with the original response, deleted if the work fails.
+model IdempotencyKey {
+  organizationId String @map("organization_id")
+  endpoint       String
+  key            String
+
+  /// SHA-256 over the canonical request and its caller. The same key with a
+  /// different body — or from another user — is `409 IDEMPOTENCY_KEY_REUSED`.
+  requestHash String @map("request_hash")
+
+  /// Minted at claim; `complete` and `release` match on it, so a claim that
+  /// expired and was re-taken can neither finish nor free its successor's row.
+  claimToken String @map("claim_token")
+
+  state          IdempotencyState
+  responseStatus Int?             @map("response_status")
+  responseBody   Json?            @map("response_body")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// MAINTENANCE_IDEMPOTENCY_TTL_HOURS after the claim (24 by default).
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt], map: "idempotency_key_expires_at_idx")
+  @@map("idempotency_key")
+}
+
+enum IdempotencyState {
+  IN_PROGRESS
+  COMPLETED
+}
+
 model AssetUsageMeter {
   /// The asset id issued by asset-service.
   assetId String @id @map("asset_id")
