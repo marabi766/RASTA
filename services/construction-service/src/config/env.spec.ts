@@ -208,3 +208,76 @@ describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
     expect(() => load({ CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: '-1' })).toThrow();
   });
 });
+
+describe('the tender key-encryption keys (ADR-066 § 2)', () => {
+  const KEK = Buffer.alloc(32, 9).toString('base64');
+
+  it('are unset by default: no tender can be published, and there is no default key', () => {
+    const env = load();
+    expect(env.CONSTRUCTION_TENDER_KEKS).toBeUndefined();
+    expect(env.CONSTRUCTION_TENDER_KEK_CURRENT).toBeUndefined();
+  });
+
+  it('accept well-formed id:base64 pairs', () => {
+    const env = load({
+      CONSTRUCTION_TENDER_KEKS: `v1:${KEK}`,
+      CONSTRUCTION_TENDER_KEK_CURRENT: 'v1',
+    });
+    expect(env.CONSTRUCTION_TENDER_KEKS).toBe(`v1:${KEK}`);
+  });
+
+  it('are judged together with the current id: a current that is not among the keys stops the boot', () => {
+    // Codex review of #163: this used to pass startup and fail on the first publication.
+    const secret = KEK;
+    let message = '';
+    try {
+      load({ CONSTRUCTION_TENDER_KEKS: `v1:${secret}`, CONSTRUCTION_TENDER_KEK_CURRENT: 'v2' });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/CONSTRUCTION_TENDER_KEK_CURRENT/);
+    expect(message).not.toContain(secret);
+
+    // Keys with no current, and a current with no keys, are the same mistake.
+    expect(() => load({ CONSTRUCTION_TENDER_KEKS: `v1:${KEK}` })).toThrow(
+      /CONSTRUCTION_TENDER_KEK_CURRENT/,
+    );
+    expect(() => load({ CONSTRUCTION_TENDER_KEK_CURRENT: 'v1' })).toThrow(
+      /CONSTRUCTION_TENDER_KEK_CURRENT/,
+    );
+    // And the good pairs still load, older ids kept for unwrapping.
+    const other = Buffer.alloc(32, 4).toString('base64');
+    expect(
+      load({
+        CONSTRUCTION_TENDER_KEKS: `v1:${KEK},v2:${other}`,
+        CONSTRUCTION_TENDER_KEK_CURRENT: 'v2',
+      }).CONSTRUCTION_TENDER_KEK_CURRENT,
+    ).toBe('v2');
+  });
+
+  it('report a malformed entry once, at its own field, not again as a bad pair', () => {
+    let message = '';
+    try {
+      load({ CONSTRUCTION_TENDER_KEKS: 'v1:short', CONSTRUCTION_TENDER_KEK_CURRENT: 'v1' });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/CONSTRUCTION_TENDER_KEKS/);
+    expect(message).not.toMatch(/CONSTRUCTION_TENDER_KEK_CURRENT/);
+  });
+
+  it('stop the service at startup when malformed, without repeating the value', () => {
+    const secret = Buffer.alloc(20, 3).toString('base64');
+    let message = '';
+    try {
+      load({ CONSTRUCTION_TENDER_KEKS: `v1:${secret}` });
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toMatch(/CONSTRUCTION_TENDER_KEKS/);
+    expect(message).not.toContain(secret);
+    expect(() => load({ CONSTRUCTION_TENDER_KEK_CURRENT: 'V 1' })).toThrow(
+      /CONSTRUCTION_TENDER_KEK_CURRENT/,
+    );
+  });
+});
