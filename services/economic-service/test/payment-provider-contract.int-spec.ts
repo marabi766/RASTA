@@ -11,6 +11,7 @@ import type {
   PaymentProvider,
   ProviderPaymentStatus,
   RefundResult,
+  RefundStatusResult,
 } from '../src/payment/provider';
 
 /**
@@ -79,6 +80,10 @@ class SilentlyRefusingProvider implements PaymentProvider {
   async getStatus(): Promise<ProviderPaymentStatus> {
     return 'UNKNOWN';
   }
+
+  async getRefundStatus(): Promise<RefundStatusResult> {
+    return { refund: 'UNKNOWN', authoritative: false, simulated: true };
+  }
 }
 
 /** A provider that moves real money, so the disclosure must say so. */
@@ -101,6 +106,9 @@ class LiveProvider implements PaymentProvider {
   }
   async getStatus(): Promise<ProviderPaymentStatus> {
     return 'UNKNOWN';
+  }
+  async getRefundStatus(): Promise<RefundStatusResult> {
+    return { refund: 'UNKNOWN', authoritative: false, simulated: false };
   }
 }
 

@@ -52,6 +52,9 @@ import { PaymentService } from './payment/payment.service';
 import { PaymentReconciliationRepository } from './payment/payment-reconciliation.repository';
 import { PaymentController } from './payment/payment.controller';
 import { MockPaymentProvider } from './payment/mock.provider';
+import { TimedPaymentProvider } from './payment/provider-timeout';
+import { PaymentReconciler } from './payment/payment-reconciler';
+import { PaymentReconciliationSweeper } from './payment/payment-reconciliation.sweeper';
 import { SettlementService } from './settlement/settlement.service';
 import { SettlementController } from './settlement/settlement.controller';
 import { IdempotencyStore } from './shared/idempotency';
@@ -89,8 +92,8 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
 const MAINTENANCE_TOPICS = ['rasta.maintenance.v1'];
 const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 
-// A note on the three providers nothing below injects — the two consumers and
-// `LedgerBalanceAudit`. Nest instantiates every provider a module declares, so
+// A note on the providers nothing below injects — the two consumers,
+// `LedgerBalanceAudit` and `PaymentReconciliationSweeper`. Nest instantiates every provider a module declares, so
 // their `onModuleInit` runs and they subscribe and start their timer without
 // anyone holding a reference. Injecting them into `AppModule` purely to keep
 // them alive would be a lie about the dependency.
@@ -154,6 +157,8 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     RewardService,
     PaymentService,
     PaymentReconciliationRepository,
+    PaymentReconciler,
+    PaymentReconciliationSweeper,
     SettlementService,
     LedgerBalanceAudit,
 
@@ -170,8 +175,13 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     {
       provide: PAYMENT_PROVIDER,
       inject: [ENV],
+      // Every call under the deadline (ADR-064 step B2): a call past it is an
+      // unknown outcome for the reconciler, never a hung request.
       useFactory: (env: EconomicEnv) =>
-        new MockPaymentProvider(env.ECONOMIC_MOCK_PAYMENT_LATENCY_MS),
+        new TimedPaymentProvider(
+          new MockPaymentProvider(env.ECONOMIC_MOCK_PAYMENT_LATENCY_MS),
+          env.ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS,
+        ),
     },
 
     /**

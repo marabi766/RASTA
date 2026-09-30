@@ -1,8 +1,8 @@
 # Durable payment reconciler, step B — STEP 0 plan
 
 > Branch `fix/economic-payment-reconciler-b`, cut from `fix/economic-refund-safety` @ `3a0a5d0` (#143, B0, queued). I will
-> merge `main` in once #143 lands and never rebase. ADR-064; D-035; Q-81; Q-82. **B1 (the task table) is implemented on this
-> branch; B2 and B3 are not.** Only `MockPaymentProvider` exists; no bank connection is claimed (ADR-024).
+> merge `main` in once #143 lands and never rebase. ADR-064; D-035; Q-81; Q-82. **B1 (the task table) and B2 (the reconciler) are
+> implemented; B3 is not.** Only `MockPaymentProvider` exists; no bank connection is claimed (ADR-024).
 
 ## 0. Rulings (PM, on this plan)
 
@@ -37,6 +37,27 @@ GO, with these answers. Where they differ from the plan below, they win.
   history.
 - The foreign key is composite, `(organization_id, payment_intent_id)`, as in #148.
 - Backfilled rows are `PRT_<intent id>`.
+
+**What B2 changed from § 2.3–2.6** (on `fix/economic-payment-reconciler-b2`):
+
+- **Heal pass (Codex on #161, HIGH 1).** Each sweep, bounded by the batch size, heals the queue both ways before it claims
+  anything:
+  - it opens a task for a marker that has none (due after the grace if the outcome is unknown, at once if it is known);
+  - it closes an open task whose intent no longer carries its marker, as `NOTHING_TO_RECONCILE`, with no money action;
+  - it leaves the task alone when the refund hold is still active, and the claim path escalates it as
+    `HOLD_WITHOUT_MARKER`.
+- **New partial index.** Migration `20260930210000` adds `ix_payment_intent_unfinished_refund`, so the heal query reads
+  the unfinished intents only.
+- **Resolution events.** `PAYMENT_RECONCILIATION_RESOLVED` is emitted for every reconciler finish, `NOTHING_TO_RECONCILE`
+  included. The heal pass's closes emit none: the intent's own resolution already did.
+- **No jitter.** Backoff is `min(base · 2^attempts, max)`, without the jitter ADR-064 § 4 mentioned. The lease and `SKIP
+LOCKED` already keep sweepers apart.
+- **Mock limitation.** The mock's authoritative `NOT_FOUND` assumes a single replica.
+- **New configuration defaults:**
+  - interval 60 s, batch 20, lease 120 s;
+  - backoff 60 s up to 3600 s;
+  - escalation after 12 attempts or 72 h;
+  - provider timeout 10 000 ms.
 
 `file:line` references are to `services/economic-service/src/payment/payment.service.ts` at `3a0a5d0` unless another
 file is named.

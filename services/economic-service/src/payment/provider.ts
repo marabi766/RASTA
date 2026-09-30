@@ -88,7 +88,46 @@ export interface RefundResult {
 export type ProviderPaymentStatus =
   'UNKNOWN' | 'CREATED' | 'AUTHORIZED' | 'CAPTURED' | 'FAILED' | 'REFUNDED';
 
-/** The interface ADR-024 specifies, unchanged. */
+/**
+ * Which refund attempt the reconciler is asking about (ADR-064 step B2).
+ *
+ * An attempt is a (reference, idempotency key) pair: `<key>:refund` for an
+ * operator refund, `<key>:uncredited` for the refund of a capture the ledger
+ * could not credit. Two keys of one reference are two attempts.
+ */
+export interface RefundStatusQuery {
+  paymentIntentId: string;
+  providerReference: string;
+  idempotencyKey: string;
+  /**
+   * When this platform asked for the refund, where it knows: the refund
+   * hold's `placed_at`, or the intent's `authorized_at` for an uncredited
+   * capture. A real adapter ignores it; the mock uses it to decide whether it
+   * can vouch for having never seen the attempt.
+   */
+  requestedAt?: Date;
+}
+
+/**
+ * The provider's own record of one refund attempt.
+ *
+ * `NOT_FOUND` means the provider never received the attempt. It is acted on
+ * **only** when `authoritative` is true — the provider vouches for it — and is
+ * otherwise no better than `UNKNOWN`. Never assume.
+ */
+export interface RefundStatusResult {
+  refund: 'REFUNDED' | 'DECLINED' | 'NOT_FOUND' | 'UNKNOWN';
+  authoritative: boolean;
+  /** For `DECLINED`: a code, never a message (S-09). */
+  failureCode?: string;
+  simulated: boolean;
+}
+
+/**
+ * The interface ADR-024 specifies, with one addition: `getRefundStatus`
+ * (ADR-064 § 3, scoped to refunds), which the reconciler asks before it
+ * resolves an unknown refund.
+ */
 export interface PaymentProvider {
   readonly name: string;
   /**
@@ -104,4 +143,5 @@ export interface PaymentProvider {
   capture(request: CaptureRequest): Promise<CaptureResult>;
   refund(request: RefundRequest): Promise<RefundResult>;
   getStatus(providerReference: string): Promise<ProviderPaymentStatus>;
+  getRefundStatus(query: RefundStatusQuery): Promise<RefundStatusResult>;
 }
