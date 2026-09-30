@@ -546,7 +546,7 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 **پیاده‌شده در CON-002 PR 4b:** `TENDER_PUBLISHED` (رویداد کاتالوگ؛ `aggregateType = Tender`، کلید `tenderId`؛ `visibility`،
 `bidOpeningAt`، `bidClosingAt`، `criteriaCount`، `keyId` — شناسهٔ کدر جفت‌کلید، `publishedBy`، `publishedAt`؛ **نه** عنوان، متن،
 معیار یا کلید عمومی) و **`TENDER_BIDDER_INVITED`** (`invitedOrganizationId`، `invitedBy`، `invitedAt`) — دومی برای پوشش S-06 از دعوت
-افزوده شد و **منتظر پذیرش مدیر پروژه است**.
+افزوده شد و **مدیر پروژه پذیرفت (2026-09-30؛ فقط شناسه‌ها)**.
 
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
