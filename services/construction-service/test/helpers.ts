@@ -277,12 +277,39 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   });
 }
 
-/** Every outbox row one organization produced, oldest first. */
+/**
+ * Every outbox row one organization produced, by `createdAt`.
+ *
+ * `createdAt` is the instant the producing transaction *started* (`now()`,
+ * `src/shared/clock.ts`), taken before it waits for the project lock. For
+ * commands that ran one after another that is commit order; for commands that
+ * ran concurrently it is not. Use `outboxStream` when the order of two
+ * concurrent commands is what is being asserted.
+ */
 export async function outboxFor(prisma: PrismaService, organizationId: string) {
   return runUnscoped('the outbox carries its own tenant column', () =>
     prisma.client.outboxMessage.findMany({
       where: { organizationId },
       orderBy: [{ createdAt: 'asc' }, { streamSeq: 'asc' }],
+    }),
+  );
+}
+
+/**
+ * One project's event stream in stream order — the order the events were
+ * allocated, under the project's lock, and so the order they committed in
+ * (ADR-051 B3; `EventPublisher`). This is the order a consumer of the topic
+ * relies on; wall-clock `createdAt` is not.
+ */
+export async function outboxStream(
+  prisma: PrismaService,
+  organizationId: string,
+  projectId: string,
+) {
+  return runUnscoped('the outbox carries its own tenant column', () =>
+    prisma.client.outboxMessage.findMany({
+      where: { organizationId, partitionKey: projectId },
+      orderBy: { streamSeq: 'asc' },
     }),
   );
 }

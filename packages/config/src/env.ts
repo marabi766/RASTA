@@ -167,6 +167,16 @@ export function queryBooleanDefault(schema: unknown): boolean | undefined {
   return typeof marker === 'boolean' ? marker : undefined;
 }
 
+/**
+ * How long shutdown waits for the application to close (in-flight requests,
+ * consumers, relays, sweepers) before giving up and exiting non-zero.
+ *
+ * 25 s sits under the 30 s Kubernetes grace period, leaving room for the
+ * telemetry flush that follows, so the process chooses how it ends instead of
+ * being SIGKILLed mid-close.
+ */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 25_000;
+
 /** Every Rasta service has these, without exception. */
 export const baseEnvSchema = z.object({
   NODE_ENV: z.enum(NODE_ENVS).default('development'),
@@ -181,6 +191,15 @@ export const baseEnvSchema = z.object({
   OTEL_EXPORTER_OTLP_ENDPOINT: httpUrlSchema.optional(),
   OTEL_TRACES_ENABLED: booleanEnv(true),
   OTEL_SERVICE_NAMESPACE: z.string().default('rasta'),
+
+  // Bounded, and bounded *below* the orchestrator's own grace period: see
+  // `installGracefulShutdown` in @rasta/nest-common.
+  SHUTDOWN_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .max(120_000)
+    .default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
