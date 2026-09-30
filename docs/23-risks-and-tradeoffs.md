@@ -859,7 +859,7 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   برای رویداد مالی. تصمیم و مالک با مدیر پروژه.
 - **به‌روز 2026-09-29 — نیمهٔ (۲) ساخته شد (`feat/dlq-replay-tool`):** `scripts/replay-dlq.mjs` فقط به نام `ops-replay`،
   Dry-run پیش‌فرض، انتخاب صریح و محدود (حداکثر ۱۰۰)، `--execute` فقط با `--expect-count` برابر و همه-یا-هیچ؛ مقصد فقط
-  `<Topic مبدأ>.retry`؛ فقط `EVENT_HEADERS` به‌همراه `x-replay-id`؛ کلید = `streamKey` (بی Sequence رد، تا D-040)؛
+  `<Topic مبدأ>.retry` (از `.retry` دقیقاً یک پسوند حذف)؛ فقط `EVENT_HEADERS` به‌همراه `x-replay-id` (`x-producer` از پاکت)؛ کلید = `streamKey` یا کلید نگه‌داشتهٔ DLQ (بی هر دو رد)؛
   `NEVER_AUTO_REPLAY` و دلیل‌های بی‌علاج رد؛ کهنگی با خواندن Topic مبدأ (READ تازهٔ `ops-replay` فقط در گروه‌های
   `ops-replay.`) و رد مگر `--allow-stale <eventId>`. `scripts/replay-dlq.broker.test.mjs` در CI همین را روی Broker احرازشده
   با یک Consumer آزمونی روی `.retry` نشان می‌دهد. نیمهٔ (۱) با #145 رسید (`EventConsumer` `.retry` را می‌خواند؛ DLQ کلید را نگه می‌دارد، D-040) — «وضعیت» پایین.

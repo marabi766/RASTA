@@ -2825,9 +2825,9 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   استقرار فقط `kafka-acl.mjs apply --profile deployment` از Secret Store. ADR-061 § ۳ اصلاحیهٔ 2026-09-28؛ چرخش:
   [`docs/runbooks/kafka-credential-rotation.md`](docs/runbooks/kafka-credential-rotation.md) (همه درجا با شرط سکون و
   بی از دست رفتن داده — آزموده روی Broker توسعه؛ پاک کردن داده راه چرخش نیست). **ابزار بازپخش DLQ** (2026-09-29): `scripts/replay-dlq.mjs`، به نام `ops-replay`، Dry-run پیش‌فرض، مقصد فقط
-  `.retry`، کلید = `streamKey`، رد `NEVER_AUTO_REPLAY` و کهنه (مگر `--allow-stale`)، مهر `x-replay-id`؛ `ops-replay` اکنون
-  Topicهای مشترک را برای کهنگی می‌خواند (فقط گروه‌های `ops-replay.`). **شکاف باز:** هیچ Consumerی `.retry` را Subscribe
-  نمی‌کند (D-039، کار `packages/nest-common`) و DLQ کلید را نگه نمی‌دارد (D-040)؛ رکورد ممیزی `rasta.ops.replay.v1` PR بعدی است.
+  `.retry`، کلید = `streamKey` یا کلید نگه‌داشتهٔ DLQ، رد `NEVER_AUTO_REPLAY` و کهنه (مگر `--allow-stale`)، مهر `x-replay-id`؛ `ops-replay` اکنون
+  Topicهای مشترک را برای کهنگی می‌خواند (فقط گروه‌های `ops-replay.`). `EventConsumer` از #145 `.retry` را می‌خواند (D-039) و DLQ کلید را نگه
+  می‌دارد (D-040). **شکاف باز:** رکورد ممیزی `rasta.ops.replay.v1` (یک `REPLAY_EXECUTED` برای هر رویداد) PR بعدی است.
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
 

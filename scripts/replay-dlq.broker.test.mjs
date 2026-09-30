@@ -1,18 +1,26 @@
 /**
- * The DLQ replay tool against the live, authenticated broker (RUN-006;
- * docs/runbooks/replay-dlq.md). It needs the broker the bootstrap started
- * and these principals' passwords — fleet-service (publishes originals),
- * maintenance-service (dead-letters them, as its EventConsumer would),
- * itest-observer (reads what lands) and ops-replay (the tool) — and refuses to
- * run rather than skip without them.
+ * The DLQ replay tool against the live, authenticated broker, end to end with
+ * the platform's own consumer (RUN-006, D-039/D-040 via #145;
+ * docs/runbooks/replay-dlq.md).
+ *
+ * The consumer is a real `EventConsumer` (`@rasta/nest-common`), as
+ * maintenance-service, subscribed to `rasta.fleet.v1` — and therefore to its
+ * `.retry` twin (#145). Its handler rejects the events this run names, so the
+ * dead letters are the real ones `EventConsumer.deadLetter` writes: the
+ * original body, the platform headers with `x-producer` overwritten by the
+ * consumer, the `x-dlq-*` headers, and the kept key. The one exception is a
+ * keyless dead letter, written by hand to stand for one dead-lettered before
+ * #145 kept keys.
  *
  * The tool runs as a child process whose environment holds **only**
- * ops-replay's credential: whatever it manages, it manages as ops-replay.
+ * ops-replay's credential. A replay is proven twice: consumed by the real
+ * consumer from `rasta.fleet.v1.retry` (the producer check passing there), and
+ * read off the wire by the observer (key, body, headers).
  *
- * Until D-039 lands no service consumes `.retry`, so the harness reads it as
- * the development observer. Like the ACL test, it writes marker records on real
- * topics (the original, the dead letter, `.retry`): run it where nothing else
- * consumes them — CI runs it last.
+ * It needs fleet-service, maintenance-service, itest-observer and ops-replay's
+ * passwords and refuses to run rather than skip without them. It writes marker
+ * records on real topics: run it where no other maintenance-service consumer
+ * is reading rasta.fleet.v1 — CI runs it last.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,8 +35,11 @@ import { connectionFor, passwordVariable } from './kafka-acl-lib.mjs';
 
 const { Kafka, logLevel } = kafkajs;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const contracts = createRequire(import.meta.url)(resolve(ROOT, 'packages/contracts/dist/index.js'));
+const require = createRequire(import.meta.url);
+const contracts = require(resolve(ROOT, 'packages/contracts/dist/index.js'));
+const nestCommon = require(resolve(ROOT, 'packages/nest-common/dist/index.js'));
 const { EVENT_HEADERS, DLQ_HEADERS, DLQ_REASONS, REPLAY_HEADERS } = contracts;
+const { EventConsumer, UnprocessableEventError, kafkaConnectionFor } = nestCommon;
 
 const ORIGINAL = 'rasta.fleet.v1';
 const RETRY = 'rasta.fleet.v1.retry';
@@ -40,7 +51,8 @@ const CA =
   configuredCa && isAbsolute(configuredCa)
     ? configuredCa
     : resolve(ROOT, 'infrastructure/docker/kafka/.tls/ca.pem');
-const env = { ...process.env, KAFKA_SSL_CA_FILE: CA };
+const env = { ...process.env, KAFKA_SSL_CA_FILE: CA, KAFKA_SSL: 'true' };
+const read = (path) => readFileSync(path, 'utf8');
 const PRINCIPALS = ['fleet-service', 'maintenance-service', 'itest-observer', 'ops-replay'];
 const missing = PRINCIPALS.map(passwordVariable).filter((variable) => !process.env[variable]);
 if (missing.length > 0) {
@@ -51,10 +63,11 @@ if (missing.length > 0) {
 }
 
 const run = randomUUID().slice(0, 8);
+const TENANT = `ORG_REPLAY_${run}`;
 const clients = [];
 const kafka = (principal) =>
   new Kafka({
-    ...connectionFor(principal, env, (path) => readFileSync(path, 'utf8')),
+    ...connectionFor(principal, env, read),
     clientId: `replay-itest-${principal}-${run}`,
     logLevel: logLevel.NOTHING,
     retry: { retries: 3 },
@@ -64,6 +77,16 @@ async function connected(entity) {
   clients.push(entity);
   await entity.connect();
   return entity;
+}
+
+async function eventually(what, probe, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await probe();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((settle) => setTimeout(settle, 250));
+  }
 }
 
 /** Everything on `topic` from `since` (partition → next offset) to the current end, as `principal`. */
@@ -92,8 +115,9 @@ async function readSince(principal, topic, since) {
           if (!range) return;
           for (const message of batch.messages) {
             const offset = BigInt(message.offset);
-            if (offset >= range.from && offset < range.to)
+            if (offset >= range.from && offset < range.to) {
               records.push({ partition: batch.partition, ...message });
+            }
           }
           if (BigInt(batch.lastOffset()) + 1n >= range.to) pending.delete(batch.partition);
           if (pending.size === 0) {
@@ -113,8 +137,8 @@ async function readSince(principal, topic, since) {
   return records;
 }
 
-async function endOffsets(principal, topic) {
-  const admin = await connected(kafka(principal).admin());
+async function endOffsets(topic) {
+  const admin = await connected(kafka('itest-observer').admin());
   const offsets = await admin.fetchTopicOffsets(topic);
   return new Map(offsets.map(({ partition, high }) => [partition, BigInt(high)]));
 }
@@ -134,11 +158,7 @@ function replay(
   const result = spawnSync(
     'node',
     [resolve(ROOT, 'scripts/replay-dlq.mjs'), '--dlq', DLQ, ...args],
-    {
-      env: childEnv,
-      encoding: 'utf8',
-      timeout: 180_000,
-    },
+    { env: childEnv, encoding: 'utf8', timeout: 180_000 },
   );
   const lines = result.stdout
     .split('\n')
@@ -161,8 +181,8 @@ function envelope(eventId, streamKey, overrides = {}) {
     producer: 'fleet-service',
     producerVersion: '1.0.0',
     aggregateType: 'UsageRecord',
-    aggregateId: `USG_${run}`,
-    tenantId: `ORG_REPLAY_${run}`,
+    aggregateId: `USG_${eventId}`,
+    tenantId: TENANT,
     correlationId: `COR_${run}`,
     ...(streamKey ? { streamKey, streamSeq: 1 } : {}),
     payload: { marker: `replay-itest-${run}` },
@@ -176,130 +196,244 @@ const ids = {
   newer: `EVT_RPL_NEWER_${run}`,
   unsequenced: `EVT_RPL_UNSEQ_${run}`,
   financial: `EVT_RPL_MONEY_${run}`,
-  forged: `EVT_RPL_FORGED_${run}`,
+  unconfirmed: `EVT_RPL_UNCONF_${run}`,
+  again: `EVT_RPL_AGAIN_${run}`,
+  keyless: `EVT_RPL_KEYLESS_${run}`,
 };
-const keys = { replayable: `AST_OK_${run}`, stale: `AST_STALE_${run}` };
-/** eventId → the original bytes, for the byte-for-byte check. */
+const keys = {
+  replayable: `AST_OK_${run}`,
+  stale: `AST_STALE_${run}`,
+  again: `AST_AGAIN_${run}`,
+};
+/** The events the consumer rejects on their first delivery from the original topic, and why. */
+const REJECT_ON_ORIGINAL = new Map([
+  [ids.replayable, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
+  [ids.stale, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
+  [ids.unsequenced, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
+  [ids.financial, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
+  [ids.unconfirmed, DLQ_REASONS.SOURCE_UNCONFIRMED],
+  [ids.again, DLQ_REASONS.BUSINESS_RULE_VIOLATION],
+]);
+/** Rejected once more when replayed, so it is dead-lettered from `.retry`. */
+const REJECT_ONCE_ON_RETRY = new Set([ids.again]);
+
+/** What the real consumer was delivered, from which topic. */
+const deliveries = [];
 const bodies = new Map();
-let dlqRange;
+let consumer;
 let originalEnds;
 
+const deliveredFrom = (eventId, topic) =>
+  deliveries.some((d) => d.eventId === eventId && d.topic === topic);
+
+/** Our dead letters currently on the DLQ, by event id and origin. */
+async function deadLetters(since) {
+  const records = await readSince('itest-observer', DLQ, since);
+  return records
+    .map((record) => ({
+      eventId:
+        record.headers?.[EVENT_HEADERS.eventId]?.toString() ??
+        JSON.parse(record.value?.toString() ?? '{}').eventId,
+      originalTopic: record.headers?.[DLQ_HEADERS.originalTopic]?.toString(),
+      partition: record.partition,
+      offset: record.offset,
+      key: record.key?.toString() ?? null,
+      producer: record.headers?.[EVENT_HEADERS.producer]?.toString(),
+    }))
+    .filter((d) => Object.values(ids).includes(d.eventId));
+}
+let dlqStart;
+
 before(async () => {
+  dlqStart = await endOffsets(DLQ);
+
+  consumer = new EventConsumer(
+    {
+      ...kafkaConnectionFor(
+        'maintenance-service',
+        `maintenance-service-replay-itest-${run}`,
+        env,
+        read,
+      ),
+      groupId: `maintenance-service.replay-itest-${run}`,
+      topics: [ORIGINAL],
+      deadLetterTopic: DLQ,
+      fromBeginning: false,
+      retryBackoffMs: 50,
+    },
+    async (event, delivery) => {
+      if (event.tenantId !== TENANT) return 'SKIPPED';
+      deliveries.push({ eventId: event.eventId, topic: delivery.topic });
+      const reason = REJECT_ON_ORIGINAL.get(event.eventId);
+      if (delivery.topic === ORIGINAL && reason) {
+        throw new UnprocessableEventError(reason, 'replay-itest: rejected by the harness');
+      }
+      if (delivery.topic === RETRY && REJECT_ONCE_ON_RETRY.delete(event.eventId)) {
+        throw new UnprocessableEventError(
+          DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+          'replay-itest: rejected again on .retry',
+        );
+      }
+      return undefined;
+    },
+    { log: () => undefined, warn: () => undefined, error: () => undefined },
+  );
+  await consumer.start();
+
   const fleet = await connected(
     kafka('fleet-service').producer({ idempotent: true, maxInFlightRequests: 1 }),
   );
-  const maintenance = await connected(
-    kafka('maintenance-service').producer({ idempotent: true, maxInFlightRequests: 1 }),
-  );
+  const publish = async (original) => {
+    const value = JSON.stringify(original);
+    bodies.set(original.eventId, value);
+    // As the outbox relay publishes (nest-common outbox `buildHeaders`).
+    const headers = {
+      [EVENT_HEADERS.eventId]: original.eventId,
+      [EVENT_HEADERS.eventName]: original.eventName,
+      [EVENT_HEADERS.eventVersion]: String(original.eventVersion),
+      [EVENT_HEADERS.correlationId]: original.correlationId,
+      [EVENT_HEADERS.producer]: original.producer,
+      [EVENT_HEADERS.tenantId]: original.tenantId,
+    };
+    if (original.streamSeq !== undefined) {
+      headers[EVENT_HEADERS.streamSeq] = String(original.streamSeq);
+    }
+    await fleet.send({
+      topic: ORIGINAL,
+      acks: -1,
+      messages: [{ key: original.streamKey ?? original.aggregateId, value, headers }],
+    });
+  };
 
-  // The originals, as fleet-service publishes them: keyed by the stream key.
-  const originals = [
+  // The consumer has joined once a warm-up event reaches it.
+  const warmUp = `EVT_RPL_WARM_${run}`;
+  await eventually('the consumer to join', async () => {
+    await publish(envelope(warmUp, `AST_WARM_${run}`));
+    return deliveredFrom(warmUp, ORIGINAL);
+  });
+
+  for (const original of [
     envelope(ids.replayable, keys.replayable),
     envelope(ids.stale, keys.stale),
     envelope(ids.unsequenced, null),
     envelope(ids.financial, `AST_MONEY_${run}`, { eventName: 'FUNDS_HELD' }),
-    envelope(ids.forged, `AST_FORGED_${run}`),
-  ];
-  const positions = new Map();
-  for (const original of originals) {
-    const value = JSON.stringify(original);
-    bodies.set(original.eventId, value);
-    const [meta] = await fleet.send({
-      topic: ORIGINAL,
-      acks: -1,
-      messages: [{ key: original.streamKey ?? original.aggregateId, value }],
-    });
-    positions.set(original.eventId, { partition: meta.partition, offset: meta.baseOffset });
+    envelope(ids.unconfirmed, `AST_UNCONF_${run}`),
+    envelope(ids.again, keys.again),
+  ]) {
+    await publish(original);
   }
   // A newer event on the stale one's stream, after it.
-  await fleet.send({
-    topic: ORIGINAL,
-    acks: -1,
-    messages: [{ key: keys.stale, value: JSON.stringify(envelope(ids.newer, keys.stale)) }],
-  });
-  originalEnds = await endOffsets('itest-observer', ORIGINAL);
+  await publish(envelope(ids.newer, keys.stale));
+  originalEnds = await endOffsets(ORIGINAL);
 
-  // The dead letters, as maintenance-service's EventConsumer writes them: the
-  // original body, its platform headers and x-dlq-*, and no key (D-040). One
-  // send, so they sit on consecutive offsets.
-  const reasonOf = (eventId) =>
-    eventId === ids.forged ? DLQ_REASONS.PRODUCER_NOT_ALLOWED : DLQ_REASONS.MAX_RETRIES_EXCEEDED;
-  const [dead] = await maintenance.send({
+  let seen = [];
+  await eventually('the six real dead letters', async () => {
+    seen = await deadLetters(dlqStart);
+    return REJECT_ON_ORIGINAL.size === seen.length;
+  }).catch((error) => {
+    throw new Error(
+      `${error.message}; dead letters seen: ${JSON.stringify(seen.map((d) => d.eventId))}; ` +
+        `deliveries: ${JSON.stringify(deliveries)}`,
+    );
+  });
+
+  // One dead letter from before #145 kept keys: written by hand, keyless,
+  // as maintenance-service's consumer wrote them then.
+  const unsequencedOld = envelope(ids.keyless, null);
+  const maintenance = await connected(
+    kafka('maintenance-service').producer({ idempotent: true, maxInFlightRequests: 1 }),
+  );
+  await maintenance.send({
     topic: DLQ,
     acks: -1,
-    messages: originals.map((original) => ({
-      value: bodies.get(original.eventId),
-      headers: {
-        [EVENT_HEADERS.eventId]: original.eventId,
-        [EVENT_HEADERS.eventName]: original.eventName,
-        [EVENT_HEADERS.eventVersion]: String(original.eventVersion),
-        [EVENT_HEADERS.correlationId]: original.correlationId,
-        [EVENT_HEADERS.tenantId]: original.tenantId,
-        [EVENT_HEADERS.producer]: original.producer,
-        [DLQ_HEADERS.reason]: reasonOf(original.eventId),
-        [DLQ_HEADERS.originalTopic]: ORIGINAL,
-        [DLQ_HEADERS.originalPartition]: String(positions.get(original.eventId).partition),
-        [DLQ_HEADERS.originalOffset]: String(positions.get(original.eventId).offset),
-        [DLQ_HEADERS.attempts]: '4',
-        [DLQ_HEADERS.error]: 'replay-itest',
+    messages: [
+      {
+        value: JSON.stringify(unsequencedOld),
+        headers: {
+          [EVENT_HEADERS.eventId]: unsequencedOld.eventId,
+          [EVENT_HEADERS.eventName]: unsequencedOld.eventName,
+          [EVENT_HEADERS.eventVersion]: '1',
+          [EVENT_HEADERS.correlationId]: unsequencedOld.correlationId,
+          [EVENT_HEADERS.tenantId]: unsequencedOld.tenantId,
+          [EVENT_HEADERS.producer]: 'maintenance-service',
+          [DLQ_HEADERS.reason]: DLQ_REASONS.BUSINESS_RULE_VIOLATION,
+          [DLQ_HEADERS.originalTopic]: ORIGINAL,
+          [DLQ_HEADERS.originalPartition]: '0',
+          [DLQ_HEADERS.originalOffset]: '0',
+        },
       },
-    })),
+    ],
   });
-  const first = BigInt(dead.baseOffset);
-  dlqRange = {
-    partition: dead.partition,
-    from: String(first),
-    to: String(first + BigInt(originals.length) - 1n),
-  };
-}, 120_000);
+}, 240_000);
 
 after(async () => {
+  await consumer?.stop();
   await Promise.allSettled(clients.map((entity) => entity.disconnect()));
 });
 
-const byRange = () => [
-  '--partition',
-  String(dlqRange.partition),
-  '--from-offset',
-  dlqRange.from,
-  '--to-offset',
-  dlqRange.to,
-];
+describe('the dead letters are the real ones (#145)', () => {
+  test('the consumer kept the key and overwrote x-producer with its own name', async () => {
+    const dead = await deadLetters(dlqStart);
+    const replayable = dead.find((d) => d.eventId === ids.replayable);
+    assert.equal(replayable.key, keys.replayable);
+    assert.equal(replayable.originalTopic, ORIGINAL);
+    assert.notEqual(replayable.producer, 'fleet-service');
+    assert.equal(dead.find((d) => d.eventId === ids.keyless).key, null);
+  });
+});
 
 describe('a dry-run decides every record and writes nothing', () => {
   test('each verdict, with its reason', async () => {
-    const retryBefore = await endOffsets('itest-observer', RETRY);
-    const result = replay(byRange());
+    const retryBefore = await endOffsets(RETRY);
+    const result = replay(
+      [
+        ids.replayable,
+        ids.stale,
+        ids.unsequenced,
+        ids.financial,
+        ids.unconfirmed,
+        ids.keyless,
+      ].flatMap((id) => ['--event-id', id]),
+    );
     assert.equal(result.status, 0, result.stderr);
     const verdict = Object.fromEntries(
       result.records.map((r) => [r.eventId, [r.verdict, r.refusal, r.stale]]),
     );
     assert.deepEqual(verdict[ids.replayable], ['REPLAYABLE', null, false]);
     assert.deepEqual(verdict[ids.stale], ['REFUSED', 'STALE', true]);
-    assert.deepEqual(verdict[ids.unsequenced], ['REFUSED', 'UNSEQUENCED', null]);
+    // Unsequenced, but the dead letter kept the publisher's key.
+    assert.deepEqual(verdict[ids.unsequenced], ['REPLAYABLE', null, false]);
     assert.deepEqual(verdict[ids.financial], ['REFUSED', 'NEVER_AUTO_REPLAY', null]);
-    assert.deepEqual(verdict[ids.forged], ['REFUSED', 'REASON_NOT_REPLAYABLE', null]);
-    assert.deepEqual([result.summary.selected, result.summary.replayable], [5, 1]);
-    // No payload in the report.
-    assert.ok(!JSON.stringify(result.records).includes(`replay-itest-${run}`));
-    assert.deepEqual(await endOffsets('itest-observer', RETRY), retryBefore);
+    assert.deepEqual(verdict[ids.unconfirmed], ['REFUSED', 'REASON_NOT_REPLAYABLE', null]);
+    assert.deepEqual(verdict[ids.keyless], ['REFUSED', 'UNSEQUENCED_NO_KEY', null]);
+    assert.deepEqual([result.summary.selected, result.summary.replayable], [6, 2]);
+    assert.ok(!JSON.stringify(result.records).includes(`replay-itest-${run}`), 'no payload');
+    assert.deepEqual(await endOffsets(RETRY), retryBefore);
   });
 });
 
 describe('--execute writes only what a dry-run approved, exactly as many as expected', () => {
   test('a selection with a refusal in it writes nothing', async () => {
-    const retryBefore = await endOffsets('itest-observer', RETRY);
-    const result = replay([...byRange(), '--execute', '--expect-count', '5']);
+    const retryBefore = await endOffsets(RETRY);
+    const result = replay([
+      '--event-id',
+      ids.replayable,
+      '--event-id',
+      ids.financial,
+      '--execute',
+      '--expect-count',
+      '2',
+    ]);
     assert.equal(result.status, 1);
     assert.equal(result.summary.written, 0);
-    assert.deepEqual(await endOffsets('itest-observer', RETRY), retryBefore);
+    assert.deepEqual(await endOffsets(RETRY), retryBefore);
   });
 
   test('a count other than the selection’s writes nothing', async () => {
-    const retryBefore = await endOffsets('itest-observer', RETRY);
+    const retryBefore = await endOffsets(RETRY);
     const result = replay(['--event-id', ids.replayable, '--execute', '--expect-count', '2']);
     assert.equal(result.status, 1);
-    assert.deepEqual(await endOffsets('itest-observer', RETRY), retryBefore);
+    assert.deepEqual(await endOffsets(RETRY), retryBefore);
   });
 
   test('no operator in the environment, no execution', () => {
@@ -316,13 +450,17 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     assert.match(result.stderr, /as ops-replay/);
   });
 
-  test('replays one record to .retry: its body, its stream key, its platform headers and the replay stamp', async () => {
-    const retryBefore = await endOffsets('itest-observer', RETRY);
+  test('a replay is consumed from .retry by the real consumer, and is on the wire as the publisher sent it', async () => {
+    const retryBefore = await endOffsets(RETRY);
     const result = replay(['--event-id', ids.replayable, '--execute', '--expect-count', '1']);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.summary.written, 1);
-    const replayId = `${result.summary.reportId}/${OPERATOR}`;
 
+    await eventually('the consumer to take the replay from .retry', async () =>
+      deliveredFrom(ids.replayable, RETRY),
+    );
+
+    const replayId = `${result.summary.reportId}/${OPERATOR}`;
     const landed = (await readSince('itest-observer', RETRY, retryBefore)).filter(
       (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
     );
@@ -330,23 +468,36 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     const [message] = landed;
     assert.equal(message.key.toString(), keys.replayable);
     assert.equal(message.value.toString(), bodies.get(ids.replayable));
-    const names = Object.keys(message.headers).sort();
-    for (const name of names) {
+    for (const name of Object.keys(message.headers)) {
       assert.ok(
         name === REPLAY_HEADERS.replayId || Object.values(EVENT_HEADERS).includes(name),
         `unexpected header ${name}`,
       );
     }
-    assert.ok(!names.some((name) => name.startsWith('x-dlq-')));
-    assert.equal(message.headers[EVENT_HEADERS.eventId].toString(), ids.replayable);
+    // The publisher, as the relay set it — not the consumer that dead-lettered it.
+    assert.equal(message.headers[EVENT_HEADERS.producer].toString(), 'fleet-service');
+  });
+
+  test('an unsequenced event replays under the key its dead letter kept', async () => {
+    const retryBefore = await endOffsets(RETRY);
+    const result = replay(['--event-id', ids.unsequenced, '--execute', '--expect-count', '1']);
+    assert.equal(result.status, 0, result.stderr);
+    await eventually('the consumer to take it from .retry', async () =>
+      deliveredFrom(ids.unsequenced, RETRY),
+    );
+    const replayId = `${result.summary.reportId}/${OPERATOR}`;
+    const [message] = (await readSince('itest-observer', RETRY, retryBefore)).filter(
+      (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
+    );
+    assert.equal(message.key.toString(), `USG_${ids.unsequenced}`);
   });
 
   test('a stale record is refused, and replayed only when --allow-stale names it', async () => {
     const refused = replay(['--event-id', ids.stale, '--execute', '--expect-count', '1']);
     assert.equal(refused.status, 1);
     assert.equal(refused.records[0].refusal, 'STALE');
+    assert.ok(!deliveredFrom(ids.stale, RETRY));
 
-    const retryBefore = await endOffsets('itest-observer', RETRY);
     const allowed = replay([
       '--event-id',
       ids.stale,
@@ -358,12 +509,57 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     ]);
     assert.equal(allowed.status, 0, allowed.stderr);
     assert.equal(allowed.records[0].stale, true, 'the report still says it was stale');
-    const replayId = `${allowed.summary.reportId}/${OPERATOR}`;
-    const landed = (await readSince('itest-observer', RETRY, retryBefore)).filter(
-      (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
+    await eventually('the consumer to take it from .retry', async () =>
+      deliveredFrom(ids.stale, RETRY),
     );
-    assert.equal(landed.length, 1);
-    assert.equal(landed[0].key.toString(), keys.stale);
+  });
+
+  test('a replay dead-lettered again from .retry goes back to that same .retry, once allowed', async () => {
+    // First replay: the harness rejects it once more on .retry, so the
+    // consumer dead-letters it with x-dlq-original-topic = rasta.fleet.v1.retry.
+    const first = replay(['--event-id', ids.again, '--execute', '--expect-count', '1']);
+    assert.equal(first.status, 0, first.stderr);
+    const second = await eventually('the dead letter from .retry', async () =>
+      (await deadLetters(dlqStart)).find(
+        (d) => d.eventId === ids.again && d.originalTopic === RETRY,
+      ),
+    );
+    const byOffset = [
+      '--partition',
+      String(second.partition),
+      '--from-offset',
+      second.offset,
+      '--to-offset',
+      second.offset,
+    ];
+
+    // Exactly one `.retry` is stripped: the target is the same twin, and the
+    // tool cannot see the stream from there, so staleness is unknown.
+    const dry = replay(byOffset);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.deepEqual(
+      [dry.records[0].target, dry.records[0].stale, dry.records[0].refusal],
+      [RETRY, 'UNKNOWN', 'STALENESS_UNKNOWN'],
+    );
+
+    const deliveredBefore = deliveries.filter(
+      (d) => d.eventId === ids.again && d.topic === RETRY,
+    ).length;
+    const allowed = replay([
+      ...byOffset,
+      '--allow-stale',
+      ids.again,
+      '--execute',
+      '--expect-count',
+      '1',
+    ]);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    await eventually(
+      'the consumer to take it from .retry again',
+      async () =>
+        deliveries.filter((d) => d.eventId === ids.again && d.topic === RETRY).length >
+        deliveredBefore,
+    );
   });
 
   test('nothing the tool wrote reached the original topic', async () => {

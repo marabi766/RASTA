@@ -58,7 +58,9 @@ function deadLetter(body = envelope(), headerOverrides = {}, { key = null } = {}
     [EVENT_HEADERS.eventVersion]: Buffer.from(String(body.eventVersion)),
     [EVENT_HEADERS.correlationId]: Buffer.from(body.correlationId),
     [EVENT_HEADERS.tenantId]: Buffer.from(body.tenantId),
-    [EVENT_HEADERS.producer]: Buffer.from(body.producer),
+    // As EventConsumer.deadLetter writes it (#145): the consumer's client id,
+    // not the original publisher.
+    [EVENT_HEADERS.producer]: Buffer.from('maintenance-service'),
     [DLQ_HEADERS.reason]: Buffer.from(DLQ_REASONS.MAX_RETRIES_EXCEEDED),
     [DLQ_HEADERS.originalTopic]: Buffer.from('rasta.fleet.v1'),
     [DLQ_HEADERS.originalPartition]: Buffer.from('1'),
@@ -221,9 +223,16 @@ const refusals = [
     ],
   ),
   [
-    'an unsequenced event (D-040: no key to replay it with)',
+    'an unsequenced event dead-lettered before the key was kept (#145): no key to replay it with',
     deadLetter(envelope({ streamKey: undefined, streamSeq: undefined })),
-    'UNSEQUENCED',
+    'UNSEQUENCED_NO_KEY',
+  ],
+  [
+    'a dead letter from `<topic>.retry.retry`: exactly one suffix is stripped',
+    deadLetter(envelope(), {
+      [DLQ_HEADERS.originalTopic]: Buffer.from('rasta.fleet.v1.retry.retry'),
+    }),
+    'ORIGINAL_TOPIC_NOT_SUBSCRIBED',
   ],
   [
     'a dead letter whose kept key is not the stream key',
@@ -238,6 +247,31 @@ for (const [what, record, refusal] of refusals) {
     assert.equal(decision.refusal, refusal);
   });
 }
+
+test('x-producer is neither compared nor copied: the replay carries the publisher, as the relay set it', () => {
+  const decision = assess(deadLetter(), context);
+  assert.equal(decision.verdict, 'REPLAYABLE', decision.refusal);
+  assert.equal(decision.message.headers[EVENT_HEADERS.producer], 'fleet-service');
+});
+
+test('an unsequenced event is replayed under the key the dead letter kept (#145)', () => {
+  const decision = assess(
+    deadLetter(envelope({ streamKey: undefined, streamSeq: undefined }), {}, { key: 'USG_1' }),
+    context,
+  );
+  assert.equal(decision.verdict, 'REPLAYABLE', decision.refusal);
+  assert.equal(decision.message.key, 'USG_1');
+  assert.equal(decision.summary.key, 'USG_1');
+  assert.equal(decision.summary.streamKey, null);
+  // And its staleness is looked for under that key.
+  assert.equal(stalenessProbe(decision, contracts.RETRY_TOPIC_SUFFIX).key, 'USG_1');
+});
+
+test('a sequenced dead letter that kept its key replays under it', () => {
+  const decision = assess(deadLetter(envelope(), {}, { key: 'AST_1' }), context);
+  assert.equal(decision.verdict, 'REPLAYABLE', decision.refusal);
+  assert.equal(decision.message.key, 'AST_1');
+});
 
 test('every NEVER_AUTO_REPLAY event is refused — there is no override', () => {
   for (const eventName of contracts.NEVER_AUTO_REPLAY) {

@@ -16,15 +16,25 @@
  *     the same answer);
  *   - it is not a `NEVER_AUTO_REPLAY` event — money is replayed by the
  *     runbook's manual procedure, and this tool has no override for it;
- *   - it carries its stream key (`envelope.streamKey`), which becomes the
- *     message key: an unsequenced event is refused until the dead letter keeps
- *     the original key (D-040) — no guessing from `aggregateId`;
+ *   - it has a message key: the envelope's stream key, or else the key the
+ *     dead letter kept from the original (D-040, #145); a dead letter with
+ *     neither — an unsequenced event dead-lettered before #145 — is refused,
+ *     with no guessing from `aggregateId`; a kept key that is not the stream
+ *     key is refused;
  *   - it is not stale — no newer event for the same stream key on the original
  *     topic — unless the operator names it with `--allow-stale <eventId>`.
  *
- * What is replayed: the original body, byte for byte, keyed by the stream key,
- * with only the platform headers (`EVENT_HEADERS`) it carried, and
- * `x-replay-id: <reportId>/<operator>` — never an `x-dlq-*` header.
+ * What is replayed: the original body, byte for byte, under that key, with
+ * only the platform headers (`EVENT_HEADERS`) — each as the original publisher
+ * set it — and `x-replay-id: <reportId>/<operator>`, never an `x-dlq-*` header.
+ * `x-producer` is the one platform header a dead letter does not keep: the
+ * dead-lettering consumer overwrites it with its own client id. It is neither
+ * compared nor copied; it is restored from the envelope's `producer`, exactly
+ * as the outbox relay set it.
+ *
+ * A dead letter from a `.retry` topic (a replay that failed again) names that
+ * topic as its original: exactly one `.retry` suffix is stripped to find the
+ * subscribed topic, and the replay goes back to that same `.retry` twin.
  */
 
 export const DEFAULT_MAX = 10;
@@ -231,6 +241,7 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     firstFailedAt: headers[DLQ_HEADERS.firstFailedAt] ?? null,
     streamKey: null,
     streamSeq: null,
+    key: record.key == null ? null : record.key.toString('utf8'),
     target: null,
   };
   const refuse = (refusal) => ({ summary, verdict: 'REFUSED', refusal });
@@ -263,6 +274,8 @@ export function assess(record, { dlq, topology, topics, contracts }) {
   summary.streamSeq = envelope.streamSeq ?? null;
 
   for (const [field, name] of Object.entries(EVENT_HEADERS)) {
+    // The dead letter's x-producer names the consumer that wrote it, by design.
+    if (field === 'producer') continue;
     const header = headers[name];
     const body = envelope[HEADER_FIELDS[field]];
     if (header !== undefined && body !== undefined && header !== String(body)) {
@@ -276,19 +289,27 @@ export function assess(record, { dlq, topology, topics, contracts }) {
   ];
   if (unfixable.includes(summary.reason)) return refuse('REASON_NOT_REPLAYABLE');
   if (NEVER_AUTO_REPLAY.has(envelope.eventName)) return refuse('NEVER_AUTO_REPLAY');
-  if (!envelope.streamKey) return refuse('UNSEQUENCED');
-  const key = record.key == null ? null : record.key.toString('utf8');
-  if (key !== null && key !== envelope.streamKey) return refuse('KEY_MISMATCH');
+  const kept = summary.key;
+  if (envelope.streamKey && kept !== null && kept !== envelope.streamKey) {
+    return refuse('KEY_MISMATCH');
+  }
+  const key = envelope.streamKey ?? kept;
+  // Unsequenced and dead-lettered before the key was kept (#145): nothing
+  // says which partition key the publisher used.
+  if (!key) return refuse('UNSEQUENCED_NO_KEY');
+  summary.key = key;
 
   const restored = {};
-  for (const name of Object.values(EVENT_HEADERS)) {
+  for (const [field, name] of Object.entries(EVENT_HEADERS)) {
+    if (field === 'producer') continue;
     if (headers[name] !== undefined) restored[name] = headers[name];
   }
+  restored[EVENT_HEADERS.producer] = envelope.producer;
   return {
     summary,
     verdict: 'REPLAYABLE',
     refusal: null,
-    message: { key: envelope.streamKey, value: record.value, headers: restored },
+    message: { key, value: record.value, headers: restored },
   };
 }
 
@@ -313,7 +334,7 @@ export function stalenessProbe(assessment, suffix) {
     topic: originalTopic,
     partition: Number(originalPartition),
     after: BigInt(originalOffset),
-    key: assessment.summary.streamKey,
+    key: assessment.summary.key,
   };
 }
 
