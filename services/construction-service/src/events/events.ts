@@ -58,6 +58,9 @@ export const CONSTRUCTION_EVENTS = {
   APPROVAL_POLICY_CREATED: 'APPROVAL_POLICY_CREATED',
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
+  // Q-83: taken out of force by the system when an ORGANIZATION_MOVED means
+  // the union that wrote it no longer governs the organization.
+  APPROVAL_POLICY_SUSPENDED: 'APPROVAL_POLICY_SUSPENDED',
   // Q-70 (7), decided 2026-09-26: the platform approval step (names approved
   // by the PM, 2026-09-26).
   APPROVAL_POLICY_SUBMITTED: 'APPROVAL_POLICY_SUBMITTED',
@@ -322,6 +325,27 @@ export const approvalPolicyActivatedPayload = z
   })
   .strict();
 
+/**
+ * Taken out of force because the union that wrote it no longer governs the
+ * organization (Q-83). `suspendedBy` is the system actor; the cause is the
+ * ORGANIZATION_MOVED event and the organization it moved. No free text: the
+ * reason is a closed code.
+ */
+export const approvalPolicySuspendedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    authorOrganizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    reason: z.literal('ORGANIZATION_MOVED'),
+    causeEventId: identifier,
+    movedOrganizationId: identifier,
+    suspendedBy: identifier,
+    suspendedAt: isoTimestamp,
+  })
+  .strict();
+
 export const approvalPolicyRetiredPayload = z
   .object({
     policyId: identifier,
@@ -370,6 +394,7 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   APPROVAL_POLICY_CREATED: approvalPolicyCreatedPayload,
   APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
   APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
+  APPROVAL_POLICY_SUSPENDED: approvalPolicySuspendedPayload,
   APPROVAL_POLICY_SUBMITTED: approvalPolicySubmittedPayload,
   APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
   PROJECT_PROGRESS_REPORT_DRAFTED: progressReportDraftedPayload,

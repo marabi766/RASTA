@@ -10,6 +10,8 @@ import { IdempotencyStore } from '../src/shared/idempotency';
 import { ApprovalRepository } from '../src/approval/approval.repository';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
+import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
+import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
@@ -72,6 +74,10 @@ export interface Wiring {
   hierarchy: FakeHierarchy;
   execution: ExecutionService;
   progress: ProgressService;
+  /** Q-83: policies follow an ORGANIZATION_MOVED. */
+  suspension: PolicySuspensionService;
+  /** The consumer's handler, without a broker: `moves.handle(envelope)`. */
+  moves: OrganizationMovedConsumer;
   close(): Promise<void>;
 }
 
@@ -106,11 +112,25 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     env,
     hierarchy as unknown as OrganizationDirectory,
   );
+  const suspension = new PolicySuspensionService(
+    prisma,
+    approvalRepository,
+    events,
+    hierarchy as unknown as OrganizationDirectory,
+  );
   return {
     prisma,
     env,
     repository,
     projects,
+    suspension,
+    moves: new OrganizationMovedConsumer(
+      () => {
+        throw new Error('the integration suites call handle() and never subscribe');
+      },
+      suspension,
+      { info: () => undefined, warn: () => undefined, debug: () => undefined },
+    ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
     approvalRepository,
     approvals,

@@ -857,6 +857,9 @@ export const EXPECTED = {
       'ck_policy_rejection_complete',
       'ck_policy_activation_complete',
       'ck_policy_retirement_complete',
+      // 20260930130000_policy_suspension (Q-83): a suspension names who, when
+      // and why, exactly when the policy is SUSPENDED.
+      'ck_policy_suspension_complete',
       'ck_step_authority_not_oversight',
       'ck_step_amount_range',
       'ck_approval_decision_complete',

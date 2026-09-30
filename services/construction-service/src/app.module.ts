@@ -10,6 +10,7 @@ import {
   AllExceptionsFilter,
   AuthGuard,
   AUTH_OPTIONS,
+  EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
@@ -43,6 +44,13 @@ import { ExecutionService } from './project/execution.service';
 import { ApprovalRepository } from './approval/approval.repository';
 import { ApprovalService } from './approval/approval.service';
 import { PolicyService } from './approval/policy.service';
+import { PolicySuspensionService } from './approval/policy-suspension.service';
+import {
+  CONSTRUCTION_DEAD_LETTER_TOPIC,
+  ORGANIZATION_MOVES_CONSUMER,
+  ORGANIZATION_MOVES_TOPICS,
+  OrganizationMovedConsumer,
+} from './events/organization-moved.consumer';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
 import { ApprovalController } from './approval/approval.controller';
@@ -55,7 +63,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
 /**
  * construction-service wiring (CON-001).
  *
- * ## No external boundary, no consumer, no workflow — by decision
+ * ## One consumer, no workflow — by decision
  *
  * `docs/04` § 4.12 lists supplier, fleet and document as dependencies and
  * Temporal for tender deadlines. None is wired here: CON-001 PR 1 needs none of
@@ -65,7 +73,12 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
  * The consumed events (`SUPPLIER_QUALIFIED`, `CONTRACT_SIGNED`, `ASSET_*`,
  * `AVAILABILITY_CHANGED`) all feed CON-002 or the fleet analysis. A handler
  * that consumed them and did nothing would write a `processed_event` row that
- * looks like work done (ADR-032). The table exists for the first real one.
+ * looks like work done (ADR-032).
+ *
+ * The one consumer is `ORGANIZATION_MOVED` (Q-83): an approval policy a union
+ * wrote must stop governing an organization that left the union's subtree. It
+ * writes no `processed_event` row either, by design — see
+ * `OrganizationMovedConsumer`.
  */
 @Module({
   controllers: [
@@ -120,8 +133,34 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ApprovalService,
     PolicyService,
     OrganizationDirectory,
+    PolicySuspensionService,
     ExecutionService,
     ProgressService,
+
+    {
+      provide: OrganizationMovedConsumer,
+      inject: [ENV, LOGGER, PolicySuspensionService],
+      useFactory: (env: ConstructionEnv, logger: Logger, suspension: PolicySuspensionService) =>
+        new OrganizationMovedConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-organization-moves`),
+                groupId: ORGANIZATION_MOVES_CONSUMER,
+                topics: [...ORGANIZATION_MOVES_TOPICS],
+                deadLetterTopic: CONSTRUCTION_DEAD_LETTER_TOPIC,
+              },
+              handler,
+              {
+                log: (m) => logger.info(m),
+                warn: (m) => logger.warn(m),
+                error: (m, trace) => logger.error({ err: trace }, m),
+              },
+            ),
+          suspension,
+          logger,
+        ),
+    },
 
     {
       provide: InternalTokenService,
@@ -193,6 +232,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   constructor(
     private readonly relay: OutboxRelay,
+    private readonly moves: OrganizationMovedConsumer,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
   ) {}
@@ -204,7 +244,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     consumer.apply(RequestContextMiddleware).forRoutes('*');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // The consumer first: a topic it cannot subscribe to must stop the boot
+    // (`EventConsumer` never auto-creates topics), not leave a service that
+    // looks healthy and never hears a move.
+    await this.moves.start();
     this.relay.start();
 
     const sample = async () => {
@@ -231,6 +275,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
+    await this.moves.stop();
     await this.relay.stop();
   }
 }

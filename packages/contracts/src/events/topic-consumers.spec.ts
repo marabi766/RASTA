@@ -46,6 +46,11 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.insurance.v1', 'rasta.maintenance.v1'],
         deadLetterTopic: 'rasta.notification.v1.dlq',
       },
+      // Q-83: an ORGANIZATION_MOVED re-checks the policies unions wrote.
+      'construction-service': {
+        subscribes: ['rasta.organization.v1'],
+        deadLetterTopic: 'rasta.construction.v1.dlq',
+      },
       'supplier-service': {
         subscribes: ['rasta.marketplace.v1'],
         deadLetterTopic: 'rasta.supplier.v1.dlq',

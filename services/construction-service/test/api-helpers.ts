@@ -15,6 +15,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { FakeHierarchy, databaseUrl } from './helpers';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
+import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness
@@ -176,6 +177,10 @@ export async function startApi(): Promise<ApiHarness> {
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(OutboxRelay)
+    .useValue(inertRelay)
+    // The ORGANIZATION_MOVED consumer is proven without a broker in
+    // organization-moved.int-spec.ts; nothing here subscribes.
+    .overrideProvider(OrganizationMovedConsumer)
     .useValue(inertRelay)
     // The HTTP client to organization-service is proven against its contract
     // in organization-directory.int-spec.ts; here the hierarchy is given.

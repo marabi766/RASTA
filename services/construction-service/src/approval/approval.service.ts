@@ -287,8 +287,9 @@ export class ApprovalService {
    * network call. The id returned is pinned into `openRound`: if another
    * policy came into force in between, the round is not opened on it (409).
    * The window between this answer and the commit is the documented residual
-   * race (ADR-063); event-driven suspension on `ORGANIZATION_MOVED` is the
-   * follow-up that closes it.
+   * race (ADR-063). Between moves and rounds, `PolicySuspensionService`
+   * (Q-83) suspends a policy on `ORGANIZATION_MOVED`, so a stranded policy is
+   * out of force before any round asks; this check stays as the last gate.
    *
    * Returns the id of the confirmed policy, or `null` when none is in force
    * (the caller's 422 / "none configured" path, unchanged).

@@ -302,10 +302,38 @@
     },
     {
       "principal": "construction-service",
+      "resourceType": "GROUP",
+      "resourceName": "construction-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "construction-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.construction.v1",
       "patternType": "LITERAL",
       "operation": "WRITE"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "construction-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.organization.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
     },
     {
       "principal": "document-service",
@@ -514,6 +542,13 @@
       "principal": "itest-observer",
       "resourceType": "TOPIC",
       "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -737,6 +772,13 @@
     {
       "principal": "kafka-exporter",
       "resourceType": "GROUP",
+      "resourceName": "construction-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
       "resourceName": "economic-service.",
       "patternType": "PREFIXED",
       "operation": "DESCRIBE"
@@ -815,6 +857,13 @@
       "principal": "kafka-ui",
       "resourceType": "GROUP",
       "resourceName": "audit-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "construction-service.",
       "patternType": "PREFIXED",
       "operation": "DESCRIBE"
     },
@@ -1025,6 +1074,13 @@
       "principal": "ops-replay",
       "resourceType": "TOPIC",
       "resourceName": "rasta.audit.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.dlq",
       "patternType": "LITERAL",
       "operation": "READ"
     },

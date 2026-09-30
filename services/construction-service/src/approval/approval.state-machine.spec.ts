@@ -26,6 +26,9 @@ describe('the policy lifecycle', () => {
     'PENDING_PLATFORM_APPROVAL→ACTIVE',
     'PENDING_PLATFORM_APPROVAL→REJECTED',
     'ACTIVE→RETIRED',
+    // Q-83: the system takes a policy out of force when its union no longer
+    // governs the organization; it is never reactivated.
+    'ACTIVE→SUSPENDED',
   ];
 
   it.each(POLICY_STATES.flatMap((from) => POLICY_STATES.map((to) => [from, to] as const)))(

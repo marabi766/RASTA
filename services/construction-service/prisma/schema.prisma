@@ -170,6 +170,9 @@ enum ApprovalPolicyStatus {
   ACTIVE
   REJECTED
   RETIRED
+  /// Taken out of force by an ORGANIZATION_MOVED (Q-83): never governs, never
+  /// reactivated — a new version replaces it.
+  SUSPENDED
 }
 
 /// Which approvals a lifecycle step needs, from whom, above which amount.
@@ -215,6 +218,11 @@ model ApprovalPolicy {
   rejectionReason      String?   @map("rejection_reason")
   retiredAt            DateTime? @map("retired_at")
   retiredBy            String?   @map("retired_by")
+  /// Suspended when the union that wrote it stopped governing the organization
+  /// (Q-83): when, by whom (the system actor), and why.
+  suspendedAt          DateTime? @map("suspended_at")
+  suspendedBy          String?   @map("suspended_by")
+  suspensionReason     String?   @map("suspension_reason")
 
   version Int @default(1)
 
