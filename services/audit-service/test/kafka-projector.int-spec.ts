@@ -25,7 +25,17 @@ import {
 import { AUDIT_TRAIL_CONSUMER } from '../src/audit/audit-trail.mapper';
 import { OpsReplayConsumer } from '../src/consumers/ops-replay.consumer';
 import { OPS_REPLAY_CONSUMER } from '../src/audit/ops-replay.mapper';
-import { brokers, cleanupRun, id, newMigratorPrisma, newPrisma, RUN_TAG, waitFor } from './helpers';
+import {
+  brokers,
+  cleanupRun,
+  id,
+  instantIn,
+  newMigratorPrisma,
+  newPrisma,
+  runMonth,
+  RUN_TAG,
+  waitFor,
+} from './helpers';
 
 /**
  * The projector over a real broker and a real database.
@@ -1114,6 +1124,7 @@ describeWithOpsReplay('replay-record consumer over Kafka, published as ops-repla
     debug: () => undefined,
   } as unknown as ConstructorParameters<typeof OpsReplayConsumer>[2];
 
+  let minute = 0;
   function replayRecord(tenant: string | null): EventEnvelope {
     const reportId = `rpl-${randomUUID()}`;
     const replayed = id('EVT');
@@ -1121,7 +1132,10 @@ describeWithOpsReplay('replay-record consumer over Kafka, published as ops-repla
       eventId: id('RPL'),
       eventName: REPLAY_EXECUTED,
       eventVersion: 1,
-      occurredAt: new Date().toISOString(),
+      // In this run's own month, never now: a platform record joins the
+      // platform chain of its month, and `cleanupRun` rightly refuses to cut
+      // a chain other suites' platform rows are in (ADR-053 § 6).
+      occurredAt: instantIn(runMonth(20), (minute += 1)).toISOString(),
       producer: 'ops-replay',
       producerVersion: '1.0.0',
       aggregateType: 'ReplayRun',
