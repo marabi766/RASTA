@@ -164,6 +164,44 @@ async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponse
 }
 
 /**
+ * The platform's own answer to "who am I", asked with the token just issued.
+ *
+ * A token can name a user identity-service has never heard of (the realm and
+ * the identity seed are two files, and they drifted once: the second tenant's
+ * administrator existed in Keycloak only). Such a session still carries the
+ * right organization claim, so a tenant-isolation check run as that person
+ * passes on the token alone while the portal's own reads of that person answer
+ * 404. Requiring `/v1/users/me` to agree with the realm fixture before a
+ * session is sealed makes a persona that is not a real seeded user fail here,
+ * by name, instead of passing for the wrong reason.
+ */
+async function requireSeededPlatformUser(fixture: Fixture, accessToken: string): Promise<void> {
+  const gateway = requiredEnv('API_GATEWAY_URL').replace(/\/+$/, '');
+  const response = await fetch(`${gateway}/v1/users/me`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `${fixture.username} is not a working seeded platform user: /v1/users/me answered ` +
+        `${response.status}. The Keycloak realm fixture and the identity seed must agree.`,
+    );
+  }
+  const me = z
+    .object({
+      id: z.literal(fixture.userId),
+      username: z.literal(fixture.username),
+      activeOrganizationId: z.literal(fixture.organizationId),
+    })
+    .safeParse(await response.json());
+  if (!me.success) {
+    throw new Error(
+      `/v1/users/me does not describe ${fixture.username} as the realm fixture does ` +
+        `(${fixture.userId} in ${fixture.organizationId}).`,
+    );
+  }
+}
+
+/**
  * Signs `persona` in by putting the same sealed cookie the portal's own OIDC
  * flow would set into `context`. Defaults to the operator the usage scenario
  * was written for.
@@ -187,6 +225,7 @@ export async function installLiveSession(
       rasta_uid: z.literal(fixture.userId),
     })
     .parse(decodeJwt(tokens.access_token));
+  await requireSeededPlatformUser(fixture, tokens.access_token);
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + tokens.expires_in;
 

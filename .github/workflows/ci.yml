@@ -606,6 +606,7 @@ jobs:
         env:
           WEB_LIVE_STACK_E2E: 'true'
           WEB_E2E_FLEET_URL: http://localhost:3104
+          WEB_E2E_MAINTENANCE_URL: http://localhost:3105
           API_GATEWAY_URL: http://localhost:3000
           OIDC_ISSUER_URL: http://localhost:8080/realms/rasta
           OIDC_CLIENT_ID: rasta-web

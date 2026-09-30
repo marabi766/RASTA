@@ -39,6 +39,9 @@ const OTHER_TENANT_ASSET_TAG = 'D2-GRD-001';
 const OWN_ASSET = 'AST-SEED-0001';
 const OWN_ASSET_TAG = 'D1-TRK-001';
 const MISSING_ID = 'AST-SEED-9999';
+/** What the driver list renders for each driver (fleet-service's seed). */
+const OWN_DRIVER_NUMBERS = ['OP-104', 'OP-108'] as const;
+const OTHER_TENANT_DRIVER_NUMBER = 'OP-201';
 
 test.describe('tenant isolation through the live stack', () => {
   test.skip(
@@ -157,7 +160,16 @@ test.describe('tenant isolation through the live stack', () => {
     }) => {
       await page.goto('/drivers');
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('راننده و تخصیص');
-      expect(await mainText(page)).not.toContain('USR-SEED-DEHYARI2-ADMIN');
+
+      // The list shows each driver's employee number, not their user id, so an
+      // absence of the other tenant's *user id* proves nothing: assert on what
+      // is rendered. Both of this organization's drivers are there; the other
+      // tenant's (seeded as OP-201) is not.
+      const text = await mainText(page);
+      expect(text).toContain(OWN_DRIVER_NUMBERS[0]);
+      expect(text).toContain(OWN_DRIVER_NUMBERS[1]);
+      expect(text).not.toContain(OTHER_TENANT_DRIVER_NUMBER);
+      expect(text).not.toContain('USR-SEED-DEHYARI2-ADMIN');
     });
 
     test('a write to the other organization’s machine is refused and changes nothing', async ({
@@ -236,6 +248,15 @@ test.describe('tenant isolation through the live stack', () => {
       await page.goto('/maintenance/MNT-SEED-9999');
       const missing = await mainText(page);
       expect(foreign).toBe(missing);
+    });
+
+    test('the driver list holds its own driver and not ORG-DEH-0001’s', async ({ page }) => {
+      await page.goto('/drivers');
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText('راننده و تخصیص');
+
+      const text = await mainText(page);
+      expect(text).toContain(OTHER_TENANT_DRIVER_NUMBER);
+      for (const number of OWN_DRIVER_NUMBERS) expect(text).not.toContain(number);
     });
 
     test('its machine is unchanged after ORG-DEH-0001 tried to write to it', async ({
