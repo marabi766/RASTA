@@ -338,6 +338,8 @@ export const approvalPolicySuspendedPayload = z
     authorOrganizationId: identifier,
     workflowKey,
     policyVersion: positive,
+    /** In force, or still waiting for the platform approval, when it was suspended. */
+    fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
     reason: z.literal('ORGANIZATION_MOVED'),
     causeEventId: identifier,
     movedOrganizationId: identifier,

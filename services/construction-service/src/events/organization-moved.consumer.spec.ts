@@ -26,7 +26,9 @@ const envelope = (eventName: string, payload: unknown): EventEnvelope =>
     payload,
   }) as EventEnvelope;
 
-function build(reconfirmAll = jest.fn().mockResolvedValue({ checked: 2, suspended: ['APL_1'] })) {
+function build(
+  reconfirmAll = jest.fn().mockResolvedValue({ checked: 2, deferred: 0, suspended: ['APL_1'] }),
+) {
   const info = jest.fn();
   const started: { handler?: EventHandler } = {};
   const consumer = new OrganizationMovedConsumer(

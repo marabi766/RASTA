@@ -3,7 +3,9 @@ import { RastaError } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { CreatePolicyDto } from '../src/approval/dto';
 import type { WorkflowKey } from '../src/approval/approval.state-machine';
-import { SYSTEM_ACTOR } from '../src/approval/policy-suspension.service';
+import { EventPublisher } from '../src/events/publisher';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
+import { PolicySuspensionService, SYSTEM_ACTOR } from '../src/approval/policy-suspension.service';
 import {
   approvalsOf,
   asAdmin,
@@ -447,6 +449,193 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
         name: 'UnprocessableEventError',
         reason: 'VALIDATION_FAILED',
       });
+    });
+  });
+
+  describe('approval racing a move', () => {
+    /** A policy a union wrote and submitted, waiting for the platform (version 2). */
+    async function pendingPolicy(union: string, county: string): Promise<string> {
+      const policy = await asSetter(union, () =>
+        w.policies.create(policyFor(county, 'project.execution')),
+      );
+      await asSetter(union, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
+      return policy.id;
+    }
+
+    const activations = async (organizationId: string) =>
+      (await outboxFor(w.prisma, organizationId)).filter(
+        (event) => event.eventName === 'APPROVAL_POLICY_ACTIVATED',
+      );
+
+    it('suspends a policy still waiting for the platform, and approval then refuses it', async () => {
+      const { union, county } = tree();
+      const policyId = await pendingPolicy(union, county);
+      w.hierarchy.disown(county);
+
+      await w.moves.handle(moved(county));
+
+      expect(await row(policyId)).toMatchObject({
+        status: 'SUSPENDED',
+        suspendedBy: SYSTEM_ACTOR,
+        activatedAt: null,
+      });
+      const [announced] = await suspensions(county);
+      expect(eventEnvelopeSchema.parse(announced!.payload).payload).toMatchObject({
+        policyId,
+        fromStatus: 'PENDING_PLATFORM_APPROVAL',
+      });
+      // Approval asks the hierarchy first and refuses; the interleaving where
+      // it asked before the move is the next test.
+      await expect(
+        asPlatform(() => w.policies.approve(policyId, { expectedVersion: 2 })),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect(await activations(county)).toEqual([]);
+    });
+
+    it('leaves a DRAFT alone: it becomes ACTIVE only through submit and approve, which ask again', async () => {
+      const { union, county } = tree();
+      const draft = await asSetter(union, () =>
+        w.policies.create(policyFor(county, 'project.execution')),
+      );
+      w.hierarchy.disown(county);
+
+      await w.moves.handle(moved(county));
+
+      expect(await statusOf(draft.id)).toBe('DRAFT');
+      await expect(
+        asSetter(union, () => w.policies.submit(draft.id, { expectedVersion: 1 })),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('approval that confirmed the union before the move cannot activate the policy after it', async () => {
+      const { union, county } = tree();
+      const policyId = await pendingPolicy(union, county);
+
+      // Hold approval between its hierarchy answer and its transaction.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const atGate = new Promise<void>((resolve) => (reached = resolve));
+      let armed = true;
+      const answer = w.hierarchy.isWithin.bind(w.hierarchy);
+      jest.spyOn(w.hierarchy, 'isWithin').mockImplementation(async (scope, organizationId) => {
+        const within = await answer(scope, organizationId);
+        if (armed && scope === union && organizationId === county) {
+          armed = false;
+          reached();
+          await gate;
+        }
+        return within;
+      });
+
+      const approving = asPlatform(() => w.policies.approve(policyId, { expectedVersion: 2 }));
+      await atGate; // approval has been told "within"; its transaction has not begun
+
+      w.hierarchy.disown(county);
+      await w.moves.handle(moved(county)); // the move's handler runs first
+      release();
+
+      await expect(approving).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+      expect(await statusOf(policyId)).toBe('SUSPENDED');
+      expect(await activations(county)).toEqual([]);
+      await expect(
+        w.approvals.confirmGoverningPolicy(county, 'project.execution'),
+      ).resolves.toBeNull();
+    });
+
+    it('approval that commits first is suspended by the consumer, whatever it listed', async () => {
+      const { union, county } = tree();
+      const policyId = await pendingPolicy(union, county);
+      const candidate = {
+        id: policyId,
+        organizationId: county,
+        authorOrganizationId: union,
+        workflowKey: 'project.execution' as const,
+        policyVersion: 1,
+      };
+      // The consumer listed the policy while it was pending; approval then
+      // committed it, and only then did the answer come back "outside".
+      jest
+        .spyOn(w.approvalRepository, 'listUnionPoliciesToReconfirm')
+        .mockResolvedValueOnce([candidate]);
+      await asPlatform(() => w.policies.approve(policyId, { expectedVersion: 2 }));
+      expect(await statusOf(policyId)).toBe('ACTIVE');
+      w.hierarchy.disown(county);
+
+      await w.moves.handle(moved(county));
+
+      expect(await statusOf(policyId)).toBe('SUSPENDED');
+      const [announced] = await suspensions(county);
+      expect(eventEnvelopeSchema.parse(announced!.payload).payload).toMatchObject({
+        fromStatus: 'ACTIVE',
+      });
+    });
+  });
+
+  describe('bounded work per delivery (D-041)', () => {
+    const bounded = (maxLookups: number, budgetMs = 30_000) =>
+      new PolicySuspensionService(
+        w.prisma,
+        w.approvalRepository,
+        new EventPublisher(w.env),
+        w.hierarchy as unknown as OrganizationDirectory,
+        { maxLookups, budgetMs },
+      );
+    const cause = (organizationId: string) => ({
+      eventId: ulid(),
+      movedOrganizationId: organizationId,
+      correlationId: ulid(),
+      callerService: 'organization-service',
+    });
+
+    it('asks the moved organization first and leaves the rest to the check at round opening', async () => {
+      const { union, county } = tree();
+      const moved1 = await inForce(union, county);
+      const other = org();
+      w.hierarchy.adopt(union, other);
+      const stranded = await inForce(union, other);
+      w.hierarchy.disown(county);
+      w.hierarchy.disown(other);
+      w.hierarchy.asked.length = 0;
+
+      const outcome = await bounded(1).reconfirmAll(cause(county));
+
+      expect(outcome).toMatchObject({ checked: 1, suspended: [moved1] });
+      expect(outcome.deferred).toBeGreaterThanOrEqual(1);
+      expect(w.hierarchy.asked).toEqual([[union, county]]);
+      // Not asked, so still in force — but never usable: a round is refused.
+      expect(await statusOf(stranded)).toBe('ACTIVE');
+      await expect(
+        w.approvals.confirmGoverningPolicy(other, 'project.execution'),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('asks nothing once the time budget is spent', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      w.hierarchy.disown(county);
+      w.hierarchy.asked.length = 0;
+
+      const outcome = await bounded(100, 0).reconfirmAll(cause(county));
+
+      expect(outcome).toMatchObject({ checked: 0, suspended: [] });
+      expect(w.hierarchy.asked).toEqual([]);
+      expect(await statusOf(policyId)).toBe('ACTIVE');
+    });
+
+    it('asks an unreachable organization-service once per attempt, not once per pair', async () => {
+      const { union, county } = tree();
+      await inForce(union, county);
+      const other = org();
+      w.hierarchy.adopt(union, other);
+      await inForce(union, other);
+      w.hierarchy.unavailable = true;
+      w.hierarchy.asked.length = 0;
+
+      await expect(w.suspension.reconfirmAll(cause(county))).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect(w.hierarchy.asked.length).toBe(1);
     });
   });
 

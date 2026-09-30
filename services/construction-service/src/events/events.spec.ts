@@ -111,6 +111,7 @@ Object.assign(VALID, {
     ...POLICY,
     policyVersion: 2,
     authorOrganizationId: 'ORG_U',
+    fromStatus: 'ACTIVE',
     reason: 'ORGANIZATION_MOVED',
     causeEventId: 'EVT_1',
     movedOrganizationId: 'ORG_M',

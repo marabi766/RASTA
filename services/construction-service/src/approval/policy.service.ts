@@ -258,6 +258,19 @@ export class PolicyService implements OnModuleInit {
           found.workflowKey as WorkflowKey,
         );
         const policy = await this.policyOrNotFound(tx, policyId);
+        // Before the version check: the hierarchy was asked before this
+        // transaction, and `ORGANIZATION_MOVED` may have suspended the policy
+        // since (Q-83). Say so, rather than report a stale version — and never
+        // activate it. The activation below is a compare-and-set on the exact
+        // pre-state (PENDING and this version), so a suspension that lands any
+        // later still matches no row.
+        if (policy.status === 'SUSPENDED') {
+          throw RastaError.businessRule(
+            `Approval policy ${policyId} was suspended because its union no longer governs the ` +
+              'organization; write a new version',
+            { policyId, status: 'SUSPENDED' },
+          );
+        }
         this.assertVersion(policy.id, policy.version, dto.expectedVersion);
         assertPolicyTransition(policyId, policy.status as PolicyStateName, 'ACTIVE');
         this.assertFourEyes(policy, actor);

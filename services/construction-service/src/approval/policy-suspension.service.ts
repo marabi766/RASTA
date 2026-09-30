@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher } from '../events/publisher';
@@ -28,9 +28,24 @@ export interface MoveCause {
   callerService: string;
 }
 
+/**
+ * The work one delivery may do (docs/23 D-041). `EventConsumer` runs the
+ * handler inside a Kafka session of 60 s and gives it no heartbeat, so the
+ * budget is half of that; the lookup cap keeps a slow answer per pair from
+ * eating it. Not configuration: raising them is a decision about the session.
+ */
+export interface ReconfirmBounds {
+  maxLookups: number;
+  budgetMs: number;
+}
+
+export const DEFAULT_RECONFIRM_BOUNDS: ReconfirmBounds = { maxLookups: 100, budgetMs: 30_000 };
+
 export interface ReconfirmOutcome {
-  /** Policies whose union was asked about. */
+  /** (Union, organization) pairs asked about. */
   checked: number;
+  /** Pairs left unasked by the bound: the round-opening check covers them. */
+  deferred: number;
   /** The policies suspended by this call. */
   suspended: string[];
 }
@@ -92,8 +107,9 @@ export interface ReconfirmOutcome {
  * ## What a suspension does not touch
  *
  * A round already open keeps the steps it copied (`docs/08` § 8.9); nothing
- * here reads or writes an approval. A DRAFT or PENDING policy is left alone:
- * submit and approve re-confirm the union themselves. A policy the platform
+ * here reads or writes an approval. A DRAFT policy is left alone: it becomes
+ * ACTIVE only through submit and approve, and each re-confirms the union. A
+ * PENDING one is suspended too — see `suspend`. A policy the platform
  * administrator wrote never depends on the hierarchy and is never listed.
  */
 @Injectable()
@@ -105,39 +121,87 @@ export class PolicySuspensionService {
     private readonly repository: ApprovalRepository,
     private readonly events: EventPublisher,
     private readonly directory: OrganizationDirectory,
+    // Only a test passes this; Nest finds no provider and the default holds.
+    @Optional() private readonly bounds: ReconfirmBounds = DEFAULT_RECONFIRM_BOUNDS,
   ) {}
 
   async reconfirmAll(cause: MoveCause): Promise<ReconfirmOutcome> {
     const candidates = await this.repository.listUnionPoliciesToReconfirm();
+    const pairKey = (c: { authorOrganizationId: string; organizationId: string }) =>
+      `${c.authorOrganizationId}\u0000${c.organizationId}`;
 
-    // One question per (union, organization) pair, however many policies use it.
+    // One question per (union, organization) pair, however many policies use
+    // it — and the moved organization's own pairs first, since they are the
+    // likeliest to have changed. Only an order: the answer never comes from
+    // the event.
+    const pairs = new Map<string, (typeof candidates)[number]>();
+    for (const candidate of [...candidates].sort(
+      (a, b) =>
+        Number(b.organizationId === cause.movedOrganizationId) -
+        Number(a.organizationId === cause.movedOrganizationId),
+    )) {
+      if (!pairs.has(pairKey(candidate))) pairs.set(pairKey(candidate), candidate);
+    }
+
+    // Bounded per delivery (docs/23 D-041): a lookup count and a time budget,
+    // both well inside the consumer's session timeout, which this handler
+    // cannot extend (`EventConsumer` hands it no heartbeat). What the bound
+    // leaves unasked is not lost: a policy still stranded is refused when a
+    // round is opened on it (`ApprovalService.confirmGoverningPolicy`), and
+    // the next move asks again.
+    const startedAt = Date.now();
     const answers = new Map<string, boolean>();
     let unconfirmed: unknown;
-    for (const candidate of candidates) {
-      const key = `${candidate.authorOrganizationId}\u0000${candidate.organizationId}`;
-      if (answers.has(key)) continue;
+    let asked = 0;
+    for (const [key, candidate] of pairs) {
+      if (unconfirmed !== undefined) break;
+      if (asked >= this.bounds.maxLookups || Date.now() - startedAt >= this.bounds.budgetMs) break;
+      asked += 1;
       try {
         answers.set(
           key,
           await this.directory.isWithin(candidate.authorOrganizationId, candidate.organizationId),
         );
       } catch (error) {
-        unconfirmed ??= error;
+        // Stop at the first failure: an unreachable organization-service is
+        // asked once per attempt, not once per pair at one timeout each. What
+        // was confirmed is still acted on below; the error is rethrown so the
+        // event is retried.
+        unconfirmed = error;
       }
+    }
+    const deferred = unconfirmed === undefined ? pairs.size - asked : 0;
+    if (deferred > 0) {
+      this.logger.warn(
+        `Reconfirmed ${asked} of ${pairs.size} (union, organization) pairs for event ` +
+          `${cause.eventId}; ${deferred} left to the check at round opening`,
+      );
     }
 
     const suspended: string[] = [];
     for (const candidate of candidates) {
-      const key = `${candidate.authorOrganizationId}\u0000${candidate.organizationId}`;
-      if (answers.get(key) !== false) continue;
+      if (answers.get(pairKey(candidate)) !== false) continue;
       if (await this.suspend(candidate, cause)) suspended.push(candidate.id);
     }
 
     if (unconfirmed !== undefined) throw unconfirmed;
-    return { checked: candidates.length, suspended };
+    return { checked: asked, deferred, suspended };
   }
 
-  /** ACTIVE → SUSPENDED in one transaction. `false`: nothing was in force to suspend. */
+  /**
+   * ACTIVE or PENDING_PLATFORM_APPROVAL → SUSPENDED in one transaction.
+   * `false`: nothing was there to suspend.
+   *
+   * A pending policy is included because approval checks the hierarchy before
+   * its own transaction: approval confirms, the move commits, and this runs
+   * while the policy is still pending — if only ACTIVE were scanned, approval
+   * would then commit a stranded ACTIVE policy nobody re-checks. Taking the
+   * slot lock and re-reading the *actual* status makes both orders safe: this
+   * first, and `approve` then finds SUSPENDED and refuses; `approve` first,
+   * and this finds ACTIVE and suspends that. A DRAFT is not touched: it can
+   * only become ACTIVE through submit and approve, and each asks the
+   * hierarchy again.
+   */
   private async suspend(
     candidate: { id: string; organizationId: string; workflowKey: WorkflowKey },
     cause: MoveCause,
@@ -159,13 +223,16 @@ export class PolicySuspensionService {
         // retire or a replay may have run since the list was read.
         await this.repository.lockPolicySlot(tx, candidate.organizationId, candidate.workflowKey);
         const policy = await this.repository.findPolicy(tx, candidate.id);
-        if (policy?.status !== 'ACTIVE') return false;
-        assertPolicyTransition(policy.id, policy.status as PolicyStateName, 'SUSPENDED');
+        if (policy?.status !== 'ACTIVE' && policy?.status !== 'PENDING_PLATFORM_APPROVAL') {
+          return false;
+        }
+        const from = policy.status as PolicyStateName;
+        assertPolicyTransition(policy.id, from, 'SUSPENDED');
 
         const matched = await this.repository.transitionPolicy(tx, {
           organizationId: policy.organizationId,
           policyId: policy.id,
-          from: 'ACTIVE',
+          from,
           data: {
             status: 'SUSPENDED',
             suspendedAt: at,
@@ -188,6 +255,7 @@ export class PolicySuspensionService {
             authorOrganizationId: policy.authorOrganizationId,
             workflowKey: policy.workflowKey,
             policyVersion: policy.policyVersion,
+            fromStatus: from,
             reason: SUSPENSION_CAUSE,
             causeEventId: cause.eventId,
             movedOrganizationId: cause.movedOrganizationId,

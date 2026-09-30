@@ -99,8 +99,8 @@ export class OrganizationMovedConsumer {
       callerService: envelope.producer,
     });
     this.logger.info(
-      `${envelope.eventName} ${envelope.eventId}: ${outcome.checked} union-written ` +
-        `policies re-confirmed, ${outcome.suspended.length} suspended`,
+      `${envelope.eventName} ${envelope.eventId}: ${outcome.checked} (union, organization) ` +
+        `pairs re-confirmed, ${outcome.deferred} deferred, ${outcome.suspended.length} suspended`,
     );
   }
 }

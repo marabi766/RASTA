@@ -12,6 +12,14 @@
 -- `activated_at` stays set. `ux_approval_policy_active` covers ACTIVE only, so
 -- suspending frees the slot for the replacement.
 --
+-- ## Rolling back loses the suspension
+--
+-- `down.sql` cannot keep a value the older enum does not have: every SUSPENDED
+-- policy becomes RETIRED (retired when, and by whom, it was suspended) and the
+-- suspension fields — the fact that it was suspended, and why — are dropped
+-- with their columns. Events already published, and audit-service's copy of
+-- them, are the only record left.
+--
 -- ## The enum value and the constraints that name it
 --
 -- PostgreSQL allows ADD VALUE inside a transaction, but the new value cannot

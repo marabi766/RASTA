@@ -15,7 +15,8 @@ import { RastaError } from '@rasta/nest-common';
  *                                                                       RETIRED
  * ```
  *
- * An ACTIVE policy is also SUSPENDED — by the system, never by a person — when
+ * An ACTIVE or PENDING_PLATFORM_APPROVAL policy is also SUSPENDED — by the
+ * system, never by a person — when
  * organization-service says the union that wrote it no longer governs the
  * organization it was written for (ORGANIZATION_MOVED, Q-83). SUSPENDED is
  * terminal: a suspended policy never governs and is never reactivated, and a
@@ -59,7 +60,7 @@ export type PolicyStateName = (typeof POLICY_STATES)[number];
 
 export const POLICY_TRANSITIONS: Readonly<Record<PolicyStateName, readonly PolicyStateName[]>> = {
   DRAFT: ['PENDING_PLATFORM_APPROVAL'],
-  PENDING_PLATFORM_APPROVAL: ['ACTIVE', 'REJECTED'],
+  PENDING_PLATFORM_APPROVAL: ['ACTIVE', 'REJECTED', 'SUSPENDED'],
   ACTIVE: ['RETIRED', 'SUSPENDED'],
   REJECTED: [],
   RETIRED: [],
