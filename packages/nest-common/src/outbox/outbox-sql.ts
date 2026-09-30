@@ -1,6 +1,6 @@
 import { toStreamSeq } from '@rasta/contracts';
 
-import type { OutboxRow } from './outbox';
+import { orderForPublish, type OutboxRow } from './outbox';
 
 /**
  * The SQL behind every service's outbox store.
@@ -68,6 +68,8 @@ export interface RawOutboxRow {
   published_at: Date | null;
   attempts: number;
   last_error: string | null;
+  /** `BIGINT`, so Prisma's raw query returns a `bigint`; NULL before B3. */
+  stream_seq: bigint | number | null;
 }
 
 export function toOutboxRow(row: RawOutboxRow): OutboxRow {
@@ -87,6 +89,9 @@ export function toOutboxRow(row: RawOutboxRow): OutboxRow {
     publishedAt: row.published_at,
     attempts: row.attempts,
     lastError: row.last_error,
+    // Converted at the one boundary that checks it (see `toStreamSeq`).
+    streamSeq:
+      row.stream_seq === null || row.stream_seq === undefined ? null : toStreamSeq(row.stream_seq),
   };
 }
 
@@ -298,6 +303,14 @@ interface ClaimedExtras {
  * (12 same-millisecond ULIDs, 6 inversions, measured), so ties used to break
  * arbitrarily. This buys deterministic *selection* (G6). It does not buy
  * semantic per-aggregate ordering, which is D-027 and stays open.
+ *
+ * The one thing done about it here: the rows of a claimed batch are handed
+ * back with each stream's sequenced rows in `stream_seq` order
+ * ({@link orderForPublish}), because `created_at` may be a transaction *start*
+ * and so disagree with commit order. That is a re-order of what was already
+ * selected — the selection, the four streams and the plan are untouched — and
+ * it covers one batch only. A stream whose earlier row is held by another
+ * relay or in backoff is ADR-051 B4's head-of-line claim, not this.
  */
 export async function claimPendingSql(
   client: OutboxSqlClient,
@@ -363,6 +376,7 @@ export async function claimPendingSql(
      RETURNING o.id, o.aggregate_type, o.aggregate_id, o.event_name, o.event_version,
                o.topic, o.partition_key, o.payload, o.headers, o.organization_id,
                o.correlation_id, o.created_at, o.published_at, o.attempts, o.last_error,
+               o.stream_seq,
                o.claim_token,
                (due.prev_expires_at IS NOT NULL) AS reclaimed`,
     options.token,
@@ -389,7 +403,10 @@ export async function claimPendingSql(
     // emit the updated rows in any order, and it does. Without this the relay
     // would hand Kafka a batch in an arbitrary order on every poll, which is
     // the ordering guarantee G6 exists to provide.
-    rows: rows.map(toOutboxRow).sort(byCreatedAtThenId),
+    //
+    // Then `stream_seq` overrules `created_at` *within one stream*: created_at is
+    // the transaction's start, stream_seq is its commit order (ADR-051 § R4).
+    rows: orderForPublish(rows.map(toOutboxRow).sort(byCreatedAtThenId)),
     reclaimed: rows.filter((row) => row.reclaimed).length,
   };
 }
