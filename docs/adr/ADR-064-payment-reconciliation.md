@@ -35,6 +35,11 @@ now + grace`) در همان تراکنشی که ساخته می‌شود، و ه
 «شاید گیر کرده باشد» لازم نیست. `grace` فقط آشتی‌دهنده را از درخواست‌های در جریان دور نگه می‌دارد؛ درستی به آن وابسته
 نیست (§ ۴).
 
+> **اصلاح (Q-B2، تصمیم مدیر پروژه روی طرح گام B، #161):** زمان‌بندی در جدول جداگانهٔ `payment_reconciliation_task` است
+> (§ ۸)، نه ستون‌هایی روی `payment_intent`. برای بازپرداخت، تسک در **همان تراکنشی** باز می‌شود که مبلغ را Hold یا علامت را
+> ثبت می‌کند، و در **همان تراکنشی** بسته می‌شود که نتیجه را ثبت می‌کند. Intentهای Top-up گیرکرده (U1–U5، U7، U8) گام C
+> است، روی همین جدول (Q-B1).
+
 ### ۲. بازپرداخت اپراتور وجوه را Hold می‌کند — در گام B0 (تصمیم فنی مدیر پروژه، Q-A؛ بازبینی دور ۱ #143)
 
 بررسی موجودی پیش از Provider به‌تنهایی کافی نیست: تراکنش بررسی Commit می‌شود و قفل‌ها را آزاد می‌کند، خرجی هم‌زمان در
@@ -111,6 +116,9 @@ getStatus(query: { paymentIntentId: string; providerReference?: string; idempote
 
 ### ۴. آشتی‌دهنده
 
+> پس از اصلاح § ۸، Claim و Lease روی `payment_reconciliation_task` است و `reconcile_state` زیر نام `status` آن
+> (`PENDING`/`ESCALATED`/`DONE`) می‌آید؛ شکل سازوکار همان است.
+
 - **Claim:** یک تراکنش کوتاه، تنها Query بی‌محدودهٔ مستأجر (`runUnscoped` با دلیل): `UPDATE … WHERE id IN (SELECT … WHERE
 reconcile_state='SCHEDULED' AND next_reconcile_at <= now() AND <lease آزاد> ORDER BY next_reconcile_at LIMIT $batch
 FOR UPDATE SKIP LOCKED) RETURNING id, organization_id` — شکل Claim بادوام ADR-050، Commit پیش از هر فراخوانی Provider.
@@ -145,8 +153,17 @@ ADR-024 است.
   مسیرهایی اعمال می‌شود که پاسخ Provider، با کنشگر و دلیل روی رویداد `PAYMENT_RECONCILIATION_RESOLVED`.
 
 مجوز: فهرست نقش پیکربندی‌پذیر `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES`، **پیش‌فرض فقط `SYSTEM_ADMIN`**. حل‌کننده
-نمی‌تواند همان کسی باشد که Intent را ساخت (`created_by`). تأیید دونفره برای `resolve` کلید پیکربندی
-`ECONOMIC_PAYMENT_RECONCILIATION_FOUR_EYES`، **پیش‌فرض خاموش** (امروز یک مدیر پلتفرم هست) و مستند.
+نمی‌تواند همان کسی باشد که Intent را ساخت (`created_by`).
+
+**تأیید دونفره (Q-B3، تصمیم مدیر پروژه؛ ساخته می‌شود در گام B3):**
+
+- `resolve` حلی در وضعیت `PENDING_APPROVAL` می‌سازد و **هیچ پولی جابه‌جا نمی‌کند**.
+- `SYSTEM_ADMIN` دوم آن را تأیید یا رد می‌کند. او نه پیشنهاددهنده است و نه سازندهٔ Intent.
+- **فقط تأیید** تابع اعمال (همان تابعی که پاسخ Provider را اعمال می‌کند، با همان قفل‌ها و Fence) را اجرا می‌کند.
+- هر دو کنشگر و شاهد (`evidenceReference`) روی رویداد `PAYMENT_RECONCILIATION_RESOLVED` و در سابقهٔ حسابرسی می‌آیند.
+- کلید `ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES` **پیش‌فرض `true`** است. اعتبارسنجی پیکربندی `false` را رد
+  می‌کند مگر `NODE_ENV` برابر `development` یا `test` باشد.
+- `requeue` تک‌کنشگر می‌ماند: پولی جابه‌جا نمی‌کند و فقط تسک را به صف برمی‌گرداند.
 
 ### ۷. کجا اجرا می‌شود: Timer درون فرایند، نه Temporal
 
@@ -156,15 +173,28 @@ Crash فقط یک Claim را از دست می‌دهد و Lease آن را برم
 به دلیل سه سازوکار § ۴ امن است؛ Leader Election لازم نیست. درز آینده `reconcileOne(intentId)` است که یک Activity تمپورال
 می‌تواند آن را بپوشاند.
 
-### ۸. شِما و Index
+### ۸. شِما و Index (اصلاح‌شده، Q-B2)
 
-- وضعیت تازهٔ `REFUND_PENDING`؛ ستون‌های `reconcile_state`، `next_reconcile_at`، `reconcile_attempts`،
-  `reconcile_last_outcome` (فقط کد)، `reconcile_lease_until`، `escalated_at`، `refund_requested_at`؛ CHECK هم‌خوانی.
-  Migration برگشت‌پذیر با `down.sql` که اگر ردیف `REFUND_PENDING` بماند با راهنما رد می‌کند.
-- **Index جزئی میان‌مستأجری** `payment_intent (next_reconcile_at) WHERE reconcile_state = 'SCHEDULED'` با ورودی
-  `EXEMPTIONS.economic` در `scripts/check-tenant-index-order-lib.mjs` (تصمیم مدیر پروژه). توجیه: Job سیستمی، محدود به
-  ردیف‌های زنده، و **هرگز از درخواست مستأجر در دسترس نیست**. تستی ثابت می‌کند هیچ Query محدود به مستأجر از آن استفاده
-  نمی‌کند.
+طرح نخست یک وضعیت تازهٔ `REFUND_PENDING` و ستون‌های `reconcile_*` روی `payment_intent` بود. **جایگزین شد** (تصمیم مدیر
+پروژه، Q-B2؛ الگوی صف آشتی #148):
+
+- **علامت‌ها در `failure_reason` می‌مانند**، همان‌جا که B0 گذاشت. آن‌ها وضعیت پول را توصیف می‌کنند. Enum وضعیت Intent و
+  CHECK چرخهٔ عمرش تغییر نمی‌کنند.
+- **زمان‌بندی در جدول جداگانه:** `payment_reconciliation_task`، با ستون‌های `kind` (`REFUND` | `UNCREDITED_REFUND`)،
+  `status` (`PENDING` | `ESCALATED` | `DONE`)، `attempts`، `next_attempt_at`، `lease_until`/`lease_token` (Fence)،
+  `last_outcome` و `resolution` (فقط کد)، `escalated_at`، `resolved_by` و `done_at`.
+- **کلید خارجی ترکیبی** `(organization_id, payment_intent_id)` → `payment_intent(organization_id, id)`: تسک به Intent
+  **در مستأجر خودش** بسته است.
+- **CHECKها:** جفت Lease؛ `DONE` ⇔ `done_at`، `resolution` و `resolved_by`؛ `ESCALATED` ⇒ `escalated_at`؛ کد بسته؛
+  `attempts` نامنفی.
+- **Indexها:**
+  - `ux_payment_reconciliation_open`: یکتا روی `(payment_intent_id) WHERE status <> 'DONE'`، یعنی حداکثر یک تسک باز برای
+    هر Intent.
+  - `ix_payment_reconciliation_due`: روی `(next_attempt_at) WHERE status = 'PENDING'`. تک‌ستونی است، پس بررسی ترتیب Index
+    مستأجر آن را نمی‌گیرد و **استثنایی لازم نیست**.
+- **Migration** (`20260930200000`، گام B1) برای هر Intent علامت‌دار موجود یک تسک `PENDING` سررسیده می‌نویسد. `down.sql`
+  تا وقتی تسکی باز است با راهنما رد می‌کند. هر دو را `verify-migration-reversible.mjs economic` روی داده می‌آزماید.
+- **تست جداسازی مستأجر:** مستأجر دیگر تسک را نه می‌خواند، نه می‌بندد، نه روی Intent دیگری باز می‌کند.
 
 ### ۹. رویدادها
 
@@ -181,18 +211,18 @@ promtool.
 
 ## گام‌ها
 
-| گام    | محتوا                                                                                                                | PR   |
-| ------ | -------------------------------------------------------------------------------------------------------------------- | ---- |
-| A      | طرح STEP 0 و همین ADR، Q-81، Q-82                                                                                    | #140 |
-| **B0** | R2: Hold بازپرداخت و چهار علامت آن (§ ۲)؛ U6: بازپرداخت بی‌پاسخ نامعلوم است، نه رد                                   | #143 |
-| B      | Port و Mock، Timeout، Migration (انتقال علامت‌های B0 به `REFUND_PENDING`)، نشانگر از لحظهٔ تولد، رویدادهای بازپرداخت | —    |
-| C      | آشتی‌دهنده، پیکربندی، متریک و هشدار، تست‌های هم‌زمانی و جداسازی مستأجر                                               | —    |
-| D      | Endpoint حل انسانی، OpenAPI، Runbook، به‌روزرسانی حافظهٔ پروژه و D-035                                               | —    |
+| گام    | محتوا                                                                                                                 | PR   |
+| ------ | --------------------------------------------------------------------------------------------------------------------- | ---- |
+| A      | طرح STEP 0 و همین ADR، Q-81، Q-82                                                                                     | #140 |
+| **B0** | R2: Hold بازپرداخت و چهار علامت آن (§ ۲)؛ U6: بازپرداخت بی‌پاسخ نامعلوم است، نه رد                                    | #143 |
+| B1     | جدول تسک، Migration با Backfill، تولد تسک با Hold یا علامت و مرگش با نتیجه در همان تراکنش، تست جداسازی مستأجر (§ ۸)   | #161 |
+| B2     | آشتی‌دهنده (`SKIP LOCKED`، Lease، Fence)، `getRefundStatus` در Port و Mock، Timeout، جدول تصمیم، تشدید، متریک و هشدار | —    |
+| B3     | مسیر اپراتور با تأیید دونفره (§ ۶)، حذف `UPDATE` دستی Runbook، OpenAPI، به‌روزرسانی حافظهٔ پروژه و D-035              | —    |
+| C      | Intentهای Top-up گیرکرده (U1–U5، U7، U8) روی همان جدول و آشتی‌دهنده؛ `getStatus` پرداخت و سیاست Capture (Q-81)        | —    |
 
-> **دامنهٔ گام B (تصمیم مدیر پروژه، بازبینی نهایی #143):** بازیابی Intentهای علامت‌دار کهنه از C و D به B می‌آید و B باید دست‌کم این‌ها
-> را داشته باشد: اسکن پایدار `REFUND_REQUESTED` کهنه و علامت‌های دیگر، پرسش وضعیت از Provider پیش از حل، حل زیر قفل Intent و کیف پول،
-> رویداد و متریک تشدید، و مسیر اپراتور (`SYSTEM_ADMIN`، شاهد الزامی). تقسیم دقیق در طرح STEP 0 گام B می‌آید؛ جدول بالا تا آن زمان
-> تقسیم پیشین است.
+> **دامنهٔ گام B (تصمیم مدیر پروژه، بازبینی نهایی #143 و طرح #161):** اسکن پایدار `REFUND_REQUESTED` کهنه و علامت‌های دیگر،
+> پرسش وضعیت از Provider پیش از حل، حل زیر قفل Intent و کیف پول، رویداد و متریک تشدید، و مسیر اپراتور (`SYSTEM_ADMIN`، شاهد
+> الزامی، تأیید دونفره). طرح: `docs/evidence/payment-reconciler/step-b-plan.md` (#161).
 
 ## Consequences
 
@@ -200,7 +230,7 @@ promtool.
   آزاد می‌شود. دو مسیر دوبار-ارزش بسته‌اند.
 - **منفی:** Mock پس از Restart همیشه `UNKNOWN` است، پس در Stack نمایشی تشدید مسیر عادی Intentهای گیرکرده است — پاسخ صادقانه.
   هر بازپرداخت یک جفت `FUNDS_HELD`/`FUNDS_RELEASED` در تاریخچه دارد. تلاش دوباره با همان کلید که امروز `422` می‌گیرد پس از
-  گام C نتیجه‌ای پایانی می‌گیرد. `down.sql` نوع Enum را بازمی‌سازد و قفل کوتاهی می‌گیرد.
+  گام C نتیجه‌ای پایانی می‌گیرد. `down.sql` صف آشتی تا وقتی تسکی باز است رد می‌کند.
 - **ممنوع می‌ماند:** ویرایش ورودی دفتر کل، `float` برای پول، ادعای اتصال بانکی، Business Logic در `packages/`.
 
 ## Alternatives Considered
