@@ -189,6 +189,18 @@ export function DossierScreen({ result, assetId, editForm, notice }: DossierScre
       <PageHeader
         title={asset.name}
         description={`${assetTypeLabel(asset.type)} — ${result.data.organizationName ?? 'سازمان نامشخص'}`}
+        actions={
+          // Only a link. Whether this person may report work is decided on the
+          // page it leads to, which offers the form to the roles that can use
+          // it and nothing to the rest — so there is no role check to keep in
+          // step with maintenance-service here.
+          <ButtonLink
+            tone="secondary"
+            href={`/maintenance?assetId=${encodeURIComponent(assetId)}#report-request`}
+          >
+            ثبت درخواست نگهداری
+          </ButtonLink>
+        }
       />
 
       {notice ? <Alert tone="success">{NOTICES[notice]}</Alert> : null}
