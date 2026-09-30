@@ -27,9 +27,7 @@ const envelope = (eventName: string, payload: unknown): EventEnvelope =>
     payload,
   }) as EventEnvelope;
 
-function build(
-  reconfirmAll = jest.fn().mockResolvedValue({ checked: 2, deferred: 0, suspended: ['APL_1'] }),
-) {
+function build(enqueueMove = jest.fn().mockResolvedValue({ candidates: 2, queued: 2 })) {
   const info = jest.fn();
   const started: { handler?: EventHandler } = {};
   const consumer = new OrganizationMovedConsumer(
@@ -37,15 +35,15 @@ function build(
       started.handler = handler;
       return { start: async () => undefined, stop: async () => undefined } as EventConsumer;
     },
-    { reconfirmAll } as unknown as PolicySuspensionService,
+    { enqueueMove } as unknown as PolicySuspensionService,
     { info, warn: jest.fn(), debug: jest.fn() },
   );
-  return { consumer, reconfirmAll, info, started };
+  return { consumer, enqueueMove, info, started };
 }
 
 describe('the ORGANIZATION_MOVED consumer', () => {
   it('uses the trigger only: the moved organization, the event and the correlation id', async () => {
-    const { consumer, reconfirmAll } = build();
+    const { consumer, enqueueMove } = build();
     await consumer.handle(
       envelope('ORGANIZATION_MOVED', {
         organizationId: 'ORG_M',
@@ -57,35 +55,34 @@ describe('the ORGANIZATION_MOVED consumer', () => {
         reason: 'reorganisation',
       }),
     );
-    expect(reconfirmAll).toHaveBeenCalledTimes(1);
-    expect(reconfirmAll).toHaveBeenCalledWith({
+    expect(enqueueMove).toHaveBeenCalledTimes(1);
+    expect(enqueueMove).toHaveBeenCalledWith({
       eventId: 'EVT_1',
       movedOrganizationId: 'ORG_M',
       correlationId: 'COR_1',
-      callerService: 'organization-service',
     });
   });
 
   it.each(['ORGANIZATION_CREATED', 'ORGANIZATION_UPDATED', 'ORGANIZATION_STATUS_CHANGED'])(
     'skips %s',
     async (name) => {
-      const { consumer, reconfirmAll } = build();
+      const { consumer, enqueueMove } = build();
       await expect(consumer.handle(envelope(name, { organizationId: 'ORG_M' }))).resolves.toBe(
         'SKIPPED',
       );
-      expect(reconfirmAll).not.toHaveBeenCalled();
+      expect(enqueueMove).not.toHaveBeenCalled();
     },
   );
 
   it.each([{}, { organizationId: '' }, { organizationId: 7 }, null])(
     'dead-letters a payload that names no organization (%j), without asking anyone',
     async (payload) => {
-      const { consumer, reconfirmAll } = build();
+      const { consumer, enqueueMove } = build();
       await expect(consumer.handle(envelope('ORGANIZATION_MOVED', payload))).rejects.toMatchObject({
         name: 'UnprocessableEventError',
         reason: 'VALIDATION_FAILED',
       });
-      expect(reconfirmAll).not.toHaveBeenCalled();
+      expect(enqueueMove).not.toHaveBeenCalled();
     },
   );
 
@@ -118,7 +115,7 @@ describe('the ORGANIZATION_MOVED consumer', () => {
         eachMessage = config.eachMessage;
       },
     };
-    const { reconfirmAll } = build();
+    const { enqueueMove } = build();
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
     const factory = organizationMovesConsumerFactory(
       { brokers: ['localhost:9092'], clientId: 'construction-service-organization-moves' },
@@ -132,7 +129,7 @@ describe('the ORGANIZATION_MOVED consumer', () => {
         };
         return real;
       },
-      { reconfirmAll } as unknown as PolicySuspensionService,
+      { enqueueMove } as unknown as PolicySuspensionService,
       logger,
     );
 
@@ -145,8 +142,8 @@ describe('the ORGANIZATION_MOVED consumer', () => {
       partition: 0,
       message: { value: Buffer.from(JSON.stringify(replay)), headers: {}, offset: '7', key: null },
     });
-    expect(reconfirmAll).toHaveBeenCalledTimes(1);
-    expect(reconfirmAll).toHaveBeenCalledWith(
+    expect(enqueueMove).toHaveBeenCalledTimes(1);
+    expect(enqueueMove).toHaveBeenCalledWith(
       expect.objectContaining({ eventId: 'EVT_1', movedOrganizationId: 'ORG_M' }),
     );
   });

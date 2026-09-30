@@ -16,6 +16,7 @@ import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka
 import { FakeHierarchy, databaseUrl } from './helpers';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness
@@ -181,6 +182,9 @@ export async function startApi(): Promise<ApiHarness> {
     // The ORGANIZATION_MOVED consumer is proven without a broker in
     // organization-moved.int-spec.ts; nothing here subscribes.
     .overrideProvider(OrganizationMovedConsumer)
+    .useValue(inertRelay)
+    // Nor does the sweeper tick: organization-moved.int-spec.ts drives runOnce().
+    .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inertRelay)
     // The HTTP client to organization-service is proven against its contract
     // in organization-directory.int-spec.ts; here the hierarchy is given.

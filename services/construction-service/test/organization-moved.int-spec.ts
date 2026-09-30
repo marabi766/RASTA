@@ -1,11 +1,9 @@
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { CreatePolicyDto } from '../src/approval/dto';
 import type { WorkflowKey } from '../src/approval/approval.state-machine';
-import { EventPublisher } from '../src/events/publisher';
-import { OrganizationDirectory } from '../src/organization/organization-directory';
-import { PolicySuspensionService, SYSTEM_ACTOR } from '../src/approval/policy-suspension.service';
+import { SYSTEM_ACTOR } from '../src/approval/policy-suspension.service';
 import {
   approvalsOf,
   asAdmin,
@@ -116,6 +114,34 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       (event) => event.eventName === 'APPROVAL_POLICY_SUSPENDED',
     );
 
+  /**
+   * The consumer's handler, then one sweep: what a delivery and the sweeper's
+   * next tick do together. The handler alone only queues (see `queue` below).
+   */
+  const settle = async (event: EventEnvelope) => {
+    const outcome = await w.moves.handle(event);
+    await w.sweeper.runOnce();
+    return outcome;
+  };
+
+  /** The tasks of a policy, oldest first. */
+  const tasksOf = (policyId: string) =>
+    runUnscoped('the suite reads the queue of the policies it wrote', () =>
+      w.prisma.client.policyReconciliationTask.findMany({
+        where: { policyId },
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
+
+  /** Makes every open task of this suite's organizations due now, and lets its lease lapse. */
+  const makeDue = () =>
+    runUnscoped('the suite moves the retry time of its own tasks', () =>
+      w.prisma.client.policyReconciliationTask.updateMany({
+        where: { organizationId: { in: organizations }, status: 'PENDING' },
+        data: { nextAttemptAt: new Date(0), leaseUntil: null, leaseToken: null },
+      }),
+    );
+
   beforeAll(() => {
     w = wire();
   });
@@ -138,7 +164,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       w.hierarchy.disown(county);
 
       const event = moved(county);
-      await expect(w.moves.handle(event)).resolves.toBeUndefined();
+      await expect(settle(event)).resolves.toBeUndefined();
 
       const suspended = await row(policyId);
       expect(suspended).toMatchObject({
@@ -174,7 +200,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       await inForce(union, county);
       const project = await readyProject(w, county);
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       await expect(
         w.approvals.confirmGoverningPolicy(county, 'project.execution'),
@@ -195,7 +221,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const other = await inForce(union, staying);
 
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await statusOf(execution)).toBe('SUSPENDED');
       expect(await statusOf(completion)).toBe('SUSPENDED');
@@ -210,7 +236,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
 
       // The county moved away, taking the village with it.
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await statusOf(policyId)).toBe('SUSPENDED');
       expect((await suspensions(village)).length).toBe(1);
@@ -229,7 +255,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       // The county moves up, directly under the root: the root still governs
       // it, the union no longer does.
       w.hierarchy.adopt(root, county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await statusOf(byRoot)).toBe('ACTIVE');
       expect(await statusOf(byUnion)).toBe('SUSPENDED');
@@ -244,7 +270,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
 
       // Neither depends on the hierarchy: nobody governs `county`, and the union
       // is known to nobody as anything but itself.
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await statusOf(own)).toBe('ACTIVE');
       expect(await statusOf(platform)).toBe('ACTIVE');
@@ -262,7 +288,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const [before] = await approvalsOf(w, county, project.id);
 
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
       expect(await statusOf(policyId)).toBe('SUSPENDED');
 
       // The snapshot names the suspended policy, unchanged, and still decides.
@@ -288,12 +314,12 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       w.hierarchy.disown(county);
       const event = moved(county);
 
-      await w.moves.handle(event);
+      await settle(event);
       const first = await row(policyId);
       // The handler cannot tell the main topic from `.retry`: the same event
       // again is the same call.
-      await w.moves.handle(event);
-      await w.moves.handle(event);
+      await settle(event);
+      await settle(event);
 
       const again = await row(policyId);
       expect(again).toMatchObject({ status: 'SUSPENDED', version: first!.version });
@@ -301,19 +327,30 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       expect((await suspensions(county)).length).toBe(1);
     });
 
-    it('a replayed event finds an outage over and suspends then, not never', async () => {
+    it('an outage leaves the policy untouched and the task queued; it is suspended when the answer comes, with no second move', async () => {
       const { union, county } = tree();
       const policyId = await inForce(union, county);
       w.hierarchy.disown(county);
       const event = moved(county);
 
       w.hierarchy.unavailable = true;
-      await expect(w.moves.handle(event)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      await settle(event); // the handler queues; the sweep cannot ask, and does not throw
       expect(await statusOf(policyId)).toBe('ACTIVE');
+      const [task] = await tasksOf(policyId);
+      expect(task).toMatchObject({
+        status: 'PENDING',
+        attempts: 1,
+        lastErrorCode: 'UPSTREAM_UNAVAILABLE',
+        leaseToken: null,
+      });
+      // Backed off: not due again yet, so a sweep right now does nothing.
+      expect(await w.sweeper.runOnce()).toMatchObject({ claimed: 0 });
 
       w.hierarchy.unavailable = false;
-      await w.moves.handle(event);
+      await makeDue();
+      await w.sweeper.runOnce();
       expect(await statusOf(policyId)).toBe('SUSPENDED');
+      expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'DONE', lastErrorCode: null });
     });
 
     it('a stale event replayed after the organization moved back suspends nothing', async () => {
@@ -324,7 +361,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       w.hierarchy.disown(county);
       const out = moved(county);
       w.hierarchy.adopt(union, county);
-      await w.moves.handle(out);
+      await settle(out);
 
       expect(await statusOf(policyId)).toBe('ACTIVE');
       expect(await suspensions(county)).toEqual([]);
@@ -340,8 +377,8 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       // Out of the union, then under another organization — still not the union's.
       w.hierarchy.disown(county);
       w.hierarchy.adopt(other, county);
-      await w.moves.handle(second);
-      await w.moves.handle(first);
+      await settle(second);
+      await settle(first);
 
       expect(await statusOf(policyId)).toBe('SUSPENDED');
       expect((await suspensions(county)).length).toBe(1);
@@ -351,10 +388,10 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const { union, county } = tree();
       const suspendedId = await inForce(union, county);
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       w.hierarchy.adopt(union, county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
       expect(await statusOf(suspendedId)).toBe('SUSPENDED');
       await expect(
         w.approvals.confirmGoverningPolicy(county, 'project.execution'),
@@ -372,32 +409,23 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       expect(await statusOf(suspendedId)).toBe('SUSPENDED');
     });
 
-    it('a policy retired or replaced since it was listed is left alone', async () => {
+    it('a policy retired or replaced after it was queued is left alone, and its task is done', async () => {
       const { union, county } = tree();
       const policyId = await inForce(union, county);
-      const candidate = {
-        id: policyId,
-        organizationId: county,
-        authorOrganizationId: union,
-        workflowKey: 'project.execution' as const,
-        policyVersion: 1,
-      };
-      // The list was read while it was in force; then it was retired.
-      jest
-        .spyOn(w.approvalRepository, 'listUnionPoliciesToReconfirm')
-        .mockResolvedValueOnce([candidate]);
-      await asSetter(union, () => w.policies.retire(policyId, { expectedVersion: 3 }));
       w.hierarchy.disown(county);
+      await w.moves.handle(moved(county)); // queued while in force
+      await asSetter(union, () => w.policies.retire(policyId, { expectedVersion: 3 }));
 
-      await w.moves.handle(moved(county));
+      await w.sweeper.runOnce();
 
       expect(await statusOf(policyId)).toBe('RETIRED');
       expect(await suspensions(county)).toEqual([]);
+      expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'DONE' });
     });
   });
 
   describe('fail closed', () => {
-    it('suspends what it could confirm, refuses what it could not, and rethrows so the event is retried', async () => {
+    it('suspends what it could confirm, leaves what it could not, and retries the latter later', async () => {
       const { union, county } = tree();
       const stranded = await inForce(union, county);
       const unknown = org();
@@ -411,20 +439,26 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
         return answer(scope, organizationId);
       });
 
-      await expect(w.moves.handle(moved(county))).rejects.toMatchObject({
-        code: 'UPSTREAM_TIMEOUT',
-      });
+      await settle(moved(county));
+
       expect(await statusOf(stranded)).toBe('SUSPENDED');
       expect(await statusOf(unconfirmed)).toBe('ACTIVE');
+      expect((await tasksOf(stranded))[0]).toMatchObject({ status: 'DONE' });
+      expect((await tasksOf(unconfirmed))[0]).toMatchObject({
+        status: 'PENDING',
+        attempts: 1,
+        lastErrorCode: 'UPSTREAM_TIMEOUT',
+      });
     });
 
-    it('asks once per (union, organization) however many policies name them', async () => {
+    it('asks once per (union, organization) in a sweep however many policies name them', async () => {
       const { union, county } = tree();
       await inForce(union, county, 'project.execution');
       await inForce(union, county, 'project.completion');
+      await w.moves.handle(moved(county));
       w.hierarchy.asked.length = 0;
 
-      await w.moves.handle(moved(county));
+      await w.sweeper.runOnce();
 
       expect(w.hierarchy.asked.filter(([scope, id]) => scope === union && id === county)).toEqual([
         [union, county],
@@ -439,13 +473,13 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       w.hierarchy.disown(county);
       const other = { ...moved(county), eventName: 'ORGANIZATION_UPDATED' };
 
-      await expect(w.moves.handle(other)).resolves.toBe('SKIPPED');
+      await expect(settle(other)).resolves.toBe('SKIPPED');
       expect(await statusOf(policyId)).toBe('ACTIVE');
     });
 
     it('dead-letters an ORGANIZATION_MOVED that names no organization, without retrying', async () => {
       const broken = { ...moved(org()), payload: {} };
-      await expect(w.moves.handle(broken)).rejects.toMatchObject({
+      await expect(settle(broken)).rejects.toMatchObject({
         name: 'UnprocessableEventError',
         reason: 'VALIDATION_FAILED',
       });
@@ -472,7 +506,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const policyId = await pendingPolicy(union, county);
       w.hierarchy.disown(county);
 
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await row(policyId)).toMatchObject({
         status: 'SUSPENDED',
@@ -499,7 +533,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       );
       w.hierarchy.disown(county);
 
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await statusOf(draft.id)).toBe('DRAFT');
       await expect(
@@ -532,7 +566,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       await atGate; // approval has been told "within"; its transaction has not begun
 
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county)); // the move's handler runs first
+      await settle(moved(county)); // the move's handler runs first
       release();
 
       await expect(approving).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
@@ -543,26 +577,17 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       ).resolves.toBeNull();
     });
 
-    it('approval that commits first is suspended by the consumer, whatever it listed', async () => {
+    it('approval that commits first is suspended by the sweeper, whatever the task was queued for', async () => {
       const { union, county } = tree();
       const policyId = await pendingPolicy(union, county);
-      const candidate = {
-        id: policyId,
-        organizationId: county,
-        authorOrganizationId: union,
-        workflowKey: 'project.execution' as const,
-        policyVersion: 1,
-      };
-      // The consumer listed the policy while it was pending; approval then
-      // committed it, and only then did the answer come back "outside".
-      jest
-        .spyOn(w.approvalRepository, 'listUnionPoliciesToReconfirm')
-        .mockResolvedValueOnce([candidate]);
+      // Queued while the policy was pending; approval then committed it, and
+      // only then did the answer come back "outside".
+      await w.moves.handle(moved(county));
       await asPlatform(() => w.policies.approve(policyId, { expectedVersion: 2 }));
       expect(await statusOf(policyId)).toBe('ACTIVE');
       w.hierarchy.disown(county);
 
-      await w.moves.handle(moved(county));
+      await w.sweeper.runOnce();
 
       expect(await statusOf(policyId)).toBe('SUSPENDED');
       const [announced] = await suspensions(county);
@@ -572,70 +597,181 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
     });
   });
 
-  describe('bounded work per delivery (D-041)', () => {
-    const bounded = (maxLookups: number, budgetMs = 30_000) =>
-      new PolicySuspensionService(
-        w.prisma,
-        w.approvalRepository,
-        new EventPublisher(w.env),
-        w.hierarchy as unknown as OrganizationDirectory,
-        { maxLookups, budgetMs },
-      );
-    const cause = (organizationId: string) => ({
-      eventId: ulid(),
-      movedOrganizationId: organizationId,
-      correlationId: ulid(),
-      callerService: 'organization-service',
-    });
+  describe('the durable queue (D-041)', () => {
+    /** `count` organizations under `union`, each with a union-written policy in force. */
+    async function manyStranded(count: number): Promise<{ union: string; policies: string[] }> {
+      const union = org();
+      const policies: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const child = org();
+        w.hierarchy.adopt(union, child);
+        policies.push(await inForce(union, child));
+        w.hierarchy.disown(child);
+      }
+      return { union, policies };
+    }
 
-    it('asks the moved organization first and leaves the rest to the check at round opening', async () => {
-      const { union, county } = tree();
-      const moved1 = await inForce(union, county);
-      const other = org();
-      w.hierarchy.adopt(union, other);
-      const stranded = await inForce(union, other);
-      w.hierarchy.disown(county);
-      w.hierarchy.disown(other);
-      w.hierarchy.asked.length = 0;
-
-      const outcome = await bounded(1).reconfirmAll(cause(county));
-
-      expect(outcome).toMatchObject({ checked: 1, suspended: [moved1] });
-      expect(outcome.deferred).toBeGreaterThanOrEqual(1);
-      expect(w.hierarchy.asked).toEqual([[union, county]]);
-      // Not asked, so still in force — but never usable: a round is refused.
-      expect(await statusOf(stranded)).toBe('ACTIVE');
-      await expect(
-        w.approvals.confirmGoverningPolicy(other, 'project.execution'),
-      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
-    });
-
-    it('asks nothing once the time budget is spent', async () => {
+    it('the handler only queues: no hierarchy lookup, a task per stranded policy, nothing suspended', async () => {
       const { union, county } = tree();
       const policyId = await inForce(union, county);
       w.hierarchy.disown(county);
       w.hierarchy.asked.length = 0;
 
-      const outcome = await bounded(100, 0).reconfirmAll(cause(county));
+      await w.moves.handle(moved(county));
 
-      expect(outcome).toMatchObject({ checked: 0, suspended: [] });
       expect(w.hierarchy.asked).toEqual([]);
       expect(await statusOf(policyId)).toBe('ACTIVE');
+      const [task] = await tasksOf(policyId);
+      expect(task).toMatchObject({
+        organizationId: county,
+        unionId: union,
+        movedOrganizationId: county,
+        status: 'PENDING',
+        attempts: 0,
+      });
     });
 
-    it('asks an unreachable organization-service once per attempt, not once per pair', async () => {
+    it('more policies than a sweep takes all end SUSPENDED once the sweeper has drained, with no second move', async () => {
+      const { policies } = await manyStranded(5);
+      await w.moves.handle(moved(org()));
+      const small = w.sweeperWith({ batchSize: 2 });
+
+      const sweeps = [];
+      // Bounded batches, then nothing due; other suites' leftovers may add tasks.
+      for (let guard = 0; guard < 50; guard += 1) {
+        const outcome = await small.runOnce();
+        sweeps.push(outcome);
+        if (outcome.claimed === 0) break;
+        expect(outcome.claimed).toBeLessThanOrEqual(2);
+      }
+
+      expect(sweeps.length).toBeGreaterThan(1);
+      for (const policyId of policies) expect(await statusOf(policyId)).toBe('SUSPENDED');
+    });
+
+    it('a replay, a `.retry` delivery and a second move coalesce into one open task', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      w.hierarchy.disown(county);
+      const event = moved(county);
+
+      await w.moves.handle(event);
+      await w.moves.handle(event); // redelivery, or `.retry`: the same call
+      await w.moves.handle(moved(county)); // another move before the sweep
+
+      const tasks = await tasksOf(policyId);
+      expect(tasks.filter((task) => task.status === 'PENDING').length).toBe(1);
+      expect(tasks.length).toBe(1);
+      expect(tasks[0]?.sourceEventId).toBe(event.eventId);
+      await w.sweeper.runOnce();
+      expect(await statusOf(policyId)).toBe('SUSPENDED');
+      expect((await suspensions(county)).length).toBe(1);
+    });
+
+    it('a replay after the task is done queues a fresh look', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      await settle(moved(county)); // within: DONE, nothing changed
+      expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'DONE' });
+
+      w.hierarchy.disown(county);
+      await settle(moved(county));
+
+      expect((await tasksOf(policyId)).length).toBe(2);
+      expect(await statusOf(policyId)).toBe('SUSPENDED');
+    });
+
+    it('two sweepers running together never suspend a policy twice', async () => {
+      const { policies } = await manyStranded(6);
+      await w.moves.handle(moved(org()));
+
+      const [a, b] = [w.sweeperWith({ batchSize: 3 }), w.sweeperWith({ batchSize: 3 })];
+      for (let round = 0; round < 6; round += 1) await Promise.all([a.runOnce(), b.runOnce()]);
+
+      for (const policyId of policies) {
+        expect(await statusOf(policyId)).toBe('SUSPENDED');
+        const [task] = await tasksOf(policyId);
+        expect((await suspensions(task!.organizationId)).length).toBe(1);
+      }
+    });
+
+    it('a sweeper whose lease was taken back cannot finish the new holder’s task', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      w.hierarchy.disown(county);
+      await w.moves.handle(moved(county));
+
+      const first = await w.reconciliations.claimDue(500, 120, 'TOKEN_A');
+      const mine = first.find((task) => task.policyId === policyId)!;
+      await makeDue(); // the lease lapses ...
+      const second = await w.reconciliations.claimDue(500, 120, 'TOKEN_B'); // ... and another takes it
+      expect(second.map((task) => task.id)).toContain(mine.id);
+
+      expect(await w.reconciliations.markDone(mine)).toBe(0);
+      expect(await w.reconciliations.retryLater(mine, 'INTERNAL', 1)).toBe(0);
+      expect((await tasksOf(policyId))[0]).toMatchObject({
+        status: 'PENDING',
+        leaseToken: 'TOKEN_B',
+      });
+    });
+
+    it('a round opened on a stranded policy suspends it, and is still refused', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      const project = await readyProject(w, county);
+      w.hierarchy.disown(county); // no move event has been handled yet
+
+      await expect(
+        asAdmin(county, () =>
+          w.approvals.request(project.id, { expectedVersion: project.version }),
+        ),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+      expect(await row(policyId)).toMatchObject({ status: 'SUSPENDED', suspendedBy: SYSTEM_ACTOR });
+      const [announced] = await suspensions(county);
+      expect(eventEnvelopeSchema.parse(announced!.payload).payload).toMatchObject({
+        policyId,
+        reason: 'ROUND_OPENING_RECHECK',
+        causeEventId: null,
+        movedOrganizationId: null,
+      });
+    });
+
+    it('a task for one tenant never touches another tenant’s policy', async () => {
+      const { union, county } = tree();
+      const stranded = await inForce(union, county);
+      const otherUnion = org();
+      const otherCounty = org();
+      w.hierarchy.adopt(otherUnion, otherCounty);
+      const kept = await inForce(otherUnion, otherCounty);
+      const keptBefore = await row(kept);
+      w.hierarchy.disown(county);
+
+      await settle(moved(county));
+
+      expect(await statusOf(stranded)).toBe('SUSPENDED');
+      expect(await row(kept)).toMatchObject({ status: 'ACTIVE', version: keptBefore!.version });
+      // Each task names the tenant of its own policy, not the moved organization's.
+      expect((await tasksOf(stranded))[0]).toMatchObject({ organizationId: county });
+      expect((await tasksOf(kept))[0]).toMatchObject({
+        organizationId: otherCounty,
+        status: 'DONE',
+      });
+      expect(await suspensions(otherCounty)).toEqual([]);
+    });
+
+    it('reports the backlog and how long the oldest due task has waited', async () => {
       const { union, county } = tree();
       await inForce(union, county);
-      const other = org();
-      w.hierarchy.adopt(union, other);
-      await inForce(union, other);
-      w.hierarchy.unavailable = true;
-      w.hierarchy.asked.length = 0;
+      w.hierarchy.disown(county);
+      await w.moves.handle(moved(county));
+      await makeDue();
 
-      await expect(w.suspension.reconfirmAll(cause(county))).rejects.toMatchObject({
-        code: 'UPSTREAM_UNAVAILABLE',
-      });
-      expect(w.hierarchy.asked.length).toBe(1);
+      const backlog = await w.reconciliations.backlog();
+      expect(backlog.open).toBeGreaterThanOrEqual(1);
+      expect(backlog.due).toBeGreaterThanOrEqual(1);
+      expect(backlog.oldestDueAgeSeconds).toBeGreaterThan(0);
+      await w.sweeper.runOnce();
     });
   });
 
@@ -651,7 +787,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const outboxBefore = (await outboxFor(w.prisma, otherCounty)).length;
 
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
 
       expect(await statusOf(stranded)).toBe('SUSPENDED');
       expect(await statusOf(untouched)).toBe('ACTIVE');
@@ -662,7 +798,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const { union, county } = tree();
       const policyId = await inForce(union, county);
       w.hierarchy.disown(county);
-      await w.moves.handle(moved(county));
+      await settle(moved(county));
       const stranger = org();
 
       await expect(asSetter(stranger, () => w.policies.get(policyId))).rejects.toMatchObject({

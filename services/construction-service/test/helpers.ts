@@ -11,6 +11,11 @@ import { ApprovalRepository } from '../src/approval/approval.repository';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
 import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
+import { PolicyReconciliationRepository } from '../src/approval/policy-reconciliation.repository';
+import {
+  PolicyReconciliationSweeper,
+  type SweeperOptions,
+} from '../src/approval/policy-reconciliation.sweeper';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
@@ -61,6 +66,15 @@ export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv
   });
 }
 
+/** A sweep big enough to drain what one suite queued, and a retry that is quick. */
+const TEST_SWEEPER: SweeperOptions = {
+  intervalMs: 60_000,
+  batchSize: 500,
+  leaseSeconds: 120,
+  backoffSeconds: 30,
+  backoffMaxSeconds: 900,
+};
+
 export interface Wiring {
   prisma: PrismaService;
   env: ConstructionEnv;
@@ -76,6 +90,10 @@ export interface Wiring {
   progress: ProgressService;
   /** Q-83: policies follow an ORGANIZATION_MOVED. */
   suspension: PolicySuspensionService;
+  reconciliations: PolicyReconciliationRepository;
+  /** The sweeper, driven by `runOnce()`; it never ticks in these suites. */
+  sweeper: PolicyReconciliationSweeper;
+  sweeperWith(overrides?: Partial<SweeperOptions>): PolicyReconciliationSweeper;
   /** The consumer's handler, without a broker: `moves.handle(envelope)`. */
   moves: OrganizationMovedConsumer;
   close(): Promise<void>;
@@ -102,6 +120,13 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     env,
     approvalRepository,
   );
+  const reconciliations = new PolicyReconciliationRepository(prisma);
+  const suspension = new PolicySuspensionService(
+    prisma,
+    approvalRepository,
+    events,
+    reconciliations,
+  );
   const approvals = new ApprovalService(
     prisma,
     approvalRepository,
@@ -111,19 +136,25 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     access,
     env,
     hierarchy as unknown as OrganizationDirectory,
+    suspension,
   );
-  const suspension = new PolicySuspensionService(
-    prisma,
-    approvalRepository,
-    events,
-    hierarchy as unknown as OrganizationDirectory,
-  );
+  /** A sweeper over this wiring's hierarchy; `sweeperWith` for other options. */
+  const sweeperWith = (overrides: Partial<SweeperOptions> = {}) =>
+    new PolicyReconciliationSweeper(
+      reconciliations,
+      suspension,
+      hierarchy as unknown as OrganizationDirectory,
+      { ...TEST_SWEEPER, ...overrides },
+    );
   return {
     prisma,
     env,
     repository,
     projects,
     suspension,
+    reconciliations,
+    sweeper: sweeperWith(),
+    sweeperWith,
     moves: new OrganizationMovedConsumer(
       () => {
         throw new Error('the integration suites call handle() and never subscribe');
@@ -236,6 +267,7 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
   await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
     await prisma.client.approval.deleteMany({ where });
     await prisma.client.progressReport.deleteMany({ where });
+    await prisma.client.policyReconciliationTask.deleteMany({ where });
     await prisma.client.approvalPolicyStep.deleteMany({ where });
     await prisma.client.approvalPolicy.deleteMany({ where });
     await prisma.client.projectNeed.deleteMany({ where });

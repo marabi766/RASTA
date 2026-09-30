@@ -89,6 +89,10 @@ function roleList(name: string, options: { min: number }) {
  *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
  *                                       How long that confirmation may take;
  *                                       no answer in time refuses (504).
+ *   CONSTRUCTION_RECONCILE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS /
+ *   _BACKOFF_SECONDS / _BACKOFF_MAX_SECONDS
+ *                                       The sweeper that suspends policies a
+ *                                       moved organization stranded (Q-83).
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
  *                                       Q-68. Submitted needs a project must
  *                                       have before it may request approval.
@@ -180,6 +184,25 @@ export const constructionEnvSchema = baseEnvSchema
       .min(100)
       .max(30_000)
       .default(3000),
+
+    /**
+     * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041). A sweep
+     * every `INTERVAL_MS` claims at most `BATCH_SIZE` due tasks, so one sweep
+     * costs at most BATCH_SIZE × CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS;
+     * `LEASE_SECONDS` must exceed that, or a slow sweep loses its claims to
+     * another instance (harmless — the writes are conditional — but wasteful).
+     * A failed task is retried after `BACKOFF_SECONDS`, doubling to `BACKOFF_MAX_SECONDS`.
+     */
+    CONSTRUCTION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(500).max(300_000).default(5000),
+    CONSTRUCTION_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    CONSTRUCTION_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
+    CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(30),
+    CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
 
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),

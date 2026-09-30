@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import type { CursorPage } from '@rasta/contracts';
 import { ulid } from 'ulid';
@@ -16,6 +16,7 @@ import { assertProjectTransition, type ProjectStateName } from '../project/proje
 import { ProjectService } from '../project/project.service';
 import type { ProjectView } from '../project/dto';
 import { ApprovalRepository } from './approval.repository';
+import { PolicySuspensionService } from './policy-suspension.service';
 import {
   assertDecidable,
   stepApplies,
@@ -71,7 +72,10 @@ export class ApprovalService {
     private readonly access: ProjectAccess,
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly directory: OrganizationDirectory,
+    private readonly suspension: PolicySuspensionService,
   ) {}
+
+  private readonly logger = new Logger(ApprovalService.name);
 
   /** RequestApproval: DRAFT | CHANGES_REQUESTED → PENDING_APPROVAL. */
   async request(projectId: string, dto: ProjectCommandDto): Promise<ProjectView> {
@@ -287,9 +291,10 @@ export class ApprovalService {
    * network call. The id returned is pinned into `openRound`: if another
    * policy came into force in between, the round is not opened on it (409).
    * The window between this answer and the commit is the documented residual
-   * race (ADR-063). Between moves and rounds, `PolicySuspensionService`
-   * (Q-83) suspends a policy on `ORGANIZATION_MOVED`, so a stranded policy is
-   * out of force before any round asks; this check stays as the last gate.
+   * race (ADR-063). A move queues the policy for the sweeper
+   * (`PolicySuspensionService`, Q-83), which suspends it soon after; this
+   * check is the gate for a round that arrives first, and it suspends what it
+   * finds stranded rather than only refusing it.
    *
    * Returns the id of the confirmed policy, or `null` when none is in force
    * (the caller's 422 / "none configured" path, unchanged).
@@ -307,6 +312,25 @@ export class ApprovalService {
     if (policy.authorRole === UNION_ROLE) {
       const within = await this.directory.isWithin(policy.authorOrganizationId, organizationId);
       if (!within) {
+        // Not only refused: suspended, with the same event and audit as the
+        // sweeper's (Q-83), so the policy does not wait for a queued task to
+        // stop being in force. The caller's refusal is the same either way,
+        // and a suspension that fails must not turn it into another error.
+        await this.suspension
+          .suspend(
+            { id: policy.id, organizationId },
+            {
+              reason: 'ROUND_OPENING_RECHECK',
+              correlationId: getContext().correlationId,
+              callerService: SERVICE_NAME,
+            },
+          )
+          .catch((error: unknown) => {
+            this.logger.warn(
+              `Could not suspend stranded approval policy ${policy.id}: ` +
+                `${error instanceof RastaError ? error.code : 'INTERNAL'}`,
+            );
+          });
         throw RastaError.forbidden(
           'The union that wrote the approval policy in force no longer governs this organization',
         );

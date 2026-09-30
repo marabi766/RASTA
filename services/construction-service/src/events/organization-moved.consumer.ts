@@ -58,9 +58,12 @@ export function organizationMovesConsumerFactory(
 }
 
 /**
- * Reacts to an organization being moved in the hierarchy (Q-83): asks whether
- * each union-written approval policy in force is still governed by its union,
- * and suspends the ones that are not (`PolicySuspensionService`).
+ * Reacts to an organization being moved in the hierarchy (Q-83): queues the
+ * re-confirmation of every union-written approval policy that could have been
+ * stranded (`PolicySuspensionService.enqueueMove`). **Database work only — no
+ * network call** — so the Kafka session never waits on organization-service,
+ * however many policies there are, and nothing is skipped for lack of time.
+ * The sweeper (`PolicyReconciliationSweeper`) asks the hierarchy and suspends.
  *
  * ## The payload is a trigger, not the state — on every delivery
  *
@@ -68,12 +71,13 @@ export function organizationMovesConsumerFactory(
  * (a replay after a dead-letter, `docs/runbooks/replay-dlq.md`) are handled
  * identically, and neither is applied *as written*: the payload names the
  * organization that moved, and the answer to "is it still beneath the union" is
- * always fetched from organization-service now. A stale, duplicated or
- * out-of-order event therefore cannot suspend a policy whose union governs
- * again, or spare one whose union no longer does — it can only cause a fresh
- * look at the truth. That is also why a forged event is harmless here: it
- * triggers a re-check and decides nothing, so this consumer needs no separate
- * "enabled" gate the way a consumer that writes what an event says does.
+ * always fetched from organization-service when the task runs. A stale,
+ * duplicated or out-of-order event therefore cannot suspend a policy whose
+ * union governs again, or spare one whose union no longer does — it can only
+ * cause a fresh look at the truth. That is also why a forged event is harmless
+ * here: it queues a re-check and decides nothing, so this consumer needs no
+ * separate "enabled" gate the way a consumer that writes what an event says
+ * does.
  *
  * ## Provenance
  *
@@ -85,9 +89,12 @@ export function organizationMovesConsumerFactory(
  *
  * ## Idempotency
  *
- * By the conditional ACTIVE → SUSPENDED write, not by a `processed_event`
- * marker (see `PolicySuspensionService`): redelivery finds nothing in force to
- * suspend and does nothing, and a replay still gets a fresh answer.
+ * A replay, a `.retry` delivery or a second move while a policy's task is still
+ * open coalesces into that task (one open task per policy); one after it is
+ * done queues a fresh look. No `processed_event` marker, on purpose: it would
+ * make a replay after an outage a no-op. What a task finally does is idempotent
+ * too — the ACTIVE|PENDING → SUSPENDED write is conditional (see
+ * `PolicySuspensionService`).
  */
 export class OrganizationMovedConsumer {
   private consumer?: EventConsumer;
@@ -120,15 +127,14 @@ export class OrganizationMovedConsumer {
       );
     }
 
-    const outcome = await this.suspension.reconfirmAll({
+    const outcome = await this.suspension.enqueueMove({
       eventId: envelope.eventId,
       movedOrganizationId: payload.data.organizationId,
       correlationId: envelope.correlationId,
-      callerService: envelope.producer,
     });
     this.logger.info(
-      `${envelope.eventName} ${envelope.eventId}: ${outcome.checked} (union, organization) ` +
-        `pairs re-confirmed, ${outcome.deferred} deferred, ${outcome.suspended.length} suspended`,
+      `${envelope.eventName} ${envelope.eventId}: ${outcome.queued} of ${outcome.candidates} ` +
+        'union-written policies queued for re-confirmation',
     );
   }
 }

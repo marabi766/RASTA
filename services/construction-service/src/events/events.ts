@@ -328,8 +328,8 @@ export const approvalPolicyActivatedPayload = z
 /**
  * Taken out of force because the union that wrote it no longer governs the
  * organization (Q-83). `suspendedBy` is the system actor; the cause is the
- * ORGANIZATION_MOVED event and the organization it moved. No free text: the
- * reason is a closed code.
+ * ORGANIZATION_MOVED event and the organization it moved, or a round being
+ * opened. No free text: the reason is a closed code.
  */
 export const approvalPolicySuspendedPayload = z
   .object({
@@ -340,9 +340,11 @@ export const approvalPolicySuspendedPayload = z
     policyVersion: positive,
     /** In force, or still waiting for the platform approval, when it was suspended. */
     fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
-    reason: z.literal('ORGANIZATION_MOVED'),
-    causeEventId: identifier,
-    movedOrganizationId: identifier,
+    /** A move found it (the sweeper), or a round being opened on it did. */
+    reason: z.enum(['ORGANIZATION_MOVED', 'ROUND_OPENING_RECHECK']),
+    /** The ORGANIZATION_MOVED event and the organization it moved; null when a round found it. */
+    causeEventId: identifier.nullable(),
+    movedOrganizationId: identifier.nullable(),
     suspendedBy: identifier,
     suspendedAt: isoTimestamp,
   })

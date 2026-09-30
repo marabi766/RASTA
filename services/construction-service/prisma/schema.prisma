@@ -226,8 +226,9 @@ model ApprovalPolicy {
 
   version Int @default(1)
 
-  steps     ApprovalPolicyStep[]
-  approvals Approval[]
+  steps               ApprovalPolicyStep[]
+  approvals           Approval[]
+  reconciliationTasks PolicyReconciliationTask[]
 
   // SQL-only: `ux_approval_policy_active` — at most one ACTIVE policy per
   // (organization, workflow key).
@@ -235,6 +236,47 @@ model ApprovalPolicy {
   @@unique([organizationId, workflowKey, policyVersion], map: "ux_approval_policy_version")
   @@index([organizationId, workflowKey, status], map: "ix_approval_policy_org_key_status")
   @@map("approval_policy")
+}
+
+enum PolicyReconciliationStatus {
+  PENDING
+  DONE
+}
+
+/// The durable work queue behind ORGANIZATION_MOVED (Q-83, docs/23 D-041): one
+/// task per policy a move could have stranded. The Kafka handler inserts, a
+/// sweeper claims, asks organization-service and suspends. `organizationId` is
+/// the tenant of the policy, not the moved organization.
+model PolicyReconciliationTask {
+  id String @id
+
+  organizationId      String @map("organization_id")
+  policyId            String @map("policy_id")
+  /// The union that wrote the policy: the scope its hierarchy question is signed for.
+  unionId             String @map("union_id")
+  /// The move that queued it, and the organization that moved — for the record.
+  sourceEventId       String @map("source_event_id")
+  movedOrganizationId String @map("moved_organization_id")
+  correlationId       String @map("correlation_id")
+
+  status        PolicyReconciliationStatus @default(PENDING)
+  attempts      Int                        @default(0)
+  nextAttemptAt DateTime                   @map("next_attempt_at")
+  /// The claim: a time and the token that fences its holder.
+  leaseUntil    DateTime?                  @map("lease_until")
+  leaseToken    String?                    @map("lease_token")
+  /// A closed code (`UPSTREAM_UNAVAILABLE` …), never a message.
+  lastErrorCode String?                    @map("last_error_code")
+
+  createdAt DateTime  @map("created_at")
+  updatedAt DateTime  @map("updated_at")
+  doneAt    DateTime? @map("done_at")
+
+  policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  // SQL-only: `ux_policy_reconciliation_open` — at most one PENDING task per
+  // policy; `ix_policy_reconciliation_due` — the sweeper's scan.
+  @@map("policy_reconciliation_task")
 }
 
 /// One required approval of a policy, in order.
