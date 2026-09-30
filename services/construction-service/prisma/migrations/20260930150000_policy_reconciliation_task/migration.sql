@@ -12,6 +12,12 @@
 -- (`ux_policy_reconciliation_open`). A DONE task is history; the next move
 -- creates a new one.
 --
+-- Coalescing must not lose a re-check: a move that lands while a sweeper holds
+-- the task (its lookup may predate the move) bumps `generation` and makes the
+-- task due again. The sweeper finishes the task only if the generation it
+-- claimed is still the current one; otherwise it releases the task, and the
+-- next sweep looks again.
+--
 -- `organization_id` is the tenant of the policy, and the foreign key binds the
 -- task to that policy in that tenant, like every other child in this service.
 -- =============================================================================
@@ -30,6 +36,7 @@ CREATE TABLE "policy_reconciliation_task" (
     "correlation_id" TEXT NOT NULL,
     "status" "PolicyReconciliationStatus" NOT NULL DEFAULT 'PENDING',
     "attempts" INTEGER NOT NULL DEFAULT 0,
+    "generation" INTEGER NOT NULL DEFAULT 0,
     "next_attempt_at" TIMESTAMP(3) NOT NULL,
     "lease_until" TIMESTAMP(3),
     "lease_token" TEXT,
@@ -59,7 +66,7 @@ ALTER TABLE "policy_reconciliation_task" ADD CONSTRAINT "ck_reconciliation_text_
          AND btrim("moved_organization_id") <> '' AND btrim("correlation_id") <> '');
 
 ALTER TABLE "policy_reconciliation_task" ADD CONSTRAINT "ck_reconciliation_attempts_nonneg"
-  CHECK ("attempts" >= 0);
+  CHECK ("attempts" >= 0 AND "generation" >= 0);
 
 -- DONE names when, and only DONE does.
 ALTER TABLE "policy_reconciliation_task" ADD CONSTRAINT "ck_reconciliation_done_complete"

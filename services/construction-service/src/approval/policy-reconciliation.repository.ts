@@ -38,7 +38,18 @@ export interface ClaimedTask {
   movedOrganizationId: string;
   correlationId: string;
   attempts: number;
+  /** The generation at claim: what `complete` must still find for a "nothing to do" verdict. */
+  generation: number;
   leaseToken: string;
+}
+
+/**
+ * What the suspension transaction asks of a task: is this worker still its
+ * owner (checked first, with the row locked), and how to finish it there.
+ */
+export interface TaskOwnership {
+  verify(tx: ExtendedPrismaClient): Promise<boolean>;
+  finish(tx: ExtendedPrismaClient): Promise<unknown>;
 }
 
 export interface Backlog {
@@ -69,6 +80,23 @@ export class PolicyReconciliationRepository {
           data: rows.map((row) => ({ ...row, nextAttemptAt: at, createdAt: at, updatedAt: at })),
           skipDuplicates: true,
         }),
+    );
+
+    // The coalesced ones — an open task that was already there — must not lose
+    // this move: a sweeper holding one may have asked the hierarchy before it
+    // landed. Bump the generation, so that sweeper cannot finish the task, and
+    // make it due now. The lease is left alone (a live claim is not stolen);
+    // the tasks created above carry this transaction's `at` and are skipped.
+    await runUnscoped('a later move re-opens the open tasks it coalesces into (Q-83)', () =>
+      tx.$executeRawUnsafe(
+        `UPDATE policy_reconciliation_task
+            SET generation = generation + 1,
+                next_attempt_at = LEAST(next_attempt_at, $2::timestamp),
+                updated_at = $2::timestamp
+          WHERE status = 'PENDING' AND created_at < $2::timestamp AND policy_id = ANY($1::text[])`,
+        rows.map((row) => row.policyId),
+        at,
+      ),
     );
     return result.count;
   }
@@ -105,6 +133,7 @@ export class PolicyReconciliationRepository {
                   moved_organization_id AS "movedOrganizationId",
                   correlation_id AS "correlationId",
                   attempts,
+                  generation,
                   lease_token AS "leaseToken"`,
           limit,
           leaseSeconds,
@@ -114,14 +143,48 @@ export class PolicyReconciliationRepository {
   }
 
   /**
-   * DONE, fenced on the lease. `0`: the lease was taken back; whatever the
-   * caller did in the same transaction is conditional and stays correct.
+   * DONE, fenced on the lease and — with `currentGeneration` — on the
+   * generation claimed. `0`: the lease was taken back, or (for a "nothing to
+   * do" verdict) a later move coalesced into the task after the lookup, so the
+   * task must be looked at again rather than finished.
    */
-  async complete(tx: ExtendedPrismaClient, task: ClaimedTask): Promise<number> {
+  async complete(
+    tx: ExtendedPrismaClient,
+    task: ClaimedTask,
+    options: { currentGeneration: boolean },
+  ): Promise<number> {
     return tx.$executeRawUnsafe(
       `UPDATE policy_reconciliation_task
           SET status = 'DONE', done_at = now(), updated_at = now(),
               lease_until = NULL, lease_token = NULL, last_error_code = NULL
+        WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
+          AND ($4::boolean = false OR generation = $5::int)`,
+      task.organizationId,
+      task.id,
+      task.leaseToken,
+      options.currentGeneration,
+      task.generation,
+    );
+  }
+
+  /**
+   * Finishes a task whose lookup said "within", or gives it back if a later
+   * move landed since it was claimed: `true` = DONE, `false` = released and due
+   * again (or the lease was lost), so the next sweep asks once more.
+   */
+  async markDone(task: ClaimedTask): Promise<boolean> {
+    if ((await this.complete(this.prisma.client, task, { currentGeneration: true })) > 0) {
+      return true;
+    }
+    await this.release(task);
+    return false;
+  }
+
+  /** Lets go of the lease without finishing: the task stays open and, if due, is claimable at once. */
+  async release(task: ClaimedTask): Promise<number> {
+    return this.prisma.client.$executeRawUnsafe(
+      `UPDATE policy_reconciliation_task
+          SET lease_until = NULL, lease_token = NULL, updated_at = now()
         WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
       task.organizationId,
       task.id,
@@ -129,9 +192,31 @@ export class PolicyReconciliationRepository {
     );
   }
 
-  /** `complete` on its own, for a task whose policy needs no change. */
-  async markDone(task: ClaimedTask): Promise<number> {
-    return this.complete(this.prisma.client, task);
+  /**
+   * The check a suspension transaction makes before it changes anything: lock
+   * the task row and confirm this worker still holds it (token, open). A worker
+   * whose lease lapsed and was re-claimed fails here, so it can neither suspend
+   * nor emit — the fence guards the effect, not only the task.
+   *
+   * The suspension needs only the lease, not the generation: "outside" is the
+   * safe direction whatever landed since, and a suspended policy has nothing
+   * left to re-look at, so its task is finished whatever the generation is.
+   */
+  ownershipOf(task: ClaimedTask): TaskOwnership {
+    return {
+      verify: async (tx) => {
+        const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
+          `SELECT id FROM policy_reconciliation_task
+            WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
+              FOR UPDATE`,
+          task.organizationId,
+          task.id,
+          task.leaseToken,
+        );
+        return rows.length === 1;
+      },
+      finish: (tx) => this.complete(tx, task, { currentGeneration: false }),
+    };
   }
 
   /** One more attempt, later, with the reason as a closed code. Fenced on the lease. */

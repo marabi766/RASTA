@@ -261,6 +261,9 @@ model PolicyReconciliationTask {
 
   status        PolicyReconciliationStatus @default(PENDING)
   attempts      Int                        @default(0)
+  /// Bumped when a later move coalesces into this open task: a sweeper that
+  /// claimed an older generation must not finish it (its lookup may predate the move).
+  generation    Int                        @default(0)
   nextAttemptAt DateTime                   @map("next_attempt_at")
   /// The claim: a time and the token that fences its holder.
   leaseUntil    DateTime?                  @map("lease_until")

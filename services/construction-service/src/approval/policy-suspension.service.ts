@@ -6,7 +6,10 @@ import { EventPublisher } from '../events/publisher';
 import { transactionNow } from '../shared/clock';
 import { SERVICE_NAME } from '../config/env';
 import { ApprovalRepository } from './approval.repository';
-import { PolicyReconciliationRepository } from './policy-reconciliation.repository';
+import {
+  PolicyReconciliationRepository,
+  type TaskOwnership,
+} from './policy-reconciliation.repository';
 import { assertPolicyTransition, type PolicyStateName } from './approval.state-machine';
 
 /** `suspendedBy` on a policy the system suspended: nobody's user id. */
@@ -30,6 +33,9 @@ export type SuspensionCause =
       callerService: string;
     }
   | { reason: 'ROUND_OPENING_RECHECK'; correlationId: string; callerService: string };
+
+/** `NOT_OWNER`: the sweeper's lease was lost; nothing was read or written. */
+export type SuspendResult = 'SUSPENDED' | 'NOTHING' | 'NOT_OWNER';
 
 export interface MoveCause {
   eventId: string;
@@ -149,9 +155,14 @@ export class PolicySuspensionService {
 
   /**
    * ACTIVE or PENDING_PLATFORM_APPROVAL → SUSPENDED in one transaction, with the
-   * event. `false`: nothing was there to suspend. `inTransaction` runs in the
-   * same transaction whatever the outcome — the sweeper marks its task DONE
-   * there, so a task and its policy never disagree.
+   * event. `NOTHING`: nothing was there to suspend.
+   *
+   * With `ownership` (the sweeper's), the task row is locked and its lease
+   * verified **first**: a worker whose lease lapsed and was re-claimed gets
+   * `NOT_OWNER` before anything is read or written — no policy change, no
+   * event. The fence guards the effect, not only the task. An owner's
+   * transaction also finishes the task, whatever the outcome, so a task and its
+   * policy never disagree.
    *
    * A pending policy is included because approval checks the hierarchy before
    * its own transaction: approval confirms, the move commits, and this runs
@@ -164,8 +175,8 @@ export class PolicySuspensionService {
   async suspend(
     candidate: { id: string; organizationId: string },
     cause: SuspensionCause,
-    inTransaction?: (tx: ExtendedPrismaClient) => Promise<unknown>,
-  ): Promise<boolean> {
+    ownership?: TaskOwnership,
+  ): Promise<SuspendResult> {
     // The tenant is the policy's own organization, never the moved one: the
     // event names one organization, the stranded policies belong to others.
     const context = createSystemContext({
@@ -176,9 +187,11 @@ export class PolicySuspensionService {
 
     return runWithContext(context, () =>
       this.prisma.transaction(async (tx) => {
+        // First: nothing below may run for a worker that no longer owns the task.
+        if (ownership && !(await ownership.verify(tx))) return 'NOT_OWNER' as const;
         const suspended = await this.suspendIn(tx, candidate.id, cause);
-        await inTransaction?.(tx);
-        return suspended;
+        await ownership?.finish(tx);
+        return suspended ? ('SUSPENDED' as const) : ('NOTHING' as const);
       }),
     );
   }

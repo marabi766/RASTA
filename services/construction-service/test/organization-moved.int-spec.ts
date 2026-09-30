@@ -707,12 +707,91 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
       const second = await w.reconciliations.claimDue(500, 120, 'TOKEN_B'); // ... and another takes it
       expect(second.map((task) => task.id)).toContain(mine.id);
 
-      expect(await w.reconciliations.markDone(mine)).toBe(0);
+      expect(await w.reconciliations.markDone(mine)).toBe(false);
       expect(await w.reconciliations.retryLater(mine, 'INTERNAL', 1)).toBe(0);
       expect((await tasksOf(policyId))[0]).toMatchObject({
         status: 'PENDING',
         leaseToken: 'TOKEN_B',
       });
+    });
+
+    it('a worker whose lease lapsed cannot suspend or emit; the new holder can, once', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      w.hierarchy.disown(county);
+      await w.moves.handle(moved(county));
+      const cause = {
+        reason: 'ORGANIZATION_MOVED' as const,
+        eventId: ulid(),
+        movedOrganizationId: county,
+        correlationId: ulid(),
+        callerService: 'organization-service',
+      };
+
+      const first = await w.reconciliations.claimDue(500, 120, 'TOKEN_A');
+      const stale = first.find((task) => task.policyId === policyId)!;
+      await makeDue(); // the lease lapses ...
+      const second = await w.reconciliations.claimDue(500, 120, 'TOKEN_B'); // ... and another takes it
+      const current = second.find((task) => task.policyId === policyId)!;
+
+      // The stale worker's lookup said "outside" and it goes to suspend: refused
+      // before anything is read or written.
+      await expect(
+        w.suspension.suspend(
+          { id: policyId, organizationId: county },
+          cause,
+          w.reconciliations.ownershipOf(stale),
+        ),
+      ).resolves.toBe('NOT_OWNER');
+      expect(await statusOf(policyId)).toBe('ACTIVE');
+      expect(await suspensions(county)).toEqual([]);
+      expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'PENDING' });
+
+      await expect(
+        w.suspension.suspend(
+          { id: policyId, organizationId: county },
+          cause,
+          w.reconciliations.ownershipOf(current),
+        ),
+      ).resolves.toBe('SUSPENDED');
+      expect(await statusOf(policyId)).toBe('SUSPENDED');
+      expect((await suspensions(county)).length).toBe(1);
+      expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'DONE' });
+    });
+
+    it('a move landing between the lookup and completion keeps the task open; the next sweep suspends', async () => {
+      const { union, county } = tree();
+      const policyId = await inForce(union, county);
+      await w.moves.handle(moved(county)); // queued, and the union still governs
+
+      // The sweeper asks, is told "within" — and only then does the second move
+      // land and coalesce into the task it is holding.
+      let landed = false;
+      const answer = w.hierarchy.isWithin.bind(w.hierarchy);
+      jest.spyOn(w.hierarchy, 'isWithin').mockImplementation(async (scope, organizationId) => {
+        const within = await answer(scope, organizationId);
+        if (!landed && scope === union && organizationId === county) {
+          landed = true;
+          w.hierarchy.disown(county);
+          await w.moves.handle(moved(county));
+        }
+        return within;
+      });
+
+      const first = await w.sweeper.runOnce();
+      expect(first.requeued).toBeGreaterThanOrEqual(1);
+      expect(await statusOf(policyId)).toBe('ACTIVE');
+      // Not finished, not lost: open, generation bumped, no lease, due now.
+      expect((await tasksOf(policyId))[0]).toMatchObject({
+        status: 'PENDING',
+        generation: 1,
+        leaseToken: null,
+      });
+
+      await w.sweeper.runOnce();
+      expect(await statusOf(policyId)).toBe('SUSPENDED');
+      expect((await tasksOf(policyId))[0]).toMatchObject({ status: 'DONE' });
+      expect((await suspensions(county)).length).toBe(1);
     });
 
     it('a round opened on a stranded policy suspends it, and is still refused', async () => {

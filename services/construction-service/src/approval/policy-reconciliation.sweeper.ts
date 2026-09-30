@@ -33,6 +33,10 @@ export interface SweepOutcome {
   confirmed: number;
   /** Failed and put back for later. */
   retried: number;
+  /** Answered "within", but a later move landed meanwhile: released, due again at once. */
+  requeued: number;
+  /** The lease was lost before the write: nothing was changed. */
+  notOwned: number;
 }
 
 /** The closed code recorded for a failure: a platform error code, or `INTERNAL`. */
@@ -51,7 +55,10 @@ function errorCodeOf(error: unknown): string {
  *   - **not within** → `PolicySuspensionService.suspend`, whose transaction also
  *     marks the task DONE: the suspension, its event and the task's completion
  *     commit together;
- *   - **within** → DONE, nothing changed;
+ *   - **within** → DONE, nothing changed — but only if no later move coalesced
+ *     into the task since the claim (its `generation`); otherwise the lookup may
+ *     predate that move, so the task is released, due at once, and the next sweep
+ *     asks again;
  *   - **could not confirm** → the policy is left exactly as it is, the task's
  *     attempts go up and its next attempt moves out by an exponential backoff.
  *     Nothing partial, and nothing skipped: the task stays until an answer comes.
@@ -110,7 +117,14 @@ export class PolicyReconciliationSweeper {
       this.options.leaseSeconds,
       token,
     );
-    const outcome: SweepOutcome = { claimed: tasks.length, suspended: 0, confirmed: 0, retried: 0 };
+    const outcome: SweepOutcome = {
+      claimed: tasks.length,
+      suspended: 0,
+      confirmed: 0,
+      retried: 0,
+      requeued: 0,
+      notOwned: 0,
+    };
 
     // One question per (union, organization) pair in the batch.
     const answers = new Map<string, Promise<boolean>>();
@@ -134,13 +148,20 @@ export class PolicyReconciliationSweeper {
         await runWithContext(context, async () => {
           const within = await ask(task);
           if (within) {
-            // Nothing about the policy changes: the task alone is finished.
-            await this.reconciliations.markDone(task);
-            outcome.confirmed += 1;
-            policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'confirmed' });
+            // Nothing about the policy changes: the task alone is finished —
+            // unless a later move coalesced into it after the claim, in which
+            // case this answer may predate that move and the task is given
+            // back, due at once, to be looked at again.
+            if (await this.reconciliations.markDone(task)) {
+              outcome.confirmed += 1;
+              policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'confirmed' });
+            } else {
+              outcome.requeued += 1;
+              policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'requeued' });
+            }
             return;
           }
-          const suspended = await this.suspension.suspend(
+          const result = await this.suspension.suspend(
             { id: task.policyId, organizationId: task.organizationId },
             {
               reason: 'ORGANIZATION_MOVED',
@@ -149,13 +170,14 @@ export class PolicyReconciliationSweeper {
               correlationId: task.correlationId,
               callerService: MOVE_PRODUCER,
             },
-            (tx) => this.reconciliations.complete(tx, task),
+            this.reconciliations.ownershipOf(task),
           );
-          if (suspended) outcome.suspended += 1;
-          else outcome.confirmed += 1;
+          if (result === 'SUSPENDED') outcome.suspended += 1;
+          else if (result === 'NOTHING') outcome.confirmed += 1;
+          else outcome.notOwned += 1;
           policyReconciliationTotal.inc({
             service: SERVICE_NAME,
-            result: suspended ? 'suspended' : 'noop',
+            result: result === 'SUSPENDED' ? 'suspended' : result === 'NOTHING' ? 'noop' : 'lost',
           });
         });
       } catch (error) {
@@ -169,7 +191,8 @@ export class PolicyReconciliationSweeper {
       const backlog = await this.reconciliations.backlog().catch(() => undefined);
       this.logger.log(
         `Reconciliation sweep: claimed ${outcome.claimed}, suspended ${outcome.suspended}, ` +
-          `confirmed ${outcome.confirmed}, retried ${outcome.retried}` +
+          `confirmed ${outcome.confirmed}, retried ${outcome.retried}, ` +
+          `requeued ${outcome.requeued}, lost ${outcome.notOwned}` +
           (backlog
             ? `; backlog ${backlog.open} open, ${backlog.due} due, oldest due ` +
               `${Math.round(backlog.oldestDueAgeSeconds)}s`
