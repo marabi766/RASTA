@@ -47,6 +47,13 @@ overrides:
   # resolves an affected fast-uri. 3.1.7 is the first fixed 3.x; 3.1.8 is the
   # newest one past the seven-day minimum release age.
   'fast-uri@<3.1.7': '3.1.8'
+  # GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7 (high), GHSA-q2hr-2g5m-vwhr
+  # (moderate) — stack exhaustion in brace expansion. Reached through minimatch
+  # in eslint, typescript-eslint, rimraf/glob and the OpenTelemetry GCP
+  # detector; each parent still resolves an affected release of its major.
+  'brace-expansion@<1.1.21': '1.1.21'
+  'brace-expansion@>=2.0.0 <2.1.7': '2.1.7'
+  'brace-expansion@>=4.0.0 <5.0.12': '5.0.12'
 
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that

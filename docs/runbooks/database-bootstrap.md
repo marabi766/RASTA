@@ -206,6 +206,18 @@ Index معتبر و بدون از دست رفتن هیچ سفارشی.
 
 ---
 
+<a id="marketplace-idempotency-claim-token"></a>
+
+### marketplace: توکن Claim کلید Idempotency (#147)
+
+Migration `20260930120000_idempotency_claim_token` ستون `idempotency_key.claim_token` را
+اضافه می‌کند و کد جدید `complete`/`release` را فقط با همین توکن می‌پذیرد.
+
+**این تغییر برای Rolling Update امن نیست.** همهٔ نمونه‌های قدیمی marketplace-service را
+متوقف کن (Scale به صفر)، سپس نمونه‌های جدید را بالا بیاور؛ نسخهٔ قدیم و جدید هرگز
+همزمان اجرا نشوند. نمونهٔ قدیمی `complete`/`release` را بدون توکن انجام می‌دهد و
+می‌تواند Claim نمونهٔ جدید را آزاد یا کامل کند.
+
 ## بازسازی کامل محیط توسعه
 
 ```bash

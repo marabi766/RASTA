@@ -166,6 +166,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 
     await expect(asTenant(() => store.claim('POST /v1/orders', 'K', {}))).resolves.toEqual({
       kind: 'PROCEED',
+      token: expect.any(String),
     });
     expect(idempotencyKey.create).toHaveBeenCalledTimes(2);
   });
@@ -195,6 +196,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 
     await expect(asTenant(() => store.claim('POST /v1/orders', 'K', {}))).resolves.toEqual({
       kind: 'PROCEED',
+      token: expect.any(String),
     });
     // Conditional on expiry, so a fresh claim a racer put in its place — or a
     // row a racer already deleted — is never touched and never a 500.
@@ -289,6 +291,7 @@ describe('IdempotencyStore.execute — when the claim is released', () => {
         organizationId: 'ORG-UNIT',
         endpoint: 'POST /v1/orders',
         key: 'K',
+        claimToken: expect.any(String),
         state: 'IN_PROGRESS',
       },
     });
