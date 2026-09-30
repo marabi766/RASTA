@@ -224,6 +224,15 @@ const refusals = [
     `HEADER_BODY_MISMATCH:${EVENT_HEADERS.tenantId}`,
   ],
   [
+    'a header whose body field the schema would default (x-event-version, no eventVersion)',
+    (() => {
+      const body = envelope();
+      delete body.eventVersion;
+      return deadLetter(body, { [EVENT_HEADERS.eventVersion]: Buffer.from('1') });
+    })(),
+    `HEADER_BODY_MISMATCH:${EVENT_HEADERS.eventVersion}`,
+  ],
+  [
     'a body field whose platform header is absent (causationId, no x-causation-id)',
     deadLetter(envelope({ causationId: 'EVT_0' })),
     `HEADER_BODY_MISMATCH:${EVENT_HEADERS.causationId}`,

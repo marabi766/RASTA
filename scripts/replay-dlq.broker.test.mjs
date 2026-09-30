@@ -18,11 +18,15 @@
  * read off the wire by the observer (key, body, headers).
  *
  * It needs fleet-service, maintenance-service, itest-observer and ops-replay's
- * passwords, and the broker admin's — which deletes records from one
- * rasta.fleet.v1 partition, as retention would, for the last test — and
- * refuses to run rather than skip without them. It writes marker records on
- * real topics: run it where no other maintenance-service consumer is reading
- * rasta.fleet.v1 — CI runs it last.
+ * passwords, and the broker admin's, and refuses to run rather than skip
+ * without them. It writes marker records on real topics: run it where no
+ * other maintenance-service consumer is reading rasta.fleet.v1.
+ *
+ * The last test deletes records from one rasta.fleet.v1 partition, as
+ * retention would — irreversibly. It runs only on a broker declared
+ * disposable (`REPLAY_TEST_DISPOSABLE_BROKER=1`, which CI's fresh broker job
+ * sets), and even there it deletes nothing unless every record it would
+ * delete was written by this run; anywhere else it is skipped, and says so.
  */
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,6 +52,8 @@ const ORIGINAL = 'rasta.fleet.v1';
 const RETRY = 'rasta.fleet.v1.retry';
 const DLQ = 'rasta.maintenance.v1.dlq';
 const OPERATOR = 'replay-itest';
+/** Records may be deleted only on a broker declared throwaway (CI's fresh one). */
+const DISPOSABLE_BROKER = process.env.REPLAY_TEST_DISPOSABLE_BROKER === '1';
 
 const configuredCa = process.env.KAFKA_SSL_CA_FILE?.trim();
 const CA =
@@ -594,21 +600,62 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
 });
 
 describe('retention past the original offset (Codex round 1 on #144, H1)', () => {
-  test('a newer record for the key that retention took leaves staleness unknown, never "not stale"', async () => {
+  test('a newer record for the key that retention took leaves staleness unknown, never "not stale"', async (t) => {
+    if (!DISPOSABLE_BROKER) {
+      t.skip(
+        'deletes rasta.fleet.v1 records, as retention would: runs only with ' +
+          'REPLAY_TEST_DISPOSABLE_BROKER=1 on a throwaway broker (CI sets it)',
+      );
+      return;
+    }
     const before = replay(['--event-id', ids.expired]);
     assert.equal(before.status, 0, before.stderr);
     const [line] = before.records;
     assert.deepEqual([line.stale, line.refusal], [true, 'STALE']);
 
     // Retention, as the broker applies it: the partition's start moves past
-    // the original, and the newer record for the key goes with it.
+    // the original, and the newer record for the key goes with it. Deleted:
+    // [low, the newer record] and nothing after it — and only once every
+    // record in that range is shown to be this run's own.
     const partition = Number(line.originalPartition);
     const admin = await connected(kafka(BROKER_ADMIN_PRINCIPAL).admin());
-    const { high } = (await admin.fetchTopicOffsets(ORIGINAL)).find(
+    const { low } = (await admin.fetchTopicOffsets(ORIGINAL)).find(
       (o) => o.partition === partition,
     );
-    assert.ok(BigInt(high) > BigInt(line.originalOffset) + 1n, 'the newer record follows it');
-    await admin.deleteTopicRecords({ topic: ORIGINAL, partitions: [{ partition, offset: high }] });
+    const records = await readSince(
+      'itest-observer',
+      ORIGINAL,
+      new Map([[partition, BigInt(low)]]),
+    );
+    const newer = records.find(
+      (r) => r.headers?.[EVENT_HEADERS.eventId]?.toString() === ids.expiredNewer,
+    );
+    assert.ok(newer, 'the newer record for the key is on the original partition');
+    const range = records.filter((r) => BigInt(r.offset) <= BigInt(newer.offset));
+    const foreign = range.filter((r) => {
+      try {
+        return JSON.parse(r.value?.toString() ?? '').payload?.marker !== `replay-itest-${run}`;
+      } catch {
+        return true;
+      }
+    });
+    assert.deepEqual(
+      foreign.map((r) => r.offset),
+      [],
+      `${ORIGINAL}/${partition} holds records this run did not write before offset ` +
+        `${newer.offset}: refusing to delete them — the broker is not a throwaway one`,
+    );
+    assert.equal(
+      BigInt(range.length),
+      BigInt(newer.offset) + 1n - BigInt(low),
+      'every offset in the range was read and checked',
+    );
+    const deleteTo = String(BigInt(newer.offset) + 1n);
+    assert.ok(BigInt(deleteTo) > BigInt(line.originalOffset) + 1n, 'the newer record follows it');
+    await admin.deleteTopicRecords({
+      topic: ORIGINAL,
+      partitions: [{ partition, offset: deleteTo }],
+    });
 
     const after = replay(['--event-id', ids.expired]);
     assert.equal(after.status, 0, after.stderr);

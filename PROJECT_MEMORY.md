@@ -2827,7 +2827,9 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   بی از دست رفتن داده — آزموده روی Broker توسعه؛ پاک کردن داده راه چرخش نیست). **ابزار بازپخش DLQ** (2026-09-29): `scripts/replay-dlq.mjs`، به نام `ops-replay`، Dry-run پیش‌فرض، مقصد فقط
   `.retry`، کلید = کلید نگه‌داشتهٔ DLQ (برابر `streamKey`؛ بی کلید ← `KEY_UNVERIFIABLE`/`UNSEQUENCED_NO_KEY`)، رد `NEVER_AUTO_REPLAY` (نام یا Topic مبدأ economic) و کهنه/نامعلوم — شامل Retention گذشته از Offset اصلی — (مگر `--allow-stale`)، مهر `x-replay-id`، حداقل یک‌بار (Idempotency مصرف‌کننده)؛ `ops-replay` اکنون
   Topicهای مشترک را جز economic برای کهنگی می‌خواند (فقط گروه‌های `ops-replay.`). `EventConsumer` از #145 `.retry` را می‌خواند (D-039) و DLQ کلید را نگه
-  می‌دارد (D-040). **شکاف باز:** رکورد ممیزی `rasta.ops.replay.v1` (یک `REPLAY_EXECUTED` برای هر رویداد) PR بعدی است.
+  می‌دارد (D-040). آزمون‌های Broker (ACL و بازپخش) در Job جدای CI «Broker authorisation» روی Broker تازه اجرا می‌شوند؛ آزمون
+  Retention رکورد پاک می‌کند و فقط با `REPLAY_TEST_DISPOSABLE_BROKER=1` و رکوردهای همان اجرا کار می‌کند (محلی: Skip).
+  **شکاف باز:** رکورد ممیزی `rasta.ops.replay.v1` (یک `REPLAY_EXECUTED` برای هر رویداد) PR بعدی است.
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
 

@@ -268,16 +268,17 @@ export function assess(record, { dlq, topology, topics, contracts }) {
   if (topics.get(target) !== 'retry') return refuse('UNKNOWN_RETRY_TOPIC');
   summary.target = target;
 
-  let envelope;
+  // The body as published, before the schema fills in any default
+  // (`eventVersion` defaults to 1): presence is judged on this.
+  let raw;
   try {
-    const parsed = contracts.eventEnvelopeSchema.safeParse(
-      JSON.parse(record.value?.toString('utf8') ?? ''),
-    );
-    if (!parsed.success) return refuse('INVALID_ENVELOPE');
-    envelope = parsed.data;
+    raw = JSON.parse(record.value?.toString('utf8') ?? '');
   } catch {
     return refuse('UNPARSEABLE_BODY');
   }
+  const parsed = contracts.eventEnvelopeSchema.safeParse(raw);
+  if (!parsed.success) return refuse('INVALID_ENVELOPE');
+  const envelope = parsed.data;
   summary.eventId = envelope.eventId;
   summary.eventName = envelope.eventName;
   summary.tenantId = envelope.tenantId ?? null;
@@ -288,11 +289,13 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     // The dead letter's x-producer names the consumer that wrote it, by design.
     if (field === 'producer') continue;
     const header = headers[name];
-    const body = envelope[HEADER_FIELDS[field]];
     // The relay writes a header exactly when the body has the field (an empty
-    // one included, as absent), so the two agree on presence as on value.
-    const bodyPresent = body !== undefined && body !== null && body !== '';
+    // one included, as absent), so the two agree on presence — judged on the
+    // body as published, not after schema defaults — and on value.
+    const published = raw[HEADER_FIELDS[field]];
+    const bodyPresent = published !== undefined && published !== null && published !== '';
     if ((header !== undefined) !== bodyPresent) return refuse(`HEADER_BODY_MISMATCH:${name}`);
+    const body = envelope[HEADER_FIELDS[field]];
     if (header !== undefined && header !== String(body)) {
       return refuse(`HEADER_BODY_MISMATCH:${name}`);
     }
