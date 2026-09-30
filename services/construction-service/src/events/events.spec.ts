@@ -59,6 +59,7 @@ const STEP = {
   stepOrder: 1,
 };
 const POLICY = { policyId: 'APL_1', organizationId: 'ORG_A', workflowKey: 'project.execution' };
+const TENDER = { tenderId: 'TND_1', projectId: 'PRJ_01', organizationId: 'ORG_A' };
 
 Object.assign(VALID, {
   APPROVAL_REQUESTED: {
@@ -132,9 +133,29 @@ Object.assign(VALID, {
     discardedBy: 'USR_1',
     discardedAt: AT,
   },
+  TENDER_CREATED: {
+    ...TENDER,
+    procurementNature: null,
+    createdBy: 'USR_1',
+    createdAt: AT,
+  },
+  TENDER_UPDATED: {
+    ...TENDER,
+    changedFields: ['bidClosingAt', 'bidOpeningAt'],
+    updatedBy: 'USR_1',
+    updatedAt: AT,
+  },
+  TENDER_CANCELLED: {
+    ...TENDER,
+    from: 'DRAFT',
+    reasonCode: 'OWNER_REQUEST',
+    cancelledBy: 'USR_1',
+    cancelledAt: AT,
+  },
 });
 
 const NAMES = Object.values(CONSTRUCTION_EVENTS);
+const TENDER_EVENTS = ['TENDER_CREATED', 'TENDER_UPDATED', 'TENDER_CANCELLED'];
 const POLICY_EVENTS = [
   'APPROVAL_POLICY_CREATED',
   'APPROVAL_POLICY_ACTIVATED',
@@ -143,10 +164,12 @@ const POLICY_EVENTS = [
   'APPROVAL_POLICY_SUBMITTED',
   'APPROVAL_POLICY_REJECTED',
 ];
-const PROJECT_EVENTS = NAMES.filter((name) => !POLICY_EVENTS.includes(name));
+const PROJECT_EVENTS = NAMES.filter(
+  (name) => !POLICY_EVENTS.includes(name) && !TENDER_EVENTS.includes(name),
+);
 
 describe('the construction event catalogue', () => {
-  it('publishes exactly the CON-001 events: seven of PR 1, thirteen of PR 2 and the Q-83 suspension', () => {
+  it('publishes the CON-001 events (seven of PR 1, thirteen of PR 2, the Q-83 suspension) and the CON-002 tender events so far', () => {
     expect([...NAMES].sort()).toEqual([
       'APPROVAL_GRANTED',
       'APPROVAL_POLICY_ACTIVATED',
@@ -169,6 +192,9 @@ describe('the construction event catalogue', () => {
       'PROJECT_STARTED',
       'PROJECT_STATUS_CHANGED',
       'PROJECT_UPDATED',
+      'TENDER_CANCELLED',
+      'TENDER_CREATED',
+      'TENDER_UPDATED',
     ]);
     expect(Object.keys(CONSTRUCTION_EVENT_SCHEMAS).sort()).toEqual([...NAMES].sort());
   });
@@ -189,6 +215,16 @@ describe('the construction event catalogue', () => {
     expect(() => validateConstructionPayload(name, withoutProject)).toThrow();
     expect(() => validateConstructionPayload(name, withoutOrganization)).toThrow();
   });
+
+  it.each(TENDER_EVENTS as typeof NAMES)(
+    '%s requires the tender, project and organization',
+    (name) => {
+      for (const field of ['tenderId', 'projectId', 'organizationId']) {
+        const { [field]: _omitted, ...without } = VALID[name]!;
+        expect(() => validateConstructionPayload(name, without)).toThrow();
+      }
+    },
+  );
 
   it.each(POLICY_EVENTS as typeof NAMES)(
     '%s requires the organization and workflow key',
@@ -290,6 +326,11 @@ describe('payload rules', () => {
     ['PROJECT_PROGRESS_UPDATED', { assetsUsed: ['AST_01JBQ4Y8ZK3M5N7P9R1S3T5V7W'] }],
     ['PROJECT_PROGRESS_UPDATED', { assetsUsed: ['the grader and two trucks'] }],
     ['PROJECT_PROGRESS_UPDATED', { obstacles: 'Rain on two days' }],
+    // ADR-065: a tender's prose, its stated reason and its window's text stay in the database.
+    ['TENDER_CREATED', { title: 'Road resurfacing tender' }],
+    ['TENDER_CREATED', { scopeOfWork: 'Private specification' }],
+    ['TENDER_UPDATED', { title: 'New title' }],
+    ['TENDER_CANCELLED', { reason: 'Funding withdrawn' }],
   ])('refuses free text on %s (%j)', (name, prose) => {
     expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...prose })).toThrow();
   });
@@ -310,6 +351,32 @@ describe('routing (docs/07 § 7.7)', () => {
       expect(resolvePartitionKey(name, payload).key).toBe('ORG_A/project.execution');
     },
   );
+
+  it.each(TENDER_EVENTS as typeof NAMES)(
+    '%s is about a Tender and keyed by its tenderId, not its project',
+    (name) => {
+      expect(AGGREGATE_OF[name]).toBe('Tender');
+      const payload = validateConstructionPayload(name, VALID[name]);
+      const decision = resolvePartitionKey(name, payload);
+      expect(decision.key).toBe('TND_1');
+      expect(decision.key).not.toBe('PRJ_01');
+    },
+  );
+
+  it('refuses to route a tender event with no tenderId', () => {
+    expect(() =>
+      resolvePartitionKey('TENDER_CREATED', { projectId: 'PRJ_01', organizationId: 'ORG_A' }),
+    ).toThrow(/no tenderId/);
+  });
+
+  it('closes the reason code of a cancellation: nothing outside the set reaches the log', () => {
+    expect(() =>
+      validateConstructionPayload('TENDER_CANCELLED', {
+        ...VALID.TENDER_CANCELLED!,
+        reasonCode: 'Funding was withdrawn',
+      }),
+    ).toThrow();
+  });
 
   it('refuses to route a project event with no projectId', () => {
     expect(() => resolvePartitionKey('PROJECT_CREATED', { organizationId: 'ORG_A' })).toThrow(

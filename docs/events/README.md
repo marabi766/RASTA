@@ -532,6 +532,11 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `TENDER_CANCELLED` — را مدیر پروژه با همین نام‌ها پذیرفت (2026-09-30).** `BID_ACCESSED` هرگز محتوای پیشنهاد حمل نمی‌کند: فقط
 شناسه‌ها، بازیگر، زمان و هدف بسته (`.strict()` هر فیلد دیگر را رد می‌کند).
 
+**پیاده‌شده در CON-002 PR 2:** `TENDER_CREATED` و `TENDER_CANCELLED` (`from` وضعیت پیشین، `reasonCode` از مجموعهٔ بستهٔ
+`OWNER_REQUEST | NO_QUALIFIED_BID`؛ دلیل نوشتاری فقط در پایگاه داده) و **`TENDER_UPDATED`** (`changedFields[]`، فقط نام فیلدها؛ مثل
+`PROJECT_UPDATED`، برای پوشش S-06 از ویرایش پیش‌نویس) — **`TENDER_UPDATED` در فهرست هشت‌تایی پذیرفته‌شده نبود و منتظر پذیرش مدیر پروژه است.**
+همه با `aggregateType = Tender` و کلید پارتیشن `tenderId`. بقیه هنوز تولید نمی‌شوند.
+
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
 گزارش در پایگاه داده می‌مانند؛ ولی تا مالکیتشان در برابر `asset-service` سنجیده نشود، روی `rasta.construction.v1`
