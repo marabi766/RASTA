@@ -59,6 +59,8 @@ import {
 } from './fleet/transfer-record';
 import { UsageFactService } from './fleet/source-fact';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
+import { AssetSnapshotClient, MaintenanceStateClient } from './consumers/replica-sources';
+import { AssetWorkStateService } from './fleet/asset-work-state';
 import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
@@ -75,6 +77,14 @@ import { loadFleetEnv, SERVICE_NAME, type FleetEnv } from './config/env';
  * — an empty topic is free — and means launching maintenance-service is a
  * deployment rather than a change here.
  */
+/** A minting `InternalTokenService`, from the secret the guard verifies with. */
+const internalTokens = (env: FleetEnv): InternalTokenService =>
+  new InternalTokenService(
+    env.INTERNAL_TOKEN_SECRET,
+    env.INTERNAL_TOKEN_ISSUER,
+    env.INTERNAL_TOKEN_TTL_SECONDS,
+  );
+
 const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintenance.v1'];
 
 @Module({
@@ -135,6 +145,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     AssignmentService,
     UsageService,
     UsageFactService,
+    AssetWorkStateService,
     TransferClearanceService,
     // One monotonic clock for the clearance bound, read by the arrival
     // middleware and the service alike (ADR-062 § 2); a test replaces it.
@@ -160,8 +171,13 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
 
     {
       provide: AssetSyncConsumer,
-      inject: [ENV, LOGGER, FleetRepository],
-      useFactory: (env: FleetEnv, logger: Logger, repository: FleetRepository) =>
+      inject: [ENV, LOGGER, FleetRepository, TRANSFER_RECORD_SOURCE],
+      useFactory: (
+        env: FleetEnv,
+        logger: Logger,
+        repository: FleetRepository,
+        transferRecords: TransferRecordSource,
+      ) =>
         new AssetSyncConsumer(
           (handler) =>
             new EventConsumer(
@@ -186,6 +202,21 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
               },
             ),
           repository,
+          // D-039: a `.retry` delivery refreshes the replica from the owners
+          // of the state instead of applying the replayed payload.
+          new AssetSnapshotClient({
+            from: SERVICE_NAME,
+            baseUrl: env.ASSET_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: internalTokens(env),
+          }),
+          new MaintenanceStateClient({
+            from: SERVICE_NAME,
+            baseUrl: env.MAINTENANCE_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: internalTokens(env),
+          }),
+          transferRecords,
         ),
     },
 

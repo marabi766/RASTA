@@ -9,6 +9,7 @@ import {
   isAllowedProducer,
   isDeclaredConsumer,
   isDeclaredTopic,
+  RETRY_TOPIC_SUFFIX,
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
@@ -69,6 +70,10 @@ export interface EventConsumerOptions extends KafkaConnectionOptions {
    * half the stream.
    */
   groupId: string;
+  /**
+   * The declared topics to consume. Each is subscribed together with its
+   * `.retry` twin ({@link subscribedTopics}), so a replay lands somewhere.
+   */
   topics: string[];
   /**
    * Where messages go when they cannot be processed. **Required** for every
@@ -184,6 +189,19 @@ function exhaustedReason(error: unknown): DlqReason {
   return DLQ_REASONS.MAX_RETRIES_EXCEEDED;
 }
 
+/**
+ * What the consumer subscribes to: each declared topic and its `.retry` twin
+ * (D-039), in that order, without repeats. The twin is where `ops-replay`
+ * republishes a dead letter; it goes through the same checks as the original
+ * topic — `isAllowedProducer` reads the owner topic from the delivery topic.
+ */
+export function subscribedTopics(topics: readonly string[]): string[] {
+  const all = topics.flatMap((topic) =>
+    topic.endsWith(RETRY_TOPIC_SUFFIX) ? [topic] : [topic, `${topic}${RETRY_TOPIC_SUFFIX}`],
+  );
+  return [...new Set(all)];
+}
+
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BACKOFF_MS = 500;
 
@@ -258,7 +276,7 @@ export class EventConsumer {
    */
   private initializeDlqSeries(): void {
     if (!this.options.deadLetterTopic) return;
-    for (const topic of this.options.topics) {
+    for (const topic of subscribedTopics(this.options.topics)) {
       for (const reason of Object.values(DLQ_REASONS)) {
         dlqMessagesTotal.inc({ service: this.options.clientId, topic, reason }, 0);
       }
@@ -290,7 +308,7 @@ export class EventConsumer {
     // the broker's connection limit, not the missing topic, became the visible
     // problem.
     try {
-      for (const topic of this.options.topics) {
+      for (const topic of subscribedTopics(this.options.topics)) {
         await consumer.subscribe({ topic, fromBeginning: this.options.fromBeginning ?? false });
       }
 
@@ -305,6 +323,7 @@ export class EventConsumer {
             message.value,
             message.headers,
             message.offset,
+            message.key,
           );
         },
       });
@@ -315,7 +334,9 @@ export class EventConsumer {
 
     this.consumer = consumer;
     this.running = true;
-    this.logger.log(`Consuming ${this.options.topics.join(', ')} as group ${this.options.groupId}`);
+    this.logger.log(
+      `Consuming ${subscribedTopics(this.options.topics).join(', ')} as group ${this.options.groupId}`,
+    );
   }
 
   /**
@@ -345,6 +366,7 @@ export class EventConsumer {
     value: Buffer | null,
     headers: IHeaders | undefined,
     offset?: string,
+    key?: Buffer | null,
   ): Promise<void> {
     let envelope: EventEnvelope;
 
@@ -367,7 +389,7 @@ export class EventConsumer {
       const where = `${topic}[${partition}]${offset === undefined ? '' : `@${offset}`}`;
       this.logger.error(`Unparseable message on ${where}: ${reason}`);
       await this.deadLetter(
-        { topic, partition, offset },
+        { topic, partition, offset, key },
         value,
         headers,
         DLQ_REASONS.VALIDATION_FAILED,
@@ -399,7 +421,7 @@ export class EventConsumer {
           `producer=${logField(envelope.producer)}`,
       );
       await this.deadLetter(
-        { topic, partition, offset },
+        { topic, partition, offset, key },
         value,
         headers,
         refusal.reason,
@@ -438,7 +460,7 @@ export class EventConsumer {
         if (error instanceof UnprocessableEventError) {
           this.logger.error(`Handler refused ${event} (${error.reason}): ${message}`);
           await this.deadLetter(
-            { topic, partition, offset },
+            { topic, partition, offset, key },
             value,
             headers,
             error.reason,
@@ -452,7 +474,7 @@ export class EventConsumer {
           const reason = exhaustedReason(error);
           this.logger.error(`Handler failed ${maxRetries}x for ${event} (${reason}): ${message}`);
           await this.deadLetter(
-            { topic, partition, offset },
+            { topic, partition, offset, key },
             value,
             headers,
             reason,
@@ -488,7 +510,12 @@ export class EventConsumer {
    * topic and the `DlqReason` — and never an event, tenant or error value.
    */
   private async deadLetter(
-    original: { topic: string; partition: number; offset: string | undefined },
+    original: {
+      topic: string;
+      partition: number;
+      offset: string | undefined;
+      key?: Buffer | null;
+    },
     value: Buffer | null,
     headers: IHeaders | undefined,
     reason: DlqReason,
@@ -511,6 +538,9 @@ export class EventConsumer {
       acks: -1,
       messages: [
         {
+          // The publisher's partition key (D-040): it carries the aggregate's
+          // ordering, and a replay cannot always rebuild it from the body.
+          key: original.key ?? null,
           value,
           headers: {
             ...forwardedHeaders(headers),

@@ -44,6 +44,9 @@ function harness(
       calls.push('upsert');
       upserts.push(data);
     },
+    async lockAssetRef(): Promise<void> {
+      // The replica-row lock every delivery takes (D-039); not part of the ordering pinned here.
+    },
     async lockAssetForWork(_tx: unknown, assetId: string, mode: string): Promise<void> {
       calls.push(`lock:${assetId}:${mode}`);
     },
