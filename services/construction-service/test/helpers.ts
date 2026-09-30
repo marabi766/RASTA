@@ -378,6 +378,34 @@ export async function waitFor<T>(
   }
 }
 
+/**
+ * Waits until some database session is blocked on a lock — proof, not hope, that
+ * a command started while another holds a row lock is really queued behind it
+ * (Codex, LOW on #162: a gated test released the first command without showing
+ * the second was waiting). Bounded by wall clock, not by turns; suites run in
+ * band, so a waiting session is the one the test started.
+ */
+export async function untilASessionWaitsOnALock(
+  prisma: PrismaService,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await prisma.client.$queryRawUnsafe<{ waiting: bigint }[]>(
+      `SELECT count(*) AS waiting
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND pid <> pg_backend_pid()`,
+    );
+    if (Number(rows[0]?.waiting ?? 0) > 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`No session was waiting on a lock after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 /** Runs `fn` as a user of `organizationId` with the given roles. */
 export function asUser<T>(
   organizationId: string,

@@ -8,6 +8,7 @@ import {
   cleanup,
   newOrganizationId,
   outboxFor,
+  untilASessionWaitsOnALock,
   wire,
   type Wiring,
 } from './helpers';
@@ -333,6 +334,8 @@ describe('evaluation criteria', () => {
         const setB = asAdmin(a, () =>
           w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: WHOLE }),
         );
+        // Not assumed: set B is shown to be waiting on the row lock set A holds.
+        await untilASessionWaitsOnALock(w.prisma);
         release();
         const [first, second] = await Promise.all([setA, setB]);
 
