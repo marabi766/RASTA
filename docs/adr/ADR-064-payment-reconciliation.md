@@ -114,6 +114,22 @@ getStatus(query: { paymentIntentId: string; providerReference?: string; idempote
   امروز فقط برای رساندن تست‌ها به حالت‌های U و R افزوده می‌شوند.
 - هر فراخوانی Provider زیر `ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS` است؛ Timeout یک نتیجهٔ نامعلوم است، نه شکست.
 
+> **اصلاح در گام B2 (بازبینی Codex روی #164؛ تصمیم مدیر پروژه):**
+>
+> - **پرسش بازپرداخت جداست.** برای بازپرداخت‌ها `getRefundStatus({ paymentIntentId, providerReference, idempotencyKey })`
+>   وضعیت **همان تلاش** را می‌پرسد: `REFUNDED | DECLINED | NOT_FOUND | UNKNOWN`، همراه `authoritative`. شکل `getStatus`
+>   بالا برای Intentهای Top-up گام C می‌ماند.
+> - **توانایی در سطح Provider است، نه پاسخ.** توانایی `authoritativeNotFound` بالا به نام `PaymentProvider.authoritativeAbsence` ساخته شد.
+>   `NOT_FOUND` فقط وقتی Hold را برمی‌گرداند (یا Capture را اعتبارپذیر می‌کند) که Provider این توانایی را **اعلام کرده**
+>   باشد. `MockPaymentProvider` مقدار `false` اعلام می‌کند، چون حافظه‌اش مال یک فرایند است: پس از Restart خالی است و میان
+>   Replicaها مشترک نیست، پس Replica B دربارهٔ بازپرداختی که Replica A کرده «ندیدم» می‌گوید. پاسخ «ندیده» آن `UNKNOWN` است و
+>   تسک Backoff می‌کند و سرانجام به انسان سپرده می‌شود (گام B3). شاخهٔ `NOT_FOUND` جدول تصمیم برای Providerهایی می‌ماند که
+>   این توانایی را اعلام می‌کنند.
+> - **Timeout فقط سمت بازپرداخت است.** Timeout فقط `refund` و `getRefundStatus` را در بر می‌گیرد. `authorize` و `capture` تا
+>   گام C بی Timeout می‌مانند: Authorize که Timeout شود Intent را `CREATED` می‌گذارد، در حالی که Provider شاید آن را Authorize
+>   کرده باشد، و تا گام C چیزی آن را بازیابی نمی‌کند. مبلغش سقف کیف پول را برای همیشه رزرو می‌کرد. اعتبارسنجی پیکربندی
+>   Timeout کمتر یا برابر تأخیر Mock را رد می‌کند.
+
 ### ۴. آشتی‌دهنده
 
 > پس از اصلاح § ۸، Claim و Lease روی `payment_reconciliation_task` است و `reconcile_state` زیر نام `status` آن
