@@ -505,6 +505,33 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `submittedBy`, `submittedAt` — **بدون `assetsUsed`** (پایین‌تر)                             |
 | `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                              |
 
+**رویدادهای مناقصه — CON-002 (طرح، 2026-09-30؛ هنوز تولید نمی‌شوند).** ردیف‌های `TENDER_*`/`BID_*`/`BIDS_EVALUATED` جدول
+بالا **طرح**‌اند و با این جدول (ADR-065/066/067) جایگزین می‌شوند: `aggregateType = Tender`، **کلید پارتیشن `tenderId`**
+(`docs/07` § ۷٫۴)، مالک Topic و ACL تولیدکننده بی‌تغییر. **هیچ Payloadی محتوا، قیمت پیشنهادی، رمزنوشته یا متن آزاد
+حمل نمی‌کند** (`.strict()`)؛ `matrix`/`justification`/`amount` کاتالوگ نیز به‌جایشان شناسه و شمار و `hasJustification` می‌آیند. بازیگر
+در لفافه است؛ پس شناسهٔ پیمانکار روی Topic دیدنی است و فقط `audit-service` آن را می‌خواند (D-044).
+
+| رویداد                               | مصرف‌کنندگان                                               | Payload کلیدی                                                                                                                                         |
+| ------------------------------------ | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TENDER_CREATED`                     | audit                                                      | `tenderId`, `projectId`, `organizationId`, `procurementNature` (یا `null` تا انتشار), `createdBy`, `createdAt`                                        |
+| `TENDER_PUBLISHED`                   | audit · notification (پیمانکاران) · search                 | `tenderId`, `organizationId`, `visibility`, `bidOpeningAt`, `bidClosingAt`, `criteriaCount`, `publishedBy`, `publishedAt`                             |
+| `TENDER_CLOSED`                      | audit · notification                                       | `tenderId`, `organizationId`, `bidCount`, `closedAt`, `closedBy` (بازیگر سیستم برای جاروکننده)                                                        |
+| `BID_SUBMITTED`                      | audit (مهر زمانی و رسید)                                   | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `revision`, `receivedAt`, `contentCommitment`, `receipt`                               |
+| `BID_REVISED`                        | audit                                                      | همان `BID_SUBMITTED` با `revision` بالاتر                                                                                                             |
+| `BID_WITHDRAWN`                      | audit                                                      | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `withdrawnAt`                                                                          |
+| `BIDS_OPENED`                        | audit · notification                                       | `tenderId`, `organizationId`, `bidCount`, `openedBy`, `openedAt`                                                                                      |
+| `BID_ACCESSED`                       | audit                                                      | `bidId`, `tenderId`, `organizationId`, `accessorOrganizationId`, `purpose` (بسته), `outcome`, `accessedAt`                                            |
+| `BID_QUALIFIED` / `BID_DISQUALIFIED` | audit                                                      | `bidId`, `tenderId`, `organizationId`, `reasonCode` (بسته، فقط رد), `decidedBy`, `decidedAt`                                                          |
+| `BIDS_EVALUATED`                     | audit · analytics                                          | `tenderId`, `organizationId`, `evaluatedBidCount`, `evaluatedBy`, `evaluatedAt`                                                                       |
+| `TENDER_AWARDED`                     | **contract (پیش‌نویس، CON-003)** · notification · supplier | `tenderId`, `projectId`, `organizationId`, `winningBidId`, `winnerOrganizationId`, `amountMinor` (رشته)، `hasJustification`, `awardedBy`, `awardedAt` |
+| `TENDER_CANCELLED`                   | audit · notification                                       | `tenderId`, `organizationId`, `from`, `reasonCode` (بسته، مثل `NO_QUALIFIED_BID`), `cancelledBy`, `cancelledAt`                                       |
+
+`TENDER_AWARDED.amountMinor` تنها مبلغ برنده است و فقط پس از `EVALUATED` منتشر می‌شود (بازگشایی رخ داده)؛ CON-003 قرارداد را
+با کلید Idempotency `tenderId` می‌سازد. `BID_ACCESSED` و `BID_QUALIFIED`/`BID_DISQUALIFIED` رویدادهای **افزودهٔ CON-002** برای پوشش S-06
+هستند. **هشت رویداد افزوده — `BID_ACCESSED`، `BID_QUALIFIED`، `BID_DISQUALIFIED`، `BIDS_OPENED`، `BID_REVISED`، `BID_WITHDRAWN`، `TENDER_CLOSED`،
+`TENDER_CANCELLED` — را مدیر پروژه با همین نام‌ها پذیرفت (2026-09-30).** `BID_ACCESSED` هرگز محتوای پیشنهاد حمل نمی‌کند: فقط
+شناسه‌ها، بازیگر، زمان و هدف بسته (`.strict()` هر فیلد دیگر را رد می‌کند).
+
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
 گزارش در پایگاه داده می‌مانند؛ ولی تا مالکیتشان در برابر `asset-service` سنجیده نشود، روی `rasta.construction.v1`

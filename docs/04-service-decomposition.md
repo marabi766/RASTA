@@ -372,7 +372,7 @@ marketplace (گام ۵) پیاده شده‌اند؛ موتور محاسبه (گ
 | **Publishes**    | `PROJECT_CREATED` · `APPROVAL_REQUESTED` · `APPROVAL_GRANTED` · `APPROVAL_REJECTED` · `TENDER_CREATED` · `TENDER_PUBLISHED` · `BID_SUBMITTED` · `BIDS_EVALUATED` · `TENDER_AWARDED` · `PROJECT_STARTED` · `PROJECT_PROGRESS_UPDATED` · `PROJECT_COMPLETED`                                                                                                                             |
 | **Consumes**     | `SUPPLIER_QUALIFIED` / `SUPPLIER_SUSPENDED` · `CONTRACT_SIGNED` · `ASSET_*` و `AVAILABILITY_CHANGED` (تحلیل ناوگان)                                                                                                                                                                                                                                                                    |
 | **Dependencies** | PostgreSQL + PostGIS · Kafka · **Temporal (گردش‌کار مناقصه)** · `supplier` · `fleet` · `document`                                                                                                                                                                                                                                                                                      |
-| **مرز امنیتی**   | **بالاترین حساسیت.** پیشنهادها تا پایان مهلت **رمزنگاری‌شده** و غیرقابل مشاهده برای همه، از جمله اپراتور. هر تصمیم در Audit با مهر زمانی.                                                                                                                                                                                                                                              |
+| **مرز امنیتی**   | **بالاترین حساسیت.** پیشنهادها در حالت سکون **رمزنگاری‌شده** و تا بازگشایی صریح از راه API برای هیچ نقشی دیدنی نیستند؛ هر خواندن حسابرسی می‌شود و از هر پیشنهاد Hash تعهد ثبت می‌شود (ADR-066). اپراتور پلتفرم از نظر رمزنگاری بیرون نیست (D-043). هر تصمیم در Audit با مهر زمانی.                                                                                                     |
 | **Scale**        | کم اما بلندمدت — یک مناقصه هفته‌ها طول می‌کشد. Temporal این را می‌سازد، نه Cron.                                                                                                                                                                                                                                                                                                       |
 | **Failure**      | افت آن ثبت پیشنهاد جدید را می‌خواباند. **مهلت‌ها در Temporal‌اند و از دست نمی‌روند.**                                                                                                                                                                                                                                                                                                  |
 
@@ -394,6 +394,11 @@ Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v
 سیاست را `UNION_ADMIN` برای سازمان خودش یا زیرمجموعه می‌نویسد و `SYSTEM_ADMIN` پیش از حاکم‌شدن تأیید می‌کند (Q-70
 بند ۷، تصمیم مالک 2026-09-26)؛ تنها وابستگی هم‌زمان این سرویس، پرسش سلسله‌مراتب از `organization-service` هنگام نوشتن
 سیاست است (`GET /v1/organizations/{id}` با توکن داخلی؛ پاسخ فقط `{ id }` یا `404`؛ هر پاسخ دیگر رد).
+
+**CON-002 (در دست اجرا، 2026-09-30).** طراحی در ADR-065 (چرخهٔ مناقصه/پیشنهاد و مهلت؛ جاروکننده پیش از Temporal)، ADR-066 (محرمانگی پیشنهاد)
+و ADR-067 (ارزیابی و تعارض منافع)؛ پرسش‌ها Q-84 تا Q-90؛ قرارداد API در
+[`docs/api/construction-service.tender.planned.openapi.json`](api/construction-service.tender.planned.openapi.json) (طرح، نه رفتار امروز).
+**وابستگی:** فقط `SUPPLIER_QUALIFIED`/`SUPPLIER_SUSPENDED` از COM-005 (که هنوز `IN_PROGRESS` است).
 
 **هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد، ارزیابی و انتخاب — CON-002؛ قرارداد — CON-003؛
 تحلیل ناوگان؛ هیچ Consumer رویدادی.
