@@ -819,6 +819,7 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'policy_reconciliation_task',
       'processed_event',
       'progress_report',
       'project',
@@ -857,6 +858,17 @@ export const EXPECTED = {
       'ck_policy_rejection_complete',
       'ck_policy_activation_complete',
       'ck_policy_retirement_complete',
+      // 20260930130000_policy_suspension (Q-83): a suspension names who, when
+      // and why, exactly when the policy is SUSPENDED.
+      'ck_policy_suspension_complete',
+      // 20260930150000_policy_reconciliation_task (Q-83, D-041): a task's
+      // lease is a time and its token or neither, DONE names when, and the
+      // task is bound to its policy's tenant.
+      'ck_reconciliation_text_not_blank',
+      'ck_reconciliation_attempts_nonneg',
+      'ck_reconciliation_done_complete',
+      'ck_reconciliation_lease_pair',
+      'policy_reconciliation_task_organization_id_policy_id_fkey',
       'ck_step_authority_not_oversight',
       'ck_step_amount_range',
       'ck_approval_decision_complete',

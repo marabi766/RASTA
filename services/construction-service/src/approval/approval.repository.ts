@@ -230,6 +230,47 @@ export class ApprovalRepository {
   }
 
   /**
+   * Every ACTIVE or PENDING_PLATFORM_APPROVAL policy a union wrote for an
+   * organization other than its own, across all tenants — the ones an
+   * ORGANIZATION_MOVED can strand (Q-83). A pending one is listed because
+   * approval can activate it after the move (see `PolicySuspensionService`).
+   * Nothing but identifiers is read, and the caller acts on each in the tenant
+   * that row names. A union's policy for itself needs no hierarchy, and a
+   * platform administrator's is never stranded by a move.
+   */
+  async listUnionPoliciesToReconfirm(): Promise<
+    {
+      id: string;
+      organizationId: string;
+      authorOrganizationId: string;
+      workflowKey: WorkflowKey;
+      policyVersion: number;
+    }[]
+  > {
+    const rows = await runUnscoped(
+      'an organization move re-confirms every union-written policy in force, in any tenant (Q-83)',
+      () =>
+        this.prisma.client.approvalPolicy.findMany({
+          where: {
+            status: { in: ['ACTIVE', 'PENDING_PLATFORM_APPROVAL'] },
+            authorRole: 'UNION_ADMIN',
+          },
+          select: {
+            id: true,
+            organizationId: true,
+            authorOrganizationId: true,
+            workflowKey: true,
+            policyVersion: true,
+          },
+          orderBy: { id: 'asc' },
+        }),
+    );
+    return rows
+      .filter((row) => row.organizationId !== row.authorOrganizationId)
+      .map((row) => ({ ...row, workflowKey: row.workflowKey as WorkflowKey }));
+  }
+
+  /**
    * Policies an organization governs by or wrote — or, with `organizationId`
    * null, every organization's (the platform administrator's queue).
    */
