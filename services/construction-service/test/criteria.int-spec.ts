@@ -502,10 +502,10 @@ describe('evaluation criteria', () => {
       await insertCriterion(a, tender.id, {});
       // PostgreSQL names the key's columns in a unique violation, not the index.
       await expect(insertCriterion(a, tender.id, { position: '2' })).rejects.toThrow(
-        /\(tender_id, code\)/,
+        /\(organization_id, tender_id, code\)/,
       );
       await expect(insertCriterion(a, tender.id, { code: `'D'` })).rejects.toThrow(
-        /\(tender_id, \\?"position\\?"\)/,
+        /\(organization_id, tender_id, \\?"position\\?"\)/,
       );
       await expect(insertCriterion(b, tender.id, { code: `'E'`, position: '5' })).rejects.toThrow(
         /tender_criterion_organization_id_tender_id_fkey/,
