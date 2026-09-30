@@ -2810,9 +2810,9 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   **به‌روزرسانی 2026-09-28 (RUN-006، PR A #128 + PR B `chore/kafka-sasl-acl-broker`):** Broker توسعه و CI **احراز و
   مجوزدهی می‌کند** — SASL_SSL با SCRAM-SHA-512، یک Principal برای هر سرویس، `allow.everyone.if.no.acl.found=false`، و
   ACLهای تولیدشده از `TOPIC_PRODUCERS` و `TOPIC_CONSUMERS` در دو پروفایل: `broker-acls.development.json` (Compose و CI؛
-  ۱۶ Principal، ۱۶۷ Binding) و `broker-acls.deployment.json` (۱۳ Principal، ۱۰۷ Binding — بی `itest-observer`، Kafka UI
+  ۱۶ Principal، ۱۸۶ Binding از 2026-09-30 با Consumer construction — ۱۶۷ پیش از READ کهنگی `ops-replay`، بی READ `rasta.economic.v1` و WRITE `.retry` آن) و `broker-acls.deployment.json` (۱۳ Principal، ۱۲۳ Binding، پیش‌تر ۱۰۷ — بی `itest-observer`، Kafka UI
   و Exporter). اعمال‌کننده (`pnpm kafka:acl:apply:dev` ← `kafka-acl.mjs apply --profile …`) و Broker بی پروفایل صریح اجرا
-  نمی‌شوند. فهرست Topicهای Bootstrap (`topics.txt`، ۳۴ Topic، شامل `rasta.audit.trail.v1.retry`) هم تولیدی است و آزمون
+  نمی‌شوند. فهرست Topicهای Bootstrap (`topics.txt`، ۳۵ Topic، شامل `rasta.audit.trail.v1.retry` و `rasta.construction.v1.dlq`) هم تولیدی است و آزمون
   قرارداد-به-Bootstrap برابری‌اش را با قراردادها و ACLها نگه می‌دارد. فقط مالک روی Topicش می‌نویسد؛ Consumer فقط
   اشتراکش را زیر گروه‌های `<service>.` می‌خواند؛ فقط `ops-replay` روی `.retry` می‌نویسد و DLQها را می‌خواند؛
   `itest-observer` فقط READ دارد و فقط در پروفایل development. اعتبار admin، ops-replay و observer در
@@ -2824,8 +2824,12 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   `kafka-data` ماندگار است؛ `kafka-init` به Principal بی‌اعتبار اعتبار می‌دهد. اعمال ACL: `pnpm kafka:acl:apply:dev`؛
   استقرار فقط `kafka-acl.mjs apply --profile deployment` از Secret Store. ADR-061 § ۳ اصلاحیهٔ 2026-09-28؛ چرخش:
   [`docs/runbooks/kafka-credential-rotation.md`](docs/runbooks/kafka-credential-rotation.md) (همه درجا با شرط سکون و
-  بی از دست رفتن داده — آزموده روی Broker توسعه؛ پاک کردن داده راه چرخش نیست). **شکاف باز:** ابزار بازپخش DLQ وجود ندارد و هیچ Consumerی `.retry` را Subscribe نمی‌کند
-  (D-039).
+  بی از دست رفتن داده — آزموده روی Broker توسعه؛ پاک کردن داده راه چرخش نیست). **ابزار بازپخش DLQ** (2026-09-29): `scripts/replay-dlq.mjs`، به نام `ops-replay`، Dry-run پیش‌فرض، مقصد فقط
+  `.retry`، کلید = کلید نگه‌داشتهٔ DLQ (برابر `streamKey`؛ بی کلید ← `KEY_UNVERIFIABLE`/`UNSEQUENCED_NO_KEY`)، رد `NEVER_AUTO_REPLAY` (نام یا Topic مبدأ economic) و کهنه/نامعلوم — شامل Retention گذشته از Offset اصلی — (مگر `--allow-stale`)، مهر `x-replay-id`، حداقل یک‌بار (Idempotency مصرف‌کننده)؛ `ops-replay` اکنون
+  Topicهای مشترک را جز economic برای کهنگی می‌خواند (فقط گروه‌های `ops-replay.`). `EventConsumer` از #145 `.retry` را می‌خواند (D-039) و DLQ کلید را نگه
+  می‌دارد (D-040). آزمون‌های Broker (ACL و بازپخش) در Job جدای CI «Broker authorisation» روی Broker تازه اجرا می‌شوند؛ آزمون
+  Retention رکورد پاک می‌کند و فقط با `REPLAY_TEST_DISPOSABLE_BROKER=1` و رکوردهای همان اجرا کار می‌کند (محلی: Skip).
+  **شکاف باز:** رکورد ممیزی `rasta.ops.replay.v1` (یک `REPLAY_EXECUTED` برای هر رویداد) PR بعدی است.
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
 

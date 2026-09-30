@@ -305,6 +305,46 @@ describe('evaluation criteria', () => {
       expect((await asAdmin(a, () => w.tenders.get(tender.id))).version).toBe(1);
     });
 
+    it('answers with the state its own change produced, even when a second set follows at once', async () => {
+      // The class of defect Codex found in #162: an answer read after the commit
+      // can report the next change's state. Set A is held right after its write
+      // (row lock still held); set B queues behind that lock; A is released.
+      const { a, tender } = await withTender();
+      let release!: () => void;
+      let atGate!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const reached = new Promise<void>((resolve) => (atGate = resolve));
+      const original = EventPublisher.prototype.enqueue;
+      const spy = jest
+        .spyOn(EventPublisher.prototype, 'enqueue')
+        .mockImplementationOnce(async function (
+          this: EventPublisher,
+          ...args: Parameters<EventPublisher['enqueue']>
+        ) {
+          await original.apply(this, args);
+          atGate();
+          await gate;
+        } as unknown as EventPublisher['enqueue']);
+      try {
+        const setA = asAdmin(a, () =>
+          w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: [PRICE] }),
+        );
+        await reached;
+        const setB = asAdmin(a, () =>
+          w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: WHOLE }),
+        );
+        release();
+        const [first, second] = await Promise.all([setA, setB]);
+
+        expect(first).toMatchObject({ version: 2, totalWeightBp: 4000 });
+        expect(first.items.map((item) => item.code)).toEqual(['PRICE']);
+        expect(second).toMatchObject({ version: 3, totalWeightBp: 10_000 });
+        expect(second.items).toHaveLength(3);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('lets exactly one of two concurrent sets win', async () => {
       const { a, tender } = await withTender();
 

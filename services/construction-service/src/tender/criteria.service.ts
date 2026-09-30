@@ -146,8 +146,12 @@ export class CriteriaService {
   async setCriteria(tenderId: string, dto: SetCriteriaDto): Promise<CriteriaView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
+    // The answer is read inside the transaction, with the tender still locked: read
+    // after the commit, a second change could land in between and this one would
+    // report its state and version (the class of defect Codex found in #162).
+    let view: CriteriaView;
     try {
-      await withFinancialSpan(
+      view = await withFinancialSpan(
         'construction.tender.set-criteria',
         () =>
           this.prisma.transaction(async (tx) => {
@@ -206,6 +210,7 @@ export class CriteriaService {
               },
               occurredAt: at,
             });
+            return this.criteriaView(tx, organizationId, tenderId);
           }),
         { 'rasta.tender.command': 'set-criteria' },
       );
@@ -224,19 +229,28 @@ export class CriteriaService {
     }
     tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'set-criteria' });
 
-    return this.getCriteria(tenderId);
+    return view;
   }
 
   async getCriteria(tenderId: string): Promise<CriteriaView> {
     const { organizationId } = this.access.assertCanRead();
-    const tender = await this.tenders.findTender(tenderId);
-    if (!tender) throw RastaError.notFound('Tender', tenderId);
-    assertOwnTender(tender, organizationId);
-    const rows = await this.repository.listCriteria(tenderId);
-    return toCriteriaView(tender.id, tender.version, rows);
+    return this.criteriaView(this.prisma.client, organizationId, tenderId);
   }
 
   // -- helpers ----------------------------------------------------------------
+
+  /** A tender's criteria and version, read through `client` (a transaction's, when it must match a write). */
+  private async criteriaView(
+    client: ExtendedPrismaClient,
+    organizationId: string,
+    tenderId: string,
+  ): Promise<CriteriaView> {
+    const tender = await this.tenders.findTender(tenderId, client);
+    if (!tender) throw RastaError.notFound('Tender', tenderId);
+    assertOwnTender(tender, organizationId);
+    const rows = await this.repository.listCriteria(tenderId, client);
+    return toCriteriaView(tender.id, tender.version, rows);
+  }
 
   private async templateView(
     organizationId: string,
