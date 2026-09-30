@@ -108,26 +108,59 @@ function fixtureFor(persona: LivePersona): Fixture {
   return { username, password, organizationId, userId };
 }
 
+/** What Keycloak said, reduced to labels that cannot carry request material. */
+async function refusalReason(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    const description = z.object({ error_description: z.string() }).safeParse(body);
+    const text = description.success ? description.data.error_description : '';
+    if (/temporarily disabled/i.test(text)) return 'account temporarily locked';
+    if (/invalid user credentials/i.test(text)) return 'credentials not accepted';
+    if (/not fully set up/i.test(text)) return 'account not fully set up';
+    if (/disabled/i.test(text)) return 'account disabled';
+  } catch {
+    // An unreadable body is still a refusal; the status below says so.
+  }
+  return 'no recognised reason';
+}
+
+const TOKEN_ATTEMPTS = 3;
+const TOKEN_RETRY_DELAY_MS = 750;
+
+/**
+ * A 401 from the password grant has been seen once in a while on the shared CI
+ * Keycloak while two browser workers sign in at the same moment, and passes on
+ * the next try. A bounded retry absorbs that; a real lock-out (which lasts a
+ * minute) or a wrong fixture password fails at once or after three tries, with
+ * the reason named, instead of being hidden behind a test-level retry.
+ */
 async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponseSchema>> {
   const issuer = requiredEnv('OIDC_ISSUER_URL').replace(/\/+$/, '');
-  const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'password',
-      client_id: requiredEnv('OIDC_CLIENT_ID'),
-      username: fixture.username,
-      password: fixture.password,
-      scope: 'openid',
-    }),
+  const body = new URLSearchParams({
+    grant_type: 'password',
+    client_id: requiredEnv('OIDC_CLIENT_ID'),
+    username: fixture.username,
+    password: fixture.password,
+    scope: 'openid',
   });
 
-  if (!response.ok) {
+  let refusal = '';
+  for (let attempt = 1; attempt <= TOKEN_ATTEMPTS; attempt += 1) {
+    const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (response.ok) return tokenResponseSchema.parse(await response.json());
+
     // Never include the response body: an identity-provider error can echo
     // request material, and this helper handles a password and refresh token.
-    throw new Error(`Keycloak refused the live browser fixture (${response.status})`);
+    const reason = await refusalReason(response);
+    refusal = `${response.status}, ${reason}, attempt ${attempt} of ${TOKEN_ATTEMPTS}`;
+    if (response.status !== 401 || reason === 'account temporarily locked') break;
+    await new Promise((done) => setTimeout(done, TOKEN_RETRY_DELAY_MS * attempt));
   }
-  return tokenResponseSchema.parse(await response.json());
+  throw new Error(`Keycloak refused the live browser fixture for ${fixture.username} (${refusal})`);
 }
 
 /**
