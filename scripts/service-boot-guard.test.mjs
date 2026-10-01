@@ -92,7 +92,7 @@ test('every split service with an app module is held to the connected-role check
 for (const service of ROLE_CHECKED) {
   test(`${service}: asserts the connected role first in AppModule.onModuleInit, through the shared check`, () => {
     const app = readFileSync(join(ROOT, 'services', service, 'src', 'app.module.ts'), 'utf8');
-    const init = /\n  async onModuleInit\(\): Promise<void> \{\n([\s\S]*?)\n  \}\n/.exec(app);
+    const init = /\n {2}async onModuleInit\(\): Promise<void> \{\n([\s\S]*?)\n {2}\}\n/.exec(app);
     assert.ok(init, 'AppModule has no onModuleInit');
     const firstStatement = init[1]
       .split('\n')
