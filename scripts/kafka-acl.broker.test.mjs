@@ -21,7 +21,9 @@
  *   - only a topic's owner writes it; a service reads only what it subscribes
  *     to, under groups in its own namespace;
  *   - a service writes only its own dead-letter topic; only `ops-replay`
- *     writes `.retry` topics and reads dead-letter topics;
+ *     writes `.retry` topics and reads dead-letter topics, and it reads an
+ *     original topic (the replay tool's staleness check) only in its own
+ *     groups, never writing it;
  *   - no password, a wrong password, an unknown principal or SASL/PLAIN (even
  *     with a real password) is refused, and so is PLAINTEXT;
  *   - no principal but the admin creates a topic, by request or by producing;
@@ -115,6 +117,30 @@ async function produce(principal, topic, options = {}) {
 }
 
 /**
+ * One committed transaction under `transactionalId`, writing a marker to
+ * `topic`. `retries` lets the allowed case wait out a transaction coordinator
+ * that a fresh broker loads on first use; kafkajs refuses an idempotent
+ * producer without at least one, and an authorization error is never retried.
+ */
+async function transact(principal, transactionalId, topic, retries = 1) {
+  const producer = await connected(
+    client(principal, { retry: { retries, initialRetryTime: 300 } }).producer({
+      transactionalId,
+      idempotent: true,
+      maxInFlightRequests: 1,
+      allowAutoTopicCreation: false,
+    }),
+  );
+  const transaction = await producer.transaction();
+  await transaction.send({
+    topic,
+    acks: -1,
+    messages: [{ key: run, value: JSON.stringify({ aclTest: run }) }],
+  });
+  await transaction.commit();
+}
+
+/**
  * What stopped a call: the broker's error type (`TOPIC_AUTHORIZATION_FAILED`)
  * when kafkajs carries one anywhere down its wrapping chain, else the kafkajs
  * error's name. kafkajs wraps a protocol error in a non-retriable one.
@@ -157,6 +183,40 @@ async function coordinatorReady(groupId) {
  * Joins `groupId` as `principal`, subscribed to `topic`, and resolves once the
  * group is joined — or with the refusal that stopped it.
  */
+/**
+ * `READ` — the fetch itself, not only the join (WRITE already implies
+ * DESCRIBE): reads `topic`/`partition` from `offset` as `principal` until a
+ * message arrives, or the reason it was refused.
+ */
+async function fetchAt(principal, groupId, topic, partition, offset) {
+  await coordinatorReady(groupId);
+  const consumer = client(principal).consumer({
+    groupId,
+    sessionTimeout: 10_000,
+    retry: { retries: 0 },
+  });
+  clients.push(consumer);
+  return new Promise((resolveRead) => {
+    const timer = setTimeout(() => resolveRead('TIMEOUT'), 30_000);
+    const done = (outcome) => {
+      clearTimeout(timer);
+      resolveRead(outcome);
+    };
+    consumer.on(consumer.events.CRASH, ({ payload }) => done(reason(payload?.error)));
+    (async () => {
+      await consumer.connect();
+      await consumer.subscribe({ topic, fromBeginning: false });
+      await consumer.run({
+        autoCommit: false,
+        eachMessage: async ({ partition: at, message }) => {
+          if (at === partition && BigInt(message.offset) >= BigInt(offset)) done('READ');
+        },
+      });
+      consumer.seek({ topic, partition, offset: String(offset) });
+    })().catch((error) => done(reason(error)));
+  });
+}
+
 async function consume(principal, groupId, topic) {
   await coordinatorReady(groupId);
   const consumer = client(principal).consumer({
@@ -332,6 +392,125 @@ describe('5. dead-letter and retry topics', () => {
     );
     assert.equal(
       await refusal(() => produce('ops-replay', 'rasta.fleet.v1.dlq')),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+  });
+
+  test('ops-replay reads an original topic — the staleness check — only in its own groups, and never writes it', async () => {
+    assert.equal(
+      await consume('ops-replay', `ops-replay.acl-stale-${run}`, 'rasta.fleet.v1'),
+      'JOINED',
+    );
+    // Another namespace's group: refused as GROUP_AUTHORIZATION_FAILED, which
+    // kafkajs reports as "coordinator not found" (as in § 4).
+    assert.equal(
+      await consume('ops-replay', `maintenance-service.acl-stale-${run}`, 'rasta.fleet.v1'),
+      'KafkaJSGroupCoordinatorNotFound',
+    );
+    assert.equal(
+      await refusal(() => produce('ops-replay', 'rasta.fleet.v1')),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+  });
+
+  test('ops-replay alone writes its replay record, rasta.ops.replay.v1, and still no original of anyone else', async () => {
+    assert.equal(await refusal(() => produce('ops-replay', 'rasta.ops.replay.v1')), 'ALLOWED');
+    // Not the services — the audit-service that reads it least of all.
+    for (const principal of ['audit-service', 'fleet-service', 'identity-service']) {
+      assert.equal(
+        await refusal(() => produce(principal, 'rasta.ops.replay.v1')),
+        'TOPIC_AUTHORIZATION_FAILED',
+        principal,
+      );
+    }
+    for (const topic of ['rasta.fleet.v1', 'rasta.audit.trail.v1', 'rasta.economic.v1.retry']) {
+      assert.equal(
+        await refusal(() => produce('ops-replay', topic)),
+        'TOPIC_AUTHORIZATION_FAILED',
+        topic,
+      );
+    }
+  });
+
+  test('ops-replay alone uses transactional ids, and only its own: ops-replay.*', async () => {
+    // Each replay and its REPLAY_EXECUTED record are one transaction (round 1 on #166).
+    assert.equal(
+      await refusal(() =>
+        transact('ops-replay', `ops-replay.acl-${run}`, 'rasta.fleet.v1.retry', 10),
+      ),
+      'ALLOWED',
+    );
+    for (const [principal, transactionalId, topic] of [
+      ['ops-replay', `fleet-service.acl-${run}`, 'rasta.fleet.v1.retry'],
+      ['fleet-service', `fleet-service.acl-${run}`, 'rasta.fleet.v1'],
+      ['fleet-service', `ops-replay.acl-other-${run}`, 'rasta.fleet.v1'],
+    ]) {
+      // The control: the admin, a super user, runs the same transactional id,
+      // so its coordinator is known to be up and the refusal below is the
+      // ACL's alone. kafkajs reports TRANSACTIONAL_ID_AUTHORIZATION_FAILED on
+      // FindCoordinator as "coordinator not found", as it does for groups (§ 4).
+      assert.equal(
+        await refusal(() => transact(spec.admin, transactionalId, topic, 10)),
+        'ALLOWED',
+        `admin control as ${transactionalId}`,
+      );
+      assert.ok(
+        ['TRANSACTIONAL_ID_AUTHORIZATION_FAILED', 'KafkaJSGroupCoordinatorNotFound'].includes(
+          await refusal(() => transact(principal, transactionalId, topic)),
+        ),
+        `${principal} as ${transactionalId} must be refused`,
+      );
+    }
+  });
+
+  test('ops-replay reads back the .retry it writes — --check-marker — in its own groups only', async () => {
+    // Round 3 on #166: the recovery check after an unknown commit runs as
+    // ops-replay, so the deployment ACLs must let it read the position.
+    const producer = await connected(
+      client('ops-replay').producer({ allowAutoTopicCreation: false }),
+    );
+    const [landed] = await producer.send({
+      topic: 'rasta.fleet.v1.retry',
+      acks: -1,
+      messages: [{ key: run, value: JSON.stringify({ aclTest: run, check: true }) }],
+    });
+    assert.equal(
+      await fetchAt(
+        'ops-replay',
+        `ops-replay.check.acl-${run}`,
+        'rasta.fleet.v1.retry',
+        landed.partition,
+        landed.baseOffset,
+      ),
+      'READ',
+    );
+    assert.equal(
+      await fetchAt(
+        'ops-replay',
+        `fleet-service.check.acl-${run}`,
+        'rasta.fleet.v1.retry',
+        landed.partition,
+        landed.baseOffset,
+      ),
+      'KafkaJSGroupCoordinatorNotFound',
+    );
+  });
+
+  test('ops-replay may neither read the economic stream nor write its .retry — it never replays it', async () => {
+    assert.equal(
+      await consume('ops-replay', `ops-replay.acl-economic-${run}`, 'rasta.economic.v1'),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+    assert.equal(
+      await refusal(() => produce('ops-replay', 'rasta.economic.v1.retry')),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+    assert.equal(
+      await consume(
+        'ops-replay',
+        `ops-replay.acl-economic-retry-${run}`,
+        'rasta.economic.v1.retry',
+      ),
       'TOPIC_AUTHORIZATION_FAILED',
     );
   });

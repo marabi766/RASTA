@@ -33,8 +33,9 @@ import { OrderCommandForm } from './OrderCommandForm';
  * its supplier "accept" and its buyer nothing but the wait. Nothing here maps
  * a status to a button; that mapping is the one a client gets wrong.
  *
- * `newSubmissionId` is passed in rather than imported so this stays a pure
- * function of its props, renderable in a test, while the page mints the ids.
+ * `mintSubmissionId` is passed in rather than imported so this stays a pure
+ * function of its props, renderable in a test, while the page mints the ids —
+ * an id is bound to the signed-in session, which only the page has.
  */
 
 export interface OrderDetailScreenProps {

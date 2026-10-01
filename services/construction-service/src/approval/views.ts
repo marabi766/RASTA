@@ -41,6 +41,9 @@ export function toPolicyView(row: PolicyWithSteps): PolicyView {
     rejectionReason: row.rejectionReason,
     retiredAt: iso(row.retiredAt),
     retiredBy: row.retiredBy,
+    suspendedAt: iso(row.suspendedAt),
+    suspendedBy: row.suspendedBy,
+    suspensionReason: row.suspensionReason,
     version: row.version,
   };
 }

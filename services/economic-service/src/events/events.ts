@@ -38,6 +38,9 @@ export const ECONOMIC_EVENTS = {
   PAYMENT_COMPLETED: 'PAYMENT_COMPLETED',
   PAYMENT_FAILED: 'PAYMENT_FAILED',
   PAYMENT_CAPTURE_UNRECONCILED: 'PAYMENT_CAPTURE_UNRECONCILED',
+  PAYMENT_REFUND_UNRECONCILED: 'PAYMENT_REFUND_UNRECONCILED',
+  PAYMENT_RECONCILIATION_ESCALATED: 'PAYMENT_RECONCILIATION_ESCALATED',
+  PAYMENT_RECONCILIATION_RESOLVED: 'PAYMENT_RECONCILIATION_RESOLVED',
   COMMISSION_APPLIED: 'COMMISSION_APPLIED',
   REWARD_GRANTED: 'REWARD_GRANTED',
   REWARD_LEVEL_CHANGED: 'REWARD_LEVEL_CHANGED',
@@ -170,10 +173,19 @@ export const paymentFailedPayload = z.object({
 });
 /**
  * The provider captured the money, the wallet could not be credited, and
- * returning the capture at the provider failed too (Codex round 2 on #121,
- * F2). The intent stays AUTHORIZED with `failure_reason =
- * CAPTURED_NOT_CREDITED`: the payer has been charged and nothing is credited
- * until a same-key retry credits it or a person reconciles it.
+ * returning the capture at the provider did not succeed (Codex round 2 on
+ * #121, F2). The intent stays AUTHORIZED: the payer has been charged and
+ * nothing is credited.
+ *
+ * `providerRefund` says which of two very different states that is (ADR-064,
+ * U6):
+ *
+ *   `DECLINED` — the provider answered and refused the refund, so it still
+ *     holds the capture. `failure_reason = CAPTURED_NOT_CREDITED`; a same-key
+ *     retry credits it once the wallet has room.
+ *   `UNKNOWN`  — the refund call failed without an answer. The provider may
+ *     have refunded. `failure_reason = CAPTURED_REFUND_UNKNOWN`; nothing
+ *     credits it until the provider's own state is established.
  *
  * Published in the transaction that records the failure reason, so the alert
  * cannot be lost while the state persists. Codes only, no free text
@@ -188,7 +200,120 @@ export const paymentCaptureUnreconciledPayload = z.object({
   provider: z.string(),
   simulated: z.boolean(),
   reason: z.enum(['WALLET_BALANCE_LIMIT', 'CAPTURE_NOT_CREDITED']),
+  providerRefund: z.enum(['DECLINED', 'UNKNOWN']),
   detectedAt: z.string(),
+});
+
+/**
+ * An operator refund whose outcome the ledger could not record (ADR-064, R2).
+ *
+ * The refund holds the amount in escrow before the provider is asked, so the
+ * money cannot be spent while the answer is outstanding. Two outcomes leave
+ * the intent CAPTURED with that hold still in place:
+ *
+ *   `PROVIDER_OUTCOME_UNKNOWN` — the provider call failed without an answer.
+ *     The payer may have the money back. `failure_reason = REFUND_UNKNOWN`;
+ *     a second refund is refused until the provider's state is established.
+ *   `PROVIDER_DECLINED_RELEASE_PENDING` — the provider declined, and returning
+ *     the held amount failed. `failure_reason =
+ *     REFUND_DECLINED_RELEASE_PENDING`; a retry of the refund returns the hold
+ *     and never asks the provider again.
+ *   `REVERSAL_FAILED` / `INSUFFICIENT_BALANCE` — the provider refunded and the
+ *     reversal could not be written. `failure_reason = REFUNDED_NOT_REVERSED`;
+ *     a retry of the refund reverses it without asking the provider again.
+ *
+ * Published in the transaction that records the failure reason. Codes only.
+ */
+export const paymentRefundUnreconciledPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  amountMinor,
+  currency,
+  provider: z.string(),
+  simulated: z.boolean(),
+  reason: z.enum([
+    'PROVIDER_OUTCOME_UNKNOWN',
+    'PROVIDER_DECLINED_RELEASE_PENDING',
+    'INSUFFICIENT_BALANCE',
+    'REVERSAL_FAILED',
+  ]),
+  detectedAt: z.string(),
+});
+
+/** What a reconciliation task is for (ADR-064 step B). */
+const reconciliationKind = z.enum(['REFUND', 'UNCREDITED_REFUND']);
+
+/** The markers a reconciliation task can find on its intent (B0). */
+const unfinishedRefundMarker = z.enum([
+  'REFUND_REQUESTED',
+  'REFUND_UNKNOWN',
+  'REFUNDED_NOT_REVERSED',
+  'REFUND_DECLINED_RELEASE_PENDING',
+  'CAPTURED_REFUND_UNKNOWN',
+]);
+
+/** A closed code: upper-case letters and underscores, never free text (S-09). */
+const code = z.string().regex(/^[A-Z][A-Z_]{0,63}$/);
+
+/**
+ * The reconciler gave up on its own and handed an unfinished refund to a
+ * person (ADR-064 step B2).
+ *
+ * After `ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS` unanswered questions, or
+ * `…_MAX_AGE_HOURS` since the task was opened, or on a state it must not
+ * guess about (`HOLD_WITHOUT_MARKER`). **The hold stays**: escalation changes
+ * who decides, not where the money is. Published in the transaction that
+ * marks the task ESCALATED; audit-service keeps it as the record. `marker` is
+ * null only when the intent no longer carries one.
+ */
+export const paymentReconciliationEscalatedPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  kind: reconciliationKind,
+  marker: unfinishedRefundMarker.nullable(),
+  lastOutcome: code,
+  attempts: z.number().int().nonnegative(),
+  amountMinor,
+  currency,
+  provider: z.string(),
+  simulated: z.boolean(),
+  escalatedAt: z.string(),
+});
+
+/**
+ * An unfinished refund was resolved by the reconciler (ADR-064 step B2) —
+ * and, from step B3, by an approved operator resolution.
+ *
+ * `providerRefund` is the provider's answer the resolution rests on, or null
+ * when the marker was a known outcome and nobody was asked. `resolvedBy` is
+ * `PAYMENT_RECONCILER` for the sweeper. Published in the transaction that
+ * moves the money (if any) and marks the task DONE. Codes only.
+ */
+export const paymentReconciliationResolvedPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  kind: reconciliationKind,
+  marker: unfinishedRefundMarker.nullable(),
+  providerRefund: z.enum(['REFUNDED', 'DECLINED', 'NOT_FOUND']).nullable(),
+  resolution: z.enum([
+    'REFUNDED',
+    'REFUND_DECLINED',
+    'REFUND_NOT_REACHED',
+    'UNCREDITED_REFUNDED',
+    'UNCREDITED_DECLINED',
+    'UNCREDITED_NOT_REACHED',
+    'NOTHING_TO_RECONCILE',
+  ]),
+  resolvedBy: z.string().min(1),
+  attempts: z.number().int().nonnegative(),
+  amountMinor,
+  currency,
+  provider: z.string(),
+  simulated: z.boolean(),
+  resolvedAt: z.string(),
 });
 
 // ---------------------------------------------------------------------------
@@ -467,6 +592,9 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.PAYMENT_COMPLETED]: paymentCompletedPayload,
   [ECONOMIC_EVENTS.PAYMENT_FAILED]: paymentFailedPayload,
   [ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED]: paymentCaptureUnreconciledPayload,
+  [ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED]: paymentRefundUnreconciledPayload,
+  [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_ESCALATED]: paymentReconciliationEscalatedPayload,
+  [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_RESOLVED]: paymentReconciliationResolvedPayload,
   [ECONOMIC_EVENTS.COMMISSION_APPLIED]: commissionAppliedPayload,
   [ECONOMIC_EVENTS.REWARD_GRANTED]: rewardGrantedPayload,
   [ECONOMIC_EVENTS.REWARD_LEVEL_CHANGED]: rewardLevelChangedPayload,

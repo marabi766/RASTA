@@ -1,0 +1,64 @@
+# Alert rules for the payment reconciler (ADR-064 step B2), evaluated by the
+# local Prometheus in docker-compose.yml (`observability` profile).
+#
+# Local-only, like the audit and notification rules next door: there is no
+# Alertmanager in this repository, so a firing alert is visible at
+# http://localhost:9090/alerts and nowhere else. Production routing is a
+# deployment concern this file does not provide.
+#
+# Behaviour is proven by tests/rasta-economic-alerts.test.yml:
+#   promtool test rules /etc/prometheus/tests/rasta-economic-alerts.test.yml
+#
+# What is at stake: a refund whose outcome was not recorded keeps its amount
+# held in escrow. The reconciler asks the provider and resolves it; when it
+# cannot, it escalates to a person and the money stays held — safe, but the
+# payer and the wallet both wait on somebody. These alerts are how that
+# somebody hears about it. Payments are simulated in the MVP
+# (`MockPaymentProvider`, ADR-024); no bank connection is implied.
+#
+# No label carries an intent, a wallet or a tenant: the gauges are counts, and
+# the rows are in the database under authorization (AGENTS.md S-09).
+
+groups:
+  - name: rasta-economic-payment-reconciliation
+    rules:
+      # Any escalated task is a refund hold only a person can release. The
+      # gauge is sampled every sweep, so a short `for` rides out one sample.
+      - alert: RastaPaymentReconciliationEscalated
+        expr: max(rasta_economic_payment_reconciliation_escalated) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Payment refunds need a person ({{ $value }} escalated)'
+          description: 'The payment reconciler escalated at least one unfinished refund: the provider could not confirm what happened within the attempt or age limit, or the state was one it must not guess about. The refunded amount stays held in escrow until a person resolves it. The task table and the PAYMENT_RECONCILIATION_ESCALATED events name the intents; this alert deliberately carries none.'
+          runbook: docs/runbooks/payment-refund-stuck.md
+
+      # Due tasks waiting long past their time: the sweeper runs but cannot
+      # keep up, or keeps failing to apply. An hour is well beyond one backoff
+      # step at the default settings.
+      - alert: RastaPaymentReconciliationBacklogAging
+        expr: max(rasta_economic_payment_reconciliation_oldest_due_age_seconds) > 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Payment reconciliation tasks are waiting past their due time'
+          description: 'The oldest due payment reconciliation task has waited more than an hour past its due time for 15 minutes. Refund holds stay in place meanwhile. Check the economic-service log for the reconciler and the provider.'
+          runbook: docs/runbooks/payment-refund-stuck.md
+
+      # The sweeper has not finished a sweep in five intervals. Both gauges
+      # exist only while the sweeper is enabled, so a disabled one raises
+      # nothing, and the timestamp is set at start-up so a sweeper that never
+      # completes one still goes stale.
+      - alert: RastaPaymentReconcilerStalled
+        expr: >-
+          max by (instance) (time() - rasta_economic_payment_reconciler_last_sweep_timestamp_seconds)
+          > 5 * max by (instance) (rasta_economic_payment_reconciler_interval_seconds)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The payment reconciler has stopped sweeping ({{ $labels.instance }})'
+          description: 'An economic-service instance with the payment reconciler enabled has not completed a sweep in more than five intervals. Unfinished refunds are not being asked about or resolved on that instance.'
+          runbook: docs/runbooks/payment-refund-stuck.md

@@ -14,6 +14,8 @@ import {
 } from './broker-acls';
 import { TOPIC_PRODUCERS } from './topic-producers';
 import { TOPIC_CONSUMERS } from './topic-consumers';
+import { NEVER_AUTO_REPLAY_TOPICS } from './envelope';
+import { OPS_REPLAY_TOPIC } from './ops-replay';
 
 /**
  * RUN-006: the broker's ACLs, derived from the topology contracts. Each test
@@ -69,7 +71,7 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
     }
   });
 
-  it('lets only ops-replay write a retry topic', () => {
+  it('lets only ops-replay write a retry topic, and nobody that of a never-replayed topic', () => {
     const writers = principalsOf(
       acls.filter((acl) => acl.operation === 'WRITE' && acl.resourceName.endsWith('.retry')),
     );
@@ -81,8 +83,13 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
           resourceName: `${topic}.retry`,
           operation: 'WRITE',
         }),
-      ).toHaveLength(1);
+      ).toHaveLength(NEVER_AUTO_REPLAY_TOPICS.has(topic) ? 0 : 1);
     }
+    // Least privilege (PM, round 1 on #144): the tool never replays the
+    // economic stream, so ops-replay may not write its .retry either.
+    expect(where(acls, { resourceName: 'rasta.economic.v1.retry', operation: 'WRITE' })).toEqual(
+      [],
+    );
   });
 
   it('lets only ops-replay (and, in development, the test observer) read a dead-letter topic', () => {
@@ -94,6 +101,105 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
         ? [DEVELOPMENT_PRINCIPALS.observer, OPS_REPLAY_PRINCIPAL].sort()
         : [OPS_REPLAY_PRINCIPAL],
     );
+  });
+
+  it('lets ops-replay read every replayable subscribed topic — for the staleness check — and write none of them', () => {
+    const subscribed = new Set(Object.values(TOPIC_CONSUMERS).flatMap((c) => [...c.subscribes]));
+    const reads = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'READ' })
+      .filter(
+        (acl) =>
+          acl.resourceType === 'TOPIC' &&
+          !DEAD_LETTERS.includes(acl.resourceName) &&
+          !acl.resourceName.endsWith('.retry'),
+      )
+      .map((acl) => acl.resourceName)
+      .sort();
+    expect(reads).toEqual([...subscribed].filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t)).sort());
+    // audit-service subscribes to the economic stream, yet the tool never
+    // replays it: no READ there (Codex round 1 on #144, H2).
+    expect(subscribed.has('rasta.economic.v1')).toBe(true);
+    expect(reads).not.toContain('rasta.economic.v1');
+    // A never-replayed topic the contracts do not declare would exclude nothing.
+    for (const name of NEVER_AUTO_REPLAY_TOPICS)
+      expect(Object.keys(TOPIC_PRODUCERS)).toContain(name);
+    // Its WRITE is the .retry twins and its own replay record alone: never
+    // another original, never a dead letter.
+    const writes = where(acls, {
+      principal: OPS_REPLAY_PRINCIPAL,
+      operation: 'WRITE',
+      resourceType: 'TOPIC',
+    })
+      .map((acl) => acl.resourceName)
+      .sort();
+    expect(writes).toEqual(
+      [
+        OPS_REPLAY_TOPIC,
+        ...DECLARED_TOPICS.filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t)).map((t) => `${t}.retry`),
+      ].sort(),
+    );
+    // And its groups stay in its own namespace.
+    expect(
+      where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceType: 'GROUP' }).map((acl) => [
+        acl.resourceName,
+        acl.patternType,
+        acl.operation,
+      ]),
+    ).toEqual([[`${OPS_REPLAY_PRINCIPAL}.`, 'PREFIXED', 'READ']]);
+  });
+
+  it('lets ops-replay alone write its replay record, rasta.ops.replay.v1, which audit-service reads', () => {
+    expect(
+      principalsOf(where(acls, { resourceName: OPS_REPLAY_TOPIC, operation: 'WRITE' })),
+    ).toEqual([OPS_REPLAY_PRINCIPAL]);
+    expect(
+      principalsOf(where(acls, { resourceName: OPS_REPLAY_TOPIC, operation: 'READ' })).filter(
+        (p) => p !== DEVELOPMENT_PRINCIPALS.observer && p !== OPS_REPLAY_PRINCIPAL,
+      ),
+    ).toEqual(['audit-service']);
+    // And it still writes no original but that one, and not the economic stream's .retry.
+    const writes = where(acls, {
+      principal: OPS_REPLAY_PRINCIPAL,
+      operation: 'WRITE',
+      resourceType: 'TOPIC',
+    }).map((acl) => acl.resourceName);
+    expect(writes.filter((t) => !t.endsWith('.retry'))).toEqual([OPS_REPLAY_TOPIC]);
+    expect(writes).not.toContain('rasta.economic.v1.retry');
+  });
+
+  it('lets ops-replay alone hold a transactional id, only under ops-replay.', () => {
+    // One Kafka transaction per replay and its record (round 1 on #166).
+    expect(
+      where(acls, { resourceType: 'TRANSACTIONAL_ID' }).map((acl) => [
+        acl.principal,
+        acl.resourceName,
+        acl.patternType,
+        acl.operation,
+      ]),
+    ).toEqual([[OPS_REPLAY_PRINCIPAL, `${OPS_REPLAY_PRINCIPAL}.`, 'PREFIXED', 'WRITE']]);
+  });
+
+  it('lets ops-replay read exactly the .retry topics it writes — for --check-marker — never a never-replayed one', () => {
+    // Round 3 on #166: after a commit whose answer was lost, the tool reads
+    // the replay's own position read-committed, as ops-replay.
+    const retryOf = (operation: 'READ' | 'WRITE') =>
+      where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation, resourceType: 'TOPIC' })
+        .map((acl) => acl.resourceName)
+        .filter((name) => name.endsWith('.retry'))
+        .sort();
+    expect(retryOf('READ')).toEqual(retryOf('WRITE'));
+    expect(retryOf('READ')).toEqual(
+      DECLARED_TOPICS.filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t))
+        .map((t) => `${t}.retry`)
+        .sort(),
+    );
+    for (const name of NEVER_AUTO_REPLAY_TOPICS) {
+      expect(
+        where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceName: `${name}.retry` }),
+      ).toEqual([]);
+    }
+    for (const acl of where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceType: 'TOPIC' })) {
+      expect(acl.patternType).toBe('LITERAL');
+    }
   });
 
   it('grants groups only by prefix, and only within the principal’s own namespace (tools only describe)', () => {
@@ -120,10 +226,12 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
   });
 
   it('never lets a service write a topic it does not own, or read one it does not subscribe to', () => {
-    const services = new Set([
-      ...Object.values(TOPIC_PRODUCERS).flat(),
-      ...Object.keys(TOPIC_CONSUMERS),
-    ]);
+    // ops-replay's .retry writes are its own rule, stated above.
+    const services = new Set(
+      [...Object.values(TOPIC_PRODUCERS).flat(), ...Object.keys(TOPIC_CONSUMERS)].filter(
+        (name) => name !== OPS_REPLAY_PRINCIPAL,
+      ),
+    );
     for (const acl of acls.filter((a) => services.has(a.principal) && a.resourceType === 'TOPIC')) {
       if (acl.operation === 'WRITE') {
         const owned = Object.entries(TOPIC_PRODUCERS)

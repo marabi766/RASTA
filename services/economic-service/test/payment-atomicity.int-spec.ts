@@ -34,6 +34,7 @@ describe('payment authorisation atomicity (real database)', () => {
       wiring.wallets,
       wiring.walletRepository,
       provider,
+      wiring.paymentReconciliation,
     );
   });
 
@@ -176,8 +177,9 @@ describe('payment authorisation atomicity (real database)', () => {
     await cleanup(prisma, [organizationId]);
   });
 
-  it('treats a provider refund that throws like one that refuses', async () => {
-    // A provider down at the worst moment: the refund call itself fails.
+  it('records a provider refund that throws as unknown, not as refused', async () => {
+    // A provider down at the worst moment: the refund call itself fails, so
+    // whether it refunded is not known (ADR-064, U6).
     const organizationId = `${org.c}-STUCK-THROW`;
     jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
     jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider unreachable'));
@@ -186,7 +188,10 @@ describe('payment authorisation atomicity (real database)', () => {
       code: 'BUSINESS_RULE_VIOLATION',
     });
     const [intent] = await intentsOf(organizationId);
-    expect(intent).toMatchObject({ status: 'AUTHORIZED', failureReason: 'CAPTURED_NOT_CREDITED' });
+    expect(intent).toMatchObject({
+      status: 'AUTHORIZED',
+      failureReason: 'CAPTURED_REFUND_UNKNOWN',
+    });
     // Announced in the transaction that marked it (Codex round 2, F2).
     const [alert] = await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED);
     expect(alert?.aggregateId).toBe(intent?.id);
@@ -296,11 +301,19 @@ describe('payment authorisation atomicity (real database)', () => {
   });
 
   it('credits a stranded capture on a same-key retry, once, without asking the provider again', async () => {
-    // F2: the first attempt can neither credit nor refund.
+    // F2: the first attempt can neither credit nor refund. The provider
+    // declined the refund — an answer — so it still holds the capture. A
+    // refund that failed without an answer is never credited this way (U6,
+    // payment-unknown-outcome.int-spec.ts).
     const organizationId = `${org.c}-RESUME`;
     const key = `RESUME-${ulid()}`;
     jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
-    jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider unreachable'));
+    jest.spyOn(provider, 'refund').mockResolvedValueOnce({
+      outcome: 'FAILED',
+      providerReference: 'x',
+      failureCode: 'PROVIDER_UNAVAILABLE',
+      simulated: true,
+    });
     await expect(topUpWith(organizationId, 750n, key)).rejects.toMatchObject({
       code: 'BUSINESS_RULE_VIOLATION',
     });
@@ -478,7 +491,13 @@ describe('payment authorisation atomicity (real database)', () => {
     const organizationId = `${org.a}-INSTRUMENT`;
     const key = `INSTRUMENT-${ulid()}`;
     jest.spyOn(wiring.wallets, 'credit').mockRejectedValueOnce(walletBalanceLimit('WLT_STAND_IN'));
-    jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider unreachable'));
+    // Declined, so the intent is creditable and only the hash stops the retry.
+    jest.spyOn(provider, 'refund').mockResolvedValueOnce({
+      outcome: 'FAILED',
+      providerReference: 'x',
+      failureCode: 'PROVIDER_UNAVAILABLE',
+      simulated: true,
+    });
     await expect(topUpWith(organizationId, 820n, key, 'tok_first')).rejects.toMatchObject({
       code: 'BUSINESS_RULE_VIOLATION',
     });

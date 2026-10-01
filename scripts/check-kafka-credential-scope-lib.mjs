@@ -22,7 +22,9 @@
  *     `KAFKA_SECRETS_DIR` goes, in a step's own `env:`, only to a step that
  *     calls kafka-credentials.sh or ci-up.sh, and a step that starts services
  *     unsets it before it launches any; `KAFKA_ADMIN_SECRETS_DIR` goes only to
- *     the broker bootstrap and the broker tests.
+ *     the broker bootstrap, the broker tests and the retry-replay step, which
+ *     alone takes the `replay` scope (the `tests` scope plus ops-replay's
+ *     password, D-039) and runs only `pnpm run test:retry-replay`.
  *
  * The accepted CI residual (ADR-061 § 3): every step runs as the same runner
  * user, so test code pointed at a secrets directory can read what is in it.
@@ -40,6 +42,8 @@ export const TOOLS = ['KAFKA_UI', 'KAFKA_EXPORTER'];
 const PASSWORD = /KAFKA_SASL_PASSWORD_([A-Z0-9_]+)/;
 export const ADMIN_SCOPE_STEP = 'Broker authorisation, asked of the broker';
 export const BOOTSTRAP_STEP = 'Start the authenticated Kafka broker';
+/** The one step that gets ops-replay's password: it publishes on `.retry` (D-039). */
+export const REPLAY_SCOPE_STEP = 'Retry replay, published as ops-replay';
 const SECRETS_DIRS = ['KAFKA_SECRETS_DIR', 'KAFKA_ADMIN_SECRETS_DIR'];
 
 /** `fleet-service` -> `FLEET`: the stem of a service's password variable. */
@@ -191,12 +195,29 @@ export function checkWorkflow(text) {
     if (/kafka-credentials\.sh admin\b/.test(run) && step.name !== ADMIN_SCOPE_STEP) {
       problems.push(`"${step.name}" takes the admin scope, which only "${ADMIN_SCOPE_STEP}" may`);
     }
+    if (/kafka-credentials\.sh replay\b/.test(run) && step.name !== REPLAY_SCOPE_STEP) {
+      problems.push(`"${step.name}" takes the replay scope, which only "${REPLAY_SCOPE_STEP}" may`);
+    }
+    // The replay step runs the retry-replay specs and nothing else: no suite
+    // that could publish or read with ops-replay's password by accident.
     if (
-      (envKeys.includes('KAFKA_ADMIN_SECRETS_DIR') || run.includes('KAFKA_ADMIN_SECRETS_DIR')) &&
-      ![ADMIN_SCOPE_STEP, BOOTSTRAP_STEP].includes(step.name)
+      step.name === REPLAY_SCOPE_STEP &&
+      !(
+        /kafka-credentials\.sh replay\b/.test(run) &&
+        /pnpm run test:retry-replay\b/.test(run) &&
+        !/test:integration|test:e2e|dist\/main\.js/.test(run)
+      )
     ) {
       problems.push(
-        `"${step.name}" is given KAFKA_ADMIN_SECRETS_DIR, which only "${BOOTSTRAP_STEP}" and "${ADMIN_SCOPE_STEP}" may be`,
+        `"${step.name}" must take the replay scope and run \`pnpm run test:retry-replay\` only`,
+      );
+    }
+    if (
+      (envKeys.includes('KAFKA_ADMIN_SECRETS_DIR') || run.includes('KAFKA_ADMIN_SECRETS_DIR')) &&
+      ![ADMIN_SCOPE_STEP, BOOTSTRAP_STEP, REPLAY_SCOPE_STEP].includes(step.name)
+    ) {
+      problems.push(
+        `"${step.name}" is given KAFKA_ADMIN_SECRETS_DIR, which only "${BOOTSTRAP_STEP}", "${ADMIN_SCOPE_STEP}" and "${REPLAY_SCOPE_STEP}" may be`,
       );
     }
     if (
@@ -223,7 +244,7 @@ export function checkWorkflow(text) {
       problems.push(`"${step.name}" starts services without first unsetting KAFKA_SECRETS_DIR`);
     }
     // Each service with its own password only.
-    if (/kafka-credentials\.sh (tests|admin|observer)\b/.test(run)) {
+    if (/kafka-credentials\.sh (tests|admin|observer|replay)\b/.test(run)) {
       problems.push(`"${step.name}" starts services with a scope wider than one service's own`);
     }
     for (const name of [...BOOTSTRAP_ONLY, ...TOOLS]) {

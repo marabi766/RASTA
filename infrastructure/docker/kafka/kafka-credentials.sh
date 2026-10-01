@@ -17,6 +17,11 @@
 #                   observer's — the integration suites publish as each topic's
 #                   owner and observe as itest-observer. Test steps only; never
 #                   the admin's, ops-replay's or a tool's.
+#   replay          `tests`, plus ops-replay's password (KAFKA_ADMIN_SECRETS_DIR):
+#                   the one step that publishes on `<topic>.retry` as the
+#                   operator's replay principal, to show a replay is consumed
+#                   like the original (D-039). Never the admin's or a tool's,
+#                   and never a step that starts services.
 #   admin           KAFKA_ADMIN_SECRETS_DIR as well: everything, the admin
 #                   included — the broker tests alone
 set -euo pipefail
@@ -66,6 +71,13 @@ case "${1:-}" in
     while IFS= read -r name; do emit "${name}" "${dir}"; done < <(services)
     emit itest-observer "${dir}"
     ;;
+  replay)
+    dir="$(services_dir)"
+    admin_dir="${KAFKA_ADMIN_SECRETS_DIR:?KAFKA_ADMIN_SECRETS_DIR is not set for this step}"
+    while IFS= read -r name; do emit "${name}" "${dir}"; done < <(services)
+    emit itest-observer "${dir}"
+    emit ops-replay "${admin_dir}"
+    ;;
   admin)
     dir="$(services_dir)"
     admin_dir="${KAFKA_ADMIN_SECRETS_DIR:?KAFKA_ADMIN_SECRETS_DIR is not set for this step}"
@@ -79,7 +91,7 @@ case "${1:-}" in
     done < "${PRINCIPALS_FILE}"
     ;;
   *)
-    echo "usage: kafka-credentials.sh service <name> | observer | tests | admin" >&2
+    echo "usage: kafka-credentials.sh service <name> | observer | tests | replay | admin" >&2
     exit 2
     ;;
 esac

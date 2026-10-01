@@ -39,8 +39,11 @@ export class FleetRepository {
     return this.prisma.client;
   }
 
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.prisma.transaction(fn);
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.prisma.transaction(fn, options);
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
@@ -261,6 +264,11 @@ export class FleetRepository {
   // Usage
   // -------------------------------------------------------------------------
 
+  /** Whether an assignment is open on the machine, in the caller's organization. Scoped. */
+  async hasActiveAssignment(assetId: string): Promise<boolean> {
+    return (await this.client.assignment.count({ where: { assetId, endedAt: null } })) > 0;
+  }
+
   async findUsageById(id: string) {
     return this.client.usageRecord.findFirst({ where: { id } });
   }
@@ -357,8 +365,12 @@ export class FleetRepository {
   /** The machine's fence, if any, and whether it has expired by the database's clock. */
   async findTransferFence(
     assetId: string,
+    tx?: ExtendedPrismaClient,
   ): Promise<{ fenceId: string; organizationId: string; expired: boolean } | null> {
-    const rows = await this.client.$queryRaw<
+    // A caller inside a transaction passes it: reading through the pool from
+    // there needs a second connection, which a one-connection or saturated
+    // pool never grants while the transaction is open.
+    const rows = await (tx ?? this.client).$queryRaw<
       { fence_id: string; organization_id: string; expired: boolean }[]
     >`
       SELECT fence_id, organization_id, expires_at <= now() AS expired
@@ -413,6 +425,20 @@ export class FleetRepository {
         DELETE FROM asset_transfer_fence
         WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}`;
     });
+  }
+
+  /**
+   * Removes one fence, in the caller's transaction and under its
+   * {@link lockAssetRef}. The caller has established that asset-service records
+   * the transfer the fence was placed for (D-039).
+   */
+  async deleteTransferFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    fenceId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence WHERE asset_id = ${assetId} AND fence_id = ${fenceId}`;
   }
 
   /** The transfer landed: whatever the previous owner fenced is moot. */

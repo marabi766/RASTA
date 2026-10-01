@@ -10,6 +10,7 @@ import { TransactionService } from '../src/transaction/transaction.service';
 import { CommissionService } from '../src/commission/commission.service';
 import { RewardService } from '../src/reward/reward.service';
 import { SettlementService } from '../src/settlement/settlement.service';
+import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
 import type { Logger } from '@rasta/logging';
 
@@ -111,6 +112,8 @@ export function testEnv(): EconomicEnv {
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
     // The reconciliation runs on a timer; a test drives it explicitly.
     ECONOMIC_BALANCE_AUDIT_ENABLED: 'false',
+    // So does the payment reconciler (ADR-064 step B2).
+    ECONOMIC_PAYMENT_RECONCILER_ENABLED: 'false',
   });
 }
 
@@ -136,6 +139,7 @@ export interface Wiring {
   commissions: CommissionService;
   rewards: RewardService;
   settlements: SettlementService;
+  paymentReconciliation: PaymentReconciliationRepository;
 }
 
 /**
@@ -171,8 +175,11 @@ export function wire(prisma: PrismaService): Wiring {
     commissions,
   );
 
+  const paymentReconciliation = new PaymentReconciliationRepository(prisma, env);
+
   return {
     prisma,
+    paymentReconciliation,
     ledgerRepository,
     ledger,
     walletRepository,
@@ -503,6 +510,8 @@ export async function cleanup(
       'commission',
       'reward',
       'reward_balance',
+      // Before its intent: the task's foreign key is ON DELETE RESTRICT.
+      'payment_reconciliation_task',
       'payment_intent',
       'wallet_hold',
       'idempotency_key',

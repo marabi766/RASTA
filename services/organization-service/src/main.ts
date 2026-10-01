@@ -29,6 +29,7 @@ import { VersioningType } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
+import { installGracefulShutdown } from '@rasta/nest-common';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
@@ -87,7 +88,15 @@ async function bootstrap(): Promise<void> {
     SwaggerModule.setup('docs', app, document);
   }
 
-  app.enableShutdownHooks();
+  // The one shutdown path (`installGracefulShutdown`, @rasta/nest-common): close
+  // the app so Nest's hooks finish, flush telemetry, then exit 0 — or 1 if the
+  // close fails or outlasts SHUTDOWN_TIMEOUT_MS. No `enableShutdownHooks()`
+  // beside it: two competing paths let the exit cut an in-flight batch off.
+  installGracefulShutdown(app, {
+    serviceName: SERVICE_NAME,
+    timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+    afterClose: shutdownTelemetry,
+  });
 
   await app.listen(env.PORT, '0.0.0.0');
 
@@ -96,15 +105,6 @@ async function bootstrap(): Promise<void> {
       (allowsDeveloperTooling(env) ? ` — docs at http://localhost:${env.PORT}/docs` : ''),
   );
 }
-
-async function shutdown(signal: string): Promise<void> {
-  console.warn(`[${SERVICE_NAME}] received ${signal}, shutting down`);
-  await shutdownTelemetry();
-  process.exit(0);
-}
-
-process.on('SIGTERM', () => void shutdown('SIGTERM'));
-process.on('SIGINT', () => void shutdown('SIGINT'));
 
 bootstrap().catch((error) => {
   console.error(`[${SERVICE_NAME}] failed to start`, error);

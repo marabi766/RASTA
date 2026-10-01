@@ -8,6 +8,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -89,6 +90,10 @@ function roleList(name: string, options: { min: number }) {
  *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
  *                                       How long that confirmation may take;
  *                                       no answer in time refuses (504).
+ *   CONSTRUCTION_RECONCILE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS /
+ *   _BACKOFF_SECONDS / _BACKOFF_MAX_SECONDS
+ *                                       The sweeper that suspends policies a
+ *                                       moved organization stranded (Q-83).
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
  *                                       Q-68. Submitted needs a project must
  *                                       have before it may request approval.
@@ -181,13 +186,98 @@ export const constructionEnvSchema = baseEnvSchema
       .max(30_000)
       .default(3000),
 
+    /**
+     * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041). A sweep
+     * every `INTERVAL_MS` claims at most `BATCH_SIZE` due tasks, so one sweep
+     * costs at most BATCH_SIZE × CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS;
+     * `LEASE_SECONDS` must exceed that, or a slow sweep loses its claims to
+     * another instance (harmless — the writes are conditional — but wasteful).
+     * A failed task is retried after `BACKOFF_SECONDS`, doubling to `BACKOFF_MAX_SECONDS`.
+     */
+    CONSTRUCTION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(500).max(300_000).default(5000),
+    CONSTRUCTION_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    CONSTRUCTION_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
+    CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(30),
+    CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
+
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
     CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
 
+    /**
+     * The key-encryption keys that wrap each tender's private key (ADR-066 § 2):
+     * `id:base64,id:base64`, each key 32 random bytes. A **secret**: it comes from
+     * the deployment's secret store, never from a file in the repository, and no
+     * message here repeats it. Unset means no tender can be published (the seal
+     * fails closed, `KEY_UNAVAILABLE`); there is no default key. The platform
+     * operator who can read this and the database can open a bid (D-043).
+     */
+    CONSTRUCTION_TENDER_KEKS: z
+      .string()
+      .optional()
+      .refine(
+        (value) => {
+          try {
+            parseKekEntries(value);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        {
+          message:
+            'CONSTRUCTION_TENDER_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+        },
+      ),
+    /** The id in `CONSTRUCTION_TENDER_KEKS` that wraps new tender keys; older ones only unwrap. */
+    CONSTRUCTION_TENDER_KEK_CURRENT: z
+      .string()
+      .optional()
+      .refine((value) => value === undefined || value === '' || isKekId(value), {
+        message: 'CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)',
+      }),
+
+    /**
+     * Q-84 (3): the shortest bidding window a tender may be published with.
+     * Default 0 — the platform invents no minimum; the window must only be a
+     * window that has not already closed.
+     */
+    CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(31_536_000)
+      .default(0),
+
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+  })
+  // The two key settings are one setting (Codex review of #163): keys with a
+  // CURRENT that is not among them — or a CURRENT with no keys — used to pass
+  // startup and fail only when a tender was first published. Judged together, here.
+  .superRefine((env, ctx) => {
+    try {
+      parseKekEntries(env.CONSTRUCTION_TENDER_KEKS);
+    } catch {
+      return; // malformed entries are already reported at their own field
+    }
+    try {
+      parseKekConfiguration(env.CONSTRUCTION_TENDER_KEKS, env.CONSTRUCTION_TENDER_KEK_CURRENT);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_TENDER_KEK_CURRENT'],
+        message:
+          'CONSTRUCTION_TENDER_KEK_CURRENT must name one of the ids in CONSTRUCTION_TENDER_KEKS, ' +
+          'and be set exactly when CONSTRUCTION_TENDER_KEKS is',
+      });
+    }
   });
 
 export type ConstructionEnv = z.infer<typeof constructionEnvSchema>;

@@ -40,8 +40,11 @@ export class MaintenanceRepository {
     return this.prisma.client;
   }
 
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.prisma.transaction(fn);
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.prisma.transaction(fn, options);
   }
 
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
@@ -470,8 +473,12 @@ export class MaintenanceRepository {
   /** The machine's fence, if any, and whether it has expired by the database's clock. */
   async findTransferFence(
     assetId: string,
+    tx?: ExtendedPrismaClient,
   ): Promise<{ fenceId: string; organizationId: string; expired: boolean } | null> {
-    const rows = await this.client.$queryRaw<
+    // A caller inside a transaction passes it: reading through the pool from
+    // there needs a second connection, which a one-connection or saturated
+    // pool never grants while the transaction is open.
+    const rows = await (tx ?? this.client).$queryRaw<
       { fence_id: string; organization_id: string; expired: boolean }[]
     >`
       SELECT fence_id, organization_id, expires_at <= now() AS expired
@@ -586,6 +593,40 @@ export class MaintenanceRepository {
       WHERE asset_id = ${assetId} AND organization_id = ${organizationId} AND fence_id = ${fenceId}
         AND expires_at > now()`;
     return rows.length > 0;
+  }
+
+  /**
+   * Removes one fence, in the caller's transaction and under its locks. The
+   * caller has established that asset-service records the transfer the fence
+   * was placed for (D-039).
+   */
+  async deleteTransferFence(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    fenceId: string,
+  ): Promise<number> {
+    return tx.$executeRaw`
+      DELETE FROM asset_transfer_fence WHERE asset_id = ${assetId} AND fence_id = ${fenceId}`;
+  }
+
+  /**
+   * Serializes the writers of one machine's replica row, so what a refresh
+   * reads is still the newest when it writes (D-039). Its own key: the work
+   * lock is the one a new request takes, and is always taken after this.
+   */
+  async lockAssetRef(tx: ExtendedPrismaClient, assetId: string): Promise<void> {
+    await runUnscoped(
+      'serializes concurrent replica writers for one asset; the replica row is platform-wide',
+      async () => {
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`asset_ref:${assetId}`}, 0))`;
+        await tx.$queryRaw`SELECT id FROM asset_ref WHERE id = ${assetId} FOR UPDATE`;
+      },
+    );
+  }
+
+  /** Whether a repair is in progress on the machine, in the caller's organization. Scoped. */
+  async hasRepairInProgress(assetId: string): Promise<boolean> {
+    return (await this.client.repairOrder.count({ where: { assetId, status: 'IN_PROGRESS' } })) > 0;
   }
 
   /** The transfer landed: whatever the previous owner fenced is moot. */

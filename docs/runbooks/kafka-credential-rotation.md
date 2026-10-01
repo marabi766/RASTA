@@ -170,8 +170,8 @@ node scripts/kafka-outbox-tables.mjs
 #    ردیف‌های security_event_outbox تا پایان پنجرهٔ تجمیع خود (window_ends_at) منتشر نمی‌شوند: اگر ردیفی ماند، سرویس را
 #    پس از آن زمان دوباره راه بینداز تا منتشر کند.
 
-# ۴. Topicهای dead-letter و retry — هیچ گروهی امروز .retry را نمی‌خواند (D-039)، پس گام ۲ آن را نشان نمی‌دهد:
-#    هر رکورد یا طبق replay-dlq رسیدگی شده، یا بیرون برده و آگاهانه کنار گذاشته شده
+# ۴. Topicهای dead-letter و retry — گروه هر Consumer از D-039 به بعد `.retry` را هم می‌خواند و گام ۲ عقب‌ماندگی آن را
+#    نشان می‌دهد؛ DLQ را هیچ گروهی نمی‌خواند: هر رکورد یا طبق replay-dlq رسیدگی شده، یا بیرون برده و آگاهانه کنار گذاشته شده
 docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
   --bootstrap-server kafka:9094 --command-config /tmp/admin.properties \
   --topic '.*\.(dlq|retry)$'

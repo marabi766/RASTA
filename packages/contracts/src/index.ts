@@ -69,7 +69,9 @@ export {
   EVENT_HEADERS,
   DLQ_HEADERS,
   DLQ_REASONS,
+  REPLAY_HEADERS,
   NEVER_AUTO_REPLAY,
+  NEVER_AUTO_REPLAY_TOPICS,
   isAutoReplayable,
   MAX_STREAM_SEQ,
   toStreamSeq,
@@ -140,6 +142,18 @@ export {
   auditTrailSourceSchema,
   auditTrailPayloadSchemaV1,
 } from './events/audit-trail';
+export {
+  OPS_REPLAY_TOPIC,
+  OPS_REPLAY_PRODUCER,
+  REPLAY_EXECUTED,
+  REPLAY_EXECUTED_VERSION,
+  REPLAY_REPORT_ID_PATTERN,
+  REPLAY_OPERATOR_PATTERN,
+  REPLAY_RUN_AGGREGATE,
+  replayPositionSchema,
+  replayExecutedPayloadSchemaV1,
+} from './events/ops-replay';
+export type { ReplayPosition, ReplayExecutedPayloadV1 } from './events/ops-replay';
 export type {
   AuditOutcome,
   AuditTrailActor,

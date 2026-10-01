@@ -314,8 +314,8 @@ test('every notification object the verifier asserts is created by a notificatio
     assert.match(down, new RegExp(`DROP TRIGGER IF EXISTS "${name}"`));
   }
   for (const name of functions) {
-    assert.match(up, new RegExp(`CREATE OR REPLACE FUNCTION ${name}\(\)`));
-    assert.match(down, new RegExp(`DROP FUNCTION IF EXISTS ${name}\(\)`));
+    assert.match(up, new RegExp(`CREATE OR REPLACE FUNCTION ${name}\\(\\)`));
+    assert.match(down, new RegExp(`DROP FUNCTION IF EXISTS ${name}\\(\\)`));
   }
   // NTF-004 widened an existing enum instead of creating a type, which the
   // loop above cannot see: `notification_channel` is created by NTF-001 and

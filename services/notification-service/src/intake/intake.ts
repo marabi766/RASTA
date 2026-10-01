@@ -1,5 +1,5 @@
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventDelivery } from '@rasta/nest-common';
+import { originalDelivery, type EventDelivery } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { dedupeKeyFor } from '../rules/dedupe';
 import { sanitiseContext, type ContextData } from '../rules/context-sanitiser';
@@ -128,7 +128,10 @@ export function decideIntake(envelope: EventEnvelope, delivery: EventDelivery): 
       organizationId,
       sourceEventId: envelope.eventId,
       sourceEventName: envelope.eventName,
-      sourceTopic: delivery.topic,
+      // A replay arrives on `<topic>.retry` but is the same stream: the
+      // staleness check below the intake compares within one source topic, so
+      // the retry twin must not open a stream of its own (D-039).
+      sourceTopic: originalDelivery(delivery).topic,
       // The stream is `topic + partitionKey` (ADR-051 § C-7). The envelope's
       // `streamKey` is that key when the producer sent one; the aggregate id
       // is what every producer here partitions on when it did not.

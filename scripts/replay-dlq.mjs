@@ -1,0 +1,443 @@
+#!/usr/bin/env node
+/**
+ * Replays dead letters to their `.retry` topic, as `ops-replay`
+ * (docs/runbooks/replay-dlq.md; the rules are replay-dlq-lib.mjs).
+ *
+ *   node scripts/replay-dlq.mjs --dlq rasta.maintenance.v1.dlq --event-id EVT_… [--event-id …]
+ *   node scripts/replay-dlq.mjs --dlq rasta.maintenance.v1.dlq --partition 0 --from-offset 10 --to-offset 14
+ *     [--max N] [--allow-stale EVT_…] [--report replay.jsonl]
+ *     [--execute --expect-count N]
+ *
+ * A dry-run by default: it reads, decides and reports, and writes nothing.
+ * `--execute` writes only when the selection is exactly what `--expect-count`
+ * says and every record in it is replayable; then one at a time (acks=-1,
+ * idempotent), in dead-letter order, stopping at the first failure — each
+ * replay and its `REPLAY_EXECUTED` record on `rasta.ops.replay.v1` (which
+ * audit-service keeps) in one Kafka transaction, id `ops-replay.<reportId>`:
+ * both are committed, or neither is visible to any (read-committed)
+ * consumer.
+ *
+ * After `COMMIT OUTCOME UNKNOWN`, the one recovery step (round 3 on #166) —
+ * the warning prints it whole:
+ *
+ *   node scripts/replay-dlq.mjs --check-marker '<x-replay-id>' --topic <…>.retry \
+ *     --partition P --offset O --replayed-at <ISO>
+ *
+ * answers COMMITTED (exit 0: do not replay it again), ABORTED (exit 0: replay
+ * it again) or STILL_UNKNOWN (exit 3: ask again later), reading read-committed
+ * under an `ops-replay.check.` group; MISMATCH (exit 2) when the position holds
+ * another record.
+ *
+ * Environment: KAFKA_BROKERS, KAFKA_SASL_PASSWORD_OPS_REPLAY (development:
+ * infrastructure/docker/kafka/bootstrap.env; a deployment: its secret store),
+ * KAFKA_SSL_CA_FILE (absolute; otherwise the exported development CA), and for
+ * --execute REPLAY_OPERATOR — who runs it, stamped on every replayed record.
+ * It connects as `ops-replay` and nothing else: without that credential it
+ * refuses to run.
+ */
+import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import kafkajs from 'kafkajs';
+import { connectionFor } from './kafka-acl-lib.mjs';
+import {
+  SCAN_LIMIT,
+  UsageError,
+  assess,
+  executeReplays,
+  executionProblems,
+  headerStrings,
+  markerVerdict,
+  operatorFrom,
+  parseArgs,
+  parseCheckArgs,
+  parseTopics,
+  reportLine,
+  staleFrom,
+  stalenessProbe,
+  topologyOf,
+  withStaleness,
+} from './replay-dlq-lib.mjs';
+
+const { Kafka, logLevel } = kafkajs;
+const PRINCIPAL = 'ops-replay';
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const contracts = createRequire(import.meta.url)(resolve(root, 'packages/contracts/dist/index.js'));
+
+function fail(message, code = 1) {
+  process.stderr.write(`replay-dlq: ${message}\n`);
+  process.exit(code);
+}
+
+const argv = process.argv.slice(2);
+let options = {};
+let check = null;
+let operator = null;
+try {
+  if (argv.includes('--check-marker')) {
+    check = parseCheckArgs(argv);
+  } else {
+    options = parseArgs(argv);
+    if (options.execute) operator = operatorFrom(process.env);
+  }
+} catch (error) {
+  if (error instanceof UsageError) fail(error.message, 2);
+  throw error;
+}
+
+const topics = parseTopics(
+  readFileSync(resolve(root, 'infrastructure/docker/kafka/topics.txt'), 'utf8'),
+);
+let topology;
+try {
+  if (check) {
+    // Only a .retry the tool writes — never the economic stream's.
+    const original = check.topic.slice(0, -contracts.RETRY_TOPIC_SUFFIX.length);
+    if (!topics.has(check.topic) || contracts.NEVER_AUTO_REPLAY_TOPICS.has(original)) {
+      throw new UsageError(`${check.topic} is not a .retry topic the tool replays to`);
+    }
+  } else {
+    topology = topologyOf(options.dlq, { topics, consumers: contracts.TOPIC_CONSUMERS });
+  }
+} catch (error) {
+  if (error instanceof UsageError) fail(error.message, 2);
+  throw error;
+}
+
+const configuredCa = process.env.KAFKA_SSL_CA_FILE?.trim();
+const env = {
+  ...process.env,
+  KAFKA_SSL_CA_FILE:
+    configuredCa && isAbsolute(configuredCa)
+      ? configuredCa
+      : resolve(root, 'infrastructure/docker/kafka/.tls/ca.pem'),
+};
+const connection = connectionFor(PRINCIPAL, env, (path) => readFileSync(path, 'utf8'));
+if (!connection.sasl || !connection.ssl) {
+  fail(
+    'KAFKA_SASL_PASSWORD_OPS_REPLAY and the broker CA are required: the tool connects as ops-replay ' +
+      'over SASL_SSL and as nothing else',
+  );
+}
+
+const reportId = `rpl-${randomUUID()}`;
+const mode = check ? 'check-marker' : options.execute ? 'execute' : 'dry-run';
+const kafka = new Kafka({
+  ...connection,
+  clientId: `ops-replay-${reportId}`,
+  logLevel: logLevel.ERROR,
+  retry: { initialRetryTime: 300, retries: 5 },
+});
+const admin = kafka.admin();
+
+function report(line) {
+  const text = `${JSON.stringify(line)}\n`;
+  process.stdout.write(text);
+  if (options.report) appendFileSync(options.report, text);
+}
+
+/**
+ * Reads `[from, to)` of one partition under an `ops-replay.` group, never
+ * committing. Returns `{ records, incomplete }`; incomplete when more than
+ * `limit` records were in range or the read timed out.
+ */
+async function readPartition(
+  topic,
+  partition,
+  from,
+  to,
+  limit = SCAN_LIMIT,
+  groupId = `ops-replay.${reportId}.${topic}.${partition}`,
+) {
+  if (from >= to) return { records: [], incomplete: false };
+  const consumer = kafka.consumer({
+    groupId,
+    allowAutoTopicCreation: false,
+  });
+  const records = [];
+  try {
+    await consumer.connect();
+    await consumer.subscribe({ topic, fromBeginning: false });
+    const outcome = await new Promise((resolveRead, rejectRead) => {
+      const timer = setTimeout(() => resolveRead('TIMEOUT'), 60_000);
+      const settle = (value) => {
+        clearTimeout(timer);
+        resolveRead(value);
+      };
+      consumer
+        .run({
+          autoCommit: false,
+          eachBatch: async ({ batch }) => {
+            if (batch.partition !== partition) return;
+            for (const message of batch.messages) {
+              const offset = BigInt(message.offset);
+              if (offset < from) continue;
+              if (offset >= to) return settle('DONE');
+              records.push({
+                partition,
+                offset: message.offset,
+                key: message.key,
+                value: message.value,
+                headers: message.headers,
+              });
+              if (records.length > limit) return settle('LIMIT');
+              if (offset + 1n >= to) return settle('DONE');
+            }
+            // A batch can end on offsets that carry no message (control
+            // records); its last offset still says how far the log was read.
+            if (BigInt(batch.lastOffset()) + 1n >= to) return settle('DONE');
+          },
+        })
+        .then(() => consumer.seek({ topic, partition, offset: String(from) }))
+        .catch(rejectRead);
+    });
+    return { records, incomplete: outcome !== 'DONE' };
+  } finally {
+    await consumer.disconnect().catch(() => undefined);
+  }
+}
+
+/** `[low, high)` of a partition, as bigints. */
+async function bounds(topic, partition) {
+  const offsets = await admin.fetchTopicOffsets(topic);
+  const entry = offsets.find((o) => o.partition === partition);
+  if (!entry) throw new UsageError(`${topic} has no partition ${partition}`);
+  return { low: BigInt(entry.low), high: BigInt(entry.high) };
+}
+
+/** The dead letters the selection names, in dead-letter order. */
+async function select() {
+  if (options.eventIds.length === 0) {
+    const { low, high } = await bounds(options.dlq, options.partition);
+    const from = BigInt(options.fromOffset);
+    const to = BigInt(options.toOffset) + 1n;
+    if (from < low || to > high) {
+      throw new UsageError(
+        `offsets ${options.fromOffset}–${options.toOffset} are not all on ${options.dlq}/${options.partition} (${low}–${high - 1n})`,
+      );
+    }
+    const { records, incomplete } = await readPartition(options.dlq, options.partition, from, to);
+    if (incomplete) throw new Error(`could not read ${options.dlq}/${options.partition} in full`);
+    return records;
+  }
+
+  const wanted = new Set(options.eventIds);
+  const found = new Map();
+  const offsets = await admin.fetchTopicOffsets(options.dlq);
+  for (const { partition, low, high } of offsets) {
+    const { records, incomplete } = await readPartition(
+      options.dlq,
+      partition,
+      BigInt(low),
+      BigInt(high),
+    );
+    if (incomplete) throw new Error(`could not read ${options.dlq}/${partition} in full`);
+    for (const record of records) {
+      const headers = headerStrings(record.headers);
+      let eventId = headers[contracts.EVENT_HEADERS.eventId];
+      if (!eventId) {
+        try {
+          eventId = JSON.parse(record.value?.toString('utf8') ?? '').eventId;
+        } catch {
+          eventId = undefined;
+        }
+      }
+      if (!wanted.has(eventId)) continue;
+      if (found.has(eventId)) {
+        throw new UsageError(
+          `${eventId} is on ${options.dlq} more than once; select it by offset instead`,
+        );
+      }
+      found.set(eventId, record);
+    }
+  }
+  const missing = options.eventIds.filter((id) => !found.has(id));
+  if (missing.length > 0) throw new UsageError(`not on ${options.dlq}: ${missing.join(', ')}`);
+  return [...found.values()].sort((a, b) =>
+    a.partition !== b.partition
+      ? a.partition - b.partition
+      : BigInt(a.offset) < BigInt(b.offset)
+        ? -1
+        : 1,
+  );
+}
+
+/** Staleness for every replayable record: one scan per original partition. */
+async function staleness(assessments) {
+  const probes = new Map();
+  for (const assessment of assessments) {
+    if (assessment.verdict !== 'REPLAYABLE') continue;
+    const probe = stalenessProbe(assessment, contracts.RETRY_TOPIC_SUFFIX);
+    if (!probe) continue;
+    const id = `${probe.topic}\u0000${probe.partition}`;
+    const group = probes.get(id) ?? { ...probe, from: probe.after + 1n };
+    if (probe.after + 1n < group.from) group.from = probe.after + 1n;
+    probes.set(id, group);
+  }
+  const scans = new Map();
+  for (const [id, group] of probes) {
+    const { low, high } = await bounds(group.topic, group.partition);
+    // Retention may have taken the start of the tail: read what is left, and
+    // let `staleFrom` see how much is missing.
+    const from = group.from > low ? group.from : low;
+    const scan = await readPartition(group.topic, group.partition, from, high);
+    scans.set(id, {
+      low,
+      incomplete: scan.incomplete,
+      records: scan.records.map((r) => ({
+        offset: r.offset,
+        key: r.key == null ? null : r.key.toString('utf8'),
+      })),
+    });
+  }
+  return assessments.map((assessment) => {
+    if (assessment.verdict !== 'REPLAYABLE')
+      return withStaleness(assessment, null, options.allowStale);
+    const probe = stalenessProbe(assessment, contracts.RETRY_TOPIC_SUFFIX);
+    const scan = probe ? scans.get(`${probe.topic}\u0000${probe.partition}`) : undefined;
+    return withStaleness(assessment, staleFrom(probe, scan), options.allowStale);
+  });
+}
+
+/**
+ * `--check-marker` (round 3 on #166): the last stable offset first — read
+ * committed, as kafkajs lists offsets — and only past it a read of the one
+ * position. Returns the exit code.
+ */
+async function checkMarker() {
+  const { low, high: stableOffset } = await bounds(check.topic, check.partition);
+  let record = null;
+  let unread = false;
+  if (low <= check.offset && stableOffset > check.offset) {
+    const read = await readPartition(
+      check.topic,
+      check.partition,
+      check.offset,
+      check.offset + 1n,
+      1,
+      `ops-replay.check.${reportId}`,
+    );
+    unread = read.incomplete;
+    const [found] = read.records;
+    if (found) {
+      record = {
+        replayId: headerStrings(found.headers)[contracts.REPLAY_HEADERS.replayId] ?? null,
+      };
+    }
+  }
+  const verdict = unread
+    ? { answer: 'STILL_UNKNOWN', reason: `could not read offset ${check.offset} in time` }
+    : markerVerdict({
+        marker: check.marker,
+        offset: check.offset,
+        lowOffset: low,
+        stableOffset,
+        record,
+        replayedAtMs: check.replayedAtMs,
+        nowMs: Date.now(),
+      });
+  report({
+    reportId,
+    mode,
+    marker: check.marker,
+    topic: check.topic,
+    partition: check.partition,
+    offset: String(check.offset),
+    stableOffset: String(stableOffset),
+    ...verdict,
+  });
+  return { COMMITTED: 0, ABORTED: 0, MISMATCH: 2 }[verdict.answer] ?? 3;
+}
+
+let exitCode = 0;
+try {
+  await admin.connect();
+  if (check) {
+    exitCode = await checkMarker();
+    await admin.disconnect().catch(() => undefined);
+    process.exit(exitCode);
+  }
+  if (options.report) writeFileSync(options.report, '');
+  const records = await select();
+  const assessed = records.map((record) =>
+    assess(record, { dlq: options.dlq, topology, topics, contracts }),
+  );
+  const decisions = await staleness(assessed);
+
+  if (!options.execute) {
+    for (const decision of decisions) report(reportLine(reportId, mode, decision));
+    const replayable = decisions.filter((d) => d.verdict === 'REPLAYABLE').length;
+    report({
+      reportId,
+      mode,
+      summary: true,
+      dlq: options.dlq,
+      selected: decisions.length,
+      replayable,
+      refused: decisions.length - replayable,
+    });
+  } else {
+    const problems = executionProblems(decisions, options.expectCount);
+    if (problems.length > 0) {
+      for (const decision of decisions) report(reportLine(reportId, mode, decision));
+      report({ reportId, mode, summary: true, written: 0, refused: problems });
+      exitCode = 1;
+    } else {
+      // One transaction per replay and its record (round 1 on #166): the
+      // transactional id is the run's, in ops-replay's own namespace — the
+      // only transactional ids the broker lets it, or anyone, use.
+      const producer = kafka.producer({
+        transactionalId: `ops-replay.${reportId}`,
+        idempotent: true,
+        maxInFlightRequests: 1,
+        allowAutoTopicCreation: false,
+        transactionTimeout: 30_000,
+      });
+      await producer.connect();
+      let outcome;
+      try {
+        outcome = await executeReplays(decisions, {
+          reportId,
+          operator,
+          contracts,
+          report,
+          beginTransaction: async () => {
+            const transaction = await producer.transaction();
+            return {
+              send: async (topic, message) => {
+                const [result] = await transaction.send({ topic, acks: -1, messages: [message] });
+                if (!result) throw new Error(`${topic}: the broker returned no position`);
+                return { partition: result.partition, offset: result.baseOffset };
+              },
+              commit: () => transaction.commit(),
+              abort: () => transaction.abort(),
+            };
+          },
+          newEventId: () => randomUUID(),
+          now: () => new Date().toISOString(),
+          warn: (text) => process.stderr.write(`replay-dlq: ${text}\n`),
+        });
+      } finally {
+        await producer.disconnect().catch(() => undefined);
+      }
+      if (outcome.failed) exitCode = 1;
+      report({
+        reportId,
+        mode,
+        summary: true,
+        replayIdPrefix: `${reportId}/${operator}/`,
+        written: outcome.written,
+        recorded: outcome.recorded,
+        expected: options.expectCount,
+      });
+    }
+  }
+} catch (error) {
+  process.stderr.write(`replay-dlq: ${error.message}\n`);
+  exitCode = error instanceof UsageError ? 2 : 1;
+} finally {
+  await admin.disconnect().catch(() => undefined);
+}
+process.exit(exitCode);

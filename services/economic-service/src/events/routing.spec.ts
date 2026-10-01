@@ -93,7 +93,49 @@ const PAYLOADS = {
     provider: 'mock',
     simulated: true,
     reason: 'WALLET_BALANCE_LIMIT',
+    providerRefund: 'DECLINED',
     detectedAt: '2026-08-29T00:00:02.000Z',
+  },
+  PAYMENT_REFUND_UNRECONCILED: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    amountMinor: '5000',
+    currency: 'IRR',
+    provider: 'mock',
+    simulated: true,
+    reason: 'INSUFFICIENT_BALANCE',
+    detectedAt: '2026-08-29T00:00:03.000Z',
+  },
+  PAYMENT_RECONCILIATION_ESCALATED: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    kind: 'REFUND',
+    marker: 'REFUND_UNKNOWN',
+    lastOutcome: 'PROVIDER_OUTCOME_UNKNOWN',
+    attempts: 12,
+    amountMinor: '5000',
+    currency: 'IRR',
+    provider: 'mock',
+    simulated: true,
+    escalatedAt: '2026-08-29T00:00:04.000Z',
+  },
+  PAYMENT_RECONCILIATION_RESOLVED: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    kind: 'REFUND',
+    marker: 'REFUND_UNKNOWN',
+    providerRefund: 'DECLINED',
+    resolution: 'REFUND_DECLINED',
+    resolvedBy: 'PAYMENT_RECONCILER',
+    attempts: 1,
+    amountMinor: '5000',
+    currency: 'IRR',
+    provider: 'mock',
+    simulated: true,
+    resolvedAt: '2026-08-29T00:00:05.000Z',
   },
   COMMISSION_APPLIED: {
     commissionId: 'CMS_1',
@@ -229,6 +271,9 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   PAYMENT_COMPLETED: { scope: 'TRANSACTION', key: TXN },
   PAYMENT_FAILED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_CAPTURE_UNRECONCILED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_REFUND_UNRECONCILED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_RECONCILIATION_ESCALATED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_RECONCILIATION_RESOLVED: { scope: 'PAYMENT_INTENT', key: INTENT },
   COMMISSION_APPLIED: { scope: 'TRANSACTION', key: TXN },
   REWARD_GRANTED: { scope: 'REWARD', key: 'RWD_1' },
   REWARD_LEVEL_CHANGED: { scope: 'REWARD_SUBJECT', key: `${ORG}:USR-1` },
@@ -251,13 +296,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the fifteen events the catalogue publishes', () => {
+  it('covers exactly the eighteen events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(15);
+    expect(NAMES).toHaveLength(18);
   });
 });
 
@@ -387,6 +432,9 @@ describe('aggregate identity is untouched by this change', () => {
       PAYMENT_COMPLETED: 'PaymentIntent',
       PAYMENT_FAILED: 'PaymentIntent',
       PAYMENT_CAPTURE_UNRECONCILED: 'PaymentIntent',
+      PAYMENT_REFUND_UNRECONCILED: 'PaymentIntent',
+      PAYMENT_RECONCILIATION_ESCALATED: 'PaymentIntent',
+      PAYMENT_RECONCILIATION_RESOLVED: 'PaymentIntent',
       COMMISSION_APPLIED: 'Commission',
       REWARD_GRANTED: 'Reward',
       REWARD_LEVEL_CHANGED: 'RewardBalance',

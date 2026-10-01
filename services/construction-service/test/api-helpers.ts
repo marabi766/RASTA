@@ -13,8 +13,10 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
-import { FakeHierarchy, databaseUrl } from './helpers';
+import { FakeHierarchy, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
+import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness
@@ -157,6 +159,10 @@ function applyEnvironment(): void {
   process.env.OIDC_AUDIENCE ??= 'rasta-api';
   process.env.INTERNAL_TOKEN_SECRET = INTERNAL_SECRET;
   process.env.KAFKA_BROKERS ??= 'localhost:9092';
+  // The key-encryption key the app publishes tenders with (ADR-066 § 2): the
+  // one minted for this process in helpers.ts.
+  process.env.CONSTRUCTION_TENDER_KEKS = `${TEST_KEK_ID}:${TEST_KEK}`;
+  process.env.CONSTRUCTION_TENDER_KEK_CURRENT = TEST_KEK_ID;
   // Nothing built here reaches the broker (the relay and consumers are
   // inert), so the app may be built without this service's broker
   // credential: the explicit opt-out, honoured only under NODE_ENV test
@@ -176,6 +182,13 @@ export async function startApi(): Promise<ApiHarness> {
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(OutboxRelay)
+    .useValue(inertRelay)
+    // The ORGANIZATION_MOVED consumer is proven without a broker in
+    // organization-moved.int-spec.ts; nothing here subscribes.
+    .overrideProvider(OrganizationMovedConsumer)
+    .useValue(inertRelay)
+    // Nor does the sweeper tick: organization-moved.int-spec.ts drives runOnce().
+    .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inertRelay)
     // The HTTP client to organization-service is proven against its contract
     // in organization-directory.int-spec.ts; here the hierarchy is given.

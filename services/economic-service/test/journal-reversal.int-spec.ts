@@ -54,6 +54,7 @@ describe('journal reversal refusals (real database)', () => {
       wiring.wallets,
       wiring.walletRepository,
       new MockPaymentProvider(),
+      wiring.paymentReconciliation,
     );
     const wallet = await asActor({ organizationId: payer }, () => wiring.wallets.getOrOpen('IRR'));
     const topUp: TopUpResult = await asActor({ organizationId: payer }, () =>

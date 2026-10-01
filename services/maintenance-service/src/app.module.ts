@@ -37,6 +37,7 @@ import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { MaintenanceRepository } from './maintenance/maintenance.repository';
 import { ScheduleService } from './maintenance/schedule.service';
 import { RequestService } from './maintenance/request.service';
+import { IdempotencyStore } from './maintenance/idempotency';
 import { RepairOrderService } from './maintenance/repair-order.service';
 import { DueAnnouncerService } from './maintenance/due-announcer.service';
 import { DueScanner } from './maintenance/due-scanner';
@@ -60,6 +61,8 @@ import {
 import { MaintenanceFactService } from './maintenance/source-fact';
 import { RepairOrderController } from './maintenance/repair-order.controller';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
+import { AssetSnapshotClient } from './consumers/replica-sources';
+import { AssetWorkStateService } from './maintenance/asset-work-state';
 import { UsageConsumer } from './consumers/usage.consumer';
 import { requestsAwaitingApproval, requestsOpenTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -148,7 +151,9 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     MaintenanceRepository,
     ScheduleService,
     RequestService,
+    IdempotencyStore,
     MaintenanceFactService,
+    AssetWorkStateService,
     TransferClearanceService,
     // One monotonic clock for the clearance bound, read by the arrival
     // middleware and the service alike (ADR-062 § 2); a test replaces it.
@@ -213,8 +218,13 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
 
     {
       provide: AssetSyncConsumer,
-      inject: [ENV, LOGGER, MaintenanceRepository],
-      useFactory: (env: MaintenanceEnv, logger: Logger, repository: MaintenanceRepository) =>
+      inject: [ENV, LOGGER, MaintenanceRepository, TRANSFER_RECORD_SOURCE],
+      useFactory: (
+        env: MaintenanceEnv,
+        logger: Logger,
+        repository: MaintenanceRepository,
+        transferRecords: TransferRecordSource,
+      ) =>
         new AssetSyncConsumer(
           (handler) =>
             new EventConsumer(
@@ -233,6 +243,19 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
               },
             ),
           repository,
+          // D-039: a `.retry` delivery refreshes the replica from asset-service
+          // instead of applying the replayed payload.
+          new AssetSnapshotClient({
+            from: SERVICE_NAME,
+            baseUrl: env.ASSET_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: new InternalTokenService(
+              env.INTERNAL_TOKEN_SECRET,
+              env.INTERNAL_TOKEN_ISSUER,
+              env.INTERNAL_TOKEN_TTL_SECONDS,
+            ),
+          }),
+          transferRecords,
         ),
     },
 
@@ -298,6 +321,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly repository: MaintenanceRepository,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -333,6 +357,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         );
       } catch {
         // Metrics must never take the service down.
+      }
+      try {
+        // Expired Idempotency-Key records (#157), removed by age alone:
+        // unscoped by necessity, safe because they are already unusable.
+        await this.idempotency.purgeExpired();
+      } catch {
+        // Upkeep must never take the service down either.
       }
     };
 

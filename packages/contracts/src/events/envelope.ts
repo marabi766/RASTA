@@ -213,6 +213,16 @@ export const DLQ_HEADERS = {
   originalOffset: 'x-dlq-original-offset',
 } as const;
 
+/**
+ * Stamped on every record the DLQ replay tool publishes (docs/runbooks/replay-dlq.md):
+ * `<reportId>/<operator>`, the tool's report id and the operator named in its
+ * environment — no secret. A consumer or an auditor can tell a replay from an
+ * original, and find the report that explains it.
+ */
+export const REPLAY_HEADERS = {
+  replayId: 'x-replay-id',
+} as const;
+
 export const DLQ_REASONS = {
   VALIDATION_FAILED: 'VALIDATION_FAILED',
   SCHEMA_VERSION_UNSUPPORTED: 'SCHEMA_VERSION_UNSUPPORTED',
@@ -269,6 +279,9 @@ export const NEVER_AUTO_REPLAY = new Set([
   'PAYMENT_COMPLETED',
   'PAYMENT_FAILED',
   'PAYMENT_CAPTURE_UNRECONCILED',
+  'PAYMENT_REFUND_UNRECONCILED',
+  'PAYMENT_RECONCILIATION_ESCALATED',
+  'PAYMENT_RECONCILIATION_RESOLVED',
   'COMMISSION_APPLIED',
   'REWARD_GRANTED',
   'REWARD_LEVEL_CHANGED',
@@ -278,6 +291,16 @@ export const NEVER_AUTO_REPLAY = new Set([
   'REWARD_RULE_CHANGED',
   'TRANSACTION_STATUS_CHANGED',
 ]);
+
+/**
+ * Source topics whose dead letters are never replayed, whatever event they
+ * name: refused by the topic they came from (or its `.retry` twin), not only
+ * by their name, so an event the list above has not caught up with is still
+ * refused (Codex round 1 on #144, M3). The broker derives ops-replay's READ
+ * grant from the subscribed topics minus these (`broker-acls.ts`): the tool
+ * never replays them, so it has no reason to read them.
+ */
+export const NEVER_AUTO_REPLAY_TOPICS: ReadonlySet<string> = new Set(['rasta.economic.v1']);
 
 export function isAutoReplayable(eventName: string): boolean {
   return !NEVER_AUTO_REPLAY.has(eventName);

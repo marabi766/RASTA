@@ -28,6 +28,7 @@ export const TENANT_SCOPED_MODELS = [
   'PartUsage',
   'LaborEntry',
   'MaintenanceCost',
+  'IdempotencyKey',
 ] as const;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
@@ -96,7 +97,13 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * on it for a second reason — a repair order's total and the lines it is
    * computed from must move together (docs/03 § 3.3).
    */
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient));
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.client.$transaction(
+      (tx) => fn(tx as ExtendedPrismaClient),
+      options?.timeoutMs === undefined ? undefined : { timeout: options.timeoutMs },
+    );
   }
 }

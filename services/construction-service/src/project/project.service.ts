@@ -13,6 +13,7 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { projectTransitionsTotal, versionConflictsTotal } from '../observability/metrics';
 import { ProjectRepository, type LockedProject } from './project.repository';
 import { ApprovalRepository } from '../approval/approval.repository';
+import { TenderRepository } from '../tender/tender.repository';
 import { assertProjectCancellable, assertProjectEditable } from './project.state-machine';
 import { toProjectSummaryView, toProjectView } from './views';
 import type {
@@ -52,6 +53,7 @@ export class ProjectService {
     private readonly idempotency: IdempotencyStore,
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly approvals: ApprovalRepository,
+    private readonly tenders: TenderRepository,
   ) {}
 
   /**
@@ -245,6 +247,16 @@ export class ProjectService {
       const locked = await this.lockOrNotFound(tx, organizationId, projectId);
       this.assertVersion(locked, dto.expectedVersion);
       assertProjectCancellable(projectId, locked.status, this.env.CONSTRUCTION_CANCELLABLE_STATES);
+
+      // A tender is a commitment: it is ended by name and with a reason, never
+      // swept away by its project (ADR-065 § 4). Creating a tender takes this
+      // same project lock, so a tender cannot appear behind this check.
+      if (await this.tenders.hasLiveTender(tx, projectId)) {
+        throw RastaError.businessRule(
+          `Project ${projectId} has a tender that is not finished; cancel the tender first`,
+          { projectId },
+        );
+      }
 
       const matched = await this.repository.transitionProject(tx, {
         projectId,

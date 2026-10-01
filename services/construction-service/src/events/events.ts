@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PROJECT_STATES } from '../project/project.state-machine';
 import { WORKFLOW_KEYS } from '../approval/approval.state-machine';
+import { CANCELLATION_CODES, TENDER_STATES } from '../tender/tender.state-machine';
 
 /**
  * Events published by construction-service, on `rasta.construction.v1`.
@@ -58,12 +59,30 @@ export const CONSTRUCTION_EVENTS = {
   APPROVAL_POLICY_CREATED: 'APPROVAL_POLICY_CREATED',
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
+  // Q-83: taken out of force by the system when an ORGANIZATION_MOVED means
+  // the union that wrote it no longer governs the organization.
+  APPROVAL_POLICY_SUSPENDED: 'APPROVAL_POLICY_SUSPENDED',
   // Q-70 (7), decided 2026-09-26: the platform approval step (names approved
   // by the PM, 2026-09-26).
   APPROVAL_POLICY_SUBMITTED: 'APPROVAL_POLICY_SUBMITTED',
   APPROVAL_POLICY_REJECTED: 'APPROVAL_POLICY_REJECTED',
   PROJECT_PROGRESS_REPORT_DRAFTED: 'PROJECT_PROGRESS_REPORT_DRAFTED',
   PROJECT_PROGRESS_REPORT_DISCARDED: 'PROJECT_PROGRESS_REPORT_DISCARDED',
+  // CON-002 (ADR-065). `TENDER_CREATED` is a catalogue event; `TENDER_CANCELLED`
+  // was accepted by the project manager (2026-09-30); `TENDER_UPDATED` follows
+  // the `PROJECT_UPDATED` precedent (a DRAFT edit is a state change audit must
+  // hear about, S-06) and is flagged for acceptance in the PR.
+  TENDER_CREATED: 'TENDER_CREATED',
+  TENDER_UPDATED: 'TENDER_UPDATED',
+  TENDER_CANCELLED: 'TENDER_CANCELLED',
+  // CON-002 PR 4a. Both added for S-06 (a criteria change is a state change
+  // audit must hear about); flagged for the project manager's acceptance.
+  CRITERIA_TEMPLATE_CREATED: 'CRITERIA_TEMPLATE_CREATED',
+  TENDER_CRITERIA_SET: 'TENDER_CRITERIA_SET',
+  // CON-002 PR 4b. `TENDER_PUBLISHED` is a catalogue event; `TENDER_BIDDER_INVITED`
+  // is added for S-06 (an invitation decides who may bid) and awaits acceptance.
+  TENDER_PUBLISHED: 'TENDER_PUBLISHED',
+  TENDER_BIDDER_INVITED: 'TENDER_BIDDER_INVITED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -322,6 +341,31 @@ export const approvalPolicyActivatedPayload = z
   })
   .strict();
 
+/**
+ * Taken out of force because the union that wrote it no longer governs the
+ * organization (Q-83). `suspendedBy` is the system actor; the cause is the
+ * ORGANIZATION_MOVED event and the organization it moved, or a round being
+ * opened. No free text: the reason is a closed code.
+ */
+export const approvalPolicySuspendedPayload = z
+  .object({
+    policyId: identifier,
+    organizationId: identifier,
+    authorOrganizationId: identifier,
+    workflowKey,
+    policyVersion: positive,
+    /** In force, or still waiting for the platform approval, when it was suspended. */
+    fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
+    /** A move found it (the sweeper), or a round being opened on it did. */
+    reason: z.enum(['ORGANIZATION_MOVED', 'ROUND_OPENING_RECHECK']),
+    /** The ORGANIZATION_MOVED event and the organization it moved; null when a round found it. */
+    causeEventId: identifier.nullable(),
+    movedOrganizationId: identifier.nullable(),
+    suspendedBy: identifier,
+    suspendedAt: isoTimestamp,
+  })
+  .strict();
+
 export const approvalPolicyRetiredPayload = z
   .object({
     policyId: identifier,
@@ -353,6 +397,111 @@ export const progressReportDiscardedPayload = z
   })
   .strict();
 
+// ---------------------------------------------------------------------------
+// CON-002 — tenders (ADR-065). Keyed by `tenderId`, about a `Tender`.
+//
+// **No payload carries a title, the scope of work, a stated reason, a bid, a
+// price or any free text.** They stay in this service's database; a consumer
+// asks the API under its own authorization.
+// ---------------------------------------------------------------------------
+
+const tenderState = z.enum(TENDER_STATES);
+const procurementNature = z.enum(['FORMAL_TENDER', 'INQUIRY', 'RFP', 'MARKETPLACE_DEAL']);
+
+const tenderIdentity = {
+  tenderId: identifier,
+  projectId: identifier,
+  organizationId: identifier,
+};
+
+export const tenderCreatedPayload = z
+  .object({
+    ...tenderIdentity,
+    /** Null until the owner chooses it; the platform never defaults it (Q-03). */
+    procurementNature: procurementNature.nullable(),
+    createdBy: identifier,
+    createdAt: isoTimestamp,
+  })
+  .strict();
+
+export const tenderUpdatedPayload = z
+  .object({
+    ...tenderIdentity,
+    changedFields,
+    updatedBy: identifier,
+    updatedAt: isoTimestamp,
+  })
+  .strict();
+
+/** The stated reason is prose and stays in the database; the code is a closed set. */
+export const tenderCancelledPayload = z
+  .object({
+    ...tenderIdentity,
+    from: tenderState,
+    reasonCode: z.enum(CANCELLATION_CODES),
+    cancelledBy: identifier,
+    cancelledAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * A criteria template was written (a new version of a label). The label and the
+ * criteria are text an organization typed and stay in the database; the event
+ * says that one exists, its version and how many criteria it has.
+ */
+export const criteriaTemplateCreatedPayload = z
+  .object({
+    templateId: identifier,
+    organizationId: identifier,
+    version: z.number().int().positive(),
+    criteriaCount: z.number().int().positive(),
+    totalWeightBp: z.number().int().positive().max(10_000),
+    createdBy: identifier,
+    createdAt: isoTimestamp,
+  })
+  .strict();
+
+/** A DRAFT tender's criteria were replaced. Counts and weights only, never codes or labels. */
+export const tenderCriteriaSetPayload = z
+  .object({
+    ...tenderIdentity,
+    criteriaCount: z.number().int().positive(),
+    totalWeightBp: z.number().int().positive().max(10_000),
+    /** The template they were copied from, or null when written out. */
+    templateId: identifier.nullable(),
+    setBy: identifier,
+    setAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * A tender was opened to bidders. Carries the window and how many criteria are
+ * frozen — never a title, the scope, a criterion or the tender's public key.
+ * `keyId` is an opaque identifier of the key pair bids will be sealed to.
+ */
+export const tenderPublishedPayload = z
+  .object({
+    ...tenderIdentity,
+    visibility: z.enum(['PUBLIC', 'RESTRICTED']),
+    bidOpeningAt: isoTimestamp,
+    bidClosingAt: isoTimestamp,
+    criteriaCount: z.number().int().positive(),
+    keyId: identifier,
+    publishedBy: identifier,
+    publishedAt: isoTimestamp,
+  })
+  .strict();
+
+/** An organization was invited to a RESTRICTED tender. */
+export const tenderBidderInvitedPayload = z
+  .object({
+    ...tenderIdentity,
+    invitedOrganizationId: identifier,
+    invitedBy: identifier,
+    invitedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -370,10 +519,18 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   APPROVAL_POLICY_CREATED: approvalPolicyCreatedPayload,
   APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
   APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
+  APPROVAL_POLICY_SUSPENDED: approvalPolicySuspendedPayload,
   APPROVAL_POLICY_SUBMITTED: approvalPolicySubmittedPayload,
   APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
   PROJECT_PROGRESS_REPORT_DRAFTED: progressReportDraftedPayload,
   PROJECT_PROGRESS_REPORT_DISCARDED: progressReportDiscardedPayload,
+  TENDER_CREATED: tenderCreatedPayload,
+  TENDER_UPDATED: tenderUpdatedPayload,
+  TENDER_CANCELLED: tenderCancelledPayload,
+  CRITERIA_TEMPLATE_CREATED: criteriaTemplateCreatedPayload,
+  TENDER_CRITERIA_SET: tenderCriteriaSetPayload,
+  TENDER_PUBLISHED: tenderPublishedPayload,
+  TENDER_BIDDER_INVITED: tenderBidderInvitedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

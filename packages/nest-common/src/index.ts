@@ -50,6 +50,8 @@ export {
 
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
+export { internalGet } from './auth/internal-get';
+export type { InternalGetOptions, InternalGetResult } from './auth/internal-get';
 export type {
   UserClaims,
   ServiceClaims,
@@ -128,10 +130,12 @@ export type {
   HandlerOutcome,
   ConsumerLogger,
 } from './consumer/event-consumer';
+export { isRetryDelivery, originalDelivery } from './consumer/original-delivery';
 
 // Outbox ---------------------------------------------------------------------
 export {
   buildOutboxRow,
+  orderForPublish,
   OutboxRelay,
   renewalIntervalMs,
   renewalDeadlineMs,
@@ -168,3 +172,17 @@ export type {
   ClaimOptions,
   OutboxTxRunner,
 } from './outbox/outbox-sql';
+
+// Lifecycle ------------------------------------------------------------------
+export {
+  installGracefulShutdown,
+  DEFAULT_AFTER_CLOSE_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_SIGNALS,
+} from './lifecycle/graceful-shutdown';
+export type {
+  GracefulShutdown,
+  GracefulShutdownOptions,
+  ShutdownLogger,
+  ShutdownSignalSource,
+  ShutdownTarget,
+} from './lifecycle/graceful-shutdown';

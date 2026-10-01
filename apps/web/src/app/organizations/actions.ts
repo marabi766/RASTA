@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   parseUpdateOrganizationForm,
   updateOrganization,
@@ -50,7 +50,7 @@ async function gate(form: FormData) {
   if (!csrf.ok) return { ok: false, state: { kind: 'REFUSED', reason: 'CSRF' } } as const;
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) {
+  if (!isBoundSubmissionId(submissionId, session)) {
     return { ok: false, state: { kind: 'REFUSED', reason: 'SUBMISSION' } } as const;
   }
 
@@ -106,8 +106,11 @@ export async function submitUpdateOrganization(
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }
@@ -153,8 +156,11 @@ export async function submitUpdateMemberRoles(
       return { kind: 'NOT_FOUND' };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }
@@ -198,8 +204,11 @@ export async function submitRevokeMembership(
       return { kind: 'NOT_FOUND' };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

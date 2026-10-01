@@ -68,6 +68,8 @@ describe('claimPending', () => {
     published_at: null,
     attempts: 2,
     last_error: 'broker refused the write',
+    // BIGINT, so Prisma hands back a bigint. A value only this column could produce.
+    stream_seq: 41n,
   };
 
   it('maps every selected column onto the field the relay reads', async () => {
@@ -90,8 +92,16 @@ describe('claimPending', () => {
         publishedAt: null,
         attempts: 2,
         lastError: 'broker refused the write',
+        streamSeq: 41,
       },
     ]);
+  });
+
+  it('reads an unsequenced row as streamSeq null', async () => {
+    const { stream_seq: _unsequenced, ...withoutSeq } = RAW;
+    echoToken([withoutSeq]);
+
+    expect((await claim(10)).rows[0]?.streamSeq).toBeNull();
   });
 
   it('turns absent headers into an empty object rather than null', async () => {

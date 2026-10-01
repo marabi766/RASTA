@@ -265,6 +265,17 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
           w.approvals.request(project.id, { expectedVersion: project.version }),
         );
 
+      // Unconfirmable is refused — never read as "still within" — and the
+      // policy is left as it is: a failed lookup suspends nothing.
+      w.hierarchy.unavailable = true;
+      await expect(request()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      w.hierarchy.unavailable = false;
+      w.hierarchy.timedOut = true;
+      await expect(request()).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
+      w.hierarchy.timedOut = false;
+      expect((await policyRow(policy.id))?.status).toBe('ACTIVE');
+      expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(0);
+
       // The dehyari leaves the union (organization-service's MOVE).
       w.hierarchy.disown(dehyari);
       w.hierarchy.asked.length = 0;
@@ -273,20 +284,15 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
       expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(0);
       const unchanged = await asAdmin(dehyari, () => w.projects.get(project.id));
       expect(unchanged).toMatchObject({ status: 'DRAFT', version: project.version });
+      // Refused, and suspended too (Q-83): the policy no longer waits for a sweep.
+      expect((await policyRow(policy.id))?.status).toBe('SUSPENDED');
 
-      // Unconfirmable is refused too — never read as "still within".
+      // Back under another organization, it is not revived (Q-83 B): no policy
+      // is in force, so no round opens — and a policy of the union's does not
+      // come back by itself.
       w.hierarchy.adopt(county, dehyari);
-      w.hierarchy.unavailable = true;
-      await expect(request()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
-      w.hierarchy.unavailable = false;
-      w.hierarchy.timedOut = true;
-      await expect(request()).rejects.toMatchObject({ code: 'UPSTREAM_TIMEOUT' });
-      w.hierarchy.timedOut = false;
+      await expect(request()).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
       expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(0);
-
-      // Back under the union, the same policy opens the round.
-      await request();
-      expect(await approvalsOf(w, dehyari, project.id)).toHaveLength(1);
     });
 
     it("a platform administrator's policy asks no hierarchy when used", async () => {

@@ -236,6 +236,93 @@ export const DOCUMENT_DATA_ROLLBACK = {
   ],
 };
 
+/** A payment intent as the schema before `20260930200000` holds it. */
+const PAYMENT_INTENT_MIGCHECK = (id, status, failureReason) => `
+INSERT INTO "payment_intent" (
+  "id", "organization_id", "wallet_id", "provider", "amount_minor", "currency", "status",
+  "failure_reason", "idempotency_key", "correlation_id", "authorized_at", "captured_at",
+  "created_by"
+) VALUES (
+  '${id}', 'ORG-MIGCHECK', 'WLT_MIGCHECK', 'mock', 1000, 'IRR', '${status}',
+  ${failureReason ? `'${failureReason}'` : 'NULL'}, 'KEY-${id}', 'COR-${id}', NOW(),
+  ${status === 'CAPTURED' ? 'NOW()' : 'NULL'}, 'USR-MIGCHECK'
+);`;
+
+/**
+ * The rollback of `20260930200000_payment_reconciliation_task`, against rows.
+ *
+ * Two things only data can show. The forward migration **backfills** a task
+ * for every intent B0 (#143) already left marked, and nothing else; and the
+ * down script **refuses** while a task is open, because dropping the queue
+ * then would leave a held refund that nothing ever looks at again (ADR-064
+ * step B1). The whole-chain reversal below runs on an empty table and sees
+ * neither.
+ */
+export const ECONOMIC_DATA_ROLLBACK = {
+  migration: '20260930200000_payment_reconciliation_task',
+  label: 'intents B0 left marked, and the open tasks they get',
+  steps: [
+    {
+      label: 'down: the rollback succeeds while no task is open',
+      runDownScript: true,
+    },
+    {
+      label: 'down: the schema before the queue holds marked intents',
+      sql: [
+        PAYMENT_INTENT_MIGCHECK('PAY_MIGCHECK_REFUND', 'CAPTURED', 'REFUND_UNKNOWN'),
+        PAYMENT_INTENT_MIGCHECK('PAY_MIGCHECK_UNCREDITED', 'AUTHORIZED', 'CAPTURED_REFUND_UNKNOWN'),
+        PAYMENT_INTENT_MIGCHECK('PAY_MIGCHECK_DECLINED', 'AUTHORIZED', 'CAPTURED_NOT_CREDITED'),
+        PAYMENT_INTENT_MIGCHECK('PAY_MIGCHECK_PLAIN', 'CAPTURED', null),
+      ].join('\n'),
+    },
+    { label: 'up again: the forward migration applies over them', reapply: true },
+    {
+      label: 'up again: a task for each unknown refund, and none for the rest',
+      sql: `
+        DO $$
+        DECLARE row_count INT;
+        BEGIN
+          SELECT count(*) INTO row_count FROM "payment_reconciliation_task"
+           WHERE organization_id = 'ORG-MIGCHECK';
+          IF row_count <> 2 THEN
+            RAISE EXCEPTION 'the backfill wrote % task(s), expected 2', row_count;
+          END IF;
+          SELECT count(*) INTO row_count FROM "payment_reconciliation_task"
+           WHERE (id, payment_intent_id, kind::text, last_outcome) IN (
+                   ('PRT_PAY_MIGCHECK_REFUND', 'PAY_MIGCHECK_REFUND', 'REFUND', 'REFUND_UNKNOWN'),
+                   ('PRT_PAY_MIGCHECK_UNCREDITED', 'PAY_MIGCHECK_UNCREDITED',
+                    'UNCREDITED_REFUND', 'CAPTURED_REFUND_UNKNOWN'))
+             AND status = 'PENDING' AND next_attempt_at <= NOW();
+          IF row_count <> 2 THEN
+            RAISE EXCEPTION 'the backfilled tasks are not the expected ones (found %)', row_count;
+          END IF;
+        END
+        $$;`,
+    },
+    {
+      label: 'up again: the down script refuses while a task is open',
+      runDownScript: true,
+      mustFail: 'refusing to drop the queue',
+    },
+    {
+      label: 'up again: an intent cannot have a second open task',
+      sql: `INSERT INTO "payment_reconciliation_task"
+              ("id", "organization_id", "payment_intent_id", "kind", "next_attempt_at",
+               "correlation_id", "created_at", "updated_at")
+            VALUES ('PRT_MIGCHECK_SECOND', 'ORG-MIGCHECK', 'PAY_MIGCHECK_REFUND', 'REFUND',
+                    NOW(), 'COR-MIGCHECK', NOW(), NOW());`,
+      // Reported by the key, not the index name; `ux_payment_reconciliation_open`
+      // is the only unique index on the intent id alone.
+      mustFail: 'Unique constraint failed on the fields: (`payment_intent_id`)',
+    },
+    {
+      label: 'cleanup: the probe rows are removed before the chain reversal',
+      sql: `DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
+            DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
+    },
+  ],
+};
+
 /**
  * What each service's schema must contain after `up`, and must not contain
  * after `down`.
@@ -512,13 +599,27 @@ export const EXPECTED = {
     ],
   },
   economic: {
-    tables: ['wallet', 'ledger_account', 'journal', 'ledger_entry', 'transaction', 'settlement'],
+    tables: [
+      'wallet',
+      'ledger_account',
+      'journal',
+      'ledger_entry',
+      'transaction',
+      'settlement',
+      'payment_reconciliation_task',
+    ],
     triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],
-    constraints: ['ck_wallet_balances'],
+    // The queue's: a finished task names its resolution and holds no lease.
+    constraints: [
+      'ck_wallet_balances',
+      'ck_payment_reconciliation_done_complete',
+      'ck_payment_reconciliation_lease_pair',
+    ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the
     // double-settlement race it closes, silently.
-    indexes: ['ux_transaction_source_fact'],
+    indexes: ['ux_transaction_source_fact', 'ux_payment_reconciliation_open'],
+    dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
   /**
    * The constraints listed are the ones carrying a financial invariant, not a
@@ -819,12 +920,36 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'policy_reconciliation_task',
       'processed_event',
       'progress_report',
       'project',
       'project_need',
+      'tender',
+      'criteria_template',
+      'tender_criterion',
+      'tender_invitation',
+      'tender_key',
     ],
-    triggers: [],
+    // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
+    // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
+    // 20260930180000_tender_publication: a tender's key is never deleted and its
+    // public half never changes.
+    triggers: [
+      'tg_tender_criterion_freeze',
+      'tg_tender_publish_requires_criteria',
+      'tg_tender_status_transition',
+      'tg_criteria_template_append_only',
+      'tg_criteria_template_no_truncate',
+      'tg_tender_key_guard',
+    ],
+    functions: [
+      'tender_criterion_freeze',
+      'tender_publish_requires_criteria',
+      'tender_status_transition_guard',
+      'criteria_template_append_only',
+      'tender_key_guard',
+    ],
     constraints: [
       'ck_project_text_not_blank',
       'ck_project_actor_recorded',
@@ -857,6 +982,17 @@ export const EXPECTED = {
       'ck_policy_rejection_complete',
       'ck_policy_activation_complete',
       'ck_policy_retirement_complete',
+      // 20260930130000_policy_suspension (Q-83): a suspension names who, when
+      // and why, exactly when the policy is SUSPENDED.
+      'ck_policy_suspension_complete',
+      // 20260930150000_policy_reconciliation_task (Q-83, D-041): a task's
+      // lease is a time and its token or neither, DONE names when, and the
+      // task is bound to its policy's tenant.
+      'ck_reconciliation_text_not_blank',
+      'ck_reconciliation_attempts_nonneg',
+      'ck_reconciliation_done_complete',
+      'ck_reconciliation_lease_pair',
+      'policy_reconciliation_task_organization_id_policy_id_fkey',
       'ck_step_authority_not_oversight',
       'ck_step_amount_range',
       'ck_approval_decision_complete',
@@ -871,6 +1007,37 @@ export const EXPECTED = {
       'approval_organization_id_policy_id_fkey',
       'approval_policy_step_organization_id_policy_id_fkey',
       'progress_report_organization_id_project_id_fkey',
+      // 20260930160000_tender_core (CON-002 PR 2, ADR-065): a tender is bound to
+      // its project's tenant, names who acted, has a real bidding window, is
+      // never published on a default, and a cancellation says why.
+      'tender_organization_id_project_id_fkey',
+      'ck_tender_text_not_blank',
+      'ck_tender_actor_recorded',
+      'ck_tender_version_positive',
+      'ck_tender_timestamps_ordered',
+      'ck_tender_window_ordered',
+      'ck_tender_published_complete',
+      'ck_tender_cancellation_has_reason',
+      // 20260930170000_tender_criteria (CON-002 PR 4a, ADR-067 § 1).
+      'tender_criterion_organization_id_tender_id_fkey',
+      'ck_criteria_template_text_not_blank',
+      'ck_criteria_template_version_positive',
+      'ck_criteria_template_is_array',
+      'ck_criteria_template_actor_recorded',
+      'ck_criterion_text_not_blank',
+      'ck_criterion_weight_range',
+      'ck_criterion_position_positive',
+      'ck_criterion_max_score',
+      'ck_criterion_actor_recorded',
+      // 20260930180000_tender_publication (CON-002 PR 4b, ADR-065, ADR-066 § 2).
+      'ck_tender_publication_complete',
+      'ck_tender_published_after_created',
+      'tender_invitation_organization_id_tender_id_fkey',
+      'ck_invitation_not_self',
+      'ck_invitation_text_not_blank',
+      'tender_key_organization_id_tender_id_fkey',
+      'ck_tender_key_wrap_shape',
+      'ck_tender_key_text_not_blank',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

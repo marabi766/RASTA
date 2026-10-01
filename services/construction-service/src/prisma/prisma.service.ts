@@ -18,8 +18,14 @@ export const TENANT_SCOPED_MODELS = [
   'IdempotencyKey',
   'ApprovalPolicy',
   'ApprovalPolicyStep',
+  'PolicyReconciliationTask',
   'Approval',
   'ProgressReport',
+  'Tender',
+  'CriteriaTemplate',
+  'TenderCriterion',
+  'TenderInvitation',
+  'TenderKey',
 ] as const;
 
 /**
@@ -90,7 +96,19 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * The outbox pattern requires the state change and the outbox insert to
    * share one transaction (AGENTS.md A-08, ADR-021).
    */
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient));
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { isolationLevel: 'RepeatableRead' },
+  ): Promise<T> {
+    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+  }
+
+  /**
+   * Runs `fn` against one snapshot (REPEATABLE READ): every read in it sees the
+   * database as it was at the first query, so two reads of one aggregate (the
+   * tender and its criteria) cannot straddle a commit between them.
+   */
+  snapshot<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.transaction(fn, { isolationLevel: 'RepeatableRead' });
   }
 }
