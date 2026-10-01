@@ -510,7 +510,8 @@ export async function cleanup(
       'commission',
       'reward',
       'reward_balance',
-      // Before its intent: the task's foreign key is ON DELETE RESTRICT.
+      // Children first: each foreign key here is ON DELETE RESTRICT.
+      'payment_reconciliation_resolution',
       'payment_reconciliation_task',
       'payment_intent',
       'wallet_hold',

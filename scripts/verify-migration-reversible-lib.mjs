@@ -257,14 +257,25 @@ INSERT INTO "payment_intent" (
  * then would leave a held refund that nothing ever looks at again (ADR-064
  * step B1). The whole-chain reversal below runs on an empty table and sees
  * neither.
+ *
+ * Every later migration that hangs off the task table is rolled back first,
+ * newest first (a `runDownScript` list runs in order), and re-applied with it:
+ * B2's heal-window index and B3's resolution table. Rolling back the task
+ * table alone dropped B2's index with it and the re-deploy never put it back
+ * (the ledger still listed B2) — caught once B3's snapshot expected it. The
+ * probe also shows B3's down script refusing while a proposal awaits approval.
  */
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label: 'intents B0 left marked, and the open tasks they get',
   steps: [
     {
-      label: 'down: the rollback succeeds while no task is open',
-      runDownScript: true,
+      label: 'down: the rollback succeeds while no task is open (the resolutions first)',
+      runDownScript: [
+        '20261001100000_payment_reconciliation_resolution',
+        '20260930210000_payment_intent_unfinished_refund_index',
+        '20260930200000_payment_reconciliation_task',
+      ],
     },
     {
       label: 'down: the schema before the queue holds marked intents',
@@ -316,8 +327,24 @@ export const ECONOMIC_DATA_ROLLBACK = {
       mustFail: 'Unique constraint failed on the fields: (`payment_intent_id`)',
     },
     {
+      label: 'up again: a proposal awaits approval on the backfilled task',
+      sql: `INSERT INTO "payment_reconciliation_resolution"
+              ("id", "organization_id", "payment_intent_id", "task_id", "status", "provider_outcome",
+               "evidence_reference", "reason", "four_eyes", "proposed_by", "proposed_at",
+               "correlation_id", "created_at", "updated_at")
+            VALUES ('PRR_MIGCHECK', 'ORG-MIGCHECK', 'PAY_MIGCHECK_REFUND', 'PRT_PAY_MIGCHECK_REFUND',
+                    'PENDING_APPROVAL', 'DECLINED', 'TICKET-MIGCHECK', 'a migration probe', true,
+                    'USR-MIGCHECK', NOW(), 'COR-MIGCHECK', NOW(), NOW());`,
+    },
+    {
+      label: 'up again: the resolution table refuses its rollback while a proposal is pending',
+      runDownScript: ['20261001100000_payment_reconciliation_resolution'],
+      mustFail: 'refusing to drop it',
+    },
+    {
       label: 'cleanup: the probe rows are removed before the chain reversal',
-      sql: `DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
+      sql: `DELETE FROM "payment_reconciliation_resolution" WHERE organization_id = 'ORG-MIGCHECK';
+            DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
             DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
     },
   ],
@@ -607,6 +634,7 @@ export const EXPECTED = {
       'transaction',
       'settlement',
       'payment_reconciliation_task',
+      'payment_reconciliation_resolution',
     ],
     triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],
     // The queue's: a finished task names its resolution and holds no lease.
@@ -614,11 +642,17 @@ export const EXPECTED = {
       'ck_wallet_balances',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
+      // Separation of duties on an operator resolution (ADR-064 § 6).
+      'ck_payment_resolution_four_eyes',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the
     // double-settlement race it closes, silently.
-    indexes: ['ux_transaction_source_fact', 'ux_payment_reconciliation_open'],
+    indexes: [
+      'ux_transaction_source_fact',
+      'ux_payment_reconciliation_open',
+      'ux_payment_resolution_pending',
+    ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
   /**

@@ -39,6 +39,7 @@ export const TENANT_SCOPED_MODELS = [
   'TransactionLeg',
   'PaymentIntent',
   'PaymentReconciliationTask',
+  'PaymentReconciliationResolution',
   'Commission',
   'Reward',
   'RewardSourceEvaluation',
