@@ -12,3 +12,9 @@
 
 export const ENV = Symbol('CONSTRUCTION_ENV');
 export const LOGGER = Symbol('CONSTRUCTION_LOGGER');
+
+/**
+ * Where a tender's private key is kept (`TenderKeyProvider`, ADR-066 § 2): an
+ * interface with one implementation today, so the seam is a token, not a class.
+ */
+export const TENDER_KEY_PROVIDER = Symbol('CONSTRUCTION_TENDER_KEY_PROVIDER');

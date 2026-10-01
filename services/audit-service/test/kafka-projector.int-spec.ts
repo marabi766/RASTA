@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Kafka, type Consumer, type Producer } from 'kafkajs';
 import { ulid } from 'ulid';
 import { EventConsumer, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
@@ -6,6 +7,8 @@ import {
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_TRAIL_TOPIC,
   DLQ_HEADERS,
+  OPS_REPLAY_TOPIC,
+  REPLAY_EXECUTED,
   ERROR_CODES,
   producersOf,
   type EventEnvelope,
@@ -20,7 +23,19 @@ import {
   DOMAIN_TOPICS,
 } from '../src/audit/audit.mapper';
 import { AUDIT_TRAIL_CONSUMER } from '../src/audit/audit-trail.mapper';
-import { brokers, cleanupRun, id, newMigratorPrisma, newPrisma, RUN_TAG, waitFor } from './helpers';
+import { OpsReplayConsumer } from '../src/consumers/ops-replay.consumer';
+import { OPS_REPLAY_CONSUMER } from '../src/audit/ops-replay.mapper';
+import {
+  brokers,
+  cleanupRun,
+  id,
+  instantIn,
+  newMigratorPrisma,
+  newPrisma,
+  runMonth,
+  RUN_TAG,
+  waitFor,
+} from './helpers';
 
 /**
  * The projector over a real broker and a real database.
@@ -1073,4 +1088,182 @@ describeWithKafka('audit-trail consumer over Kafka', () => {
     const after = await rowFor(source.eventId)();
     expect(flatten(after)).toBe(before);
   });
+});
+
+/**
+ * The replay record end to end: a `REPLAY_EXECUTED` published on
+ * `rasta.ops.replay.v1` with ops-replay's own credential — the topic's only
+ * producer (RUN-006) — becomes one audit row under the replayed event's tenant.
+ *
+ * ops-replay's password is not in the shared `.env` nor in the `tests` scope,
+ * so, like the `.retry` tests above, these run in CI's "Retry replay, published
+ * as ops-replay" step (the `[retry-replay]` tag selects them) and are skipped,
+ * saying so, without the credential — or fail, where RETRY_REPLAY_REQUIRED says
+ * the credential must be there.
+ */
+const opsReplayPassword = process.env.KAFKA_SASL_PASSWORD_OPS_REPLAY;
+const opsReplayRequired = process.env.RETRY_REPLAY_REQUIRED === 'true';
+const describeWithOpsReplay =
+  brokerList && (opsReplayPassword || opsReplayRequired) ? describe : describe.skip;
+if (brokerList && !opsReplayPassword && !opsReplayRequired) {
+  console.warn(
+    '[audit] KAFKA_SASL_PASSWORD_OPS_REPLAY is not set — skipping the replay-record tests',
+  );
+}
+
+describeWithOpsReplay('replay-record consumer over Kafka, published as ops-replay', () => {
+  let prisma: PrismaService;
+  let migrator: PrismaService;
+  let consumer: OpsReplayConsumer;
+  let producer: Producer;
+  const groupId = `audit-service.itest-ops-replay-${ulid().slice(-12)}`;
+  const silentLogger = {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  } as unknown as ConstructorParameters<typeof OpsReplayConsumer>[2];
+
+  let minute = 0;
+  function replayRecord(tenant: string | null): EventEnvelope {
+    const reportId = `rpl-${randomUUID()}`;
+    const replayed = id('EVT');
+    return {
+      eventId: id('RPL'),
+      eventName: REPLAY_EXECUTED,
+      eventVersion: 1,
+      // In this run's own month, never now: a platform record joins the
+      // platform chain of its month, and `cleanupRun` rightly refuses to cut
+      // a chain other suites' platform rows are in (ADR-053 § 6).
+      occurredAt: instantIn(runMonth(20), (minute += 1)).toISOString(),
+      producer: 'ops-replay',
+      producerVersion: '1.0.0',
+      aggregateType: 'ReplayRun',
+      aggregateId: reportId,
+      ...(tenant === null ? {} : { tenantId: tenant }),
+      correlationId: reportId,
+      causationId: replayed,
+      actor: { type: 'USER', id: 'ops.itest' },
+      payload: {
+        reportId,
+        operator: 'ops.itest',
+        replayedEvent: {
+          eventId: replayed,
+          eventName: 'USAGE_RECORDED',
+          ...(tenant === null ? {} : { tenantId: tenant }),
+        },
+        dlq: { topic: 'rasta.maintenance.v1.dlq', partition: 0, offset: '7' },
+        target: { topic: 'rasta.fleet.v1.retry', partition: 2, offset: '19' },
+        stale: false,
+      },
+    } as EventEnvelope;
+  }
+
+  const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function publish(body: EventEnvelope): Promise<void> {
+    await producer.send({
+      topic: OPS_REPLAY_TOPIC,
+      acks: -1,
+      messages: [{ key: body.correlationId, value: JSON.stringify(body) }],
+    });
+  }
+
+  const rowFor = (sourceEventId: string) => () =>
+    prisma.client.auditEvent.findFirst({ where: { sourceEventId, sourceTopic: OPS_REPLAY_TOPIC } });
+
+  beforeAll(async () => {
+    if (!opsReplayPassword) {
+      throw new Error('KAFKA_SASL_PASSWORD_OPS_REPLAY is required here and is not set');
+    }
+    prisma = newPrisma();
+    migrator = newMigratorPrisma();
+    await prisma.onModuleInit();
+    await migrator.onModuleInit();
+
+    const kafka = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('ops-replay', 'audit-itest-ops-replay-record')),
+      logLevel: 1,
+    });
+    producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+    await producer.connect();
+
+    consumer = new OpsReplayConsumer(
+      (handler) =>
+        new EventConsumer(
+          {
+            ...kafkaConnectionFor('audit-service', 'audit-itest-ops-replay'),
+            groupId,
+            topics: [OPS_REPLAY_TOPIC],
+            // Only this run's records: a fresh group joins at the end, and a
+            // warm-up record published until one lands proves it has joined.
+            fromBeginning: false,
+            deadLetterTopic: AUDIT_DEAD_LETTER_TOPIC,
+            retryBackoffMs: 50,
+          },
+          handler,
+          { log: () => undefined, warn: () => undefined, error: () => undefined },
+        ),
+      new AuditRepository(prisma),
+      silentLogger,
+    );
+    await consumer.start();
+
+    await waitFor(
+      'the replay-record consumer to join and record a warm-up record',
+      async () => {
+        const warmUp = replayRecord(id('ORG'));
+        await publish(warmUp);
+        await pause(1_000);
+        return rowFor(warmUp.eventId)();
+      },
+      GROUP_JOIN_TIMEOUT_MS * 2,
+      500,
+    );
+  }, 180_000);
+
+  afterAll(async () => {
+    await consumer?.onModuleDestroy();
+    await producer?.disconnect();
+    await cleanupRun(migrator);
+    await prisma?.onModuleDestroy();
+    await migrator?.onModuleDestroy();
+  }, 120_000);
+
+  it('[retry-replay] records a REPLAY_EXECUTED published as ops-replay, under the replayed event’s tenant', async () => {
+    const tenant = id('ORG');
+    const source = replayRecord(tenant);
+    await publish(source);
+
+    const row = await waitFor('the replay row', rowFor(source.eventId), DELIVERY_TIMEOUT_MS);
+    const payload = source.payload as { reportId: string; replayedEvent: { eventId: string } };
+    expect(row).toMatchObject({
+      actorType: 'USER',
+      actorId: 'ops.itest',
+      organizationId: tenant,
+      action: REPLAY_EXECUTED,
+      resourceType: 'Event',
+      resourceId: payload.replayedEvent.eventId,
+      sourceService: 'ops-replay',
+      sourceTopic: OPS_REPLAY_TOPIC,
+      correlationId: payload.reportId,
+    });
+    expect(
+      await prisma.client.processedEvent.count({
+        where: { eventId: source.eventId, consumerName: OPS_REPLAY_CONSUMER },
+      }),
+    ).toBe(1);
+  }, 180_000);
+
+  it('[retry-replay] records the replay of an event with no tenant as a platform record', async () => {
+    const source = replayRecord(null);
+    await publish(source);
+
+    const row = await waitFor(
+      'the platform replay row',
+      rowFor(source.eventId),
+      DELIVERY_TIMEOUT_MS,
+    );
+    expect(row.organizationId).toBeNull();
+  }, 180_000);
 });

@@ -5,6 +5,7 @@ import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { DomainProjectorConsumer } from '../consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from '../consumers/audit-trail.consumer';
+import { OpsReplayConsumer } from '../consumers/ops-replay.consumer';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -67,6 +68,7 @@ export class HealthController {
     private readonly prisma: PrismaService,
     private readonly projector: DomainProjectorConsumer,
     private readonly trail: AuditTrailConsumer,
+    private readonly replay: OpsReplayConsumer,
   ) {}
 
   @Get('live')
@@ -84,21 +86,22 @@ export class HealthController {
   async ready(@Res({ passthrough: true }) response: Response): Promise<{
     status: string;
     service: string;
-    checks: { database: boolean; projector: boolean; trail: boolean };
+    checks: { database: boolean; projector: boolean; trail: boolean; replay: boolean };
     ingests: true;
     queryApi: true;
   }> {
     const database = await this.prisma.isHealthy();
     const projector = this.projector.isRunning();
     const trail = this.trail.isRunning();
+    const replay = this.replay.isRunning();
 
-    const ready = database && projector && trail;
+    const ready = database && projector && trail && replay;
     response.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
 
     return {
       status: ready ? 'ok' : 'unavailable',
       service: SERVICE_NAME,
-      checks: { database, projector, trail },
+      checks: { database, projector, trail, replay },
       // Said in the payload rather than only in a doc, and kept honest in both
       // directions: while `queryApi` was `false` it stated a real absence, and
       // AUD-002 built the read API, so it says so. A readiness payload that

@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 /** Tables with a `published_at` that is not an outbox's: `service table`. */
 export const DOMAIN_PUBLISHED_AT = [
+  'construction-service tender',
   'marketplace-service offer',
   'notification-service notification_template_version',
 ];

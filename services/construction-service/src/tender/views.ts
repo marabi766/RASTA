@@ -23,6 +23,8 @@ export function toTenderView(row: Tender): TenderView {
     statusReasonCode: row.statusReasonCode,
     statusChangedAt: row.statusChangedAt.toISOString(),
     statusChangedBy: row.statusChangedBy,
+    publishedAt: row.publishedAt?.toISOString() ?? null,
+    publishedBy: row.publishedBy,
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,
     updatedAt: row.updatedAt.toISOString(),
