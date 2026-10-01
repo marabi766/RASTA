@@ -10,9 +10,12 @@
 // lib/service-privilege-split.bash runs — the upgrade the runbook describes —
 // and the check must report nothing, the row must still be there and writable,
 // and DISABLE TRIGGER must be refused. A table the migrator creates afterwards
-// must reach the runtime role as DML by default privileges, and the migration
-// ledger only until scripts/prisma-lib.mjs's revoke runs. The split runs a
-// second time to prove it is idempotent.
+// must reach the runtime role as DML by default privileges. The migration
+// ledger is the split's own (Codex review of #176): created before any
+// migration, the migrator's, granted to no one — and a real `prisma migrate
+// deploy` that fails half-way leaves it so, with no help from
+// scripts/prisma.mjs's revoke. The pre-created ledger is Prisma's shape, column
+// for column. The split runs a second time to prove it is idempotent.
 //
 // The roles are throwaway too (`rasta_d045t<pid>` and its migrator), so the
 // test never touches a real service's roles. Needs `psql` and a superuser:
@@ -22,6 +25,8 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FINDINGS_SQL } from './check-db-runtime-privileges-lib.mjs';
@@ -29,6 +34,8 @@ import { ledgerRevoke } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
+// Any service's Prisma CLI: the version every service migrates with.
+const PRISMA = join(ROOT, 'services/construction-service/node_modules/.bin/prisma');
 
 const SERVICE = `d045t${process.pid}`;
 const DB = `rasta_${SERVICE}`;
@@ -144,12 +151,28 @@ test('after the split: nothing to report, the data intact and writable, the guar
   assert.deepEqual(findings(), []);
 });
 
-test('a table the migrator creates later reaches the runtime role as DML; its migration ledger only until the revoke', () => {
-  ok(
-    `CREATE TABLE later (id integer);
-     CREATE TABLE _prisma_migrations (id varchar(36) PRIMARY KEY);`,
-    { role: MIGRATOR },
+const LEDGER_RIGHTS = `SELECT has_table_privilege('${RUNTIME}', 'public._prisma_migrations',
+                                 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+                         OR has_any_column_privilege('${RUNTIME}', 'public._prisma_migrations',
+                                 'SELECT, INSERT, UPDATE, REFERENCES')`;
+
+test('the split creates the migration ledger itself: the migrator owns it, the runtime role holds nothing on it', () => {
+  assert.equal(
+    ok(
+      `SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public._prisma_migrations'::regclass`,
+    ),
+    MIGRATOR,
   );
+  assert.equal(ok(LEDGER_RIGHTS), 'f');
+  const write = psql(
+    `INSERT INTO _prisma_migrations (id, checksum, migration_name) VALUES ('x', 'x', 'x')`,
+    { role: RUNTIME },
+  );
+  assert.match(write.stderr, /permission denied/);
+});
+
+test('a table the migrator creates later reaches the runtime role as DML', () => {
+  ok('CREATE TABLE later (id integer)', { role: MIGRATOR });
   assert.equal(
     ok(
       `SELECT has_table_privilege('${RUNTIME}', 'later', 'SELECT, INSERT, UPDATE, DELETE')
@@ -157,8 +180,105 @@ test('a table the migrator creates later reaches the runtime role as DML; its mi
     ),
     't',
   );
-  // Default privileges cover the ledger too — which is why scripts/prisma.mjs
-  // revokes it after every migration run.
+  assert.deepEqual(findings(), []);
+});
+
+/** A Prisma project in a temporary directory: `migrations` maps name → SQL. */
+function prismaProject(migrations) {
+  const dir = mkdtempSync(join(tmpdir(), 'd045-prisma-'));
+  writeFileSync(
+    join(dir, 'schema.prisma'),
+    'datasource db {\n  provider = "postgresql"\n  url      = env("DATABASE_URL")\n}\n',
+  );
+  mkdirSync(join(dir, 'migrations'));
+  writeFileSync(join(dir, 'migrations', 'migration_lock.toml'), 'provider = "postgresql"\n');
+  for (const [name, sql] of Object.entries(migrations)) {
+    mkdirSync(join(dir, 'migrations', name));
+    writeFileSync(join(dir, 'migrations', name, 'migration.sql'), sql);
+  }
+  return dir;
+}
+
+/** `prisma migrate deploy` as the migrator, straight — not through scripts/prisma.mjs. */
+function deployAsMigrator(dir, schema = 'public') {
+  const host = process.env.PGHOST ?? '127.0.0.1';
+  const port = process.env.PGPORT ?? '5432';
+  return spawnSync(PRISMA, ['migrate', 'deploy', '--schema', join(dir, 'schema.prisma')], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      DATABASE_URL: `postgresql://${MIGRATOR}:${PASSWORD[MIGRATOR]}@${host}:${port}/${DB}?schema=${schema}`,
+      PRISMA_HIDE_UPDATE_MESSAGE: '1',
+    },
+    encoding: 'utf8',
+  });
+}
+
+test('a migration that fails half-way leaves the runtime role no right on the ledger — no revoke needed', () => {
+  const dir = prismaProject({
+    '20260101000000_applies': 'CREATE TABLE "made_by_migration" (id integer);',
+    '20260101000001_fails': 'CREATE TABLE "half_done" (id integer);\nSELECT 1 / 0;',
+  });
+  try {
+    const run = deployAsMigrator(dir);
+    assert.notEqual(run.status, 0, 'the second migration was meant to fail');
+    assert.match(run.stdout + run.stderr, /20260101000001_fails/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // Prisma adopted the pre-created ledger: the first migration is recorded as
+  // finished, the second as started and never finished.
+  assert.equal(
+    ok(
+      `SELECT string_agg(migration_name || ':' || (finished_at IS NOT NULL), ',' ORDER BY migration_name)
+         FROM _prisma_migrations`,
+    ),
+    '20260101000000_applies:true,20260101000001_fails:false',
+  );
+  // …and the runtime role still holds nothing on it, so it cannot mark the
+  // failed migration applied (or rewrite any other row).
+  assert.equal(ok(LEDGER_RIGHTS), 'f');
+  const forge = psql(
+    `UPDATE _prisma_migrations SET finished_at = now(), logs = NULL WHERE finished_at IS NULL`,
+    { role: RUNTIME },
+  );
+  assert.match(forge.stderr, /permission denied/);
+  assert.deepEqual(findings(), []);
+  // The migration's own table reached the runtime role as DML, as any would.
+  assert.equal(
+    ok(`SELECT has_table_privilege('${RUNTIME}', 'made_by_migration', 'SELECT, INSERT')`),
+    't',
+  );
+});
+
+test('the pre-created ledger is the one Prisma would have made, column for column', () => {
+  const dir = prismaProject({ '20260101000000_applies': 'SELECT 1;' });
+  try {
+    const run = deployAsMigrator(dir, 'prisma_made');
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const shape = (schema) =>
+    ok(
+      `SELECT string_agg(concat_ws(' ', column_name, data_type, character_maximum_length,
+                                    is_nullable, column_default), E'\n' ORDER BY ordinal_position)
+         FROM information_schema.columns
+        WHERE table_schema = '${schema}' AND table_name = '_prisma_migrations';
+       SELECT string_agg(a.attname, ',') FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indisprimary AND i.indrelid = '"${schema}"."_prisma_migrations"'::regclass;`,
+    );
+  assert.notEqual(shape('prisma_made'), '');
+  assert.equal(shape('public'), shape('prisma_made'));
+});
+
+test('belt and braces: a ledger Prisma re-creates (a reset) inherits DML, and the revoke in scripts/prisma.mjs takes it back', () => {
+  ok(
+    `DROP TABLE _prisma_migrations;
+     CREATE TABLE _prisma_migrations (id varchar(36) PRIMARY KEY);`,
+    { role: MIGRATOR },
+  );
   assert.deepEqual(findings(), ['a right on public._prisma_migrations']);
   const revoke = ledgerRevoke({
     migratorUrl: `postgresql://${MIGRATOR}:x@h/${DB}?schema=public`,

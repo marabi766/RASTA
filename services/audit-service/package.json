@@ -14,8 +14,8 @@
     "test": "jest --selectProjects unit",
     "test:unit": "jest --selectProjects unit",
     "db:generate": "prisma generate",
-    "db:migrate": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate deploy",
-    "db:migrate:dev": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate dev",
+    "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",
+    "db:migrate:dev": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate dev",
     "test:integration": "jest --selectProjects integration --runInBand",
     "test:retry-replay": "jest --selectProjects integration --runInBand --testPathPattern kafka-projector --testNamePattern retry-replay",
     "test:coverage": "jest --coverage --runInBand"

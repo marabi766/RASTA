@@ -45,13 +45,19 @@
 #                    USAGE, SELECT on every sequence in `public`, now and — by
 #                    ALTER DEFAULT PRIVILEGES FOR ROLE the migrator — on every
 #                    table and sequence it creates later. Never TRUNCATE,
-#                    REFERENCES or TRIGGER. Nothing on `_prisma_migrations`
-#                    (scripts/prisma.mjs revokes it again after each migration,
-#                    because a fresh database's ledger is created after this
-#                    runs and inherits the defaults).
+#                    REFERENCES or TRIGGER.
 #       migration  — nothing here: each table's grant is in the service's own
 #                    migrations (supplier-service grants less than DML on its
 #                    append-only and insert-only tables).
+#   * The migration ledger `_prisma_migrations` is created **here**, with
+#     Prisma's own DDL, owned by the migrator and granted to no one — before any
+#     migration runs (Codex review of #176). Left to Prisma, a fresh database's
+#     ledger would be created by the first `migrate deploy` and inherit the
+#     default DML grant above, so the runtime role could edit migration history
+#     for the whole of that run, and for good if the run failed before
+#     scripts/prisma.mjs's post-migration revoke (which stays, belt and braces).
+#     Prisma adopts a ledger it finds: `migrate deploy` reads the table and
+#     applies what it does not list.
 #
 # ## Upgrading an existing database — the order matters
 #
@@ -65,6 +71,38 @@
 
 _svc_split_psql() {
   psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -c "$2"
+}
+
+# Prisma's migration ledger, exactly as its schema engine creates it on
+# PostgreSQL (prisma 6; compared column for column with a Prisma-made one by
+# scripts/check-db-runtime-privileges.pg.test.mjs).
+_prisma_ledger_ddl() {
+  printf '%s' "CREATE TABLE IF NOT EXISTS \"$1\".\"_prisma_migrations\" (
+    \"id\"                  VARCHAR(36) PRIMARY KEY NOT NULL,
+    \"checksum\"            VARCHAR(64) NOT NULL,
+    \"finished_at\"         TIMESTAMPTZ,
+    \"migration_name\"      VARCHAR(255) NOT NULL,
+    \"logs\"                TEXT,
+    \"rolled_back_at\"      TIMESTAMPTZ,
+    \"started_at\"          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    \"applied_steps_count\" INTEGER NOT NULL DEFAULT 0
+  )"
+}
+
+# own_migration_ledger <database> <schema> <migrator> <runtime>
+#
+# The ledger exists, belongs to the migrator and grants nothing to PUBLIC or the
+# runtime role — in one transaction, so it is never visible with a grant. Created
+# *as* the migrator, so an existing one (REASSIGNed above) and a new one end the
+# same; the REVOKE also undoes the default DML grant a migrator-created table
+# receives.
+own_migration_ledger() {
+  local db="$1" schema="$2" migrator="$3" runtime="$4"
+  _svc_split_psql "${db}" "BEGIN;
+    SET LOCAL ROLE ${migrator};
+    $(_prisma_ledger_ddl "${schema}");
+    REVOKE ALL ON TABLE \"${schema}\".\"_prisma_migrations\" FROM PUBLIC, ${runtime};
+    COMMIT;"
 }
 
 # split_service_privileges <service> [database] [default|migration]
@@ -137,16 +175,14 @@ split_service_privileges() {
     _svc_split_psql "${db}" "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${runtime}"
     _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtime}"
     _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${runtime}"
-    # The migration ledger is the migrator's alone: a runtime role that could
-    # write it could mark a guard-creating migration as already applied.
-    _svc_split_psql "${db}" "DO \$\$ BEGIN
-        IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
-          REVOKE ALL ON TABLE public._prisma_migrations FROM ${runtime};
-        END IF;
-      END \$\$;"
   fi
 
-  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}"
+  # The migration ledger is the migrator's alone, from before the first
+  # migration: a runtime role that could write it could mark a guard-creating
+  # migration as already applied. Last, so the grants above cannot reach it.
+  own_migration_ledger "${db}" public "${migrator}" "${runtime}"
+
+  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights"
 }
 
 # split_audit_database_privileges [database]
@@ -173,20 +209,24 @@ split_audit_database_privileges() {
   _svc_split_psql postgres "GRANT CONNECT ON DATABASE ${db} TO ${runtime}"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM PUBLIC"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
+  # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
+  # ledger; the same pre-creation, so it never holds a runtime grant either.
+  own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
 
-  echo "    - ${db}: database owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB"
+  echo "    - ${db}: database owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created"
 }
 
-# Run directly (not sourced): resolve passwords exactly as the bootstrap does,
-# then split the named service's database with the grants mode the bootstrap
-# gives it.
+# Run directly (not sourced): split the named service's database with the
+# grants mode the bootstrap gives it. Only the migrator's password is resolved —
+# POSTGRES_PASSWORD_<SVC>_MIGRATOR, which must be exported: outside the compose
+# container (RASTA_DB_BOOTSTRAP=compose) there is no development fallback
+# (lib/role-passwords.bash). audit's split sets no password at all.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   set -euo pipefail
   : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
   svc="${1:?usage: service-privilege-split.bash <service> [database]}"
   # shellcheck source=role-passwords.bash
   source "$(dirname "${BASH_SOURCE[0]}")/role-passwords.bash"
-  resolve_role_passwords || exit 1
   if [[ "${svc}" == audit ]]; then
     echo "==> audit-service database ownership"
     split_audit_database_privileges "${2:-rasta_audit}"
@@ -196,6 +236,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "${svc} is not in PRIVILEGE_SPLIT_SERVICES (lib/role-passwords.bash)" >&2
     exit 1
   fi
+  resolve_role_passwords "rasta_${svc}_migrator" || exit 1
   echo "==> ${svc}-service privilege split"
   split_service_privileges "${svc}" "${2:-rasta_${svc}}" "$(privilege_split_grants_mode "${svc}")"
 fi

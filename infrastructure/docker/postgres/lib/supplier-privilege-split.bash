@@ -36,14 +36,15 @@ split_supplier_privileges() {
   split_service_privileges supplier "${1:-rasta_supplier}" migration
 }
 
-# Run directly (not sourced): resolve passwords exactly as the bootstrap does,
-# then split the named database.
+# Run directly (not sourced): resolve the migrator's password — exported, or
+# the compose bootstrap's development default (lib/role-passwords.bash) — then
+# split the named database.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   set -euo pipefail
   : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
   # shellcheck source=role-passwords.bash
   source "$(dirname "${BASH_SOURCE[0]}")/role-passwords.bash"
-  resolve_role_passwords || exit 1
+  resolve_role_passwords rasta_supplier_migrator || exit 1
   echo "==> supplier-service privilege split"
   split_supplier_privileges "${1:-rasta_supplier}"
 fi

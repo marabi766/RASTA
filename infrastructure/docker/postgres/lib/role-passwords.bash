@@ -10,11 +10,17 @@
 # its own.
 #
 # Every role reads POSTGRES_PASSWORD_<ROLE> (POSTGRES_PASSWORD_IDENTITY,
-# POSTGRES_PASSWORD_AUDIT_MIGRATOR, …), with a distinct development default,
-# rasta_<role>_dev_password. Real environments set every variable.
+# POSTGRES_PASSWORD_AUDIT_MIGRATOR, …). The development default,
+# rasta_<role>_dev_password, is published in this repository, so it is used for
+# an unset variable **only** in the disposable bootstrap — compose's postgres
+# container and CI's throwaway service — which says so explicitly with
+# RASTA_DB_BOOTSTRAP=compose (Codex review of #176: a standalone upgrade of a
+# real cluster must never give an owner role a known password because a
+# variable was not exported). Every other invocation refuses.
 #
 # resolve_role_passwords refuses, before any role is created or altered:
 #
+#   * a role whose variable is unset, outside RASTA_DB_BOOTSTRAP=compose;
 #   * the old shared POSTGRES_SERVICE_PASSWORD, still set — roles would get
 #     passwords that silently differ from the connection strings beside it;
 #   * a password that is not URL-safe — it is used unescaped in SQL here and in
@@ -84,12 +90,20 @@ role_password_var() {
 
 declare -gA ROLE_PASSWORDS=()
 
-# Fills ROLE_PASSWORDS for every role, or prints every problem and returns 1.
-# Reads nothing from, and writes nothing to, the database.
+# resolve_role_passwords [role …]
+#
+# Fills ROLE_PASSWORDS for the named roles — every role when none is named — or
+# prints every problem and returns 1. A standalone split names only the one
+# role it changes, so an operator supplies only that password. Reads nothing
+# from, and writes nothing to, the database.
 resolve_role_passwords() {
   local problems=0 role var value
   declare -A owner_of=()
   ROLE_PASSWORDS=()
+  local roles=("$@")
+  if ((${#roles[@]} == 0)); then
+    mapfile -t roles < <(rasta_roles)
+  fi
 
   if [[ -n "${POSTGRES_SERVICE_PASSWORD:-}" ]]; then
     echo "POSTGRES_SERVICE_PASSWORD is no longer read: each role has its own" >&2
@@ -101,9 +115,18 @@ resolve_role_passwords() {
   # image passes POSTGRES_PASSWORD, a host-side run (CI) passes PGPASSWORD.
   local superuser_password="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}"
 
-  while IFS= read -r role; do
+  for role in "${roles[@]}"; do
     var="$(role_password_var "$role")"
-    value="${!var:-${role}_dev_password}"
+    if [[ -n "${!var:-}" ]]; then
+      value="${!var}"
+    elif [[ "${RASTA_DB_BOOTSTRAP:-}" == compose ]]; then
+      value="${role}_dev_password"
+    else
+      echo "${var} is not set. Outside the disposable compose bootstrap (RASTA_DB_BOOTSTRAP=compose)" >&2
+      echo "  every role password is supplied explicitly: the development default is published." >&2
+      problems=$((problems + 1))
+      continue
+    fi
     if [[ ! "$value" =~ ^[A-Za-z0-9_.~-]{16,}$ ]]; then
       echo "${var}: at least 16 characters from [A-Za-z0-9_.~-] (it is used unescaped in URLs)" >&2
       problems=$((problems + 1))
@@ -120,7 +143,7 @@ resolve_role_passwords() {
       owner_of[$value]="$var"
     fi
     ROLE_PASSWORDS[$role]="$value"
-  done < <(rasta_roles)
+  done
 
   if ((problems > 0)); then
     echo "Refusing to create or alter any role: ${problems} problem(s) above. Nothing was changed." >&2

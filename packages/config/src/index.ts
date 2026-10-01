@@ -39,3 +39,10 @@ export {
   demoSeedRefusals,
 } from './seed-guard';
 export type { DemoSeedDatabaseProbe } from './seed-guard';
+
+export {
+  MIGRATOR_CREDENTIAL_PATTERN,
+  MigratorCredentialInServiceError,
+  assertNoMigratorCredentials,
+  migratorCredentialsIn,
+} from './owner-credentials';
