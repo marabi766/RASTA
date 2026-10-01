@@ -421,6 +421,23 @@ Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v
 فقط شاخهٔ «تأییدشده» را می‌افزاید. زمان انتشار و رویداد، لحظهٔ پایگاه داده **پس از قفل** است. بازگشت مهاجرت (`down.sql`) تا وقتی کلید مناقصه‌ای
 یا دعوتی هست رد می‌شود.
 
+**CON-002 PR 5 (وضعیت پیمانکار).** مدل خواندنی از رویدادهای supplier-service روی `rasta.supplier.v1` (گروه
+`construction-service.supplier-standing`): `SUPPLIER_QUALIFIED` فقط وقتی `CONTRACTING` در `qualifiedFor` باشد،
+`SUPPLIER_SUSPENDED`/`SUPPLIER_REINSTATED` به‌ازای شناسهٔ دورهٔ تعلیق. هر نوشتن جابه‌جاپذیر و تکرارپذیر است (بیشینهٔ زمان تأیید؛
+پر شدن هر نیمهٔ دوره حداکثر یک بار)، پس ترتیب و بازپخش پاسخ را عوض نمی‌کند. سازمانِ ناشناخته **واجد شرایط نیست** (بستهٔ
+شکست‌پذیر)؛ محتوای نامعتبر یا شناسهٔ دوره‌ای از سازمان دیگر به صف مرده می‌رود. وابستگی COM-005 فقط
+`SUPPLIER_QUALIFIED`/`SUSPENDED` است (تصمیم ۳). مصرف‌کننده: گام ۶ (پیشنهاد).
+**Bootstrap (بازبینی Codex روی #170):** گروه مصرف‌کننده از انتهای لاگ هفت‌روزه شروع می‌کند، پس آنچه پیش از آن بوده فقط از
+`supplier-service` خوانده می‌شود: `GET /v1/suppliers/standing-snapshot` (`@AllowService('construction-service')`، توکن بی مستأجر، صفحه‌بندی با
+Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ تعلیق، با شناسه و لحظه‌ها، بی هیچ متن). `construction-service` پس از شروع مصرف‌کننده آن را به
+همان شکل هم‌گرا در دو جدول می‌نویسد و نشانگر `standing_bootstrap` را ثبت می‌کند؛ **تا آن‌گاه هر پرسش صلاحیت `STANDING_NOT_LOADED` است**
+(Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. **این مدل خواندنی مشورتی است (بازبینی دور دوم Codex):** برای فهرست و UI است، نه منبع تصمیم؛
+چون پس از قطعی بلندتر از نگه‌داشت لاگ (هفت روز) تعلیقِ منقضی‌شده را نمی‌بیند، و تعلیقی که در `supplier-service` Commit شده ولی Outbox هنوز
+نرسانده را هم. **صلاحیت برای پیشنهاد تصمیمی قطعی است:** هنگام ثبت، `construction-service` وضعیت همان یک پیمانکار را با
+`GET /v1/suppliers/standing-snapshot/{organizationId}` (همان `@AllowService` و توکن بی مستأجر) از `supplier-service` می‌پرسد (بیرون از
+تراکنش و قفل مناقصه) و اگر در دسترس نبود `503/504` می‌دهد، یعنی Fail Closed (`StandingAuthority`). همین مسیر، بازسازی پس از `down.sql` است
+(`docs/runbooks/contractor-standing-bootstrap.md`).
+
 **هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد، ارزیابی و انتخاب — CON-002؛ قرارداد — CON-003؛
 تحلیل ناوگان؛ هیچ Consumer رویدادی.
 

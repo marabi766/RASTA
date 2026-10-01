@@ -258,10 +258,14 @@ describe('route ordering in the controller', () => {
     const queue = controller.indexOf("@Get('qualifications')");
     const byId = controller.indexOf("@Get(':id')");
 
+    const snapshot = controller.indexOf("@Get('standing-snapshot')");
+
     expect(qualified).toBeGreaterThan(-1);
     expect(queue).toBeGreaterThan(-1);
+    expect(snapshot).toBeGreaterThan(-1);
     expect(byId).toBeGreaterThan(qualified);
     expect(byId).toBeGreaterThan(queue);
+    expect(byId).toBeGreaterThan(snapshot);
   });
 
   it('exposes no performance endpoint', () => {

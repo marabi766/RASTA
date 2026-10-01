@@ -26,6 +26,13 @@ import {
   type SweeperOptions,
 } from '../src/approval/policy-reconciliation.sweeper';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
+import { ContractorStandingRepository } from '../src/tender/contractor-standing.repository';
+import { StandingBootstrap } from '../src/tender/standing-bootstrap';
+import type {
+  StandingSnapshotPage,
+  StandingSnapshotSource,
+} from '../src/tender/supplier-snapshot.client';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
@@ -142,6 +149,9 @@ export interface Wiring {
   sweeperWith(overrides?: Partial<SweeperOptions>): PolicyReconciliationSweeper;
   /** The consumer's handler, without a broker: `moves.handle(envelope)`. */
   moves: OrganizationMovedConsumer;
+  /** Contractor standing (CON-002 PR 5): the read model and its consumer's handler. */
+  standing: ContractorStandingRepository;
+  supplierEvents: SupplierStandingConsumer;
   close(): Promise<void>;
 }
 
@@ -174,6 +184,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     approvalRepository,
     tenderRepository,
   );
+  const standing = new ContractorStandingRepository(prisma);
   const reconciliations = new PolicyReconciliationRepository(prisma);
   const suspension = new PolicySuspensionService(
     prisma,
@@ -214,6 +225,14 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
         throw new Error('the integration suites call handle() and never subscribe');
       },
       suspension,
+      { info: () => undefined, warn: () => undefined, debug: () => undefined },
+    ),
+    standing,
+    supplierEvents: new SupplierStandingConsumer(
+      () => {
+        throw new Error('the integration suites call handle() and never subscribe');
+      },
+      standing,
       { info: () => undefined, warn: () => undefined, debug: () => undefined },
     ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
@@ -384,6 +403,8 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
     await owner.projectNeed.deleteMany({ where });
     await owner.project.deleteMany({ where });
     await owner.idempotencyKey.deleteMany({ where });
+    await owner.contractorSuspension.deleteMany({ where });
+    await owner.contractorStanding.deleteMany({ where });
     await owner.outboxMessage.deleteMany({ where });
   } finally {
     await owner.$disconnect();
@@ -494,6 +515,86 @@ export function asUser<T>(
     context({ organizationId, organizationIds: [organizationId], userId, roles }),
     fn,
   );
+}
+
+/** A snapshot page list for the bootstrap, with a hook between a fetch and the next (a live event arriving). */
+export class FakeSnapshot implements StandingSnapshotSource {
+  readonly fetched: (string | null)[] = [];
+  /** Throws on the n-th fetch (1-based), once. */
+  failOnFetch: number | undefined;
+  /** Runs after a page is handed out and before it is applied. */
+  afterFetch: ((pageIndex: number) => Promise<void>) | undefined;
+
+  constructor(
+    private readonly pages: Omit<StandingSnapshotPage, 'nextCursor' | 'hasMore'>[],
+    private readonly at = '2026-10-01T09:00:00.000Z',
+  ) {}
+
+  async fetchPage(cursor: string | null): Promise<StandingSnapshotPage> {
+    this.fetched.push(cursor);
+    if (this.failOnFetch === this.fetched.length) {
+      this.failOnFetch = undefined;
+      throw new Error('supplier-service is unavailable');
+    }
+    // The cursor is the 1-based index of the last page served: opaque to the caller.
+    const index = cursor ? Number(cursor) : 0;
+    const page = this.pages[index];
+    const hasMore = index + 1 < this.pages.length;
+    const result: StandingSnapshotPage = {
+      items: page?.items ?? [],
+      snapshotAt: page?.snapshotAt ?? this.at,
+      hasMore,
+      nextCursor: hasMore ? String(index + 1) : null,
+    };
+    // The page is read as it is now; whatever the hook does (a live event, say)
+    // happens while it is "in flight", before the caller applies it.
+    if (this.afterFetch) await this.afterFetch(index);
+    return result;
+  }
+}
+
+/** Builds the bootstrap over this wiring's database and a snapshot source. */
+export function bootstrapOf(w: Wiring, source: StandingSnapshotSource): StandingBootstrap {
+  return new StandingBootstrap(
+    w.prisma,
+    w.standing,
+    source,
+    { CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: 100 },
+    { info: () => undefined, warn: () => undefined },
+  );
+}
+
+/**
+ * Makes the standing "loaded" the way a real start would, from an empty snapshot,
+ * unless it already is. The suites that ask about eligibility need it: until the
+ * marker exists nobody is eligible (fail closed).
+ */
+export async function loadStanding(w: Wiring): Promise<void> {
+  await bootstrapOf(
+    w,
+    new FakeSnapshot([{ items: [], snapshotAt: '2026-10-01T09:00:00.000Z' }]),
+  ).runOnce();
+}
+
+/**
+ * Removes the bootstrap marker through the owner connection (the trigger forbids it
+ * for everybody else), so a suite can show the state before the standing is loaded.
+ */
+export async function forgetBootstrap(): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "standing_bootstrap" DISABLE TRIGGER "tg_standing_bootstrap_guard"',
+      );
+      await tx.standingBootstrap.deleteMany({});
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "standing_bootstrap" ENABLE TRIGGER "tg_standing_bootstrap_guard"',
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
 }
 
 /** Runs `fn` as the union administrator of `organizationId` (a policy author, Q-70 (7)). */

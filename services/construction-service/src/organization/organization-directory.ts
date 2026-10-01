@@ -13,7 +13,7 @@ export const ORGANIZATION_SERVICE = 'organization-service';
 export const MAX_RESPONSE_BYTES = 1024;
 
 /** The body as text, or `null` once it exceeds `limit` bytes (reading stops). */
-async function readCapped(response: Response, limit: number): Promise<string | null> {
+export async function readCapped(response: Response, limit: number): Promise<string | null> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);

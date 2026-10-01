@@ -87,6 +87,9 @@ function roleList(name: string, options: { min: number }) {
  *                                       a policy is not configurable: the owner
  *                                       decided that (Q-70 (7)).
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
+ *   SUPPLIER_SERVICE_URL                Where the contractor-standing snapshot is read
+ *                                       (and CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
+ *                                       CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS).
  *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
  *                                       How long that confirmation may take;
  *                                       no answer in time refuses (504).
@@ -179,6 +182,27 @@ export const constructionEnvSchema = baseEnvSchema
      * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
      */
     ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    /**
+     * Where the contractor-standing snapshot is read (CON-002 PR 5, ADR-061 § 4):
+     * `GET {SUPPLIER_SERVICE_URL}/v1/suppliers/standing-snapshot`, a platform-wide
+     * service call with a token signed for no tenant. Until it has been loaded
+     * once, no contractor is eligible.
+     */
+    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    /** One page of the snapshot, headers to parse; an answer too slow is a failed attempt, retried. */
+    CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
+    /** Wait between failed attempts to load the snapshot. */
+    CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(600_000)
+      .default(15_000),
     CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
