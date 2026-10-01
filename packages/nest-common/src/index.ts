@@ -186,3 +186,15 @@ export type {
   ShutdownSignalSource,
   ShutdownTarget,
 } from './lifecycle/graceful-shutdown';
+
+export {
+  CONNECTED_ROLE_SQL,
+  RuntimeRoleRefusedError,
+  assertRuntimeRole,
+  connectedRoleProblems,
+} from './database/runtime-role';
+export type {
+  AssertRuntimeRoleOptions,
+  ConnectedRoleFacts,
+  RuntimeRoleQueryClient,
+} from './database/runtime-role';

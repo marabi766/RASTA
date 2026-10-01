@@ -1056,10 +1056,14 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   Migration ناموفق هم دفتر را نوشتنی نمی‌گذارد (آزمون زنده با `prisma migrate deploy` ناموفق)؛ (۲) گذرواژهٔ پیش‌فرض
   توسعه فقط با `RASTA_DB_BOOTSTRAP=compose` (Compose و CI) پذیرفته می‌شود و هر اجرای دیگر بی گذرواژهٔ صریح رد می‌کند؛ (۳)
   اعتبار مهاجر از `.env` به `.env.migrator` رفت که هیچ سرویسی بار نمی‌کند، و هر سرویس با متغیر `*_MIGRATOR` در محیطش بالا
-  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). سپس **identity** (نگهبان
-  `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم تقسیم شدند
-  (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`). **باقی‌مانده**
-  (`PENDING_SPLIT`): organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
+  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). دور دوم Codex روی #176: گذرواژهٔ مهاجر
+  برابر با گذرواژهٔ نقش اجرا یا هر نقش شناخته‌شدهٔ دیگر رد می‌شود (تقسیم مستقل هر دو گذرواژه را می‌خواهد)؛ و هر سرویس
+  تقسیم‌شده پیش از کار، نقشِ واقعاً وصل‌شده را از Catalogue می‌پرسد (`assertRuntimeRole` مشترک در `@rasta/nest-common`) و
+  با Superuser، مهاجر، مالک یا دارندهٔ `CREATE` بالا نمی‌آید — پس `DATABASE_URL`ی که به مهاجر اشاره کند هم گرفته می‌شود.
+  سپس **identity** (نگهبان `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم
+  تقسیم شدند (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`).
+  **باقی‌مانده** (`PENDING_SPLIT`): organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه
+  دادهٔ بی‌جدول —
   هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری

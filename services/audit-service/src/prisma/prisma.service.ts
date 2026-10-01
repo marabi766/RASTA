@@ -1,4 +1,5 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { assertRuntimeRole as assertConnectedRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 
 /**
@@ -58,37 +59,23 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * connection string naming the migrator — or any superuser — would pass
    * every privilege check the readiness probe makes and silently hold the
    * power to alter or drop the evidence. So startup asks the catalogue who it
-   * is connected as, and stops if that role is a superuser or can act as the
-   * owner of schema `audit` (directly or through membership).
+   * is connected as, and stops if that role is a superuser or a migrator, owns
+   * the database, a schema or any relation (directly or through membership),
+   * or holds CREATE — the shared check every split service runs
+   * (@rasta/nest-common runtime-role.ts, D-045).
    *
    * Called by `AppModule` before either consumer starts. Not in
    * `onModuleInit`: tests open owner connections through this class on
    * purpose, to undo a control and to clean up.
    */
   async assertRuntimeRole(): Promise<void> {
-    const rows = await this.client.$queryRaw<
-      { role: string; superuser: boolean; owner: boolean }[]
-    >`
-      SELECT current_user::text AS role,
-             r.rolsuper AS superuser,
-             EXISTS (
-               SELECT 1 FROM pg_namespace n
-               WHERE n.nspname = 'audit' AND pg_has_role(current_user, n.nspowner, 'USAGE')
-             ) AS owner
-      FROM pg_roles r
-      WHERE r.rolname = current_user
-    `;
-    const row = rows[0];
-    if (!row) throw new Error('audit-service could not read the role it is connected as');
-    if (row.superuser || row.owner) {
-      throw new Error(
-        `audit-service refuses to start: it is connected as ${row.role}, which ` +
-          `${row.superuser ? 'is a superuser' : 'can act as the owner of schema audit'}. ` +
-          'Only the runtime role (DATABASE_URL_AUDIT) may run the service; the migrator ' +
-          '(DATABASE_URL_AUDIT_MIGRATOR) is for migration tooling only (ADR-053 § 6).',
-      );
-    }
-    this.logger.log(`Connected as ${row.role}: not a superuser, owns nothing in schema audit`);
+    const facts = await assertConnectedRuntimeRole(this.client, {
+      service: 'audit-service',
+      runtimeVariable: 'DATABASE_URL_AUDIT',
+    });
+    this.logger.log(
+      `Connected as ${facts.role}: not a superuser or a migrator, owns nothing, no CREATE`,
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
