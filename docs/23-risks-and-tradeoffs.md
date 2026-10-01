@@ -1051,7 +1051,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   Migration می‌گیرد؛ `scripts/check-db-runtime-privileges.mjs` در CI شکست می‌خورد اگر نقش اجرای یک سرویس تقسیم‌شده مالک
   چیزی باشد یا `TRIGGER`/`TRUNCATE`/`REFERENCES`/`CREATE` داشته باشد. **construction-service** تقسیم شد (آزمون زندهٔ
   `runtime-privileges.int-spec.ts`: `DISABLE TRIGGER`، `ALTER`، `DROP`، `TRUNCATE` → `42501`)؛ supplier به همان سازوکار
-  منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. سپس **identity** (نگهبان
+  منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. بازبینی Codex روی #176: (۱) دفتر
+  `_prisma_migrations` را خود تقسیم پیش از هر Migration با DDL دقیق Prisma و بی هیچ حقی برای نقش اجرا می‌سازد، پس
+  Migration ناموفق هم دفتر را نوشتنی نمی‌گذارد (آزمون زنده با `prisma migrate deploy` ناموفق)؛ (۲) گذرواژهٔ پیش‌فرض
+  توسعه فقط با `RASTA_DB_BOOTSTRAP=compose` (Compose و CI) پذیرفته می‌شود و هر اجرای دیگر بی گذرواژهٔ صریح رد می‌کند؛ (۳)
+  اعتبار مهاجر از `.env` به `.env.migrator` رفت که هیچ سرویسی بار نمی‌کند، و هر سرویس با متغیر `*_MIGRATOR` در محیطش بالا
+  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). سپس **identity** (نگهبان
   `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم تقسیم شدند
   (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس از آن
   organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement، inventory،

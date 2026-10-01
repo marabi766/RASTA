@@ -14,6 +14,10 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const EXAMPLE = resolve(here, '..', '.env.example');
+const MIGRATOR_EXAMPLE = resolve(here, '..', '.env.migrator.example');
+/** What the CLI checks by default: both committed files, as one text. */
+const committed = () =>
+  [EXAMPLE, MIGRATOR_EXAMPLE].map((file) => readFileSync(file, 'utf8')).join('\n');
 const CLI = resolve(here, 'check-local-postgres-config.mjs');
 
 /** A password no message may ever contain. */
@@ -208,8 +212,8 @@ test('parses assignments, comments and malformed lines with their line numbers',
   assert.equal(classifyHost(REQUIRED_HOST), REQUIRED_HOST);
 });
 
-test('the committed .env.example satisfies the contract, with no PostgreSQL URL missed', () => {
-  const text = readFileSync(EXAMPLE, 'utf8');
+test('the committed .env.example and .env.migrator.example satisfy the contract, with no PostgreSQL URL missed', () => {
+  const text = committed();
   const result = validateLocalPostgresConfig(text);
   assert.deepEqual(result.errors, []);
 
@@ -224,8 +228,8 @@ test('the committed .env.example satisfies the contract, with no PostgreSQL URL 
   assert.ok(result.postgresUrls.includes('DATABASE_URL_AUDIT_MIGRATOR'));
 });
 
-test('negative controls on the real .env.example text, in memory', () => {
-  const text = readFileSync(EXAMPLE, 'utf8');
+test('negative controls on the real committed text, in memory', () => {
+  const text = committed();
   const urlCount = validateLocalPostgresConfig(text).postgresUrls.length;
 
   // 1. Every PostgreSQL default back to localhost.

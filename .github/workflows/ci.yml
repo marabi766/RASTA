@@ -227,6 +227,12 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Services refuse a database owner credential at boot (D-045)
+        # Each built dist/main.js, started with a *_MIGRATOR URL or password in
+        # its environment, must exit naming the variable and never its value
+        # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
+        run: pnpm run test:boot-guard
+
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
   # nobody is forced to read is not a control.
@@ -394,6 +400,10 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
         run: |
           export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
           bash infrastructure/docker/postgres/00-init-databases.sh
@@ -681,6 +691,10 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
           POSTGRES_USER: rasta
         run: |
           # The same script the local stack uses, so CI and a developer
@@ -1618,6 +1632,10 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
         run: |
           export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
           bash infrastructure/docker/postgres/00-init-databases.sh
