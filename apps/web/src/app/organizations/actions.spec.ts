@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import {
@@ -21,6 +21,14 @@ import {
  * gateway is not a refusal — and all three actions share one gate, so each is
  * checked rather than one being assumed to stand for the others.
  */
+
+Object.assign(process.env, {
+  API_GATEWAY_URL: 'http://gateway.test:3000',
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+  WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+});
 
 const currentSession = jest.fn();
 const updateOrganization = jest.fn();
@@ -72,7 +80,8 @@ function formData(
   for (const [key, value] of entries) form.append(key, value);
   const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
   if (csrf !== null) form.set(CSRF_FIELD, csrf);
-  const submission = options.submission === undefined ? newSubmissionId() : options.submission;
+  const submission =
+    options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
   return form;
 }
@@ -168,6 +177,26 @@ describe('the gate all three share', () => {
     expect(c.service).not.toHaveBeenCalled();
   });
 
+  it.each(cases)(
+    'refuses every id that is not one this server minted for this session ($name)',
+    async (c) => {
+      const notMinted = [
+        `sub_${'A'.repeat(38)}`,
+        `sub_${'Zz9_-'.repeat(8)}ab`,
+        `sub_${'B'.repeat(20)}`,
+        mintSubmissionId({ ...SESSION, subject: 'someone-else' }),
+        mintSubmissionId({ ...SESSION, csrfToken: 'the-token-before-re-login' }),
+      ];
+      for (const submission of notMinted) {
+        await expect(c.run(formData(c.entries, { submission }))).resolves.toEqual({
+          kind: 'REFUSED',
+          reason: 'SUBMISSION',
+        });
+      }
+      expect(c.service).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(cases)('checks CSRF before the submission id for $name', async (c) => {
     await expect(
       c.run(formData(c.entries, { csrf: 'wrong', submission: 'also-wrong' })),
@@ -246,7 +275,7 @@ describe('changing a member’s roles', () => {
   });
 
   it('keeps the values and the submission id so a retry is the same submission', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     const state = await submitUpdateMemberRoles(
       IDLE_UPDATE_MEMBER_ROLES_FORM,
       formData(

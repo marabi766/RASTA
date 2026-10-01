@@ -10,7 +10,7 @@ import {
   type ReadResult,
   type TransactionListQuery,
 } from '@/server/wallet';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { WalletScreen } from './WalletScreen';
 
@@ -81,7 +81,7 @@ export default async function WalletPage({
         provider={provider}
         query={query}
         csrfToken={session.csrfToken}
-        submissionId={newSubmissionId()}
+        submissionId={mintSubmissionId(session)}
       />
     </AppShell>
   );
