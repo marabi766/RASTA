@@ -1300,7 +1300,9 @@ jobs:
         # throwaway database; REQUIRED makes a missing URL an error, not a skip.
         run: pnpm run test:migration-lib
         env:
-          MIGRATION_LIB_TEST_DATABASE_URL: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity
+          # A role that may CREATE DATABASE: identity's migrator. Its runtime role
+          # lost CREATEDB with the owner split (D-045).
+          MIGRATION_LIB_TEST_DATABASE_URL: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity
           # A second role, connected to a scratch database while the first one
           # drops it: the case that made `DROP DATABASE … WITH (FORCE)` fail
           # here once (an autovacuum worker, on main cd0c39a). The scratch drop
