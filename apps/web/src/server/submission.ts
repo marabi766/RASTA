@@ -19,50 +19,29 @@ import type { WebSession } from './session';
  *
  * Whether a repeat of it produces **one** record is entirely the receiving
  * service's decision, and services differ: a service that stores it makes a
- * retry one record; a service that ignores it — maintenance-service's create
- * path today — relies on its own rules (an open-request unique index) and a
- * retry can be refused or, for some writes, applied twice. So nothing in the
- * portal may say "a retry is not a second record" of a write whose service is
- * not known to store it; `lib/unconfirmed-write.ts` is the honest state for a
- * write whose outcome is unknown.
+ * retry one record; a service that ignores it — maintenance-service's and
+ * asset-service's create paths today — relies on its own rules (a unique index
+ * on the open request, on the serial number) and a retry can be refused or, for
+ * some writes, applied twice. So nothing in the portal may say "a retry is not
+ * a second record" of a write whose service is not known to store it;
+ * `lib/unconfirmed-write.ts` is the honest state for a write whose outcome is
+ * unknown.
  *
- * ## Two kinds of id
+ * ## Bound to the session
  *
- * `newSubmissionId` / `isSubmissionId` are the original pair: a random id, and
- * a check on its **shape only**. The shape check stops a client choosing an id
- * short enough to collide on purpose or long enough to exceed what a service
- * stores; it does not prove this server issued it.
+ * The id carries a MAC, keyed from the server's session secret, over the
+ * session's subject, its CSRF token and the id's own nonce. A well-formed id
+ * this server never issued, another person's id, and an id minted under an
+ * earlier login are all refused before anything reaches the gateway.
  *
- * `mintSubmissionId` / `isBoundSubmissionId` are bound to the signed-in
- * session: the id carries a MAC, keyed from the server's session secret, over
- * the session's subject, its CSRF token and the id's own nonce. A well-formed
- * id this server never issued, another person's id, and an id minted under
- * an earlier login are all refused. The two kinds differ in length, so neither
- * verifier accepts the other's ids — an old-style id cannot be presented where
- * a bound one is required.
+ * Every form uses this pair. There used to be a second, shape-only pair (a
+ * random id and a regular-expression check) that proved an id was the right
+ * length and alphabet and nothing about who issued it; once the last form moved
+ * off it, it was removed rather than left as the easy thing to copy.
  */
 
-/** Twenty base64url characters of entropy behind a prefix that says what it is. */
+/** What every id starts with, so a log line says what it is. */
 const PREFIX = 'sub_';
-const ENTROPY_BYTES = 15;
-
-export function newSubmissionId(): string {
-  return `${PREFIX}${randomBytes(ENTROPY_BYTES).toString('base64url')}`;
-}
-
-/**
- * The shape the server accepts back for an unbound id.
- *
- * Fixed length and alphabet, so a client cannot choose an id that is short
- * enough to collide on purpose or long enough to exceed what a service stores
- * (`clientReference` is bounded at 8–128 characters).
- */
-const SUBMISSION_ID = /^sub_[A-Za-z0-9_-]{20}$/;
-
-/** Shape only. See the header: this does not prove the server issued the id. */
-export function isSubmissionId(value: unknown): value is string {
-  return typeof value === 'string' && SUBMISSION_ID.test(value);
-}
 
 // ---------------------------------------------------------------------------
 // Bound to the session

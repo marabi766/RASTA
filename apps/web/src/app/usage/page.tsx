@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import { Alert, AppShell, Button, Identifier, PageHeader, Section, Sidebar, TopBar } from '@/ui';
 import { PORTAL_NAV } from '@/app/nav';
 import { currentSession } from '@/server/current-session';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 
 import { UsageForm } from './UsageForm';
 
@@ -63,7 +63,7 @@ export default async function UsagePage({
       ) : null}
 
       <Section headingId="usage-form" title="بازهٔ کارکرد" className="mt-4">
-        <UsageForm csrfToken={session.csrfToken} submissionId={newSubmissionId()} />
+        <UsageForm csrfToken={session.csrfToken} submissionId={mintSubmissionId(session)} />
       </Section>
     </AppShell>
   );

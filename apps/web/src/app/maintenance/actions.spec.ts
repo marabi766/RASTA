@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, mintSubmissionId, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_REPORT_REQUEST_FORM } from './form-state';
@@ -126,7 +126,7 @@ describe('what is refused before anything is called', () => {
   it('refuses an id in the old random format, which only ever proved its own shape', async () => {
     const state = await submitReportRequest(
       IDLE_REPORT_REQUEST_FORM,
-      formData(VALID, { submission: newSubmissionId() }),
+      formData(VALID, { submission: `sub_${'B'.repeat(20)}` }),
     );
     expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
     expect(reportMaintenanceRequest).not.toHaveBeenCalled();
