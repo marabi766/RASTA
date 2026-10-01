@@ -193,15 +193,41 @@ export const INGESTION_FAILURE_REASONS = {
   REPLAY_TENANT_MISMATCH: 'replay_tenant_mismatch',
 
   // The tender-evidence projection (`rasta.construction.v1`, CON-002 PR 6): a bid
-  // receipt that does not continue its tender's chain. Two reasons, because a gap
-  // (an out-of-order delivery or a lost event) and a fork (a split chain — tampering
-  // or a producer fault) need different responses; neither is ever accepted.
+  // receipt that cannot be placed in its tender's chain. Three reasons, because a
+  // fork (a split chain — tampering or a producer fault), a gap that stayed open (a
+  // lost or withheld event) and an identity disagreement need different responses;
+  // none is ever accepted silently.
 
-  /** The link names a predecessor this service has not seen. */
-  TENDER_CHAIN_GAP: 'tender_chain_gap',
   /** The link's predecessor already has a successor, or its receipt is already recorded. */
   TENDER_CHAIN_FORK: 'tender_chain_fork',
+  /**
+   * A receipt held for its predecessor is still waiting after
+   * `AUDIT_TENDER_GAP_ALERT_SECONDS`: counted once per held receipt, so the
+   * ingestion-failure alert fires. (An out-of-order delivery itself is not a
+   * failure: it is held, and drained when the predecessor arrives.)
+   */
+  TENDER_CHAIN_GAP_OVERDUE: 'tender_chain_gap_overdue',
+  /**
+   * A bid event whose envelope and payload disagree about the tenant or the tender,
+   * or a receipt for a tender already held under another organization. Never stored
+   * under either identity; a tenant-isolation signal, like `trail_tenant_mismatch`.
+   */
+  TENDER_EVIDENCE_MISMATCH: 'tender_evidence_mismatch',
 } as const;
+
+/** Receipts held for a predecessor that has not arrived (sampled, never maintained by inc). */
+export const auditTenderPendingLinks = new Gauge({
+  name: 'rasta_audit_tender_pending_links',
+  help: 'Bid receipts held until their predecessor arrives',
+  registers: [registry],
+});
+
+/** Age of the oldest held receipt; 0 when none is held. */
+export const auditTenderPendingOldestAgeSeconds = new Gauge({
+  name: 'rasta_audit_tender_pending_oldest_age_seconds',
+  help: 'Age in seconds of the oldest bid receipt held for its predecessor',
+  registers: [registry],
+});
 
 export type IngestionFailureReason =
   (typeof INGESTION_FAILURE_REASONS)[keyof typeof INGESTION_FAILURE_REASONS];

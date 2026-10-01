@@ -609,13 +609,21 @@ export class FakeSupplier implements StandingOfSource {
   async fetchStanding(organizationId: string): Promise<StandingOfOrganization> {
     this.asked.push(organizationId);
     if (this.failure) throw this.failure;
-    return {
+    const answer = {
       organizationId,
       contractingApprovedAt: this.approved.get(organizationId) ?? null,
       suspensions: (this.episodes.get(organizationId) ?? []).map((e) => ({ ...e })),
       asOf: new Date().toISOString(),
     };
+    // What happens in supplier-service right after it answered, before the caller commits.
+    const hook = this.afterAnswer;
+    this.afterAnswer = undefined;
+    hook?.();
+    return answer;
   }
+
+  /** Runs once, right after the next answer: a change that lands between check and commit. */
+  afterAnswer: (() => void) | undefined;
 }
 
 export const SUPPLIER = new FakeSupplier();

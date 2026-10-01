@@ -28,11 +28,13 @@ export class TenderEvidenceController {
   @ApiOperation({
     summary: 'A tender’s bid-receipt chain and its head, as announced (internal)',
     description:
-      'Reserved for `construction-service` with a token signed for no tenant; every other ' +
-      'service, every user token and a tenant-signed token are refused. The head is held ' +
-      'here, outside construction-service’s database, so opening bids can be checked ' +
-      'against something it cannot rewrite. Digests and identifiers only. An unknown ' +
-      'tender answers an empty chain whose head is the genesis.',
+      'Reserved for `construction-service` with a token signed for the tender owner’s ' +
+      'organization; every other service, every user token and a token signed for no ' +
+      'tenant are refused. The lookup is scoped by that organization and the tender, so ' +
+      'another organization’s tender answers as if nothing was announced. The head is ' +
+      'held here, outside construction-service’s database, so opening bids can be ' +
+      'checked against something it cannot rewrite. Digests and identifiers only. An ' +
+      'unknown tender answers an empty chain whose head is the genesis.',
   })
   chain(@Param('tenderId') tenderId: string): Promise<TenderChainView> {
     return this.evidence.chainOf(tenderId);

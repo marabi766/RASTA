@@ -406,6 +406,8 @@ export const EXPECTED = {
       // record of who read which bid.
       'tender_receipt_link',
       'bid_access_evidence',
+      // 20261001130000_tender_receipt_pending: receipts held until their predecessor arrives.
+      'tender_receipt_pending',
     ],
     triggers: [
       'tg_tender_receipt_link_append_only',
@@ -438,6 +440,9 @@ export const EXPECTED = {
       'ux_tender_receipt_link_previous',
       'ux_tender_receipt_link_event',
       'ix_bid_access_evidence_tender',
+      'ux_tender_receipt_pending_previous',
+      'ux_tender_receipt_pending_receipt',
+      'ix_tender_receipt_pending_held',
     ],
     types: ['audit_chain_scope'],
     // The two trigger functions, named separately from the triggers that call
@@ -480,6 +485,7 @@ export const EXPECTED = {
       'audit_chain_head_hash_is_sha256',
       'ck_tender_receipt_link_shape',
       'ck_bid_access_evidence_shape',
+      'ck_tender_receipt_pending_shape',
     ],
   },
   /**

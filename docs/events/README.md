@@ -546,9 +546,12 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 هیچ‌کدام `projectId` ندارند؛ کلید پارتیشن `tenderId` است.
 
 **مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
-`tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود؛ شکاف یا دوشاخه‌شدن پذیرفته نمی‌شود (DLQ و هشدار).
-`BID_ACCESSED` با فیلدهای شناسه‌ای و `outcome` واقعی (`GRANTED | REFUSED`) در `bid_access_evidence` می‌ماند. سرِ زنجیره را فقط
-`GET /v1/internal/tender-evidence/{tenderId}/chain` (`@AllowService('construction-service')`) می‌دهد.
+`tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
+(`tender_receipt_pending`) و در تراکنشِ الحاق پیشینش به ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_TENDER_GAP_ALERT_SECONDS` هشدار
+می‌دهد. دوشاخه‌شدن و ناسازگاری `tenantId` پاکت با `payload.organizationId` (یا `aggregateId` با `payload.tenderId`) پذیرفته
+نمی‌شود (DLQ و هشدار). `BID_ACCESSED` با فیلدهای شناسه‌ای و `outcome` واقعی (`GRANTED | REFUSED`) در `bid_access_evidence` می‌ماند.
+سرِ زنجیره را فقط `GET /v1/internal/tender-evidence/{tenderId}/chain` (`@AllowService('construction-service')`، با توکن امضاشده برای
+سازمان مالکِ Tender؛ جستجو با سازمان و Tender) می‌دهد.
 
 **پیاده‌شده در CON-002 PR 2:** `TENDER_CREATED` و `TENDER_CANCELLED` (`from` وضعیت پیشین، `reasonCode` از مجموعهٔ بستهٔ
 `OWNER_REQUEST | NO_QUALIFIED_BID`؛ دلیل نوشتاری فقط در پایگاه داده) و **`TENDER_UPDATED`** (`changedFields[]`، فقط نام فیلدها؛ مثل

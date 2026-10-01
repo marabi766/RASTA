@@ -3,12 +3,10 @@ import request from 'supertest';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
-import {
-  TenderEvidenceContinuityError,
-  TenderEvidenceUnmappableError,
-  genesisReceipt,
-} from '../src/audit/tender-evidence';
+import { TenderEvidenceUnmappableError, genesisReceipt } from '../src/audit/tender-evidence';
 import { TenderEvidenceRepository } from '../src/audit/tender-evidence.repository';
+import { TenderGapMonitor } from '../src/audit/tender-gap-monitor';
+import { registry } from '@rasta/observability';
 import { TenderEvidenceConsumer } from '../src/consumers/tender-evidence.consumer';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { auditIngestionFailuresTotal } from '../src/observability/metrics';
@@ -39,7 +37,12 @@ describe('the tender-evidence projection', () => {
       .get()
       .then((metric) => metric.values.find((v) => v.labels.reason === reason)?.value ?? 0);
 
-  const envelope = (eventName: string, tenderId: string, payload: object): EventEnvelope =>
+  const envelope = (
+    eventName: string,
+    tenderId: string,
+    payload: object,
+    overrides: object = {},
+  ): EventEnvelope =>
     eventEnvelopeSchema.parse({
       eventId: id('EVT'),
       eventName,
@@ -50,6 +53,7 @@ describe('the tender-evidence projection', () => {
       tenantId: OWNER,
       correlationId: ulid(),
       payload,
+      ...overrides,
     }) as EventEnvelope;
 
   const receipt = (
@@ -57,31 +61,49 @@ describe('the tender-evidence projection', () => {
     tenderId: string,
     previousReceipt: string,
     overrides: object = {},
+    envelopeOverrides: object = {},
   ) => {
     const next = hash();
     return {
-      event: envelope(eventName, tenderId, {
-        bidId: id('BID'),
+      event: envelope(
+        eventName,
         tenderId,
-        organizationId: OWNER,
-        bidderOrganizationId: BIDDER,
-        revision: 1,
-        receivedAt: new Date().toISOString(),
-        contentCommitment: hash(),
-        ciphertextSha256: hash(),
-        previousReceipt,
-        receipt: next,
-        submittedBy: 'USR_1',
-        ...overrides,
-      }),
+        {
+          bidId: id('BID'),
+          tenderId,
+          organizationId: OWNER,
+          bidderOrganizationId: BIDDER,
+          revision: 1,
+          receivedAt: new Date().toISOString(),
+          contentCommitment: hash(),
+          ciphertextSha256: hash(),
+          previousReceipt,
+          receipt: next,
+          submittedBy: 'USR_1',
+          ...overrides,
+        },
+        envelopeOverrides,
+      ),
       receipt: next,
     };
   };
 
-  const chainOf = async (tenderId: string) => {
+  const heldFor = async (tenderId: string): Promise<number> => {
+    const [{ count }] = await migrator.client.$queryRawUnsafe<{ count: bigint }[]>(
+      `SELECT count(*) AS count FROM tender_receipt_pending WHERE tender_id = $1`,
+      tenderId,
+    );
+    return Number(count);
+  };
+
+  /** The chain as construction-service reads it: a token signed for the tender owner. */
+  const chainOf = async (tenderId: string, organizationId: string = OWNER) => {
     const response = await request(api.app.getHttpServer())
       .get(`/v1/internal/tender-evidence/${tenderId}/chain`)
-      .set('x-internal-token', await internalToken('construction-service'));
+      .set(
+        'x-internal-token',
+        await internalToken('construction-service', 'SERVICE', organizationId),
+      );
     expect(response.status).toBe(200);
     return response.body as {
       genesis: string;
@@ -155,33 +177,108 @@ describe('the tender-evidence projection', () => {
       expect((await chainOf(tenderId)).links).toHaveLength(1);
     });
 
-    it('refuses a first link that does not start at the genesis, and records nothing', async () => {
+    it('holds a link whose predecessor has not arrived — it is not dead-lettered, not in the chain, not lost', async () => {
       const tenderId = id('TND');
-      const before = await failures('tender_chain_gap');
       const stray = receipt('BID_SUBMITTED', tenderId, hash());
 
-      await expect(consumer.handle(stray.event, DELIVERY)).rejects.toMatchObject({
-        name: 'TenderEvidenceContinuityError',
-        reason: 'GAP',
-      });
+      await expect(consumer.handle(stray.event, DELIVERY)).resolves.toBeUndefined();
 
-      expect((await chainOf(tenderId)).links).toEqual([]);
-      expect(await failures('tender_chain_gap')).toBe(before + 1);
+      const chain = await chainOf(tenderId);
+      expect(chain.links).toEqual([]);
+      expect(chain.head).toBe(chain.genesis);
+      expect(await heldFor(tenderId)).toBe(1);
+      // A redelivery of the held event is a duplicate, not a second held row.
+      await consumer.handle(stray.event, DELIVERY);
+      expect(await heldFor(tenderId)).toBe(1);
     });
 
-    it('treats an out-of-order delivery as a gap that resolves when its predecessor arrives', async () => {
+    it('places a successor delivered first as soon as its predecessor arrives, in the same step', async () => {
       const tenderId = id('TND');
       const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
       const second = receipt('BID_SUBMITTED', tenderId, first.receipt);
 
-      await expect(consumer.handle(second.event, DELIVERY)).rejects.toBeInstanceOf(
-        TenderEvidenceContinuityError,
-      );
-      await consumer.handle(first.event, DELIVERY);
-      // The retry the shared consumer makes.
+      // The real out-of-order delivery: the later receipt reaches the consumer first.
       await consumer.handle(second.event, DELIVERY);
+      expect((await chainOf(tenderId)).links).toEqual([]);
+      await consumer.handle(first.event, DELIVERY);
 
-      expect((await chainOf(tenderId)).head).toBe(second.receipt);
+      const chain = await chainOf(tenderId);
+      expect(chain.head).toBe(second.receipt);
+      expect(chain.links.map((l) => [l.seq, l.receipt])).toEqual([
+        [1, first.receipt],
+        [2, second.receipt],
+      ]);
+      expect(await heldFor(tenderId)).toBe(0);
+    });
+
+    it('drains a whole run held behind one missing link, in order, whatever order they came in', async () => {
+      const tenderId = id('TND');
+      const links = [receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId))];
+      for (let i = 1; i < 5; i += 1) {
+        links.push(receipt('BID_REVISED', tenderId, links[i - 1]!.receipt, { revision: i }));
+      }
+
+      // Newest first, the first link last.
+      for (const link of [links[3]!, links[1]!, links[4]!, links[2]!]) {
+        await consumer.handle(link.event, DELIVERY);
+      }
+      expect((await chainOf(tenderId)).links).toEqual([]);
+      expect(await heldFor(tenderId)).toBe(4);
+
+      await consumer.handle(links[0]!.event, DELIVERY);
+
+      const chain = await chainOf(tenderId);
+      expect(chain.links.map((l) => l.receipt)).toEqual(links.map((l) => l.receipt));
+      expect(chain.links.map((l) => l.seq)).toEqual([1, 2, 3, 4, 5]);
+      expect(chain.head).toBe(links[4]!.receipt);
+      expect(await heldFor(tenderId)).toBe(0);
+    });
+
+    it('counts a gap that stays open past the configured time, once, and clears when it closes', async () => {
+      const tenderId = id('TND');
+      const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
+      const second = receipt('BID_SUBMITTED', tenderId, first.receipt);
+      const repository = new TenderEvidenceRepository(prisma);
+      const monitor = new TenderGapMonitor(repository, {
+        AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
+      } as never);
+      const gauge = async (name: string): Promise<number> =>
+        (await registry.getSingleMetric(name)!.get()).values[0]?.value ?? 0;
+
+      await consumer.handle(second.event, DELIVERY);
+      const before = await failures('tender_chain_gap_overdue');
+      await monitor.sample();
+      // Held, but not for long enough yet: no alert.
+      expect(await failures('tender_chain_gap_overdue')).toBe(before);
+      expect(await gauge('rasta_audit_tender_pending_links')).toBeGreaterThanOrEqual(1);
+
+      // The owner role may backdate it; the runtime role cannot (no UPDATE grant).
+      await migrator.client.$executeRawUnsafe(
+        `UPDATE tender_receipt_pending SET held_at = now() - interval '10 minutes' WHERE tender_id = $1`,
+        tenderId,
+      );
+      await monitor.sample();
+      await monitor.sample();
+      expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
+      expect(await gauge('rasta_audit_tender_pending_oldest_age_seconds')).toBeGreaterThanOrEqual(
+        600,
+      );
+
+      await consumer.handle(first.event, DELIVERY);
+      await monitor.sample();
+      expect(await heldFor(tenderId)).toBe(0);
+      expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
+    });
+
+    it('refuses two held successors of one missing predecessor: a fork, even while it is unseen', async () => {
+      const tenderId = id('TND');
+      const missing = hash();
+      await consumer.handle(receipt('BID_SUBMITTED', tenderId, missing).event, DELIVERY);
+
+      await expect(
+        consumer.handle(receipt('BID_SUBMITTED', tenderId, missing).event, DELIVERY),
+      ).rejects.toMatchObject({ name: 'TenderEvidenceContinuityError', reason: 'FORK' });
+      expect(await heldFor(tenderId)).toBe(1);
     });
 
     it('refuses a fork: a second successor of one link, and a receipt recorded again under another event', async () => {
@@ -246,6 +343,59 @@ describe('the tender-evidence projection', () => {
         TenderEvidenceUnmappableError,
       );
       expect((await chainOf(tenderId)).links).toEqual([]);
+    });
+
+    it('refuses a receipt whose envelope and payload disagree about the tenant or the tender, and stores nothing', async () => {
+      const tenderId = id('TND');
+      const genesis = genesisReceipt(tenderId);
+      const before = await failures('tender_evidence_mismatch');
+
+      for (const envelopeOverrides of [
+        { tenantId: BIDDER },
+        { tenantId: undefined },
+        { aggregateId: id('TND-OTHER') },
+      ]) {
+        const wrong = receipt('BID_SUBMITTED', tenderId, genesis, {}, envelopeOverrides);
+        await expect(consumer.handle(wrong.event, DELIVERY)).rejects.toMatchObject({
+          name: 'TenderEvidenceIdentityError',
+        });
+      }
+
+      expect((await chainOf(tenderId)).links).toEqual([]);
+      expect(await heldFor(tenderId)).toBe(0);
+      expect(await failures('tender_evidence_mismatch')).toBe(before + 3);
+    });
+
+    it('refuses a receipt for a tender whose chain belongs to another organization', async () => {
+      const tenderId = id('TND');
+      const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
+      await consumer.handle(first.event, DELIVERY);
+
+      // Consistent with itself (envelope and payload agree) but not with the chain.
+      const intruder = receipt(
+        'BID_SUBMITTED',
+        tenderId,
+        first.receipt,
+        { organizationId: BIDDER },
+        { tenantId: BIDDER },
+      );
+      await expect(consumer.handle(intruder.event, DELIVERY)).rejects.toMatchObject({
+        name: 'TenderEvidenceIdentityError',
+      });
+      // …and the same for one that would only be held.
+      const stray = receipt(
+        'BID_SUBMITTED',
+        tenderId,
+        hash(),
+        { organizationId: BIDDER },
+        { tenantId: BIDDER },
+      );
+      await expect(consumer.handle(stray.event, DELIVERY)).rejects.toMatchObject({
+        name: 'TenderEvidenceIdentityError',
+      });
+
+      expect((await chainOf(tenderId)).links.map((l) => l.receipt)).toEqual([first.receipt]);
+      expect(await heldFor(tenderId)).toBe(0);
     });
 
     it('ignores the events it does not read', async () => {
@@ -334,6 +484,31 @@ describe('the tender-evidence projection', () => {
       expect(Number(count)).toBe(1);
     });
 
+    it('refuses a read whose envelope and payload disagree about the tenant or the tender', async () => {
+      const tenderId = id('TND');
+      const payload = {
+        bidId: null,
+        tenderId,
+        organizationId: OWNER,
+        accessorOrganizationId: BIDDER,
+        accessedBy: 'USR_9',
+        purpose: 'OWN_BID_RECEIPT',
+        outcome: 'REFUSED',
+        accessedAt: new Date().toISOString(),
+      };
+      for (const overrides of [{ tenantId: BIDDER }, { aggregateId: id('TND-OTHER') }]) {
+        await expect(
+          consumer.handle(envelope('BID_ACCESSED', tenderId, payload, overrides), DELIVERY),
+        ).rejects.toMatchObject({ name: 'TenderEvidenceIdentityError' });
+      }
+
+      const [{ count }] = await migrator.client.$queryRawUnsafe<{ count: bigint }[]>(
+        `SELECT count(*) AS count FROM bid_access_evidence WHERE tender_id = $1`,
+        tenderId,
+      );
+      expect(Number(count)).toBe(0);
+    });
+
     it('refuses an outcome that is neither granted nor refused', async () => {
       const tenderId = id('TND');
       const bad = envelope('BID_ACCESSED', tenderId, {
@@ -381,7 +556,7 @@ describe('the tender-evidence projection', () => {
     });
   });
 
-  describe('the one read: construction-service, platform-wide, nobody else', () => {
+  describe('the one read: construction-service, for the tender owner’s organization, nobody else', () => {
     it('refuses everybody else', async () => {
       const path = `/v1/internal/tender-evidence/${id('TND')}/chain`;
       const server = request(api.app.getHttpServer());
@@ -391,15 +566,29 @@ describe('the tender-evidence projection', () => {
         403,
       );
       for (const token of [
-        await internalToken('identity-service'),
-        await internalToken('marketplace-service'),
-        // construction-service, but acting for a tenant: this is a platform-wide read.
-        await internalToken('construction-service', 'SERVICE', OWNER),
+        await internalToken('identity-service', 'SERVICE', OWNER),
+        await internalToken('marketplace-service', 'SERVICE', OWNER),
+        // construction-service, but signed for no tenant: the read is scoped by organization.
+        await internalToken('construction-service'),
       ]) {
         expect((await server.get(path).set('x-internal-token', token)).status).toBe(403);
       }
-      const relay = await internalToken('construction-service', 'RELAY');
+      const relay = await internalToken('construction-service', 'RELAY', OWNER);
       expect((await server.get(path).set('x-internal-token', relay)).status).toBe(401);
+    });
+
+    it('is scoped by organization and tender: another organization sees nothing of this chain', async () => {
+      const tenderId = id('TND');
+      const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
+      await consumer.handle(first.event, DELIVERY);
+
+      expect((await chainOf(tenderId, OWNER)).head).toBe(first.receipt);
+      // The same tender id asked for under another organization: as if nothing was
+      // announced — no link, no head, and no way to tell that the tender exists.
+      const other = await chainOf(tenderId, BIDDER);
+      expect(other.links).toEqual([]);
+      expect(other.head).toBe(other.genesis);
+      expect(JSON.stringify(other)).not.toContain(first.receipt);
     });
   });
 });

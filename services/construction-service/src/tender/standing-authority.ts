@@ -45,11 +45,24 @@ export class StandingAuthority {
   constructor(@Inject(STANDING_OF_SOURCE) private readonly source: StandingOfSource) {}
 
   async verdictFor(organizationId: string): Promise<AuthoritativeVerdict> {
+    return (await this.decisionFor(organizationId)).verdict;
+  }
+
+  /**
+   * The verdict and **the instant supplier-service read it at**: that instant is the
+   * decision's effective time (ADR-067 § eligibility), recorded with the bid revision.
+   * A contractor suspended after it, before the bid commits, is not stopped by this
+   * check — the award step re-checks current standing and refuses an award to a
+   * contractor suspended at award time.
+   */
+  async decisionFor(
+    organizationId: string,
+  ): Promise<{ verdict: AuthoritativeVerdict; asOf: Date }> {
     const standing = await this.source.fetchStanding(organizationId);
     if (standing.organizationId !== organizationId) {
       // An answer about somebody else is not an answer about this contractor.
       throw RastaError.upstreamUnavailable('supplier-service');
     }
-    return verdictOf(standing);
+    return { verdict: verdictOf(standing), asOf: new Date(standing.asOf) };
   }
 }

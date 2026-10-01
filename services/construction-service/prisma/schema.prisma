@@ -853,6 +853,9 @@ model BidReceipt {
   contentCommitment String  @map("content_commitment")
   previousReceipt  String   @map("previous_receipt")
   receipt          String
+  /// The instant supplier-service read the contractor's standing at, for this revision:
+  /// the eligibility decision's effective time. Award re-checks current standing (ADR-067).
+  eligibleAsOf     DateTime @map("eligible_as_of")
 
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 

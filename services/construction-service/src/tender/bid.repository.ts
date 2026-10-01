@@ -332,6 +332,7 @@ export class BidRepository {
       contentCommitment: string;
       previousReceipt: string;
       receipt: string;
+      eligibleAsOf: Date;
     },
   ): Promise<void> {
     await runUnscoped('a submission appends one link to the tenders receipt chain', () =>

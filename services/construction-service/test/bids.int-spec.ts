@@ -427,6 +427,32 @@ describe('bids', () => {
       expect((await submit(bidder, tenderId)).revision).toBe(1);
     });
 
+    it('records the instant eligibility was decided with each revision; a suspension landing after the check does not stop that bid (award re-checks, ADR-067)', async () => {
+      const { bidder, tenderId } = await setup();
+      const before = Date.now();
+      // supplier-service answers "eligible", and the contractor is suspended a moment
+      // later, before the bid commits: the MVP ruling is that the decision's effective
+      // instant is the check, and the award step refuses it if it is still suspended.
+      SUPPLIER.afterAnswer = () => SUPPLIER.suspend(bidder, `SUS_RACE_${bidder}`);
+      const view = await submit(bidder, tenderId);
+      expect(view.revision).toBe(1);
+
+      const [link] = await linksOf(tenderId);
+      expect(link!.eligibleAsOf.getTime()).toBeGreaterThanOrEqual(before - 1000);
+      expect(link!.eligibleAsOf.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+
+      // The next decision sees the suspension: a replacement is refused, and its asOf
+      // is never recorded.
+      expect(
+        await refusalsOf(
+          asBidder(bidder, () =>
+            w.bids.revise(tenderId, view.bidId, { expectedRevision: 1, content: bidContent('9') }),
+          ),
+        ),
+      ).toContain('BIDDER_NOT_ELIGIBLE');
+      expect((await linksOf(tenderId)).map((l) => l.revision)).toEqual([1]);
+    });
+
     it('lets a contractor suspended since take its bid back, but not replace it', async () => {
       const { bidder, tenderId } = await setup();
       const view = await submit(bidder, tenderId);
@@ -659,13 +685,17 @@ describe('bids', () => {
     };
 
     /** An audit-service stand-in serving one frozen chain, verifying the token as audit-service does. */
-    const serveEvidence = async (chain: TenderChain | undefined) => {
+    const serveEvidence = async (chain: TenderChain | undefined, ownerOrganizationId: string) => {
       const server = createServer((req, res) => {
         void (async () => {
           const claims = await tokens
             .verify((req.headers['x-internal-token'] as string | undefined) ?? '', 'audit-service')
             .catch(() => null);
-          if (!claims || claims.callerService !== 'construction-service' || claims.organizationId) {
+          if (
+            !claims ||
+            claims.callerService !== 'construction-service' ||
+            claims.organizationId !== ownerOrganizationId
+          ) {
             res.writeHead(403).end();
             return;
           }
@@ -720,8 +750,8 @@ describe('bids', () => {
       // What audit-service holds, frozen now: the bids were just made and nobody has
       // touched anything yet. It is served over HTTP and read back through the client,
       // the only way opening may learn the head.
-      const evidence = await serveEvidence(await evidenceFromEvents(owner, tenderId));
-      const external = await evidence.client.fetchChain(tenderId);
+      const evidence = await serveEvidence(await evidenceFromEvents(owner, tenderId), owner);
+      const external = await evidence.client.fetchChain(owner, tenderId);
       const externalHead = external.head;
       const original = await linksOf(tenderId);
       expect(verifyReceiptChain(tenderId, original, externalHead)).toEqual({ ok: true });
@@ -814,11 +844,20 @@ describe('bids', () => {
       const honest = await evidenceFromEvents(owner, tenderId);
 
       // Unreachable: no head, no fallback to the local one.
-      const down = await serveEvidence(undefined);
-      await expect(down.client.fetchChain(tenderId)).rejects.toMatchObject({
+      const down = await serveEvidence(undefined, owner);
+      await expect(down.client.fetchChain(owner, tenderId)).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
       await down.close();
+
+      // The read is signed for the tender owner's organization: asked for under any other
+      // (here, a bidder's), the evidence service refuses and nothing is used.
+      const scoped = await serveEvidence(honest, owner);
+      await expect(scoped.client.fetchChain(bidder, tenderId)).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect((await scoped.client.fetchChain(owner, tenderId)).head).toBe(honest.head);
+      await scoped.close();
 
       // A chain whose head is not its newest link, or that does not start at this tender's
       // genesis, is refused rather than used.

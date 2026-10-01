@@ -5,6 +5,7 @@ import type { Logger } from '@rasta/logging';
 import type { TenderEvidenceRepository } from '../audit/tender-evidence.repository';
 import {
   TenderEvidenceContinuityError,
+  TenderEvidenceIdentityError,
   TenderEvidenceUnmappableError,
   toTenderEvidenceEvent,
 } from '../audit/tender-evidence';
@@ -20,13 +21,19 @@ import { auditIngestionFailuresTotal, INGESTION_FAILURE_REASONS } from '../obser
  * key, and it **validates** where the projector records whatever arrives. Events it
  * does not read are skipped (the domain projector records them as audit rows).
  *
- * ## A break is loud
+ * ## Out of order is held, a break is loud
  *
- * A link that does not continue the tender's chain — a gap, or a fork — throws, so
- * the shared consumer retries (an out-of-order delivery resolves on its own) and then
- * dead-letters; the failure is counted under its own reason so the existing ingestion
- * alert fires. It is never recorded "as is": a chain accepted with a hole is a head
- * nobody can trust. Nothing is marked processed without its row.
+ * The relay orders events only inside one claimed batch, so a receipt can arrive before
+ * its predecessor. It is **never dead-lettered for that**: it is held durably
+ * (`tender_receipt_pending`) and placed, with every successor held behind it, in the
+ * transaction that appends its predecessor. A hole that stays open past
+ * `AUDIT_TENDER_GAP_ALERT_SECONDS` is counted and alerted by the gap monitor.
+ *
+ * A fork — a second successor of one link, a receipt recorded twice — and an event whose
+ * envelope and payload disagree about the tenant or the tender throw, so the shared
+ * consumer retries and then dead-letters; each is counted under its own reason so the
+ * existing ingestion alert fires. Neither is ever recorded "as is". Nothing is marked
+ * processed without its row (or its held row).
  */
 @Injectable()
 export class TenderEvidenceConsumer implements OnModuleDestroy {
@@ -58,7 +65,12 @@ export class TenderEvidenceConsumer implements OnModuleDestroy {
     try {
       event = toTenderEvidenceEvent(envelope);
     } catch (error) {
-      if (error instanceof TenderEvidenceUnmappableError) {
+      if (error instanceof TenderEvidenceIdentityError) {
+        auditIngestionFailuresTotal.inc({
+          reason: INGESTION_FAILURE_REASONS.TENDER_EVIDENCE_MISMATCH,
+        });
+        this.logger.error(error.message);
+      } else if (error instanceof TenderEvidenceUnmappableError) {
         auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ENVELOPE });
         // Identifiers only; the payload is never logged.
         this.logger.error(error.message);
@@ -75,11 +87,11 @@ export class TenderEvidenceConsumer implements OnModuleDestroy {
       }
     } catch (error) {
       if (error instanceof TenderEvidenceContinuityError) {
+        auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.TENDER_CHAIN_FORK });
+        this.logger.error(error.message);
+      } else if (error instanceof TenderEvidenceIdentityError) {
         auditIngestionFailuresTotal.inc({
-          reason:
-            error.reason === 'FORK'
-              ? INGESTION_FAILURE_REASONS.TENDER_CHAIN_FORK
-              : INGESTION_FAILURE_REASONS.TENDER_CHAIN_GAP,
+          reason: INGESTION_FAILURE_REASONS.TENDER_EVIDENCE_MISMATCH,
         });
         this.logger.error(error.message);
       } else {

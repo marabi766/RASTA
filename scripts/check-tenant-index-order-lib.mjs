@@ -119,6 +119,10 @@ export const EXEMPTIONS = {
       'a receipt is one link of its tender, whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
     ux_tender_receipt_link_previous:
       'a link has one successor per tender (no fork), whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    ux_tender_receipt_pending_previous:
+      'one held successor per predecessor within a tender: the fork check must not be weakened by a differing organization_id',
+    ux_tender_receipt_pending_receipt:
+      'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
     ix_bid_access_evidence_tender:
       "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
   },

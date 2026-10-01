@@ -121,7 +121,7 @@ export class BidService {
   async submit(tenderId: string, dto: SubmitBidDto): Promise<BidReceiptView> {
     const { organizationId: bidder, actor } = this.access.assertCanBid();
     const bidId = newId(ID_PREFIX.bid);
-    await this.assertEligible(tenderId, bidder);
+    const eligibleAsOf = await this.assertEligible(tenderId, bidder);
 
     try {
       const view = await withFinancialSpan(
@@ -165,6 +165,7 @@ export class BidService {
               sealed,
               actor,
               at,
+              eligibleAsOf,
             });
           }),
         { 'rasta.tender.command': 'bid-submit' },
@@ -181,7 +182,7 @@ export class BidService {
 
   async revise(tenderId: string, bidId: string, dto: ReviseBidDto): Promise<BidReceiptView> {
     const { organizationId: bidder, actor } = this.access.assertCanBid();
-    await this.assertEligible(tenderId, bidder);
+    const eligibleAsOf = await this.assertEligible(tenderId, bidder);
 
     const view = await withFinancialSpan(
       'construction.bid.revise',
@@ -224,6 +225,7 @@ export class BidService {
               sealed,
               actor,
               at,
+              eligibleAsOf,
             });
           })
           .catch((error: unknown) => {
@@ -368,9 +370,10 @@ export class BidService {
    * 404 does, so an ineligible contractor on a tender it can see is refused, and
    * the visibility rules still answer 404 inside the transaction.
    */
-  private async assertEligible(tenderId: string, bidder: string): Promise<void> {
-    const verdict = await this.standing.verdictFor(bidder);
+  private async assertEligible(tenderId: string, bidder: string): Promise<Date> {
+    const { verdict, asOf } = await this.standing.decisionFor(bidder);
     if (verdict !== 'ELIGIBLE') throw this.refused(tenderId, ['BIDDER_NOT_ELIGIBLE']);
+    return asOf;
   }
 
   /**
@@ -439,6 +442,8 @@ export class BidService {
       sealed: SealedBid;
       actor: string;
       at: Date;
+      /** When supplier-service read the contractor's standing for this revision. */
+      eligibleAsOf: Date;
     },
   ): Promise<BidReceiptView> {
     const slot = await this.bids.nextReceiptSlot(tx, input.tenderId);
@@ -458,6 +463,7 @@ export class BidService {
       ...link,
       previousReceipt: previous,
       receipt,
+      eligibleAsOf: input.eligibleAsOf,
     });
 
     await this.events.enqueue(tx, {

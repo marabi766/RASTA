@@ -38,25 +38,32 @@ export const tenderChainViewSchema = z
 export type TenderChainView = z.infer<typeof tenderChainViewSchema>;
 
 /**
- * Refuses everything but construction-service acting platform-wide: not a person
- * with any role, not another service, not a token signed for a tenant. The second
- * layer behind `@AllowService`, and the only one against a user token.
+ * Refuses everything but construction-service acting **for a tenant** — the tender
+ * owner's organization, signed into the token (ADR-035, ADR-061 § 4): not a person
+ * with any role, not another service, not a platform-wide token. The second layer
+ * behind `@AllowService`, and the only one against a user token. Returns the
+ * organization the read is scoped to.
  */
-export function assertEvidenceCaller(): void {
+export function assertEvidenceCaller(): string {
   const context = getContext();
   if (
     context.authType !== 'SERVICE' ||
     context.callerService !== TENDER_EVIDENCE_CALLER ||
-    context.organizationId !== undefined
+    context.organizationId === undefined
   ) {
-    throw RastaError.forbidden('This endpoint is reserved for construction-service');
+    throw RastaError.forbidden(
+      'This endpoint is reserved for construction-service acting for a tenant',
+    );
   }
+  return context.organizationId;
 }
 
 /**
  * A tender's receipt chain and its head, from the evidence audit-service holds
  * (ADR-066 § 2): what the opening of bids is checked against, because
- * construction-service cannot rewrite it. An unknown tender has an empty chain whose
+ * construction-service cannot rewrite it. The lookup is scoped by the token's
+ * organization **and** the tender, so no organization can read another's chain. A
+ * tender nothing was announced for (under that organization) has an empty chain whose
  * head is the genesis — nothing was announced, which is itself the answer.
  */
 @Injectable()
@@ -64,9 +71,9 @@ export class TenderEvidenceService {
   constructor(private readonly repository: TenderEvidenceRepository) {}
 
   async chainOf(tenderId: string): Promise<TenderChainView> {
-    assertEvidenceCaller();
+    const organizationId = assertEvidenceCaller();
 
-    const links = await this.repository.chainOf(tenderId);
+    const links = await this.repository.chainOf(organizationId, tenderId);
     if (links.length > MAX_CHAIN_LINKS) {
       // Refused rather than cut: a truncated chain would be a wrong head.
       throw RastaError.internal('The tender chain is longer than this service will return');

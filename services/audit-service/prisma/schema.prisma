@@ -406,6 +406,29 @@ model TenderReceiptLink {
   @@map("tender_receipt_link")
 }
 
+/// A receipt announced before its predecessor arrived, held until it can be placed in the
+/// chain (and drained in order, in the transaction that appends the predecessor). A work
+/// queue, not evidence: rows are deleted when drained.
+model TenderReceiptPending {
+  sourceEventId        String   @id @map("source_event_id") @db.VarChar(128)
+  tenderId             String   @map("tender_id") @db.VarChar(128)
+  organizationId       String   @map("organization_id") @db.VarChar(128)
+  bidderOrganizationId String   @map("bidder_organization_id") @db.VarChar(128)
+  bidId                String   @map("bid_id") @db.VarChar(128)
+  revision             Int
+  receivedAt           DateTime @map("received_at") @db.Timestamptz(3)
+  ciphertextSha256     String   @map("ciphertext_sha256") @db.Char(64)
+  contentCommitment    String   @map("content_commitment") @db.Char(64)
+  previousReceipt      String   @map("previous_receipt") @db.Char(64)
+  receipt              String   @db.Char(64)
+  heldAt               DateTime @default(now()) @map("held_at") @db.Timestamptz(6)
+
+  @@unique([tenderId, previousReceipt], map: "ux_tender_receipt_pending_previous")
+  @@unique([tenderId, receipt], map: "ux_tender_receipt_pending_receipt")
+  @@index([heldAt], map: "ix_tender_receipt_pending_held")
+  @@map("tender_receipt_pending")
+}
+
 /// One read of a bid, granted or refused (`BID_ACCESSED`), with the **real outcome**.
 /// Identifiers and a closed purpose only. Append-only.
 model BidAccessEvidence {

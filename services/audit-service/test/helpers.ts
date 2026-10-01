@@ -378,6 +378,9 @@ export async function cleanupRun(
     );
     await tx.$executeRawUnsafe('ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only');
 
+    // Receipts a run left held (a work queue: no trigger to lift).
+    await tx.$executeRawUnsafe(`DELETE FROM tender_receipt_pending WHERE tender_id LIKE $1`, like);
+
     // The tender-evidence rows the run wrote (append-only for everybody, so the owner
     // lifts the row triggers for the length of this transaction, like the two above).
     for (const [table, trigger] of [

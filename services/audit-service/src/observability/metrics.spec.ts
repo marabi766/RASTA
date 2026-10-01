@@ -245,7 +245,7 @@ describe('alert-driving series exported at zero', () => {
   async function assertStartupExposition(): Promise<void> {
     const ingestion = await exposed(INGESTION);
     expect(ingestion.map((sample) => sample.labels.reason).sort()).toEqual(expectedIngestion);
-    expect(ingestion).toHaveLength(13);
+    expect(ingestion).toHaveLength(14);
     for (const sample of ingestion) {
       expect(Object.keys(sample.labels)).toEqual(['reason']);
       expect(sample.value).toBe(0);
@@ -304,7 +304,7 @@ describe('alert-driving series exported at zero', () => {
     initializeAuditAlertSeries();
 
     const ingestion = await exposed(INGESTION);
-    expect(ingestion).toHaveLength(13);
+    expect(ingestion).toHaveLength(14);
     expect(ingestion.filter((sample) => sample.value > 0)).toEqual([
       { labels: { reason: INGESTION_FAILURE_REASONS.DATABASE_ERROR }, value: 1 },
     ]);

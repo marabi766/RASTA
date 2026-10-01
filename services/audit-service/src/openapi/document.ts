@@ -157,7 +157,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
     description:
       'A signed internal service token. The correction-target lookup accepts one ' +
       'minted for audit-service by identity-service, and the tender-evidence chain read ' +
-      'one minted by construction-service for no tenant; nothing else.',
+      'one minted by construction-service for the tender owner’s organization; nothing else.',
   } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {

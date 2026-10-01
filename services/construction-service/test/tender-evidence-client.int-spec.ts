@@ -11,9 +11,9 @@ import { testEnv } from './helpers';
  * `TenderEvidenceClient` against a server that answers as audit-service's own test
  * proves it does (`services/audit-service/test/tender-evidence.int-spec.ts`):
  *
- *   X-Internal-Token from construction-service, for audit-service, signed for **no
- *   tenant**; GET /v1/internal/tender-evidence/{tenderId}/chain
- *     any other caller, or a tenant-signed token → 403
+ *   X-Internal-Token from construction-service, for audit-service, signed for the
+ *   tender owner's organization; GET /v1/internal/tender-evidence/{tenderId}/chain
+ *     any other caller, or a token signed for no tenant or for another → 403
  *     otherwise → 200 { tenderId, genesis, head, links }
  *
  * The server verifies the token with the real verifier. Then every way the answer can
@@ -66,7 +66,11 @@ describe('TenderEvidenceClient against the audit-service contract', () => {
           res.writeHead(500).end();
           return;
         }
-        if (!claims || claims.callerService !== 'construction-service' || claims.organizationId) {
+        if (
+          !claims ||
+          claims.callerService !== 'construction-service' ||
+          claims.organizationId !== 'ORG_A'
+        ) {
           res.writeHead(403).end();
           return;
         }
@@ -112,13 +116,13 @@ describe('TenderEvidenceClient against the audit-service contract', () => {
       tokens,
     );
 
-  it('reads a tender’s chain with a service token for audit-service that is signed for no tenant', async () => {
-    const chain = await client().fetchChain('TND_A/1');
+  it('reads a tender’s chain with a service token for audit-service signed for the tender owner’s organization', async () => {
+    const chain = await client().fetchChain('ORG_A', 'TND_A/1');
 
     expect(chain).toEqual(chainFor('TND_A/1'));
     expect(seen[0]!.url).toBe('/v1/internal/tender-evidence/TND_A%2F1/chain');
     expect(seen[0]!.claims).toMatchObject({ callerService: 'construction-service' });
-    expect(seen[0]!.claims!.organizationId).toBeUndefined();
+    expect(seen[0]!.claims!.organizationId).toBe('ORG_A');
   });
 
   it.each([
@@ -131,7 +135,7 @@ describe('TenderEvidenceClient against the audit-service contract', () => {
     'refuses %s as unavailable, never as an empty chain',
     async (_label, mode) => {
       behaviour = mode;
-      await expect(client().fetchChain('TND_A')).rejects.toMatchObject({
+      await expect(client().fetchChain('ORG_A', 'TND_A')).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
     },
@@ -139,7 +143,7 @@ describe('TenderEvidenceClient against the audit-service contract', () => {
 
   it('times out on a server that never answers', async () => {
     behaviour = 'slow';
-    await expect(client('300').fetchChain('TND_A')).rejects.toMatchObject({
+    await expect(client('300').fetchChain('ORG_A', 'TND_A')).rejects.toMatchObject({
       code: 'UPSTREAM_TIMEOUT',
     });
   });
@@ -153,6 +157,8 @@ describe('TenderEvidenceClient against the audit-service contract', () => {
       }),
       tokens,
     );
-    await expect(dead.fetchChain('TND_A')).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    await expect(dead.fetchChain('ORG_A', 'TND_A')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
   });
 });

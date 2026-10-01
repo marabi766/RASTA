@@ -71,19 +71,51 @@ export class TenderEvidenceUnmappableError extends Error {
 }
 
 /**
- * The link the projection could not accept: it names a predecessor this service has
- * not (yet) seen (`GAP` — an out-of-order delivery is retried and resolves; one that
- * never does is dead-lettered), or one that already has a successor, or a receipt
- * already recorded under another event (`FORK`) — a chain that splits is evidence of
- * tampering or a producer fault, and is never silently accepted.
+ * The link the projection refuses: its predecessor already has a successor, or its
+ * receipt is already recorded under another event (`FORK`) — a chain that splits is
+ * evidence of tampering or a producer fault, and is never silently accepted.
+ *
+ * (A link whose predecessor has simply not arrived yet is **not** an error: it is held
+ * and drained in order when the predecessor is appended.)
  */
 export class TenderEvidenceContinuityError extends Error {
   constructor(
-    readonly reason: 'GAP' | 'FORK',
+    readonly reason: 'FORK',
     eventId: string,
   ) {
     super(`receipt link of ${eventId} breaks the tender's chain (${reason})`);
     this.name = 'TenderEvidenceContinuityError';
+  }
+}
+
+/**
+ * The envelope and the payload disagree about whose record this is (the tenant, or
+ * the tender the event is about), or the receipt belongs to a tender already held
+ * under another organization. Neither answer is picked for the producer: the
+ * delivery is refused (retried, then dead-lettered with this reason). Names the
+ * field, never its value.
+ */
+export class TenderEvidenceIdentityError extends Error {
+  constructor(
+    eventName: string,
+    eventId: string,
+    readonly field: 'tenantId' | 'tenderId' | 'organization',
+  ) {
+    super(`${eventName} ${eventId}: ${field} disagrees between the envelope and the payload`);
+    this.name = 'TenderEvidenceIdentityError';
+  }
+}
+
+/** The envelope and the payload must name the same tenant and the same tender. */
+function assertSameIdentity(
+  envelope: EventEnvelope,
+  payload: { organizationId: string; tenderId: string },
+): void {
+  if (envelope.tenantId !== payload.organizationId) {
+    throw new TenderEvidenceIdentityError(envelope.eventName, envelope.eventId, 'tenantId');
+  }
+  if (envelope.aggregateId !== payload.tenderId) {
+    throw new TenderEvidenceIdentityError(envelope.eventName, envelope.eventId, 'tenderId');
   }
 }
 
@@ -92,12 +124,14 @@ export function toTenderEvidenceEvent(envelope: EventEnvelope): TenderEvidenceEv
     const parsed = receiptPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success)
       throw new TenderEvidenceUnmappableError(envelope.eventName, envelope.eventId);
+    assertSameIdentity(envelope, parsed.data);
     return { kind: 'RECEIPT', eventId: envelope.eventId, payload: parsed.data };
   }
   if (envelope.eventName === 'BID_ACCESSED') {
     const parsed = accessPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success)
       throw new TenderEvidenceUnmappableError(envelope.eventName, envelope.eventId);
+    assertSameIdentity(envelope, parsed.data);
     return { kind: 'ACCESS', eventId: envelope.eventId, payload: parsed.data };
   }
   return undefined;

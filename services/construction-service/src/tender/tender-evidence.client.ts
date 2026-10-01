@@ -46,7 +46,7 @@ export type TenderChain = z.infer<typeof tenderChainSchema>;
 
 /** The seam opening bids reads the head through; tests put a chain in directly. */
 export interface TenderEvidenceSource {
-  fetchChain(tenderId: string): Promise<TenderChain>;
+  fetchChain(organizationId: string, tenderId: string): Promise<TenderChain>;
 }
 
 /**
@@ -62,8 +62,10 @@ export interface TenderEvidenceSource {
  * opening. There is no fallback to a local head.
  *
  * `GET {AUDIT_SERVICE_URL}/v1/internal/tender-evidence/{tenderId}/chain` with an
- * `X-Internal-Token` signed for audit-service and for no tenant; audit-service
- * refuses every other caller.
+ * `X-Internal-Token` signed for audit-service **and for the tender owner's
+ * organization** (ADR-035, ADR-061 § 4): audit-service scopes the lookup by that
+ * organization and the tender, so a chain is only ever read for the tenant it belongs
+ * to; it refuses every other caller and a token signed for no tenant.
  */
 @Injectable()
 export class TenderEvidenceClient implements TenderEvidenceSource {
@@ -74,8 +76,9 @@ export class TenderEvidenceClient implements TenderEvidenceSource {
     private readonly tokens: InternalTokenService,
   ) {}
 
-  async fetchChain(tenderId: string): Promise<TenderChain> {
-    const token = await this.tokens.issue(SERVICE_NAME, AUDIT_SERVICE, 'SERVICE');
+  /** `organizationId` is the tender **owner's**: the organization the bids are stored under. */
+  async fetchChain(organizationId: string, tenderId: string): Promise<TenderChain> {
+    const token = await this.tokens.issue(SERVICE_NAME, AUDIT_SERVICE, 'SERVICE', organizationId);
     const url =
       `${this.env.AUDIT_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/internal/tender-evidence/${encodeURIComponent(tenderId)}/chain`;

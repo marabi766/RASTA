@@ -173,9 +173,13 @@ test('the audit entry names every object AUD-003 adds', () => {
     'audit_event_correction_idx',
     // The tender-evidence projection, added by 20261001110000_tender_evidence.
     'ix_bid_access_evidence_tender',
+    // The held receipts, added by 20261001130000_tender_receipt_pending.
+    'ix_tender_receipt_pending_held',
     'ux_tender_receipt_link_event',
     'ux_tender_receipt_link_previous',
     'ux_tender_receipt_link_receipt',
+    'ux_tender_receipt_pending_previous',
+    'ux_tender_receipt_pending_receipt',
   ]);
   assert.deepEqual(types, ['audit_chain_scope']);
   // Both trigger functions, not only AUD-003's: the AUD-001 one carries the

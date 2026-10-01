@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   TENDER_EVIDENCE_CONSUMER,
   TenderEvidenceContinuityError,
+  TenderEvidenceIdentityError,
   genesisReceipt,
   type AccessPayload,
   type ReceiptPayload,
@@ -11,7 +13,8 @@ import {
 /** A tender has a bounded number of bids; a chain longer than this is refused, not truncated. */
 export const MAX_CHAIN_LINKS = 10_000;
 
-export type EvidenceOutcome = 'WRITTEN' | 'DUPLICATE';
+/** `HELD`: the predecessor has not arrived; the receipt waits for it, durably. */
+export type EvidenceOutcome = 'WRITTEN' | 'DUPLICATE' | 'HELD';
 
 export interface ChainLink {
   seq: number;
@@ -37,6 +40,19 @@ export interface ChainLink {
 export class TenderEvidenceRepository {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Appends a link, or holds it, or recognises it.
+   *
+   * - Its predecessor is the head (or the genesis, for the first): appended, and every
+   *   held successor that now continues the chain is drained **in order, in this same
+   *   transaction**.
+   * - Its predecessor is a link already recorded but not the head, or the genesis once
+   *   a first link exists, or its receipt is already recorded: a fork, refused.
+   * - Its predecessor has not arrived (the relay orders events only inside one claimed
+   *   batch, so a later receipt can reach the topic first): **held**, durably, never
+   *   dead-lettered. The event is marked processed with the held row, so a redelivery
+   *   is a duplicate; it is placed when its predecessor is appended.
+   */
   async appendLink(eventId: string, link: ReceiptPayload): Promise<EvidenceOutcome> {
     return this.prisma.client.$transaction(async (tx) => {
       const already = await tx.processedEvent.findUnique({
@@ -50,28 +66,54 @@ export class TenderEvidenceRepository {
       const head = await tx.tenderReceiptLink.findFirst({
         where: { tenderId: link.tenderId },
         orderBy: { seq: 'desc' },
-        select: { seq: true, receipt: true },
+        select: { seq: true, receipt: true, organizationId: true },
       });
-      const expected = head?.receipt ?? genesisReceipt(link.tenderId);
 
-      if (link.previousReceipt !== expected) {
-        // Either it names a link this service has not seen (out of order, or a gap),
-        // or one that already has a successor (a fork). Never accepted either way.
-        const named =
-          link.previousReceipt === genesisReceipt(link.tenderId)
-            ? { receipt: link.previousReceipt }
-            : await tx.tenderReceiptLink.findFirst({
-                where: { tenderId: link.tenderId, receipt: link.previousReceipt },
-                select: { receipt: true },
-              });
-        throw new TenderEvidenceContinuityError(named ? 'FORK' : 'GAP', eventId);
+      // A tender belongs to one organization: a chain (or a held receipt) under
+      // another is never extended by this one.
+      const owner =
+        head?.organizationId ??
+        (
+          await tx.tenderReceiptPending.findFirst({
+            where: { tenderId: link.tenderId },
+            select: { organizationId: true },
+          })
+        )?.organizationId;
+      if (owner !== undefined && owner !== link.organizationId) {
+        throw new TenderEvidenceIdentityError('BID_RECEIPT', eventId, 'organization');
       }
 
+      const genesis = genesisReceipt(link.tenderId);
+      const expected = head?.receipt ?? genesis;
+
+      if (link.previousReceipt === expected) {
+        await this.insertLink(tx, eventId, link, (head?.seq ?? 0) + 1);
+        await this.drain(tx, link.tenderId, link.receipt, (head?.seq ?? 0) + 1);
+        await tx.processedEvent.create({
+          data: { eventId, consumerName: TENDER_EVIDENCE_CONSUMER },
+        });
+        return 'WRITTEN';
+      }
+
+      // Not the head: either a link recorded already (a fork), or one not seen yet.
+      const known =
+        link.previousReceipt === genesis
+          ? { receipt: genesis }
+          : await tx.tenderReceiptLink.findFirst({
+              where: { tenderId: link.tenderId, receipt: link.previousReceipt },
+              select: { receipt: true },
+            });
+      const duplicate = await tx.tenderReceiptLink.findFirst({
+        where: { tenderId: link.tenderId, receipt: link.receipt },
+        select: { receipt: true },
+      });
+      if (known || duplicate) throw new TenderEvidenceContinuityError('FORK', eventId);
+
       try {
-        await tx.tenderReceiptLink.create({
+        await tx.tenderReceiptPending.create({
           data: {
+            sourceEventId: eventId,
             tenderId: link.tenderId,
-            seq: (head?.seq ?? 0) + 1,
             organizationId: link.organizationId,
             bidderOrganizationId: link.bidderOrganizationId,
             bidId: link.bidId,
@@ -81,22 +123,120 @@ export class TenderEvidenceRepository {
             contentCommitment: link.contentCommitment,
             previousReceipt: link.previousReceipt,
             receipt: link.receipt,
-            sourceEventId: eventId,
           },
         });
       } catch (error) {
-        // The same receipt under another event, or a second successor: a fork.
+        // A second held successor of one predecessor, or the same receipt held twice.
         if ((error as { code?: string }).code === 'P2002') {
           throw new TenderEvidenceContinuityError('FORK', eventId);
         }
         throw error;
       }
-
       await tx.processedEvent.create({
         data: { eventId, consumerName: TENDER_EVIDENCE_CONSUMER },
       });
-      return 'WRITTEN';
+      return 'HELD';
     });
+  }
+
+  private async insertLink(
+    tx: Prisma.TransactionClient,
+    eventId: string,
+    link: ReceiptPayload,
+    seq: number,
+  ): Promise<void> {
+    try {
+      await tx.tenderReceiptLink.create({
+        data: {
+          tenderId: link.tenderId,
+          seq,
+          organizationId: link.organizationId,
+          bidderOrganizationId: link.bidderOrganizationId,
+          bidId: link.bidId,
+          revision: link.revision,
+          receivedAt: new Date(link.receivedAt),
+          ciphertextSha256: link.ciphertextSha256,
+          contentCommitment: link.contentCommitment,
+          previousReceipt: link.previousReceipt,
+          receipt: link.receipt,
+          sourceEventId: eventId,
+        },
+      });
+    } catch (error) {
+      // The same receipt under another event, or a second successor: a fork.
+      if ((error as { code?: string }).code === 'P2002') {
+        throw new TenderEvidenceContinuityError('FORK', eventId);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Moves held receipts into the chain, oldest link first, for as long as one continues
+   * it. A held receipt whose receipt is already in the chain is left held (and so
+   * becomes an overdue gap): it must neither be dropped silently nor block the legitimate
+   * link whose arrival triggered the drain.
+   */
+  private async drain(
+    tx: Prisma.TransactionClient,
+    tenderId: string,
+    headReceipt: string,
+    headSeq: number,
+  ): Promise<void> {
+    let receipt = headReceipt;
+    let seq = headSeq;
+    for (let guard = 0; guard < MAX_CHAIN_LINKS; guard += 1) {
+      const next = await tx.tenderReceiptPending.findFirst({
+        where: { tenderId, previousReceipt: receipt },
+      });
+      if (!next) return;
+      const placed = await tx.tenderReceiptLink.findFirst({
+        where: { tenderId, receipt: next.receipt },
+        select: { receipt: true },
+      });
+      if (placed) return;
+
+      seq += 1;
+      await this.insertLink(
+        tx,
+        next.sourceEventId,
+        {
+          bidId: next.bidId,
+          tenderId: next.tenderId,
+          organizationId: next.organizationId,
+          bidderOrganizationId: next.bidderOrganizationId,
+          revision: next.revision,
+          receivedAt: next.receivedAt.toISOString(),
+          contentCommitment: next.contentCommitment,
+          ciphertextSha256: next.ciphertextSha256,
+          previousReceipt: next.previousReceipt,
+          receipt: next.receipt,
+        },
+        seq,
+      );
+      await tx.tenderReceiptPending.delete({ where: { sourceEventId: next.sourceEventId } });
+      receipt = next.receipt;
+    }
+  }
+
+  /**
+   * Receipts held longer than `olderThanSeconds` for a predecessor that has not come,
+   * and the figures the gauges report. Identifiers of held events only.
+   */
+  async pendingSummary(olderThanSeconds: number): Promise<{
+    held: number;
+    oldestAgeSeconds: number;
+    overdue: string[];
+  }> {
+    const rows = await this.prisma.client.$queryRaw<
+      { source_event_id: string; age: number }[]
+    >`SELECT source_event_id, EXTRACT(EPOCH FROM (clock_timestamp() - held_at))::float8 AS age
+        FROM tender_receipt_pending ORDER BY held_at ASC LIMIT 1000`;
+    return {
+      held: rows.length,
+      oldestAgeSeconds: rows[0] ? Math.max(0, Math.floor(rows[0].age)) : 0,
+      overdue: rows.filter((row) => row.age >= olderThanSeconds).map((row) => row.source_event_id),
+    };
   }
 
   async recordAccess(eventId: string, access: AccessPayload): Promise<EvidenceOutcome> {
@@ -128,9 +268,9 @@ export class TenderEvidenceRepository {
   }
 
   /** A tender's chain in order, bounded; `null` head means "nothing announced yet". */
-  async chainOf(tenderId: string): Promise<ChainLink[]> {
+  async chainOf(organizationId: string, tenderId: string): Promise<ChainLink[]> {
     const rows = await this.prisma.client.tenderReceiptLink.findMany({
-      where: { tenderId },
+      where: { organizationId, tenderId },
       orderBy: { seq: 'asc' },
       take: MAX_CHAIN_LINKS + 1,
     });
