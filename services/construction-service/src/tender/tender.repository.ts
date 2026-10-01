@@ -164,6 +164,30 @@ export class TenderRepository {
     return result.count;
   }
 
+  /**
+   * DRAFT → PUBLISHED: the status change of {@link transitionTender} plus who
+   * published and when. Compare-and-set on status and version; returns 0 or 1.
+   */
+  async publishTender(
+    tx: ExtendedPrismaClient,
+    input: { tenderId: string; expectedVersion: number; actor: string; at: Date },
+  ): Promise<number> {
+    const result = await tx.tender.updateMany({
+      where: { id: input.tenderId, status: 'DRAFT', version: input.expectedVersion },
+      data: {
+        status: 'PUBLISHED',
+        publishedAt: input.at,
+        publishedBy: input.actor,
+        statusChangedAt: input.at,
+        statusChangedBy: input.actor,
+        updatedAt: input.at,
+        updatedBy: input.actor,
+        version: { increment: 1 },
+      },
+    });
+    return result.count;
+  }
+
   async findTender(
     tenderId: string,
     client: ExtendedPrismaClient = this.prisma.client,

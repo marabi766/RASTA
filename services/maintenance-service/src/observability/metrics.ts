@@ -19,6 +19,18 @@ import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
  * reports come from the database (docs/04 § 4.15).
  */
 
+/**
+ * Requests answered from a stored response under their Idempotency-Key
+ * (#157): a client retry that did not raise the work again. Labelled by the
+ * route template only — never the key.
+ */
+export const idempotentReplaysTotal = new Counter({
+  name: 'rasta_maintenance_idempotent_replays_total',
+  help: 'Requests answered from a stored response under their Idempotency-Key',
+  labelNames: ['service', 'endpoint'] as const,
+  registers: [registry],
+});
+
 export const requestsCreatedTotal = new Counter({
   name: 'rasta_maintenance_requests_created_total',
   help: 'Maintenance requests raised, by type',

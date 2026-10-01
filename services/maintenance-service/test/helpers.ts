@@ -160,6 +160,7 @@ export async function cleanup(
     'asset_usage_meter',
     'asset_transfer_fence',
     'outbox_message',
+    'idempotency_key',
   ]) {
     await client.$executeRawUnsafe(
       `DELETE FROM ${table} WHERE organization_id = ANY($1::text[])`,

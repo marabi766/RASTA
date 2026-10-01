@@ -57,13 +57,20 @@ import { ProgressService } from './progress/progress.service';
 import { TenderRepository } from './tender/tender.repository';
 import { TenderService } from './tender/tender.service';
 import { TenderController } from './tender/tender.controller';
+import { CriteriaRepository } from './tender/criteria.repository';
+import { CriteriaService } from './tender/criteria.service';
+import { CriteriaController } from './tender/criteria.controller';
+import { PublicationRepository } from './tender/publication.repository';
+import { PublicationService } from './tender/publication.service';
+import { PublicationController } from './tender/publication.controller';
+import { EnvKekProvider } from './tender/sealing/key-provider';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import {
   policyReconciliationBacklog,
   policyReconciliationOldestDueAgeSeconds,
 } from './observability/metrics';
-import { ENV, LOGGER } from './tokens';
+import { ENV, LOGGER, TENDER_KEY_PROVIDER } from './tokens';
 import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
 
 /**
@@ -93,6 +100,8 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     PolicyController,
     ApprovalController,
     TenderController,
+    CriteriaController,
+    PublicationController,
     HealthController,
     MetricsController,
   ],
@@ -137,6 +146,18 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     TenderRepository,
     ProjectService,
     TenderService,
+    CriteriaRepository,
+    CriteriaService,
+    PublicationRepository,
+    PublicationService,
+    {
+      // ADR-066 § 2. A malformed or half-set configuration stops the boot; an
+      // absent one leaves a provider that publishes nothing (fail closed).
+      provide: TENDER_KEY_PROVIDER,
+      inject: [ENV],
+      useFactory: (env: ConstructionEnv) =>
+        new EnvKekProvider(env.CONSTRUCTION_TENDER_KEKS, env.CONSTRUCTION_TENDER_KEK_CURRENT),
+    },
     NeedService,
     ApprovalRepository,
     ApprovalService,

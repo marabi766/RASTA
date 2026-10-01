@@ -243,6 +243,18 @@ export const constructionEnvSchema = baseEnvSchema
         message: 'CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)',
       }),
 
+    /**
+     * Q-84 (3): the shortest bidding window a tender may be published with.
+     * Default 0 — the platform invents no minimum; the window must only be a
+     * window that has not already closed.
+     */
+    CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(31_536_000)
+      .default(0),
+
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
   })

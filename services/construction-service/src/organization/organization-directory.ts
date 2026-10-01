@@ -76,6 +76,17 @@ export class OrganizationDirectory {
     private readonly tokens: InternalTokenService,
   ) {}
 
+  /**
+   * Does `organizationId` exist? The same call, signed for the organization
+   * itself: organization-service answers `{ id }` when the organization is the
+   * signed one (or beneath it), and 404 when there is no such organization.
+   * Used before inviting an organization to a tender (CON-002); fail closed like
+   * `isWithin` — an unconfirmed answer is an error, never "exists".
+   */
+  exists(organizationId: string): Promise<boolean> {
+    return this.isWithin(organizationId, organizationId);
+  }
+
   async isWithin(scopeOrganizationId: string, organizationId: string): Promise<boolean> {
     const token = await this.tokens.issue(
       SERVICE_NAME,

@@ -46,7 +46,26 @@ export type WriteResult<T, F extends string> =
    * that could not be read or did not look like the resource. A form must
    * not say nothing changed — a retry could apply the change twice.
    */
-  | { readonly kind: 'UNKNOWN_OUTCOME'; readonly correlationId: string };
+  | { readonly kind: 'UNKNOWN_OUTCOME'; readonly correlationId: string }
+  /**
+   * Another request with this submission id is still being processed (round
+   * 1 on PR 171): the service answered `409 CONFLICT` **with** `Retry-After`.
+   * Nothing is wrong with the form, and the first request's outcome is not
+   * known yet — sending the same form again after the wait answers it (the
+   * same id replays the first request's result). A `409` without
+   * `Retry-After` is a conflict waiting will not change, and stays `INVALID`.
+   */
+  | {
+      readonly kind: 'IN_PROGRESS';
+      readonly retryAfterSeconds: number;
+      readonly correlationId: string;
+    };
+
+/**
+ * The longest wait a form holds its button for, whatever `Retry-After` says:
+ * the platform sends one second, and a wrong header must not lock a form.
+ */
+export const MAX_IN_PROGRESS_WAIT_SECONDS = 30;
 
 /**
  * How a service's error details map onto a form.
@@ -135,6 +154,16 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     // UPSTREAM_TIMEOUT: the gateway forwarded the write and gave up waiting —
     // the same unknown, one hop further on.
     if (status === 504) return { kind: 'UNKNOWN_OUTCOME', correlationId };
+    if (status === 409 && problem?.code === 'CONFLICT' && error.retryAfterSeconds !== null) {
+      return {
+        kind: 'IN_PROGRESS',
+        retryAfterSeconds: Math.min(
+          Math.max(error.retryAfterSeconds, 1),
+          MAX_IN_PROGRESS_WAIT_SECONDS,
+        ),
+        correlationId,
+      };
+    }
     if (status === 403) return { kind: 'FORBIDDEN', correlationId };
     if (status === 404) return { kind: 'NOT_FOUND', correlationId };
     if ((status === 400 || status === 422 || status === 409) && problem) {

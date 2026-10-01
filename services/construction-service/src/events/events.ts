@@ -75,6 +75,14 @@ export const CONSTRUCTION_EVENTS = {
   TENDER_CREATED: 'TENDER_CREATED',
   TENDER_UPDATED: 'TENDER_UPDATED',
   TENDER_CANCELLED: 'TENDER_CANCELLED',
+  // CON-002 PR 4a. Both added for S-06 (a criteria change is a state change
+  // audit must hear about); flagged for the project manager's acceptance.
+  CRITERIA_TEMPLATE_CREATED: 'CRITERIA_TEMPLATE_CREATED',
+  TENDER_CRITERIA_SET: 'TENDER_CRITERIA_SET',
+  // CON-002 PR 4b. `TENDER_PUBLISHED` is a catalogue event; `TENDER_BIDDER_INVITED`
+  // is added for S-06 (an invitation decides who may bid) and awaits acceptance.
+  TENDER_PUBLISHED: 'TENDER_PUBLISHED',
+  TENDER_BIDDER_INVITED: 'TENDER_BIDDER_INVITED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -436,6 +444,64 @@ export const tenderCancelledPayload = z
   })
   .strict();
 
+/**
+ * A criteria template was written (a new version of a label). The label and the
+ * criteria are text an organization typed and stay in the database; the event
+ * says that one exists, its version and how many criteria it has.
+ */
+export const criteriaTemplateCreatedPayload = z
+  .object({
+    templateId: identifier,
+    organizationId: identifier,
+    version: z.number().int().positive(),
+    criteriaCount: z.number().int().positive(),
+    totalWeightBp: z.number().int().positive().max(10_000),
+    createdBy: identifier,
+    createdAt: isoTimestamp,
+  })
+  .strict();
+
+/** A DRAFT tender's criteria were replaced. Counts and weights only, never codes or labels. */
+export const tenderCriteriaSetPayload = z
+  .object({
+    ...tenderIdentity,
+    criteriaCount: z.number().int().positive(),
+    totalWeightBp: z.number().int().positive().max(10_000),
+    /** The template they were copied from, or null when written out. */
+    templateId: identifier.nullable(),
+    setBy: identifier,
+    setAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * A tender was opened to bidders. Carries the window and how many criteria are
+ * frozen — never a title, the scope, a criterion or the tender's public key.
+ * `keyId` is an opaque identifier of the key pair bids will be sealed to.
+ */
+export const tenderPublishedPayload = z
+  .object({
+    ...tenderIdentity,
+    visibility: z.enum(['PUBLIC', 'RESTRICTED']),
+    bidOpeningAt: isoTimestamp,
+    bidClosingAt: isoTimestamp,
+    criteriaCount: z.number().int().positive(),
+    keyId: identifier,
+    publishedBy: identifier,
+    publishedAt: isoTimestamp,
+  })
+  .strict();
+
+/** An organization was invited to a RESTRICTED tender. */
+export const tenderBidderInvitedPayload = z
+  .object({
+    ...tenderIdentity,
+    invitedOrganizationId: identifier,
+    invitedBy: identifier,
+    invitedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -461,6 +527,10 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   TENDER_CREATED: tenderCreatedPayload,
   TENDER_UPDATED: tenderUpdatedPayload,
   TENDER_CANCELLED: tenderCancelledPayload,
+  CRITERIA_TEMPLATE_CREATED: criteriaTemplateCreatedPayload,
+  TENDER_CRITERIA_SET: tenderCriteriaSetPayload,
+  TENDER_PUBLISHED: tenderPublishedPayload,
+  TENDER_BIDDER_INVITED: tenderBidderInvitedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

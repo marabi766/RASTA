@@ -1,4 +1,4 @@
-import { AUDIT_OUTCOMES, AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_OUTCOMES, AUDIT_TRAIL_TOPIC, OPS_REPLAY_TOPIC } from '@rasta/contracts';
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
 import { DOMAIN_TOPICS } from '../audit/audit.mapper';
 import { sourceTopicsOf, type AuditSourceService } from '../audit/audit-producer-topology';
@@ -17,7 +17,7 @@ import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
  * store's access controls. A metric naming an organization leaks the tenant
  * list to everyone who can read the dashboard.
  *
- * Every label below is drawn from a set fixed at deploy time: the eleven topics
+ * Every label below is drawn from a set fixed at deploy time: the topics
  * this service subscribes to, the services that produce them, and three
  * outcome values. That is what makes them safe.
  */
@@ -31,7 +31,7 @@ import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
  * from `audit-producer-topology.ts` instead — the delivery topic's owner when
  * the producer agrees (path A), a known trail producer (path B), otherwise
  * `unknown` — so it takes at most ten values (`AUDIT_SOURCE_SERVICE_LABELS`).
- * `source_topic` is the delivery topic, eleven values. `outcome` is the
+ * `source_topic` is the delivery topic, one of `AUDIT_INGESTION_SOURCE_TOPICS`. `outcome` is the
  * three-value enum. The stored row still keeps the producer's own claim.
  */
 export const auditRecordsIngestedTotal = new Counter({
@@ -96,13 +96,14 @@ export const auditIngestionLagSeconds = new Histogram({
 });
 
 /**
- * Every `source_topic` this service writes rows from: the ten path-A domain
- * topics and the path-B trail topic. Derived, never restated, so a topic added
- * to a subscription is exported here with it.
+ * Every `source_topic` this service writes rows from: the path-A domain
+ * topics, the path-B trail topic and the replay record. Derived, never
+ * restated, so a topic added to a subscription is exported here with it.
  */
 export const AUDIT_INGESTION_SOURCE_TOPICS: readonly string[] = Object.freeze([
   ...DOMAIN_TOPICS,
   AUDIT_TRAIL_TOPIC,
+  OPS_REPLAY_TOPIC,
 ]);
 
 /**
@@ -180,6 +181,16 @@ export const INGESTION_FAILURE_REASONS = {
   TRAIL_TENANT_MISMATCH: 'trail_tenant_mismatch',
   /** A `changes` entry for a `SENSITIVE_KEYS` field carried a raw value. */
   TRAIL_UNREDACTED_SENSITIVE_CHANGE: 'trail_unredacted_sensitive_change',
+
+  // The replay record (`rasta.ops.replay.v1`): a message the ops-replay
+  // consumer refuses to record, by what an operator would have to fix.
+
+  /** The envelope did not parse, or is not `REPLAY_EXECUTED` v1 from ops-replay on its topic. */
+  REPLAY_UNSUPPORTED_EVENT: 'replay_unsupported_event',
+  /** The payload failed the v1 contract, or disagreed with its own envelope. */
+  REPLAY_INVALID_PAYLOAD: 'replay_invalid_payload',
+  /** The replayed event's tenant and `envelope.tenantId` did not agree. */
+  REPLAY_TENANT_MISMATCH: 'replay_tenant_mismatch',
 } as const;
 
 export type IngestionFailureReason =

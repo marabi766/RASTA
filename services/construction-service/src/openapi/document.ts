@@ -17,6 +17,23 @@ import { ApprovalService } from '../approval/approval.service';
 import { ProgressService } from '../progress/progress.service';
 import { TenderController } from '../tender/tender.controller';
 import { TenderService } from '../tender/tender.service';
+import { PublicationController } from '../tender/publication.controller';
+import { PublicationService } from '../tender/publication.service';
+import {
+  invitationViewSchema,
+  inviteBidderSchema,
+  listInvitationsQuerySchema,
+  publishTenderSchema,
+} from '../tender/publication.dto';
+import { CriteriaController } from '../tender/criteria.controller';
+import { CriteriaService } from '../tender/criteria.service';
+import {
+  createCriteriaTemplateSchema,
+  criteriaTemplateViewSchema,
+  criteriaViewSchema,
+  listCriteriaTemplatesQuerySchema,
+  setCriteriaSchema,
+} from '../tender/criteria.dto';
 import {
   cancelTenderSchema,
   createTenderSchema,
@@ -149,6 +166,14 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/tenders/{id}': { status: '200', schema: tenderViewSchema },
   'PATCH /v1/tenders/{id}': { status: '200', schema: tenderViewSchema },
   'POST /v1/tenders/{id}/cancel': { status: '200', schema: tenderViewSchema },
+  'POST /v1/criteria-templates': { status: '201', schema: criteriaTemplateViewSchema },
+  'GET /v1/criteria-templates': { status: '200', schema: cursorPageOf(criteriaTemplateViewSchema) },
+  'GET /v1/criteria-templates/{id}': { status: '200', schema: criteriaTemplateViewSchema },
+  'PUT /v1/tenders/{id}/criteria': { status: '200', schema: criteriaViewSchema },
+  'GET /v1/tenders/{id}/criteria': { status: '200', schema: criteriaViewSchema },
+  'POST /v1/tenders/{id}/publish': { status: '200', schema: tenderViewSchema },
+  'POST /v1/tenders/{id}/invitations': { status: '201', schema: invitationViewSchema },
+  'GET /v1/tenders/{id}/invitations': { status: '200', schema: cursorPageOf(invitationViewSchema) },
 };
 
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
@@ -174,6 +199,10 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/projects/{id}/tenders': createTenderSchema,
   'PATCH /v1/tenders/{id}': updateTenderSchema,
   'POST /v1/tenders/{id}/cancel': cancelTenderSchema,
+  'POST /v1/criteria-templates': createCriteriaTemplateSchema,
+  'PUT /v1/tenders/{id}/criteria': setCriteriaSchema,
+  'POST /v1/tenders/{id}/publish': publishTenderSchema,
+  'POST /v1/tenders/{id}/invitations': inviteBidderSchema,
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -185,6 +214,8 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/approval-policies/pending-platform-approval': listPoliciesQuerySchema,
   'GET /v1/approvals': inboxQuerySchema,
   'GET /v1/tenders': listTendersQuerySchema,
+  'GET /v1/criteria-templates': listCriteriaTemplatesQuerySchema,
+  'GET /v1/tenders/{id}/invitations': listInvitationsQuerySchema,
 };
 
 /** The create endpoints that accept an optional `Idempotency-Key`. */
@@ -194,6 +225,7 @@ const IDEMPOTENT = new Set([
   'POST /v1/projects/{id}/progress',
   'POST /v1/approval-policies',
   'POST /v1/projects/{id}/tenders',
+  'POST /v1/criteria-templates',
 ]);
 
 /** Operations that act on an existing row and so can lose a compare-and-set. */
@@ -215,6 +247,8 @@ const VERSIONED = new Set([
   'POST /v1/approvals/{id}/decision',
   'PATCH /v1/tenders/{id}',
   'POST /v1/tenders/{id}/cancel',
+  'PUT /v1/tenders/{id}/criteria',
+  'POST /v1/tenders/{id}/publish',
 ]);
 
 /** Commands with no version that can still be refused by the lifecycle (422). */
@@ -222,6 +256,7 @@ const LIFECYCLE_CREATES = new Set([
   'POST /v1/projects/{id}/needs',
   'POST /v1/projects/{id}/progress',
   'POST /v1/projects/{id}/tenders',
+  'POST /v1/tenders/{id}/invitations',
 ]);
 
 /**
@@ -239,7 +274,14 @@ const HIERARCHY_CHECKED = new Set([
 ]);
 
 /** A create that can lose a race on a unique key (409 CONFLICT, retry). */
-const RACING_CREATES = new Set(['POST /v1/approval-policies']);
+const RACING_CREATES = new Set([
+  'POST /v1/approval-policies',
+  // The same organization invited twice: 409 ALREADY_EXISTS.
+  'POST /v1/tenders/{id}/invitations',
+]);
+
+/** Publishing needs the tender key provider; without a key-encryption key it answers 503. */
+const KEY_PROVIDER_CHECKED = new Set(['POST /v1/tenders/{id}/publish']);
 
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
@@ -260,9 +302,9 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use).',
   404: 'Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.',
   409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender that is not a DRAFT; cancelling a project that has a tender not yet finished.',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished.',
   500: 'Unexpected server error.',
-  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed).',
+  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066).',
   504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused.',
 };
 
@@ -308,10 +350,14 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     PolicyController,
     ApprovalController,
     TenderController,
+    CriteriaController,
+    PublicationController,
   ],
   providers: [
+    { provide: PublicationService, useValue: {} },
     { provide: ProjectService, useValue: {} },
     { provide: TenderService, useValue: {} },
+    { provide: CriteriaService, useValue: {} },
     { provide: NeedService, useValue: {} },
     { provide: ExecutionService, useValue: {} },
     { provide: PolicyService, useValue: {} },
@@ -397,7 +443,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           continue;
         }
         if (status === '422' && !VERSIONED.has(key) && !LIFECYCLE_CREATES.has(key)) continue;
-        if ((status === '503' || status === '504') && !HIERARCHY_CHECKED.has(key)) continue;
+        if (
+          (status === '503' || status === '504') &&
+          !HIERARCHY_CHECKED.has(key) &&
+          !(status === '503' && KEY_PROVIDER_CHECKED.has(key))
+        ) {
+          continue;
+        }
         operation.responses[status] ??= {
           description,
           ...(status === '409' && IDEMPOTENT.has(key)
