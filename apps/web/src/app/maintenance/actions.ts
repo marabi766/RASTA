@@ -78,5 +78,17 @@ export async function submitReportRequest(
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
+    case 'IN_PROGRESS':
+      // The first submission of this form is still being processed — a
+      // double press, or a create slower than the service waits for. Same
+      // values, same submission id: sent again after the wait, it is answered
+      // with that first request's result, never a second request.
+      return {
+        kind: 'IN_PROGRESS',
+        submissionId,
+        values,
+        retryAfterSeconds: result.retryAfterSeconds,
+        correlationId: result.correlationId,
+      };
   }
 }

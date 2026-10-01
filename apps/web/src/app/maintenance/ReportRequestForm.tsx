@@ -1,10 +1,11 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useEffect, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { IN_PROGRESS_WRITE_MESSAGE } from '@/lib/in-progress-write';
 import { maintenanceTypeOptions, severityOptions } from '@/lib/labels';
 import {
   EMPTY_REPORT_REQUEST_FORM,
@@ -37,7 +38,9 @@ const LABELS: Record<ReportRequestField, string> = {
 };
 
 function valuesOf(state: ReportRequestFormState, initialAssetId: string): ReportRequestFormValues {
-  if (state.kind === 'INVALID' || state.kind === 'NOT_FOUND') return state.values;
+  if (state.kind === 'INVALID' || state.kind === 'NOT_FOUND' || state.kind === 'IN_PROGRESS') {
+    return state.values;
+  }
   return { ...EMPTY_REPORT_REQUEST_FORM, assetId: initialAssetId };
 }
 
@@ -71,7 +74,10 @@ export function ReportRequestForm({
   const values = valuesOf(state, initialAssetId);
   const errors = errorsOf(state);
   const currentSubmissionId =
-    state.kind === 'INVALID' || state.kind === 'NOT_FOUND' ? state.submissionId : submissionId;
+    state.kind === 'INVALID' || state.kind === 'NOT_FOUND' || state.kind === 'IN_PROGRESS'
+      ? state.submissionId
+      : submissionId;
+  const waiting = useRetryAfter(state);
 
   return (
     <form action={action} className="flex flex-col gap-4">
@@ -189,15 +195,40 @@ export function ReportRequestForm({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 pt-2">
-        <Button type="submit" disabled={pending}>
-          {pending ? 'در حال ثبت…' : 'ثبت درخواست'}
+        <Button type="submit" disabled={pending || waiting}>
+          {pending ? 'در حال ثبت…' : waiting ? 'کمی صبر کنید…' : 'ثبت درخواست'}
         </Button>
       </div>
     </form>
   );
 }
 
+/**
+ * Holds the button for the `Retry-After` an in-progress answer gave (round 1
+ * on PR 171), then offers the same submission again. Each answer is a new state
+ * object, so a second in-progress answer starts a fresh wait. Without
+ * JavaScript the button is never held: a post too soon is answered in progress
+ * again, which is safe.
+ */
+function useRetryAfter(state: ReportRequestFormState): boolean {
+  const [heldFor, setHeldFor] = useState<ReportRequestFormState | null>(null);
+  useEffect(() => {
+    if (state.kind !== 'IN_PROGRESS') return;
+    const timer = setTimeout(() => setHeldFor(state), state.retryAfterSeconds * 1000);
+    return () => clearTimeout(timer);
+  }, [state]);
+  return state.kind === 'IN_PROGRESS' && heldFor !== state;
+}
+
 function FormBanner({ state }: { state: ReportRequestFormState }) {
+  if (state.kind === 'IN_PROGRESS') {
+    return (
+      <Alert tone="info">
+        {IN_PROGRESS_WRITE_MESSAGE} کد پیگیری: {state.correlationId}
+      </Alert>
+    );
+  }
+
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
   }

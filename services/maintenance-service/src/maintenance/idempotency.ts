@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { isUniqueViolation } from './maintenance.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
@@ -12,10 +12,12 @@ const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
 
 /**
  * How long a request waits on a key another request is still working on,
- * before it answers `409 CONFLICT`. A create takes a fraction of a second, so
- * a double submit — the portal's button pressed twice, a proxy retrying — is
- * answered with the first request's own 201 rather than an error the portal
- * would have to handle (#157).
+ * before it answers `409 CONFLICT` with `Retry-After`. A create takes a
+ * fraction of a second, so a double submit — the portal's button pressed
+ * twice, a proxy retrying — is normally answered with the first request's own
+ * 201 (#157). A create slower than this leaves its duplicate the 409, which
+ * the portal shows as in progress and offers again after the wait (round 1 on
+ * #171), never as an invalid form.
  */
 export const IN_FLIGHT_WAIT_MS = 5_000;
 const IN_FLIGHT_POLL_MS = 100;
@@ -43,7 +45,41 @@ function inFlight(endpoint: string): RastaError {
   });
 }
 
+/**
+ * The claim this request took is no longer its own — expired, purged, or
+ * re-taken by a retry — so its work must not commit. The key is either free
+ * or another request's, and a retry learns which.
+ */
+function claimLost(endpoint: string): RastaError {
+  return new RastaError(
+    'CONFLICT',
+    'This request took too long and its Idempotency-Key lapsed; retry shortly',
+    { internalContext: { endpoint }, retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS },
+  );
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * What the work does with its claim **inside its own transaction** (round 1 on
+ * #171): `hold` is the transaction's first statement and `complete` its last,
+ * so the claim check, the domain write, its outbox rows and the stored
+ * response commit together — or none of them does.
+ */
+export interface ClaimFence<T> {
+  /**
+   * Locks this claim's row (`SELECT … FOR UPDATE`) by its token. Throws — and
+   * so aborts the whole transaction — when the claim is no longer this
+   * request's: expired, or released and re-taken by a retry.
+   */
+  hold(tx: ExtendedPrismaClient): Promise<void>;
+  /**
+   * Stores `result` as the response to replay, on the row `hold` locked, and
+   * starts the key's lifetime from now. Returns the stored JSON, which is
+   * what this caller and every replay receive.
+   */
+  complete(tx: ExtendedPrismaClient, result: T): Promise<T>;
+}
 
 type Claim = { kind: 'PROCEED'; token: string } | { kind: 'REPLAY'; status: number; body: unknown };
 
@@ -94,15 +130,26 @@ export function optionalIdempotencyKey(value: string | undefined): string | unde
  * cancelled since is not raised again while the key is live: that is the
  * point of the key.
  *
- * ## Claim, then work, then complete — each its own statement
+ * ## Claim first; then check, work and complete in one transaction
  *
- * The claim is committed before the work starts, so a concurrent duplicate
- * finds `IN_PROGRESS` at once and waits for the stored response rather than
- * racing the work. `complete` and `release` match the claim's own token: a
- * claim that expired and was re-taken can neither finish nor free its
- * successor's row. Only a failure of the work releases the claim; a failure
- * to record the response after the work committed keeps it, so a retry meets
- * the in-flight 409 until expiry instead of raising the work twice.
+ * The claim is committed on its own before the work starts, so a concurrent
+ * duplicate finds `IN_PROGRESS` at once and waits for the stored response
+ * rather than racing the work. The work's own transaction then locks the claim
+ * row by its token before anything else ({@link ClaimFence.hold}) and stores
+ * the response on it as its last statement ({@link ClaimFence.complete})
+ * (round 1 on #171):
+ *
+ * - a create that outlives its claim cannot commit: once the claim expired
+ *   and a retry re-took it, `hold` finds no row with this token and the whole
+ *   create aborts — the token fences the work, not only the row;
+ * - a claim that expires while its create holds the lock cannot be re-taken
+ *   under it: the retry's removal of the expired row waits for the lock, and
+ *   then finds the row completed with a fresh lifetime, and replays it;
+ * - the response cannot fail to be stored after the request committed: it
+ *   commits with the request and its outbox rows, or nothing does.
+ *
+ * Any failure of the work — its own, or the claim being lost — releases the
+ * claim, but only this claim's own in-flight row, never a successor's.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -117,28 +164,99 @@ export class IdempotencyStore {
    * Runs `work` at most once for this key, and returns its result — or the
    * stored result of the request that already ran it. Either way the value is
    * the JSON the first request answered with, so both callers of a double
-   * submit receive the same body.
+   * submit receive the same body — when the first finishes within
+   * {@link IN_FLIGHT_WAIT_MS}. Past that, the duplicate is answered
+   * `409 CONFLICT` with `Retry-After`, and its retry gets the same body.
    */
   async execute<T>(
     endpoint: string,
     key: string,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
+    work: (fence: ClaimFence<T>) => Promise<T>,
   ): Promise<{ result: T; executed: boolean }> {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
 
-    let result: T;
+    let stored: { value: T } | undefined;
+    const fence: ClaimFence<T> = {
+      hold: (tx) => this.hold(tx, endpoint, key, claim.token),
+      complete: async (tx, result) => {
+        const value = JSON.parse(JSON.stringify(result)) as T;
+        await this.storeResponse(tx, endpoint, key, claim.token, successStatus, value);
+        stored = { value };
+        return value;
+      },
+    };
+
     try {
-      result = await work();
+      await work(fence);
     } catch (error) {
       await this.release(endpoint, key, claim.token);
       throw error;
     }
-    const stored = JSON.parse(JSON.stringify(result)) as T;
-    await this.complete(endpoint, key, claim.token, successStatus, stored);
-    return { result: stored, executed: true };
+    // A work that returned without completing its claim committed nothing the
+    // key can replay: a defect, never a success to report.
+    if (!stored) {
+      await this.release(endpoint, key, claim.token);
+      throw new Error(`${endpoint}: the work returned without completing its idempotency claim`);
+    }
+    return { result: stored.value, executed: true };
+  }
+
+  /**
+   * {@link ClaimFence.hold}: the first statement of the work's transaction.
+   * Not expired by this service's clock, and still this claim's — or the
+   * transaction aborts.
+   */
+  private async hold(
+    tx: ExtendedPrismaClient,
+    endpoint: string,
+    key: string,
+    token: string,
+  ): Promise<void> {
+    const organizationId = getOrganizationId();
+    const rows = await tx.$queryRaw<{ held: number }[]>`
+      SELECT 1 AS held FROM idempotency_key
+      WHERE organization_id = ${organizationId} AND endpoint = ${endpoint} AND key = ${key}
+        AND claim_token = ${token} AND state = 'IN_PROGRESS' AND expires_at > ${new Date()}
+      FOR UPDATE`;
+    if (rows.length === 0) {
+      this.logLostClaim('hold', endpoint);
+      throw claimLost(endpoint);
+    }
+  }
+
+  /**
+   * {@link ClaimFence.complete}: the response for replay, on the row `hold`
+   * locked, in the work's own transaction. The key lives
+   * `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` from now — from the response, not the
+   * claim — so a retry that waited on the lock finds it live and replays it.
+   */
+  async storeResponse(
+    tx: ExtendedPrismaClient,
+    endpoint: string,
+    key: string,
+    token: string,
+    status: number,
+    body: unknown,
+  ): Promise<void> {
+    const organizationId = getOrganizationId();
+    const { count } = await tx.idempotencyKey.updateMany({
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
+      data: {
+        state: 'COMPLETED',
+        responseStatus: status,
+        responseBody: body as object,
+        expiresAt: this.expiry(new Date()),
+      },
+    });
+    // Held since the transaction began, so never 0 — unless `hold` was skipped.
+    if (count !== 1) throw claimLost(endpoint);
+  }
+
+  private expiry(from: Date): Date {
+    return new Date(from.getTime() + this.env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000);
   }
 
   /** SHA-256 over the canonical request and the caller who sent it. */
@@ -183,9 +301,7 @@ export class IdempotencyStore {
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
     const now = new Date();
-    const expiresAt = new Date(
-      now.getTime() + this.env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
-    );
+    const expiresAt = this.expiry(now);
 
     const token = randomUUID();
     try {
@@ -230,26 +346,6 @@ export class IdempotencyStore {
   }
 
   /**
-   * Stores the response for replay — only on this claim's own in-flight row.
-   * A late completion of a claim that expired and was re-taken is a logged
-   * no-op: the work committed, and failing here would not undo it.
-   */
-  async complete(
-    endpoint: string,
-    key: string,
-    token: string,
-    status: number,
-    body: unknown,
-  ): Promise<void> {
-    const organizationId = getOrganizationId();
-    const { count } = await this.prisma.client.idempotencyKey.updateMany({
-      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
-      data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
-    });
-    if (count === 0) this.logLostClaim('complete', endpoint);
-  }
-
-  /**
    * Frees a claim whose work failed, so a corrected retry with the same key
    * can run — only this claim's own in-flight row, never a completed one or a
    * successor's.
@@ -263,7 +359,7 @@ export class IdempotencyStore {
   }
 
   /** Nothing of the key or token in the log (S-09). */
-  private logLostClaim(operation: 'complete' | 'release', endpoint: string): void {
+  private logLostClaim(operation: 'hold' | 'release', endpoint: string): void {
     this.logger.warn(
       `idempotency ${operation} matched no in-progress row for this claim (expired, purged or already finished); left untouched: ${endpoint}`,
     );

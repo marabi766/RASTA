@@ -31,6 +31,7 @@ import {
 import { assessDue } from './due';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { toRule } from './schedule.service';
+import type { ClaimFence } from './idempotency';
 import {
   toRepairOrderView,
   toRequestView,
@@ -140,8 +141,17 @@ export class RequestService {
    * `MAINTENANCE_CREATED` says "a piece of work now exists" — the thing
    * asset-service records in the machine's file. Collapsing them would force
    * every consumer to infer one from the other's `type` field.
+   *
+   * Under an Idempotency-Key, `fence` is the caller's claim on it (#157,
+   * round 1 on #171): checked and locked as the transaction's first statement,
+   * completed with this request's view as its last — so the claim, the
+   * request, its outbox rows and the response to replay commit together, and a
+   * create whose claim lapsed and was re-taken commits nothing.
    */
-  async create(dto: CreateRequestDto): Promise<MaintenanceRequestView> {
+  async create(
+    dto: CreateRequestDto,
+    fence?: ClaimFence<MaintenanceRequestView>,
+  ): Promise<MaintenanceRequestView> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? 'SYSTEM';
 
@@ -184,7 +194,9 @@ export class RequestService {
     }
 
     try {
-      const created = await this.repository.transaction(async (tx) => {
+      const view = await this.repository.transaction(async (tx) => {
+        // First: still this caller's claim, held to the commit.
+        if (fence) await fence.hold(tx);
         // The machine again, under the lock a transfer's clearance takes
         // exclusively (ADR-062). Either the clearance committed first and its
         // fence refuses this, or this commits first and the clearance counts
@@ -253,11 +265,13 @@ export class RequestService {
           }),
         });
 
-        return request;
+        const created = toRequestView(request as RequestRow);
+        // Last: the response to replay, in the same commit.
+        return fence ? fence.complete(tx, created) : created;
       });
 
       requestsCreatedTotal.inc({ service: SERVICE_NAME, type: dto.type });
-      return toRequestView(created as RequestRow);
+      return view;
     } catch (error) {
       throw this.translateDuplicate(error, dto.assetId, dto.type);
     }

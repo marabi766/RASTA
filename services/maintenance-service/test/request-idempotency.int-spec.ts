@@ -4,7 +4,7 @@ import { RepairOrderService } from '../src/maintenance/repair-order.service';
 import { UnverifiedWorkshopDirectory } from '../src/maintenance/workshop.directory';
 import { CREATE_REQUEST_ENDPOINT, RequestController } from '../src/maintenance/request.controller';
 import { IdempotencyStore } from '../src/maintenance/idempotency';
-import type { CreateRequestDto } from '../src/maintenance/dto';
+import type { CreateRequestDto, MaintenanceRequestView } from '../src/maintenance/dto';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
 
@@ -147,35 +147,150 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     expect(await keyRow(org.b, key)).toHaveLength(1);
   });
 
-  it('fences a stale claim: A’s late complete or release after expiry and B’s re-claim changes nothing', async () => {
+  // ---- Round 1 on #171: the claim check, the create, its outbox rows and the
+  // completion commit in ONE transaction. Real creates, real rows.
+
+  const actor = { organizationId: org.a, userId: reporter };
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const outboxFor = (assetId: string) =>
+    prisma.client.$queryRawUnsafe<{ aggregate_id: string }[]>(
+      'SELECT aggregate_id FROM outbox_message WHERE partition_key = $1',
+      assetId,
+    );
+
+  /** A gate a test opens by hand, and a signal that something reached it. */
+  function gate() {
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    let reach!: () => void;
+    const reached = new Promise<void>((resolve) => (reach = resolve));
+    return { open, opened, reach, reached };
+  }
+
+  it('commits nothing of a create whose claim lapsed and was re-taken: exactly one request', async () => {
+    const assetId = await machine();
     const key = id('KEY');
-    const body = { anything: 'the same request' };
-    await asActor({ organizationId: org.a, userId: reporter }, async () => {
-      const a = await store.claim(CREATE_REQUEST_ENDPOINT, key, body);
-      if (a.kind !== 'PROCEED') throw new Error('A should own the key');
+    const dto = breakdown(assetId);
+    const a = gate();
 
-      // A's claim expires while its work is still running.
-      await prisma.client.$executeRawUnsafe(
-        `UPDATE idempotency_key SET expires_at = now() - interval '1 second' WHERE organization_id = $1 AND key = $2`,
-        org.a,
+    // A claims, then stalls before its transaction — a slow client, a GC pause.
+    const first = asActor(actor, () =>
+      store.execute<MaintenanceRequestView>(
+        CREATE_REQUEST_ENDPOINT,
         key,
+        dto,
+        201,
+        async (fence) => {
+          a.reach();
+          await a.opened;
+          return requests.create(dto, fence);
+        },
+      ),
+    ).then(
+      (outcome) => ({ outcome }),
+      (error: unknown) => ({ error }),
+    );
+    await a.reached;
+
+    // A's claim expires; a retry re-takes the key and creates the request.
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE idempotency_key SET expires_at = now() - interval '1 second' WHERE organization_id = $1 AND key = $2`,
+      org.a,
+      key,
+    );
+    const retried = (await create(dto, key)) as { id: string };
+    // Closed, so the open-request rule no longer stands between A and a
+    // second request: only the claim can stop it now.
+    await asActor(actor, () => requests.cancel(retried.id, { reason: 'handled already' }));
+
+    a.open();
+    expect(await first).toEqual({ error: expect.objectContaining({ code: 'CONFLICT' }) });
+    expect((await requestsFor(assetId)).map((row) => row.id)).toEqual([retried.id]);
+    expect(await keyRow(org.a, key)).toEqual([expect.objectContaining({ state: 'COMPLETED' })]);
+    expect(await create(dto, key)).toEqual(retried);
+  });
+
+  it('does not let a retry re-take a claim that expires under a running create: it waits, then replays', async () => {
+    const assetId = await machine();
+    const key = id('KEY');
+    const dto = breakdown(assetId);
+    const a = gate();
+    const LIFETIME_MS = 1_500;
+
+    // A's claim is about to expire as A's transaction takes it.
+    const first = asActor(actor, () =>
+      store.execute<MaintenanceRequestView>(
+        CREATE_REQUEST_ENDPOINT,
+        key,
+        dto,
+        201,
+        async (fence) => {
+          await prisma.client.$executeRawUnsafe(
+            `UPDATE idempotency_key SET expires_at = now() + make_interval(secs => $3) WHERE organization_id = $1 AND key = $2`,
+            org.a,
+            key,
+            LIFETIME_MS / 1000,
+          );
+          return requests.create(dto, {
+            hold: async (tx) => {
+              await fence.hold(tx);
+              a.reach();
+              await a.opened;
+            },
+            complete: fence.complete,
+          });
+        },
+      ),
+    );
+    await a.reached;
+    await sleep(LIFETIME_MS + 200);
+
+    // The claim has expired while A holds it. The retry's removal of the
+    // expired row must wait for A's lock...
+    const retry = create(dto, key);
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const [{ waiting }] = await prisma.client.$queryRawUnsafe<{ waiting: number }[]>(
+        `SELECT count(*)::int AS waiting FROM pg_stat_activity
+         WHERE wait_event_type = 'Lock' AND query ILIKE 'DELETE FROM%idempotency_key%'`,
       );
+      if (waiting > 0) break;
+      if (Date.now() > deadline) throw new Error('the retry never waited on the held claim');
+      await sleep(25);
+    }
 
-      const b = await store.claim(CREATE_REQUEST_ENDPOINT, key, body);
-      if (b.kind !== 'PROCEED') throw new Error('B should re-claim the expired key');
-      expect(b.token).not.toBe(a.token);
+    // ...and, once A commits with a fresh lifetime, find the response to replay.
+    a.open();
+    const original = (await first).result as { id: string };
+    expect(await retry).toEqual(original);
+    expect((await requestsFor(assetId)).map((row) => row.id)).toEqual([original.id]);
+  });
 
-      await store.complete(CREATE_REQUEST_ENDPOINT, key, a.token, 201, { from: 'A' });
-      await store.release(CREATE_REQUEST_ENDPOINT, key, a.token);
-      expect(await keyRow(org.a, key)).toEqual([
-        expect.objectContaining({ state: 'IN_PROGRESS', claim_token: b.token }),
-      ]);
+  it('leaves nothing half-done when the completion fails: no request, no outbox row, the key free', async () => {
+    const assetId = await machine();
+    const key = id('KEY');
+    const dto = breakdown(assetId);
 
-      await store.complete(CREATE_REQUEST_ENDPOINT, key, b.token, 201, { from: 'B' });
-      await store.release(CREATE_REQUEST_ENDPOINT, key, a.token);
-      const replay = await store.claim(CREATE_REQUEST_ENDPOINT, key, body);
-      expect(replay).toEqual({ kind: 'REPLAY', status: 201, body: { from: 'B' } });
-    });
+    const failing = jest
+      .spyOn(store, 'storeResponse')
+      .mockRejectedValueOnce(new Error('response store failed (injected)'));
+    try {
+      await expect(create(dto, key)).rejects.toThrow('response store failed (injected)');
+    } finally {
+      failing.mockRestore();
+    }
+    expect(await requestsFor(assetId)).toEqual([]);
+    expect(await outboxFor(assetId)).toEqual([]);
+    expect(await keyRow(org.a, key)).toEqual([]);
+
+    // The retry is the first request that commits — once, with its events.
+    const created = (await create(dto, key)) as { id: string };
+    expect((await requestsFor(assetId)).map((row) => row.id)).toEqual([created.id]);
+    const events = await outboxFor(assetId);
+    expect(events.length).toBeGreaterThan(0);
+    expect(new Set(events.map((row) => row.aggregate_id))).toEqual(new Set([created.id]));
+    expect(await create(dto, key)).toEqual(created);
   });
 
   it('releases the key when the work fails, so a corrected retry can run', async () => {

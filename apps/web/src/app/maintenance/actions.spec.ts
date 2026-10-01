@@ -323,6 +323,30 @@ describe('what the service refuses', () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
+  it('keeps a submission still in flight retryable: same values, same submission id, the wait', async () => {
+    // Round 1 on PR 171: a 409 CONFLICT with Retry-After is the first submission
+    // still being processed — not an invalid form. Sent again with the same
+    // id after the wait, it is answered with that first request's result.
+    reportMaintenanceRequest.mockResolvedValue({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    const submission = mintSubmissionId(SESSION);
+    const state = await submitReportRequest(
+      IDLE_REPORT_REQUEST_FORM,
+      formData(VALID, { submission }),
+    );
+    expect(state).toEqual({
+      kind: 'IN_PROGRESS',
+      submissionId: submission,
+      values: expect.objectContaining({ assetId: VALID.assetId, title: VALID.title }),
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it('reports an outage with its status and correlation id', async () => {
     reportMaintenanceRequest.mockResolvedValue({
       kind: 'UNAVAILABLE',

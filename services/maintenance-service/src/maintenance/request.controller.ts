@@ -15,6 +15,7 @@ import {
   type CancelRequestDto,
   type CreateRequestDto,
   type ListRequestsQuery,
+  type MaintenanceRequestView,
 } from './dto';
 
 /**
@@ -96,8 +97,12 @@ export class RequestController {
   ) {
     const key = optionalIdempotencyKey(idempotencyKey);
     if (key === undefined) return this.requests.create(dto);
-    const { result } = await this.idempotency.execute(CREATE_REQUEST_ENDPOINT, key, dto, 201, () =>
-      this.requests.create(dto),
+    const { result } = await this.idempotency.execute<MaintenanceRequestView>(
+      CREATE_REQUEST_ENDPOINT,
+      key,
+      dto,
+      201,
+      (fence) => this.requests.create(dto, fence),
     );
     return result;
   }

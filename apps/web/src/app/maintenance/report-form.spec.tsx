@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
@@ -138,6 +138,42 @@ describe('the report form after an attempt', () => {
       'sub_BBBBBBBBBBBBBBBBBBBB',
     );
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('shows a submission still in flight as in progress, holds the button for Retry-After, then offers it again', async () => {
+    // Round 1 on PR 171: never "correct your form". Same values, same id; after
+    // the wait the same submission is answered with the first one's result.
+    jest.useFakeTimers();
+    try {
+      const { container } = renderForm({
+        kind: 'IN_PROGRESS',
+        submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
+        values: VALUES,
+        retryAfterSeconds: 2,
+        correlationId: 'corr-sample',
+      });
+
+      expect(screen.getByText(/در حال پردازش است، کمی بعد دوباره ببینید/)).toBeInTheDocument();
+      expect(container.querySelector('[name="title"]')).toHaveValue('نشتی روغن');
+      expect(container.querySelector(`input[name="${SUBMISSION_FIELD}"]`)).toHaveValue(
+        'sub_CCCCCCCCCCCCCCCCCCCC',
+      );
+      expect(container.querySelector('[aria-invalid="true"]')).toBeNull();
+      const button = screen.getByRole('button');
+      expect(button).toBeDisabled();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1_999);
+      });
+      expect(button).toBeDisabled();
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+      });
+      expect(button).toBeEnabled();
+      expect(button).toHaveTextContent('ثبت درخواست');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('shows a rule the service did not attach to a field as a message for the form', async () => {

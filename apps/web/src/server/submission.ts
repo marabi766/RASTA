@@ -21,7 +21,9 @@ import type { WebSession } from './session';
  * service's decision, and services differ: a service that stores it makes a
  * retry one record — maintenance-service's create path does since issue 157,
  * answering the same key and body with the original 201 while the key lives
- * (MAINTENANCE_IDEMPOTENCY_TTL_HOURS, 24 by default); a service that ignores
+ * (MAINTENANCE_IDEMPOTENCY_TTL_HOURS, 24 by default), or, while the first is
+ * still being processed, with 409 CONFLICT and Retry-After (`IN_PROGRESS` in
+ * `write.ts`); a service that ignores
  * it — asset-service's create path today — relies on its own rules (a unique
  * index on the serial number) and a retry can be refused or, for
  * some writes, applied twice. So nothing in the portal may say "a retry is not
