@@ -892,8 +892,19 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   در بازتاب Keycloak ساختن دوبارهٔ وضعیت فعلی). **دور ۲:** آزمون Retention رکورد پاک می‌کند، پس فقط روی Broker دورانداختنی
   (`REPLAY_TEST_DISPOSABLE_BROKER=1`) و فقط وقتی هر رکورد بازه مال همان اجرا باشد اجرا می‌شود؛ در CI Job جدای «Broker
   authorisation» با Broker تازه (آزمون بازپخش اول، سپس ACL). حضور Header با بدنهٔ خام پیش از پیش‌فرض‌های Schema سنجیده می‌شود.
-  **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر
-  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است — و تشخیص «قبلاً بازپخش شده» همان‌جا.
+  **به‌روز 2026-09-30 — رکورد ممیزی پلتفرم ساخته شد (`feat/ops-replay-audit`):** Topic `rasta.ops.replay.v1` (+ `.retry`)،
+  ناشر فقط `ops-replay` (WRITE تازه فقط همان‌جا)، مصرف‌کننده audit-service با گروه `audit-service.ops-replay`؛ یک
+  `REPLAY_EXECUTED` برای هر رویداد **پس از** نشستن روی `.retry` (شناسهٔ گزارش، اپراتور، DLQ/Partition/Offset، `.retry`/
+  Partition/Offset، شناسه و نام رویداد، حکم کهنگی — هرگز Payload)، فقط‌الحاقی در `audit_event` زیر مستأجرِ رویداد یا پلتفرمی.
+  **دور ۱ بازبینی #166:** بازپخش و رکوردش در **یک تراکنش Kafka** (`ops-replay.<reportId>`، ACL `TRANSACTIONAL_ID` فقط برای
+  `ops-replay` زیر `ops-replay.`)؛ مصرف‌کننده‌ها فقط Commit‌شده می‌خوانند، پس کشته شدن میان دو ارسال هیچ‌کدام را نمی‌گذارد؛
+  میدانی که رکورد نمی‌پذیرد (`eventId` > ۱۲۸) پیش از ارسال `UNRECORDABLE:<مسیر>` رد می‌شود.
+  **دور ۲:** مهر `x-replay-id` برای هر رویداد جداست (`<reportId>/<operator>/<seq>/<eventId>`)، پس پس از Commit نامعلومِ
+  رویداد دوم، جست‌وجوی مهرش بازپخش Commit‌شدهٔ رویداد اول را نمی‌یابد؛ هشدار مهر دقیق و موقعیت را نام می‌برد.
+  **دور ۳:** تنها گام بازیابی `--check-marker` است (Read-Committed، گروه `ops-replay.check.*`، با READ تازهٔ `ops-replay` روی
+  هر `.retry` که می‌نویسد): `COMMITTED` با یافتن مهر، `ABORTED` فقط پس از گذشتن LSO از Offset **و** Timeout تراکنش از زمان
+  بازپخش، وگرنه `STILL_UNKNOWN` — «ندیدم» هرگز زود «نشده» شمرده نمی‌شود.
+  **آنچه باز می‌ماند:** تشخیص «قبلاً بازپخش شده» پیش از ارسال (پایه‌اش همین رکوردها).
 - **اولویت:** متوسط
 - **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را

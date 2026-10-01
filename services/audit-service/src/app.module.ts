@@ -7,7 +7,7 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
-import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_TRAIL_TOPIC, OPS_REPLAY_TOPIC } from '@rasta/contracts';
 import {
   AllExceptionsFilter,
   AuthGuard,
@@ -39,12 +39,14 @@ import {
 } from './audit/audit.query.pipes';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
+import { OpsReplayConsumer } from './consumers/ops-replay.consumer';
 import {
   AUDIT_DEAD_LETTER_TOPIC,
   DOMAIN_PROJECTOR_CONSUMER,
   DOMAIN_TOPICS,
 } from './audit/audit.mapper';
 import { AUDIT_TRAIL_CONSUMER } from './audit/audit-trail.mapper';
+import { OPS_REPLAY_CONSUMER } from './audit/ops-replay.mapper';
 import { auditPartitionRows, initializeExpectedProducerSeries } from './observability/metrics';
 import { ENV, LOGGER } from './tokens';
 import { loadAuditEnv, SERVICE_NAME, type AuditEnv } from './config/env';
@@ -71,6 +73,9 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  *   path B  `audit-service.trail` over `rasta.audit.trail.v1` (AUD-004 Phase
  *           B). Validating: an `AUDIT_EVENT_RECORDED` v1 message whose envelope,
  *           payload or tenant agreement fails is refused, never repaired.
+ *   replay  `audit-service.ops-replay` over `rasta.ops.replay.v1`: one
+ *           `REPLAY_EXECUTED` per executed DLQ replay, from the operator's
+ *           replay tool alone. Validating, like path B.
  *
  * Both write through one repository that stores the audit row, its chain link,
  * its idempotency marker — and, for path A only, the organization hierarchy
@@ -284,6 +289,34 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
         ),
     },
 
+    {
+      provide: OpsReplayConsumer,
+      inject: [ENV, LOGGER, AuditRepository],
+      useFactory: (env: AuditEnv, logger: Logger, repository: AuditRepository): OpsReplayConsumer =>
+        new OpsReplayConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, env.KAFKA_CLIENT_ID),
+                // Fixed: also the replay record's `processed_event` key.
+                groupId: OPS_REPLAY_CONSUMER,
+                // The replay record alone, never merged into `DOMAIN_TOPICS`.
+                topics: [OPS_REPLAY_TOPIC],
+                // Replay-safe as the other two: every write is idempotent on
+                // `(eventId, consumerName)`, and the topic is retained as
+                // evidence (`create-topics.sh`, kind `audit-trail`).
+                fromBeginning: true,
+                // A refused record is kept, for the operator to replay once fixed.
+                deadLetterTopic: AUDIT_DEAD_LETTER_TOPIC,
+              },
+              handler,
+              consumerLogger(logger),
+            ),
+          repository,
+          logger,
+        ),
+    },
+
     // Authenticate, then authorize. Global, so an endpoint is closed unless it
     // opts out with `@Public` (AGENTS.md A-12, S-02).
     { provide: APP_GUARD, useClass: AuthGuard },
@@ -297,6 +330,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly projector: DomainProjectorConsumer,
     private readonly trail: AuditTrailConsumer,
+    private readonly replay: OpsReplayConsumer,
     private readonly repository: AuditRepository,
     @Inject(ENV) private readonly env: AuditEnv,
     private readonly prisma: PrismaService,
@@ -322,6 +356,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // its own `onModuleDestroy`, which Nest calls for every provider.
     await this.projector.start();
     await this.trail.start();
+    await this.replay.start();
 
     // Sampled from the catalogue, never maintained by inc/dec: an arithmetic
     // gauge drifts on every restart, and a drifting capacity number is worse
