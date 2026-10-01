@@ -38,6 +38,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import kafkajs from 'kafkajs';
 import { connectionFor, passwordVariable } from './kafka-acl-lib.mjs';
+import { REPLAY_TRANSACTION_TIMEOUT_MS } from './replay-dlq-lib.mjs';
 
 const { Kafka, logLevel } = kafkajs;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -174,7 +175,11 @@ function replay(
   if (operator) childEnv.REPLAY_OPERATOR = operator;
   const result = spawnSync(
     'node',
-    [resolve(ROOT, 'scripts/replay-dlq.mjs'), '--dlq', DLQ, ...args],
+    [
+      resolve(ROOT, 'scripts/replay-dlq.mjs'),
+      ...(args.includes('--check-marker') ? [] : ['--dlq', DLQ]),
+      ...args,
+    ],
     { env: childEnv, encoding: 'utf8', timeout: 180_000 },
   );
   const lines = result.stdout
@@ -776,6 +781,79 @@ describe('one Kafka transaction per replay and its record (round 1 on #166)', ()
 
     assert.deepEqual(await markerKinds(RETRY, retryBefore), ['killed-sentinel']);
     assert.deepEqual(await markerKinds(OPS_REPLAY, recordsBefore), ['killed-sentinel']);
+  });
+
+  // ---- --check-marker: the one recovery step after an unknown commit, run
+  // as an operator would, with ops-replay's credential (round 3 on #166).
+
+  /** A replay stamp as `replayIdFor` writes one, unique to this test. */
+  const stampFor = (seq) => `rpl-${randomUUID()}/${OPERATOR}/${seq}/EVT_CHECK_${seq}_${run}`;
+
+  /** One transaction holding a stamped replay on RETRY; returns it open, with its position. */
+  async function stampedReplay(kind, stamp) {
+    const producer = await transactional(`ops-replay.itest-check-${kind}-${run}`);
+    const transaction = await producer.transaction();
+    const message = { ...marker(`check-${kind}`), headers: { [REPLAY_HEADERS.replayId]: stamp } };
+    const [landed] = await transaction.send({ topic: RETRY, acks: -1, messages: [message] });
+    return { transaction, partition: landed.partition, offset: landed.baseOffset };
+  }
+
+  const ask = (stamp, { partition, offset }, replayedAt) =>
+    replay([
+      '--check-marker',
+      stamp,
+      '--topic',
+      RETRY,
+      '--partition',
+      String(partition),
+      '--offset',
+      String(offset),
+      '--replayed-at',
+      replayedAt,
+    ]);
+
+  const longAgo = () => new Date(Date.now() - REPLAY_TRANSACTION_TIMEOUT_MS - 5_000).toISOString();
+
+  test('--check-marker answers COMMITTED for a replay whose transaction committed', async () => {
+    const stamp = stampFor(1);
+    const replayed = await stampedReplay('committed', stamp);
+    await replayed.transaction.commit();
+
+    const result = ask(stamp, replayed, new Date().toISOString());
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      [result.records[0].answer, result.records[0].marker, result.records[0].offset],
+      ['COMMITTED', stamp, String(replayed.offset)],
+    );
+    // Another stamp at that position is not this replay.
+    const other = ask(stampFor(2), replayed, longAgo());
+    assert.equal(other.status, 2, other.stderr);
+    assert.equal(other.records[0].answer, 'MISMATCH');
+  });
+
+  test('--check-marker never answers early: STILL_UNKNOWN while open, and until the timeout has passed; ABORTED only then', async () => {
+    const stamp = stampFor(3);
+    const replayed = await stampedReplay('aborted', stamp);
+
+    // Still open: the last stable offset has not passed it.
+    const open = ask(stamp, replayed, longAgo());
+    assert.equal(open.status, 3, open.stderr);
+    assert.equal(open.records[0].answer, 'STILL_UNKNOWN');
+    assert.ok(BigInt(open.records[0].stableOffset) <= BigInt(replayed.offset));
+
+    await replayed.transaction.abort();
+    await sentinel('check');
+
+    // Decided and stable — but too soon after the replay to call it aborted.
+    const soon = ask(stamp, replayed, new Date().toISOString());
+    assert.equal(soon.status, 3, soon.stderr);
+    assert.equal(soon.records[0].answer, 'STILL_UNKNOWN');
+    assert.ok(BigInt(soon.records[0].stableOffset) > BigInt(replayed.offset));
+
+    // Stable past it, and the transaction timeout has passed since the replay.
+    const settled = ask(stamp, replayed, longAgo());
+    assert.equal(settled.status, 0, settled.stderr);
+    assert.equal(settled.records[0].answer, 'ABORTED');
   });
 });
 

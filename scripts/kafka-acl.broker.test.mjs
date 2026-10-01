@@ -183,6 +183,40 @@ async function coordinatorReady(groupId) {
  * Joins `groupId` as `principal`, subscribed to `topic`, and resolves once the
  * group is joined — or with the refusal that stopped it.
  */
+/**
+ * `READ` — the fetch itself, not only the join (WRITE already implies
+ * DESCRIBE): reads `topic`/`partition` from `offset` as `principal` until a
+ * message arrives, or the reason it was refused.
+ */
+async function fetchAt(principal, groupId, topic, partition, offset) {
+  await coordinatorReady(groupId);
+  const consumer = client(principal).consumer({
+    groupId,
+    sessionTimeout: 10_000,
+    retry: { retries: 0 },
+  });
+  clients.push(consumer);
+  return new Promise((resolveRead) => {
+    const timer = setTimeout(() => resolveRead('TIMEOUT'), 30_000);
+    const done = (outcome) => {
+      clearTimeout(timer);
+      resolveRead(outcome);
+    };
+    consumer.on(consumer.events.CRASH, ({ payload }) => done(reason(payload?.error)));
+    (async () => {
+      await consumer.connect();
+      await consumer.subscribe({ topic, fromBeginning: false });
+      await consumer.run({
+        autoCommit: false,
+        eachMessage: async ({ partition: at, message }) => {
+          if (at === partition && BigInt(message.offset) >= BigInt(offset)) done('READ');
+        },
+      });
+      consumer.seek({ topic, partition, offset: String(offset) });
+    })().catch((error) => done(reason(error)));
+  });
+}
+
 async function consume(principal, groupId, topic) {
   await coordinatorReady(groupId);
   const consumer = client(principal).consumer({
@@ -429,6 +463,39 @@ describe('5. dead-letter and retry topics', () => {
     }
   });
 
+  test('ops-replay reads back the .retry it writes — --check-marker — in its own groups only', async () => {
+    // Round 3 on #166: the recovery check after an unknown commit runs as
+    // ops-replay, so the deployment ACLs must let it read the position.
+    const producer = await connected(
+      client('ops-replay').producer({ allowAutoTopicCreation: false }),
+    );
+    const [landed] = await producer.send({
+      topic: 'rasta.fleet.v1.retry',
+      acks: -1,
+      messages: [{ key: run, value: JSON.stringify({ aclTest: run, check: true }) }],
+    });
+    assert.equal(
+      await fetchAt(
+        'ops-replay',
+        `ops-replay.check.acl-${run}`,
+        'rasta.fleet.v1.retry',
+        landed.partition,
+        landed.baseOffset,
+      ),
+      'READ',
+    );
+    assert.equal(
+      await fetchAt(
+        'ops-replay',
+        `fleet-service.check.acl-${run}`,
+        'rasta.fleet.v1.retry',
+        landed.partition,
+        landed.baseOffset,
+      ),
+      'KafkaJSGroupCoordinatorNotFound',
+    );
+  });
+
   test('ops-replay may neither read the economic stream nor write its .retry — it never replays it', async () => {
     assert.equal(
       await consume('ops-replay', `ops-replay.acl-economic-${run}`, 'rasta.economic.v1'),
@@ -436,6 +503,14 @@ describe('5. dead-letter and retry topics', () => {
     );
     assert.equal(
       await refusal(() => produce('ops-replay', 'rasta.economic.v1.retry')),
+      'TOPIC_AUTHORIZATION_FAILED',
+    );
+    assert.equal(
+      await consume(
+        'ops-replay',
+        `ops-replay.acl-economic-retry-${run}`,
+        'rasta.economic.v1.retry',
+      ),
       'TOPIC_AUTHORIZATION_FAILED',
     );
   });

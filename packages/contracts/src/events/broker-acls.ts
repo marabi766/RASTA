@@ -67,7 +67,8 @@ export const BROKER_ADMIN_PRINCIPAL = 'admin';
 /**
  * The operator's replay tool: the only writer of `.retry`, the only reader of
  * `.dlq`, and a reader (never a writer) of every subscribed topic, for the
- * staleness check (docs/runbooks/replay-dlq.md). Its one original topic is its
+ * staleness check, and of each `.retry` it writes, for `--check-marker`
+ * (docs/runbooks/replay-dlq.md). Its one original topic is its
  * own record of what it replayed, `rasta.ops.replay.v1`, declared in
  * `TOPIC_PRODUCERS` like any producer's.
  */
@@ -157,8 +158,15 @@ export function brokerAcls(profile: BrokerProfile): AclBinding[] {
   // original topic, to tell whether a newer event exists for the stream key.
   // Neither, for a topic whose dead letters it never replays (the economic
   // stream): no READ of it and no WRITE of its `.retry`.
+  //
+  // It also READs each `.retry` it writes — and only those (round 3 on #166):
+  // after a commit whose answer was lost, `--check-marker` reads the replay's
+  // own position, read-committed, to learn whether it committed. Never the
+  // economic stream's `.retry`, which it neither writes nor reads.
   for (const name of declaredTopics()) {
-    if (!NEVER_AUTO_REPLAY_TOPICS.has(name)) topic(OPS_REPLAY_PRINCIPAL, retry(name), 'WRITE');
+    if (NEVER_AUTO_REPLAY_TOPICS.has(name)) continue;
+    topic(OPS_REPLAY_PRINCIPAL, retry(name), 'WRITE');
+    topic(OPS_REPLAY_PRINCIPAL, retry(name), 'READ');
   }
   for (const name of deadLetters) topic(OPS_REPLAY_PRINCIPAL, name, 'READ');
   for (const name of subscribedTopics) {

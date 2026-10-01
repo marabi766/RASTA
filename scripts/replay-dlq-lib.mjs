@@ -462,6 +462,129 @@ export function replayIdFor(reportId, operator, seq, eventId) {
   return `${reportId}/${operator}/${seq}/${eventId}`;
 }
 
+/**
+ * The transaction timeout of every replay's producer (`replay-dlq.mjs`): the
+ * longest a transaction may stay open before its coordinator aborts it.
+ * `--check-marker` answers `ABORTED` only once at least this long has passed
+ * since the replay (round 3 on #166).
+ */
+export const REPLAY_TRANSACTION_TIMEOUT_MS = 30_000;
+
+/** A stamp {@link replayIdFor} writes: report, operator, place in the run, event id. */
+export const REPLAY_MARKER_PATTERN =
+  /^rpl-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9._@-]{1,64}\/[1-9]\d*\/.+$/;
+
+/**
+ * `--check-marker <x-replay-id> --topic <.retry> --partition P --offset O
+ * --replayed-at <ISO>`: the one recovery step after `COMMIT OUTCOME UNKNOWN`
+ * (round 3 on #166). Every value comes from the warning, which prints the
+ * whole command.
+ */
+export function parseCheckArgs(argv) {
+  const options = {};
+  const flags = {
+    '--check-marker': 'marker',
+    '--topic': 'topic',
+    '--partition': 'partition',
+    '--offset': 'offset',
+    '--replayed-at': 'replayedAt',
+  };
+  for (let i = 0; i < argv.length; i += 2) {
+    const name = flags[argv[i]];
+    if (!name) throw new UsageError(`unknown argument ${argv[i]} with --check-marker`);
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith('--'))
+      throw new UsageError(`${argv[i]} needs a value`);
+    options[name] = next;
+  }
+  for (const [flag, name] of Object.entries(flags)) {
+    if (options[name] === undefined)
+      throw new UsageError(`${flag} is required with --check-marker`);
+  }
+  if (!REPLAY_MARKER_PATTERN.test(options.marker)) {
+    throw new UsageError('--check-marker must be an x-replay-id as the warning printed it');
+  }
+  if (!options.topic.endsWith('.retry')) throw new UsageError('--topic must be a .retry topic');
+  if (!OFFSET.test(options.partition) || !OFFSET.test(options.offset)) {
+    throw new UsageError('--partition and --offset must be numbers');
+  }
+  const replayedAtMs = Date.parse(options.replayedAt);
+  if (!Number.isFinite(replayedAtMs)) throw new UsageError('--replayed-at must be an ISO instant');
+  return {
+    marker: options.marker,
+    topic: options.topic,
+    partition: Number(options.partition),
+    offset: BigInt(options.offset),
+    replayedAtMs,
+  };
+}
+
+/** The command that answers an unknown commit, as the warning prints it. */
+export function checkMarkerCommand({ marker, topic, partition, offset, replayedAt }) {
+  return (
+    `node scripts/replay-dlq.mjs --check-marker '${marker}' --topic ${topic} ` +
+    `--partition ${partition} --offset ${offset} --replayed-at ${replayedAt}`
+  );
+}
+
+/**
+ * Whether the replay stamped `marker` at `offset` committed (round 3 on #166).
+ *
+ * - `COMMITTED` — a read-committed read finds the record at `offset`, with
+ *   exactly this stamp.
+ * - `ABORTED` — only when both hold: the partition's last stable offset is
+ *   past `offset` (every transaction that wrote there is decided, and a
+ *   read-committed read does not return it), **and** at least the producer's
+ *   transaction timeout has passed since the replay.
+ * - `STILL_UNKNOWN` — anything else. Never "absent" early: a transaction still
+ *   being resolved is not yet readable, and reading that as an abort would
+ *   replay it twice.
+ * - `MISMATCH` — the position holds another committed record: the arguments
+ *   are not this replay's.
+ *
+ * `record` is the read-committed record at `offset`, or null when that read
+ * returned none; `stableOffset` is the partition's last stable offset and
+ * `lowOffset` its first (a position retention removed answers nothing).
+ */
+export function markerVerdict({
+  marker,
+  offset,
+  lowOffset = 0n,
+  stableOffset,
+  record,
+  replayedAtMs,
+  nowMs,
+  transactionTimeoutMs = REPLAY_TRANSACTION_TIMEOUT_MS,
+}) {
+  if (record) {
+    if (record.replayId === marker) return { answer: 'COMMITTED' };
+    return {
+      answer: 'MISMATCH',
+      reason: `offset ${offset} holds another record (x-replay-id ${record.replayId ?? 'none'})`,
+    };
+  }
+  if (lowOffset > offset) {
+    return {
+      answer: 'STILL_UNKNOWN',
+      reason: `retention has removed offset ${offset} (the partition now starts at ${lowOffset}): it cannot be read either way`,
+    };
+  }
+  if (stableOffset <= offset) {
+    return {
+      answer: 'STILL_UNKNOWN',
+      reason: `the last stable offset is ${stableOffset}: a transaction at ${offset} may still be open`,
+    };
+  }
+  const waited = nowMs - replayedAtMs;
+  if (waited < transactionTimeoutMs) {
+    return {
+      answer: 'STILL_UNKNOWN',
+      reason: `only ${Math.max(0, Math.floor(waited / 1000))} s since the replay; ask again after ${transactionTimeoutMs / 1000} s`,
+    };
+  }
+  return { answer: 'ABORTED' };
+}
+
 /** The record published to `.retry`: body unchanged, keyed, platform headers and the replay stamp. */
 export function replayMessage(decision, replayId, REPLAY_HEADERS) {
   return {
@@ -613,11 +736,17 @@ export async function executeReplays(
       );
       warn(
         `COMMIT OUTCOME UNKNOWN for ${decision.summary.eventId} (${error.message}): its replay and ` +
-          `its ${contracts.REPLAY_EXECUTED} record are both committed or both not. It landed — if ` +
-          `committed — at ${decision.summary.target} partition ${line.replayPartition} offset ` +
-          `${line.replayOffset}: read that position read-committed and look for exactly ` +
-          `x-replay-id ${replayId}; any other x-replay-id, this run's earlier ones included, says ` +
-          'nothing about this event (runbook: docs/runbooks/replay-dlq.md, step 3). Stopped here.',
+          `its ${contracts.REPLAY_EXECUTED} record are both committed or both not. Before running ` +
+          'again, ask — and only this answers it (runbook: docs/runbooks/replay-dlq.md, step 3): ' +
+          checkMarkerCommand({
+            marker: replayId,
+            topic: decision.summary.target,
+            partition: line.replayPartition,
+            offset: line.replayOffset,
+            replayedAt: line.replayedAt,
+          }) +
+          ' — COMMITTED: done, do not replay it again; ABORTED: replay it again; STILL_UNKNOWN: ' +
+          'ask again later. Stopped here.',
       );
       return { written, recorded: written, failed: true };
     }

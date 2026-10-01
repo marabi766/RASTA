@@ -106,7 +106,12 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
   it('lets ops-replay read every replayable subscribed topic — for the staleness check — and write none of them', () => {
     const subscribed = new Set(Object.values(TOPIC_CONSUMERS).flatMap((c) => [...c.subscribes]));
     const reads = where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation: 'READ' })
-      .filter((acl) => acl.resourceType === 'TOPIC' && !DEAD_LETTERS.includes(acl.resourceName))
+      .filter(
+        (acl) =>
+          acl.resourceType === 'TOPIC' &&
+          !DEAD_LETTERS.includes(acl.resourceName) &&
+          !acl.resourceName.endsWith('.retry'),
+      )
       .map((acl) => acl.resourceName)
       .sort();
     expect(reads).toEqual([...subscribed].filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t)).sort());
@@ -171,6 +176,30 @@ describe.each(PROFILES)('brokerAcls(%s)', (profile) => {
         acl.operation,
       ]),
     ).toEqual([[OPS_REPLAY_PRINCIPAL, `${OPS_REPLAY_PRINCIPAL}.`, 'PREFIXED', 'WRITE']]);
+  });
+
+  it('lets ops-replay read exactly the .retry topics it writes — for --check-marker — never a never-replayed one', () => {
+    // Round 3 on #166: after a commit whose answer was lost, the tool reads
+    // the replay's own position read-committed, as ops-replay.
+    const retryOf = (operation: 'READ' | 'WRITE') =>
+      where(acls, { principal: OPS_REPLAY_PRINCIPAL, operation, resourceType: 'TOPIC' })
+        .map((acl) => acl.resourceName)
+        .filter((name) => name.endsWith('.retry'))
+        .sort();
+    expect(retryOf('READ')).toEqual(retryOf('WRITE'));
+    expect(retryOf('READ')).toEqual(
+      DECLARED_TOPICS.filter((t) => !NEVER_AUTO_REPLAY_TOPICS.has(t))
+        .map((t) => `${t}.retry`)
+        .sort(),
+    );
+    for (const name of NEVER_AUTO_REPLAY_TOPICS) {
+      expect(
+        where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceName: `${name}.retry` }),
+      ).toEqual([]);
+    }
+    for (const acl of where(acls, { principal: OPS_REPLAY_PRINCIPAL, resourceType: 'TOPIC' })) {
+      expect(acl.patternType).toBe('LITERAL');
+    }
   });
 
   it('grants groups only by prefix, and only within the principal’s own namespace (tools only describe)', () => {

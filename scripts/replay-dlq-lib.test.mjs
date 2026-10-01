@@ -14,7 +14,10 @@ import {
   operatorFrom,
   parseArgs,
   parseTopics,
+  markerVerdict,
+  parseCheckArgs,
   recordProblem,
+  REPLAY_TRANSACTION_TIMEOUT_MS,
   replayExecutedRecord,
   replayIdFor,
   replayMessage,
@@ -669,8 +672,14 @@ test('an unknown commit on the 2nd event names its own stamp and position, never
   );
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /^COMMIT OUTCOME UNKNOWN for EVT_2 /);
-  assert.ok(warnings[0].includes(`x-replay-id ${REPORT}/ops.alice/2/EVT_2`), warnings[0]);
-  assert.ok(warnings[0].includes('rasta.fleet.v1.retry partition 0 offset 1'), warnings[0]);
+  // The one recovery step, whole: this event's stamp, its position, its time.
+  assert.ok(
+    warnings[0].includes(
+      `--check-marker '${REPORT}/ops.alice/2/EVT_2' --topic rasta.fleet.v1.retry ` +
+        '--partition 0 --offset 1 --replayed-at 2026-09-30T08:00:00.000Z',
+    ),
+    warnings[0],
+  );
   // The stamp the warning names is not on the committed replay of EVT_1.
   const committedStamps = broker.committed
     .filter((s) => s.topic === 'rasta.fleet.v1.retry')
@@ -690,4 +699,70 @@ test('an event its record cannot state is refused by name before anything is sen
     'REPLAYABLE',
   );
   assert.equal(recordProblem(replayable().summary, contracts), null);
+});
+
+// ---- --check-marker (round 3 on #166) ------------------------------------
+
+const MARKER = `${REPORT}/ops.alice/2/EVT_2`;
+const CHECK = [
+  '--check-marker',
+  MARKER,
+  '--topic',
+  'rasta.fleet.v1.retry',
+  '--partition',
+  '0',
+  '--offset',
+  '41',
+  '--replayed-at',
+  '2026-09-30T08:00:00.000Z',
+];
+
+test('--check-marker takes the stamp, the position and the time the warning printed', () => {
+  assert.deepEqual(parseCheckArgs(CHECK), {
+    marker: MARKER,
+    topic: 'rasta.fleet.v1.retry',
+    partition: 0,
+    offset: 41n,
+    replayedAtMs: Date.parse('2026-09-30T08:00:00.000Z'),
+  });
+  assert.throws(() => parseCheckArgs(CHECK.slice(0, 8)), /--replayed-at is required/);
+  assert.throws(
+    () => parseCheckArgs(['--check-marker', `${REPORT}/ops.alice`, ...CHECK.slice(2)]),
+    UsageError,
+  );
+  assert.throws(
+    () => parseCheckArgs([...CHECK.slice(0, 3), 'rasta.fleet.v1', ...CHECK.slice(4)]),
+    /\.retry topic/,
+  );
+  assert.throws(() => parseCheckArgs([...CHECK, '--execute', 'x']), UsageError);
+});
+
+const at = Date.parse('2026-09-30T08:00:00.000Z');
+const verdict = (over) =>
+  markerVerdict({
+    marker: MARKER,
+    offset: 41n,
+    lowOffset: 0n,
+    stableOffset: 50n,
+    record: null,
+    replayedAtMs: at,
+    nowMs: at + REPLAY_TRANSACTION_TIMEOUT_MS,
+    ...over,
+  }).answer;
+
+test('COMMITTED only when the record at the position carries exactly this stamp', () => {
+  assert.equal(verdict({ record: { replayId: MARKER } }), 'COMMITTED');
+  assert.equal(verdict({ record: { replayId: `${REPORT}/ops.alice/1/EVT_1` } }), 'MISMATCH');
+  assert.equal(verdict({ record: { replayId: null } }), 'MISMATCH');
+});
+
+test('ABORTED only after the last stable offset passed the position AND the transaction timeout elapsed', () => {
+  assert.equal(verdict({}), 'ABORTED');
+  // Not yet stable: a transaction there may still be open.
+  assert.equal(verdict({ stableOffset: 41n }), 'STILL_UNKNOWN');
+  assert.equal(verdict({ stableOffset: 10n }), 'STILL_UNKNOWN');
+  // Stable, but too soon since the replay.
+  assert.equal(verdict({ nowMs: at + REPLAY_TRANSACTION_TIMEOUT_MS - 1 }), 'STILL_UNKNOWN');
+  // Retention removed the position: never "absent", never "aborted".
+  assert.equal(verdict({ lowOffset: 42n }), 'STILL_UNKNOWN');
 });
