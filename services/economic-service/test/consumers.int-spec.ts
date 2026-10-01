@@ -11,8 +11,17 @@ import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authori
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { CONSUMED_EVENTS } from '../src/events/consumed';
 import { recordCutoverIfMissing } from '../src/reward/evaluation-cutover';
-import { asActor, cleanup, newPrisma, tenants, wire, type Wiring } from './helpers';
+import {
+  asActor,
+  cleanup,
+  newPrisma,
+  ownerDatabaseUrl,
+  tenants,
+  wire,
+  type Wiring,
+} from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaClient } from '../src/generated/prisma';
 
 type Transaction = Parameters<Parameters<PrismaService['transaction']>[0]>[0];
 import { FakeSourceFacts } from './source-facts.fake';
@@ -1100,11 +1109,26 @@ describe('economic consumers', () => {
     await expect(
       attempt((tx) => tx.rewardEvaluationCutover.delete({ where: { singleton: true } })),
     ).rejects.toThrow(/may only move forward/);
+    // The service's role may not truncate at all (D-045: it holds DML only)…
     await expect(
       // ISOLATION-ALLOW-UNBOUNDED: asserts TRUNCATE is refused, which only a
       // TRUNCATE can test; the transaction is rolled back whatever happens.
       attempt((tx) => tx.$executeRawUnsafe('TRUNCATE "reward_evaluation_cutover"')),
-    ).rejects.toThrow(/may only move forward/);
+    ).rejects.toThrow(/permission denied/);
+    // …and the trigger still refuses the owner, whose TRUNCATE would be a
+    // migration's or an operator's. Rolled back the same way.
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await expect(
+        owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe('TRUNCATE "reward_evaluation_cutover"');
+          throw rollback;
+        }),
+      ).rejects.toThrow(/may only move forward/);
+    } finally {
+      await owner.$disconnect();
+    }
 
     // Forward is allowed (it only refuses more), and rolled back here so the
     // rest of the suite keeps its cutover.

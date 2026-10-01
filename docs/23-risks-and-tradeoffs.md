@@ -1045,7 +1045,8 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `SELECT/INSERT/UPDATE` لازم؛ آزمونی که نبودنِ `ALTER TABLE` را با نقش اجرا ثابت کند (مثل `runtime-privileges.int-spec.ts`).
 - **اولویت:** بالا (RUN-002)
 - **ثبت‌شده:** 2026-10-01
-- **وضعیت:** در حال رفع (2026-10-01، `fix/d045-db-role-split`). سازوکار مشترک ساخته شد: `lib/service-privilege-split.bash`
+- **وضعیت:** **رفع‌شده** (2026-10-01؛ چهار PR: `fix/d045-db-role-split`، `fix/d045-split-identity-notification`،
+  `fix/d045-split-remaining`، `fix/d045-split-economic`). سازوکار مشترک ساخته شد: `lib/service-privilege-split.bash`
   برای هر سرویس در `PRIVILEGE_SPLIT_SERVICES` پایگاه داده و همهٔ اشیای آن را به `rasta_<svc>_migrator` می‌دهد و به نقش
   اجرا فقط DML (با `ALTER DEFAULT PRIVILEGES`)؛ `scripts/prisma.mjs` حق نقش اجرا روی `_prisma_migrations` را پس از هر
   Migration می‌گیرد؛ `scripts/check-db-runtime-privileges.mjs` در CI شکست می‌خورد اگر نقش اجرای یک سرویس تقسیم‌شده مالک
@@ -1056,8 +1057,10 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس از آن
   organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement، inventory،
   contract، analytics) — `fix/d045-split-remaining`؛ Schema آزمایشی پروتکل Outbox در document اکنون با مهاجر ساخته
-  می‌شود. **باقی‌مانده** (`PENDING_SPLIT`): فقط **economic** (Helper آزمونش Triggerهای دفتر کل را با اتصال اجرا برمی‌دارد؛
-  واگذاری آن با مدیر پروژه، issue #150)؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook:
+  می‌شود. آخر **economic** (`fix/d045-split-economic`): هفت Trigger دفتر کل و برش پاداش و CHECK `ck_wallet_balances` در
+  برابر نقش اجرا `42501` می‌دهند؛ پاک‌سازی آزمون‌ها Triggerهای دفتر کل را فقط با اتصال مهاجر
+  (`DATABASE_URL_ECONOMIC_MIGRATOR`، بی بازگشت) برمی‌دارد. اکنون **هر** سرویس در `PRIVILEGE_SPLIT_SERVICES` است (audit با
+  تقسیم خودش)؛ فهرست «در انتظار» حذف شد و `check:db-runtime-privileges` هر سرویس تازه‌ای را که تقسیم نشده رد می‌کند. Runbook:
   `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری

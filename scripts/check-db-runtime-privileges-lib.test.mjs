@@ -1,14 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  FINDINGS_SQL,
-  PENDING_SPLIT,
-  classifyServices,
-  verdict,
-} from './check-db-runtime-privileges-lib.mjs';
+import { FINDINGS_SQL, classifyServices, verdict } from './check-db-runtime-privileges-lib.mjs';
 import { servicesFromLibrary, splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
-test('every service is placed exactly once: split, audit or pending (D-045)', () => {
+test('every service is placed exactly once: split or audit (D-045)', () => {
   const placed = classifyServices();
   assert.deepEqual(
     placed.map((entry) => entry.service),
@@ -21,26 +16,26 @@ test('every service is placed exactly once: split, audit or pending (D-045)', ()
       .sort(),
     [...splitServicesFromLibrary()].sort(),
   );
-  assert.ok(splitServicesFromLibrary().includes('construction'));
-  assert.ok(!PENDING_SPLIT.includes('construction'));
+  assert.ok(splitServicesFromLibrary().includes('economic'));
+  assert.ok(!splitServicesFromLibrary().includes('audit'));
   for (const entry of placed) {
     assert.equal(entry.database, `rasta_${entry.service}`);
     assert.equal(entry.runtime, `rasta_${entry.service}`);
   }
 });
 
-test('a service in no list, in two, or unknown is refused — a new service has to be placed', () => {
+test('a service not split, split twice over, or unknown is refused — a new service has to be split', () => {
   const services = ['a', 'b', 'audit'];
   assert.throws(
-    () => classifyServices({ services, split: ['a'], pending: [] }),
-    /b: in RASTA_SERVICES but neither split nor pending/,
+    () => classifyServices({ services, split: ['a'] }),
+    /b: in RASTA_SERVICES but not in PRIVILEGE_SPLIT_SERVICES/,
   );
   assert.throws(
-    () => classifyServices({ services, split: ['a', 'b'], pending: ['b'] }),
-    /b is both split and pending/,
+    () => classifyServices({ services, split: ['a', 'b', 'audit'] }),
+    /audit is both split and audit/,
   );
   assert.throws(
-    () => classifyServices({ services, split: ['a', 'b', 'c'], pending: [] }),
+    () => classifyServices({ services, split: ['a', 'b', 'c'] }),
     /c is not in RASTA_SERVICES/,
   );
 });
@@ -56,14 +51,6 @@ test('a split service fails on any finding and passes on none', () => {
     verdict({ service: 'audit', kind: 'audit' }, ['owns database rasta_audit']).ok,
     false,
   );
-});
-
-test('a pending service must still fail: one that passes is a stale entry, and fails the check', () => {
-  const pending = { service: 'economic', kind: 'pending' };
-  assert.equal(verdict(pending, ['owns database rasta_economic']).ok, true);
-  const stale = verdict(pending, []);
-  assert.equal(stale.ok, false);
-  assert.match(stale.line, /move it to PRIVILEGE_SPLIT_SERVICES/);
 });
 
 test('the query asks about every right the PM ruled out, through role membership', () => {

@@ -605,6 +605,9 @@ export const EXPECTED = {
     ],
   },
   economic: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_economic.
+    connectAs: 'migrator',
     tables: [
       'wallet',
       'ledger_account',

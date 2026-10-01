@@ -8,22 +8,14 @@
 import { servicesFromLibrary, splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 /**
- * Services whose runtime role still owns its database and tables, each to be
- * split in its own PR (D-045, issue #150). The check expects these to FAIL and
- * fails CI when one of them passes — a stale entry would hide a regression —
- * so this list only ever shrinks, until it is empty and D-045 is resolved.
- */
-export const PENDING_SPLIT = Object.freeze(['economic']);
-
-/**
- * Every service's place in the split: `split` (lib/service-privilege-split.bash),
- * `audit` (its own schema, and its database since D-045) or `pending`. Throws
- * when a service is in no list or in two — a new service has to be placed.
+ * Every service's place in the split: `split` (lib/service-privilege-split.bash)
+ * or `audit` (its own schema, and its database since D-045). Throws when a
+ * service is in neither or is unknown — a new service is split from its first
+ * migration, by adding it to PRIVILEGE_SPLIT_SERVICES.
  */
 export function classifyServices({
   services = servicesFromLibrary(),
   split = splitServicesFromLibrary(),
-  pending = PENDING_SPLIT,
 } = {}) {
   const placed = new Map();
   const place = (service, kind) => {
@@ -34,14 +26,13 @@ export function classifyServices({
   };
   for (const service of split) place(service, 'split');
   place('audit', 'audit');
-  for (const service of pending) place(service, 'pending');
   for (const service of placed.keys()) {
     if (!services.includes(service)) throw new Error(`${service} is not in RASTA_SERVICES`);
   }
   const unplaced = services.filter((service) => !placed.has(service));
   if (unplaced.length > 0) {
     throw new Error(
-      `${unplaced.join(', ')}: in RASTA_SERVICES but neither split nor pending (D-045)`,
+      `${unplaced.join(', ')}: in RASTA_SERVICES but not in PRIVILEGE_SPLIT_SERVICES (D-045)`,
     );
   }
   return services.map((service) => ({
@@ -123,25 +114,8 @@ SELECT finding FROM (
 ORDER BY finding;
 `;
 
-/**
- * The verdict for one service, from its findings.
- *
- *   split / audit  — must hold nothing: any finding fails.
- *   pending        — expected to own its database; if it holds nothing it was
- *                    split without being moved off PENDING_SPLIT, and that
- *                    stale entry fails too.
- */
-export function verdict({ service, kind }, findings) {
-  if (kind === 'pending') {
-    return findings.length > 0
-      ? { ok: true, line: `${service}: pending (D-045) — runtime role still owns its database` }
-      : {
-          ok: false,
-          line:
-            `${service}: holds nothing a runtime role may not, but is still on PENDING_SPLIT — ` +
-            'move it to PRIVILEGE_SPLIT_SERVICES',
-        };
-  }
+/** The verdict for one service, from its findings: any finding fails. */
+export function verdict({ service }, findings) {
   if (findings.length === 0) return { ok: true, line: `${service}: runtime role owns nothing` };
   return {
     ok: false,

@@ -77,9 +77,12 @@ Repository هیچ IaC پایگاه داده ندارد؛ DBA باید همین �
 - همان دستورهای `service-privilege-split.bash` (با Superuser یا نقش ادمین مدیریت‌شده) یک بار، سپس Migrationها با مهاجر.
 - `scripts/check-db-runtime-privileges.mjs` را پس از هر استقرار با یک نقش فقط‌خواندنیِ Catalogue اجرا کنید.
 
-## ۶. افزودن سرویس به تقسیم (هر PR بعدی D-045)
+## ۶. افزودن سرویس تازه
 
-1. سرویس را از `PENDING_SPLIT` (`scripts/check-db-runtime-privileges-lib.mjs`) به `PRIVILEGE_SPLIT_SERVICES` ببر.
+از پایان D-045 هر سرویس تقسیم‌شده است و `check:db-runtime-privileges` سرویسی را که در `RASTA_SERVICES` هست ولی در
+`PRIVILEGE_SPLIT_SERVICES` نیست رد می‌کند؛ پس سرویس تازه از نخستین Migration تقسیم‌شده به دنیا می‌آید:
+
+1. سرویس را به `PRIVILEGE_SPLIT_SERVICES` (`lib/role-passwords.bash`) اضافه کن.
 2. `POSTGRES_PASSWORD_<SVC>_MIGRATOR` در `.env.example` و `docker-compose.yml`؛ `DATABASE_URL_<SVC>_MIGRATOR` در
    `.env.example` و در **هر** `env:` CI که Migration آن سرویس را اجرا می‌کند.
 3. `connectAs: 'migrator'` در `scripts/verify-migration-reversible-lib.mjs` (نقش اجرا نه Schema می‌سازد نه Database).
@@ -93,4 +96,4 @@ Repository هیچ IaC پایگاه داده ندارد؛ DBA باید همین �
 
 - **سرویس تقسیم‌شده با یافته:** Migrationی جدولی را با نقش اجرا ساخته (URL مهاجر تنظیم نبوده) یا کسی دستی Grant داده
   است. گام‌های ۴٫۲ تا ۴٫۴ را دوباره اجرا کن؛ اسکریپت Idempotent است.
-- **سرویس `PENDING_SPLIT` بی یافته:** تقسیم انجام شده ولی ثبت نشده — سرویس را به `PRIVILEGE_SPLIT_SERVICES` ببر.
+- **«in RASTA_SERVICES but not in PRIVILEGE_SPLIT_SERVICES»:** سرویس تازه‌ای بی تقسیم اضافه شده — گام‌های § ۶.
