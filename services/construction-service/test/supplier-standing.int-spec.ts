@@ -1,7 +1,7 @@
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { UnprocessableEventError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { cleanup, newOrganizationId, wire, type Wiring } from './helpers';
+import { cleanup, loadStanding, newOrganizationId, wire, type Wiring } from './helpers';
 
 /**
  * CON-002 PR 5 (ADR-067 § 4): the contractor-standing read model, folded from
@@ -55,8 +55,10 @@ describe('contractor standing follows supplier-service events', () => {
   const handle = (e: EventEnvelope) => w.supplierEvents.handle(e);
   const eligible = (organizationId: string) => w.standing.isEligible(organizationId);
 
-  beforeAll(() => {
+  beforeAll(async () => {
     w = wire();
+    // Folding is what is under test; the standing is loaded (bootstrapped), or nobody is eligible.
+    await loadStanding(w);
   });
 
   afterAll(async () => {
