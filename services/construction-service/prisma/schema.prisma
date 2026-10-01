@@ -498,10 +498,75 @@ model Tender {
   /// The compare-and-set token. Every change matches on it and increments it.
   version Int @default(1)
 
+  criteria TenderCriterion[]
+
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
   @@index([organizationId, projectId, status], map: "ix_tender_org_project_status")
   @@map("tender")
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation criteria — data, never code (ADR-067 § 1)
+// ---------------------------------------------------------------------------
+
+/// The scoring methods the code implements (a closed set; ADR-067 § 1, Q-88).
+/// The weights and the maximum score are data; a new method is code and an ADR.
+enum ScoringMethod {
+  MANUAL_SCORE
+  PASS_FAIL
+}
+
+/// An organization's reusable set of criteria, versioned: a change is a new row,
+/// never an edit, so a tender that copied version 2 can always say what version
+/// 2 was. The criteria are a JSON array validated at the boundary and checked
+/// to be an array by the database.
+model CriteriaTemplate {
+  id String @id
+
+  organizationId String @map("organization_id")
+  label          String
+  version        Int
+  /// [{ code, label, weightBp, scoringMethod, maxScore }], as `criterionInputSchema`.
+  criteria       Json
+
+  createdAt            DateTime @map("created_at")
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+
+  @@unique([organizationId, label, version], map: "ux_criteria_template_label_version")
+  @@index([organizationId, id], map: "ix_criteria_template_org_id")
+  @@map("criteria_template")
+}
+
+/// One criterion of one tender. Copied from a template (or written out) while
+/// the tender is a DRAFT, and frozen when it is published (threat C3, docs/09):
+/// a trigger refuses any change once the tender is not a DRAFT.
+model TenderCriterion {
+  id String @id
+
+  organizationId String @map("organization_id")
+  tenderId       String @map("tender_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  position      Int
+  code          String
+  label         String
+  /// Basis points of the total; the weights of a published tender sum to 10000.
+  weightBp      Int           @map("weight_bp")
+  scoringMethod ScoringMethod @map("scoring_method")
+  maxScore      Int           @map("max_score")
+  /// Provenance only: the template this was copied from. Not a foreign key.
+  templateId    String?       @map("template_id")
+
+  createdAt DateTime @map("created_at")
+  createdBy String   @map("created_by")
+
+  @@unique([organizationId, tenderId, code], map: "ux_tender_criterion_code")
+  @@unique([organizationId, tenderId, position], map: "ux_tender_criterion_position")
+  @@index([organizationId, tenderId], map: "ix_tender_criterion_org_tender")
+  @@map("tender_criterion")
 }
 
 // ---------------------------------------------------------------------------

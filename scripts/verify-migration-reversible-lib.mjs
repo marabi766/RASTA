@@ -926,8 +926,24 @@ export const EXPECTED = {
       'project',
       'project_need',
       'tender',
+      'criteria_template',
+      'tender_criterion',
     ],
-    triggers: [],
+    // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
+    // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
+    triggers: [
+      'tg_tender_criterion_freeze',
+      'tg_tender_publish_requires_criteria',
+      'tg_tender_status_transition',
+      'tg_criteria_template_append_only',
+      'tg_criteria_template_no_truncate',
+    ],
+    functions: [
+      'tender_criterion_freeze',
+      'tender_publish_requires_criteria',
+      'tender_status_transition_guard',
+      'criteria_template_append_only',
+    ],
     constraints: [
       'ck_project_text_not_blank',
       'ck_project_actor_recorded',
@@ -996,6 +1012,17 @@ export const EXPECTED = {
       'ck_tender_window_ordered',
       'ck_tender_published_complete',
       'ck_tender_cancellation_has_reason',
+      // 20260930170000_tender_criteria (CON-002 PR 4a, ADR-067 § 1).
+      'tender_criterion_organization_id_tender_id_fkey',
+      'ck_criteria_template_text_not_blank',
+      'ck_criteria_template_version_positive',
+      'ck_criteria_template_is_array',
+      'ck_criteria_template_actor_recorded',
+      'ck_criterion_text_not_blank',
+      'ck_criterion_weight_range',
+      'ck_criterion_position_positive',
+      'ck_criterion_max_score',
+      'ck_criterion_actor_recorded',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

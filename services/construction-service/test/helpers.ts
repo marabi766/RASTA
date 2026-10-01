@@ -1,5 +1,6 @@
 import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
 import { ProjectRepository } from '../src/project/project.repository';
@@ -10,6 +11,8 @@ import { IdempotencyStore } from '../src/shared/idempotency';
 import { ApprovalRepository } from '../src/approval/approval.repository';
 import { TenderRepository } from '../src/tender/tender.repository';
 import { TenderService } from '../src/tender/tender.service';
+import { CriteriaRepository } from '../src/tender/criteria.repository';
+import { CriteriaService } from '../src/tender/criteria.service';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
 import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
@@ -50,6 +53,25 @@ export function databaseUrl(): string {
   return url;
 }
 
+/**
+ * The owner connection the suites' cleanup alone may use to lift a trigger
+ * (`DATABASE_URL_CONSTRUCTION_MIGRATOR`). **Required, with no fallback** to the
+ * runtime URL: a suite that quietly fell back would be switching guards off with
+ * the service's own credentials, which is what the owner connection exists to
+ * keep apart. Construction's runtime role still owns its tables today (docs/23
+ * D-045), so the value may name the same role — but it must be named on purpose.
+ */
+export function ownerDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL_CONSTRUCTION_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_CONSTRUCTION_MIGRATOR is not set. The suites lift an integrity trigger only ' +
+        'through the owner connection, never the runtime one; see .env.example (docs/23 D-045).',
+    );
+  }
+  return url;
+}
+
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {
   return loadConstructionEnv({
     ...process.env,
@@ -85,6 +107,8 @@ export interface Wiring {
   needs: NeedService;
   tenderRepository: TenderRepository;
   tenders: TenderService;
+  criteriaRepository: CriteriaRepository;
+  criteria: CriteriaService;
   approvalRepository: ApprovalRepository;
   approvals: ApprovalService;
   policies: PolicyService;
@@ -116,6 +140,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const idempotency = new IdempotencyStore(prisma, env);
   const approvalRepository = new ApprovalRepository(prisma);
   const tenderRepository = new TenderRepository(prisma);
+  const criteriaRepository = new CriteriaRepository(prisma);
   const projects = new ProjectService(
     prisma,
     repository,
@@ -171,6 +196,15 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
     tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
+    criteriaRepository,
+    criteria: new CriteriaService(
+      prisma,
+      criteriaRepository,
+      tenderRepository,
+      events,
+      access,
+      idempotency,
+    ),
     approvalRepository,
     approvals,
     policies: new PolicyService(
@@ -269,21 +303,49 @@ export const BOW_TIE = {
  * Removes everything the given organizations wrote. Children before parents:
  * every foreign key is `ON DELETE RESTRICT`.
  */
-export async function cleanup(prisma: PrismaService, organizationIds: string[]): Promise<void> {
+export async function cleanup(_prisma: PrismaService, organizationIds: string[]): Promise<void> {
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
-  await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
-    await prisma.client.tender.deleteMany({ where });
-    await prisma.client.approval.deleteMany({ where });
-    await prisma.client.progressReport.deleteMany({ where });
-    await prisma.client.policyReconciliationTask.deleteMany({ where });
-    await prisma.client.approvalPolicyStep.deleteMany({ where });
-    await prisma.client.approvalPolicy.deleteMany({ where });
-    await prisma.client.projectNeed.deleteMany({ where });
-    await prisma.client.project.deleteMany({ where });
-    await prisma.client.idempotencyKey.deleteMany({ where });
-    await prisma.client.outboxMessage.deleteMany({ where });
-  });
+  // The suite's own removal of what it wrote goes through the **owner**
+  // connection (the one migrations use), never the runtime `PrismaService` under
+  // test: a trigger that protects rows from the service must not be switched off
+  // with the service's connection, or the suites would teach the code to do it.
+  // The owner client carries no tenant guard, so it needs no `runUnscoped`.
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    // A cancelled or published tender's criteria are frozen, and a criteria
+    // template is append-only, for every writer (threat C3), so both are lifted
+    // for the length of one transaction — DDL is transactional, so a failure
+    // puts them back.
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_criterion" DISABLE TRIGGER "tg_tender_criterion_freeze"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "criteria_template" DISABLE TRIGGER "tg_criteria_template_append_only"',
+      );
+      await tx.tenderCriterion.deleteMany({ where });
+      await tx.criteriaTemplate.deleteMany({ where });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "criteria_template" ENABLE TRIGGER "tg_criteria_template_append_only"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_criterion" ENABLE TRIGGER "tg_tender_criterion_freeze"',
+      );
+    });
+    await owner.tender.deleteMany({ where });
+    await owner.approval.deleteMany({ where });
+    await owner.progressReport.deleteMany({ where });
+    await owner.policyReconciliationTask.deleteMany({ where });
+    await owner.approvalPolicyStep.deleteMany({ where });
+    await owner.approvalPolicy.deleteMany({ where });
+    await owner.projectNeed.deleteMany({ where });
+    await owner.project.deleteMany({ where });
+    await owner.idempotencyKey.deleteMany({ where });
+    await owner.outboxMessage.deleteMany({ where });
+  } finally {
+    await owner.$disconnect();
+  }
 }
 
 /**
@@ -348,6 +410,34 @@ export async function waitFor<T>(
     if (Date.now() > deadline)
       throw new Error(`Timed out after ${timeoutMs}ms waiting for ${describe}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/**
+ * Waits until some database session is blocked on a lock — proof, not hope, that
+ * a command started while another holds a row lock is really queued behind it
+ * (Codex, LOW on #162: a gated test released the first command without showing
+ * the second was waiting). Bounded by wall clock, not by turns; suites run in
+ * band, so a waiting session is the one the test started.
+ */
+export async function untilASessionWaitsOnALock(
+  prisma: PrismaService,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await prisma.client.$queryRawUnsafe<{ waiting: bigint }[]>(
+      `SELECT count(*) AS waiting
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND pid <> pg_backend_pid()`,
+    );
+    if (Number(rows[0]?.waiting ?? 0) > 0) return;
+    if (Date.now() > deadline) {
+      throw new Error(`No session was waiting on a lock after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
 

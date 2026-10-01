@@ -57,6 +57,9 @@ import { ProgressService } from './progress/progress.service';
 import { TenderRepository } from './tender/tender.repository';
 import { TenderService } from './tender/tender.service';
 import { TenderController } from './tender/tender.controller';
+import { CriteriaRepository } from './tender/criteria.repository';
+import { CriteriaService } from './tender/criteria.service';
+import { CriteriaController } from './tender/criteria.controller';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import {
@@ -93,6 +96,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     PolicyController,
     ApprovalController,
     TenderController,
+    CriteriaController,
     HealthController,
     MetricsController,
   ],
@@ -137,6 +141,8 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     TenderRepository,
     ProjectService,
     TenderService,
+    CriteriaRepository,
+    CriteriaService,
     NeedService,
     ApprovalRepository,
     ApprovalService,
