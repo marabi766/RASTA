@@ -41,6 +41,25 @@ export type ReportRequestFormState =
    * The same submission is still being processed (round 1 on PR 171): kept as
    * typed, with the same submission id, for a retry after `Retry-After`.
    */
-  | InProgressWriteState<ReportRequestFormValues>;
+  | InProgressWriteState<ReportRequestFormValues>
+  /**
+   * The person chose to change what they sent while it was still in flight
+   * (round 2 on PR 171): their values again, under a **new** bound submission
+   * id. An edited form is a new request — never a changed body under the
+   * first one's id, which the service refuses as IDEMPOTENCY_KEY_REUSED.
+   */
+  | {
+      readonly kind: 'EDITING';
+      readonly submissionId: string;
+      readonly values: ReportRequestFormValues;
+    };
 
 export const IDLE_REPORT_REQUEST_FORM: ReportRequestFormState = { kind: 'IDLE' };
+
+/**
+ * The submit button that asks for a new submission id instead of sending —
+ * "edit and send as new" while a submission is in flight. Here rather than in
+ * `actions.ts`, which as a `'use server'` file exports only async functions.
+ */
+export const REPORT_INTENT_FIELD = 'intent';
+export const EDIT_AS_NEW_INTENT = 'edit-as-new';

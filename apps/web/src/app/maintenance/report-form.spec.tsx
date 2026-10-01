@@ -1,11 +1,11 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_REPORT_REQUEST_FORM } from '@/lib/maintenance-fields';
 
 import { ReportRequestForm } from './ReportRequestForm';
-import type { ReportRequestFormState } from './form-state';
+import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } from './form-state';
 
 /**
  * The report form in every state its own action can put it in. Same technique
@@ -159,7 +159,7 @@ describe('the report form after an attempt', () => {
         'sub_CCCCCCCCCCCCCCCCCCCC',
       );
       expect(container.querySelector('[aria-invalid="true"]')).toBeNull();
-      const button = screen.getByRole('button');
+      const button = screen.getByRole('button', { name: /کمی صبر کنید|ثبت درخواست/ });
       expect(button).toBeDisabled();
 
       await act(async () => {
@@ -174,6 +174,60 @@ describe('the report form after an attempt', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('sends exactly what was sent while a submission is in flight: an edit attempt changes nothing that is posted', async () => {
+    // Round 2 on PR 171: a changed body under the same submission id would be
+    // refused as IDEMPOTENCY_KEY_REUSED instead of answered with the first
+    // result. The retry carries the original values; the controls post nothing.
+    const { container } = renderForm({
+      kind: 'IN_PROGRESS',
+      submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
+      values: VALUES,
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    const form = container.querySelector('form') as HTMLFormElement;
+
+    for (const name of Object.keys(VALUES)) {
+      const control = form.querySelector(`[name="${name}"]:not([type="hidden"])`);
+      expect([name, control]).toEqual([name, expect.anything()]);
+      expect(control).toBeDisabled();
+    }
+
+    // The attempt: a value typed into the title, by any means.
+    fireEvent.change(form.querySelector('[name="title"]:not([type="hidden"])') as Element, {
+      target: { value: 'عنوانی دیگر' },
+    });
+
+    const posted = new FormData(form);
+    for (const [name, value] of Object.entries(VALUES)) {
+      expect([name, posted.getAll(name)]).toEqual([name, [value]]);
+    }
+    expect(posted.get(SUBMISSION_FIELD)).toBe('sub_CCCCCCCCCCCCCCCCCCCC');
+    expect(posted.get(REPORT_INTENT_FIELD)).toBeNull();
+
+    // Changing it is a separate action that asks for a new submission id.
+    const editAsNew = screen.getByRole('button', { name: 'ویرایش و ارسال جدید' });
+    expect(editAsNew).toBeEnabled();
+    expect(editAsNew).toHaveAttribute('name', REPORT_INTENT_FIELD);
+    expect(editAsNew).toHaveAttribute('value', EDIT_AS_NEW_INTENT);
+  });
+
+  it('offers the values for editing under the new submission id it was given, as a new request', async () => {
+    const { container } = renderForm({
+      kind: 'EDITING',
+      submissionId: 'sub_DDDDDDDDDDDDDDDDDDDD',
+      values: VALUES,
+    });
+    const form = container.querySelector('form') as HTMLFormElement;
+    expect(form.querySelector('[name="title"]')).toBeEnabled();
+    expect(form.querySelector('[name="title"]')).toHaveValue('نشتی روغن');
+    expect(form.querySelectorAll('input[type="hidden"][name="title"]')).toHaveLength(0);
+    expect(new FormData(form).get(SUBMISSION_FIELD)).toBe('sub_DDDDDDDDDDDDDDDDDDDD');
+    expect(screen.getByText(/این یک درخواست تازه است/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'ویرایش و ارسال جدید' })).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it('shows a rule the service did not attach to a field as a message for the form', async () => {

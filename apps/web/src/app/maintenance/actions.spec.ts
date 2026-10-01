@@ -2,10 +2,10 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
-import { IDLE_REPORT_REQUEST_FORM } from './form-state';
+import { EDIT_AS_NEW_INTENT, IDLE_REPORT_REQUEST_FORM, REPORT_INTENT_FIELD } from './form-state';
 
 /**
  * The `/maintenance` report form's write path, from a posted form to a call on
@@ -345,6 +345,35 @@ describe('what the service refuses', () => {
       correlationId: 'corr-sample',
     });
     expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('answers "edit and send as new" with the values under a NEW bound submission id, sending nothing', async () => {
+    // Round 2 on PR 171: the edited form is a new request, never a changed body
+    // under the first submission's id.
+    const first = mintSubmissionId(SESSION);
+    const form = formData({ ...VALID, title: 'عنوانی دیگر' }, { submission: first });
+    form.set(REPORT_INTENT_FIELD, EDIT_AS_NEW_INTENT);
+
+    const state = await submitReportRequest(IDLE_REPORT_REQUEST_FORM, form);
+
+    expect(reportMaintenanceRequest).not.toHaveBeenCalled();
+    expect(state).toEqual({
+      kind: 'EDITING',
+      submissionId: expect.any(String),
+      values: expect.objectContaining({ title: 'عنوانی دیگر', assetId: VALID.assetId }),
+    });
+    const fresh = (state as { submissionId: string }).submissionId;
+    expect(fresh).not.toBe(first);
+    expect(isBoundSubmissionId(fresh, SESSION)).toBe(true);
+  });
+
+  it('still checks the session, CSRF and the submission id before "edit and send as new"', async () => {
+    const form = formData(VALID, { csrf: 'not-this-session' });
+    form.set(REPORT_INTENT_FIELD, EDIT_AS_NEW_INTENT);
+    expect(await submitReportRequest(IDLE_REPORT_REQUEST_FORM, form)).toEqual({
+      kind: 'REFUSED',
+      reason: 'CSRF',
+    });
   });
 
   it('reports an outage with its status and correlation id', async () => {

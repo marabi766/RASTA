@@ -14,7 +14,12 @@ import {
 } from '@/lib/maintenance-fields';
 
 import { submitReportRequest } from './actions';
-import { IDLE_REPORT_REQUEST_FORM, type ReportRequestFormState } from './form-state';
+import {
+  EDIT_AS_NEW_INTENT,
+  IDLE_REPORT_REQUEST_FORM,
+  REPORT_INTENT_FIELD,
+  type ReportRequestFormState,
+} from './form-state';
 
 /**
  * The report form (ثبت درخواست) — a breakdown somebody is standing next to, or
@@ -38,7 +43,12 @@ const LABELS: Record<ReportRequestField, string> = {
 };
 
 function valuesOf(state: ReportRequestFormState, initialAssetId: string): ReportRequestFormValues {
-  if (state.kind === 'INVALID' || state.kind === 'NOT_FOUND' || state.kind === 'IN_PROGRESS') {
+  if (
+    state.kind === 'INVALID' ||
+    state.kind === 'NOT_FOUND' ||
+    state.kind === 'IN_PROGRESS' ||
+    state.kind === 'EDITING'
+  ) {
     return state.values;
   }
   return { ...EMPTY_REPORT_REQUEST_FORM, assetId: initialAssetId };
@@ -74,10 +84,19 @@ export function ReportRequestForm({
   const values = valuesOf(state, initialAssetId);
   const errors = errorsOf(state);
   const currentSubmissionId =
-    state.kind === 'INVALID' || state.kind === 'NOT_FOUND' || state.kind === 'IN_PROGRESS'
+    state.kind === 'INVALID' ||
+    state.kind === 'NOT_FOUND' ||
+    state.kind === 'IN_PROGRESS' ||
+    state.kind === 'EDITING'
       ? state.submissionId
       : submissionId;
   const waiting = useRetryAfter(state);
+  // While a submission is in flight its retry must send exactly what was sent
+  // (round 2 on PR 171): a changed body under the same id is refused as
+  // IDEMPOTENCY_KEY_REUSED rather than answered with the first result. The
+  // controls are disabled — so they post nothing — and the original values
+  // travel in hidden fields; changing them is "edit and send as new".
+  const locked = state.kind === 'IN_PROGRESS';
 
   return (
     <form action={action} className="flex flex-col gap-4">
@@ -85,6 +104,7 @@ export function ReportRequestForm({
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
 
       <FormBanner state={state} />
+      {locked && <SentValues values={values} />}
 
       <Field label={LABELS.assetId} required error={errors.assetId} hint="مانند AST_01J…">
         {(control) => (
@@ -95,6 +115,7 @@ export function ReportRequestForm({
             dir="ltr"
             autoComplete="off"
             className={controlClassName}
+            disabled={locked}
           />
         )}
       </Field>
@@ -107,6 +128,7 @@ export function ReportRequestForm({
               name="type"
               defaultValue={values.type}
               className={controlClassName}
+              disabled={locked}
             >
               {maintenanceTypeOptions.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -128,6 +150,7 @@ export function ReportRequestForm({
               name="severity"
               defaultValue={values.severity}
               className={controlClassName}
+              disabled={locked}
             >
               <option value="">—</option>
               {severityOptions.map((option) => (
@@ -148,6 +171,7 @@ export function ReportRequestForm({
             defaultValue={values.title}
             maxLength={200}
             className={controlClassName}
+            disabled={locked}
           />
         )}
       </Field>
@@ -160,6 +184,7 @@ export function ReportRequestForm({
             rows={3}
             defaultValue={values.description}
             className={controlClassName}
+            disabled={locked}
           />
         )}
       </Field>
@@ -177,6 +202,7 @@ export function ReportRequestForm({
               name="outOfServiceAt"
               defaultValue={values.outOfServiceAt}
               className={controlClassName}
+              disabled={locked}
             />
           )}
         </Field>
@@ -189,6 +215,7 @@ export function ReportRequestForm({
               name="dueDate"
               defaultValue={values.dueDate}
               className={controlClassName}
+              disabled={locked}
             />
           )}
         </Field>
@@ -198,8 +225,33 @@ export function ReportRequestForm({
         <Button type="submit" disabled={pending || waiting}>
           {pending ? 'در حال ثبت…' : waiting ? 'کمی صبر کنید…' : 'ثبت درخواست'}
         </Button>
+        {locked && (
+          <Button
+            type="submit"
+            tone="secondary"
+            name={REPORT_INTENT_FIELD}
+            value={EDIT_AS_NEW_INTENT}
+            disabled={pending}
+          >
+            ویرایش و ارسال جدید
+          </Button>
+        )}
       </div>
     </form>
+  );
+}
+
+/**
+ * The values of a submission still in flight, exactly as they were sent: the
+ * only ones its retry may carry (round 2 on PR 171).
+ */
+function SentValues({ values }: { values: ReportRequestFormValues }) {
+  return (
+    <>
+      {Object.entries(values).map(([name, value]) => (
+        <input key={name} type="hidden" name={name} value={value} />
+      ))}
+    </>
   );
 }
 
@@ -225,6 +277,15 @@ function FormBanner({ state }: { state: ReportRequestFormState }) {
     return (
       <Alert tone="info">
         {IN_PROGRESS_WRITE_MESSAGE} کد پیگیری: {state.correlationId}
+      </Alert>
+    );
+  }
+
+  if (state.kind === 'EDITING') {
+    return (
+      <Alert tone="info">
+        این یک درخواست تازه است. درخواستی که پیش‌تر فرستادید ممکن است همچنان ثبت شود؛ پیش از ارسال،
+        فهرست درخواست‌ها را بررسی کنید.
       </Alert>
     );
   }

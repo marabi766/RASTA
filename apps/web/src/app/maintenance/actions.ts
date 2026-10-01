@@ -4,14 +4,14 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   parseReportRequestForm,
   reportMaintenanceRequest,
   reportRequestFormValues,
 } from '@/server/maintenance-commands';
 
-import type { ReportRequestFormState } from './form-state';
+import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } from './form-state';
 
 /**
  * The `/maintenance` report form's server action.
@@ -41,6 +41,15 @@ export async function submitReportRequest(
   }
 
   const values = reportRequestFormValues(form);
+
+  // "Edit and send as new" while the first submission is in flight (round 2
+  // on PR 171): nothing is sent. The values come back editable under a new
+  // bound id, so the edited form is a new request; the first keeps its own id
+  // and its own outcome.
+  if (form.get(REPORT_INTENT_FIELD) === EDIT_AS_NEW_INTENT) {
+    return { kind: 'EDITING', submissionId: mintSubmissionId(session), values };
+  }
+
   const parsed = parseReportRequestForm(values);
   if (!parsed.ok) {
     return {
