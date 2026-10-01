@@ -49,6 +49,18 @@ export const standingSnapshotPageSchema = z
 
 export type StandingSnapshotPage = z.infer<typeof standingSnapshotPageSchema>;
 
+/** One contractor's standing now: a snapshot item and the instant it was read at. */
+export const standingOfOrganizationSchema = standingSnapshotPageSchema.shape.items.element
+  .extend({ asOf: instant })
+  .strict();
+
+export type StandingOfOrganization = z.infer<typeof standingOfOrganizationSchema>;
+
+/** The seam an eligibility decision reads through; tests put an answer in directly. */
+export interface StandingOfSource {
+  fetchStanding(organizationId: string): Promise<StandingOfOrganization>;
+}
+
 /** The seam the bootstrap reads through; tests put pages in directly. */
 export interface StandingSnapshotSource {
   fetchPage(cursor: string | null, limit: number): Promise<StandingSnapshotPage>;
@@ -69,7 +81,7 @@ export interface StandingSnapshotSource {
  * advance, and nobody becomes eligible.
  */
 @Injectable()
-export class SupplierSnapshotClient implements StandingSnapshotSource {
+export class SupplierSnapshotClient implements StandingSnapshotSource, StandingOfSource {
   private readonly logger = new Logger(SupplierSnapshotClient.name);
 
   constructor(
@@ -78,12 +90,28 @@ export class SupplierSnapshotClient implements StandingSnapshotSource {
   ) {}
 
   async fetchPage(cursor: string | null, limit: number): Promise<StandingSnapshotPage> {
-    const token = await this.tokens.issue(SERVICE_NAME, SUPPLIER_SERVICE, 'SERVICE');
     const query = new URLSearchParams({ limit: String(limit) });
     if (cursor) query.set('cursor', cursor);
-    const url =
-      `${this.env.SUPPLIER_SERVICE_URL.replace(/\/+$/, '')}` +
-      `/v1/suppliers/standing-snapshot?${query.toString()}`;
+    return this.get(
+      `/v1/suppliers/standing-snapshot?${query.toString()}`,
+      standingSnapshotPageSchema,
+    );
+  }
+
+  /**
+   * One contractor's standing **now**, authoritatively (`StandingAuthority`): the
+   * same service-only, tenant-less call, for one organization.
+   */
+  fetchStanding(organizationId: string): Promise<StandingOfOrganization> {
+    return this.get(
+      `/v1/suppliers/standing-snapshot/${encodeURIComponent(organizationId)}`,
+      standingOfOrganizationSchema,
+    );
+  }
+
+  private async get<T>(path: string, schema: z.ZodType<T>): Promise<T> {
+    const token = await this.tokens.issue(SERVICE_NAME, SUPPLIER_SERVICE, 'SERVICE');
+    const url = `${this.env.SUPPLIER_SERVICE_URL.replace(/\/+$/, '')}${path}`;
 
     const timeoutMs = this.env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS;
     const controller = new AbortController();
@@ -118,10 +146,10 @@ export class SupplierSnapshotClient implements StandingSnapshotSource {
       } catch {
         body = undefined;
       }
-      const parsed = standingSnapshotPageSchema.safeParse(body);
+      const parsed = schema.safeParse(body);
       if (!parsed.success) {
         // The shape, never the content, is logged.
-        this.logger.warn('supplier-service answered a snapshot page that is not the contract');
+        this.logger.warn('supplier-service answered a standing that is not the contract');
         throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
       }
       return parsed.data;

@@ -382,3 +382,14 @@ export const standingSnapshotPageSchema = z
   .strict();
 
 export type StandingSnapshotPage = z.infer<typeof standingSnapshotPageSchema>;
+
+/**
+ * One organization's current standing, read at the moment of asking: the same
+ * shape as a snapshot item, plus the database instant it was read at. An
+ * organization with no supplier profile is a 200 with no approval and no episodes
+ * (not a 404: only the owner's own not-found means "there is none", ADR-061 § 4,
+ * and "nothing recorded" is already an answer — not qualified).
+ */
+export const standingOfSchema = standingSnapshotItemSchema.extend({ asOf: z.string() }).strict();
+
+export type StandingOf = z.infer<typeof standingOfSchema>;

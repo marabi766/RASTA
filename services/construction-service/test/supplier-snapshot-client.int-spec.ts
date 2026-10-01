@@ -23,7 +23,14 @@ const SECRET = randomBytes(24).toString('hex');
 const tokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
 
 type Behaviour =
-  'contract' | 'error' | 'extra-field' | 'bad-instant' | 'slow' | 'oversized' | 'text';
+  | 'wrong-org'
+  | 'contract'
+  | 'error'
+  | 'extra-field'
+  | 'bad-instant'
+  | 'slow'
+  | 'oversized'
+  | 'text';
 
 const PAGE = {
   items: [
@@ -77,6 +84,20 @@ describe('SupplierSnapshotClient against the supplier-service contract', () => {
         if (behaviour === 'text') {
           res.writeHead(200, { 'content-type': 'text/plain' });
           res.end('not json');
+          return;
+        }
+        // The single-organization variant: the item of the page, plus when it was read.
+        const asked = (req.url ?? '').match(/^\/v1\/suppliers\/standing-snapshot\/([^?]+)/);
+        if (asked) {
+          const one = {
+            ...PAGE.items[0],
+            organizationId:
+              behaviour === 'wrong-org' ? 'ORG-SOMEBODY-ELSE' : decodeURIComponent(asked[1]!),
+            asOf: '2026-10-01T09:05:00.000Z',
+            ...(behaviour === 'extra-field' ? { reason: 'Suspended for a failed audit' } : {}),
+          };
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(one));
           return;
         }
         const body =
@@ -144,6 +165,39 @@ describe('SupplierSnapshotClient against the supplier-service contract', () => {
       });
     },
   );
+
+  describe('one contractor, now', () => {
+    it('reads one organization with the same tenant-less service token', async () => {
+      const standing = await client().fetchStanding('ORG A/1');
+
+      expect(standing).toMatchObject({
+        organizationId: 'ORG A/1',
+        contractingApprovedAt: '2026-03-01T08:00:00.000Z',
+        asOf: '2026-10-01T09:05:00.000Z',
+      });
+      expect(seen[0]!.url).toBe('/v1/suppliers/standing-snapshot/ORG%20A%2F1');
+      expect(seen[0]!.claims).toMatchObject({ callerService: 'construction-service' });
+      expect(seen[0]!.claims!.organizationId).toBeUndefined();
+    });
+
+    it.each([
+      ['an error status', 'error'],
+      ['a body with a field the contract does not have', 'extra-field'],
+      ['a body that is not JSON', 'text'],
+    ] as [string, Behaviour][])('refuses %s as unavailable', async (_label, mode) => {
+      behaviour = mode;
+      await expect(client().fetchStanding('ORG-A')).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+    });
+
+    it('times out on a server that never answers', async () => {
+      behaviour = 'slow';
+      await expect(client('300').fetchStanding('ORG-A')).rejects.toMatchObject({
+        code: 'UPSTREAM_TIMEOUT',
+      });
+    });
+  });
 
   it('times out on a server that never answers', async () => {
     behaviour = 'slow';

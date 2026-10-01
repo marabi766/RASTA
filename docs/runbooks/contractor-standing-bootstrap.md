@@ -15,6 +15,10 @@
 `GET /v1/suppliers/standing-snapshot` (ADR-061 § ۴) وضعیت را می‌خواند و در دو جدول `contractor_standing` و `contractor_suspension`
 می‌نویسد. تا نشانگر `standing_bootstrap.completed_at` ثبت نشود، هر پرسش صلاحیت `STANDING_NOT_LOADED` جواب می‌گیرد.
 
+**این مدل مشورتی است.** تصمیم پیشنهاد (صلاحیت پیمانکار) از آن گرفته نمی‌شود: `StandingAuthority` هنگام ثبت وضعیت همان پیمانکار را از
+`supplier-service` می‌پرسد (`GET /v1/suppliers/standing-snapshot/{organizationId}`)، چون مدل پس از قطعی بلندتر از هفت روز یا با تعلیقِ هنوز
+منتقل‌نشده می‌تواند «واجد شرایط» بگوید. اگر `supplier-service` در دسترس نباشد، پیشنهاد `503/504` می‌گیرد (Fail Closed) — این به نشانگر وابسته نیست.
+
 ## تشخیص
 
 1. نشانگر:

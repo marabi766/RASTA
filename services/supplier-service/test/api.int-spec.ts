@@ -125,10 +125,11 @@ describe('supplier HTTP API', () => {
       ['post', '/v1/suppliers/SUP_X/suspend'],
       ['post', '/v1/suppliers/SUP_X/reinstate'],
       ['get', '/v1/suppliers/standing-snapshot'],
+      ['get', '/v1/suppliers/standing-snapshot/ORG_X'],
     ];
 
-    it('answers 401 without a token on all eleven endpoints', async () => {
-      expect(routes).toHaveLength(11);
+    it('answers 401 without a token on all twelve endpoints', async () => {
+      expect(routes).toHaveLength(12);
       for (const [method, path] of routes) {
         const response = await http()[method](path);
         expect({ path, status: response.status }).toEqual({
