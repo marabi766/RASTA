@@ -336,7 +336,7 @@ maintenance شروع می‌شود، نه با supplier.
 | موضوع            | تصمیم                                                                                   |
 | ---------------- | --------------------------------------------------------------------------------------- |
 | موتور            | ClamAV 1.5.4، Sidecar، غیر-root، Rootfs فقط-خواندنی                                     |
-| Image            | `clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591` |
+| Image            | `clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0` |
 | مبدأ Image       | Docker Hub، `clamav/clamav` (Cisco-Talos، رسمی)، نسخهٔ همراهِ پایگاه امضا               |
 | امضاها در Image  | `main.cvd` v63 · `daily.cvd` v28108 · `bytecode.cvd` v339                               |
 | مرز Production   | Unix Domain Socket روی Volume مشترک درون یک Pod (مُد 0660)                              |

@@ -26,6 +26,8 @@ export const TENANT_SCOPED_MODELS = [
   'TenderCriterion',
   'TenderInvitation',
   'TenderKey',
+  'ContractorStanding',
+  'ContractorSuspension',
 ] as const;
 
 /**
