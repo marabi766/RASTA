@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   changeDriverStatus,
   changeStatusFormValues,
@@ -56,7 +56,7 @@ export async function submitUpdateDriver(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
   const values = updateDriverFormValues(form);
   const parsed = parseUpdateDriverForm(values);
@@ -112,7 +112,7 @@ export async function submitChangeStatus(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
   const values = changeStatusFormValues(form);
   const parsed = parseChangeStatusForm(values);
@@ -165,7 +165,7 @@ export async function submitAssign(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
   const values = assignFormValues(form);
   const parsed = parseAssignForm(values, driverId);
@@ -222,7 +222,7 @@ export async function submitEndAssignment(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
   const values = endAssignmentFormValues(form);
   const parsed = parseEndAssignmentForm(values);
