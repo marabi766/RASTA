@@ -81,12 +81,22 @@ test.describe('the maintenance route', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * ORG-DEH-0001's loader. It is ACTIVE, and the seed gives it one open
- * `PREVENTIVE` request, so a `CORRECTIVE` one is a different kind of work the
- * service's duplicate rule does not touch.
+ * The browser suite's **own** machine, seeded for it and for nothing else
+ * (`AST-SEED-E2E-0001`, ORG-DEH-0001, in the asset and maintenance seeds): no
+ * schedule, no request, no usage. It used to report against `AST-SEED-0001`,
+ * which other scenarios read, and cleaned up by cancelling *every* open
+ * corrective request on it — work this suite never created, and a result that
+ * depended on what earlier runs had left.
  */
-const MACHINE = 'AST-SEED-0001';
-const BREAKDOWN_TITLE = 'نشتی روغن هیدرولیک در آزمون مرورگر';
+const MACHINE = 'AST-SEED-E2E-0001';
+
+/** What every request this suite files starts with, so its own can be told from anyone else's. */
+const TITLE_PREFIX = 'آزمون مرورگر';
+/** This worker's own marker: a retry, being a new worker, files under a different one. */
+const RUN = Date.now().toString(36);
+const titled = (what: string): string => `${TITLE_PREFIX} ${RUN} - ${what}`;
+
+const BREAKDOWN_TITLE = titled('نشتی روغن هیدرولیک');
 
 function maintenanceUrl(path: string): string {
   const base = process.env.WEB_E2E_MAINTENANCE_URL;
@@ -104,12 +114,7 @@ interface RequestRecord {
   title: string;
 }
 
-/**
- * This machine's open corrective requests, asked of the owning service. The
- * test does not trust the state it finds: a first attempt that failed after the
- * service had committed would otherwise make Playwright's retry meet the
- * duplicate rule and fail for a reason that has nothing to do with the code.
- */
+/** The open corrective requests on this suite's machine, asked of the owning service. */
 async function openCorrective(
   request: APIRequestContext,
   accessToken: string,
@@ -124,17 +129,33 @@ async function openCorrective(
   return ((await response.json()) as { items: RequestRecord[] }).items;
 }
 
-async function cancelAll(request: APIRequestContext, accessToken: string): Promise<void> {
-  for (const open of await openCorrective(request, accessToken)) {
-    const cancelled = await request.post(
-      maintenanceUrl(`/v1/maintenance-requests/${open.id}/cancel`),
-      {
-        headers: { authorization: `Bearer ${accessToken}` },
-        data: { reason: 'پاک‌سازی آزمون مرورگر' },
-      },
-    );
-    expect(cancelled.status()).toBe(200);
-  }
+/** Ids this test read back after creating them through the form. */
+const created = new Set<string>();
+
+async function cancel(request: APIRequestContext, accessToken: string, id: string): Promise<void> {
+  const cancelled = await request.post(maintenanceUrl(`/v1/maintenance-requests/${id}/cancel`), {
+    headers: { authorization: `Bearer ${accessToken}` },
+    data: { reason: 'پاک‌سازی آزمون مرورگر' },
+  });
+  expect(cancelled.status()).toBe(200);
+}
+
+/**
+ * Cancels what this suite filed and nothing else: the ids it saw created, and
+ * any open request on its own machine whose title carries `marker`. The marker
+ * is how a request the form committed but the test never saw (the attempt failed
+ * after the service answered) is still found — by what the test wrote into it,
+ * not by "everything open".
+ */
+async function cancelOwn(
+  request: APIRequestContext,
+  accessToken: string,
+  marker: string,
+): Promise<void> {
+  const open = await openCorrective(request, accessToken);
+  const own = open.filter((record) => created.has(record.id) || record.title.startsWith(marker));
+  for (const record of own) await cancel(request, accessToken, record.id);
+  created.clear();
 }
 
 test.describe('reporting maintenance through the live stack', () => {
@@ -143,9 +164,8 @@ test.describe('reporting maintenance through the live stack', () => {
     'requires the CI live stack (or the equivalent local environment)',
   );
 
-  // One machine, and a duplicate rule about it: two tests in parallel would
-  // cancel each other's request under each other's feet. Serial keeps them in
-  // one worker, in order.
+  // One machine, and a duplicate rule about it: two tests in parallel would meet
+  // each other's open request. Serial keeps them in one worker, in order.
   test.describe.configure({ mode: 'serial' });
 
   let accessToken = '';
@@ -153,13 +173,14 @@ test.describe('reporting maintenance through the live stack', () => {
   test.beforeEach(async ({ context, request }) => {
     const session = await installLiveSession(context, 'orgAdmin');
     accessToken = session.accessToken;
-    await cancelAll(request, accessToken);
+    // What an earlier attempt of this suite left (a crashed worker, a failed
+    // teardown): anything on this machine filed under the suite's prefix.
+    await cancelOwn(request, accessToken, TITLE_PREFIX);
   });
 
   test.afterEach(async ({ request }) => {
-    // Leaves the seeded database as found, so a re-run (or a retry) starts from
-    // the same place.
-    if (accessToken) await cancelAll(request, accessToken);
+    // Only what this test filed.
+    if (accessToken) await cancelOwn(request, accessToken, `${TITLE_PREFIX} ${RUN}`);
   });
 
   test('a breakdown reported in the form is held by maintenance-service, and a second one is refused by it', async ({
@@ -184,6 +205,7 @@ test.describe('reporting maintenance through the live stack', () => {
     await expect(page.getByText('درخواست ثبت شد')).toBeVisible();
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(BREAKDOWN_TITLE);
     const id = decodeURIComponent(new URL(page.url()).pathname.split('/').pop() ?? '');
+    created.add(id);
 
     // Asked of the owning service, with the same token: the portal is not the
     // witness of its own write.
@@ -211,7 +233,7 @@ test.describe('reporting maintenance through the live stack', () => {
       has: page.getByRole('button', { name: 'ثبت درخواست' }),
     });
     await again.locator('select[name="severity"]').selectOption('LOW');
-    await again.locator('input[name="title"]').fill('گزارش دوم برای همان خرابی');
+    await again.locator('input[name="title"]').fill(titled('گزارش دوم برای همان خرابی'));
     await again.getByRole('button', { name: 'ثبت درخواست' }).click();
 
     await expect(page.getByText(/همین حالا یک درخواست باز از همین نوع دارد/)).toBeVisible();
@@ -227,7 +249,7 @@ test.describe('reporting maintenance through the live stack', () => {
     const form = page.locator('form').filter({
       has: page.getByRole('button', { name: 'ثبت درخواست' }),
     });
-    await form.locator('input[name="title"]').fill('خرابی بدون شدت');
+    await form.locator('input[name="title"]').fill(titled('خرابی بدون شدت'));
     await form.getByRole('button', { name: 'ثبت درخواست' }).click();
 
     await expect(page.getByText('برای خرابی، شدت را مشخص کنید')).toBeVisible();
