@@ -234,7 +234,10 @@ export class CriteriaService {
 
   async getCriteria(tenderId: string): Promise<CriteriaView> {
     const { organizationId } = this.access.assertCanRead();
-    return this.criteriaView(this.prisma.client, organizationId, tenderId);
+    // One snapshot for the tender (its version) and its criteria: read apart, a
+    // concurrent `setCriteria` could land between them and the answer would pair
+    // the old version with the new rows.
+    return this.prisma.snapshot((tx) => this.criteriaView(tx, organizationId, tenderId));
   }
 
   // -- helpers ----------------------------------------------------------------

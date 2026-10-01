@@ -1,5 +1,6 @@
 import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
 import { ProjectRepository } from '../src/project/project.repository';
@@ -50,6 +51,17 @@ export function databaseUrl(): string {
     );
   }
   return url;
+}
+
+/**
+ * The connection the migrations use: `DATABASE_URL_CONSTRUCTION_MIGRATOR` when a
+ * deployment has a separate owner role, otherwise the one URL there is today.
+ * Construction's runtime role currently owns its tables (docs/23 D-045), so the
+ * two are the same role here — but they are two connections, and only this one
+ * is allowed to touch a trigger.
+ */
+export function ownerDatabaseUrl(): string {
+  return process.env.DATABASE_URL_CONSTRUCTION_MIGRATOR ?? databaseUrl();
 }
 
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {
@@ -283,34 +295,49 @@ export const BOW_TIE = {
  * Removes everything the given organizations wrote. Children before parents:
  * every foreign key is `ON DELETE RESTRICT`.
  */
-export async function cleanup(prisma: PrismaService, organizationIds: string[]): Promise<void> {
+export async function cleanup(_prisma: PrismaService, organizationIds: string[]): Promise<void> {
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
-  await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
-    // A cancelled or published tender's criteria are frozen for every writer,
-    // this one included (threat C3), so the freeze is lifted for the length of
-    // one transaction — DDL is transactional, so a failure puts it back.
-    await prisma.client.$transaction(async (tx) => {
+  // The suite's own removal of what it wrote goes through the **owner**
+  // connection (the one migrations use), never the runtime `PrismaService` under
+  // test: a trigger that protects rows from the service must not be switched off
+  // with the service's connection, or the suites would teach the code to do it.
+  // The owner client carries no tenant guard, so it needs no `runUnscoped`.
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    // A cancelled or published tender's criteria are frozen, and a criteria
+    // template is append-only, for every writer (threat C3), so both are lifted
+    // for the length of one transaction — DDL is transactional, so a failure
+    // puts them back.
+    await owner.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_criterion" DISABLE TRIGGER "tg_tender_criterion_freeze"',
       );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "criteria_template" DISABLE TRIGGER "tg_criteria_template_append_only"',
+      );
       await tx.tenderCriterion.deleteMany({ where });
+      await tx.criteriaTemplate.deleteMany({ where });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "criteria_template" ENABLE TRIGGER "tg_criteria_template_append_only"',
+      );
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_criterion" ENABLE TRIGGER "tg_tender_criterion_freeze"',
       );
     });
-    await prisma.client.criteriaTemplate.deleteMany({ where });
-    await prisma.client.tender.deleteMany({ where });
-    await prisma.client.approval.deleteMany({ where });
-    await prisma.client.progressReport.deleteMany({ where });
-    await prisma.client.policyReconciliationTask.deleteMany({ where });
-    await prisma.client.approvalPolicyStep.deleteMany({ where });
-    await prisma.client.approvalPolicy.deleteMany({ where });
-    await prisma.client.projectNeed.deleteMany({ where });
-    await prisma.client.project.deleteMany({ where });
-    await prisma.client.idempotencyKey.deleteMany({ where });
-    await prisma.client.outboxMessage.deleteMany({ where });
-  });
+    await owner.tender.deleteMany({ where });
+    await owner.approval.deleteMany({ where });
+    await owner.progressReport.deleteMany({ where });
+    await owner.policyReconciliationTask.deleteMany({ where });
+    await owner.approvalPolicyStep.deleteMany({ where });
+    await owner.approvalPolicy.deleteMany({ where });
+    await owner.projectNeed.deleteMany({ where });
+    await owner.project.deleteMany({ where });
+    await owner.idempotencyKey.deleteMany({ where });
+    await owner.outboxMessage.deleteMany({ where });
+  } finally {
+    await owner.$disconnect();
+  }
 }
 
 /**

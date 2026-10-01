@@ -98,22 +98,32 @@ ALTER TABLE "tender_criterion" ADD CONSTRAINT "ck_criterion_actor_recorded"
 -- The freeze (threat C3): a tender's criteria change only while it is a DRAFT
 -- =============================================================================
 
+-- Both tenders a write touches are judged: an UPDATE that moves a criterion from
+-- a published tender to a draft one (or the reverse) changes the criteria of both.
+-- The tender rows are locked FOR SHARE, in id order, before the status is read, so
+-- a publication in flight (which holds the row for update) is waited for rather
+-- than raced: the write then sees PUBLISHED and is refused.
 CREATE FUNCTION "tender_criterion_freeze"() RETURNS trigger AS $$
 DECLARE
-  current_status text;
-  target_tender text;
+  tenders text[];
+  frozen_status text;
 BEGIN
-  IF TG_OP = 'DELETE' THEN
-    target_tender := OLD."tender_id";
+  IF TG_OP = 'INSERT' THEN
+    tenders := ARRAY[NEW."tender_id"];
+  ELSIF TG_OP = 'DELETE' THEN
+    tenders := ARRAY[OLD."tender_id"];
   ELSE
-    target_tender := NEW."tender_id";
+    tenders := ARRAY[OLD."tender_id", NEW."tender_id"];
   END IF;
 
-  SELECT "status"::text INTO current_status FROM "tender" WHERE "id" = target_tender;
+  PERFORM 1 FROM "tender" WHERE "id" = ANY (tenders) ORDER BY "id" FOR SHARE;
+
+  SELECT "status"::text INTO frozen_status
+    FROM "tender" WHERE "id" = ANY (tenders) AND "status"::text <> 'DRAFT' LIMIT 1;
 
   -- No tender means the foreign key is about to refuse the row; let it.
-  IF current_status IS NOT NULL AND current_status <> 'DRAFT' THEN
-    RAISE EXCEPTION 'ck_tender_criteria_frozen: the criteria of a tender that is % cannot change', current_status
+  IF frozen_status IS NOT NULL THEN
+    RAISE EXCEPTION 'ck_tender_criteria_frozen: the criteria of a tender that is % cannot change', frozen_status
       USING ERRCODE = 'check_violation';
   END IF;
 
@@ -127,3 +137,57 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "tg_tender_criterion_freeze"
   BEFORE INSERT OR UPDATE OR DELETE ON "tender_criterion"
   FOR EACH ROW EXECUTE FUNCTION "tender_criterion_freeze"();
+
+-- =============================================================================
+-- A tender is published only with a complete set of criteria (ADR-067 § 1): at
+-- least one, weights summing to exactly 10000 basis points. Kept here as well as
+-- in the publish command, so a direct status update cannot publish without them.
+-- The update holds the tender row, which the freeze trigger above makes every
+-- criteria writer wait for, so the criteria cannot change between this check and
+-- the commit.
+-- =============================================================================
+
+CREATE FUNCTION "tender_publish_requires_criteria"() RETURNS trigger AS $$
+DECLARE
+  criteria_count bigint;
+  total_weight bigint;
+BEGIN
+  SELECT count(*), COALESCE(sum("weight_bp"), 0) INTO criteria_count, total_weight
+    FROM "tender_criterion" WHERE "tender_id" = NEW."id";
+
+  IF criteria_count < 1 OR total_weight <> 10000 THEN
+    RAISE EXCEPTION 'ck_tender_publish_criteria: a tender is published with at least one criterion and weights summing to 10000 (has % criteria summing to %)',
+      criteria_count, total_weight
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_tender_publish_requires_criteria"
+  BEFORE UPDATE OF "status" ON "tender"
+  FOR EACH ROW
+  WHEN (NEW."status"::text = 'PUBLISHED' AND OLD."status"::text <> 'PUBLISHED')
+  EXECUTE FUNCTION "tender_publish_requires_criteria"();
+
+-- =============================================================================
+-- A criteria template is append-only: a new version is a new row. An edit or a
+-- delete would change what a tender already copied from it claims to follow.
+-- (The table's owner can still drop or disable this trigger: runtime and owner
+-- roles are not yet split in this service, docs/23 D-045.)
+-- =============================================================================
+
+CREATE FUNCTION "criteria_template_append_only"() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'ck_criteria_template_immutable: a criteria template is append-only (% refused)', TG_OP
+    USING ERRCODE = 'check_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_criteria_template_append_only"
+  BEFORE UPDATE OR DELETE ON "criteria_template"
+  FOR EACH ROW EXECUTE FUNCTION "criteria_template_append_only"();
+
+CREATE TRIGGER "tg_criteria_template_no_truncate"
+  BEFORE TRUNCATE ON "criteria_template"
+  FOR EACH STATEMENT EXECUTE FUNCTION "criteria_template_append_only"();

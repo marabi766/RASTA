@@ -829,8 +829,18 @@ export const EXPECTED = {
       'tender_criterion',
     ],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
-    triggers: ['tg_tender_criterion_freeze'],
-    functions: ['tender_criterion_freeze'],
+    // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
+    triggers: [
+      'tg_tender_criterion_freeze',
+      'tg_tender_publish_requires_criteria',
+      'tg_criteria_template_append_only',
+      'tg_criteria_template_no_truncate',
+    ],
+    functions: [
+      'tender_criterion_freeze',
+      'tender_publish_requires_criteria',
+      'criteria_template_append_only',
+    ],
     constraints: [
       'ck_project_text_not_blank',
       'ck_project_actor_recorded',
