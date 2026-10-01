@@ -413,7 +413,10 @@ if (expected.dataRollback) {
   const downScript = readFileSync(join(migrationsDir, probe.migration, 'down.sql'), 'utf8');
 
   for (const step of probe.steps) {
-    if (step.runDownScript) {
+    if (step.runDownScript && step.mustFail) {
+      // A down script that must refuse the data in front of it.
+      mustFail(step.label, downScript, step.mustFail);
+    } else if (step.runDownScript) {
       const result = sql(downScript);
       if (!result.ok) {
         fail(

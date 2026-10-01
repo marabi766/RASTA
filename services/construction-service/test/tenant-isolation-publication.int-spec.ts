@@ -130,7 +130,7 @@ describe('tenant isolation — publication and invitations', () => {
     const own = await asAdmin(b, () => w.tenders.list({ limit: 10 }));
     const ownTender = own.items[0]!;
     const published = await asAdmin(b, () =>
-      w.publication.publish(ownTender.id, { expectedVersion: 2 }),
+      w.publication.publishApproved(ownTender.id, { expectedVersion: 2 }),
     );
     expect(published.status).toBe('PUBLISHED');
     expect(

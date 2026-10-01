@@ -1,0 +1,114 @@
+# Behaviour tests for rules/rasta-economic-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-economic-alerts.test.yml
+#
+# Inputs carry the scrape's job/instance/environment labels so each expected
+# alert also proves which labels the rule keeps and which it drops.
+
+rule_files:
+  - ../rules/rasta-economic-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaPaymentReconciliationEscalated
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_payment_reconciliation_escalated{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '0 0 1 1 1 1 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaPaymentReconciliationEscalated
+        exp_alerts: []
+      # One sample is not yet two minutes.
+      - eval_time: 3m
+        alertname: RastaPaymentReconciliationEscalated
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: RastaPaymentReconciliationEscalated
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Payment refunds need a person (1 escalated)'
+              description: 'The payment reconciler escalated at least one unfinished refund: the provider could not confirm what happened within the attempt or age limit, or the state was one it must not guess about. The refunded amount stays held in escrow until a person resolves it. The task table and the PAYMENT_RECONCILIATION_ESCALATED events name the intents; this alert deliberately carries none.'
+              runbook: docs/runbooks/payment-refund-stuck.md
+      # Resolved by a person: the gauge returns to zero and the alert clears.
+      - eval_time: 7m
+        alertname: RastaPaymentReconciliationEscalated
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaPaymentReconciliationBacklogAging
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Past an hour from minute 2 onward.
+      - series: 'rasta_economic_payment_reconciliation_oldest_due_age_seconds{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '0 1800 3700+60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RastaPaymentReconciliationBacklogAging
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: RastaPaymentReconciliationBacklogAging
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Payment reconciliation tasks are waiting past their due time'
+              description: 'The oldest due payment reconciliation task has waited more than an hour past its due time for 15 minutes. Refund holds stay in place meanwhile. Check the economic-service log for the reconciler and the provider.'
+              runbook: docs/runbooks/payment-refund-stuck.md
+
+  # A backlog that is merely due, not aging, raises nothing.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_payment_reconciliation_oldest_due_age_seconds{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '120x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: RastaPaymentReconciliationBacklogAging
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaPaymentReconcilerStalled
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Sweeps every 60s until minute 3 (timestamps 60, 120, 180), then none.
+      - series: 'rasta_economic_payment_reconciler_last_sweep_timestamp_seconds{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '0 60 120 180 180 180 180 180 180 180 180 180 180 180 180'
+      - series: 'rasta_economic_payment_reconciler_interval_seconds{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '60x14'
+    alert_rule_test:
+      # Stale by more than 5 intervals (300s) from minute 9 (540 - 180 = 360);
+      # firing after 5 more minutes.
+      - eval_time: 8m
+        alertname: RastaPaymentReconcilerStalled
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: RastaPaymentReconcilerStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: host.docker.internal:3112
+            exp_annotations:
+              summary: 'The payment reconciler has stopped sweeping (host.docker.internal:3112)'
+              description: 'An economic-service instance with the payment reconciler enabled has not completed a sweep in more than five intervals. Unfinished refunds are not being asked about or resolved on that instance.'
+              runbook: docs/runbooks/payment-refund-stuck.md
+
+  # A sweeper that keeps sweeping raises nothing.
+  - interval: 1m
+    input_series:
+      - series: 'rasta_economic_payment_reconciler_last_sweep_timestamp_seconds{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '0+60x20'
+      - series: 'rasta_economic_payment_reconciler_interval_seconds{job="economic-service",instance="host.docker.internal:3112",environment="local",service="economic-service"}'
+        values: '60x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RastaPaymentReconcilerStalled
+        exp_alerts: []

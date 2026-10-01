@@ -18,6 +18,7 @@ const READY: PublicationFacts = {
   criteriaCount: 3,
   totalWeightBp: 10_000,
   invitationCount: 0,
+  approval: 'GRANTED',
 };
 
 const refusals = (overrides: Partial<PublicationFacts>) =>
@@ -26,6 +27,12 @@ const refusals = (overrides: Partial<PublicationFacts>) =>
 describe('publicationRefusals', () => {
   it('has nothing to say about a complete public tender', () => {
     expect(publicationRefusals(READY)).toEqual([]);
+  });
+
+  it('fails closed on the approval gate: no policy, or a policy nobody has satisfied', () => {
+    expect(refusals({ approval: 'NO_POLICY' })).toEqual(['APPROVAL_POLICY_REQUIRED']);
+    expect(refusals({ approval: 'NOT_GRANTED' })).toEqual(['APPROVAL_REQUIRED']);
+    expect(refusals({ approval: 'GRANTED' })).toEqual([]);
   });
 
   it('never defaults the nature or the visibility', () => {
@@ -104,6 +111,7 @@ describe('publicationRefusals', () => {
       criteriaCount: 0,
       totalWeightBp: 0,
       invitationCount: 0,
+      approval: 'NO_POLICY',
     });
     expect(everything.length).toBeGreaterThan(0);
     for (const code of everything) expect(PUBLICATION_REFUSALS).toContain(code);

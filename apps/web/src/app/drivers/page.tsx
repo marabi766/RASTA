@@ -3,7 +3,7 @@ import { AppShell, Button, PageHeader, Section, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
 import { fetchCurrentUser } from '@/server/identity';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
@@ -77,7 +77,7 @@ export default async function DriversPage({
 
       {manage ? (
         <Section headingId="new-driver" title="ثبت راننده" className="mt-4">
-          <NewDriverForm csrfToken={session.csrfToken} submissionId={newSubmissionId()} />
+          <NewDriverForm csrfToken={session.csrfToken} submissionId={mintSubmissionId(session)} />
         </Section>
       ) : null}
 

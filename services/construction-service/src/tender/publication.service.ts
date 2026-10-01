@@ -6,7 +6,8 @@ import type { TenderInvitation } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess, assertOwnTender } from '../access/access';
-import { decisionInstant, transactionNow } from '../shared/clock';
+import { decisionInstant } from '../shared/clock';
+import { OrganizationDirectory } from '../organization/organization-directory';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { ENV, TENDER_KEY_PROVIDER } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
@@ -47,10 +48,13 @@ import type {
  * refused transaction. If no key-encryption key is configured nothing is
  * published (`503`): a tender whose bids cannot be sealed must not open.
  *
- * ## Not here yet
+ * ## The approval gate (Q-84) — fail closed
  *
- * The `tender.publication` approval gate (fail closed without an active policy,
- * Q-84) is a later step; until then publishing checks the role and the state.
+ * `publish` (the route) refuses `APPROVAL_POLICY_REQUIRED` with no active
+ * `tender.publication` policy, and `APPROVAL_REQUIRED` while the approval round is
+ * not wired (PR 11) even when one is in force. `publishApproved` is the same core
+ * with the gate satisfied; it is not routed, and PR 11 adds only the call that
+ * reaches it once a round has been granted.
  */
 @Injectable()
 export class PublicationService {
@@ -63,9 +67,34 @@ export class PublicationService {
     private readonly access: ProjectAccess,
     @Inject(ENV) private readonly env: ConstructionEnv,
     @Inject(TENDER_KEY_PROVIDER) private readonly keys: TenderKeyProvider,
+    private readonly directory: OrganizationDirectory,
   ) {}
 
-  async publish(tenderId: string, dto: PublishTenderDto): Promise<TenderView> {
+  /**
+   * POST /publish. **Fails closed on the approval gate (Q-84):** with no active
+   * `tender.publication` policy it refuses `APPROVAL_POLICY_REQUIRED`, and while
+   * the approval round is not wired (PR 11) even a policy in force refuses
+   * `APPROVAL_REQUIRED`. Nothing is published on an approval nobody gave.
+   */
+  publish(tenderId: string, dto: PublishTenderDto): Promise<TenderView> {
+    return this.execute(tenderId, dto, false);
+  }
+
+  /**
+   * The publication core, with the approval gate satisfied. Not routed: PR 11 calls
+   * it once a `tender.publication` round has been granted, which is then the only
+   * thing that changes. Kept public so the core (every other refusal, the key, the
+   * event) is tested directly now.
+   */
+  publishApproved(tenderId: string, dto: PublishTenderDto): Promise<TenderView> {
+    return this.execute(tenderId, dto, true);
+  }
+
+  private async execute(
+    tenderId: string,
+    dto: PublishTenderDto,
+    approved: boolean,
+  ): Promise<TenderView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
     // A cheap, unlocked look at the version and the state, so a stale or
@@ -78,6 +107,19 @@ export class PublicationService {
     if (first.version !== dto.expectedVersion) throw this.conflict(tenderId);
     assertTenderTransition(tenderId, first.status, 'PUBLISHED');
 
+    // Not approved: judge everything under the lock so the answer names every
+    // reason at once, then refuse — the gate is never satisfied on this path. No key
+    // pair is made for a request that cannot succeed (RSA generation is slow).
+    if (!approved) {
+      await this.prisma.transaction(async (tx) => {
+        const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
+        if (locked.version !== dto.expectedVersion) throw this.conflict(tenderId);
+        assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
+        const { refusals } = await this.judge(tx, tenderId, false);
+        throw this.refused(tenderId, refusals);
+      });
+    }
+
     const keyId = newId(ID_PREFIX.tenderKey);
     const { publicKeyPem, wrapped } = await this.makeKey(tenderId, keyId);
 
@@ -88,33 +130,16 @@ export class PublicationService {
       'construction.tender.publish',
       () =>
         this.prisma.transaction(async (tx) => {
-          const at = await transactionNow(tx);
           const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
           if (locked.version !== dto.expectedVersion) throw this.conflict(tenderId);
           assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
 
-          // The deadline is judged on the instant of the decision, after the lock.
-          const now = await decisionInstant(tx);
-          const row = await this.tenders.findTender(tenderId, tx);
-          if (!row) throw RastaError.notFound('Tender', tenderId);
-          const criteria = await this.criteria.listCriteria(tenderId, tx);
-          const refusals = publicationRefusals({
-            procurementNature: row.procurementNature,
-            visibility: row.visibility,
-            bidOpeningAt: row.bidOpeningAt,
-            bidClosingAt: row.bidClosingAt,
-            now,
-            minBiddingPeriodSeconds: this.env.CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS,
-            criteriaCount: criteria.length,
-            totalWeightBp: criteria.reduce((sum, criterion) => sum + criterion.weightBp, 0),
-            invitationCount: await this.publications.countInvitations(tx, tenderId),
-          });
-          if (refusals.length > 0) {
-            throw RastaError.businessRule(
-              `Tender ${tenderId} cannot be published: ${refusals.join(', ')}`,
-              { tenderId, refusals },
-            );
-          }
+          // One instant, read **after** the lock: the deadline is judged on it, and
+          // the row, the key and the event are all stamped with it. The transaction's
+          // start (`now()`) can precede a long wait for the lock by seconds, which
+          // would date a publication before the decision that made it.
+          const { row, criteria, refusals, at } = await this.judge(tx, tenderId, true);
+          if (refusals.length > 0) throw this.refused(tenderId, refusals);
 
           const matched = await this.tenders.publishTender(tx, {
             tenderId,
@@ -173,11 +198,32 @@ export class PublicationService {
   async invite(tenderId: string, dto: InviteBidderDto): Promise<InvitationView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
+    // Does the invited organization exist? Asked of organization-service before the
+    // transaction (a network call is never made under a row lock), and only after
+    // the tender is shown to be the caller's, so a stranger learns nothing about
+    // either. Fail closed: if it cannot be confirmed (503/504) nothing is invited.
+    // Whether the invitee is *eligible* to bid (qualified, not suspended) is not
+    // judged here: that is checked at bid time against the standing read model.
+    const first = await this.tenders.findTender(tenderId);
+    if (!first) throw RastaError.notFound('Tender', tenderId);
+    assertOwnTender(first, organizationId);
+    if (
+      dto.organizationId !== organizationId &&
+      !(await this.directory.exists(dto.organizationId))
+    ) {
+      throw RastaError.businessRule(
+        `Organization ${dto.organizationId} does not exist; it cannot be invited`,
+        { tenderId, refusals: ['INVITED_ORGANIZATION_NOT_FOUND'] },
+      );
+    }
+
     const invitationId = newId(ID_PREFIX.invitation);
     try {
       await this.prisma.transaction(async (tx) => {
-        const at = await transactionNow(tx);
         const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
+        // After the lock, like a publication: the invitation is dated by the
+        // moment it was decided, not by when the transaction began waiting.
+        const at = await decisionInstant(tx);
         if (locked.status !== 'DRAFT' && locked.status !== 'PUBLISHED') {
           throw RastaError.businessRule(
             `Tender ${tenderId} is ${locked.status}; invitations are made while it is a DRAFT or PUBLISHED`,
@@ -256,6 +302,41 @@ export class PublicationService {
   }
 
   // -- helpers ----------------------------------------------------------------
+
+  /**
+   * Reads what publishing is judged on, under the tender's lock, and judges it.
+   * `at` is the database's instant read after the lock (`clock_timestamp()`).
+   */
+  private async judge(tx: ExtendedPrismaClient, tenderId: string, approved: boolean) {
+    const at = await decisionInstant(tx);
+    const row = await this.tenders.findTender(tenderId, tx);
+    if (!row) throw RastaError.notFound('Tender', tenderId);
+    const criteria = await this.criteria.listCriteria(tenderId, tx);
+    const refusals = publicationRefusals({
+      procurementNature: row.procurementNature,
+      visibility: row.visibility,
+      bidOpeningAt: row.bidOpeningAt,
+      bidClosingAt: row.bidClosingAt,
+      now: at,
+      minBiddingPeriodSeconds: this.env.CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS,
+      criteriaCount: criteria.length,
+      totalWeightBp: criteria.reduce((sum, criterion) => sum + criterion.weightBp, 0),
+      invitationCount: await this.publications.countInvitations(tx, tenderId),
+      approval: approved
+        ? 'GRANTED'
+        : (await this.publications.hasActivePublicationPolicy(tx))
+          ? 'NOT_GRANTED'
+          : 'NO_POLICY',
+    });
+    return { row, criteria, refusals, at };
+  }
+
+  private refused(tenderId: string, refusals: readonly string[]): RastaError {
+    return RastaError.businessRule(
+      `Tender ${tenderId} cannot be published: ${refusals.join(', ')}`,
+      { tenderId, refusals },
+    );
+  }
 
   /**
    * A fresh key pair, its private half wrapped and then zeroised. Without a

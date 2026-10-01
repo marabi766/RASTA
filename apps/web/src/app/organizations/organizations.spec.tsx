@@ -266,10 +266,49 @@ describe('revoking a membership', () => {
   });
 });
 
+/**
+ * What the page hands the screen: a function that issues an id per form. The
+ * screen never mints one itself (an id is bound to the signed-in session, which
+ * only the page has), so a test can count and inspect exactly what it asked for.
+ */
+let minted = 0;
+const mint = () => `sub_${String(++minted).padStart(20, '0')}`;
+
 describe('the members list', () => {
+  beforeEach(() => {
+    minted = 0;
+  });
+
+  it('gives each form on each member its own id, from the function it was handed', () => {
+    const { container } = render(
+      <MembersScreen
+        mintSubmissionId={mint}
+        result={page([MEMBER, { ...MEMBER, id: 'USR_2', membershipId: 'MBR_2', username: 'b' }])}
+        query={{}}
+        grantableRoles={ORG_ADMIN_GRANTS}
+        csrfToken={CSRF}
+      />,
+    );
+
+    const ids = [...container.querySelectorAll(`input[name="${SUBMISSION_FIELD}"]`)].map(
+      (input) => (input as HTMLInputElement).value,
+    );
+    // Two members, two forms each; every one different, so a retry of one form
+    // is never mistaken for another's.
+    expect(ids).toHaveLength(4);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids).toEqual([
+      'sub_00000000000000000001',
+      'sub_00000000000000000002',
+      'sub_00000000000000000003',
+      'sub_00000000000000000004',
+    ]);
+  });
+
   it('renders a member with their current roles in Persian', () => {
     render(
       <MembersScreen
+        mintSubmissionId={mint}
         result={page([MEMBER])}
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
@@ -284,6 +323,7 @@ describe('the members list', () => {
   it('offers no actions for a row whose membership vanished', () => {
     const { container } = render(
       <MembersScreen
+        mintSubmissionId={mint}
         result={page([{ ...MEMBER, membershipId: null }])}
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
@@ -299,6 +339,7 @@ describe('the members list', () => {
   it('tells an empty search from an empty organization', () => {
     const { rerender } = render(
       <MembersScreen
+        mintSubmissionId={mint}
         result={page([])}
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}
@@ -309,6 +350,7 @@ describe('the members list', () => {
 
     rerender(
       <MembersScreen
+        mintSubmissionId={mint}
         result={page([])}
         query={{ q: 'کسی' }}
         grantableRoles={ORG_ADMIN_GRANTS}
@@ -321,6 +363,7 @@ describe('the members list', () => {
   it('renders a refusal without pretending the list is empty', () => {
     render(
       <MembersScreen
+        mintSubmissionId={mint}
         result={{ kind: 'FORBIDDEN' }}
         query={{}}
         grantableRoles={[]}
@@ -334,6 +377,7 @@ describe('the members list', () => {
   it('renders an outage with the id support needs', () => {
     render(
       <MembersScreen
+        mintSubmissionId={mint}
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-9' }}
         query={{}}
         grantableRoles={[]}
@@ -349,6 +393,7 @@ describe('accessibility', () => {
   it('has no violations with members and their forms shown', async () => {
     const { container } = render(
       <MembersScreen
+        mintSubmissionId={mint}
         result={page([MEMBER, { ...MEMBER, id: 'USR_3', membershipId: 'MBR_3' }])}
         query={{}}
         grantableRoles={ORG_ADMIN_GRANTS}

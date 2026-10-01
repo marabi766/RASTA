@@ -8,6 +8,8 @@ import type {
   ProviderPaymentStatus,
   RefundRequest,
   RefundResult,
+  RefundStatusQuery,
+  RefundStatusResult,
 } from './provider';
 
 /**
@@ -32,6 +34,11 @@ import type {
  *   `fail:INSUFFICIENT_FUNDS`   authorize returns FAILED with that code
  *   `fail-capture:<code>`       authorize succeeds, capture fails
  *   `fail-refund:<code>`        authorize and capture succeed, refund fails
+ *   `lose-refund:`              the refund happens and its answer is lost (a
+ *                               thrown error): an unknown outcome, for the
+ *                               reconciler (ADR-064 step B2)
+ *   `hang-refund:`              the refund never answers and never happens:
+ *                               for the provider call timeout
  *
  * `<code>` is one of {@link MOCK_DIRECTIVE_CODES}, or empty for
  * `PROVIDER_DECLINED`. Any other code fails the authorisation as
@@ -69,6 +76,15 @@ export class MockPaymentProvider implements PaymentProvider {
 
   /** Refund answers already given, by reference and idempotency key. */
   private readonly refunds = new Map<string, RefundResult>();
+
+  /**
+   * It cannot vouch for an absence (Codex on #164, HIGH 2). Its memory is one
+   * process's: lost on restart and not shared between replicas, so replica B
+   * would say "never seen" of a refund replica A made. An attempt it has no
+   * record of is therefore `UNKNOWN`, and the reconciler escalates rather
+   * than returning a hold on the strength of an empty map.
+   */
+  readonly authoritativeAbsence: boolean = false;
 
   constructor(private readonly latencyMs = 0) {}
 
@@ -148,6 +164,11 @@ export class MockPaymentProvider implements PaymentProvider {
     const replayed = this.refunds.get(dedupeKey);
     if (replayed) return replayed;
 
+    if (directive(request.providerReference, 'hang-refund')) {
+      // Never answers, never refunds: what the provider call timeout is for.
+      return new Promise<RefundResult>(() => undefined);
+    }
+
     const failure = directive(request.providerReference, 'fail-refund');
     let result: RefundResult;
     if (failure) {
@@ -173,7 +194,34 @@ export class MockPaymentProvider implements PaymentProvider {
       };
     }
     this.refunds.set(dedupeKey, result);
+    if (directive(request.providerReference, 'lose-refund')) {
+      throw new Error('simulated lost provider response');
+    }
     return result;
+  }
+
+  /**
+   * What happened to one refund attempt, from this instance's memory.
+   *
+   * It vouches for `REFUNDED` and `DECLINED`, which it remembers. An attempt
+   * it has no record of is `UNKNOWN`, never `NOT_FOUND`: see
+   * {@link authoritativeAbsence}.
+   */
+  async getRefundStatus(query: RefundStatusQuery): Promise<RefundStatusResult> {
+    await this.delay();
+    const known = this.refunds.get(`${query.providerReference}\u0000${query.idempotencyKey}`);
+    if (known?.outcome === 'REFUNDED') {
+      return { refund: 'REFUNDED', authoritative: true, simulated: true };
+    }
+    if (known) {
+      return {
+        refund: 'DECLINED',
+        authoritative: true,
+        ...(known.failureCode ? { failureCode: known.failureCode } : {}),
+        simulated: true,
+      };
+    }
+    return { refund: 'UNKNOWN', authoritative: false, simulated: true };
   }
 
   async getStatus(providerReference: string): Promise<ProviderPaymentStatus> {
@@ -213,7 +261,7 @@ export class MockPaymentProvider implements PaymentProvider {
  * reference. Comma-separated there, because `directive` ends a code at a comma
  * and a code may itself contain underscores.
  */
-const CARRIED_DIRECTIVES = ['fail-capture', 'fail-refund'] as const;
+const CARRIED_DIRECTIVES = ['fail-capture', 'fail-refund', 'lose-refund', 'hang-refund'] as const;
 
 /**
  * Reads `<prefix>:<CODE>` out of a directive string.

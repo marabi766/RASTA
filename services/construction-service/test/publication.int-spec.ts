@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { runUnscoped } from '@rasta/nest-common';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import type { CriterionInput } from '../src/tender/criteria.dto';
@@ -9,12 +11,14 @@ import {
   sealBid,
 } from '../src/tender/sealing/sealing';
 import {
+  activatePublicationPolicy,
   approvedProject,
   asAdmin,
   cleanup,
   newOrganizationId,
   outboxFor,
   testEnv,
+  untilASessionWaitsOnALock,
   wire,
   type Wiring,
 } from './helpers';
@@ -107,7 +111,7 @@ describe('publishing a tender', () => {
       const { a, project, tender, version } = await draft();
 
       const published = await asAdmin(a, () =>
-        w.publication.publish(tender.id, { expectedVersion: version }),
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
       );
 
       expect(published).toMatchObject({
@@ -159,7 +163,9 @@ describe('publishing a tender', () => {
 
     it('makes a key pair whose private half is stored wrapped, and opens a bid end to end', async () => {
       const { a, tender, version } = await draft();
-      await asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version }));
+      await asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
 
       const stored = (await keyRow(a, tender.id))!;
       expect(stored.publicKeyPem).toContain('BEGIN PUBLIC KEY');
@@ -214,7 +220,7 @@ describe('publishing a tender', () => {
     it('can still be cancelled once published, and its key is kept', async () => {
       const { a, tender, version } = await draft();
       const published = await asAdmin(a, () =>
-        w.publication.publish(tender.id, { expectedVersion: version }),
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
       );
       const cancelled = await asAdmin(a, () =>
         w.tenders.cancel(tender.id, {
@@ -224,6 +230,128 @@ describe('publishing a tender', () => {
       );
       expect(cancelled.status).toBe('CANCELLED');
       expect(await keyRow(a, tender.id)).not.toBeNull();
+    });
+  });
+
+  describe('the approval gate fails closed (Q-84)', () => {
+    const untouched = async (a: string, tenderId: string, version: number) => {
+      const now = await asAdmin(a, () => w.tenders.get(tenderId));
+      expect(now).toMatchObject({ status: 'DRAFT', version, publishedAt: null });
+      expect(await keyRow(a, tenderId)).toBeNull();
+      expect(
+        (await outboxFor(w.prisma, a)).some((row) => row.eventName === 'TENDER_PUBLISHED'),
+      ).toBe(false);
+    };
+
+    it('refuses with APPROVAL_POLICY_REQUIRED when the organization has no active policy', async () => {
+      const { a, tender, version } = await draft();
+
+      const message = await refusalsOf(
+        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+      );
+
+      expect(message).toContain('APPROVAL_POLICY_REQUIRED');
+      expect(message).not.toContain('APPROVAL_REQUIRED');
+      await untouched(a, tender.id, version);
+    });
+
+    it('still refuses with APPROVAL_REQUIRED while the round is not wired, even with a policy in force', async () => {
+      const { a, tender, version } = await draft();
+      await activatePublicationPolicy(w, a);
+
+      const message = await refusalsOf(
+        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+      );
+
+      expect(message).toContain('APPROVAL_REQUIRED');
+      expect(message).not.toContain('APPROVAL_POLICY_REQUIRED');
+      await untouched(a, tender.id, version);
+    });
+
+    it('does not take another organization’s policy for its own', async () => {
+      const mine = await draft();
+      const other = await draft();
+      await activatePublicationPolicy(w, other.a);
+
+      const message = await refusalsOf(
+        asAdmin(mine.a, () =>
+          w.publication.publish(mine.tender.id, { expectedVersion: mine.version }),
+        ),
+      );
+
+      expect(message).toContain('APPROVAL_POLICY_REQUIRED');
+    });
+
+    it('names the gate together with every other reason', async () => {
+      const { a, tender, version } = await draft({ criteria: [], visibility: 'RESTRICTED' });
+
+      const message = await refusalsOf(
+        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+      );
+
+      for (const code of ['CRITERIA_REQUIRED', 'INVITATION_REQUIRED', 'APPROVAL_POLICY_REQUIRED']) {
+        expect(message).toContain(code);
+      }
+    });
+
+    it('makes no key pair for a request that cannot succeed', async () => {
+      const { a, tender, version } = await draft();
+      const spy = jest.spyOn(w.keys, 'wrap');
+      try {
+        await asAdmin(a, () =>
+          w.publication.publish(tender.id, { expectedVersion: version }),
+        ).catch(() => undefined);
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('leaves the publication core to the approved path, which still publishes', async () => {
+      const { a, tender, version } = await draft();
+      const published = await asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
+      expect(published.status).toBe('PUBLISHED');
+    });
+  });
+
+  describe('the publication is dated by the decision, after the lock', () => {
+    it('stamps the row, the key and the event with an instant read after waiting for the tender', async () => {
+      const { a, tender, version } = await draft();
+
+      // Another transaction holds the tender row; the publication queues behind it.
+      let release!: () => void;
+      let holding!: () => void;
+      const mayRelease = new Promise<void>((resolve) => (release = resolve));
+      const held = new Promise<void>((resolve) => (holding = resolve));
+      const holder = w.prisma.client.$transaction(async (tx) => {
+        await tx.$queryRawUnsafe(`SELECT "id" FROM "tender" WHERE "id" = $1 FOR UPDATE`, tender.id);
+        holding();
+        await mayRelease;
+      });
+      await held;
+
+      const publishing = asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
+      await untilASessionWaitsOnALock(w.prisma);
+      const [{ now: released }] = await w.prisma.client.$queryRawUnsafe<{ now: Date }[]>(
+        'SELECT clock_timestamp() AS now',
+      );
+      release();
+      await holder;
+      const published = await publishing;
+
+      // The transaction began before `released`; the decision came after it.
+      expect(Date.parse(published.publishedAt!)).toBeGreaterThanOrEqual(released!.getTime());
+      const stored = await keyRow(a, tender.id);
+      expect(stored!.createdAt.toISOString()).toBe(published.publishedAt);
+      const event = (await outboxFor(w.prisma, a)).find(
+        (row) => row.eventName === 'TENDER_PUBLISHED',
+      )!;
+      expect(payloadOf(event)).toMatchObject({ publishedAt: published.publishedAt });
+      expect(eventEnvelopeSchema.parse(event.payload).occurredAt).toBe(published.publishedAt);
     });
   });
 
@@ -263,7 +391,7 @@ describe('publishing a tender', () => {
       const { a, tender, version } = await draft(ready);
 
       const message = await refusalsOf(
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
       );
 
       expect(message).toContain(code);
@@ -278,7 +406,7 @@ describe('publishing a tender', () => {
         criteria: [{ ...WHOLE[0]!, weightBp: 5000 }],
       });
       const message = await refusalsOf(
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
       );
       for (const code of [
         'NATURE_REQUIRED',
@@ -303,23 +431,29 @@ describe('publishing a tender', () => {
       expect(message).toContain('WINDOW_TOO_SHORT');
       // The same tender is publishable where no minimum is configured.
       await expect(
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
       ).resolves.toMatchObject({ status: 'PUBLISHED' });
     });
 
     it('is refused for a stale version before anything is made', async () => {
       const { a, tender, version } = await draft();
       await expect(
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version - 1 })),
+        asAdmin(a, () =>
+          w.publication.publishApproved(tender.id, { expectedVersion: version - 1 }),
+        ),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
       await nothingChanged(a, tender.id, version);
     });
 
     it('is refused a second time, and from a state that is not DRAFT', async () => {
       const { a, tender, version } = await draft();
-      await asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version }));
+      await asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
       await expect(
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version + 1 })),
+        asAdmin(a, () =>
+          w.publication.publishApproved(tender.id, { expectedVersion: version + 1 }),
+        ),
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
     });
   });
@@ -333,7 +467,7 @@ describe('publishing a tender', () => {
       const { a, tender, version } = await draft({}, bare);
 
       await expect(
-        asAdmin(a, () => bare.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => bare.publication.publishApproved(tender.id, { expectedVersion: version })),
       ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
 
       expect(await asAdmin(a, () => w.tenders.get(tender.id))).toMatchObject({
@@ -344,13 +478,90 @@ describe('publishing a tender', () => {
     });
   });
 
+  describe('the migration’s rollback', () => {
+    it('refuses while a tender key exists, and touches nothing', async () => {
+      // The rollback drops `tender_key`; re-applying the migration would leave
+      // published tenders with no private key. So its preflight — the very text of
+      // down.sql, run after its own LOCK — stops it while any key is stored.
+      const sql = readFileSync(
+        join(
+          __dirname,
+          '..',
+          'prisma',
+          'migrations',
+          '20260930180000_tender_publication',
+          'down.sql',
+        ),
+        'utf8',
+      );
+      const lock = /^LOCK TABLE [^;]+;/m.exec(sql)?.[0];
+      const block = (tag: string) =>
+        new RegExp(`DO \\$${tag}\\$[\\s\\S]*?\\$${tag}\\$;`).exec(sql)?.[0];
+      const keysCheck = block('preflight_keys');
+      const invitationsCheck = block('preflight_invitations');
+      expect(lock).toContain('ACCESS EXCLUSIVE');
+      expect(keysCheck).toBeDefined();
+      expect(invitationsCheck).toBeDefined();
+      expect(sql.indexOf(lock!)).toBeLessThan(sql.indexOf(keysCheck!));
+      expect(sql.indexOf(invitationsCheck!)).toBeLessThan(sql.indexOf('DROP TABLE'));
+      const runAfterLock = (check: string) =>
+        w.prisma.client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(lock!.replace(/;$/, ''));
+          await tx.$executeRawUnsafe(check.replace(/;$/, ''));
+        });
+
+      const { a, tender, version } = await draft();
+      await asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
+      expect(await keyRow(a, tender.id)).not.toBeNull();
+
+      await expect(runAfterLock(keysCheck!)).rejects.toThrow(
+        /down refused: \d+ tender key\(s\) exist/,
+      );
+      // The refusal rolled everything back: the key is still there.
+      expect(await keyRow(a, tender.id)).not.toBeNull();
+    });
+
+    it('refuses while an invitation exists, even with no key at all', async () => {
+      const sql = readFileSync(
+        join(
+          __dirname,
+          '..',
+          'prisma',
+          'migrations',
+          '20260930180000_tender_publication',
+          'down.sql',
+        ),
+        'utf8',
+      );
+      const lock = /^LOCK TABLE [^;]+;/m.exec(sql)?.[0];
+      const check = /DO \$preflight_invitations\$[\s\S]*?\$preflight_invitations\$;/.exec(sql)?.[0];
+
+      // A restricted draft that invited before it was ever published: an invitation, no key.
+      const { a, tender } = await draft({ visibility: 'RESTRICTED' });
+      await asAdmin(a, () => w.publication.invite(tender.id, { organizationId: 'ORG_BIDDER_1' }));
+      expect(await keyRow(a, tender.id)).toBeNull();
+
+      await expect(
+        w.prisma.client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(lock!.replace(/;$/, ''));
+          await tx.$executeRawUnsafe(check!.replace(/;$/, ''));
+        }),
+      ).rejects.toThrow(/down refused: \d+ tender invitation\(s\) exist/);
+      expect(
+        (await asAdmin(a, () => w.publication.listInvitations(tender.id, { limit: 25 }))).items,
+      ).toHaveLength(1);
+    });
+  });
+
   describe('races', () => {
     it('lets exactly one of two concurrent publications win, with one key and one event', async () => {
       const { a, tender, version } = await draft();
 
       const results = await Promise.allSettled([
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
       ]);
 
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -367,7 +578,7 @@ describe('publishing a tender', () => {
       const { a, tender, version } = await draft();
 
       const [publish, cancel] = await Promise.allSettled([
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
         asAdmin(a, () =>
           w.tenders.cancel(tender.id, {
             expectedVersion: version,
@@ -387,7 +598,7 @@ describe('publishing a tender', () => {
       const { a, tender, version } = await draft();
 
       const [publish, set] = await Promise.allSettled([
-        asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version })),
+        asAdmin(a, () => w.publication.publishApproved(tender.id, { expectedVersion: version })),
         asAdmin(a, () =>
           w.criteria.setCriteria(tender.id, {
             expectedVersion: version,
@@ -409,7 +620,7 @@ describe('publishing a tender', () => {
     it('answers with the state its own publication produced', async () => {
       const { a, tender, version } = await draft();
       const published = await asAdmin(a, () =>
-        w.publication.publish(tender.id, { expectedVersion: version }),
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
       );
       // Cancelled straight after: the earlier answer is still the publication's.
       await asAdmin(a, () =>
@@ -425,7 +636,9 @@ describe('publishing a tender', () => {
   describe('the tender key’s own guarantees', () => {
     it('is never deleted, its identity and public key never change, and its wrapping may be renewed', async () => {
       const { a, tender, version } = await draft();
-      await asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version }));
+      await asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
       const run = (sql: string) => w.prisma.client.$executeRawUnsafe(sql);
 
       await expect(
@@ -444,7 +657,9 @@ describe('publishing a tender', () => {
 
     it('refuses a wrapped key that is not what the AEAD produced, and a second key for one tender', async () => {
       const { a, tender, version } = await draft();
-      await asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: version }));
+      await asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: version }),
+      );
       const run = (sql: string) => w.prisma.client.$executeRawUnsafe(sql);
 
       await expect(
@@ -531,6 +746,60 @@ describe('inviting bidders to a restricted tender', () => {
     expect(list.items.map((item) => item.invitedOrganizationId)).toEqual(['ORG_BIDDER_1']);
   });
 
+  describe('only an organization organization-service knows can be invited', () => {
+    const invitations = async (a: string, tenderId: string) =>
+      (await asAdmin(a, () => w.publication.listInvitations(tenderId, { limit: 25 }))).items;
+
+    it('refuses a nonexistent organization, writing and counting nothing', async () => {
+      const { a, tender } = await restricted();
+      w.hierarchy.missing.add('ORG_GHOST');
+      try {
+        const error = (await asAdmin(a, () =>
+          w.publication.invite(tender.id, { organizationId: 'ORG_GHOST' }),
+        ).then(
+          () => undefined,
+          (e: unknown) => e,
+        )) as { code?: string; message?: string } | undefined;
+        expect(error?.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(error?.message).toContain('ORG_GHOST');
+      } finally {
+        w.hierarchy.missing.delete('ORG_GHOST');
+      }
+      expect(await invitations(a, tender.id)).toEqual([]);
+      expect(
+        (await outboxFor(w.prisma, a)).some((row) => row.eventName === 'TENDER_BIDDER_INVITED'),
+      ).toBe(false);
+    });
+
+    it('fails closed when organization-service cannot confirm', async () => {
+      const { a, tender } = await restricted();
+      w.hierarchy.unavailable = true;
+      try {
+        await expect(
+          asAdmin(a, () => w.publication.invite(tender.id, { organizationId: 'ORG_BIDDER_1' })),
+        ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      } finally {
+        w.hierarchy.unavailable = false;
+      }
+      expect(await invitations(a, tender.id)).toEqual([]);
+    });
+
+    it('does not ask about an organization for a stranger’s tender: 404 first', async () => {
+      const { tender } = await restricted();
+      const stranger = org();
+      w.hierarchy.unavailable = true;
+      try {
+        await expect(
+          asAdmin(stranger, () =>
+            w.publication.invite(tender.id, { organizationId: 'ORG_BIDDER_1' }),
+          ),
+        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      } finally {
+        w.hierarchy.unavailable = false;
+      }
+    });
+  });
+
   it('pages the invitations oldest first', async () => {
     const { a, tender } = await restricted();
     for (const id of ['ORG_1', 'ORG_2', 'ORG_3']) {
@@ -596,12 +865,14 @@ describe('inviting bidders to a restricted tender', () => {
       w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
     );
     await expect(
-      asAdmin(a, () => w.publication.publish(tender.id, { expectedVersion: withCriteria.version })),
+      asAdmin(a, () =>
+        w.publication.publishApproved(tender.id, { expectedVersion: withCriteria.version }),
+      ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
 
     await asAdmin(a, () => w.publication.invite(tender.id, { organizationId: 'ORG_BIDDER_1' }));
     const published = await asAdmin(a, () =>
-      w.publication.publish(tender.id, { expectedVersion: withCriteria.version }),
+      w.publication.publishApproved(tender.id, { expectedVersion: withCriteria.version }),
     );
     expect(published.status).toBe('PUBLISHED');
 

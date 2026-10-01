@@ -45,7 +45,11 @@ export class PublicationController {
       'a RESTRICTED tender has at least one invitation. The criteria are frozen from this moment. ' +
       "Makes the tender's key pair, wrapping its private half with the key-encryption key " +
       '(ADR-066); without one configured nothing is published and the answer is 503. Publishes ' +
-      `TENDER_PUBLISHED. The approval gate arrives in a later step. ${TENANT_NOTE} ${ROLES_NOTE}`,
+      'TENDER_PUBLISHED. **The approval gate fails closed (Q-84):** with no active ' +
+      '`tender.publication` approval policy the answer is 422 naming APPROVAL_POLICY_REQUIRED, and ' +
+      'while the approval round is not wired (CON-002 PR 11) even a policy in force is 422 naming ' +
+      'APPROVAL_REQUIRED — so until then this endpoint publishes nothing. ' +
+      `${TENANT_NOTE} ${ROLES_NOTE}`,
   })
   async publish(
     @Param('id') id: string,
@@ -61,7 +65,10 @@ export class PublicationController {
     description:
       'While the tender is a DRAFT or PUBLISHED, and only when its visibility is RESTRICTED (422 ' +
       'otherwise). The owner cannot invite itself (422); the same organization twice is 409 ' +
-      'ALREADY_EXISTS. The invited organization is not validated against organization-service. ' +
+      'ALREADY_EXISTS. The invited organization must exist: it is confirmed with ' +
+      'organization-service (422 INVITED_ORGANIZATION_NOT_FOUND if not; 503/504 if it cannot be ' +
+      'confirmed — nothing is invited unconfirmed). Eligibility to bid (qualified, not suspended) is ' +
+      'not judged here but at bid time. ' +
       `Publishes TENDER_BIDDER_INVITED. ${TENANT_NOTE} ${ROLES_NOTE}`,
   })
   async invite(@Param('id') id: string, @Body(zodPipe(inviteBidderSchema)) dto: InviteBidderDto) {
