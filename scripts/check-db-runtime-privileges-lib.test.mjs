@@ -15,8 +15,11 @@ test('every service is placed exactly once: split, audit or pending (D-045)', ()
     servicesFromLibrary(),
   );
   assert.deepEqual(
-    placed.filter((entry) => entry.kind === 'split').map((entry) => entry.service),
-    splitServicesFromLibrary(),
+    placed
+      .filter((entry) => entry.kind === 'split')
+      .map((entry) => entry.service)
+      .sort(),
+    [...splitServicesFromLibrary()].sort(),
   );
   assert.ok(splitServicesFromLibrary().includes('construction'));
   assert.ok(!PENDING_SPLIT.includes('construction'));

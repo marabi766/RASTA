@@ -421,6 +421,7 @@ jobs:
           pnpm --filter @rasta/fleet-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Seed the live user, asset reference and assignment
@@ -436,6 +437,7 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Build portal and live-path services
@@ -877,6 +879,7 @@ jobs:
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -889,6 +892,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
@@ -909,6 +913,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -921,6 +926,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
@@ -1104,6 +1110,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
 
       - name: Organization coverage gate
         # organization-service carried a 70% threshold in `jest.config.js` that
@@ -1200,6 +1207,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1212,6 +1220,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
@@ -1266,6 +1275,7 @@ jobs:
           # audit-correction tables, which check behaviour the catalogue
           # comparison does not (constraints refusing rows, triggers firing).
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1278,6 +1288,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
@@ -1306,6 +1317,7 @@ jobs:
         run: pnpm run test:seed-guard:db
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1327,6 +1339,7 @@ jobs:
         run: pnpm run test:outbox-b3
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1592,6 +1605,7 @@ jobs:
           pnpm --filter @rasta/organization-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
@@ -1633,6 +1647,7 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
 
       - name: Seed organization-service
         # Q-70 (7): construction-service asks organization-service whether an

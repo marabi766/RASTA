@@ -55,6 +55,8 @@ RASTA_SERVICES=(
 PRIVILEGE_SPLIT_SERVICES=(
   supplier
   construction
+  identity
+  notification
 )
 
 # How a split service's runtime role gets its table rights
