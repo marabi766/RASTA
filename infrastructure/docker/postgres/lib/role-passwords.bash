@@ -91,8 +91,9 @@ declare -gA ROLE_PASSWORDS=()
 # resolve_role_passwords [role …]
 #
 # Fills ROLE_PASSWORDS for the named roles — every role when none is named — or
-# prints every problem and returns 1. A standalone split names only the one
-# role it changes, so an operator supplies only that password. Reads nothing
+# prints every problem and returns 1. A standalone split names its runtime role
+# and its migrator, so an operator supplies those two passwords; both are still
+# compared with every other role password the run knows. Reads nothing
 # from, and writes nothing to, the database.
 resolve_role_passwords() {
   local problems=0 role var value
@@ -142,6 +143,29 @@ resolve_role_passwords() {
     fi
     ROLE_PASSWORDS[$role]="$value"
   done
+
+  # A subset — a standalone split names the runtime role and its migrator — is
+  # still held against every other role password this run knows: each
+  # POSTGRES_PASSWORD_<ROLE> set in the environment, and under the compose flag
+  # each development default (Codex review of #176). Without it a migrator
+  # given the runtime role's password, or another service's, would be accepted,
+  # and that credential would log in as the owner.
+  if (($# > 0)); then
+    local other other_var other_value
+    while IFS= read -r other; do
+      [[ -n "${ROLE_PASSWORDS[$other]+set}" ]] && continue
+      other_var="$(role_password_var "$other")"
+      other_value="${!other_var:-}"
+      if [[ -z "$other_value" && "${RASTA_DB_BOOTSTRAP:-}" == compose ]]; then
+        other_value="${other}_dev_password"
+      fi
+      [[ -z "$other_value" ]] && continue
+      if [[ -n "${owner_of[$other_value]:-}" ]]; then
+        echo "${owner_of[$other_value]} equals ${other_var}; every role needs its own password" >&2
+        problems=$((problems + 1))
+      fi
+    done < <(rasta_roles)
+  fi
 
   if ((problems > 0)); then
     echo "Refusing to create or alter any role: ${problems} problem(s) above. Nothing was changed." >&2

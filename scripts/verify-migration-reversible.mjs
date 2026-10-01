@@ -45,6 +45,7 @@ import { resolve, join } from 'node:path';
 // the same expectations this CLI runs, rather than a copy of them.
 import {
   EXPECTED,
+  verifierConnection,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -84,24 +85,18 @@ if (!existsSync(serviceDir)) usage(`No such service directory: ${serviceDir}`);
 // Connection
 // ---------------------------------------------------------------------------
 
-const serviceKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
-/**
- * The runtime url, or — for a service whose EXPECTED entry says
- * `connectAs: 'migrator'` — its migrator url. supplier-service's runtime role
- * owns nothing and may not create a schema (lib/supplier-privilege-split.bash),
- * so its throwaway schemas are made by the role that owns the database, which is
- * also the role its migrations really run as. Opt-in: audit's migrator owns only
- * its schema, not the database, and keeps verifying as before.
- */
-const envKey = EXPECTED[service]?.connectAs === 'migrator' ? `${serviceKey}_MIGRATOR` : serviceKey;
-const baseUrl = process.env.DATABASE_URL ?? process.env[envKey];
-if (!baseUrl) {
-  console.error(
-    `${envKey} is not set. Copy .env.example to .env at the repository root, ` +
-      'or set DATABASE_URL for this process.',
-  );
+// The runtime url, or — for a service whose EXPECTED entry says
+// `connectAs: 'migrator'` — its migrator url and nothing else
+// (verifierConnection in the lib). A split service's runtime role owns nothing
+// and may not create a schema (D-045), so its throwaway schemas are made by
+// the role that owns the database, which is also the role its migrations
+// really run as.
+const connection = verifierConnection(service);
+if (connection.error) {
+  console.error(connection.error);
   process.exit(1);
 }
+const baseUrl = connection.url;
 
 /**
  * The reference schema, where each migration.sql is applied on its own so the

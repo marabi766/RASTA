@@ -217,9 +217,11 @@ split_audit_database_privileges() {
 }
 
 # Run directly (not sourced): split the named service's database with the
-# grants mode the bootstrap gives it. Only the migrator's password is resolved —
-# POSTGRES_PASSWORD_<SVC>_MIGRATOR, which must be exported: outside the compose
-# container (RASTA_DB_BOOTSTRAP=compose) there is no development fallback
+# grants mode the bootstrap gives it. The runtime role's and the migrator's
+# passwords are resolved — POSTGRES_PASSWORD_<SVC> and
+# POSTGRES_PASSWORD_<SVC>_MIGRATOR, both exported: outside the compose container
+# (RASTA_DB_BOOTSTRAP=compose) there is no development fallback — and refused
+# if they are equal, or equal to any other role password in the environment
 # (lib/role-passwords.bash). audit's split sets no password at all.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   set -euo pipefail
@@ -236,7 +238,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "${svc} is not in PRIVILEGE_SPLIT_SERVICES (lib/role-passwords.bash)" >&2
     exit 1
   fi
-  resolve_role_passwords "rasta_${svc}_migrator" || exit 1
+  resolve_role_passwords "rasta_${svc}" "rasta_${svc}_migrator" || exit 1
   echo "==> ${svc}-service privilege split"
   split_service_privileges "${svc}" "${2:-rasta_${svc}}" "$(privilege_split_grants_mode "${svc}")"
 fi
