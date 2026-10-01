@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   parseUpdateOrganizationForm,
   updateOrganization,
@@ -50,7 +50,7 @@ async function gate(form: FormData) {
   if (!csrf.ok) return { ok: false, state: { kind: 'REFUSED', reason: 'CSRF' } } as const;
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) {
+  if (!isBoundSubmissionId(submissionId, session)) {
     return { ok: false, state: { kind: 'REFUSED', reason: 'SUBMISSION' } } as const;
   }
 
