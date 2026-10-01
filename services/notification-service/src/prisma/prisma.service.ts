@@ -61,19 +61,23 @@ export const TENANT_SCOPED_MODELS = [
  *                            `(topic, partitionKey)` and deliberately without
  *                            a tenant column: a stream is a transport concept.
  */
-export const TENANT_SCOPE_EXEMPT_MODELS = [
-  'OutboxMessage',
-  'OutboxStreamSequence',
-  'ProcessedEvent',
-  // The email templates and their published versions (NTF-004). Platform
-  // configuration, identical for every tenant, seeded from the code catalogue
-  // and written by nothing else. They carry no organization column, so this is
-  // an exemption in name only — it is here because the spec compares the
-  // guarded set against the whole schema and an unnamed model would be an
-  // omission rather than a decision.
-  'NotificationTemplate',
-  'NotificationTemplateVersion',
-] as const;
+export const TENANT_SCOPE_EXEMPTIONS = {
+  OutboxMessage:
+    'Platform plumbing, and the one exemption that is not free: it carries an organization column but is claimed, published and acknowledged by a relay on a timer with no request context, so a guard would refuse every one of those statements. Every write goes through runUnscoped with a written reason; the column is for filtering, not isolation.',
+  OutboxStreamSequence:
+    'The counter behind the outbox, keyed by (topic, partition key) and deliberately without a tenant column: a stream is a transport concept.',
+  ProcessedEvent:
+    'An idempotency marker keyed by (event id, consumer name) alone: a message marker, not a tenant row, and it carries no organization column at all.',
+  NotificationTemplate:
+    'Email templates: platform configuration identical for every tenant, seeded from the code catalogue and written by nothing else; no organization column, named so the schema comparison is exact.',
+  NotificationTemplateVersion:
+    'Published versions of the email templates: platform configuration identical for every tenant, seeded from the code catalogue and written by nothing else; no organization column, named so the schema comparison is exact.',
+} as const satisfies Readonly<Record<string, string>>;
+
+/** The names, for callers that only need to know what is exempt. */
+export const TENANT_SCOPE_EXEMPT_MODELS = Object.keys(TENANT_SCOPE_EXEMPTIONS) as ReadonlyArray<
+  keyof typeof TENANT_SCOPE_EXEMPTIONS
+>;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
