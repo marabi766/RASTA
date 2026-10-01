@@ -393,7 +393,8 @@ describe('evaluation criteria', () => {
       await w.prisma.client.$executeRawUnsafe(
         `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
            "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
-           "bid_closing_at" = '2026-11-30T20:30:00Z' WHERE "id" = '${tenderId}'`,
+           "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
+         WHERE "id" = '${tenderId}'`,
       );
     }
     it('refuses an insert, an update and a delete on a published tender’s criteria', async () => {
@@ -447,7 +448,8 @@ describe('evaluation criteria', () => {
     const publishSql = (tenderId: string) =>
       `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
          "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
-         "bid_closing_at" = '2026-11-30T20:30:00Z' WHERE "id" = '${tenderId}'`;
+         "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
+       WHERE "id" = '${tenderId}'`;
 
     it('refuses to move a published tender’s criterion to a draft tender (OLD is judged, not only NEW)', async () => {
       const a = org();
@@ -523,7 +525,8 @@ describe('evaluation criteria', () => {
     const publishSql = (tenderId: string) =>
       `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
          "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
-         "bid_closing_at" = '2026-11-30T20:30:00Z' WHERE "id" = '${tenderId}'`;
+         "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
+       WHERE "id" = '${tenderId}'`;
     const setStatus = (tenderId: string, status: string) =>
       w.prisma.client.$executeRawUnsafe(
         `UPDATE "tender" SET "status" = '${status}'::"TenderStatus" WHERE "id" = '${tenderId}'`,

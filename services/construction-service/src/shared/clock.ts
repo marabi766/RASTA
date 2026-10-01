@@ -47,6 +47,28 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
  * is that both sides now come from the same clock, so the comparison measures
  * the domain rather than the infrastructure.
  */
+/**
+ * The instant a **deadline decision** is made (ADR-065 § 2): `clock_timestamp()`,
+ * read after the row lock was taken.
+ *
+ * Not {@link transactionNow}. That is constant for the whole transaction and
+ * started before any lock wait; a decision about a deadline must be made at the
+ * moment it is made, or a transaction that began before the deadline and waited
+ * for a lock past it would be judged on the instant it started. Rows and events
+ * still carry `transactionNow` (one instant per transaction, D-5); this is only
+ * for comparing against a deadline. The application clock is never consulted.
+ */
+export async function decisionInstant(tx: ExtendedPrismaClient): Promise<Date> {
+  const rows = await tx.$queryRawUnsafe<{ now: Date }[]>('SELECT clock_timestamp() AS now');
+  const now = rows[0]?.now;
+  if (!(now instanceof Date)) {
+    throw new Error(
+      'SELECT clock_timestamp() did not return a timestamp; refusing to fall back to the application clock',
+    );
+  }
+  return now;
+}
+
 export async function transactionNow(tx: ExtendedPrismaClient): Promise<Date> {
   const rows = await tx.$queryRawUnsafe<{ now: Date }[]>('SELECT now() AS now');
   const now = rows[0]?.now;

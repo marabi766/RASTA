@@ -79,6 +79,10 @@ export const CONSTRUCTION_EVENTS = {
   // audit must hear about); flagged for the project manager's acceptance.
   CRITERIA_TEMPLATE_CREATED: 'CRITERIA_TEMPLATE_CREATED',
   TENDER_CRITERIA_SET: 'TENDER_CRITERIA_SET',
+  // CON-002 PR 4b. `TENDER_PUBLISHED` is a catalogue event; `TENDER_BIDDER_INVITED`
+  // is added for S-06 (an invitation decides who may bid) and awaits acceptance.
+  TENDER_PUBLISHED: 'TENDER_PUBLISHED',
+  TENDER_BIDDER_INVITED: 'TENDER_BIDDER_INVITED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -470,6 +474,34 @@ export const tenderCriteriaSetPayload = z
   })
   .strict();
 
+/**
+ * A tender was opened to bidders. Carries the window and how many criteria are
+ * frozen — never a title, the scope, a criterion or the tender's public key.
+ * `keyId` is an opaque identifier of the key pair bids will be sealed to.
+ */
+export const tenderPublishedPayload = z
+  .object({
+    ...tenderIdentity,
+    visibility: z.enum(['PUBLIC', 'RESTRICTED']),
+    bidOpeningAt: isoTimestamp,
+    bidClosingAt: isoTimestamp,
+    criteriaCount: z.number().int().positive(),
+    keyId: identifier,
+    publishedBy: identifier,
+    publishedAt: isoTimestamp,
+  })
+  .strict();
+
+/** An organization was invited to a RESTRICTED tender. */
+export const tenderBidderInvitedPayload = z
+  .object({
+    ...tenderIdentity,
+    invitedOrganizationId: identifier,
+    invitedBy: identifier,
+    invitedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -497,6 +529,8 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   TENDER_CANCELLED: tenderCancelledPayload,
   CRITERIA_TEMPLATE_CREATED: criteriaTemplateCreatedPayload,
   TENDER_CRITERIA_SET: tenderCriteriaSetPayload,
+  TENDER_PUBLISHED: tenderPublishedPayload,
+  TENDER_BIDDER_INVITED: tenderBidderInvitedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

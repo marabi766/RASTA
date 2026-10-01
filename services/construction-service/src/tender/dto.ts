@@ -168,6 +168,8 @@ export const tenderViewSchema = z
     statusReasonCode: z.string().nullable(),
     statusChangedAt: z.string(),
     statusChangedBy: z.string(),
+    publishedAt: z.string().nullable(),
+    publishedBy: z.string().nullable(),
     createdAt: z.string(),
     createdBy: z.string(),
     updatedAt: z.string(),

@@ -1,4 +1,5 @@
 import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -13,6 +14,9 @@ import { TenderRepository } from '../src/tender/tender.repository';
 import { TenderService } from '../src/tender/tender.service';
 import { CriteriaRepository } from '../src/tender/criteria.repository';
 import { CriteriaService } from '../src/tender/criteria.service';
+import { PublicationRepository } from '../src/tender/publication.repository';
+import { PublicationService } from '../src/tender/publication.service';
+import { EnvKekProvider } from '../src/tender/sealing/key-provider';
 import { ApprovalService } from '../src/approval/approval.service';
 import { PolicyService } from '../src/approval/policy.service';
 import { PolicySuspensionService } from '../src/approval/policy-suspension.service';
@@ -54,6 +58,14 @@ export function databaseUrl(): string {
 }
 
 /**
+ * A key-encryption key minted for this test process only (ADR-066 § 2). Random,
+ * never written down: a fixed string assigned to a `KEK` is indistinguishable
+ * from a real one to a secret scanner (AGENTS.md S-01).
+ */
+export const TEST_KEK = randomBytes(32).toString('base64');
+export const TEST_KEK_ID = 'itest-1';
+
+/**
  * The owner connection the suites' cleanup alone may use to lift a trigger
  * (`DATABASE_URL_CONSTRUCTION_MIGRATOR`). **Required, with no fallback** to the
  * runtime URL: a suite that quietly fell back would be switching guards off with
@@ -75,6 +87,8 @@ export function ownerDatabaseUrl(): string {
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {
   return loadConstructionEnv({
     ...process.env,
+    CONSTRUCTION_TENDER_KEKS: `${TEST_KEK_ID}:${TEST_KEK}`,
+    CONSTRUCTION_TENDER_KEK_CURRENT: TEST_KEK_ID,
     DATABASE_URL: databaseUrl(),
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
     // Never used by these suites: they call the domain with an explicit
@@ -107,6 +121,10 @@ export interface Wiring {
   needs: NeedService;
   tenderRepository: TenderRepository;
   tenders: TenderService;
+  publicationRepository: PublicationRepository;
+  /** The provider the wiring publishes with; a test asks it to unwrap what publishing stored. */
+  keys: EnvKekProvider;
+  publication: PublicationService;
   criteriaRepository: CriteriaRepository;
   criteria: CriteriaService;
   approvalRepository: ApprovalRepository;
@@ -141,6 +159,11 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const approvalRepository = new ApprovalRepository(prisma);
   const tenderRepository = new TenderRepository(prisma);
   const criteriaRepository = new CriteriaRepository(prisma);
+  const publicationRepository = new PublicationRepository(prisma);
+  const keys = new EnvKekProvider(
+    env.CONSTRUCTION_TENDER_KEKS,
+    env.CONSTRUCTION_TENDER_KEK_CURRENT,
+  );
   const projects = new ProjectService(
     prisma,
     repository,
@@ -196,6 +219,19 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
     tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
+    publicationRepository,
+    keys,
+    publication: new PublicationService(
+      prisma,
+      tenderRepository,
+      criteriaRepository,
+      publicationRepository,
+      events,
+      access,
+      env,
+      keys,
+      hierarchy as unknown as OrganizationDirectory,
+    ),
     criteriaRepository,
     criteria: new CriteriaService(
       prisma,
@@ -332,7 +368,13 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_criterion" ENABLE TRIGGER "tg_tender_criterion_freeze"',
       );
+      // A tender key is never deleted by the service (`tg_tender_key_guard`);
+      // a suite's own keys are removed the same way, for one transaction.
+      await tx.$executeRawUnsafe('ALTER TABLE "tender_key" DISABLE TRIGGER "tg_tender_key_guard"');
+      await tx.tenderKey.deleteMany({ where });
+      await tx.$executeRawUnsafe('ALTER TABLE "tender_key" ENABLE TRIGGER "tg_tender_key_guard"');
     });
+    await owner.tenderInvitation.deleteMany({ where });
     await owner.tender.deleteMany({ where });
     await owner.approval.deleteMany({ where });
     await owner.progressReport.deleteMany({ where });
@@ -490,6 +532,15 @@ export class FakeHierarchy {
     this.parents.delete(child);
   }
 
+  /** Organizations organization-service does not know; every other id exists. */
+  readonly missing = new Set<string>();
+
+  async exists(organizationId: string): Promise<boolean> {
+    if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
+    if (this.timedOut) throw RastaError.upstreamTimeout('organization-service', 3000);
+    return !this.missing.has(organizationId);
+  }
+
   async isWithin(scope: string, organizationId: string): Promise<boolean> {
     this.asked.push([scope, organizationId]);
     if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
@@ -503,6 +554,42 @@ export class FakeHierarchy {
     }
     return false;
   }
+}
+
+/**
+ * An ACTIVE `tender.publication` policy for `organizationId`, written straight to
+ * the table: the approval module cannot write one until its round is wired (PR 11),
+ * and the publication gate is proven against the row it will read.
+ */
+export async function activatePublicationPolicy(
+  w: Wiring,
+  organizationId: string,
+): Promise<string> {
+  const id = `APL_${ulid()}`;
+  await runUnscoped('the suite puts a tender.publication policy in force', () =>
+    w.prisma.client.approvalPolicy.create({
+      data: {
+        id,
+        organizationId,
+        authorOrganizationId: organizationId,
+        authorRole: 'SYSTEM_ADMIN',
+        workflowKey: 'tender.publication',
+        policyVersion: 1,
+        status: 'ACTIVE',
+        label: 'Tender publication',
+        rationale: 'Written by the publication gate suite',
+        isSample: true,
+        createdAt: new Date(),
+        createdBy: 'USR_suite',
+        createdCorrelationId: ulid(),
+        submittedAt: new Date(),
+        submittedBy: 'USR_suite',
+        activatedAt: new Date(),
+        activatedBy: 'USR_suite_2',
+      },
+    }),
+  );
+  return id;
 }
 
 export interface StepSpec {

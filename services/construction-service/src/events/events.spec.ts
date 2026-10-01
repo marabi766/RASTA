@@ -160,6 +160,22 @@ Object.assign(VALID, {
     setBy: 'USR_1',
     setAt: AT,
   },
+  TENDER_PUBLISHED: {
+    ...TENDER,
+    visibility: 'RESTRICTED',
+    bidOpeningAt: '2026-11-01T08:00:00.000Z',
+    bidClosingAt: '2026-11-30T20:30:00.000Z',
+    criteriaCount: 3,
+    keyId: 'TKY_1',
+    publishedBy: 'USR_1',
+    publishedAt: AT,
+  },
+  TENDER_BIDDER_INVITED: {
+    ...TENDER,
+    invitedOrganizationId: 'ORG_BIDDER',
+    invitedBy: 'USR_1',
+    invitedAt: AT,
+  },
   CRITERIA_TEMPLATE_CREATED: {
     templateId: 'CTP_1',
     organizationId: 'ORG_A',
@@ -177,6 +193,8 @@ const TENDER_EVENTS = [
   'TENDER_UPDATED',
   'TENDER_CANCELLED',
   'TENDER_CRITERIA_SET',
+  'TENDER_PUBLISHED',
+  'TENDER_BIDDER_INVITED',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -219,9 +237,11 @@ describe('the construction event catalogue', () => {
       'PROJECT_STARTED',
       'PROJECT_STATUS_CHANGED',
       'PROJECT_UPDATED',
+      'TENDER_BIDDER_INVITED',
       'TENDER_CANCELLED',
       'TENDER_CREATED',
       'TENDER_CRITERIA_SET',
+      'TENDER_PUBLISHED',
       'TENDER_UPDATED',
     ]);
     expect(Object.keys(CONSTRUCTION_EVENT_SCHEMAS).sort()).toEqual([...NAMES].sort());
@@ -414,6 +434,27 @@ describe('routing (docs/07 § 7.7)', () => {
       expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...extra })).toThrow();
     },
   );
+
+  it.each([
+    ['TENDER_PUBLISHED', { title: 'Road resurfacing tender' }],
+    ['TENDER_PUBLISHED', { publicKeyPem: '-----BEGIN PUBLIC KEY-----' }],
+    ['TENDER_PUBLISHED', { criteria: [{ code: 'PRICE', weightBp: 4000 }] }],
+    ['TENDER_PUBLISHED', { wrappedPrivateKey: 'AAAA' }],
+    ['TENDER_BIDDER_INVITED', { organizationName: 'Bidder Co' }],
+  ] as [ConstructionEventName, Record<string, unknown>][])(
+    'never carries text, criteria or key material: %s (%j)',
+    (name, extra) => {
+      expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...extra })).toThrow();
+    },
+  );
+
+  it('publishes only a RESTRICTED or PUBLIC visibility, and only UTC instants', () => {
+    for (const bad of [{ visibility: 'SECRET' }, { bidClosingAt: 'next Monday' }]) {
+      expect(() =>
+        validateConstructionPayload('TENDER_PUBLISHED', { ...VALID.TENDER_PUBLISHED!, ...bad }),
+      ).toThrow();
+    }
+  });
 
   it('refuses a criteria total above the whole, and none at all', () => {
     for (const totalWeightBp of [10_001, 0]) {
