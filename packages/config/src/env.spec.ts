@@ -167,7 +167,7 @@ describe('boolean flags in the shared schemas', () => {
       expect(env.OUTBOX_CLAIM_LEASE_SECONDS).toBe(60);
       expect(env.OUTBOX_CLAIM_BACKOFF_SECONDS).toBe(5);
       expect(env.OUTBOX_CLAIM_BACKOFF_MAX_SECONDS).toBe(3600);
-      expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(30);
+      expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(20);
     });
 
     it('accepts a 20-second lease, the lowest the renewal schedule tolerates', () => {
@@ -359,5 +359,89 @@ describe('KAFKA_ALLOW_PLAINTEXT', () => {
   it('an explicit false is false', () => {
     const env = load({ NODE_ENV: 'development', KAFKA_ALLOW_PLAINTEXT: 'false' });
     expect(kafkaPlaintextAllowed(env)).toBe(false);
+  });
+});
+
+/**
+ * The outbox grace is a wait inside the shutdown the timeout bounds. A grace at
+ * or above the timeout is a wait the process exits before finishing, so it is
+ * refused at boot instead of discovered as a forced exit in production.
+ */
+describe('OUTBOX_SHUTDOWN_GRACE_SECONDS against SHUTDOWN_TIMEOUT_MS', () => {
+  const schema = baseEnvSchema.merge(kafkaEnvSchema);
+  const source = {
+    SERVICE_NAME: 'fleet-service',
+    PORT: '3104',
+    KAFKA_BROKERS: 'localhost:9092',
+    KAFKA_CLIENT_ID: 'fleet-service',
+  } as NodeJS.ProcessEnv;
+  const load = (overrides: Record<string, string> = {}) =>
+    loadEnv(schema, { ...source, ...overrides } as NodeJS.ProcessEnv);
+
+  it('accepts the defaults together: 20 s of grace inside a 25 s timeout', () => {
+    const env = load();
+    expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS * 1000).toBeLessThan(env.SHUTDOWN_TIMEOUT_MS);
+  });
+
+  it('accepts a grace one second under the timeout', () => {
+    expect(
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '9', SHUTDOWN_TIMEOUT_MS: '10000' })
+        .OUTBOX_SHUTDOWN_GRACE_SECONDS,
+    ).toBe(9);
+  });
+
+  it.each([
+    ['equal to the timeout', '10', '10000'],
+    ['above the timeout', '30', '25000'],
+    ['the old default against the default timeout', '30', '25000'],
+  ])('refuses a grace %s', (_name, grace, timeout) => {
+    expect(() =>
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: grace, SHUTDOWN_TIMEOUT_MS: timeout }),
+    ).toThrow(EnvValidationError);
+  });
+
+  it('names both variables and both values, so the fix is not a search', () => {
+    let message = '';
+    try {
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '30', SHUTDOWN_TIMEOUT_MS: '25000' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('OUTBOX_SHUTDOWN_GRACE_SECONDS');
+    expect(message).toContain('SHUTDOWN_TIMEOUT_MS');
+    expect(message).toContain('30 s');
+    expect(message).toContain('25000 ms');
+  });
+
+  it('allows a zero grace whatever the timeout', () => {
+    expect(load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '0', SHUTDOWN_TIMEOUT_MS: '1000' })).toMatchObject(
+      {
+        OUTBOX_SHUTDOWN_GRACE_SECONDS: 0,
+      },
+    );
+  });
+
+  it('is not asked of a service that has only one of the two', () => {
+    expect(() =>
+      loadEnv(baseEnvSchema, {
+        SERVICE_NAME: 'api-gateway',
+        PORT: '3000',
+        SHUTDOWN_TIMEOUT_MS: '1000',
+      } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+    expect(() =>
+      loadEnv(kafkaEnvSchema, {
+        KAFKA_BROKERS: 'localhost:9092',
+        KAFKA_CLIENT_ID: 'fleet-service',
+        OUTBOX_SHUTDOWN_GRACE_SECONDS: '300',
+      } as NodeJS.ProcessEnv),
+    ).not.toThrow();
+  });
+
+  it('raising the timeout is a fix, as the message says', () => {
+    expect(
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '30', SHUTDOWN_TIMEOUT_MS: '40000' })
+        .SHUTDOWN_TIMEOUT_MS,
+    ).toBe(40_000);
   });
 });
