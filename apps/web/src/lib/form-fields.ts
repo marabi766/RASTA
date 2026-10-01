@@ -14,3 +14,17 @@
 
 export const CSRF_FIELD = 'csrf';
 export const SUBMISSION_FIELD = 'submission';
+
+/**
+ * The query parameter a redirect after a write carries its confirmation in
+ * (`server/flash.ts`): a short-lived token the server can verify, never a
+ * `?created=1` anybody could type.
+ */
+export const FLASH_PARAM = 'flash';
+
+/**
+ * The hidden field of the edit form that carries what the person was shown
+ * (`server/asset-baseline.ts`): signed, so the action diffs against the values
+ * the server rendered rather than against anything the browser claims.
+ */
+export const BASELINE_FIELD = 'baseline';

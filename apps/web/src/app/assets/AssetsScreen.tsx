@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import {
   Button,
   ButtonLink,
@@ -43,6 +44,12 @@ import type { AssetListQuery, AssetPage, ReadResult } from '@/server/assets';
 export interface AssetsScreenProps {
   readonly result: ReadResult<AssetPage>;
   readonly query: AssetListQuery;
+  /**
+   * The registration form, when this person may use it. The screen stays a
+   * pure function of what the server read: whether to offer the form is
+   * decided by the page (a role check, fail-closed) and arrives already built.
+   */
+  readonly registerForm?: ReactNode;
 }
 
 /** Rebuilds this screen's URL with one value changed. */
@@ -196,7 +203,7 @@ function AssetRows({ page, query }: { page: AssetPage; query: AssetListQuery }) 
   );
 }
 
-export function AssetsScreen({ result, query }: AssetsScreenProps) {
+export function AssetsScreen({ result, query, registerForm }: AssetsScreenProps) {
   const filtered = Boolean(query.status || query.type || query.q);
 
   return (
@@ -205,6 +212,12 @@ export function AssetsScreen({ result, query }: AssetsScreenProps) {
         title="ماشین‌آلات"
         description="دارایی‌های ثبت‌شدهٔ سازمان فعال شما، با وضعیت بهره‌برداری هر کدام."
       />
+
+      {registerForm ? (
+        <Section headingId="register-asset" title="ثبت ماشین">
+          {registerForm}
+        </Section>
+      ) : null}
 
       <Section headingId="filters" title="پالایش">
         <Filters query={query} />
