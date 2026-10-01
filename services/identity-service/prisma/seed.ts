@@ -1,7 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
-import { ORG, USERS } from './seed-users';
 
 /**
  * Demo seed for identity-service.
@@ -36,6 +35,13 @@ function resolveDatabaseUrl(): string {
 }
 
 const prisma = new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } });
+
+const ORG = {
+  province: 'ORG-PROVINCE-YAZD',
+  union: 'ORG-UNION-YAZD',
+  dehyari1: 'ORG-DEH-0001',
+  dehyari2: 'ORG-DEH-0002',
+} as const;
 
 /** Roles as defined in the product document, chapter 5. */
 const ROLES = [
@@ -188,6 +194,80 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   AUDITOR: ['analytics:read'],
   SYSTEM_ADMIN: PERMISSIONS.map(([resource, action]) => `${resource}:${action}`),
 };
+
+const USERS = [
+  {
+    id: 'USR-SEED-SYSTEM-ADMIN',
+    username: 'system.admin',
+    email: 'system.admin@rasta.local',
+    firstName: 'System',
+    lastName: 'Administrator',
+    organizationId: ORG.union,
+    roles: ['SYSTEM_ADMIN'],
+  },
+  {
+    id: 'USR-SEED-UNION-ADMIN',
+    username: 'union.admin',
+    email: 'union.admin@rasta.local',
+    firstName: 'مدیر',
+    lastName: 'اتحادیه',
+    organizationId: ORG.union,
+    roles: ['UNION_ADMIN'],
+  },
+  {
+    id: 'USR-SEED-DEHYARI-ADMIN',
+    username: 'dehyari.admin',
+    email: 'dehyari.admin@rasta.local',
+    firstName: 'دهیار',
+    lastName: 'نمونه',
+    organizationId: ORG.dehyari1,
+    roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'PROCUREMENT_USER'],
+  },
+  {
+    id: 'USR-SEED-AUDITOR',
+    username: 'province.auditor',
+    email: 'auditor@rasta.local',
+    firstName: 'ناظر',
+    lastName: 'استانداری',
+    organizationId: ORG.province,
+    roles: ['AUDITOR'],
+  },
+  {
+    // Exists so tenant isolation is demonstrable against live data: this user
+    // is in a different dehyari and must not see ORG-DEH-0001's records.
+    id: 'USR-SEED-DEHYARI2-ADMIN',
+    username: 'dehyari2.admin',
+    email: 'dehyari2.admin@rasta.local',
+    firstName: 'دهیار',
+    lastName: 'دوم',
+    organizationId: ORG.dehyari2,
+    roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER'],
+  },
+  {
+    // The second tenant's administrator as the Keycloak realm fixture defines
+    // them (`dehyari.admin.b`, rasta_user_id USR-SEED-DEHYARI-ADMIN-B): without
+    // this row a token for that person named a user identity-service had never
+    // heard of, and `/v1/users/me` answered 404. The browser suite signs in as
+    // them and requires `/users/me` to answer before it trusts the session.
+    // `src/seed-realm-agreement.spec.ts` fails if this and the realm disagree.
+    id: 'USR-SEED-DEHYARI-ADMIN-B',
+    username: 'dehyari.admin.b',
+    email: 'dehyari.admin.b@rasta.local',
+    firstName: 'دهیار',
+    lastName: 'نمونه دو',
+    organizationId: ORG.dehyari2,
+    roles: ['ORGANIZATION_ADMIN'],
+  },
+  {
+    id: 'USR-SEED-OPERATOR',
+    username: 'operator.one',
+    email: 'operator.one@rasta.local',
+    firstName: 'اپراتور',
+    lastName: 'یکم',
+    organizationId: ORG.dehyari1,
+    roles: ['OPERATOR', 'DRIVER'],
+  },
+] as const;
 
 const ORGANIZATION_REFS = [
   { id: ORG.province, name: 'استانداری یزد', type: 'GOVERNMENT', status: 'ACTIVE' },
