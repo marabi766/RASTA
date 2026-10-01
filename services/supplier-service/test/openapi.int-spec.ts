@@ -71,12 +71,14 @@ describe('the OpenAPI document describes the application that is running', () =>
     await api.close();
   });
 
-  it('documents exactly the ten supplier routes the controller serves', () => {
+  it('documents exactly the twelve supplier routes the controller serves', () => {
     const documented = documentedRoutes().filter((route) => route.includes('/suppliers'));
     expect(documented).toEqual([
       'GET /v1/suppliers',
       'GET /v1/suppliers/qualifications',
       'GET /v1/suppliers/qualified',
+      'GET /v1/suppliers/standing-snapshot',
+      'GET /v1/suppliers/standing-snapshot/{organizationId}',
       'GET /v1/suppliers/{id}',
       'POST /v1/suppliers',
       'POST /v1/suppliers/{id}/qualifications',
