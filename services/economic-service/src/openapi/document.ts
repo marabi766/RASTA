@@ -9,7 +9,13 @@ import {
 } from '../ledger/dto';
 import { listHoldsQuerySchema, walletQuerySchema } from '../wallet/dto';
 import { listSettlementsQuerySchema } from '../settlement/dto';
-import { listPaymentsQuerySchema, refundPaymentSchema, topUpSchema } from '../payment/dto';
+import {
+  listPaymentsQuerySchema,
+  operatorDecisionSchema,
+  proposeResolutionSchema,
+  refundPaymentSchema,
+  topUpSchema,
+} from '../payment/dto';
 import {
   cancelTransactionSchema,
   createTransactionSchema,
@@ -63,6 +69,12 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'POST /v1/rewards/rules': toJsonSchema(createRewardRuleSchema),
   'PATCH /v1/rewards/rules/{id}': toJsonSchema(updateRewardRuleSchema),
   'POST /v1/payment-intents/{id}/refund': toJsonSchema(refundPaymentSchema),
+  'POST /v1/payment-intents/{id}/reconciliation/requeue': toJsonSchema(operatorDecisionSchema),
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions': toJsonSchema(proposeResolutionSchema),
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve':
+    toJsonSchema(operatorDecisionSchema),
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject':
+    toJsonSchema(operatorDecisionSchema),
 };
 
 /** Query schemas, so filtering and pagination are described, not implied. */
@@ -104,6 +116,10 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/transactions/{id}/cancel',
   'POST /v1/settlements',
   'POST /v1/payment-intents/{id}/refund',
+  'POST /v1/payment-intents/{id}/reconciliation/requeue',
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions',
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve',
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject',
 ]);
 
 /**
@@ -150,6 +166,11 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/payment-intents': COMMON,
   'GET /v1/payment-intents/{id}': READ_ONE,
   'POST /v1/payment-intents/{id}/refund': WRITE,
+  'GET /v1/payment-intents/{id}/reconciliation': READ_ONE,
+  'POST /v1/payment-intents/{id}/reconciliation/requeue': WRITE,
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions': WRITE,
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve': WRITE,
+  'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject': WRITE,
 };
 
 const STATUS_TEXT: Record<number, string> = {

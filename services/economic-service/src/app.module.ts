@@ -51,6 +51,8 @@ import { RewardController } from './reward/reward.controller';
 import { PaymentService } from './payment/payment.service';
 import { PaymentReconciliationRepository } from './payment/payment-reconciliation.repository';
 import { PaymentController } from './payment/payment.controller';
+import { PaymentReconciliationController } from './payment/payment-reconciliation.controller';
+import { PaymentReconciliationOperator } from './payment/payment-reconciliation.operator';
 import { MockPaymentProvider } from './payment/mock.provider';
 import { TimedPaymentProvider } from './payment/provider-timeout';
 import { PaymentReconciler } from './payment/payment-reconciler';
@@ -107,6 +109,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     CommissionController,
     RewardController,
     PaymentController,
+    PaymentReconciliationController,
     HealthController,
     MetricsController,
   ],
@@ -158,6 +161,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     PaymentService,
     PaymentReconciliationRepository,
     PaymentReconciler,
+    PaymentReconciliationOperator,
     PaymentReconciliationSweeper,
     SettlementService,
     LedgerBalanceAudit,
