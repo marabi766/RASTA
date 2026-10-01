@@ -338,7 +338,7 @@ try {
         reportId,
         mode,
         summary: true,
-        replayId: `${reportId}/${operator}`,
+        replayIdPrefix: `${reportId}/${operator}/`,
         written: outcome.written,
         recorded: outcome.recorded,
         expected: options.expectCount,

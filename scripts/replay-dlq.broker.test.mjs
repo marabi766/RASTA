@@ -503,7 +503,10 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
       deliveredFrom(ids.replayable, RETRY),
     );
 
-    const replayId = `${result.summary.reportId}/${OPERATOR}`;
+    // The stamp is this event's own (round 2 on #166), and the report line names it.
+    const replayId = `${result.summary.reportId}/${OPERATOR}/1/${ids.replayable}`;
+    assert.equal(result.summary.replayIdPrefix, `${result.summary.reportId}/${OPERATOR}/`);
+    assert.equal(result.records[0].replayId, replayId);
     const landed = (await readSince('itest-observer', RETRY, retryBefore)).filter(
       (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
     );
@@ -552,7 +555,7 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     await eventually('the consumer to take it from .retry', async () =>
       deliveredFrom(ids.unsequenced, RETRY),
     );
-    const replayId = `${result.summary.reportId}/${OPERATOR}`;
+    const replayId = `${result.summary.reportId}/${OPERATOR}/1/${ids.unsequenced}`;
     const [message] = (await readSince('itest-observer', RETRY, retryBefore)).filter(
       (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
     );

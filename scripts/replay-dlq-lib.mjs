@@ -34,7 +34,9 @@
  *
  * What is replayed: the original body, byte for byte, under that key, with
  * only the platform headers (`EVENT_HEADERS`) — each as the original publisher
- * set it — and `x-replay-id: <reportId>/<operator>`, never an `x-dlq-*` header.
+ * set it — and `x-replay-id: <reportId>/<operator>/<seq>/<eventId>` (one per
+ * replayed event: `seq` is its 1-based place in the run, see `replayIdFor`),
+ * never an `x-dlq-*` header.
  * `x-producer` is the one platform header a dead letter does not keep: the
  * dead-lettering consumer overwrites it with its own client id. It is neither
  * compared nor copied; it is restored from the envelope's `producer`, exactly
@@ -449,6 +451,17 @@ export function executionProblems(decisions, expectCount) {
   return problems;
 }
 
+/**
+ * The replay stamp of one replayed event: `<reportId>/<operator>/<seq>/<eventId>`,
+ * `seq` its 1-based place among the run's replays. Per event, not per run
+ * (round 2 on #166): after an unknown commit, the search for this exact value
+ * can only find this event's replay — never an earlier one of the same run.
+ * The operator pattern has no `/`, so the last segment is the whole event id.
+ */
+export function replayIdFor(reportId, operator, seq, eventId) {
+  return `${reportId}/${operator}/${seq}/${eventId}`;
+}
+
 /** The record published to `.retry`: body unchanged, keyed, platform headers and the replay stamp. */
 export function replayMessage(decision, replayId, REPLAY_HEADERS) {
   return {
@@ -543,16 +556,16 @@ export function replayExecutedRecord(
  *
  * Stops at the first failure and fails the run. A commit whose answer was
  * lost is the one outcome the tool cannot know: the pair is either committed
- * or not — never one without the other — and the report says to look for the
- * replay id.
+ * or not — never one without the other — and the warning names how to tell:
+ * this event's own replay stamp at the position the replay was written to.
  */
 export async function executeReplays(
   decisions,
   { reportId, operator, beginTransaction, newEventId, now, report, warn, contracts },
 ) {
-  const replayId = `${reportId}/${operator}`;
   let written = 0;
-  for (const decision of decisions) {
+  for (const [index, decision] of decisions.entries()) {
+    const replayId = replayIdFor(reportId, operator, index + 1, decision.summary.eventId);
     let transaction;
     let line = { replayId };
     try {
@@ -600,9 +613,11 @@ export async function executeReplays(
       );
       warn(
         `COMMIT OUTCOME UNKNOWN for ${decision.summary.eventId} (${error.message}): its replay and ` +
-          `its ${contracts.REPLAY_EXECUTED} record are both committed or both not. Look for ` +
-          `x-replay-id ${replayId} on ${decision.summary.target} before running again ` +
-          '(runbook: docs/runbooks/replay-dlq.md, step 3). Stopped here.',
+          `its ${contracts.REPLAY_EXECUTED} record are both committed or both not. It landed — if ` +
+          `committed — at ${decision.summary.target} partition ${line.replayPartition} offset ` +
+          `${line.replayOffset}: read that position read-committed and look for exactly ` +
+          `x-replay-id ${replayId}; any other x-replay-id, this run's earlier ones included, says ` +
+          'nothing about this event (runbook: docs/runbooks/replay-dlq.md, step 3). Stopped here.',
       );
       return { written, recorded: written, failed: true };
     }

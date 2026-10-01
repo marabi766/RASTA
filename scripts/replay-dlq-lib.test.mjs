@@ -16,6 +16,7 @@ import {
   parseTopics,
   recordProblem,
   replayExecutedRecord,
+  replayIdFor,
   replayMessage,
   reportLine,
   staleFrom,
@@ -527,12 +528,14 @@ test('the record of an event with no tenant has none either: a platform record',
  * when it commits, as they do to a read-committed consumer. `fail(topic)` may
  * throw from a send, `failCommit` from the commit.
  */
-function fakeBroker({ fail = () => false, failCommit = false } = {}) {
+function fakeBroker({ fail = () => false, failCommit = () => false } = {}) {
   const committed = [];
   const aborted = [];
   const offsets = new Map();
+  let transactions = 0;
   const beginTransaction = async () => {
     const pending = [];
+    const nth = (transactions += 1);
     return {
       send: async (topic, message) => {
         if (fail(topic)) throw new Error(`${topic} refused (injected)`);
@@ -542,7 +545,7 @@ function fakeBroker({ fail = () => false, failCommit = false } = {}) {
         return { partition: 0, offset: String(offset) };
       },
       commit: async () => {
-        if (failCommit) throw new Error('EndTxn answer lost (injected)');
+        if (failCommit(nth)) throw new Error('EndTxn answer lost (injected)');
         committed.push(...pending);
       },
       abort: async () => {
@@ -599,6 +602,20 @@ test('each replay and its record commit together, one transaction per event, rec
   assert.deepEqual(warnings, []);
 });
 
+test('each replayed event carries its own stamp: report, operator, place in the run and event id', async () => {
+  const broker = fakeBroker();
+  const { lines } = await run(two(), broker);
+  const stamps = broker.committed
+    .filter((s) => s.topic === 'rasta.fleet.v1.retry')
+    .map((s) => s.message.headers[REPLAY_HEADERS.replayId]);
+  assert.deepEqual(stamps, [`${REPORT}/ops.alice/1/EVT_1`, `${REPORT}/ops.alice/2/EVT_2`]);
+  assert.deepEqual(
+    lines.map((l) => l.replayId),
+    stamps,
+  );
+  assert.equal(replayIdFor(REPORT, 'ops.alice', 2, 'EVT_2'), `${REPORT}/ops.alice/2/EVT_2`);
+});
+
 test('a replay that fails aborts its transaction: nothing committed, the run stops and fails', async () => {
   const broker = fakeBroker({ fail: (topic) => topic === 'rasta.fleet.v1.retry' });
   const { outcome, lines } = await run(two(), broker);
@@ -628,13 +645,37 @@ test('a failure — or a kill — between the replay and its record leaves neith
 });
 
 test('a commit whose answer is lost is reported as unknown, loudly, and fails the run', async () => {
-  const broker = fakeBroker({ failCommit: true });
+  const broker = fakeBroker({ failCommit: () => true });
   const { outcome, lines, warnings } = await run(two(), broker);
   assert.deepEqual(outcome, { written: 0, recorded: 0, failed: true });
   assert.equal(lines.length, 1);
   assert.equal(lines[0].committed, 'UNKNOWN');
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /^COMMIT OUTCOME UNKNOWN for EVT_1 .*both committed or both not/);
+});
+
+test('an unknown commit on the 2nd event names its own stamp and position, never the 1st', async () => {
+  // Round 2 on #166: EVT_1 committed; EVT_2's commit answer is lost. A
+  // run-level stamp would be found on EVT_1's replay and read as "EVT_2 landed".
+  const broker = fakeBroker({ failCommit: (nth) => nth === 2 });
+  const { outcome, lines, warnings } = await run(two(), broker);
+  assert.deepEqual(outcome, { written: 1, recorded: 1, failed: true });
+  assert.deepEqual(
+    lines.map((l) => [l.eventId, l.replayId, l.replayPartition, l.replayOffset, l.committed]),
+    [
+      ['EVT_1', `${REPORT}/ops.alice/1/EVT_1`, 0, '0', true],
+      ['EVT_2', `${REPORT}/ops.alice/2/EVT_2`, 0, '1', 'UNKNOWN'],
+    ],
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /^COMMIT OUTCOME UNKNOWN for EVT_2 /);
+  assert.ok(warnings[0].includes(`x-replay-id ${REPORT}/ops.alice/2/EVT_2`), warnings[0]);
+  assert.ok(warnings[0].includes('rasta.fleet.v1.retry partition 0 offset 1'), warnings[0]);
+  // The stamp the warning names is not on the committed replay of EVT_1.
+  const committedStamps = broker.committed
+    .filter((s) => s.topic === 'rasta.fleet.v1.retry')
+    .map((s) => s.message.headers[REPLAY_HEADERS.replayId]);
+  assert.deepEqual(committedStamps, [`${REPORT}/ops.alice/1/EVT_1`]);
 });
 
 test('an event its record cannot state is refused by name before anything is sent', () => {

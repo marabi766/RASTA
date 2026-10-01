@@ -200,7 +200,7 @@ REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dl
 - **مقصد همیشه `<Topic مبدأ>.retry`** از `x-dlq-original-topic`، و Topic مبدأ باید از اشتراک‌های همان مصرف‌کننده‌ای باشد که DLQ
   مال اوست؛ هرگز Topic اصلی. پیامی که **از** `.retry` دوباره DLQ شده (`x-dlq-original-topic` = `<topic>.retry`) با حذف **دقیقاً
   یک** پسوند `.retry` به همان `<topic>.retry` برمی‌گردد (`.retry.retry` رد می‌شود).
-- **بدنه بایت‌به‌بایت**، با **فقط** Headerهای پلتفرم (`EVENT_HEADERS`) و مهر `x-replay-id: <reportId>/<operator>` — هیچ Header
+- **بدنه بایت‌به‌بایت**، با **فقط** Headerهای پلتفرم (`EVENT_HEADERS`) و مهر `x-replay-id: <reportId>/<operator>/<seq>/<eventId>` (برای **هر رویداد** جدا؛ `seq` جایگاه ۱-مبنای آن در اجرا) — هیچ Header
   `x-dlq-*`. Header پلتفرمی که با بدنه نخواند رد می‌شود، اصلاح نمی‌شود (`HEADER_BODY_MISMATCH:<name>`) — هم در مقدار و هم در
   **حضور**: Header بی فیلد متناظر در بدنه (مثلاً `x-tenant-id` بی `tenantId`)، یا فیلد بدنه بی Header، هم ناهمخوانی است؛ Relay
   هر Header را دقیقاً وقتی می‌نویسد که فیلدش هست — جز `x-producer`: پیام DLQ آن را عمداً با نام مصرف‌کننده‌ای
@@ -247,7 +247,11 @@ REPLAY_OPERATOR=<نام اپراتور، بی Secret> node … scripts/replay-dl
   شدن فرایند میان دو ارسال — **هیچ‌کدام** را قابل دیدن نمی‌گذارد (Coordinator تراکنش باز را پس از Timeout، یا Producer بعدی با
   همان شناسه، Abort می‌کند). خط گزارش `committed: false` و `error` دارد، اجرا متوقف و **کد خروج ۱** است؛ با همان انتخاب دوباره
   اجرا کن. تنها حالت نامعلوم: پاسخ Commit گم شود — `committed: 'UNKNOWN'` و `stderr` با `COMMIT OUTCOME UNKNOWN: …`؛ جفت یا
-  هر دو Commit شده یا هیچ، **هرگز یکی بی دیگری**؛ پیش از اجرای دوباره `x-replay-id` را روی `.retry` مقصد جست‌وجو کن.
+  هر دو Commit شده یا هیچ، **هرگز یکی بی دیگری**. پیش از اجرای دوباره، **همان رویداد** را بیازما (دور ۲ بازبینی #166):
+  هشدار مهر دقیق آن (`<reportId>/<operator>/<seq>/<eventId>`) و موقعیت نوشتنش (`partition`/`offset` روی `.retry` مقصد) را
+  نام می‌برد؛ آن موقعیت را **Read-Committed** بخوان — اگر رکوردی با **دقیقاً همین** `x-replay-id` آنجاست، Commit شده (و
+  `REPLAY_EXECUTED` آن با `replayedEvent.eventId` همین رویداد و `target` همین موقعیت هم هست)؛ اگر نیست، نشده. مهری دیگر —
+  حتی مهر رویدادهای پیشین **همین اجرا** که Commit شده‌اند (`committed: true` در گزارش) — هیچ چیزی دربارهٔ این رویداد نمی‌گوید.
 - **رویدادی که رکوردش نوشتنی نیست، پیش از هر ارسال رد می‌شود:** ارزیابی رکورد `REPLAY_EXECUTED` را با همان Schema می‌سازد؛
   میدانی بیرون از حدش — مثلاً `eventId` بلندتر از ۱۲۸ نویسه که پاکت می‌پذیرد و رکورد نه — `UNRECORDABLE:<مسیر>` است
   (مثلاً `UNRECORDABLE:replayedEvent.eventId`)، نه شکستی در میانهٔ اجرا.
