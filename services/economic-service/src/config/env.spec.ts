@@ -135,6 +135,100 @@ describe('loadEconomicEnv', () => {
     }
   });
 
+  it('runs the payment reconciler unless it is switched off, with bounded defaults', () => {
+    const env = loadEconomicEnv(base);
+    expect(env).toMatchObject({
+      ECONOMIC_PAYMENT_RECONCILER_ENABLED: true,
+      ECONOMIC_PAYMENT_RECONCILER_INTERVAL_SECONDS: 60,
+      ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE: 20,
+      ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS: 120,
+      ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS: 60,
+      ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS: 3600,
+      ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS: 12,
+      ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: 72,
+      ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: 10_000,
+    });
+    expect(
+      loadEconomicEnv({ ...base, ECONOMIC_PAYMENT_RECONCILER_ENABLED: 'false' })
+        .ECONOMIC_PAYMENT_RECONCILER_ENABLED,
+    ).toBe(false);
+  });
+
+  it('refuses a grace that a provider call could outlast', () => {
+    // The grace keeps the reconciler off a refund whose call is still running:
+    // it must be more than twice the longest call (ADR-064 step B2).
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS: '30',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '15000',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS/);
+    expect(
+      loadEconomicEnv({
+        ...base,
+        ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS: '31',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '15000',
+      }).ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS,
+    ).toBe(31);
+  });
+
+  it('refuses a provider timeout the mock’s own latency would exceed (Codex on #164, HIGH 1)', () => {
+    // The stated configuration: every mock call would time out.
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_MOCK_PAYMENT_LATENCY_MS: '500',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '100',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS/);
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'development',
+        ECONOMIC_MOCK_PAYMENT_LATENCY_MS: '500',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '500',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS/);
+    expect(
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_MOCK_PAYMENT_LATENCY_MS: '500',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '600',
+      }).ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS,
+    ).toBe(600);
+  });
+
+  it('refuses a lease a provider call and its write could outlast', () => {
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS: '19',
+        ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: '15000',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS/);
+  });
+
+  it('refuses a backoff ceiling below its base, and out-of-range knobs', () => {
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS: '600',
+        ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS: '60',
+      }),
+    ).toThrow(/ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS/);
+    for (const [name, value] of [
+      ['ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE', '0'],
+      ['ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS', '0'],
+      ['ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS', '10000'],
+      ['ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS', '50'],
+    ] as const) {
+      expect(() => loadEconomicEnv({ ...base, [name]: value })).toThrow(EnvValidationError);
+    }
+  });
+
   it('refuses to start without the identity provider or the internal secret', () => {
     // Validated once, at startup, and loudly: a service that boots without
     // these discovers it on the first request, which turns a deployment error

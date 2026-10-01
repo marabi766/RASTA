@@ -612,6 +612,8 @@ model PaymentIntent {
   @@unique([organizationId, idempotencyKey])
   /// The target of the reconciliation task's composite foreign key.
   @@unique([organizationId, id])
+  // SQL-only: `ix_payment_intent_unfinished_refund` — partial, the intents a
+  // refund left unfinished, for the reconciler's heal pass (ADR-064 step B2).
   @@index([organizationId, status, createdAt(sort: Desc)])
   @@map("payment_intent")
 }

@@ -112,6 +112,8 @@ export function testEnv(): EconomicEnv {
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
     // The reconciliation runs on a timer; a test drives it explicitly.
     ECONOMIC_BALANCE_AUDIT_ENABLED: 'false',
+    // So does the payment reconciler (ADR-064 step B2).
+    ECONOMIC_PAYMENT_RECONCILER_ENABLED: 'false',
   });
 }
 
@@ -173,7 +175,7 @@ export function wire(prisma: PrismaService): Wiring {
     commissions,
   );
 
-  const paymentReconciliation = new PaymentReconciliationRepository(env);
+  const paymentReconciliation = new PaymentReconciliationRepository(prisma, env);
 
   return {
     prisma,

@@ -80,6 +80,63 @@ export const economicEnvSchema = baseEnvSchema
       .default(300),
 
     /**
+     * The payment reconciler (ADR-064 step B2): an in-process sweeper over
+     * `payment_reconciliation_task`. On by default — a stranded refund keeps
+     * its hold until something asks the provider — and safe on every replica
+     * (`SKIP LOCKED`, a lease and a fencing token), so no leader election.
+     */
+    ECONOMIC_PAYMENT_RECONCILER_ENABLED: booleanEnv(true),
+    /** How often a sweep runs, in seconds. */
+    ECONOMIC_PAYMENT_RECONCILER_INTERVAL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(3600)
+      .default(60),
+    /** Tasks claimed per sweep. With the provider timeout, the bound on one sweep. */
+    ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    /** How long a claim holds before another sweeper may take the task back. */
+    ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(3600)
+      .default(120),
+    /** Delay after the first unresolved attempt; doubles per attempt up to the maximum. */
+    ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(60),
+    ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(3600),
+    /**
+     * After this many unresolved attempts, or this long since the task was
+     * opened, it is escalated to a person with `PAYMENT_RECONCILIATION_ESCALATED`.
+     * The hold stays: escalation changes who decides, not where the money is.
+     */
+    ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(12),
+    ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+
+    /**
+     * The deadline on the refund-side provider calls — `refund` and
+     * `getRefundStatus` — in milliseconds (ADR-064 step B2). A call past it is
+     * an unknown outcome, which the reconciler resolves by asking. Top-up
+     * calls get none until step C can recover them (Codex on #164, HIGH 1).
+     */
+    ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(10_000),
+
+    /**
      * Cashback rewards.
      *
      * The product document conditions cashback on a regulatory review
@@ -142,6 +199,57 @@ export const economicEnvSchema = baseEnvSchema
 
     /** How many wallets one reconciliation pass checks. Bounds the query. */
     ECONOMIC_BALANCE_AUDIT_BATCH_SIZE: z.coerce.number().int().min(1).max(5000).default(500),
+  })
+  .superRefine((env, ctx) => {
+    // The grace keeps the reconciler off a refund whose provider call is still
+    // running: longer than twice the longest call.
+    if (
+      env.ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS * 1000 <=
+      2 * env.ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS'],
+        message: 'must be more than twice ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS',
+      });
+    }
+    // A claim must outlive the provider question and the write that follows,
+    // or another sweeper takes the task back mid-work (the fence still holds,
+    // but every such sweep is wasted).
+    if (
+      env.ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS * 1000 <
+      env.ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS + 5000
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS'],
+        message: 'must exceed ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS by at least 5 seconds',
+      });
+    }
+    // The mock's fixed latency must fit inside the deadline, or every mock
+    // refund times out (Codex on #164, HIGH 1: the stated configuration was a
+    // 500 ms latency under a 100 ms timeout). The mock is the only provider,
+    // and it is what development and test run.
+    if (
+      env.ECONOMIC_PAYMENT_PROVIDER === 'mock' &&
+      env.ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS <= env.ECONOMIC_MOCK_PAYMENT_LATENCY_MS
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS'],
+        message: 'must exceed ECONOMIC_MOCK_PAYMENT_LATENCY_MS while the mock provider is bound',
+      });
+    }
+    if (
+      env.ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS <
+      env.ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS'],
+        message: 'must not be below ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS',
+      });
+    }
   });
 
 export type EconomicEnv = z.infer<typeof economicEnvSchema>;

@@ -5,16 +5,41 @@
 **سیگنال محرک:** رویداد `PAYMENT_REFUND_UNRECONCILED` در `rasta.economic.v1` (و ردیف متناظر در `audit-service`)؛ Log سطح Error
 از `PaymentService` («the provider refund failed without an answer» یا «a refund outcome … could not be recorded»)؛ افزایش
 `rasta_economic_payment_intents_total{outcome="REFUND_UNKNOWN"|"REFUNDED_NOT_REVERSED"|"REFUND_DECLINED_RELEASE_PENDING"}`؛ یا اپراتوری که
-بازپرداخت دومش با `422 BUSINESS_RULE_VIOLATION` و `outcome` یکی از علامت‌های زیر رد شد.
-**هشدار خودکار:** **ندارد.** هیچ قاعدهٔ Prometheus روی این‌ها نیست و هیچ چیز خودکار سراغ Intent گیرکرده نمی‌رود. از گام B1 هر
-کدام یک **تسک آشتی باز** در `payment_reconciliation_task` دارد (§ ۱)، ولی آشتی‌دهنده‌ای که آن را بردارد و هشدارش **گام B2 از
-ADR-064 است و هنوز پیاده نشده**. تا آن زمان این Runbook تنها راه است.
+بازپرداخت دومش با `422 BUSINESS_RULE_VIOLATION` و `outcome` یکی از علامت‌های زیر رد شد؛ و از گام B2 رویداد
+`PAYMENT_RECONCILIATION_ESCALATED` و هشدارهای زیر.
+**هشدار خودکار (گام B2):** `RastaPaymentReconciliationEscalated` (**بحرانی**)، `RastaPaymentReconciliationBacklogAging` و
+`RastaPaymentReconcilerStalled` در `infrastructure/docker/prometheus/rules/rasta-economic-alerts.yml` (§ ۰). بیشتر این حالت‌ها را
+**آشتی‌دهنده خودش حل می‌کند**؛ این Runbook برای وقتی است که آن را به انسان سپرده (تشدید) یا خودش از کار افتاده است.
 **زمان پاسخ هدف:** ۴ ساعت کاری.
 
 > **پرداخت در MVP شبیه‌سازی‌شده است** (`MockPaymentProvider`، ADR-024). هیچ بانک و پول واقعی‌ای در کار نیست؛ این Runbook برای
 > وقتی نوشته شده که Provider واقعی جایش بنشیند، و همین امروز روی دادهٔ شبیه‌سازی‌شده هم درست است.
 
 ---
+
+## ۰. اول: آشتی‌دهنده چه کرده است (ADR-064 گام B2)
+
+`PaymentReconciliationSweeper` درون economic-service هر `ECONOMIC_PAYMENT_RECONCILER_INTERVAL_SECONDS` (پیش‌فرض ۶۰ ثانیه):
+
+1. **صف را ترمیم می‌کند** (هر دو جهت): برای علامتی بی تسک باز، تسک باز می‌کند؛ تسک بازی را که Intent آن بی تسک حل شده، بی هیچ
+   حرکت پولی `DONE` می‌کند. این برای وقتی است که نسخهٔ B0 هم‌زمان در حال اجرا بوده است.
+2. **تسک‌های سررسیده را برمی‌دارد** (`SKIP LOCKED`، Lease و Fence؛ روی هر Replica امن).
+3. برای علامت نامعلوم **از Provider می‌پرسد** (`getRefundStatus` همان مرجع و همان کلید)، و زیر قفل Intent و کیف پول با همان
+   مسیرهای کد حل می‌کند: بازپرداخت‌شده → معکوس (هرگز از کیف پول غیرفعال)؛ ردشده یا «هرگز نرسیده» با تأیید Provider → برگرداندن
+   Hold. پاسخی که پاسخ نیست (`UNKNOWN`، Timeout، «پیدا نشد» بی تأیید) **هیچ چیز را جابه‌جا نمی‌کند** و با Backoff دوباره می‌پرسد.
+   «پیدا نشد» فقط از Providerی پذیرفته می‌شود که توانایی آن را اعلام کرده است (`authoritativeAbsence`). **Mock هرگز اعلام نمی‌کند**:
+   حافظه‌اش مال یک فرایند است، پس بازپرداختی که Mock ندیده «نامعلوم» است و آن تسک سرانجام به انسان سپرده می‌شود (§ ۴).
+4. پس از `…_MAX_ATTEMPTS` یا `…_MAX_AGE_HOURS`، یا در وضعیتی که نباید حدس بزند (`HOLD_WITHOUT_MARKER`)، تسک را `ESCALATED` می‌کند
+   و `PAYMENT_RECONCILIATION_ESCALATED` می‌فرستد. **Hold می‌ماند.**
+
+| هشدار                                    | یعنی                                                  | چه کنی                                                                                                                                                                                       |
+| ---------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RastaPaymentReconciliationEscalated`    | دست‌کم یک تسک `ESCALATED` است                         | § ۱ با `task_status = 'ESCALATED'`؛ `last_outcome` می‌گوید چرا. علامت معلوم → § ۳؛ نامعلوم → § ۴. `HOLD_WITHOUT_MARKER` یک ناسازگاری است → [ledger-imbalance](ledger-imbalance.md)، دست نزن. |
+| `RastaPaymentReconciliationBacklogAging` | تسک سررسیده بیش از یک ساعت منتظر مانده                | Log `PaymentReconciler` را ببین (`APPLY_FAILED`، `PROVIDER_UNREACHABLE`)؛ پایگاه داده و Provider را بررسی کن.                                                                                |
+| `RastaPaymentReconcilerStalled`          | نمونه‌ای با آشتی‌دهندهٔ روشن پنج بازه است Sweep نکرده | Log سطح Error «Payment reconciliation sweep failed» را ببین؛ اتصال پایگاه داده؛ در صورت لزوم نمونه را Restart کن. تسک‌ها در صف می‌مانند.                                                     |
+
+تسک `ESCALATED` را آشتی‌دهنده دیگر برنمی‌دارد. با **Mock** پس از Restart، Provider هیچ تلاش پیشینی را نمی‌شناسد و پاسخ `UNKNOWN` می‌دهد؛
+در Stack نمایشی تشدید مسیر عادی چنین تسک‌هایی است — پاسخ صادقانه.
 
 ## علامت‌ها و معنای هر کدام
 
@@ -111,6 +136,9 @@ Content-Type: application/json
 
 اگر همین پاسخ دوباره شکست خورد (مثلاً `INTERNAL_ERROR`)، دوباره امتحان نکن؛ ردیف و Log را برای مالک economic-service ثبت کن.
 
+از گام B2 آشتی‌دهنده همین دو حالت را در Sweep بعدی خودش حل می‌کند (بی پرسیدن از Provider). فراخوانی دستی بالا فقط برای تسکی لازم
+است که `ESCALATED` شده یا آشتی‌دهنده خاموش است؛ هر دو مسیر زیر قفل Intent‌اند و فقط یکی اثر می‌گذارد.
+
 ## ۴. نتیجهٔ Provider نامعلوم است — `REFUND_UNKNOWN`، `REFUND_REQUESTED` (و `CAPTURED_REFUND_UNKNOWN`)
 
 API این‌ها را **عمداً رد می‌کند**: بدون دانستن کار Provider، هر حرکتی یا پول را دوبار برمی‌گرداند یا پرداخت‌کننده را بی‌پول
@@ -182,7 +210,6 @@ UPDATE payment_intent
 
 ## وقتی گام B کامل شود
 
-ADR-064 گام B سه بخش دارد. **B1** (صف تسک) آمده است: هر علامت تسک باز خودش را دارد (§ ۱). **B2** آشتی‌دهنده را می‌آورد:
-برداشتن تسک‌های سررسیده، پرسیدن وضعیت بازپرداخت از Provider، حل زیر قفل Intent و کیف پول با همان مسیرها، رویداد و متریک و
-هشدار تشدید. **B3** Endpoint حل انسانی را می‌آورد (`SYSTEM_ADMIN`، شاهد الزامی، **تأیید دونفره**، Q-82). آن زمان § ۴-۲
-(UPDATE دستی علامت) حذف می‌شود و این Runbook به آن Endpoint اشاره می‌کند.
+ADR-064 گام B سه بخش دارد. **B1** (صف تسک) و **B2** (آشتی‌دهنده، § ۰) آمده‌اند. **B3** Endpoint حل انسانی را می‌آورد
+(`SYSTEM_ADMIN`، شاهد الزامی، **تأیید دونفره**، Q-82). آن زمان § ۴-۲ (UPDATE دستی علامت) حذف می‌شود و این Runbook به آن Endpoint
+اشاره می‌کند.
