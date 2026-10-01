@@ -46,9 +46,10 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.insurance.v1', 'rasta.maintenance.v1'],
         deadLetterTopic: 'rasta.notification.v1.dlq',
       },
-      // Q-83: an ORGANIZATION_MOVED re-checks the policies unions wrote.
+      // Q-83: an ORGANIZATION_MOVED re-checks the policies unions wrote. CON-002:
+      // a contractor's qualification and suspension (SUPPLIER_*) are what a bid needs.
       'construction-service': {
-        subscribes: ['rasta.organization.v1'],
+        subscribes: ['rasta.organization.v1', 'rasta.supplier.v1'],
         deadLetterTopic: 'rasta.construction.v1.dlq',
       },
       'supplier-service': {

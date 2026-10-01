@@ -33,6 +33,7 @@ import {
   publishSql,
   urlWithSchema,
 } from './outbox-b2-fixture.mjs';
+import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(REPO_ROOT, 'scripts', 'outbox-b2-backfill.mjs');
@@ -44,14 +45,20 @@ const CLI = path.join(REPO_ROOT, 'scripts', 'outbox-b2-backfill.mjs');
  */
 function baseUrl(service) {
   const key = `DATABASE_URL_${service.toUpperCase()}`;
-  // Scratch databases and DDL: the migrator where the service has one (D-045 —
-  // the runtime role owns nothing and has no CREATEDB).
-  const url = process.env[`${key}_MIGRATOR`] ?? process.env[key];
+  // These tests create and drop throwaway schemas, which only the role that
+  // owns the database may. For a split service (D-045) that is its migrator —
+  // **required**, never a fallback to the runtime URL, whose role cannot run
+  // the DDL and would fail for a reason that hides the real one (Codex review
+  // of #178); scripts/prisma.mjs makes the same choice. An unsplit service's
+  // runtime role still owns its database.
+  const split = service === 'audit' || splitServicesFromLibrary().includes(service);
+  const wanted = split ? `${key}_MIGRATOR` : key;
+  const url = process.env[wanted];
   if (!url) {
     throw new Error(
-      `${key} is not set. These tests run against a real PostgreSQL: start it with ` +
-        '`pnpm infra:up`, copy .env.example to .env, and run them with ' +
-        '`node --env-file=.env --test scripts/outbox-b2-backfill.pg.test.mjs`.',
+      `${wanted} is not set. These tests run against a real PostgreSQL: start it with ` +
+        '`pnpm infra:up`, copy .env.example to .env and .env.migrator.example to ' +
+        '.env.migrator, and run them through pnpm.',
     );
   }
   return url;

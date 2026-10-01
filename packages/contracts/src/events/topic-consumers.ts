@@ -84,7 +84,7 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // that left the union's subtree. Reads only ORGANIZATION_MOVED, as a trigger:
   // the answer is asked of organization-service on every delivery.
   'construction-service': Object.freeze({
-    subscribes: Object.freeze(['rasta.organization.v1'] as const),
+    subscribes: Object.freeze(['rasta.organization.v1', 'rasta.supplier.v1'] as const),
     deadLetterTopic: 'rasta.construction.v1.dlq',
   }),
   'supplier-service': Object.freeze({

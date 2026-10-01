@@ -1057,15 +1057,19 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   Migration ناموفق هم دفتر را نوشتنی نمی‌گذارد (آزمون زنده با `prisma migrate deploy` ناموفق)؛ (۲) گذرواژهٔ پیش‌فرض
   توسعه فقط با `RASTA_DB_BOOTSTRAP=compose` (Compose و CI) پذیرفته می‌شود و هر اجرای دیگر بی گذرواژهٔ صریح رد می‌کند؛ (۳)
   اعتبار مهاجر از `.env` به `.env.migrator` رفت که هیچ سرویسی بار نمی‌کند، و هر سرویس با متغیر `*_MIGRATOR` در محیطش بالا
-  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). سپس **identity** (نگهبان
-  `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم تقسیم شدند
-  (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس از آن
-  organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement، inventory،
-  contract، analytics) — `fix/d045-split-remaining`؛ Schema آزمایشی پروتکل Outbox در document اکنون با مهاجر ساخته
-  می‌شود. آخر **economic** (`fix/d045-split-economic`): هفت Trigger دفتر کل و برش پاداش و CHECK `ck_wallet_balances` در
-  برابر نقش اجرا `42501` می‌دهند؛ پاک‌سازی آزمون‌ها Triggerهای دفتر کل را فقط با اتصال مهاجر
+  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). دور دوم Codex روی #176: گذرواژهٔ مهاجر
+  برابر با گذرواژهٔ نقش اجرا یا هر نقش شناخته‌شدهٔ دیگر رد می‌شود (تقسیم مستقل هر دو گذرواژه را می‌خواهد)؛ و هر سرویس
+  تقسیم‌شده پیش از کار، نقشِ واقعاً وصل‌شده را از Catalogue می‌پرسد (`assertRuntimeRole` مشترک در `@rasta/nest-common`) و
+  با Superuser، مهاجر، مالک یا دارندهٔ `CREATE` بالا نمی‌آید — پس `DATABASE_URL`ی که به مهاجر اشاره کند هم گرفته می‌شود.
+  سپس **identity** (نگهبان `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم
+  تقسیم شدند (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس
+  از آن organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement،
+  inventory، contract، analytics) — `fix/d045-split-remaining`؛ Schema آزمایشی پروتکل Outbox در document اکنون با مهاجر
+  ساخته می‌شود. آخر **economic** (`fix/d045-split-economic`): هفت Trigger دفتر کل و برش پاداش و CHECK
+  `ck_wallet_balances` در برابر نقش اجرا `42501` می‌دهند؛ پاک‌سازی آزمون‌ها Triggerهای دفتر کل را فقط با اتصال مهاجر
   (`DATABASE_URL_ECONOMIC_MIGRATOR`، بی بازگشت) برمی‌دارد. اکنون **هر** سرویس در `PRIVILEGE_SPLIT_SERVICES` است (audit با
-  تقسیم خودش)؛ فهرست «در انتظار» حذف شد و `check:db-runtime-privileges` هر سرویس تازه‌ای را که تقسیم نشده رد می‌کند. Runbook:
+  تقسیم خودش)؛ فهرست «در انتظار» حذف شد و `check:db-runtime-privileges` هر سرویس تازه‌ای را که تقسیم نشده رد می‌کند.
+  Runbook:
   `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری

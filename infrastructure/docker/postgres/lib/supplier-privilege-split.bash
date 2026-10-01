@@ -44,7 +44,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
   # shellcheck source=role-passwords.bash
   source "$(dirname "${BASH_SOURCE[0]}")/role-passwords.bash"
-  resolve_role_passwords rasta_supplier_migrator || exit 1
+  resolve_role_passwords rasta_supplier rasta_supplier_migrator || exit 1
   echo "==> supplier-service privilege split"
   split_supplier_privileges "${1:-rasta_supplier}"
 fi

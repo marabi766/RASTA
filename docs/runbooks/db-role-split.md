@@ -54,6 +54,13 @@ Default Privileges حق DML نقش اجرا را به ارث می‌برد — �
 `scripts/prisma.mjs` برای سرویس تقسیم‌شده بی URL مهاجر رد می‌کند و به URL اجرا برنمی‌گردد. `pnpm infra:up` اگر `.env`ِ
 قدیمی هنوز اعتبار مهاجر داشته باشد هشدار می‌دهد: آن‌ها را به `.env.migrator` ببر و از `.env` پاک کن.
 
+**نقشی که واقعاً وصل شده.** `DATABASE_URL`ی که خودش مهاجر را نام ببرد هیچ متغیر `*_MIGRATOR`ی ندارد. پس هر سرویس تقسیم‌شده
+(و audit) نخستین کارِ `AppModule.onModuleInit` را `PrismaService.assertRuntimeRole()` می‌کند — بررسی مشترک
+`@rasta/nest-common` (`runtime-role.ts`) که از Catalogue می‌پرسد و بالا نمی‌آید اگر نقش وصل‌شده (مستقیم یا با عضویت)
+Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrator` ختم شود، مالک پایگاه داده، Schemaی غیرسیستمی یا
+هر Relationی باشد، روی پایگاه داده یا Schemaی `CREATE` داشته باشد، یا `CREATEDB`/`CREATEROLE`/`BYPASSRLS` داشته باشد.
+آزمون زنده: `test/startup-role.int-spec.ts` هر سرویس (URL مهاجر در جای `DATABASE_URL` → رد).
+
 ## ۴. خوشهٔ تازه
 
 `cp .env.migrator.example .env.migrator`، سپس هیچ کار دیگری. `00-init-databases.sh` (Compose و CI) برای هر سرویس در
@@ -70,14 +77,16 @@ Default Privileges حق DML نقش اجرا را به ارث می‌برد — �
 
 1. **گذرواژهٔ مهاجر** را در `.env.migrator` بگذار (نه `.env`): `POSTGRES_PASSWORD_<SVC>_MIGRATOR` (توسعه: مقدار
    `.env.migrator.example`؛ هر محیط واقعی: مقدار خودش، یکتا) و `DATABASE_URL_<SVC>_MIGRATOR` با همان. برای اجرای مستقیم
-   روی هر خوشه، `POSTGRES_PASSWORD_<SVC>_MIGRATOR` باید **Export** شده باشد — بی آن اسکریپت رد می‌کند؛ فقط همین یک گذرواژه
-   لازم است.
+   روی هر خوشه، `POSTGRES_PASSWORD_<SVC>` (نقش اجرا) و `POSTGRES_PASSWORD_<SVC>_MIGRATOR` هر دو باید **Export** شده باشند —
+   بی آن‌ها اسکریپت رد می‌کند — و اگر گذرواژهٔ مهاجر با گذرواژهٔ نقش اجرا، یا با هر گذرواژهٔ نقش دیگری که در محیط هست،
+   یکی باشد هم رد می‌کند (آن اعتبار اجرا می‌توانست با نام مهاجر وارد شود).
 2. **تقسیم، به‌عنوان Superuser:**
 
    ```bash
    pnpm db:privilege-split <svc>        # محلی (docker compose exec)
    # یا روی هر خوشه:
-   POSTGRES_USER=<superuser> POSTGRES_PASSWORD_<SVC>_MIGRATOR=<secret> \
+   POSTGRES_USER=<superuser> POSTGRES_PASSWORD_<SVC>=<runtime-secret> \
+     POSTGRES_PASSWORD_<SVC>_MIGRATOR=<owner-secret> \
      bash infrastructure/docker/postgres/lib/service-privilege-split.bash <svc>
    ```
 
@@ -97,7 +106,8 @@ audit (یک بار، برای خوشه‌ای که پیش از D-045 ساخته 
 Repository هیچ IaC پایگاه داده ندارد؛ DBA باید همین مدل را بسازد:
 
 - هر سرویس **دو** اعتبار: مهاجر فقط برای Pipeline استقرار (`prisma migrate deploy`)، نقش اجرا فقط برای سرویس. اعتبار
-  مهاجر هرگز در محیط اجرای سرویس نیست — و اگر باشد، سرویس بالا نمی‌آید (`assertNoMigratorCredentials`).
+  مهاجر هرگز در محیط اجرای سرویس نیست — و اگر باشد، یا `DATABASE_URL` سرویس به مهاجر یا هر مالکی اشاره کند، سرویس بالا
+  نمی‌آید (`assertNoMigratorCredentials`، `assertRuntimeRole`).
 - مهاجر در Production `CREATEDB` لازم ندارد (`migrate deploy` Shadow Database نمی‌سازد)؛ آن را ندهید.
 - همان دستورهای `service-privilege-split.bash` (با Superuser یا نقش ادمین مدیریت‌شده) یک بار، سپس Migrationها با مهاجر.
 - `scripts/check-db-runtime-privileges.mjs` را پس از هر استقرار با یک نقش فقط‌خواندنیِ Catalogue اجرا کنید.

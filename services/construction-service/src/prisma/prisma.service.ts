@@ -1,5 +1,9 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { createTenantGuardExtension } from '@rasta/nest-common';
+import { SERVICE_NAME } from '../config/env';
+import {
+  createTenantGuardExtension,
+  assertRuntimeRole as assertConnectedRuntimeRole,
+} from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 
 /**
@@ -26,6 +30,8 @@ export const TENANT_SCOPED_MODELS = [
   'TenderCriterion',
   'TenderInvitation',
   'TenderKey',
+  'ContractorStanding',
+  'ContractorSuspension',
 ] as const;
 
 /**
@@ -74,6 +80,26 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     await this.base.$connect();
     this.logger.log('Database connection established');
+  }
+
+  /**
+   * Refuses to run as anything but this service's runtime role (D-045): not a
+   * superuser, not a migrator, owning nothing and holding no CREATE — what the
+   * catalogue says about the role actually connected, so a DATABASE_URL that
+   * names an owner is caught even though no *_MIGRATOR variable is set
+   * (@rasta/nest-common runtime-role.ts; Codex review of #176).
+   *
+   * Called first in `AppModule.onModuleInit`. Not in `onModuleInit` here: the
+   * integration suites open owner connections through this class on purpose.
+   */
+  async assertRuntimeRole(): Promise<void> {
+    const facts = await assertConnectedRuntimeRole(this.base, {
+      service: SERVICE_NAME,
+      runtimeVariable: 'DATABASE_URL_CONSTRUCTION',
+    });
+    this.logger.log(
+      `Connected as ${facts.role}: not a superuser or a migrator, owns nothing, no CREATE`,
+    );
   }
 
   async onModuleDestroy(): Promise<void> {

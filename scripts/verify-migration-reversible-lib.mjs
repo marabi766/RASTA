@@ -1262,6 +1262,40 @@ export const EXPECTED = {
  * whose verification either cannot run, runs by sequential scan, or cannot be
  * re-applied at all.
  */
+/**
+ * The connection a verification runs on, and the variable it came from.
+ *
+ * A service whose EXPECTED entry says `connectAs: 'migrator'` is verified as its
+ * migrator — the role that owns its database and runs its migrations (D-045) —
+ * and **only** as that: `DATABASE_URL_<SVC>_MIGRATOR` is required, and the
+ * generic `DATABASE_URL` is never used in its place (Codex review of #178).
+ * A shell's DATABASE_URL naming some other role would otherwise be taken
+ * silently, and the scratch schema made — or refused — by the wrong owner.
+ * Every other service keeps the old order: DATABASE_URL, then
+ * DATABASE_URL_<SVC>.
+ *
+ * Returns `{ key, url }`, or `{ key, error }` naming what to set.
+ */
+export function verifierConnection(service, env = process.env) {
+  const serviceKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
+  if (EXPECTED[service]?.connectAs === 'migrator') {
+    const key = `${serviceKey}_MIGRATOR`;
+    if (env[key]) return { key, url: env[key] };
+    return {
+      key,
+      error:
+        `${key} is not set. ${service}-service is verified as its migrator only — DATABASE_URL ` +
+        'is not used in its place. Copy .env.migrator.example to .env.migrator, or export it.',
+    };
+  }
+  if (env.DATABASE_URL) return { key: 'DATABASE_URL', url: env.DATABASE_URL };
+  if (env[serviceKey]) return { key: serviceKey, url: env[serviceKey] };
+  return {
+    key: serviceKey,
+    error: `${serviceKey} is not set. Copy .env.example to .env, or set DATABASE_URL.`,
+  };
+}
+
 export function assertionScript(expected, present, schema) {
   const {
     tables,

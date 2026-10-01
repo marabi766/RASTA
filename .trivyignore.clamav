@@ -1,0 +1,14 @@
+# Time-boxed exception for the pinned ClamAV sidecar image ONLY (ci.yml job
+# `clamav-signatures`, ADR-049 § "Temporary exception"). Never used by the
+# Rasta service image scans.
+#
+# CVE-2026-103111 — pcre2 out-of-bounds write via a crafted regular
+# expression. Fixed in pcre2 10.49-r0, which Alpine 3.24 already ships, but the
+# newest upstream clamav/clamav image (1.5.4, 2026-10-01) still carries
+# 10.48-r0. In clamd, regular expressions come from the signature databases,
+# not from scanned content, so exploiting it needs control of the signatures
+# (signed CVDs) — not of an uploaded document.
+# The three other pcre2 HIGHs (fixed in 10.48-r0) are closed by the digest bump.
+# Expires on its own: on 2026-10-16 the scan fails again unless upstream has
+# shipped a fixed image (bump the digest) or the exception is re-reviewed.
+CVE-2026-103111 exp:2026-10-16

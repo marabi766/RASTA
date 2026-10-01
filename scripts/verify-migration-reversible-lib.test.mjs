@@ -21,6 +21,7 @@ import {
   snapshotStoreScript,
   sqlstateFrom,
   staleScratchDatabases,
+  verifierConnection,
 } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -1298,3 +1299,42 @@ test(
     }
   },
 );
+
+test('a migrator-verified service connects as its named migrator only, never DATABASE_URL (Codex on #178)', () => {
+  const migratorServices = Object.entries(EXPECTED)
+    .filter(([, entry]) => entry.connectAs === 'migrator')
+    .map(([service]) => service);
+  assert.ok(migratorServices.includes('construction'), migratorServices.join(', '));
+  for (const service of migratorServices) {
+    const key = `DATABASE_URL_${service.toUpperCase()}_MIGRATOR`;
+    // Both set: the named migrator wins.
+    assert.deepEqual(
+      verifierConnection(service, {
+        DATABASE_URL: 'postgresql://other@h/d',
+        [key]: 'postgresql://m@h/d',
+      }),
+      { key, url: 'postgresql://m@h/d' },
+    );
+    // Only the generic one: refused, naming the variable — never a fallback.
+    const refused = verifierConnection(service, {
+      DATABASE_URL: 'postgresql://other@h/d',
+      [`DATABASE_URL_${service.toUpperCase()}`]: 'postgresql://runtime@h/d',
+    });
+    assert.equal(refused.url, undefined);
+    assert.equal(refused.key, key);
+    assert.match(refused.error, new RegExp(`${key} is not set`));
+    assert.ok(!refused.error.includes('other@'));
+  }
+});
+
+test('a runtime-verified service keeps its order: DATABASE_URL, then DATABASE_URL_<SVC>', () => {
+  const runtimeService = Object.entries(EXPECTED).find(([, entry]) => !entry.connectAs)?.[0];
+  if (!runtimeService) return; // every service verified as its migrator — nothing to order
+  const key = `DATABASE_URL_${runtimeService.toUpperCase()}`;
+  assert.deepEqual(verifierConnection(runtimeService, { DATABASE_URL: 'a', [key]: 'b' }), {
+    key: 'DATABASE_URL',
+    url: 'a',
+  });
+  assert.deepEqual(verifierConnection(runtimeService, { [key]: 'b' }), { key, url: 'b' });
+  assert.match(verifierConnection(runtimeService, {}).error, new RegExp(`${key} is not set`));
+});

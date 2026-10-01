@@ -12,6 +12,14 @@
 // dist/main.js — what the container image runs — with an owner URL or password
 // in its environment and nothing else, and requires it to exit naming the
 // variable, never its value, before anything else can fail.
+//
+// A third half (Codex review of #176): a DATABASE_URL that names the migrator
+// carries no *_MIGRATOR variable, so every split service — and audit — also
+// asks the catalogue who it is connected as before it serves, relays or
+// consumes anything: `await this.prisma.assertRuntimeRole()` first in
+// AppModule.onModuleInit, delegating to @rasta/nest-common's shared check. The
+// live proof is each service's test/startup-role.int-spec.ts (audit:
+// runtime-role.int-spec.ts, supplier: runtime-privileges.int-spec.ts).
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +27,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES = readdirSync(join(ROOT, 'services'))
@@ -66,5 +75,42 @@ for (const service of SERVICES) {
       assert.match(output, new RegExp(variable));
       assert.ok(!output.includes('owner_secret_value'), `${variable}: the value was printed`);
     }
+  });
+}
+
+const ROLE_CHECKED = [...splitServicesFromLibrary(), 'audit']
+  .map((service) => `${service}-service`)
+  .filter((service) => existsSync(join(ROOT, 'services', service, 'src', 'app.module.ts')))
+  .sort();
+
+test('every split service with an app module is held to the connected-role check', () => {
+  assert.ok(ROLE_CHECKED.includes('construction-service'), ROLE_CHECKED.join(', '));
+  assert.ok(ROLE_CHECKED.includes('audit-service'));
+  assert.ok(ROLE_CHECKED.includes('supplier-service'));
+});
+
+for (const service of ROLE_CHECKED) {
+  test(`${service}: asserts the connected role first in AppModule.onModuleInit, through the shared check`, () => {
+    const app = readFileSync(join(ROOT, 'services', service, 'src', 'app.module.ts'), 'utf8');
+    const init = /\n  async onModuleInit\(\): Promise<void> \{\n([\s\S]*?)\n  \}\n/.exec(app);
+    assert.ok(init, 'AppModule has no onModuleInit');
+    const firstStatement = init[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('//'));
+    assert.equal(firstStatement, 'await this.prisma.assertRuntimeRole();');
+
+    const prisma = readFileSync(
+      join(ROOT, 'services', service, 'src', 'prisma', 'prisma.service.ts'),
+      'utf8',
+    );
+    assert.match(
+      prisma,
+      /assertRuntimeRole as assertConnectedRuntimeRole[\s\S]*from '@rasta\/nest-common'/,
+    );
+    assert.match(
+      prisma,
+      /async assertRuntimeRole\(\): Promise<void> \{\n\s+const facts = await assertConnectedRuntimeRole\(/,
+    );
   });
 }
