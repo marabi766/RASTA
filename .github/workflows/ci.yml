@@ -1337,7 +1337,9 @@ jobs:
           # drops it: the case that made `DROP DATABASE … WITH (FORCE)` fail
           # here once (an autovacuum worker, on main cd0c39a). The scratch drop
           # must wait for it, never kill it.
-          MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization
+          # It creates a scratch database too, so it needs CREATEDB: organization's
+          # migrator, since the owner split took it from the runtime role (D-045).
+          MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization
           MIGRATION_LIB_TEST_DATABASE_REQUIRED: 'true'
 
       - name: Demo seeds refuse outside development and test
