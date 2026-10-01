@@ -1,4 +1,4 @@
-import { AUDIT_TRAIL_TOPIC, TOPIC_PRODUCERS } from '@rasta/contracts';
+import { AUDIT_TRAIL_TOPIC, OPS_REPLAY_TOPIC, TOPIC_PRODUCERS } from '@rasta/contracts';
 import {
   AUDIT_DOMAIN_TOPIC_OWNERS,
   AUDIT_SOURCE_SERVICE_LABELS,
@@ -6,6 +6,8 @@ import {
   AUDIT_TRAIL_PRODUCERS,
   AUDIT_UNKNOWN_SOURCE_SERVICE,
   domainSourceServiceLabel,
+  OPS_REPLAY_PRODUCERS,
+  replaySourceServiceLabel,
   isAuditSourceService,
   sourceTopicsOf,
   trailSourceServiceLabel,
@@ -53,9 +55,10 @@ describe('audit producer topology', () => {
     const declared = Object.entries(TOPIC_PRODUCERS);
 
     expect(AUDIT_DOMAIN_TOPIC_OWNERS.map(({ topic, owner }) => [topic, [owner]])).toEqual(
-      declared.filter(([topic]) => topic !== AUDIT_TRAIL_TOPIC),
+      declared.filter(([topic]) => topic !== AUDIT_TRAIL_TOPIC && topic !== OPS_REPLAY_TOPIC),
     );
     expect(AUDIT_TRAIL_PRODUCERS).toBe(TOPIC_PRODUCERS[AUDIT_TRAIL_TOPIC]);
+    expect(OPS_REPLAY_PRODUCERS).toBe(TOPIC_PRODUCERS[OPS_REPLAY_TOPIC]);
     expect(new Set(AUDIT_SOURCE_SERVICES)).toEqual(new Set(declared.flatMap(([, p]) => p)));
   });
 
@@ -63,7 +66,15 @@ describe('audit producer topology', () => {
     expect([...AUDIT_TRAIL_PRODUCERS]).toEqual(['identity-service']);
   });
 
-  it('deduplicates the known producers into eleven services', () => {
+  it('names the replay tool as the replay record’s only producer, and labels nothing else as it', () => {
+    expect([...OPS_REPLAY_PRODUCERS]).toEqual(['ops-replay']);
+    expect(replaySourceServiceLabel('ops-replay')).toBe('ops-replay');
+    for (const other of ['audit-service', 'identity-service', 'OPS-REPLAY', 'ops-replay ']) {
+      expect(replaySourceServiceLabel(other)).toBe('unknown');
+    }
+  });
+
+  it('deduplicates the known producers into eleven services and the replay tool', () => {
     expect([...AUDIT_SOURCE_SERVICES]).toEqual([
       'identity-service',
       'organization-service',
@@ -76,14 +87,15 @@ describe('audit producer topology', () => {
       'supplier-service',
       'notification-service',
       'construction-service',
+      'ops-replay',
     ]);
-    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(11);
+    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(12);
   });
 
-  it('pins the complete metric label set: eleven services and one fallback', () => {
+  it('pins the complete metric label set: eleven services, the replay tool and one fallback', () => {
     expect(AUDIT_UNKNOWN_SOURCE_SERVICE).toBe('unknown');
     expect([...AUDIT_SOURCE_SERVICE_LABELS]).toEqual([...AUDIT_SOURCE_SERVICES, 'unknown']);
-    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(12);
+    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(13);
     expect(isAuditSourceService(AUDIT_UNKNOWN_SOURCE_SERVICE)).toBe(false);
   });
 
@@ -151,7 +163,8 @@ describe('audit producer topology', () => {
     expect(sourceTopicsOf('supplier-service')).toEqual(['rasta.supplier.v1']);
     expect(sourceTopicsOf('notification-service')).toEqual(['rasta.notification.v1']);
     expect(sourceTopicsOf('construction-service')).toEqual(['rasta.construction.v1']);
-    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(13);
+    expect(sourceTopicsOf('ops-replay')).toEqual([OPS_REPLAY_TOPIC]);
+    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(14);
     expect(Object.isFrozen(sourceTopicsOf('asset-service'))).toBe(true);
   });
 });

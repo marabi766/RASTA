@@ -272,3 +272,69 @@ export const financialTransactionDuration = new Histogram({
   buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
   registers: [registry],
 });
+
+/**
+ * What the payment reconciler did with each task it claimed (ADR-064 step B2).
+ *
+ * `result` is closed: `resolved_refunded`, `resolved_declined`,
+ * `resolved_not_reached`, `resolved_uncredited`, `noop`, `retried`,
+ * `deferred`, `escalated`, `lost_lease`, `healed_opened`, `healed_closed`.
+ * No intent, wallet or tenant in any label.
+ */
+export const paymentReconciliationTotal = new Counter({
+  name: 'rasta_economic_payment_reconciliation_total',
+  help: 'Payment reconciliation task outcomes, by result',
+  labelNames: ['service', 'result'] as const,
+  registers: [registry],
+});
+
+/** The provider's answers to "what happened to this refund attempt?". */
+export const paymentProviderRefundStatusTotal = new Counter({
+  name: 'rasta_economic_payment_provider_refund_status_total',
+  help: 'Provider refund status answers, by answer and whether the provider vouched for it',
+  labelNames: ['service', 'provider', 'simulated', 'refund', 'authoritative'] as const,
+  registers: [registry],
+});
+
+/** Tasks not yet DONE: PENDING ones waiting for the sweeper. */
+export const paymentReconciliationOpen = new Gauge({
+  name: 'rasta_economic_payment_reconciliation_open',
+  help: 'Payment reconciliation tasks waiting for the sweeper',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/** Tasks handed to a person. Any is the critical alert condition. */
+export const paymentReconciliationEscalated = new Gauge({
+  name: 'rasta_economic_payment_reconciliation_escalated',
+  help: 'Payment reconciliation tasks escalated to a person, their refund hold still in place',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/** How long the oldest due PENDING task has waited past its due time. */
+export const paymentReconciliationOldestDueAge = new Gauge({
+  name: 'rasta_economic_payment_reconciliation_oldest_due_age_seconds',
+  help: 'Seconds the oldest due payment reconciliation task has waited; 0 when none',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * When the last sweep finished, and the interval it runs at. Set only while
+ * the sweeper is enabled, so "stalled" is `time() - last > 5 × interval`
+ * and a disabled sweeper raises nothing.
+ */
+export const paymentReconcilerLastSweep = new Gauge({
+  name: 'rasta_economic_payment_reconciler_last_sweep_timestamp_seconds',
+  help: 'Unix time the last payment reconciliation sweep finished (set at start-up too)',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+export const paymentReconcilerInterval = new Gauge({
+  name: 'rasta_economic_payment_reconciler_interval_seconds',
+  help: 'The configured payment reconciliation sweep interval, while the sweeper is enabled',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});

@@ -74,12 +74,15 @@ describe('tender database invariants', () => {
     bid_closing_at: `'2026-11-30T20:30:00Z'`,
   };
 
+  /** Who published and when: required from PUBLISHED on (`ck_tender_publication_complete`). */
+  const PUBLISHED_BY = { published_at: 'now()', published_by: `'USR_1'` };
+
   it('accepts the valid baselines: a bare draft, and a complete published tender', async () => {
     const a = org();
     const project = await insertProject(a);
     await expect(insertTender(a, project)).resolves.toBeUndefined();
     await expect(
-      insertTender(a, project, { status: `'PUBLISHED'`, ...COMPLETE }),
+      insertTender(a, project, { status: `'PUBLISHED'`, ...COMPLETE, ...PUBLISHED_BY }),
     ).resolves.toBeUndefined();
   });
 
@@ -158,9 +161,9 @@ describe('tender database invariants', () => {
       async (status) => {
         const a = org();
         const project = await insertProject(a);
-        await expect(insertTender(a, project, { status: `'${status}'` })).rejects.toThrow(
-          /ck_tender_published_complete/,
-        );
+        await expect(
+          insertTender(a, project, { status: `'${status}'`, ...PUBLISHED_BY }),
+        ).rejects.toThrow(/ck_tender_published_complete/);
       },
     );
 
@@ -170,9 +173,9 @@ describe('tender database invariants', () => {
         const a = org();
         const project = await insertProject(a);
         const { [missing]: _omitted, ...rest } = COMPLETE as Record<string, string>;
-        await expect(insertTender(a, project, { status: `'PUBLISHED'`, ...rest })).rejects.toThrow(
-          /ck_tender_published_complete|ck_tender_window_ordered/,
-        );
+        await expect(
+          insertTender(a, project, { status: `'PUBLISHED'`, ...rest, ...PUBLISHED_BY }),
+        ).rejects.toThrow(/ck_tender_published_complete|ck_tender_window_ordered/);
       },
     );
   });

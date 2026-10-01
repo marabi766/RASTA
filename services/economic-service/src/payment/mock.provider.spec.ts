@@ -300,3 +300,138 @@ describe('simulated latency', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(35);
   });
 });
+
+/**
+ * The status of one refund attempt (ADR-064 step B2, the § 3 amendment scoped
+ * to refunds). What the reconciler asks before it resolves anything.
+ *
+ * The mock remembers what it did, and says so. What it did *not* see it
+ * cannot vouch for: its memory is one process's, lost on restart and not
+ * shared between replicas (Codex on #164, HIGH 2). So it declares
+ * `authoritativeAbsence: false`, and an attempt it has no record of is
+ * `UNKNOWN` — never `NOT_FOUND`.
+ */
+describe('getRefundStatus', () => {
+  const refundKey = (id: string) => `KEY-${id}:refund`;
+
+  async function captured(mock: MockPaymentProvider, id: string, instrument?: string) {
+    const auth = await mock.authorize({ ...authorizeRequest, paymentIntentId: id, instrument });
+    await mock.capture({
+      paymentIntentId: id,
+      providerReference: auth.providerReference,
+      amountMinor: 1000n,
+      currency: 'IRR',
+      idempotencyKey: `KEY-${id}`,
+    });
+    return auth.providerReference;
+  }
+
+  const refundOf = (id: string, providerReference: string) => ({
+    paymentIntentId: id,
+    providerReference,
+    amountMinor: 1000n,
+    currency: 'IRR',
+    idempotencyKey: refundKey(id),
+    reason: 'the suite refunds',
+  });
+
+  const query = (id: string, providerReference: string, idempotencyKey = refundKey(id)) => ({
+    paymentIntentId: id,
+    providerReference,
+    idempotencyKey,
+  });
+
+  it('declares that it cannot vouch for an absence', () => {
+    expect(new MockPaymentProvider().authoritativeAbsence).toBe(false);
+  });
+
+  it('answers REFUNDED for an attempt it refunded', async () => {
+    const mock = new MockPaymentProvider();
+    const reference = await captured(mock, 'PAY_RS_DONE');
+    await mock.refund(refundOf('PAY_RS_DONE', reference));
+
+    expect(await mock.getRefundStatus(query('PAY_RS_DONE', reference))).toEqual({
+      refund: 'REFUNDED',
+      authoritative: true,
+      simulated: true,
+    });
+  });
+
+  it('answers DECLINED, with the code, for an attempt it refused', async () => {
+    const mock = new MockPaymentProvider();
+    const reference = await captured(mock, 'PAY_RS_NO', 'fail-refund:NOT_PERMITTED');
+    await mock.refund(refundOf('PAY_RS_NO', reference));
+
+    expect(await mock.getRefundStatus(query('PAY_RS_NO', reference))).toEqual({
+      refund: 'DECLINED',
+      authoritative: true,
+      failureCode: 'NOT_PERMITTED',
+      simulated: true,
+    });
+  });
+
+  it('answers UNKNOWN, never NOT_FOUND, for an attempt it has no record of', async () => {
+    const mock = new MockPaymentProvider();
+    expect(await mock.getRefundStatus(query('PAY_RS_NEVER', 'mock_PAY_RS_NEVER'))).toEqual({
+      refund: 'UNKNOWN',
+      authoritative: false,
+      simulated: true,
+    });
+  });
+
+  it('two replicas are two memories: B cannot see the refund A made', async () => {
+    const replicaA = new MockPaymentProvider();
+    const replicaB = new MockPaymentProvider();
+    const reference = await captured(replicaA, 'PAY_RS_REPLICA');
+    await replicaA.refund(refundOf('PAY_RS_REPLICA', reference));
+
+    expect(await replicaB.getRefundStatus(query('PAY_RS_REPLICA', reference))).toEqual({
+      refund: 'UNKNOWN',
+      authoritative: false,
+      simulated: true,
+    });
+  });
+
+  it('knows an attempt only by its own key: another key of the same reference is unknown', async () => {
+    const mock = new MockPaymentProvider();
+    const reference = await captured(mock, 'PAY_RS_KEY');
+    await mock.refund(refundOf('PAY_RS_KEY', reference));
+
+    expect(
+      await mock.getRefundStatus(query('PAY_RS_KEY', reference, 'KEY-PAY_RS_KEY:uncredited')),
+    ).toEqual({ refund: 'UNKNOWN', authoritative: false, simulated: true });
+  });
+
+  describe('directives for the unknown outcomes', () => {
+    it('lose-refund: refunds, then loses the answer — the status still tells the truth', async () => {
+      const mock = new MockPaymentProvider();
+      const reference = await captured(mock, 'PAY_RS_LOSE', 'lose-refund:');
+      expect(reference).toContain('lose-refund');
+
+      await expect(mock.refund(refundOf('PAY_RS_LOSE', reference))).rejects.toThrow(
+        'simulated lost provider response',
+      );
+      expect(await mock.getRefundStatus(query('PAY_RS_LOSE', reference))).toEqual({
+        refund: 'REFUNDED',
+        authoritative: true,
+        simulated: true,
+      });
+    });
+
+    it('hang-refund: never answers and never refunds — for the call timeout', async () => {
+      const mock = new MockPaymentProvider();
+      const reference = await captured(mock, 'PAY_RS_HANG', 'hang-refund:');
+
+      const outcome = await Promise.race([
+        mock.refund(refundOf('PAY_RS_HANG', reference)).then(() => 'answered'),
+        new Promise((resolve) => setTimeout(() => resolve('still waiting'), 30)),
+      ]);
+      expect(outcome).toBe('still waiting');
+      expect(await mock.getRefundStatus(query('PAY_RS_HANG', reference))).toEqual({
+        refund: 'UNKNOWN',
+        authoritative: false,
+        simulated: true,
+      });
+    });
+  });
+});
