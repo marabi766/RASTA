@@ -54,14 +54,22 @@ export function databaseUrl(): string {
 }
 
 /**
- * The connection the migrations use: `DATABASE_URL_CONSTRUCTION_MIGRATOR` when a
- * deployment has a separate owner role, otherwise the one URL there is today.
- * Construction's runtime role currently owns its tables (docs/23 D-045), so the
- * two are the same role here — but they are two connections, and only this one
- * is allowed to touch a trigger.
+ * The owner connection the suites' cleanup alone may use to lift a trigger
+ * (`DATABASE_URL_CONSTRUCTION_MIGRATOR`). **Required, with no fallback** to the
+ * runtime URL: a suite that quietly fell back would be switching guards off with
+ * the service's own credentials, which is what the owner connection exists to
+ * keep apart. Construction's runtime role still owns its tables today (docs/23
+ * D-045), so the value may name the same role — but it must be named on purpose.
  */
 export function ownerDatabaseUrl(): string {
-  return process.env.DATABASE_URL_CONSTRUCTION_MIGRATOR ?? databaseUrl();
+  const url = process.env.DATABASE_URL_CONSTRUCTION_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_CONSTRUCTION_MIGRATOR is not set. The suites lift an integrity trigger only ' +
+        'through the owner connection, never the runtime one; see .env.example (docs/23 D-045).',
+    );
+  }
+  return url;
 }
 
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {

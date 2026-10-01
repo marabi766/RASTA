@@ -833,12 +833,14 @@ export const EXPECTED = {
     triggers: [
       'tg_tender_criterion_freeze',
       'tg_tender_publish_requires_criteria',
+      'tg_tender_status_transition',
       'tg_criteria_template_append_only',
       'tg_criteria_template_no_truncate',
     ],
     functions: [
       'tender_criterion_freeze',
       'tender_publish_requires_criteria',
+      'tender_status_transition_guard',
       'criteria_template_append_only',
     ],
     constraints: [

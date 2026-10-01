@@ -396,45 +396,35 @@ describe('evaluation criteria', () => {
            "bid_closing_at" = '2026-11-30T20:30:00Z' WHERE "id" = '${tenderId}'`,
       );
     }
-    async function unpublishRaw(tenderId: string) {
-      await w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "status" = 'DRAFT' WHERE "id" = '${tenderId}'`,
-      );
-    }
-
     it('refuses an insert, an update and a delete on a published tender’s criteria', async () => {
       const { a, tender } = await withTender();
       await asAdmin(a, () =>
         w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
       );
       await publishRaw(tender.id);
-      try {
-        await expect(
-          w.prisma.client.$executeRawUnsafe(
-            `INSERT INTO "tender_criterion" ("id", "organization_id", "tender_id", "position", "code",
-               "label", "weight_bp", "scoring_method", "max_score", "created_at", "created_by")
-             VALUES ('CRT_${ulid()}', '${a}', '${tender.id}', 9, 'LATE', 'Late', 1, 'MANUAL_SCORE', 10,
-               now(), 'USR_1')`,
-          ),
-        ).rejects.toThrow(/ck_tender_criteria_frozen/);
-        await expect(
-          w.prisma.client.$executeRawUnsafe(
-            `UPDATE "tender_criterion" SET "weight_bp" = 9999 WHERE "tender_id" = '${tender.id}'`,
-          ),
-        ).rejects.toThrow(/ck_tender_criteria_frozen/);
-        await expect(
-          w.prisma.client.$executeRawUnsafe(
-            `DELETE FROM "tender_criterion" WHERE "tender_id" = '${tender.id}'`,
-          ),
-        ).rejects.toThrow(/ck_tender_criteria_frozen/);
-        await expect(
-          asAdmin(a, () =>
-            w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: [PRICE] }),
-          ),
-        ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
-      } finally {
-        await unpublishRaw(tender.id);
-      }
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `INSERT INTO "tender_criterion" ("id", "organization_id", "tender_id", "position", "code",
+             "label", "weight_bp", "scoring_method", "max_score", "created_at", "created_by")
+           VALUES ('CRT_${ulid()}', '${a}', '${tender.id}', 9, 'LATE', 'Late', 1, 'MANUAL_SCORE', 10,
+             now(), 'USR_1')`,
+        ),
+      ).rejects.toThrow(/ck_tender_criteria_frozen/);
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `UPDATE "tender_criterion" SET "weight_bp" = 9999 WHERE "tender_id" = '${tender.id}'`,
+        ),
+      ).rejects.toThrow(/ck_tender_criteria_frozen/);
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `DELETE FROM "tender_criterion" WHERE "tender_id" = '${tender.id}'`,
+        ),
+      ).rejects.toThrow(/ck_tender_criteria_frozen/);
+      await expect(
+        asAdmin(a, () =>
+          w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: [PRICE] }),
+        ),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
       expect((await asAdmin(a, () => w.criteria.getCriteria(tender.id))).totalWeightBp).toBe(
         10_000,
       );
@@ -526,8 +516,61 @@ describe('evaluation criteria', () => {
         w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: WHOLE }),
       );
       await expect(w.prisma.client.$executeRawUnsafe(publishSql(tender.id))).resolves.toBe(1);
-      await w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "status" = 'DRAFT' WHERE "id" = '${tender.id}'`,
+    });
+  });
+
+  describe('the database allows only the documented tender status edges', () => {
+    const publishSql = (tenderId: string) =>
+      `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
+         "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
+         "bid_closing_at" = '2026-11-30T20:30:00Z' WHERE "id" = '${tenderId}'`;
+    const setStatus = (tenderId: string, status: string) =>
+      w.prisma.client.$executeRawUnsafe(
+        `UPDATE "tender" SET "status" = '${status}'::"TenderStatus" WHERE "id" = '${tenderId}'`,
+      );
+
+    it('refuses a return to DRAFT once published, so a published tender’s criteria stay frozen', async () => {
+      const { a, tender } = await withTender();
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
+      );
+      await w.prisma.client.$executeRawUnsafe(publishSql(tender.id));
+
+      await expect(setStatus(tender.id, 'DRAFT')).rejects.toThrow(/ck_tender_status_transition/);
+      // Still published, so the edit that a return to DRAFT would have allowed is refused.
+      await expect(
+        asAdmin(a, () =>
+          w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: [PRICE] }),
+        ),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+    });
+
+    it('refuses an edge the state machine does not have, and leaves a terminal state terminal', async () => {
+      const { a, tender } = await withTender();
+      await expect(setStatus(tender.id, 'CLOSED')).rejects.toThrow(/ck_tender_status_transition/);
+      await expect(setStatus(tender.id, 'AWARDED')).rejects.toThrow(/ck_tender_status_transition/);
+
+      await asAdmin(a, () =>
+        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+      );
+      await expect(setStatus(tender.id, 'DRAFT')).rejects.toThrow(/ck_tender_status_transition/);
+      // Refused by whichever guard fires first: this tender also has no criteria.
+      await expect(setStatus(tender.id, 'PUBLISHED')).rejects.toThrow(
+        /ck_tender_(status_transition|publish_criteria)/,
+      );
+    });
+
+    it('allows the documented forward edges', async () => {
+      const { a, tender } = await withTender();
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
+      );
+      await w.prisma.client.$executeRawUnsafe(publishSql(tender.id));
+      for (const next of ['CLOSED', 'EVALUATING', 'EVALUATED', 'AWARDED']) {
+        await expect(setStatus(tender.id, next)).resolves.toBe(1);
+      }
+      await expect(setStatus(tender.id, 'CANCELLED')).rejects.toThrow(
+        /ck_tender_status_transition/,
       );
     });
   });

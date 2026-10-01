@@ -19,6 +19,9 @@ DROP FUNCTION IF EXISTS "tender_criterion_freeze"();
 DROP TRIGGER IF EXISTS "tg_tender_publish_requires_criteria" ON "tender";
 DROP FUNCTION IF EXISTS "tender_publish_requires_criteria"();
 
+DROP TRIGGER IF EXISTS "tg_tender_status_transition" ON "tender";
+DROP FUNCTION IF EXISTS "tender_status_transition_guard"();
+
 DROP TRIGGER IF EXISTS "tg_criteria_template_append_only" ON "criteria_template";
 DROP TRIGGER IF EXISTS "tg_criteria_template_no_truncate" ON "criteria_template";
 DROP FUNCTION IF EXISTS "criteria_template_append_only"();

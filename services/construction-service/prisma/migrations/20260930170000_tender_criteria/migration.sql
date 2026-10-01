@@ -171,6 +171,35 @@ CREATE TRIGGER "tg_tender_publish_requires_criteria"
   EXECUTE FUNCTION "tender_publish_requires_criteria"();
 
 -- =============================================================================
+-- A tender's status moves only along the documented edges (ADR-065 § 1, the same
+-- table as `TENDER_TRANSITIONS`): forward one step, or CANCELLED from any state
+-- before AWARDED. In particular a published tender never returns to DRAFT, which
+-- would lift the criteria freeze above; AWARDED and CANCELLED are terminal.
+-- =============================================================================
+
+CREATE FUNCTION "tender_status_transition_guard"() RETURNS trigger AS $$
+BEGIN
+  IF NOT (
+       (OLD."status"::text = 'DRAFT'      AND NEW."status"::text IN ('PUBLISHED', 'CANCELLED'))
+    OR (OLD."status"::text = 'PUBLISHED'  AND NEW."status"::text IN ('CLOSED', 'CANCELLED'))
+    OR (OLD."status"::text = 'CLOSED'     AND NEW."status"::text IN ('EVALUATING', 'CANCELLED'))
+    OR (OLD."status"::text = 'EVALUATING' AND NEW."status"::text IN ('EVALUATED', 'CANCELLED'))
+    OR (OLD."status"::text = 'EVALUATED'  AND NEW."status"::text IN ('AWARDED', 'CANCELLED'))
+  ) THEN
+    RAISE EXCEPTION 'ck_tender_status_transition: a tender cannot go from % to %', OLD."status", NEW."status"
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_tender_status_transition"
+  BEFORE UPDATE OF "status" ON "tender"
+  FOR EACH ROW
+  WHEN (OLD."status" IS DISTINCT FROM NEW."status")
+  EXECUTE FUNCTION "tender_status_transition_guard"();
+
+-- =============================================================================
 -- A criteria template is append-only: a new version is a new row. An edit or a
 -- delete would change what a tender already copied from it claims to follow.
 -- (The table's owner can still drop or disable this trigger: runtime and owner
