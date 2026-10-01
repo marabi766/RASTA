@@ -25,6 +25,7 @@ import { SERVICE_NAME } from '../config/env';
 import type { PaymentProvider, RefundResult } from './provider';
 import type { TopUpDto } from './dto';
 import { hashRequestBody } from '../shared/idempotency';
+import { PaymentReconciliationRepository } from './payment-reconciliation.repository';
 import type { PaymentIntent } from '../generated/prisma';
 
 /**
@@ -63,6 +64,7 @@ export class PaymentService {
     private readonly wallets: WalletService,
     private readonly walletRepository: WalletRepository,
     @Inject(PAYMENT_PROVIDER) private readonly provider: PaymentProvider,
+    private readonly reconciliation: PaymentReconciliationRepository,
   ) {}
 
   /**
@@ -495,8 +497,9 @@ export class PaymentService {
    *   - the call failed without an answer (a timeout, a lost response): the
    *     provider may have refunded, so `CAPTURED_REFUND_UNKNOWN`, and nothing
    *     credits it. Crediting a capture the payer already has back would give
-   *     the money twice. The durable reconciler (ADR-064) establishes the
-   *     provider's state; until it exists, the row is for a person.
+   *     the money twice. An `UNCREDITED_REFUND` reconciliation task is opened
+   *     with the marker, for the reconciler to establish the provider's state
+   *     (ADR-064 step B).
    */
   private async returnUncreditedCapture(
     { intentId, walletId, organizationId, amountMinor, currency }: CaptureTarget,
@@ -537,6 +540,17 @@ export class PaymentService {
           where: { id: intentId },
           data: { failureReason: marker },
         });
+        // Only the unanswered refund needs the provider asked again (ADR-064
+        // step B): a declined one is credited by a same-key retry.
+        if (marker === CAPTURED_REFUND_UNKNOWN) {
+          await this.reconciliation.open(tx, {
+            organizationId,
+            paymentIntentId: intentId,
+            kind: 'UNCREDITED_REFUND',
+            outcome: 'PROVIDER_OUTCOME_UNKNOWN',
+            due: 'GRACE',
+          });
+        }
         await this.ledger.enqueue(tx, {
           eventName: ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED,
           aggregateId: intentId,
@@ -828,13 +842,12 @@ export class PaymentService {
       // Refunded at the provider by an earlier attempt that could not record
       // it: the hold is still there, and only step 3 is retried.
       if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
-      // No automatic way out of these two yet. An aged REFUND_REQUESTED or a
-      // REFUND_UNKNOWN keeps its hold (money safe, never lost or credited
-      // twice) and every later refund is refused here, because nothing asks
-      // the provider what happened. Asking it, escalating and resolving under
-      // the intent and wallet locks is ADR-064 step B, NOT implemented yet.
-      // Until it ships, an operator resolves them with the provider's answer:
-      // docs/runbooks/payment-refund-stuck.md.
+      // Outcome unknown: an aged REFUND_REQUESTED or a REFUND_UNKNOWN keeps
+      // its hold (money safe, never lost or credited twice) and every later
+      // refund is refused here. Each has an open reconciliation task (ADR-064
+      // step B1); asking the provider and resolving it under the intent and
+      // wallet locks is the sweeper's (step B2), NOT implemented yet. Until it
+      // ships, an operator resolves them: docs/runbooks/payment-refund-stuck.md.
       if (row.failureReason === REFUND_REQUESTED || row.failureReason === REFUND_UNKNOWN) {
         throw refundUnresolved(intentId, row.failureReason);
       }
@@ -849,6 +862,16 @@ export class PaymentService {
       await tx.paymentIntent.update({
         where: { id: intentId },
         data: { failureReason: REFUND_REQUESTED },
+      });
+      // Its task, with the hold: whatever happens after this COMMIT, something
+      // comes back to look. Due only after the grace, so the reconciler stays
+      // away from the provider call this request is about to make.
+      await this.reconciliation.open(tx, {
+        organizationId,
+        paymentIntentId: intentId,
+        kind: 'REFUND',
+        outcome: REFUND_REQUESTED,
+        due: 'GRACE',
       });
       return { row, next: 'ASK' as const };
     });
@@ -947,6 +970,12 @@ export class PaymentService {
           // Resolved: the marker does not outlive the refund it described.
           data: { status: 'REFUNDED', refundedAt, failureReason: null },
         });
+        await this.reconciliation.close(tx, {
+          organizationId,
+          paymentIntentId: intentId,
+          resolution: 'REFUNDED',
+          resolvedBy: actor,
+        });
 
         paymentIntentsTotal.inc({
           service: SERVICE_NAME,
@@ -1027,8 +1056,9 @@ export class PaymentService {
   }
 
   /**
-   * Returns the held amount of a declined refund to the wallet and clears the
-   * marker. The caller holds the intent's and the wallet's locks.
+   * Returns the held amount of a declined refund to the wallet, clears the
+   * marker and closes the task. The caller holds the intent's and the
+   * wallet's locks.
    *
    * Idempotent: a hold already returned is not returned again (`refundHold`
    * answers `null` for a hold that is no longer ACTIVE, and refuses a
@@ -1055,17 +1085,25 @@ export class PaymentService {
       where: { id: intent.id },
       data: { failureReason: null },
     });
+    await this.reconciliation.close(tx, {
+      organizationId: intent.organizationId,
+      paymentIntentId: intent.id,
+      resolution: 'REFUND_DECLINED',
+      resolvedBy: actor,
+    });
   }
 
   /**
-   * A refund whose outcome the ledger could not record: marked and announced
-   * together (ADR-064, R2). The hold stays, so the money stays safe.
+   * A refund whose outcome the ledger could not record: marked, rescheduled
+   * and announced together (ADR-064, R2). The hold stays, so the money stays
+   * safe.
    *
    * Decided behind the intent's row lock, and only from `REFUND_REQUESTED`:
    * a reversal whose COMMIT was in flight is seen as REFUNDED and left alone,
    * and a retry that fails the same way does not announce it twice. When even
    * this write fails, the intent keeps `REFUND_REQUESTED` and its hold, the
-   * original error still propagates, and the log says why.
+   * original error still propagates, and the log says why; its task, opened in
+   * step 1, is still due after the grace.
    */
   private async markRefundUnresolved(
     intent: PaymentIntent,
@@ -1087,6 +1125,16 @@ export class PaymentService {
         await tx.paymentIntent.update({
           where: { id: intent.id },
           data: { failureReason: marker },
+        });
+        // The task step 1 opened, rescheduled: a known outcome only needs
+        // recording and is due now; an unanswered call waits the grace, as the
+        // provider may still be working on it.
+        await this.reconciliation.open(tx, {
+          organizationId: intent.organizationId,
+          paymentIntentId: intent.id,
+          kind: 'REFUND',
+          outcome: reason,
+          due: marker === REFUND_UNKNOWN ? 'GRACE' : 'NOW',
         });
         await this.ledger.enqueue(tx, {
           eventName: ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED,

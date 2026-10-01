@@ -49,6 +49,7 @@ import { CommissionController } from './commission/commission.controller';
 import { RewardService } from './reward/reward.service';
 import { RewardController } from './reward/reward.controller';
 import { PaymentService } from './payment/payment.service';
+import { PaymentReconciliationRepository } from './payment/payment-reconciliation.repository';
 import { PaymentController } from './payment/payment.controller';
 import { MockPaymentProvider } from './payment/mock.provider';
 import { SettlementService } from './settlement/settlement.service';
@@ -152,6 +153,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     CommissionService,
     RewardService,
     PaymentService,
+    PaymentReconciliationRepository,
     SettlementService,
     LedgerBalanceAudit,
 

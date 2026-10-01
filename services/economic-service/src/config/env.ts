@@ -61,6 +61,25 @@ export const economicEnvSchema = baseEnvSchema
     ECONOMIC_MOCK_PAYMENT_LATENCY_MS: z.coerce.number().int().min(0).max(10_000).default(0),
 
     /**
+     * How long a refund in flight is left alone before its reconciliation task
+     * falls due (ADR-064 step B), in seconds.
+     *
+     * The task is written when the refund holds its amount, before the
+     * provider is asked; the grace keeps the reconciler away from a refund
+     * whose provider call is still running. An outcome the request path could
+     * not record *without* an answer (`REFUND_UNKNOWN`) waits the same grace,
+     * since the provider may still be processing it; a known one is due at
+     * once. Step B2 adds the provider call timeout and refuses a grace of less
+     * than twice it.
+     */
+    ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(30)
+      .max(86_400)
+      .default(300),
+
+    /**
      * Cashback rewards.
      *
      * The product document conditions cashback on a regulatory review

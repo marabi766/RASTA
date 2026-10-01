@@ -606,9 +606,69 @@ model PaymentIntent {
   refundedAt   DateTime? @map("refunded_at")
   createdBy    String    @map("created_by")
 
+  /// The reconciliation tasks of its refunds (ADR-064 step B): at most one open.
+  reconciliationTasks PaymentReconciliationTask[]
+
   @@unique([organizationId, idempotencyKey])
+  /// The target of the reconciliation task's composite foreign key.
+  @@unique([organizationId, id])
   @@index([organizationId, status, createdAt(sort: Desc)])
   @@map("payment_intent")
+}
+
+/// What a reconciliation task is for (ADR-064 step B).
+enum PaymentReconciliationKind {
+  /// An operator refund of a CAPTURED intent whose outcome is not recorded.
+  REFUND
+  /// The refund of an AUTHORIZED intent's uncreditable capture, answer lost.
+  UNCREDITED_REFUND
+}
+
+enum PaymentReconciliationStatus {
+  /// Waiting for the sweeper, due at `nextAttemptAt`.
+  PENDING
+  /// Past what the sweeper may try on its own: a person's (B3).
+  ESCALATED
+  /// Finished: `resolution`, `resolvedBy` and `doneAt` say how, by whom, when.
+  DONE
+}
+
+/// The durable queue behind an unfinished refund (ADR-064 step B1): one task
+/// per intent whose money a refund may have stranded. Written in the same
+/// transaction as the hold or the marker, closed in the same transaction as the
+/// outcome. The marker itself stays on `PaymentIntent.failureReason`.
+model PaymentReconciliationTask {
+  /// `PRT_<ULID>` (`PRT_<intent id>` for rows the migration backfilled).
+  id String @id
+
+  organizationId  String                    @map("organization_id")
+  paymentIntentId String                    @map("payment_intent_id")
+  kind            PaymentReconciliationKind
+
+  status        PaymentReconciliationStatus @default(PENDING)
+  attempts      Int                         @default(0)
+  nextAttemptAt DateTime                    @map("next_attempt_at")
+  /// The claim: a time and the token that fences its holder (B2).
+  leaseUntil    DateTime?                   @map("lease_until")
+  leaseToken    String?                     @map("lease_token")
+  /// What was last observed, as a closed code (`PROVIDER_OUTCOME_UNKNOWN` …).
+  lastOutcome   String?                     @map("last_outcome")
+  correlationId String                      @map("correlation_id")
+  escalatedAt   DateTime?                   @map("escalated_at")
+  /// How it finished, as a closed code (`REFUNDED`, `REFUND_DECLINED` …).
+  resolution    String?
+  /// The user or service whose transaction finished it.
+  resolvedBy    String?                     @map("resolved_by")
+
+  createdAt DateTime  @map("created_at")
+  updatedAt DateTime  @map("updated_at")
+  doneAt    DateTime? @map("done_at")
+
+  paymentIntent PaymentIntent @relation(fields: [organizationId, paymentIntentId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  // SQL-only: `ux_payment_reconciliation_open` — at most one open task per
+  // intent; `ix_payment_reconciliation_due` — the sweeper's scan.
+  @@map("payment_reconciliation_task")
 }
 
 /// `CREATED → AUTHORIZED → CAPTURED | FAILED | REFUNDED` (ADR-024).

@@ -34,6 +34,7 @@ describe('payment authorisation atomicity (real database)', () => {
       wiring.wallets,
       wiring.walletRepository,
       provider,
+      wiring.paymentReconciliation,
     );
   });
 
