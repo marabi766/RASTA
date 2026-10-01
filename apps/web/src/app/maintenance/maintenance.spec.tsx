@@ -1,4 +1,4 @@
-import { render } from '@testing-library/react';
+import { cleanup as cleanupRender, render } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { MaintenanceScreen } from './MaintenanceScreen';
@@ -259,8 +259,8 @@ describe('the maintenance request detail', () => {
     });
 
     it('never confirms anything on a page whose read failed', () => {
-      // `?created=1` can be typed by anybody; it must not put a confirmation
-      // in front of a request the viewer cannot read.
+      // Even a genuine flash must not put a confirmation in front of a request
+      // the viewer cannot read.
       const { queryByText } = render(
         <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" notice="created" />,
       );
@@ -313,6 +313,110 @@ describe('the maintenance request detail', () => {
 
   it('has no accessibility violations', async () => {
     const { container } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the commands on a request', () => {
+  const ok = (data: MaintenanceRequestDetail): ReadResult<MaintenanceRequestDetail> => ({
+    kind: 'OK',
+    data,
+  });
+
+  const forms = {
+    assign: <div>فرم ارجاع نمونه</div>,
+    approve: <div>فرم تأیید نمونه</div>,
+    cancel: <div>فرم لغو نمونه</div>,
+  };
+
+  const order = (status: string) => ({
+    id: 'RPO_1',
+    status,
+    workshopName: 'تعمیرگاه مرکزی',
+    workSummary: null,
+    workPerformed: null,
+    assignedAt: '2026-02-02T08:00:00.000Z',
+    startedAt: null,
+    completedAt: null,
+    cancelledAt: null,
+    cancellationReason: null,
+    partsCostMinor: '0',
+    labourCostMinor: '0',
+    otherCostMinor: '0',
+    totalCostMinor: '0',
+  });
+
+  const shown = (data: MaintenanceRequestDetail) => {
+    const { queryByText } = render(
+      <RequestDetailScreen result={ok(data)} requestId="MREQ_1" commandForms={forms} />,
+    );
+    return {
+      assign: queryByText('فرم ارجاع نمونه') !== null,
+      approve: queryByText('فرم تأیید نمونه') !== null,
+      cancel: queryByText('فرم لغو نمونه') !== null,
+    };
+  };
+
+  it.each([
+    ['OPEN', [], { assign: true, approve: false, cancel: true }],
+    ['IN_PROGRESS', [], { assign: true, approve: false, cancel: true }],
+    ['COMPLETED', [], { assign: false, approve: true, cancel: true }],
+    ['APPROVED', [], { assign: false, approve: false, cancel: false }],
+    ['CANCELLED', [], { assign: false, approve: false, cancel: false }],
+  ] as const)(
+    'offers, for a %s request, exactly what its status leaves open',
+    (status, orders, expected) => {
+      expect(shown({ ...DETAIL, status, repairOrders: [...orders] })).toEqual(expected);
+    },
+  );
+
+  it('does not offer a second referral while one is live, and does once it was cancelled', () => {
+    expect(shown({ ...DETAIL, repairOrders: [order('OPEN')] }).assign).toBe(false);
+    cleanupRender();
+    expect(shown({ ...DETAIL, repairOrders: [order('IN_PROGRESS')] }).assign).toBe(false);
+    cleanupRender();
+    expect(shown({ ...DETAIL, repairOrders: [order('CANCELLED')] }).assign).toBe(true);
+  });
+
+  it('offers nothing to a person the page did not hand the forms to', () => {
+    const { queryByText } = render(<RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" />);
+    expect(queryByText('فرم ارجاع نمونه')).toBeNull();
+    expect(queryByText('فرم لغو نمونه')).toBeNull();
+  });
+
+  it('offers nothing where the read failed, whatever the page handed it', () => {
+    const { queryByText } = render(
+      <RequestDetailScreen
+        result={{ kind: 'NOT_FOUND' }}
+        requestId="MREQ_X"
+        commandForms={forms}
+      />,
+    );
+    expect(queryByText('فرم لغو نمونه')).toBeNull();
+    expect(queryByText('فرم تأیید نمونه')).toBeNull();
+  });
+
+  it.each([
+    ['assigned', 'کار به تعمیرگاه ارجاع شد.', 'status'],
+    ['approved', 'هزینه تأیید شد. درخواست نهایی است.', 'status'],
+    ['cancelled', 'درخواست لغو شد.', 'status'],
+    ['costChanged', 'هزینه از زمان نمایش تغییر کرده بود', 'alert'],
+  ] as const)('says what %s did, as a %s', (notice, words, role) => {
+    const { getByText } = render(
+      <RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" notice={notice} />,
+    );
+    expect(getByText(new RegExp(words)).closest(`[role="${role}"]`)).not.toBeNull();
+  });
+
+  it('has no accessibility violations with the commands in place', async () => {
+    const { container } = render(
+      <RequestDetailScreen
+        result={ok({ ...DETAIL, status: 'COMPLETED' })}
+        requestId="MREQ_1"
+        commandForms={forms}
+        notice="costChanged"
+      />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });

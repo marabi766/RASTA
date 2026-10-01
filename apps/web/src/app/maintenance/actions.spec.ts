@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
+import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
@@ -202,7 +203,13 @@ describe('what reaches the service', () => {
     await expect(submitReportRequest(IDLE_REPORT_REQUEST_FORM, formData(VALID))).rejects.toThrow(
       /NEXT_REDIRECT/,
     );
-    expect(redirect).toHaveBeenCalledWith('/maintenance/MRQ_1?created=1');
+    const url = redirect.mock.calls[0][0] as string;
+    expect(url.startsWith('/maintenance/MRQ_1?flash=')).toBe(true);
+    // A flash the server signed for this session and this record, not a bare
+    // `?created=1` anybody could type.
+    const flash = new URLSearchParams(url.split('?')[1]).get('flash');
+    expect(readFlash(SESSION, flash, 'MRQ_1', ['created'])).toBe('created');
+    expect(url).not.toContain('created=1');
   });
 
   it('percent-encodes the id it redirects to', async () => {
@@ -212,7 +219,7 @@ describe('what reaches the service', () => {
       correlationId: 'corr-sample',
     });
     await expect(submitReportRequest(IDLE_REPORT_REQUEST_FORM, formData(VALID))).rejects.toThrow();
-    expect(redirect).toHaveBeenCalledWith('/maintenance/a%2Fb%3Fc?created=1');
+    expect(redirect.mock.calls[0][0]).toMatch(/^\/maintenance\/a%2Fb%3Fc\?flash=/);
   });
 
   it('sends the parsed request under the session, not the raw form', async () => {

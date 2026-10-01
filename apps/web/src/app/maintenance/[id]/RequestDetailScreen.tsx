@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import {
   Alert,
   EmptyState,
@@ -17,6 +19,7 @@ import {
   severityLabel,
 } from '@/lib/labels';
 import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
+import type { RequestCommandNotice } from '@/lib/maintenance-fields';
 import type {
   MaintenanceRequestDetail,
   ReadResult,
@@ -27,9 +30,12 @@ import type {
  * The maintenance request detail (docs/16 § 16.6, `/maintenance/[id]`).
  *
  * Same shape as `DossierScreen` (PR #67): pure, every state reachable in a
- * test, and it renders what the request has done rather than what it could
- * do — there is no approve, assign or cancel control here, because this
- * portal has no write path yet (EXP-002 scope).
+ * test. It renders what the request has done, and — for a person who may act
+ * on it — the commands the request's status leaves open: refer to a workshop
+ * while the work is open and unreferred, approve the cost once it is completed,
+ * cancel until it is final. The forms arrive as slots (`commandForms`) built by
+ * the page, which alone has the session to mint their ids; this screen only
+ * decides which of them the status allows, and the service decides again.
  *
  * ## The workflow list is built, not stored
  *
@@ -50,8 +56,41 @@ export interface RequestDetailScreenProps {
    * confirmation on a page the viewer is already allowed to read — and it is
    * not rendered at all when the read failed.
    */
-  readonly notice?: 'created';
+  readonly notice?: 'created' | RequestCommandNotice;
+  /**
+   * The three commands, present only for a person the page found allowed to
+   * use them (`canManageMaintenance`) and only when the request read.
+   */
+  readonly commandForms?: {
+    readonly assign: ReactNode;
+    readonly approve: ReactNode;
+    readonly cancel: ReactNode;
+  };
 }
+
+const NOTICES: Record<
+  'created' | RequestCommandNotice,
+  { tone: 'success' | 'warning'; text: string }
+> = {
+  created: { tone: 'success', text: 'درخواست ثبت شد. کار از همین صفحه دنبال می‌شود.' },
+  assigned: { tone: 'success', text: 'کار به تعمیرگاه ارجاع شد.' },
+  approved: { tone: 'success', text: 'هزینه تأیید شد. درخواست نهایی است.' },
+  cancelled: { tone: 'success', text: 'درخواست لغو شد.' },
+  costChanged: {
+    tone: 'warning',
+    text: 'هزینه از زمان نمایش تغییر کرده بود، پس تأیید انجام نشد. مبلغ تازه را بررسی کنید و اگر درست بود دوباره تأیید کنید.',
+  },
+};
+
+/** Work that can still be referred on: open, and not already with a workshop. */
+function canBeReferred(request: MaintenanceRequestDetail): boolean {
+  return (
+    (request.status === 'OPEN' || request.status === 'IN_PROGRESS') &&
+    request.repairOrders.every((order) => order.status === 'CANCELLED')
+  );
+}
+
+const CANCELLABLE = ['OPEN', 'IN_PROGRESS', 'COMPLETED'];
 
 interface Milestone {
   readonly label: string;
@@ -123,7 +162,12 @@ function RepairOrderCard({ order }: { order: RepairOrderSummary }) {
   );
 }
 
-export function RequestDetailScreen({ result, requestId, notice }: RequestDetailScreenProps) {
+export function RequestDetailScreen({
+  result,
+  requestId,
+  notice,
+  commandForms,
+}: RequestDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
       <>
@@ -176,9 +220,7 @@ export function RequestDetailScreen({ result, requestId, notice }: RequestDetail
         description={`${maintenanceTypeLabel(request.type)} — گزارش‌شده در ${formatJalaliDateLong(request.reportedAt)}`}
       />
 
-      {notice === 'created' ? (
-        <Alert tone="success">درخواست ثبت شد. کار از همین صفحه دنبال می‌شود.</Alert>
-      ) : null}
+      {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 
       <Section headingId="identity" title="شناسنامه">
         <Grid columns={2}>
@@ -285,7 +327,22 @@ export function RequestDetailScreen({ result, requestId, notice }: RequestDetail
             ))}
           </ul>
         )}
+        {commandForms && canBeReferred(request) ? (
+          <div className="mt-6">{commandForms.assign}</div>
+        ) : null}
       </Section>
+
+      {commandForms && request.status === 'COMPLETED' ? (
+        <Section headingId="approve" title="تأیید هزینه">
+          {commandForms.approve}
+        </Section>
+      ) : null}
+
+      {commandForms && CANCELLABLE.includes(request.status) ? (
+        <Section headingId="cancel" title="لغو">
+          {commandForms.cancel}
+        </Section>
+      ) : null}
     </>
   );
 }

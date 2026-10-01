@@ -1,9 +1,16 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { fetchCurrentUser } from '@/server/identity';
 import { fetchMaintenanceRequest } from '@/server/maintenance';
+import { canManageMaintenance } from '@/server/maintenance-commands';
+import { mintSubmissionId } from '@/server/submission';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { REQUEST_COMMAND_NOTICES } from '@/lib/maintenance-fields';
+import { readFlash } from '@/server/flash';
 import { PORTAL_NAV } from '@/app/nav';
 import { RequestDetailScreen } from './RequestDetailScreen';
+import { ApproveRequestForm, AssignWorkshopForm, CancelRequestForm } from './RequestCommandForms';
 
 /**
  * The `/maintenance/[id]` route (docs/16 § 16.6).
@@ -30,7 +37,23 @@ export default async function MaintenanceRequestPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
 
-  const result = await fetchMaintenanceRequest(session, id);
+  const [result, currentUser] = await Promise.all([
+    fetchMaintenanceRequest(session, id),
+    fetchCurrentUser(session),
+  ]);
+
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
+  // read shows no command rather than one that might not work, and
+  // maintenance-service decides again on every submit.
+  const canManage =
+    currentUser.kind === 'USER' && canManageMaintenance(currentUser.user.effectiveRoles);
+
+  const identity = () => ({
+    csrfToken: session.csrfToken,
+    // One reference per form, so two forms never share an id.
+    submissionId: mintSubmissionId(session),
+    requestId: id,
+  });
 
   return (
     <AppShell
@@ -49,7 +72,23 @@ export default async function MaintenanceRequestPage({
       <RequestDetailScreen
         result={result}
         requestId={id}
-        notice={query.created === '1' ? 'created' : undefined}
+        notice={readFlash(
+          session,
+          typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,
+          id,
+          ['created', ...REQUEST_COMMAND_NOTICES],
+        )}
+        commandForms={
+          canManage && result.kind === 'OK'
+            ? {
+                assign: <AssignWorkshopForm {...identity()} />,
+                approve: (
+                  <ApproveRequestForm {...identity()} totalCostMinor={result.data.totalCostMinor} />
+                ),
+                cancel: <CancelRequestForm {...identity()} />,
+              }
+            : undefined
+        }
       />
     </AppShell>
   );

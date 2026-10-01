@@ -3,7 +3,16 @@ import { z } from 'zod';
 
 import { normalizePersianText } from '@/lib/format';
 import {
+  APPROVE_REQUEST_FIELDS,
+  ASSIGN_WORKSHOP_FIELDS,
+  CANCEL_REQUEST_FIELDS,
   REPORT_REQUEST_FIELDS,
+  type ApproveRequestField,
+  type ApproveRequestFormValues,
+  type AssignWorkshopField,
+  type AssignWorkshopFormValues,
+  type CancelRequestField,
+  type CancelRequestFormValues,
   type ReportRequestField,
   type ReportRequestFormValues,
 } from '@/lib/maintenance-fields';
@@ -199,6 +208,309 @@ export function reportMaintenanceRequest(
     submissionId,
     schema: reportedRequestSchema,
     mapping: REPORT_REQUEST_FIELD_MAPPING,
+    fetchImpl,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Commands on a request: refer to a workshop, approve the cost, cancel
+// ---------------------------------------------------------------------------
+
+/**
+ * The roles `assign`, `approve` and `cancel` admit (`request.controller.ts`):
+ * the ones that can commit the organization to a cost. Narrower than the
+ * reporters on purpose — an operator may raise a fault and may not refer it on,
+ * approve what it cost, or abandon it.
+ *
+ * A Route Guard as UX, like `canReportMaintenance`: it hides three forms nobody
+ * in another role could use, and maintenance-service refuses again.
+ */
+const MANAGER_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'];
+
+export function canManageMaintenance(effectiveRoles: readonly string[]): boolean {
+  return effectiveRoles.some((role) => MANAGER_ROLES.includes(role));
+}
+
+/**
+ * The service's own `displayText` character class, which it applies to every
+ * free-text field of these three commands. A copy, because the portal may not
+ * import a service (A-02); `maintenance-commands.contract.spec.ts` fails the
+ * moment the two disagree. Letters of the Arabic and Latin scripts, digits of
+ * any script, combining marks, spaces, ZWNJ and a short list of punctuation.
+ */
+export const MAINTENANCE_DISPLAY_TEXT =
+  /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+]+$/u;
+
+const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
+
+const organizationId = seedIdSchema(ID_PREFIXES.organization);
+const requestId = seedIdSchema(ID_PREFIXES.maintenanceRequest);
+
+/** The request a command is about, from the form; nothing else about it is trusted. */
+export function commandRequestId(form: FormData): string | null {
+  const raw = form.get('requestId');
+  return typeof raw === 'string' && requestId.safeParse(raw.trim()).success ? raw.trim() : null;
+}
+
+/** Text that may be left empty, which then says nothing at all. */
+function optionalText(label: string, max: number) {
+  return z
+    .string()
+    .transform((raw) => normalizePersianText(raw))
+    .pipe(
+      z
+        .string()
+        .max(max, `${label} حداکثر ${max} نویسه است`)
+        .refine(
+          (value) => value === '' || MAINTENANCE_DISPLAY_TEXT.test(value),
+          DISPLAY_TEXT_MESSAGE,
+        ),
+    )
+    .transform((value) => (value === '' ? undefined : value));
+}
+
+function readFields<F extends string>(form: FormData, fields: readonly F[]): Record<F, string> {
+  const values = {} as Record<F, string>;
+  for (const field of fields) {
+    const raw = form.get(field);
+    values[field] = typeof raw === 'string' ? raw : '';
+  }
+  return values;
+}
+
+function firstIssues<F extends string>(
+  error: z.ZodError,
+  fields: readonly F[],
+): Partial<Record<F, string>> {
+  const fieldErrors: Partial<Record<F, string>> = {};
+  for (const issue of error.issues) {
+    const field = issue.path[0];
+    if (typeof field === 'string' && (fields as readonly string[]).includes(field)) {
+      const key = field as F;
+      if (!fieldErrors[key]) fieldErrors[key] = issue.message;
+    }
+  }
+  return fieldErrors;
+}
+
+// ---- Refer to a workshop ---------------------------------------------------
+
+export function assignWorkshopFormValues(form: FormData): AssignWorkshopFormValues {
+  return readFields(form, ASSIGN_WORKSHOP_FIELDS);
+}
+
+export const assignWorkshopFormSchema = z
+  .object({
+    workshopOrganizationId: z
+      .string()
+      .trim()
+      .min(1, 'شناسهٔ سازمان تعمیرگاه را وارد کنید')
+      .refine((value) => organizationId.safeParse(value).success, 'شناسهٔ سازمان معتبر نیست'),
+    workshopName: optionalText('نام تعمیرگاه', 200).refine(
+      (value) => value === undefined || value.length >= 2,
+      'نام تعمیرگاه دست‌کم ۲ نویسه باشد',
+    ),
+    workSummary: optionalText('شرح کار', 1000).refine(
+      (value) => value === undefined || value.length >= 2,
+      'شرح کار دست‌کم ۲ نویسه باشد',
+    ),
+  })
+  .strict();
+
+/** What maintenance-service accepts on `POST /v1/maintenance-requests/{id}/assign`. */
+export type AssignWorkshopBody = z.infer<typeof assignWorkshopFormSchema>;
+
+export type ParsedAssignWorkshopForm =
+  | { readonly ok: true; readonly body: AssignWorkshopBody }
+  | { readonly ok: false; readonly fieldErrors: Partial<Record<AssignWorkshopField, string>> };
+
+export function parseAssignWorkshopForm(
+  values: AssignWorkshopFormValues,
+): ParsedAssignWorkshopForm {
+  const parsed = assignWorkshopFormSchema.safeParse(values);
+  if (parsed.success) return { ok: true, body: parsed.data };
+  return { ok: false, fieldErrors: firstIssues(parsed.error, ASSIGN_WORKSHOP_FIELDS) };
+}
+
+/**
+ * Sentences shared by the commands that move a request: a race with someone
+ * else's change, and a machine that changed hands. A sentence the portal does
+ * not know is shown as it arrived (`mapProblemToFields`).
+ */
+const REQUEST_STATE_MESSAGES: Readonly<Record<string, string>> = {
+  'An approved maintenance request is final; it authorises settlement and cannot be reopened':
+    'این درخواست تأیید شده و نهایی است؛ دیگر تغییر نمی‌کند.',
+  'A cancelled maintenance request is final; raise a new one':
+    'این درخواست لغو شده و نهایی است؛ درخواست تازه‌ای ثبت کنید.',
+  'This request was already approved or cancelled by another request':
+    'همین حالا کس دیگری این درخواست را تأیید یا لغو کرد. صفحه را تازه کنید.',
+  'The machine has been transferred to another organization; this work cannot go ahead.':
+    'این ماشین به سازمان دیگری منتقل شده است و کار نمی‌تواند پیش برود.',
+  'This machine is being transferred to another organization; raise the work after the transfer.':
+    'این ماشین در حال انتقال به سازمان دیگری است؛ کار را پس از انتقال انجام دهید.',
+};
+
+export const ASSIGN_WORKSHOP_FIELD_MAPPING: FieldMapping<AssignWorkshopField> = {
+  paths: {
+    workshopOrganizationId: 'workshopOrganizationId',
+    workshopName: 'workshopName',
+    workSummary: 'workSummary',
+  },
+  messages: {
+    ...REQUEST_STATE_MESSAGES,
+    'Contains unsupported characters': DISPLAY_TEXT_MESSAGE,
+    'This request is already with a workshop. Cancel that referral before making another.':
+      'این درخواست همین حالا نزد یک تعمیرگاه است. برای ارجاع به جای دیگر، نخست آن ارجاع را لغو کنید.',
+    'That workshop may not take on this work.': 'این تعمیرگاه نمی‌تواند این کار را بپذیرد.',
+  },
+};
+
+/** What a caller needs of the created referral: only that it exists. */
+const commandAnswerSchema = z.object({ id: z.string().min(1) });
+
+export function assignWorkshop(
+  session: WebSession,
+  id: string,
+  body: AssignWorkshopBody,
+  submissionId: string,
+  fetchImpl?: typeof fetch,
+): Promise<WriteResult<z.infer<typeof commandAnswerSchema>, AssignWorkshopField>> {
+  return writeThroughGateway(session, {
+    path: `/v1/maintenance-requests/${encodeURIComponent(id)}/assign`,
+    body,
+    submissionId,
+    schema: commandAnswerSchema,
+    mapping: ASSIGN_WORKSHOP_FIELD_MAPPING,
+    fetchImpl,
+  });
+}
+
+// ---- Approve the cost ------------------------------------------------------
+
+export function approveRequestFormValues(form: FormData): ApproveRequestFormValues {
+  return readFields(form, APPROVE_REQUEST_FIELDS);
+}
+
+export const approveRequestFormSchema = z
+  .object({
+    // Required here although the service treats it as optional: this form
+    // always echoes what it showed, because an approval that does not say what
+    // it approves is not the control docs/17 makes mandatory.
+    expectedTotalCostMinor: z
+      .string()
+      .trim()
+      .regex(/^\d{1,30}$/, 'مبلغ نمایش‌داده‌شده معتبر نیست؛ صفحه را تازه کنید'),
+    notes: optionalText('یادداشت', 1000),
+  })
+  .strict();
+
+/** What maintenance-service accepts on `POST /v1/maintenance-requests/{id}/approve`. */
+export type ApproveRequestBody = z.infer<typeof approveRequestFormSchema>;
+
+export type ParsedApproveRequestForm =
+  | { readonly ok: true; readonly body: ApproveRequestBody }
+  | { readonly ok: false; readonly fieldErrors: Partial<Record<ApproveRequestField, string>> };
+
+export function parseApproveRequestForm(
+  values: ApproveRequestFormValues,
+): ParsedApproveRequestForm {
+  const parsed = approveRequestFormSchema.safeParse(values);
+  if (parsed.success) return { ok: true, body: parsed.data };
+  return { ok: false, fieldErrors: firstIssues(parsed.error, APPROVE_REQUEST_FIELDS) };
+}
+
+/**
+ * Said when the total moved between the screen and the button. The action
+ * recognises it by this exact text and sends the person back to a page that
+ * shows the new figure; the service's sentence is matched in
+ * `APPROVE_REQUEST_FIELD_MAPPING` and pinned by the contract spec, because the
+ * platform's error body carries no rule code a client may read.
+ */
+export const APPROVAL_TOTAL_CHANGED_MESSAGE =
+  'هزینه از زمانی که نمایش داده شد تغییر کرده است؛ مبلغ تازه را ببینید و دوباره تأیید کنید.';
+
+export const APPROVE_REQUEST_FIELD_MAPPING: FieldMapping<ApproveRequestField> = {
+  paths: { expectedTotalCostMinor: 'expectedTotalCostMinor', notes: 'notes' },
+  messages: {
+    ...REQUEST_STATE_MESSAGES,
+    'Contains unsupported characters': DISPLAY_TEXT_MESSAGE,
+    'The cost has changed since it was shown to you; review it again before approving.':
+      APPROVAL_TOTAL_CHANGED_MESSAGE,
+  },
+};
+
+export function approveRequest(
+  session: WebSession,
+  id: string,
+  body: ApproveRequestBody,
+  submissionId: string,
+  fetchImpl?: typeof fetch,
+): Promise<WriteResult<z.infer<typeof commandAnswerSchema>, ApproveRequestField>> {
+  return writeThroughGateway(session, {
+    path: `/v1/maintenance-requests/${encodeURIComponent(id)}/approve`,
+    body,
+    submissionId,
+    schema: commandAnswerSchema,
+    mapping: APPROVE_REQUEST_FIELD_MAPPING,
+    fetchImpl,
+  });
+}
+
+// ---- Cancel ----------------------------------------------------------------
+
+export function cancelRequestFormValues(form: FormData): CancelRequestFormValues {
+  return readFields(form, CANCEL_REQUEST_FIELDS);
+}
+
+export const cancelRequestFormSchema = z
+  .object({
+    reason: z
+      .string()
+      .transform((raw) => normalizePersianText(raw))
+      .pipe(
+        z
+          .string()
+          .min(3, 'دلیل لغو دست‌کم ۳ نویسه باشد')
+          .max(500, 'دلیل لغو حداکثر ۵۰۰ نویسه است')
+          .refine((value) => MAINTENANCE_DISPLAY_TEXT.test(value), DISPLAY_TEXT_MESSAGE),
+      ),
+  })
+  .strict();
+
+/** What maintenance-service accepts on `POST /v1/maintenance-requests/{id}/cancel`. */
+export type CancelRequestBody = z.infer<typeof cancelRequestFormSchema>;
+
+export type ParsedCancelRequestForm =
+  | { readonly ok: true; readonly body: CancelRequestBody }
+  | { readonly ok: false; readonly fieldErrors: Partial<Record<CancelRequestField, string>> };
+
+export function parseCancelRequestForm(values: CancelRequestFormValues): ParsedCancelRequestForm {
+  const parsed = cancelRequestFormSchema.safeParse(values);
+  if (parsed.success) return { ok: true, body: parsed.data };
+  return { ok: false, fieldErrors: firstIssues(parsed.error, CANCEL_REQUEST_FIELDS) };
+}
+
+export const CANCEL_REQUEST_FIELD_MAPPING: FieldMapping<CancelRequestField> = {
+  paths: { reason: 'reason' },
+  messages: {
+    ...REQUEST_STATE_MESSAGES,
+    'Contains unsupported characters': DISPLAY_TEXT_MESSAGE,
+  },
+};
+
+export function cancelRequest(
+  session: WebSession,
+  id: string,
+  body: CancelRequestBody,
+  submissionId: string,
+  fetchImpl?: typeof fetch,
+): Promise<WriteResult<z.infer<typeof commandAnswerSchema>, CancelRequestField>> {
+  return writeThroughGateway(session, {
+    path: `/v1/maintenance-requests/${encodeURIComponent(id)}/cancel`,
+    body,
+    submissionId,
+    schema: commandAnswerSchema,
+    mapping: CANCEL_REQUEST_FIELD_MAPPING,
     fetchImpl,
   });
 }
