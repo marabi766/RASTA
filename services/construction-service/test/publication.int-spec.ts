@@ -495,11 +495,20 @@ describe('publishing a tender', () => {
         'utf8',
       );
       const lock = /^LOCK TABLE [^;]+;/m.exec(sql)?.[0];
-      const preflight = /DO \$preflight\$[\s\S]*?\$preflight\$;/.exec(sql)?.[0];
+      const block = (tag: string) =>
+        new RegExp(`DO \\$${tag}\\$[\\s\\S]*?\\$${tag}\\$;`).exec(sql)?.[0];
+      const keysCheck = block('preflight_keys');
+      const invitationsCheck = block('preflight_invitations');
       expect(lock).toContain('ACCESS EXCLUSIVE');
-      expect(preflight).toBeDefined();
-      expect(sql.indexOf(lock!)).toBeLessThan(sql.indexOf(preflight!));
-      expect(sql.indexOf(preflight!)).toBeLessThan(sql.indexOf('DROP TABLE'));
+      expect(keysCheck).toBeDefined();
+      expect(invitationsCheck).toBeDefined();
+      expect(sql.indexOf(lock!)).toBeLessThan(sql.indexOf(keysCheck!));
+      expect(sql.indexOf(invitationsCheck!)).toBeLessThan(sql.indexOf('DROP TABLE'));
+      const runAfterLock = (check: string) =>
+        w.prisma.client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(lock!.replace(/;$/, ''));
+          await tx.$executeRawUnsafe(check.replace(/;$/, ''));
+        });
 
       const { a, tender, version } = await draft();
       await asAdmin(a, () =>
@@ -507,14 +516,42 @@ describe('publishing a tender', () => {
       );
       expect(await keyRow(a, tender.id)).not.toBeNull();
 
+      await expect(runAfterLock(keysCheck!)).rejects.toThrow(
+        /down refused: \d+ tender key\(s\) exist/,
+      );
+      // The refusal rolled everything back: the key is still there.
+      expect(await keyRow(a, tender.id)).not.toBeNull();
+    });
+
+    it('refuses while an invitation exists, even with no key at all', async () => {
+      const sql = readFileSync(
+        join(
+          __dirname,
+          '..',
+          'prisma',
+          'migrations',
+          '20260930180000_tender_publication',
+          'down.sql',
+        ),
+        'utf8',
+      );
+      const lock = /^LOCK TABLE [^;]+;/m.exec(sql)?.[0];
+      const check = /DO \$preflight_invitations\$[\s\S]*?\$preflight_invitations\$;/.exec(sql)?.[0];
+
+      // A restricted draft that invited before it was ever published: an invitation, no key.
+      const { a, tender } = await draft({ visibility: 'RESTRICTED' });
+      await asAdmin(a, () => w.publication.invite(tender.id, { organizationId: 'ORG_BIDDER_1' }));
+      expect(await keyRow(a, tender.id)).toBeNull();
+
       await expect(
         w.prisma.client.$transaction(async (tx) => {
           await tx.$executeRawUnsafe(lock!.replace(/;$/, ''));
-          await tx.$executeRawUnsafe(preflight!.replace(/;$/, ''));
+          await tx.$executeRawUnsafe(check!.replace(/;$/, ''));
         }),
-      ).rejects.toThrow(/down refused: \d+ tender key\(s\) exist/);
-      // The refusal rolled everything back: the key is still there.
-      expect(await keyRow(a, tender.id)).not.toBeNull();
+      ).rejects.toThrow(/down refused: \d+ tender invitation\(s\) exist/);
+      expect(
+        (await asAdmin(a, () => w.publication.listInvitations(tender.id, { limit: 25 }))).items,
+      ).toHaveLength(1);
     });
   });
 
