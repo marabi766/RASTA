@@ -243,6 +243,82 @@ describe('supplier standing snapshot', () => {
     });
   });
 
+  describe('one contractor, now (authoritative)', () => {
+    const one = async (organizationId: string, token?: string) =>
+      http()
+        .get(`/v1/suppliers/standing-snapshot/${organizationId}`)
+        .set('x-internal-token', token ?? (await internalToken('construction-service')));
+
+    it('answers who is approved and who is suspended, with the episodes', async () => {
+      const approved = await one(orgs.approved);
+      expect(approved.status).toBe(200);
+      expect(approved.body).toEqual({
+        organizationId: orgs.approved,
+        contractingApprovedAt: expect.stringMatching(/Z$/),
+        suspensions: [],
+        asOf: expect.stringMatching(/Z$/),
+      });
+
+      const suspended = await one(orgs.suspended);
+      expect(suspended.body.suspensions).toEqual([
+        {
+          suspensionId: expect.any(String),
+          suspendedAt: expect.stringMatching(/Z$/),
+          reinstatedAt: null,
+        },
+      ]);
+      expect((await one(orgs.lifted)).body.suspensions[0].reinstatedAt).toMatch(/Z$/);
+      expect((await one(orgs.neverQualified)).body.contractingApprovedAt).toBeNull();
+    });
+
+    it('is a 200 with nothing for an organization it has no profile for, and for one not qualified for CONTRACTING', async () => {
+      for (const org of ['ORG-NOBODY-HERE', orgs.workshop, orgs.pending]) {
+        const response = await one(org);
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          organizationId: org,
+          contractingApprovedAt: null,
+          suspensions: [],
+        });
+      }
+    });
+
+    it('reads the moment it is asked: a suspension just committed is in the next answer', async () => {
+      // The delayed-outbox case: committed here, not yet relayed to any consumer.
+      expect((await one(orgs.approved)).body.suspensions).toEqual([]);
+      await suspend('approved');
+      const now = await one(orgs.approved);
+      expect(now.body.suspensions).toHaveLength(1);
+      expect(now.body.suspensions[0].reinstatedAt).toBeNull();
+      await reinstate('approved');
+      expect((await one(orgs.approved)).body.suspensions[0].reinstatedAt).toMatch(/Z$/);
+    });
+
+    it('has the same access as the snapshot: construction-service with a tenant-less token, nobody else', async () => {
+      const path = `/v1/suppliers/standing-snapshot/${orgs.approved}`;
+      expect((await http().get(path)).status).toBe(401);
+      for (const bearer of [asPlatform(), asSupplier(orgs.approved)]) {
+        expect((await http().get(path).set('authorization', bearer)).status).toBe(403);
+      }
+      for (const token of [
+        await internalToken('marketplace-service'),
+        await internalToken('construction-service', { organizationId: orgs.approved }),
+      ]) {
+        expect((await one(orgs.approved, token)).status).toBe(403);
+      }
+    });
+
+    it('leaks nothing a person typed', async () => {
+      const text = JSON.stringify([
+        (await one(orgs.suspended)).body,
+        (await one(orgs.lifted)).body,
+      ]);
+      for (const secret of ['must never leave', 'private', 'DOC-', 'reason', 'note']) {
+        expect({ secret, found: text.includes(secret) }).toEqual({ secret, found: false });
+      }
+    });
+  });
+
   describe('paging', () => {
     it('walks every supplier exactly once with a small page, in id order', async () => {
       const small = await everything(1);

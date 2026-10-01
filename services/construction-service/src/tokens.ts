@@ -24,3 +24,6 @@ export const TENDER_KEY_PROVIDER = Symbol('CONSTRUCTION_TENDER_KEY_PROVIDER');
  * supplier-service in production, a page list in tests.
  */
 export const STANDING_SNAPSHOT_SOURCE = Symbol('CONSTRUCTION_STANDING_SNAPSHOT_SOURCE');
+
+/** Where one contractor's current standing is asked (`StandingOfSource`), authoritatively. */
+export const STANDING_OF_SOURCE = Symbol('CONSTRUCTION_STANDING_OF_SOURCE');

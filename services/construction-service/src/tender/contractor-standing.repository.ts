@@ -98,7 +98,14 @@ export class ContractorStandingRepository {
   }
 
   /**
-   * Whether `organizationId` may bid as a contractor, and the reason when not:
+   * **Advisory.** What this service's read model says about `organizationId`, for
+   * listing and for a UI. It is **not** a source for deciding a bid: built from a
+   * seven-day event log and a snapshot, it can say "eligible" when supplier-service
+   * says otherwise (an event that expired while this service was down; a suspension
+   * committed but not yet relayed). A bid asks `StandingAuthority`, which asks the
+   * owner at the moment of the bid.
+   *
+   * Whether `organizationId` is eligible by the read model, and the reason when not:
    * the standing must have been **loaded** (the bootstrap marker exists), and the
    * organization qualified for `CONTRACTING` and in no open suspension episode.
    * An organization this service has heard nothing about is not eligible.

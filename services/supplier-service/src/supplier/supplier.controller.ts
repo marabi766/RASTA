@@ -121,6 +121,23 @@ export class SupplierController {
     return this.suppliers.standingSnapshot(query);
   }
 
+  @Get('standing-snapshot/:organizationId')
+  @AllowService('construction-service')
+  @ApiOperation({
+    summary: 'One contractor’s standing now (authoritative), for a bid decision',
+    description:
+      'The single-organization variant of the snapshot, with the same service-only access: ' +
+      '`construction-service` with a token signed for no tenant, 403 for anyone else. Read at ' +
+      'the moment of asking, so it includes a suspension committed here and not yet relayed on ' +
+      '`rasta.supplier.v1`, and one whose event has expired from the log. Always 200: an ' +
+      'organization with no profile answers with no approval and no episodes. Identifiers and ' +
+      'instants only; `asOf` is the database instant it was read at. A literal two-segment path, ' +
+      'declared before `:id`.',
+  })
+  async standingOf(@Param('organizationId') organizationId: string) {
+    return this.suppliers.standingOf(organizationId);
+  }
+
   @Get('qualified')
   @Roles(...DIRECTORY_ROLES)
   @ApiOperation({

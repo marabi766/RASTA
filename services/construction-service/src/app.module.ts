@@ -56,6 +56,7 @@ import {
 } from './events/supplier-standing.consumer';
 import { ContractorStandingRepository } from './tender/contractor-standing.repository';
 import { StandingBootstrap } from './tender/standing-bootstrap';
+import { StandingAuthority } from './tender/standing-authority';
 import { SupplierSnapshotClient } from './tender/supplier-snapshot.client';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
@@ -81,7 +82,13 @@ import {
   policyReconciliationBacklog,
   policyReconciliationOldestDueAgeSeconds,
 } from './observability/metrics';
-import { ENV, LOGGER, STANDING_SNAPSHOT_SOURCE, TENDER_KEY_PROVIDER } from './tokens';
+import {
+  ENV,
+  LOGGER,
+  STANDING_OF_SOURCE,
+  STANDING_SNAPSHOT_SOURCE,
+  TENDER_KEY_PROVIDER,
+} from './tokens';
 import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
 
 /**
@@ -220,6 +227,10 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     // supplier-service, and nobody is eligible until it has been (StandingBootstrap).
     SupplierSnapshotClient,
     { provide: STANDING_SNAPSHOT_SOURCE, useExisting: SupplierSnapshotClient },
+    // Eligibility to bid is decided from supplier-service's own record at the moment
+    // of the bid; the read model above is advisory (StandingAuthority).
+    { provide: STANDING_OF_SOURCE, useExisting: SupplierSnapshotClient },
+    StandingAuthority,
     StandingBootstrap,
     {
       provide: SupplierStandingConsumer,

@@ -431,7 +431,11 @@ Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v
 `supplier-service` خوانده می‌شود: `GET /v1/suppliers/standing-snapshot` (`@AllowService('construction-service')`، توکن بی مستأجر، صفحه‌بندی با
 Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ تعلیق، با شناسه و لحظه‌ها، بی هیچ متن). `construction-service` پس از شروع مصرف‌کننده آن را به
 همان شکل هم‌گرا در دو جدول می‌نویسد و نشانگر `standing_bootstrap` را ثبت می‌کند؛ **تا آن‌گاه هر پرسش صلاحیت `STANDING_NOT_LOADED` است**
-(Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. همین مسیر، بازسازی پس از `down.sql` است
+(Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. **این مدل خواندنی مشورتی است (بازبینی دور دوم Codex):** برای فهرست و UI است، نه منبع تصمیم؛
+چون پس از قطعی بلندتر از نگه‌داشت لاگ (هفت روز) تعلیقِ منقضی‌شده را نمی‌بیند، و تعلیقی که در `supplier-service` Commit شده ولی Outbox هنوز
+نرسانده را هم. **صلاحیت برای پیشنهاد تصمیمی قطعی است:** هنگام ثبت، `construction-service` وضعیت همان یک پیمانکار را با
+`GET /v1/suppliers/standing-snapshot/{organizationId}` (همان `@AllowService` و توکن بی مستأجر) از `supplier-service` می‌پرسد (بیرون از
+تراکنش و قفل مناقصه) و اگر در دسترس نبود `503/504` می‌دهد، یعنی Fail Closed (`StandingAuthority`). همین مسیر، بازسازی پس از `down.sql` است
 (`docs/runbooks/contractor-standing-bootstrap.md`).
 
 **CON-002 PR 6 (پیشنهاد).** سمت پیمانکار (نقش `CONTRACTOR` در سازمان خودش؛ نه `SYSTEM_ADMIN` و نه `AUDITOR`): `GET /v1/open-tenders[/{id}]`

@@ -449,6 +449,34 @@ export class SupplierRepository {
     );
   }
 
+  /**
+   * One organization's standing as it is right now: the same selection as one
+   * snapshot item. `null` when the organization has no supplier profile.
+   */
+  async findStandingOf(organizationId: string) {
+    return runUnscoped(
+      'construction-service asks for one contractors current standing at the moment a bid ' +
+        'is decided (ADR-061 § 4); identifiers and instants only, caller checked in access.ts',
+      () =>
+        this.prisma.client.supplier.findUnique({
+          where: { organizationId },
+          select: {
+            organizationId: true,
+            qualifications: {
+              where: { capability: 'CONTRACTING', state: 'APPROVED' },
+              select: { decidedAt: true },
+              orderBy: { decidedAt: 'desc' },
+              take: 1,
+            },
+            suspensions: {
+              select: { id: true, suspendedAt: true, reinstatedAt: true },
+              orderBy: [{ suspendedAt: 'asc' }, { id: 'asc' }],
+            },
+          },
+        }),
+    );
+  }
+
   /** The database's own instant (never the application's clock). */
   async databaseInstant(): Promise<Date> {
     const rows = await this.prisma.client.$queryRaw<
