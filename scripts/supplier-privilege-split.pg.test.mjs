@@ -127,7 +127,14 @@ function deploy(role, migrations) {
 
 function split() {
   const result = spawnSync('bash', [SPLIT, DB], {
-    env: { ...process.env, PGHOST: host, PGPORT: port, POSTGRES_USER: superuser },
+    env: {
+      ...process.env,
+      PGHOST: host,
+      PGPORT: port,
+      POSTGRES_USER: superuser,
+      // Exported, as an upgrade outside compose must (lib/role-passwords.bash).
+      POSTGRES_PASSWORD_SUPPLIER_MIGRATOR: password(MIGRATOR),
+    },
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);

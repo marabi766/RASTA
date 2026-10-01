@@ -77,7 +77,7 @@ export function ownerDatabaseUrl(): string {
   if (!url) {
     throw new Error(
       'DATABASE_URL_CONSTRUCTION_MIGRATOR is not set. The suites lift an integrity trigger only ' +
-        'through the owner connection, never the runtime one; see .env.example (docs/23 D-045).',
+        'through the owner connection, never the runtime one; see .env.migrator.example (docs/23 D-045).',
     );
   }
   return url;

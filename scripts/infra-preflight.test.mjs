@@ -10,6 +10,7 @@ import {
   checkInfraEnv,
   checkKafkaClientEnv,
   kafkaServicesFromPrincipals,
+  migratorCredentialsInEnvFile,
   passwordVariable,
   ROLE_LIBRARY,
   rolesFromLibrary,
@@ -18,6 +19,7 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BOOTSTRAP = join(ROOT, 'infrastructure/docker/postgres/00-init-databases.sh');
 const ROTATE = join(ROOT, 'infrastructure/docker/postgres/lib/rotate-role-passwords.bash');
+const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
 
 const noValues = (messages, ...values) => {
   for (const message of messages) {
@@ -214,7 +216,7 @@ test('KAFKA_ALLOW_PLAINTEXT alone, on an otherwise complete .env, is its own war
  * Runs `script` with a stub `psql` first on PATH that records each call and
  * succeeds. Returns the exit status, stderr and the recorded calls.
  */
-function runWithStubPsql(script, env, { existing = [] } = {}) {
+function runWithStubPsql(script, env, { existing = [], args = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rasta-psql-stub-'));
   try {
     const log = join(dir, 'calls.log');
@@ -227,13 +229,16 @@ function runWithStubPsql(script, env, { existing = [] } = {}) {
       `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${exists}esac\nexit 0\n`,
     );
     chmodSync(stub, 0o755);
-    const result = spawnSync('bash', [script], {
+    const result = spawnSync('bash', [script, ...args], {
       encoding: 'utf8',
       env: {
         PATH: `${dir}:${process.env.PATH}`,
         HOME: dir,
         POSTGRES_USER: 'rasta',
         POSTGRES_PASSWORD: 'superuser_password_1',
+        // As compose's postgres container and CI run the bootstrap; the tests
+        // of the fallback's refusal remove it.
+        RASTA_DB_BOOTSTRAP: 'compose',
         ...env,
       },
     });
@@ -294,6 +299,88 @@ test('bootstrap: with distinct passwords it proceeds, and sets each role its own
 });
 
 // ---------------------------------------------------------------------------
+// The development fallback, only in the disposable bootstrap (Codex review of
+// #176, finding 2)
+// ---------------------------------------------------------------------------
+
+/** Every role's password, explicit and distinct — as a real environment sets them. */
+const explicitPasswords = () =>
+  Object.fromEntries(
+    rolesFromLibrary().map((role) => [passwordVariable(role), `explicit_${role}_secret`]),
+  );
+
+for (const [label, script] of [
+  ['bootstrap', BOOTSTRAP],
+  ['rotation', ROTATE],
+]) {
+  test(`${label}: outside RASTA_DB_BOOTSTRAP=compose an unset password aborts before any psql call`, () => {
+    const { status, stderr, calls } = runWithStubPsql(script, {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: undefined,
+    });
+    assert.equal(status, 1);
+    assert.match(stderr, /POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR is not set/);
+    assert.match(stderr, /RASTA_DB_BOOTSTRAP=compose/);
+    assert.deepEqual(calls, [], 'psql was reached before the check');
+    assert.ok(!stderr.includes('_dev_password'), 'a password was printed');
+  });
+
+  test(`${label}: outside the flag, every password supplied explicitly proceeds — and none is a default`, () => {
+    const { status, calls } = runWithStubPsql(script, {
+      RASTA_DB_BOOTSTRAP: undefined,
+      ...explicitPasswords(),
+    });
+    assert.equal(status, 0);
+    assert.ok(!calls.some((call) => call.includes('_dev_password')), 'a default reached psql');
+  });
+}
+
+test('standalone split: no fallback — the migrator password must be exported, and is the only one needed', () => {
+  const refused = runWithStubPsql(
+    SPLIT,
+    { RASTA_DB_BOOTSTRAP: undefined },
+    { args: ['construction'] },
+  );
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR is not set/);
+  assert.deepEqual(refused.calls, []);
+
+  const given = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: 'explicit_construction_migrator_secret',
+    },
+    { args: ['construction'] },
+  );
+  assert.equal(given.status, 0, given.stderr);
+  assert.ok(
+    given.calls.some((call) =>
+      call.includes("ALTER ROLE rasta_construction_migrator WITH LOGIN PASSWORD 'explicit_"),
+    ),
+  );
+  assert.ok(!given.calls.some((call) => call.includes('_dev_password')));
+});
+
+test('standalone split: in the compose container the development default still applies', () => {
+  const { status, calls } = runWithStubPsql(SPLIT, {}, { args: ['construction'] });
+  assert.equal(status, 0);
+  assert.ok(
+    calls.some((call) => call.includes("PASSWORD 'rasta_construction_migrator_dev_password'")),
+  );
+});
+
+test('standalone audit split sets no password, so needs none', () => {
+  const { status, calls } = runWithStubPsql(
+    SPLIT,
+    { RASTA_DB_BOOTSTRAP: undefined },
+    { args: ['audit'] },
+  );
+  assert.equal(status, 0);
+  assert.ok(!calls.some((call) => /PASSWORD/.test(call)));
+});
+
+// ---------------------------------------------------------------------------
 // The demo-seed marker (Codex review of #117, finding 1)
 // ---------------------------------------------------------------------------
 
@@ -321,4 +408,36 @@ test('bootstrap: never marks a database that already existed', () => {
   assert.ok(!done.includes('rasta_economic'), 'marked a pre-existing rasta_economic');
   assert.equal(done.length, 14);
   assert.ok(!calls.some((call) => call.includes('CREATE DATABASE rasta_identity ')));
+});
+
+test('a .env still holding owner credentials is named, by variable only (D-045 env split)', () => {
+  assert.deepEqual(migratorCredentialsInEnvFile({ DATABASE_URL_IDENTITY: 'x' }), []);
+  const [warning] = migratorCredentialsInEnvFile({
+    DATABASE_URL_CONSTRUCTION_MIGRATOR: 'postgresql://m:owner_secret@h/d',
+    POSTGRES_PASSWORD_AUDIT_MIGRATOR: 'owner_secret',
+    DATABASE_URL_CONSTRUCTION: 'x',
+  });
+  assert.match(warning, /DATABASE_URL_CONSTRUCTION_MIGRATOR, POSTGRES_PASSWORD_AUDIT_MIGRATOR/);
+  assert.match(warning, /\.env\.migrator/);
+  assert.ok(!warning.includes('owner_secret'));
+});
+
+test('.env.example holds no owner credential; .env.migrator.example holds every migrator, URL and password', () => {
+  const read = (name) => readFileSync(join(ROOT, name), 'utf8');
+  const names = (text) => parseEnvAssignments(text).assignments.map(({ name }) => name);
+  assert.deepEqual(
+    names(read('.env.example')).filter((name) => /_MIGRATOR$/.test(name)),
+    [],
+  );
+  const migrators = rolesFromLibrary().filter((role) => role.endsWith('_migrator'));
+  const inMigratorFile = names(read('.env.migrator.example'));
+  for (const role of migrators) {
+    const stem = role.replace(/^rasta_/, '').toUpperCase();
+    assert.ok(inMigratorFile.includes(`POSTGRES_PASSWORD_${stem}`), `POSTGRES_PASSWORD_${stem}`);
+    const url = stem.replace(/_MIGRATOR$/, '');
+    assert.ok(
+      inMigratorFile.includes(`DATABASE_URL_${url}_MIGRATOR`),
+      `DATABASE_URL_${url}_MIGRATOR`,
+    );
+  }
 });

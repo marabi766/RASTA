@@ -76,7 +76,7 @@ export function classifyServices({
  *   * owns the database, any non-system schema, relation, function or type;
  *   * CREATE on the database or on any non-system schema;
  *   * TRUNCATE, REFERENCES or TRIGGER on any table;
- *   * any right on the migration ledger `_prisma_migrations`.
+ *   * any right on the migration ledger `_prisma_migrations`, table or column.
  */
 export const FINDINGS_SQL = String.raw`
 WITH me AS (
@@ -132,7 +132,8 @@ SELECT finding FROM (
   UNION ALL
   SELECT 'a right on ' || t.nspname || '._prisma_migrations' FROM user_tables t, me
    WHERE t.relname = '_prisma_migrations'
-     AND has_table_privilege(me.oid, t.oid, 'SELECT, INSERT, UPDATE, DELETE')
+     AND (has_table_privilege(me.oid, t.oid, 'SELECT, INSERT, UPDATE, DELETE')
+          OR has_any_column_privilege(me.oid, t.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))
 ) f
 ORDER BY finding;
 `;

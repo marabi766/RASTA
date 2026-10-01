@@ -1051,7 +1051,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   Migration می‌گیرد؛ `scripts/check-db-runtime-privileges.mjs` در CI شکست می‌خورد اگر نقش اجرای یک سرویس تقسیم‌شده مالک
   چیزی باشد یا `TRIGGER`/`TRUNCATE`/`REFERENCES`/`CREATE` داشته باشد. **construction-service** تقسیم شد (آزمون زندهٔ
   `runtime-privileges.int-spec.ts`: `DISABLE TRIGGER`، `ALTER`، `DROP`، `TRUNCATE` → `42501`)؛ supplier به همان سازوکار
-  منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. **باقی‌مانده** (`PENDING_SPLIT`): identity،
+  منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. بازبینی Codex روی #176: (۱) دفتر
+  `_prisma_migrations` را خود تقسیم پیش از هر Migration با DDL دقیق Prisma و بی هیچ حقی برای نقش اجرا می‌سازد، پس
+  Migration ناموفق هم دفتر را نوشتنی نمی‌گذارد (آزمون زنده با `prisma migrate deploy` ناموفق)؛ (۲) گذرواژهٔ پیش‌فرض
+  توسعه فقط با `RASTA_DB_BOOTSTRAP=compose` (Compose و CI) پذیرفته می‌شود و هر اجرای دیگر بی گذرواژهٔ صریح رد می‌کند؛ (۳)
+  اعتبار مهاجر از `.env` به `.env.migrator` رفت که هیچ سرویسی بار نمی‌کند، و هر سرویس با متغیر `*_MIGRATOR` در محیطش بالا
+  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). **باقی‌مانده** (`PENDING_SPLIT`): identity،
   notification، organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
   هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
 
