@@ -26,6 +26,8 @@ import {
   type SweeperOptions,
 } from '../src/approval/policy-reconciliation.sweeper';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
+import { ContractorStandingRepository } from '../src/tender/contractor-standing.repository';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
@@ -142,6 +144,9 @@ export interface Wiring {
   sweeperWith(overrides?: Partial<SweeperOptions>): PolicyReconciliationSweeper;
   /** The consumer's handler, without a broker: `moves.handle(envelope)`. */
   moves: OrganizationMovedConsumer;
+  /** Contractor standing (CON-002 PR 5): the read model and its consumer's handler. */
+  standing: ContractorStandingRepository;
+  supplierEvents: SupplierStandingConsumer;
   close(): Promise<void>;
 }
 
@@ -174,6 +179,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     approvalRepository,
     tenderRepository,
   );
+  const standing = new ContractorStandingRepository(prisma);
   const reconciliations = new PolicyReconciliationRepository(prisma);
   const suspension = new PolicySuspensionService(
     prisma,
@@ -214,6 +220,14 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
         throw new Error('the integration suites call handle() and never subscribe');
       },
       suspension,
+      { info: () => undefined, warn: () => undefined, debug: () => undefined },
+    ),
+    standing,
+    supplierEvents: new SupplierStandingConsumer(
+      () => {
+        throw new Error('the integration suites call handle() and never subscribe');
+      },
+      standing,
       { info: () => undefined, warn: () => undefined, debug: () => undefined },
     ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
@@ -384,6 +398,8 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
     await owner.projectNeed.deleteMany({ where });
     await owner.project.deleteMany({ where });
     await owner.idempotencyKey.deleteMany({ where });
+    await owner.contractorSuspension.deleteMany({ where });
+    await owner.contractorStanding.deleteMany({ where });
     await owner.outboxMessage.deleteMany({ where });
   } finally {
     await owner.$disconnect();

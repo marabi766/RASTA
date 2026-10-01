@@ -731,3 +731,31 @@ model ProcessedEvent {
   @@id([eventId, consumerName])
   @@map("processed_event")
 }
+
+/// CON-002 PR 5 (ADR-067 § 4): what this service knows of a contractor's
+/// standing, folded from supplier-service's events. `organizationId` is the
+/// **contractor's** organization, not the caller's: rows are written by the
+/// consumer and read by the bid path, both under `runUnscoped` with a reason.
+/// A contractor with no row is not eligible (fail closed).
+model ContractorStanding {
+  organizationId         String    @id @map("organization_id")
+  /// Latest SUPPLIER_QUALIFIED whose `qualifiedFor` included CONTRACTING.
+  contractingQualifiedAt DateTime? @map("contracting_qualified_at")
+  updatedAt              DateTime  @map("updated_at")
+
+  @@map("contractor_standing")
+}
+
+/// One suspension episode (`suspensionId` is supplier-service's). The two
+/// timestamps arrive in separate events in either order; the episode is open
+/// while it was suspended and not yet reinstated.
+model ContractorSuspension {
+  suspensionId   String    @id @map("suspension_id")
+  organizationId String    @map("organization_id")
+  suspendedAt    DateTime? @map("suspended_at")
+  reinstatedAt   DateTime? @map("reinstated_at")
+  updatedAt      DateTime  @map("updated_at")
+
+  @@index([organizationId, suspensionId], map: "ix_contractor_suspension_org")
+  @@map("contractor_suspension")
+}

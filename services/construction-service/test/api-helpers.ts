@@ -16,6 +16,7 @@ import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka
 import { FakeHierarchy, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
 import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
 
 /**
@@ -186,6 +187,9 @@ export async function startApi(): Promise<ApiHarness> {
     // The ORGANIZATION_MOVED consumer is proven without a broker in
     // organization-moved.int-spec.ts; nothing here subscribes.
     .overrideProvider(OrganizationMovedConsumer)
+    .useValue(inertRelay)
+    // Likewise the supplier-standing consumer: supplier-standing.int-spec.ts drives handle().
+    .overrideProvider(SupplierStandingConsumer)
     .useValue(inertRelay)
     // Nor does the sweeper tick: organization-moved.int-spec.ts drives runOnce().
     .overrideProvider(PolicyReconciliationSweeper)
