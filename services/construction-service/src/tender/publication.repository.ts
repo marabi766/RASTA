@@ -13,6 +13,14 @@ import type { WrappedKey } from './sealing/key-provider';
  * read of it in this class on purpose.
  */
 
+/**
+ * The approval workflow that gates publication (Q-84). Not yet one of the
+ * approval module's `WORKFLOW_KEYS`: policies for it cannot be written until the
+ * round is wired (PR 11), so until then none is ever in force and publishing is
+ * refused with `APPROVAL_POLICY_REQUIRED` — the fail-closed state, by design.
+ */
+export const PUBLICATION_WORKFLOW_KEY = 'tender.publication';
+
 export interface InvitationCreateInput {
   id: string;
   organizationId: string;
@@ -55,6 +63,18 @@ export class PublicationRepository {
     client: ExtendedPrismaClient = this.prisma.client,
   ): Promise<TenderInvitation | null> {
     return client.tenderInvitation.findFirst({ where: { id: invitationId, tenderId } });
+  }
+
+  /**
+   * Whether the organization in context has an ACTIVE `tender.publication`
+   * approval policy (Q-84). Under the tenant guard: another organization's policy
+   * is never seen. Only ACTIVE counts, never DRAFT, PENDING or REJECTED.
+   */
+  async hasActivePublicationPolicy(client: ExtendedPrismaClient): Promise<boolean> {
+    const count = await client.approvalPolicy.count({
+      where: { workflowKey: PUBLICATION_WORKFLOW_KEY, status: 'ACTIVE' },
+    });
+    return count > 0;
   }
 
   async countInvitations(tx: ExtendedPrismaClient, tenderId: string): Promise<number> {

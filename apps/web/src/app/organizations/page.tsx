@@ -16,7 +16,7 @@ import { currentSession } from '@/server/current-session';
 import { fetchCurrentUser } from '@/server/identity';
 import { fetchOrganization, type Organization, type ReadResult } from '@/server/organizations';
 import { fetchMembers, type MemberListQuery } from '@/server/members';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 
 import { MembersScreen } from './MembersScreen';
@@ -173,7 +173,7 @@ export default async function OrganizationsPage({
           <OrganizationProfile
             result={organization}
             csrfToken={session.csrfToken}
-            submissionId={newSubmissionId()}
+            submissionId={mintSubmissionId(session)}
           />
         </Section>
       )}
@@ -184,6 +184,7 @@ export default async function OrganizationsPage({
           query={query}
           grantableRoles={grantableRoles}
           csrfToken={session.csrfToken}
+          mintSubmissionId={() => mintSubmissionId(session)}
         />
       </div>
     </AppShell>

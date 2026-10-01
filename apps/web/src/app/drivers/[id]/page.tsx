@@ -3,7 +3,7 @@ import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDriver, fetchDriverAssignments } from '@/server/drivers';
 import { fetchCurrentUser } from '@/server/identity';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { DriverDetailScreen } from './DriverDetailScreen';
 
@@ -60,10 +60,10 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
         csrfToken={session.csrfToken}
         canManageDrivers={manage}
         submissionIds={{
-          update: newSubmissionId(),
-          status: newSubmissionId(),
-          assign: newSubmissionId(),
-          end: newSubmissionId(),
+          update: mintSubmissionId(session),
+          status: mintSubmissionId(session),
+          assign: mintSubmissionId(session),
+          end: mintSubmissionId(session),
         }}
       />
     </AppShell>

@@ -831,10 +831,22 @@ export const EXPECTED = {
       'tender_key',
     ],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
+    // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
     // 20260930180000_tender_publication: a tender's key is never deleted and its
     // public half never changes.
-    triggers: ['tg_tender_criterion_freeze', 'tg_tender_key_guard'],
-    functions: ['tender_criterion_freeze', 'tender_key_guard'],
+    triggers: [
+      'tg_tender_criterion_freeze',
+      'tg_tender_publish_requires_criteria',
+      'tg_criteria_template_append_only',
+      'tg_criteria_template_no_truncate',
+      'tg_tender_key_guard',
+    ],
+    functions: [
+      'tender_criterion_freeze',
+      'tender_publish_requires_criteria',
+      'criteria_template_append_only',
+      'tender_key_guard',
+    ],
     constraints: [
       'ck_project_text_not_blank',
       'ck_project_actor_recorded',

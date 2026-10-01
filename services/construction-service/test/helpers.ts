@@ -1,6 +1,7 @@
 import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
+import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
 import { ProjectRepository } from '../src/project/project.repository';
@@ -63,6 +64,17 @@ export function databaseUrl(): string {
  */
 export const TEST_KEK = randomBytes(32).toString('base64');
 export const TEST_KEK_ID = 'itest-1';
+
+/**
+ * The connection the migrations use: `DATABASE_URL_CONSTRUCTION_MIGRATOR` when a
+ * deployment has a separate owner role, otherwise the one URL there is today.
+ * Construction's runtime role currently owns its tables (docs/23 D-045), so the
+ * two are the same role here — but they are two connections, and only this one
+ * is allowed to touch a trigger.
+ */
+export function ownerDatabaseUrl(): string {
+  return process.env.DATABASE_URL_CONSTRUCTION_MIGRATOR ?? databaseUrl();
+}
 
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {
   return loadConstructionEnv({
@@ -210,6 +222,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       access,
       env,
       keys,
+      hierarchy as unknown as OrganizationDirectory,
     ),
     criteriaRepository,
     criteria: new CriteriaService(
@@ -318,18 +331,32 @@ export const BOW_TIE = {
  * Removes everything the given organizations wrote. Children before parents:
  * every foreign key is `ON DELETE RESTRICT`.
  */
-export async function cleanup(prisma: PrismaService, organizationIds: string[]): Promise<void> {
+export async function cleanup(_prisma: PrismaService, organizationIds: string[]): Promise<void> {
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: organizationIds } };
-  await runUnscoped('integration cleanup removes exactly what the suite wrote', async () => {
-    // A cancelled or published tender's criteria are frozen for every writer,
-    // this one included (threat C3), so the freeze is lifted for the length of
-    // one transaction — DDL is transactional, so a failure puts it back.
-    await prisma.client.$transaction(async (tx) => {
+  // The suite's own removal of what it wrote goes through the **owner**
+  // connection (the one migrations use), never the runtime `PrismaService` under
+  // test: a trigger that protects rows from the service must not be switched off
+  // with the service's connection, or the suites would teach the code to do it.
+  // The owner client carries no tenant guard, so it needs no `runUnscoped`.
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    // A cancelled or published tender's criteria are frozen, and a criteria
+    // template is append-only, for every writer (threat C3), so both are lifted
+    // for the length of one transaction — DDL is transactional, so a failure
+    // puts them back.
+    await owner.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_criterion" DISABLE TRIGGER "tg_tender_criterion_freeze"',
       );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "criteria_template" DISABLE TRIGGER "tg_criteria_template_append_only"',
+      );
       await tx.tenderCriterion.deleteMany({ where });
+      await tx.criteriaTemplate.deleteMany({ where });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "criteria_template" ENABLE TRIGGER "tg_criteria_template_append_only"',
+      );
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_criterion" ENABLE TRIGGER "tg_tender_criterion_freeze"',
       );
@@ -339,19 +366,20 @@ export async function cleanup(prisma: PrismaService, organizationIds: string[]):
       await tx.tenderKey.deleteMany({ where });
       await tx.$executeRawUnsafe('ALTER TABLE "tender_key" ENABLE TRIGGER "tg_tender_key_guard"');
     });
-    await prisma.client.tenderInvitation.deleteMany({ where });
-    await prisma.client.criteriaTemplate.deleteMany({ where });
-    await prisma.client.tender.deleteMany({ where });
-    await prisma.client.approval.deleteMany({ where });
-    await prisma.client.progressReport.deleteMany({ where });
-    await prisma.client.policyReconciliationTask.deleteMany({ where });
-    await prisma.client.approvalPolicyStep.deleteMany({ where });
-    await prisma.client.approvalPolicy.deleteMany({ where });
-    await prisma.client.projectNeed.deleteMany({ where });
-    await prisma.client.project.deleteMany({ where });
-    await prisma.client.idempotencyKey.deleteMany({ where });
-    await prisma.client.outboxMessage.deleteMany({ where });
-  });
+    await owner.tenderInvitation.deleteMany({ where });
+    await owner.tender.deleteMany({ where });
+    await owner.approval.deleteMany({ where });
+    await owner.progressReport.deleteMany({ where });
+    await owner.policyReconciliationTask.deleteMany({ where });
+    await owner.approvalPolicyStep.deleteMany({ where });
+    await owner.approvalPolicy.deleteMany({ where });
+    await owner.projectNeed.deleteMany({ where });
+    await owner.project.deleteMany({ where });
+    await owner.idempotencyKey.deleteMany({ where });
+    await owner.outboxMessage.deleteMany({ where });
+  } finally {
+    await owner.$disconnect();
+  }
 }
 
 /**
@@ -496,6 +524,15 @@ export class FakeHierarchy {
     this.parents.delete(child);
   }
 
+  /** Organizations organization-service does not know; every other id exists. */
+  readonly missing = new Set<string>();
+
+  async exists(organizationId: string): Promise<boolean> {
+    if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
+    if (this.timedOut) throw RastaError.upstreamTimeout('organization-service', 3000);
+    return !this.missing.has(organizationId);
+  }
+
   async isWithin(scope: string, organizationId: string): Promise<boolean> {
     this.asked.push([scope, organizationId]);
     if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
@@ -509,6 +546,42 @@ export class FakeHierarchy {
     }
     return false;
   }
+}
+
+/**
+ * An ACTIVE `tender.publication` policy for `organizationId`, written straight to
+ * the table: the approval module cannot write one until its round is wired (PR 11),
+ * and the publication gate is proven against the row it will read.
+ */
+export async function activatePublicationPolicy(
+  w: Wiring,
+  organizationId: string,
+): Promise<string> {
+  const id = `APL_${ulid()}`;
+  await runUnscoped('the suite puts a tender.publication policy in force', () =>
+    w.prisma.client.approvalPolicy.create({
+      data: {
+        id,
+        organizationId,
+        authorOrganizationId: organizationId,
+        authorRole: 'SYSTEM_ADMIN',
+        workflowKey: 'tender.publication',
+        policyVersion: 1,
+        status: 'ACTIVE',
+        label: 'Tender publication',
+        rationale: 'Written by the publication gate suite',
+        isSample: true,
+        createdAt: new Date(),
+        createdBy: 'USR_suite',
+        createdCorrelationId: ulid(),
+        submittedAt: new Date(),
+        submittedBy: 'USR_suite',
+        activatedAt: new Date(),
+        activatedBy: 'USR_suite_2',
+      },
+    }),
+  );
+  return id;
 }
 
 export interface StepSpec {

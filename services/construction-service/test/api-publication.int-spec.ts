@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { actor, apiTenant, auditorActor, orgAdmin, startApi, type ApiHarness } from './api-helpers';
-import { approvedProject, cleanup, wire, type Wiring } from './helpers';
+import { activatePublicationPolicy, approvedProject, cleanup, wire, type Wiring } from './helpers';
 
 /**
  * The publication HTTP surface through the real `AppModule` (with a real
@@ -90,34 +90,43 @@ describe('publication API', () => {
     }
   });
 
-  it('publishes a complete tender (200), and says what a second attempt is (422)', async () => {
+  it('refuses a complete tender with no active tender.publication policy (422 APPROVAL_POLICY_REQUIRED): fail closed', async () => {
     const a = org('publish');
     const { id, version, token } = await tenderFor(a);
 
-    const published = await http()
+    const refused = await http()
       .post(`/v1/tenders/${id}/publish`)
       .set(as(token))
       .send({ expectedVersion: version });
-    expect(published.status).toBe(200);
-    expect(published.body).toMatchObject({
-      status: 'PUBLISHED',
-      version: version + 1,
-      publishedBy: expect.any(String),
-    });
-    // Nothing of the key is ever in a response.
-    expect(JSON.stringify(published.body)).not.toMatch(/KEY|wrapped|kek/i);
 
-    const again = await http()
-      .post(`/v1/tenders/${id}/publish`)
-      .set(as(token))
-      .send({ expectedVersion: version + 1 });
-    expect(again.status).toBe(422);
+    expect(refused.status).toBe(422);
+    expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
+    expect(refused.body.message).toContain('APPROVAL_POLICY_REQUIRED');
+    const now = await http().get(`/v1/tenders/${id}`).set(as(token));
+    expect(now.body).toMatchObject({ status: 'DRAFT', version, publishedAt: null });
+
     const stale = await http()
       .post(`/v1/tenders/${id}/publish`)
       .set(as(token))
-      .send({ expectedVersion: version });
+      .send({ expectedVersion: version - 1 });
     expect(stale.status).toBe(409);
     expect(stale.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
+  });
+
+  it('refuses with APPROVAL_REQUIRED while the approval round is not wired, even with a policy in force', async () => {
+    const a = org('publish-policy');
+    const { id, version, token } = await tenderFor(a);
+    await activatePublicationPolicy(w, a);
+
+    const refused = await http()
+      .post(`/v1/tenders/${id}/publish`)
+      .set(as(token))
+      .send({ expectedVersion: version });
+
+    expect(refused.status).toBe(422);
+    expect(refused.body.message).toContain('APPROVAL_REQUIRED');
+    expect(refused.body.message).not.toContain('APPROVAL_POLICY_REQUIRED');
+    expect((await http().get(`/v1/tenders/${id}`).set(as(token))).body.status).toBe('DRAFT');
   });
 
   it('refuses an incomplete tender with 422 and names every reason', async () => {
@@ -166,11 +175,15 @@ describe('publication API', () => {
     expect(list.status).toBe(200);
     expect(list.body.items).toHaveLength(1);
 
+    // Publishing is the gate's to refuse until the round is wired (PR 11): the
+    // invited restricted tender is complete and still stays a DRAFT.
     const published = await http()
       .post(`/v1/tenders/${id}/publish`)
       .set(as(token))
       .send({ expectedVersion: version });
-    expect(published.status).toBe(200);
+    expect(published.status).toBe(422);
+    expect(published.body.message).toContain('APPROVAL_POLICY_REQUIRED');
+    expect(published.body.message).not.toContain('INVITATION_REQUIRED');
 
     const open = await tenderFor(org('invite-public'));
     expect(

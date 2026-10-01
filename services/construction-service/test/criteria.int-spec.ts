@@ -455,6 +455,154 @@ describe('evaluation criteria', () => {
     });
   });
 
+  describe('the database judges both tenders a criteria write touches, and waits for a publication', () => {
+    const publishSql = (tenderId: string) =>
+      `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
+         "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
+         "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
+       WHERE "id" = '${tenderId}'`;
+
+    it('refuses to move a published tender’s criterion to a draft tender (OLD is judged, not only NEW)', async () => {
+      const a = org();
+      const project = await approvedProject(w, a);
+      const published = await asAdmin(a, () =>
+        w.tenders.create(project.id, { title: 'First', scopeOfWork: 'One' }),
+      );
+      const draft = await asAdmin(a, () =>
+        w.tenders.create(project.id, { title: 'Second', scopeOfWork: 'Two' }),
+      );
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(published.id, { expectedVersion: 1, criteria: WHOLE }),
+      );
+      await w.prisma.client.$executeRawUnsafe(publishSql(published.id));
+
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `UPDATE "tender_criterion" SET "tender_id" = '${draft.id}' WHERE "tender_id" = '${published.id}'`,
+        ),
+      ).rejects.toThrow(/ck_tender_criteria_frozen/);
+      expect((await asAdmin(a, () => w.criteria.getCriteria(draft.id))).items).toEqual([]);
+    });
+
+    it('makes a criteria write wait for a publication in flight, then refuses it', async () => {
+      const { a, tender } = await withTender();
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
+      );
+
+      let commit!: () => void;
+      let held!: () => void;
+      const mayCommit = new Promise<void>((resolve) => (commit = resolve));
+      const holding = new Promise<void>((resolve) => (held = resolve));
+      const publishing = w.prisma.client.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(publishSql(tender.id));
+        held();
+        await mayCommit;
+      });
+      await holding;
+
+      const write = w.prisma.client.$executeRawUnsafe(
+        `UPDATE "tender_criterion" SET "label" = 'Late edit' WHERE "tender_id" = '${tender.id}'`,
+      );
+      const outcome = expect(write).rejects.toThrow(/ck_tender_criteria_frozen/);
+      // Not assumed: the writer is shown to be waiting on the publication's row.
+      await untilASessionWaitsOnALock(w.prisma);
+      commit();
+      await publishing;
+      await outcome;
+    });
+
+    it('refuses a direct status update that publishes without a complete set of criteria', async () => {
+      const { a, tender } = await withTender();
+      await expect(w.prisma.client.$executeRawUnsafe(publishSql(tender.id))).rejects.toThrow(
+        /ck_tender_publish_criteria/,
+      );
+
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: [PRICE, TECH] }),
+      );
+      await expect(w.prisma.client.$executeRawUnsafe(publishSql(tender.id))).rejects.toThrow(
+        /ck_tender_publish_criteria/,
+      );
+
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: WHOLE }),
+      );
+      await expect(w.prisma.client.$executeRawUnsafe(publishSql(tender.id))).resolves.toBe(1);
+      await w.prisma.client.$executeRawUnsafe(
+        `UPDATE "tender" SET "status" = 'DRAFT', "published_at" = NULL, "published_by" = NULL
+         WHERE "id" = '${tender.id}'`,
+      );
+    });
+  });
+
+  describe('a criteria template is append-only in the database', () => {
+    it('refuses an update, a delete and a truncate, whatever the write path', async () => {
+      const a = org();
+      const template = await asAdmin(a, () =>
+        w.criteria.createTemplate({ label: 'Frozen label', criteria: WHOLE }),
+      );
+
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `UPDATE "criteria_template" SET "label" = 'Renamed' WHERE "id" = '${template.id}'`,
+        ),
+      ).rejects.toThrow(/ck_criteria_template_immutable/);
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `DELETE FROM "criteria_template" WHERE "id" = '${template.id}'`,
+        ),
+      ).rejects.toThrow(/ck_criteria_template_immutable/);
+      await expect(
+        w.prisma.client.$executeRawUnsafe('TRUNCATE "criteria_template"'),
+      ).rejects.toThrow(/ck_criteria_template_immutable/);
+      expect((await asAdmin(a, () => w.criteria.getTemplate(template.id))).label).toBe(
+        'Frozen label',
+      );
+    });
+  });
+
+  describe('reading a tender’s criteria', () => {
+    it('answers from one snapshot: the version and the rows are from the same moment', async () => {
+      const { a, tender } = await withTender();
+      await asAdmin(a, () =>
+        w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: [PRICE] }),
+      );
+
+      // The read is held between its two queries; a second set commits meanwhile.
+      let release!: () => void;
+      let atGate!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const reached = new Promise<void>((resolve) => (atGate = resolve));
+      const original = w.criteriaRepository.listCriteria.bind(w.criteriaRepository);
+      const spy = jest
+        .spyOn(w.criteriaRepository, 'listCriteria')
+        .mockImplementationOnce(async (...args: Parameters<typeof original>) => {
+          atGate();
+          await gate;
+          return original(...args);
+        });
+      try {
+        const read = asAdmin(a, () => w.criteria.getCriteria(tender.id));
+        await reached;
+        await asAdmin(a, () =>
+          w.criteria.setCriteria(tender.id, { expectedVersion: 2, criteria: WHOLE }),
+        );
+        release();
+        const seen = await read;
+
+        // Version 2 with one criterion (the state before the second set), never
+        // version 2 with three rows, nor version 3 with one.
+        expect(seen.version).toBe(2);
+        expect(seen.items.map((item) => item.code)).toEqual(['PRICE']);
+      } finally {
+        spy.mockRestore();
+      }
+      const after = await asAdmin(a, () => w.criteria.getCriteria(tender.id));
+      expect([after.version, after.items.length]).toEqual([3, 3]);
+    });
+  });
+
   describe('database invariants', () => {
     async function insertCriterion(a: string, tenderId: string, overrides: Record<string, string>) {
       const columns: Record<string, string> = {
