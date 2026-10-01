@@ -4,7 +4,7 @@ import { AppShell, Button, ButtonLink, PageHeader, Sidebar, TopBar } from '@/ui'
 import { isOrderCommand } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchOrder } from '@/server/orders';
-import { newSubmissionId } from '@/server/submission';
+import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 
 import { OrderDetailScreen } from './OrderDetailScreen';
@@ -63,7 +63,7 @@ export default async function OrderPage({
         <OrderDetailScreen
           result={result}
           csrfToken={session.csrfToken}
-          mintSubmissionId={newSubmissionId}
+          mintSubmissionId={() => mintSubmissionId(session)}
           done={done}
         />
       </div>

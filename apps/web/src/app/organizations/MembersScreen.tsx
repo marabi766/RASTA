@@ -1,7 +1,6 @@
 import { ButtonLink, EmptyState, ErrorState, Identifier, NoAccessState, Section } from '@/ui';
 import { membershipStatusLabel, roleLabel } from '@/lib/organization-fields';
 import { memberName, type MemberListQuery, type MemberPage } from '@/server/members';
-import { newSubmissionId } from '@/server/submission';
 import type { ReadResult } from '@/server/assets';
 
 import { MemberRolesForm } from './MemberRolesForm';
@@ -24,6 +23,12 @@ export interface MembersScreenProps {
   readonly query: MemberListQuery;
   readonly grantableRoles: readonly string[];
   readonly csrfToken: string;
+  /**
+   * Issues a submission id for one form. Passed in rather than imported so this
+   * stays a pure function of what the page hands it: an id is bound to the
+   * signed-in session, which only the page has (`server/submission.ts`).
+   */
+  readonly mintSubmissionId: () => string;
 }
 
 function hrefWith(query: MemberListQuery, changes: Partial<MemberListQuery>): string {
@@ -76,7 +81,13 @@ function Search({ query }: { query: MemberListQuery }) {
  * (`(organizationId, endpoint, key)`), which is not a thing this file should
  * depend on staying true. A server component may mint them, so it does.
  */
-export function MembersScreen({ result, query, grantableRoles, csrfToken }: MembersScreenProps) {
+export function MembersScreen({
+  result,
+  query,
+  grantableRoles,
+  csrfToken,
+  mintSubmissionId,
+}: MembersScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست اعضای این سازمان در اختیار شما نیست." />;
   }
@@ -145,13 +156,13 @@ export function MembersScreen({ result, query, grantableRoles, csrfToken }: Memb
                       currentRoles={member.roles}
                       grantableRoles={grantableRoles}
                       csrfToken={csrfToken}
-                      submissionId={newSubmissionId()}
+                      submissionId={mintSubmissionId()}
                     />
                     <RevokeMembershipForm
                       membershipId={member.membershipId}
                       memberName={memberName(member)}
                       csrfToken={csrfToken}
-                      submissionId={newSubmissionId()}
+                      submissionId={mintSubmissionId()}
                     />
                   </div>
                 )}
