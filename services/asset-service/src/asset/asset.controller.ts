@@ -1,7 +1,8 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { ApiQueryFromSchema } from '../openapi/query-parameters';
+import { UPDATE_ASSET_BODY_SCHEMA } from '../openapi/update-asset-body';
 import { AssetService } from './asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
@@ -133,7 +134,20 @@ export class AssetController {
 
   @Patch(':id')
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Update an asset' })
+  @ApiOperation({
+    summary: 'Update an asset',
+    description:
+      '`expectedVersion` is **required**: the `version` the caller read. The update applies only ' +
+      'to that version (`UPDATE … WHERE version = ?`); if the asset has changed since, the ' +
+      'answer is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written, so an edit made from an ' +
+      'old screen cannot restore values somebody else has since changed. A body without it is ' +
+      '`400`: a caller that does not know the version cannot know what it overwrites. ' +
+      'Only fields whose value differs from the stored one are written and listed in ' +
+      '`ASSET_UPDATED.changedFields`; an update that changes nothing writes nothing, publishes ' +
+      'nothing and answers with the asset as it is. `null` clears an optional field. ' +
+      'Returns 404 for an asset in another organization — never 403 — whatever version is sent.',
+  })
+  @ApiBody({ schema: UPDATE_ASSET_BODY_SCHEMA })
   update(@Param('id') id: string, @Body(zodPipe(updateAssetSchema)) dto: UpdateAssetDto) {
     return this.assets.update(id, dto);
   }
