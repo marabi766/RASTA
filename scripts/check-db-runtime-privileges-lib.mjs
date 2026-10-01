@@ -13,19 +13,7 @@ import { servicesFromLibrary, splitServicesFromLibrary } from './infra-preflight
  * fails CI when one of them passes — a stale entry would hide a regression —
  * so this list only ever shrinks, until it is empty and D-045 is resolved.
  */
-export const PENDING_SPLIT = Object.freeze([
-  'organization',
-  'asset',
-  'fleet',
-  'maintenance',
-  'marketplace',
-  'procurement',
-  'inventory',
-  'contract',
-  'economic',
-  'document',
-  'analytics',
-]);
+export const PENDING_SPLIT = Object.freeze(['economic']);
 
 /**
  * Every service's place in the split: `split` (lib/service-privilege-split.bash),

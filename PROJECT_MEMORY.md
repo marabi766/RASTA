@@ -2735,7 +2735,7 @@ FROM PUBLIC` روی هر پایگاه داده. Extension ها (`postgis`, `ltre
 داشته باشند.
 
 > **به‌روز 2026-10-01 (D-045، `fix/d045-db-role-split`):** نقش اجرای سرویس‌های `PRIVILEGE_SPLIT_SERVICES`
-> (`lib/role-passwords.bash` — اکنون supplier، construction، identity و notification) مالک هیچ چیز نیست: `rasta_<svc>_migrator` مالک پایگاه داده و
+> (`lib/role-passwords.bash` — اکنون همهٔ سرویس‌ها جز economic) مالک هیچ چیز نیست: `rasta_<svc>_migrator` مالک پایگاه داده و
 > همهٔ اشیا است و Migrationها را اجرا می‌کند (`DATABASE_URL_<SVC>_MIGRATOR`)؛ نقش اجرا فقط DML دارد
 > (`lib/service-privilege-split.bash`). پایگاه دادهٔ `rasta_audit` هم به مهاجرش رسید. `pnpm check:db-runtime-privileges`
 > در CI هر یافته را رد می‌کند؛ سرویس‌های باقی‌مانده در `PENDING_SPLIT` هستند. Runbook: `docs/runbooks/db-role-split.md`.

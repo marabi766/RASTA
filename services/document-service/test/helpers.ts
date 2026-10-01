@@ -34,6 +34,24 @@ export function databaseUrl(): string {
   return url;
 }
 
+/**
+ * The owner of rasta_document (`DATABASE_URL_DOCUMENT_MIGRATOR`), for the one
+ * suite that needs DDL: the outbox protocol suite's isolated schema. **Required,
+ * with no fallback** to the runtime URL — since D-045 the runtime role owns
+ * nothing and can create nothing, so falling back would only fail later, for a
+ * reason that hides the missing variable.
+ */
+export function ownerDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL_DOCUMENT_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_DOCUMENT_MIGRATOR is not set. The outbox protocol suite creates its schema ' +
+        'as the owner, never the runtime role; see .env.example (docs/23 D-045).',
+    );
+  }
+  return url;
+}
+
 export function newPrisma(): PrismaService {
   return new PrismaService(databaseUrl());
 }

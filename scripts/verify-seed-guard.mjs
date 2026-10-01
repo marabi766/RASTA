@@ -152,7 +152,9 @@ function markerProblems(service, url, { probe, setting }) {
   const self = psql(url, `ALTER DATABASE "${database}" SET ${setting} = 'true'`);
   if (self.status === 0) {
     problems.push(`${service}: the service role could set ${setting} on its own database`);
-  } else if (!/permission denied/i.test(self.stderr)) {
+  } else if (!/permission denied|must be owner/i.test(self.stderr)) {
+    // `must be owner` since D-045: a split service's runtime role no longer
+    // owns its database, and is refused before the setting is even considered.
     problems.push(
       `${service}: setting the marker failed, but not as refused: ${self.stderr.trim()}`,
     );

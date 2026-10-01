@@ -57,6 +57,16 @@ PRIVILEGE_SPLIT_SERVICES=(
   construction
   identity
   notification
+  organization
+  asset
+  fleet
+  maintenance
+  marketplace
+  document
+  procurement
+  inventory
+  contract
+  analytics
 )
 
 # How a split service's runtime role gets its table rights

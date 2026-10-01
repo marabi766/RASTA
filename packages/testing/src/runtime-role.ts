@@ -98,14 +98,17 @@ export const expectedTablePrivileges = (table: string): readonly string[] =>
 
 /**
  * Statements that would lift or remove a guard on `table`, each of which the
- * runtime role must be refused. `trigger` names one of its triggers.
+ * runtime role must be refused. `trigger` names one of its triggers, when it
+ * has one; a table without triggers is still guarded by its constraints and by
+ * the table itself.
  */
-export function liftAttempts(table: string, trigger: string): string[] {
+export function liftAttempts(table: string, trigger?: string): string[] {
   const t = `"${table}"`;
   return [
-    `ALTER TABLE ${t} DISABLE TRIGGER "${trigger}"`,
+    ...(trigger
+      ? [`ALTER TABLE ${t} DISABLE TRIGGER "${trigger}"`, `DROP TRIGGER "${trigger}" ON ${t}`]
+      : []),
     `ALTER TABLE ${t} DISABLE TRIGGER ALL`,
-    `DROP TRIGGER "${trigger}" ON ${t}`,
     `ALTER TABLE ${t} ADD COLUMN "d045_probe" integer`,
     `ALTER TABLE ${t} DROP CONSTRAINT IF EXISTS "d045_none"`,
     `ALTER TABLE ${t} OWNER TO CURRENT_USER`,

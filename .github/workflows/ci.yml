@@ -423,6 +423,7 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Seed the live user, asset reference and assignment
         # operator.one is the same platform user in identity, Keycloak and
@@ -439,6 +440,7 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
 
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
@@ -881,12 +883,18 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
@@ -915,12 +923,18 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
@@ -993,6 +1007,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Document coverage gate
         # `docs/14` § 14.2 puts document-service in the 75% band. The number
@@ -1013,6 +1028,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           S3_ENDPOINT: http://localhost:9000
           S3_REGION: us-east-1
           S3_ACCESS_KEY: rasta_minio_admin
@@ -1134,6 +1150,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
 
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
@@ -1165,6 +1182,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
 
       - name: Tenant isolation and authorization tests
         # Called out separately from the rest of the suite so a failure names
@@ -1209,12 +1227,18 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
@@ -1277,12 +1301,18 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
@@ -1319,11 +1349,16 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
@@ -1341,12 +1376,18 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
 
@@ -1607,11 +1648,14 @@ jobs:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
           # The audit migration runs as the schema owner, never as the runtime
@@ -1659,6 +1703,7 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
 
       - name: Build
         run: pnpm run build

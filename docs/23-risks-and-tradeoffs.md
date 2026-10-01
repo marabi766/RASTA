@@ -1053,9 +1053,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `runtime-privileges.int-spec.ts`: `DISABLE TRIGGER`، `ALTER`، `DROP`، `TRUNCATE` → `42501`)؛ supplier به همان سازوکار
   منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. سپس **identity** (نگهبان
   `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم تقسیم شدند
-  (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`). **باقی‌مانده**
-  (`PENDING_SPLIT`): organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
-  هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
+  (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس از آن
+  organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement، inventory،
+  contract، analytics) — `fix/d045-split-remaining`؛ Schema آزمایشی پروتکل Outbox در document اکنون با مهاجر ساخته
+  می‌شود. **باقی‌مانده** (`PENDING_SPLIT`): فقط **economic** (Helper آزمونش Triggerهای دفتر کل را با اتصال اجرا برمی‌دارد؛
+  واگذاری آن با مدیر پروژه، issue #150)؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook:
+  `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری
 

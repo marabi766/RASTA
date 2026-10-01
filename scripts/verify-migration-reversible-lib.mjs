@@ -635,6 +635,9 @@ export const EXPECTED = {
    * restoring it would leave an order table that enforces nothing.
    */
   marketplace: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_marketplace.
+    connectAs: 'migrator',
     /**
      * The init migration runs `CREATE EXTENSION IF NOT EXISTS pg_trgm` and its
      * down script deliberately leaves it: the bootstrap installs pg_trgm into
@@ -703,6 +706,9 @@ export const EXPECTED = {
    * document table that enforces nothing while looking untouched.
    */
   document: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_document.
+    connectAs: 'migrator',
     tables: ['upload_intent', 'document', 'access_grant', 'outbox_message'],
     triggers: [],
     constraints: [
@@ -1096,6 +1102,9 @@ export const EXPECTED = {
     ],
   },
   organization: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_organization.
+    connectAs: 'migrator',
     // ltree / geography, unqualified in its migrations: see `scratchDatabase`
     // in verify-migration-reversible.mjs.
     scratchDatabase: true,
@@ -1127,6 +1136,9 @@ export const EXPECTED = {
     ],
   },
   asset: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_asset.
+    connectAs: 'migrator',
     // ltree / geography, unqualified in its migrations: see `scratchDatabase`
     // in verify-migration-reversible.mjs.
     scratchDatabase: true,
@@ -1158,6 +1170,9 @@ export const EXPECTED = {
     ],
   },
   fleet: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_fleet.
+    connectAs: 'migrator',
     tables: [
       'asset_ref',
       'assignment',
@@ -1184,6 +1199,9 @@ export const EXPECTED = {
     ],
   },
   maintenance: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_maintenance.
+    connectAs: 'migrator',
     tables: [
       'asset_ref',
       'asset_usage_meter',

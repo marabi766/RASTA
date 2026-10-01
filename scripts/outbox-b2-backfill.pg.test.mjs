@@ -44,7 +44,9 @@ const CLI = path.join(REPO_ROOT, 'scripts', 'outbox-b2-backfill.mjs');
  */
 function baseUrl(service) {
   const key = `DATABASE_URL_${service.toUpperCase()}`;
-  const url = process.env[key];
+  // Scratch databases and DDL: the migrator where the service has one (D-045 —
+  // the runtime role owns nothing and has no CREATEDB).
+  const url = process.env[`${key}_MIGRATOR`] ?? process.env[key];
   if (!url) {
     throw new Error(
       `${key} is not set. These tests run against a real PostgreSQL: start it with ` +
