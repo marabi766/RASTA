@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { parseUsageForm, recordUsage, usageFormValues } from '@/server/usage';
 
 import type { UsageFormState } from './form-state';
@@ -42,7 +42,7 @@ export async function submitUsage(
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
 
   const submissionId = form.get(SUBMISSION_FIELD);
-  if (!isSubmissionId(submissionId)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
+  if (!isBoundSubmissionId(submissionId, session)) return { kind: 'REFUSED', reason: 'SUBMISSION' };
 
   const values = usageFormValues(form);
   const parsed = parseUsageForm(values, submissionId);

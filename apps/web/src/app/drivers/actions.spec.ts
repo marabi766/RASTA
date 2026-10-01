@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { CSRF_FIELD } from '@/server/csrf';
-import { SUBMISSION_FIELD, newSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_CREATE_DRIVER_FORM } from './form-state';
@@ -13,6 +13,14 @@ import { IDLE_CREATE_DRIVER_FORM } from './form-state';
  * is the assertion, each refusal proves nothing was called, and the
  * double-submit case proves a retry is one record, not two.
  */
+
+Object.assign(process.env, {
+  API_GATEWAY_URL: 'http://gateway.test:3000',
+  OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+  OIDC_CLIENT_ID: 'rasta-web',
+  WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+  WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+});
 
 const currentSession = jest.fn();
 const createDriver = jest.fn();
@@ -51,7 +59,8 @@ function formData(
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
   const csrf = options.csrf === undefined ? SESSION.csrfToken : options.csrf;
   if (csrf !== null) form.set(CSRF_FIELD, csrf);
-  const submission = options.submission === undefined ? newSubmissionId() : options.submission;
+  const submission =
+    options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
   return form;
 }
@@ -100,6 +109,26 @@ describe('what is refused before anything is called', () => {
     expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
     expect(createDriver).not.toHaveBeenCalled();
   });
+
+  it('refuses every id that is not one this server minted for this session, and calls nothing', async () => {
+    const notMinted = [
+      // Right prefix, right length, right alphabet — and nobody's MAC: what a
+      // shape check alone waves through.
+      `sub_${'A'.repeat(38)}`,
+      `sub_${'Zz9_-'.repeat(8)}ab`,
+      // The original, unbound format.
+      `sub_${'B'.repeat(20)}`,
+      // Somebody else's, and one from an earlier login.
+      mintSubmissionId({ ...SESSION, subject: 'someone-else' }),
+      mintSubmissionId({ ...SESSION, csrfToken: 'the-token-before-re-login' }),
+    ];
+    for (const submission of notMinted) {
+      expect(
+        await submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID, { submission })),
+      ).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
+    }
+    expect(createDriver).not.toHaveBeenCalled();
+  });
 });
 
 describe('what the form itself catches', () => {
@@ -119,7 +148,7 @@ describe('what reaches the service', () => {
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {
-    const submission = newSubmissionId();
+    const submission = mintSubmissionId(SESSION);
     const form = () => formData(VALID, { submission });
 
     await expect(submitCreateDriver(IDLE_CREATE_DRIVER_FORM, form())).rejects.toThrow(

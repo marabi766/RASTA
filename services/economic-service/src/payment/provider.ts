@@ -88,7 +88,40 @@ export interface RefundResult {
 export type ProviderPaymentStatus =
   'UNKNOWN' | 'CREATED' | 'AUTHORIZED' | 'CAPTURED' | 'FAILED' | 'REFUNDED';
 
-/** The interface ADR-024 specifies, unchanged. */
+/**
+ * Which refund attempt the reconciler is asking about (ADR-064 step B2).
+ *
+ * An attempt is a (reference, idempotency key) pair: `<key>:refund` for an
+ * operator refund, `<key>:uncredited` for the refund of a capture the ledger
+ * could not credit. Two keys of one reference are two attempts.
+ */
+export interface RefundStatusQuery {
+  paymentIntentId: string;
+  providerReference: string;
+  idempotencyKey: string;
+}
+
+/**
+ * The provider's own record of one refund attempt.
+ *
+ * `NOT_FOUND` means the provider never received the attempt. It is acted on
+ * **only** when `authoritative` is true **and** the provider declares
+ * {@link PaymentProvider.authoritativeAbsence}; otherwise it is no better than
+ * `UNKNOWN`. Never assume.
+ */
+export interface RefundStatusResult {
+  refund: 'REFUNDED' | 'DECLINED' | 'NOT_FOUND' | 'UNKNOWN';
+  authoritative: boolean;
+  /** For `DECLINED`: a code, never a message (S-09). */
+  failureCode?: string;
+  simulated: boolean;
+}
+
+/**
+ * The interface ADR-024 specifies, with one addition: `getRefundStatus`
+ * (ADR-064 § 3, scoped to refunds), which the reconciler asks before it
+ * resolves an unknown refund.
+ */
 export interface PaymentProvider {
   readonly name: string;
   /**
@@ -99,9 +132,19 @@ export interface PaymentProvider {
    * which implementation it holds.
    */
   readonly simulated: boolean;
+  /**
+   * Whether this provider can vouch that it never received a refund attempt
+   * (ADR-064 § 3, Codex on #164). Only a provider whose records are durable
+   * and shared by every caller can: its "not found" is then evidence. The
+   * mock's memory is one process's — lost on restart, not shared between
+   * replicas — so it declares `false`, and the reconciler treats its every
+   * "not seen" as unknown.
+   */
+  readonly authoritativeAbsence: boolean;
 
   authorize(request: AuthorizeRequest): Promise<AuthorizeResult>;
   capture(request: CaptureRequest): Promise<CaptureResult>;
   refund(request: RefundRequest): Promise<RefundResult>;
   getStatus(providerReference: string): Promise<ProviderPaymentStatus>;
+  getRefundStatus(query: RefundStatusQuery): Promise<RefundStatusResult>;
 }
