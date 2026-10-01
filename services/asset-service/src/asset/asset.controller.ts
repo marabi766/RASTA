@@ -1,7 +1,8 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { ApiQueryFromSchema } from '../openapi/query-parameters';
+import { UPDATE_ASSET_BODY_SCHEMA } from '../openapi/update-asset-body';
 import { AssetService } from './asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
@@ -146,6 +147,7 @@ export class AssetController {
       'nothing and answers with the asset as it is. `null` clears an optional field. ' +
       'Returns 404 for an asset in another organization — never 403 — whatever version is sent.',
   })
+  @ApiBody({ schema: UPDATE_ASSET_BODY_SCHEMA })
   update(@Param('id') id: string, @Body(zodPipe(updateAssetSchema)) dto: UpdateAssetDto) {
     return this.assets.update(id, dto);
   }
