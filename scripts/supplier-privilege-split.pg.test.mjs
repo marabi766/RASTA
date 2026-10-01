@@ -132,7 +132,8 @@ function split() {
       PGHOST: host,
       PGPORT: port,
       POSTGRES_USER: superuser,
-      // Exported, as an upgrade outside compose must (lib/role-passwords.bash).
+      // Both exported, as an upgrade outside compose must (lib/role-passwords.bash).
+      POSTGRES_PASSWORD_SUPPLIER: password(RUNTIME),
       POSTGRES_PASSWORD_SUPPLIER_MIGRATOR: password(MIGRATOR),
     },
     encoding: 'utf8',

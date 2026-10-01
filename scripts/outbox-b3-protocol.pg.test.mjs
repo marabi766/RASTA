@@ -30,6 +30,7 @@ import {
   dropOutboxSchema,
   urlWithSchema,
 } from './outbox-b2-fixture.mjs';
+import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const require = createRequire(join(REPO_ROOT, 'package.json'));
@@ -47,14 +48,20 @@ const { EVENT_HEADERS } = require(join(REPO_ROOT, 'packages', 'contracts', 'dist
 
 function baseUrl(service) {
   const key = `DATABASE_URL_${service.toUpperCase()}`;
-  // These tests create and drop throwaway schemas. Where a service separates a
-  // migrator from its runtime role (supplier), only the migrator — which owns
-  // the database — may; scripts/prisma.mjs makes the same choice for DDL.
-  const url = process.env[`${key}_MIGRATOR`] ?? process.env[key];
+  // These tests create and drop throwaway schemas, which only the role that
+  // owns the database may. For a split service (D-045) that is its migrator —
+  // **required**, never a fallback to the runtime URL, whose role cannot run
+  // the DDL and would fail for a reason that hides the real one (Codex review
+  // of #178); scripts/prisma.mjs makes the same choice. An unsplit service's
+  // runtime role still owns its database.
+  const split = service === 'audit' || splitServicesFromLibrary().includes(service);
+  const wanted = split ? `${key}_MIGRATOR` : key;
+  const url = process.env[wanted];
   if (!url) {
     throw new Error(
-      `${key} is not set. These tests run against a real PostgreSQL: start it with ` +
-        '`pnpm infra:up`, copy .env.example to .env, and run `pnpm test:outbox-b3`.',
+      `${wanted} is not set. These tests run against a real PostgreSQL: start it with ` +
+        '`pnpm infra:up`, copy .env.example to .env and .env.migrator.example to ' +
+        '.env.migrator, and run them through pnpm.',
     );
   }
   return url;

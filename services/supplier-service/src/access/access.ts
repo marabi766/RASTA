@@ -174,6 +174,30 @@ export function assertCanRegisterSupplier(): void {
   getOrganizationId();
 }
 
+/** The one service allowed to read the standing snapshot (ADR-061 § 4). */
+export const STANDING_SNAPSHOT_CALLER = 'construction-service';
+
+/**
+ * Whether the caller is construction-service, acting platform-wide.
+ *
+ * The only service-to-service entry in this service, opened deliberately with a
+ * named caller (the note above anticipated exactly this). A person, with any
+ * role, is refused; so is any other service (`@AllowService` already, and again
+ * here); and so is a token signed for a tenant, because the snapshot is a
+ * platform-wide read and ADR-035 rule 7 allows a tenant-less service token only
+ * where a platform-wide operation is explicitly meant.
+ */
+export function assertCallerIsConstructionService(): void {
+  const context = getContext();
+  if (
+    context.authType !== 'SERVICE' ||
+    context.callerService !== STANDING_SNAPSHOT_CALLER ||
+    context.organizationId !== undefined
+  ) {
+    throw RastaError.forbidden('Only construction-service may read the supplier standing snapshot');
+  }
+}
+
 /** Whether the caller may read the cross-tenant directory at all. */
 export function assertCanBrowseDirectory(): void {
   assertNotAuditor();

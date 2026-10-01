@@ -337,17 +337,18 @@ for (const [label, script] of [
   });
 }
 
-test('standalone split: no fallback — the migrator password must be exported, and is the only one needed', () => {
+test('standalone split: no fallback — the runtime and migrator passwords must both be exported', () => {
   const refused = runWithStubPsql(
     SPLIT,
     { RASTA_DB_BOOTSTRAP: undefined },
     { args: ['construction'] },
   );
   assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /POSTGRES_PASSWORD_CONSTRUCTION is not set/);
   assert.match(refused.stderr, /POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR is not set/);
   assert.deepEqual(refused.calls, []);
 
-  const given = runWithStubPsql(
+  const noRuntime = runWithStubPsql(
     SPLIT,
     {
       RASTA_DB_BOOTSTRAP: undefined,
@@ -355,13 +356,79 @@ test('standalone split: no fallback — the migrator password must be exported, 
     },
     { args: ['construction'] },
   );
+  assert.equal(noRuntime.status, 1);
+  assert.match(noRuntime.stderr, /POSTGRES_PASSWORD_CONSTRUCTION is not set/);
+  assert.deepEqual(noRuntime.calls, []);
+
+  const given = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_CONSTRUCTION: 'explicit_construction_runtime_secret',
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: 'explicit_construction_migrator_secret',
+    },
+    { args: ['construction'] },
+  );
   assert.equal(given.status, 0, given.stderr);
   assert.ok(
     given.calls.some((call) =>
-      call.includes("ALTER ROLE rasta_construction_migrator WITH LOGIN PASSWORD 'explicit_"),
+      call.includes(
+        "ALTER ROLE rasta_construction_migrator WITH LOGIN PASSWORD 'explicit_construction_migrator_secret'",
+      ),
     ),
   );
   assert.ok(!given.calls.some((call) => call.includes('_dev_password')));
+});
+
+test("standalone split: a migrator password equal to its runtime role's aborts before any psql call (Codex on #176)", () => {
+  const shared = 'one_password_for_runtime_and_owner';
+  const { status, stderr, calls } = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_CONSTRUCTION: shared,
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: shared,
+    },
+    { args: ['construction'] },
+  );
+  assert.equal(status, 1);
+  assert.match(
+    stderr,
+    /POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR equals POSTGRES_PASSWORD_CONSTRUCTION/,
+  );
+  assert.deepEqual(calls, [], 'psql was reached before the check');
+  assert.ok(!stderr.includes(shared));
+});
+
+test('standalone split: a migrator password equal to any other known role password aborts too', () => {
+  const shared = 'identity_password_reused_as_owner';
+  const { status, stderr, calls } = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_CONSTRUCTION: 'explicit_construction_runtime_secret',
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: shared,
+      // Not a role this run changes, but a password it knows.
+      POSTGRES_PASSWORD_IDENTITY: shared,
+    },
+    { args: ['construction'] },
+  );
+  assert.equal(status, 1);
+  assert.match(stderr, /POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR equals POSTGRES_PASSWORD_IDENTITY/);
+  assert.deepEqual(calls, []);
+
+  // In the compose container the other roles' development defaults are known passwords too.
+  const devDefault = runWithStubPsql(
+    SPLIT,
+    { POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: 'rasta_fleet_dev_password' },
+    { args: ['construction'] },
+  );
+  assert.equal(devDefault.status, 1);
+  assert.match(
+    devDefault.stderr,
+    /POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR equals POSTGRES_PASSWORD_FLEET/,
+  );
+  assert.deepEqual(devDefault.calls, []);
 });
 
 test('standalone split: in the compose container the development default still applies', () => {

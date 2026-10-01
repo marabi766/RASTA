@@ -811,7 +811,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+            clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1844,7 +1844,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
+            clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
 
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
@@ -2162,8 +2162,8 @@ jobs:
         # different image than the one deployed and report on it confidently.
         run: |
           set -euo pipefail
-          docker pull clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591
-          docker tag clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591 \
+          docker pull clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+          docker tag clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0 \
             rasta/clamav-pinned:ci
 
       - name: Scan the image
@@ -2178,6 +2178,9 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
+          # One time-boxed exception, expiring 2026-10-16 (see the file and
+          # ADR-049). This input appears on this step only.
+          trivyignores: .trivyignore.clamav
 
       - name: Record the engine and signature versions the pin carries
         # Evidence rather than decoration: ADR-049 requires the image source

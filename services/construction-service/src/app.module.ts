@@ -50,6 +50,14 @@ import {
   OrganizationMovedConsumer,
   organizationMovesConsumerFactory,
 } from './events/organization-moved.consumer';
+import {
+  SupplierStandingConsumer,
+  supplierStandingConsumerFactory,
+} from './events/supplier-standing.consumer';
+import { ContractorStandingRepository } from './tender/contractor-standing.repository';
+import { StandingBootstrap } from './tender/standing-bootstrap';
+import { StandingAuthority } from './tender/standing-authority';
+import { SupplierSnapshotClient } from './tender/supplier-snapshot.client';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { PolicyController } from './approval/policy.controller';
 import { ApprovalController } from './approval/approval.controller';
@@ -70,7 +78,13 @@ import {
   policyReconciliationBacklog,
   policyReconciliationOldestDueAgeSeconds,
 } from './observability/metrics';
-import { ENV, LOGGER, TENDER_KEY_PROVIDER } from './tokens';
+import {
+  ENV,
+  LOGGER,
+  STANDING_OF_SOURCE,
+  STANDING_SNAPSHOT_SOURCE,
+  TENDER_KEY_PROVIDER,
+} from './tokens';
 import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
 
 /**
@@ -199,6 +213,30 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         ),
     },
 
+    ContractorStandingRepository,
+    // ADR-061 § 4: the standing before the consumer group existed is read from
+    // supplier-service, and nobody is eligible until it has been (StandingBootstrap).
+    SupplierSnapshotClient,
+    { provide: STANDING_SNAPSHOT_SOURCE, useExisting: SupplierSnapshotClient },
+    // Eligibility to bid is decided from supplier-service's own record at the moment
+    // of the bid; the read model above is advisory (StandingAuthority).
+    { provide: STANDING_OF_SOURCE, useExisting: SupplierSnapshotClient },
+    StandingAuthority,
+    StandingBootstrap,
+    {
+      provide: SupplierStandingConsumer,
+      inject: [ENV, LOGGER, ContractorStandingRepository],
+      useFactory: (env: ConstructionEnv, logger: Logger, standing: ContractorStandingRepository) =>
+        new SupplierStandingConsumer(
+          supplierStandingConsumerFactory(
+            kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-supplier-standing`),
+            logger,
+          ),
+          standing,
+          logger,
+        ),
+    },
+
     {
       provide: InternalTokenService,
       inject: [ENV],
@@ -268,8 +306,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   private gaugeTimer?: NodeJS.Timeout;
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly moves: OrganizationMovedConsumer,
+    private readonly standing: SupplierStandingConsumer,
+    private readonly bootstrap: StandingBootstrap,
     private readonly sweeper: PolicyReconciliationSweeper,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly store: PrismaOutboxStore,
@@ -284,10 +325,19 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onModuleInit(): Promise<void> {
+    // First of all (D-045): nothing is served, relayed or consumed as a role
+    // that could lift this service's database guards.
+    await this.prisma.assertRuntimeRole();
+
     // The consumer first: a topic it cannot subscribe to must stop the boot
     // (`EventConsumer` never auto-creates topics), not leave a service that
     // looks healthy and never hears a move.
     await this.moves.start();
+    await this.standing.start();
+    // After the consumer, never before: every event from here on is received live,
+    // and every fact before it is in the snapshot read next. Not awaited — the
+    // service serves while it loads, answering "not loaded" (fail closed) until done.
+    this.bootstrap.start();
     this.sweeper.start();
     this.relay.start();
 
@@ -324,6 +374,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     await this.moves.stop();
+    await this.standing.stop();
+    await this.bootstrap.stop();
     await this.sweeper.stop();
     await this.relay.stop();
   }

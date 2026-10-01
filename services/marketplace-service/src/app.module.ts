@@ -183,6 +183,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   private gaugeTimer?: NodeJS.Timeout;
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
@@ -194,7 +195,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     consumer.apply(RequestContextMiddleware).forRoutes('*');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // First of all (D-045): nothing is served, relayed or consumed as a role
+    // that could lift this service's database guards.
+    await this.prisma.assertRuntimeRole();
+
     this.relay.start();
 
     const sample = async () => {

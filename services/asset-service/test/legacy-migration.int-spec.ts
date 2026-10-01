@@ -45,21 +45,27 @@ describe('legacy data migration (20260925110000)', () => {
     userId: `USR-ADMIN-${organizationId.slice(-4)}`,
   });
 
+  /**
+   * `prisma db execute` on `file`, as the owner. The owner's URL — a credential
+   * — goes in the child's environment and reaches Prisma through the schema's
+   * datasource (`env("DATABASE_URL")`), never on its command line, where any
+   * process listing would show it (Codex review of #178).
+   */
+  const prismaExecute = (file: string) =>
+    [
+      require.resolve('prisma/build/index.js'),
+      'db',
+      'execute',
+      '--file',
+      file,
+      '--schema',
+      path.join(__dirname, '..', 'prisma', 'schema.prisma'),
+    ] as const;
+  const ownerEnv = () => ({ ...process.env, DATABASE_URL: ownerDatabaseUrl() });
+
   /** Runs a shipped SQL file through `prisma db execute`. */
   function runFile(file: string): void {
-    execFileSync(
-      process.execPath,
-      [
-        require.resolve('prisma/build/index.js'),
-        'db',
-        'execute',
-        '--file',
-        file,
-        '--url',
-        ownerDatabaseUrl(),
-      ],
-      { stdio: 'pipe' },
-    );
+    execFileSync(process.execPath, [...prismaExecute(file)], { stdio: 'pipe', env: ownerEnv() });
   }
 
   /** Runs the shipped migration file, as a deploy would. */
@@ -74,15 +80,8 @@ describe('legacy data migration (20260925110000)', () => {
     return new Promise((resolve) => {
       execFile(
         process.execPath,
-        [
-          require.resolve('prisma/build/index.js'),
-          'db',
-          'execute',
-          '--file',
-          file,
-          '--url',
-          ownerDatabaseUrl(),
-        ],
+        [...prismaExecute(file)],
+        { env: ownerEnv() },
         (error, _stdout, stderr) => resolve(error ? String(stderr || error) : ''),
       );
     });

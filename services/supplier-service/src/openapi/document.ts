@@ -10,6 +10,9 @@ import {
   rejectQualificationSchema,
   reviewQueueQuerySchema,
   searchSuppliersQuerySchema,
+  standingOfSchema,
+  standingSnapshotPageSchema,
+  standingSnapshotQuerySchema,
   submitQualificationSchema,
   supplierDetailViewSchema,
   supplierDirectoryViewSchema,
@@ -82,6 +85,12 @@ const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.ZodType
     status: '200',
     schema: cursorPageOf(reviewQueueEntrySchema),
   },
+  // Service-to-service (construction-service only): identifiers and instants, no words.
+  'GET /v1/suppliers/standing-snapshot': { status: '200', schema: standingSnapshotPageSchema },
+  'GET /v1/suppliers/standing-snapshot/{organizationId}': {
+    status: '200',
+    schema: standingOfSchema,
+  },
   'POST /v1/suppliers/{id}/qualifications': { status: '201', schema: qualificationViewSchema },
   'POST /v1/suppliers/{id}/qualifications/{qualificationId}/approve': {
     status: '200',
@@ -106,6 +115,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/suppliers': searchSuppliersQuerySchema,
   'GET /v1/suppliers/qualified': listQualifiedForQuerySchema,
   'GET /v1/suppliers/qualifications': reviewQueueQuerySchema,
+  'GET /v1/suppliers/standing-snapshot': standingSnapshotQuerySchema,
 };
 
 const ERROR_DESCRIPTIONS: Record<number, string> = {
