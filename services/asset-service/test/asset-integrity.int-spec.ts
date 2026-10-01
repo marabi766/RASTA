@@ -271,6 +271,109 @@ describe('asset integrity', () => {
         reason: { code: 'OPTIMISTIC_LOCK_FAILED' },
       });
     });
+
+    describe('two editors of the same machine (PR #158 review)', () => {
+      const read = (assetId: string, organization = org.a) =>
+        asActor(manager(organization), () => assets.get(assetId));
+
+      it('lets the first save win and refuses the second, which would have restored the old tag', async () => {
+        const assetId = await machine(org.a, { assetTag: `TAG-${ulid().slice(-8)}` });
+        const opened = await read(assetId);
+
+        // Both editors open the form at the same version.
+        const editorA = asActor(manager(org.a), () =>
+          assets.update(assetId, { name: 'نام از ویرایشگر یک', expectedVersion: opened.version }),
+        );
+        const editorB = asActor(manager(org.a), () =>
+          assets.update(assetId, {
+            assetTag: opened.assetTag,
+            name: 'نام از ویرایشگر دو',
+            expectedVersion: opened.version,
+          }),
+        );
+
+        const results = await Promise.allSettled([editorA, editorB]);
+        const fulfilled = results.filter((result) => result.status === 'fulfilled');
+        const rejected = results.filter((result) => result.status === 'rejected');
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0]).toMatchObject({ reason: { code: 'OPTIMISTIC_LOCK_FAILED' } });
+
+        // Exactly one version was written, and the machine holds the winner's name.
+        const after = await read(assetId);
+        expect(after.version).toBe(opened.version + 1);
+        expect(['نام از ویرایشگر یک', 'نام از ویرایشگر دو']).toContain(after.name);
+      });
+
+      it('refuses an edit made against a version somebody else has since replaced, and keeps their change', async () => {
+        const assetId = await machine(org.a, { assetTag: `TAG-${ulid().slice(-8)}` });
+        const opened = await read(assetId);
+
+        // Editor A saves a new tag.
+        const newTag = `NEW-${ulid().slice(-8)}`;
+        await asActor(manager(org.a), () =>
+          assets.update(assetId, { assetTag: newTag, expectedVersion: opened.version }),
+        );
+
+        // Editor B, still on the old form, changes the name and — as the old
+        // portal did — sends the tag it saw too.
+        await expect(
+          asActor(manager(org.a), () =>
+            assets.update(assetId, {
+              name: 'نام ویرایشگر دو',
+              assetTag: opened.assetTag,
+              expectedVersion: opened.version,
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+        const after = await read(assetId);
+        expect(after.assetTag).toBe(newTag);
+        expect(after.name).toBe(opened.name);
+        expect(after.version).toBe(opened.version + 1);
+      });
+
+      it('announces only what changed, and a repeat of the same values changes and announces nothing', async () => {
+        const assetId = await machine(org.a, { assetTag: `TAG-${ulid().slice(-8)}` });
+        const opened = await read(assetId);
+
+        const edited = await asActor(manager(org.a), () =>
+          assets.update(assetId, {
+            name: opened.name,
+            assetTag: opened.assetTag,
+            manufacturer: 'ایسوزو',
+            expectedVersion: opened.version,
+          }),
+        );
+        const updatedEvents = async () =>
+          (await outboxFor(assetId)).filter((e) => e.eventName === ASSET_EVENTS.ASSET_UPDATED);
+
+        const [event] = await updatedEvents();
+        expect(event?.payload).toMatchObject({ payload: { changedFields: ['manufacturer'] } });
+
+        const repeated = await asActor(manager(org.a), () =>
+          assets.update(assetId, { manufacturer: 'ایسوزو', expectedVersion: edited.version }),
+        );
+        expect(repeated.version).toBe(edited.version);
+        expect(await updatedEvents()).toHaveLength(1);
+      });
+
+      it("answers an edit to another organization's machine as a missing one, with or without a version", async () => {
+        const assetId = await machine(org.a);
+        const opened = await read(assetId);
+
+        for (const dto of [
+          { name: 'ربوده' },
+          { name: 'ربوده', expectedVersion: opened.version },
+          { name: 'ربوده', expectedVersion: opened.version + 7 },
+        ]) {
+          await expect(
+            asActor(manager(org.b), () => assets.update(assetId, dto)),
+          ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+        }
+        expect((await read(assetId)).name).toBe(opened.name);
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------
