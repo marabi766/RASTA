@@ -59,6 +59,7 @@ Monorepo مبتنی بر TypeScript با ۱۶ Microservice برنامه‌ریز
 ```bash
 pnpm install                  # نصب وابستگی‌ها
 cp .env.example .env          # پیکربندی محلی
+cp .env.migrator.example .env.migrator   # اعتبار مالک پایگاه داده — فقط Migration (D-045)
 pnpm infra:up                 # PostgreSQL, Redis, Kafka, Keycloak, MinIO, Temporal
 pnpm db:migrate && RASTA_ALLOW_DEMO_SEED=true pnpm db:seed   # Seed فقط در development/test
 pnpm dev                      # همه سرویس‌ها + Frontend

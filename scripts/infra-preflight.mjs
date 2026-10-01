@@ -17,9 +17,11 @@ import {
   checkInfraEnv,
   checkKafkaClientEnv,
   kafkaServicesFromPrincipals,
+  migratorCredentialsInEnvFile,
 } from './infra-preflight-lib.mjs';
 
-const envFile = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const envFile = resolve(root, '.env');
 const fromFile = {};
 const kafkaProblems = [];
 const services = kafkaServicesFromPrincipals();
@@ -30,8 +32,21 @@ if (existsSync(envFile)) {
   }
 }
 
-const env = { ...fromFile, ...process.env };
+// The migrators' passwords reach the postgres container from its env_file —
+// .env.migrator.example, overridden by .env.migrator — not from .env, so they
+// are checked from there, after everything else (D-045, Codex review of #176).
+const fromMigratorFiles = {};
+for (const name of ['.env.migrator.example', '.env.migrator']) {
+  const file = resolve(root, name);
+  if (!existsSync(file)) continue;
+  for (const { name: key, value } of parseEnvAssignments(readFileSync(file, 'utf8')).assignments) {
+    fromMigratorFiles[key] = value;
+  }
+}
+
+const env = { ...fromFile, ...process.env, ...fromMigratorFiles };
 const { errors: infraErrors, warnings } = checkInfraEnv(env);
+warnings.push(...migratorCredentialsInEnvFile(fromFile));
 // Without a .env nothing runs a service yet; the Kafka check is about a stale one.
 if (existsSync(envFile)) warnings.push(...checkKafkaClientEnv(env, services));
 const errors = [...infraErrors, ...kafkaProblems];

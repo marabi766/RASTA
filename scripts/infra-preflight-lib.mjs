@@ -170,3 +170,23 @@ export function checkKafkaClientEnv(env, services = kafkaServicesFromPrincipals(
   }
   return warnings;
 }
+
+/**
+ * A `.env` copied before D-045's env split still carries database owner
+ * credentials (`*_MIGRATOR`). Every service loads `.env`, and every service now
+ * refuses to start with one in its environment
+ * (@rasta/config assertNoMigratorCredentials) — so say so here, by name only.
+ * Compose no longer reads them from `.env` either: the postgres container takes
+ * them from .env.migrator.example / .env.migrator.
+ */
+export function migratorCredentialsInEnvFile(fromEnvFile) {
+  const names = Object.keys(fromEnvFile)
+    .filter((name) => /^(?:DATABASE_URL|POSTGRES_PASSWORD)_[A-Z0-9_]+_MIGRATOR$/.test(name))
+    .sort();
+  if (names.length === 0) return [];
+  return [
+    `.env holds database owner credentials (${names.join(', ')}), and every service refuses to ` +
+      'start with one in its environment (D-045). Move them to .env.migrator ' +
+      '(see .env.migrator.example) and delete them from .env.',
+  ];
+}

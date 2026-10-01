@@ -116,8 +116,8 @@ jobs:
         run: pnpm run test:infra-preflight
 
       - name: Database runtime-role rules (D-045)
-        # Every service is placed exactly once — split, audit or pending — and
-        # a pending one that passes fails; the migration ledger revoke
+        # Every service is placed exactly once — split or audit — and one in
+        # neither fails; the migration ledger revoke
         # scripts/prisma.mjs runs after each migration quotes and refuses
         # what it must.
         run: pnpm run test:db-runtime-privileges-lib
@@ -226,6 +226,12 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      - name: Services refuse a database owner credential at boot (D-045)
+        # Each built dist/main.js, started with a *_MIGRATOR URL or password in
+        # its environment, must exit naming the variable and never its value
+        # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
+        run: pnpm run test:boot-guard
 
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
@@ -394,6 +400,10 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
         run: |
           export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
           bash infrastructure/docker/postgres/00-init-databases.sh
@@ -681,6 +691,10 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
           POSTGRES_USER: rasta
         run: |
           # The same script the local stack uses, so CI and a developer
@@ -1424,8 +1438,8 @@ jobs:
         # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
-        # service database this job bootstrapped and migrated; a service still
-        # on PENDING_SPLIT must still fail, so a split nobody recorded fails too.
+        # service database this job bootstrapped and migrated; every service
+        # must be split (audit its own way), so a new one that is not fails.
         run: pnpm run check:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1625,6 +1639,10 @@ jobs:
       - name: Provision databases, roles and extensions
         env:
           PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
         run: |
           export PGHOST=localhost PGPORT=5432 POSTGRES_USER=rasta
           bash infrastructure/docker/postgres/00-init-databases.sh

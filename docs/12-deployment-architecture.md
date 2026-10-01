@@ -36,6 +36,7 @@
 ```bash
 pnpm install
 cp .env.example .env
+cp .env.migrator.example .env.migrator   # database owner credentials, migrations only (D-045)
 pnpm infra:up          # PostgreSQL, Redis, Kafka, Keycloak, MinIO, Temporal
 pnpm db:migrate
 pnpm db:seed

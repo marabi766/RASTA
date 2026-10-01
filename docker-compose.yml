@@ -57,10 +57,22 @@ services:
     <<: *restart
     image: postgis/postgis:16-3.4
     container_name: rasta-postgres
+    # The migrators' (database owners') passwords, D-045: kept out of .env,
+    # which every service loads, and read here from the committed defaults,
+    # overridden by a git-ignored .env.migrator when one exists.
+    env_file:
+      - path: ./.env.migrator.example
+      - path: ./.env.migrator
+        required: false
     environment:
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-rasta}
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-rasta_dev_password}
       POSTGRES_DB: postgres
+      # This volume is disposable development state: a role password left unset
+      # takes its published development default. lib/role-passwords.bash allows
+      # that fallback only under this flag — any other run of the scripts, such
+      # as an upgrade of a real cluster, must be given every password it sets.
+      RASTA_DB_BOOTSTRAP: compose
       # One password per role (L7-33); the init script reads these.
       POSTGRES_PASSWORD_IDENTITY: ${POSTGRES_PASSWORD_IDENTITY:-rasta_identity_dev_password}
       POSTGRES_PASSWORD_ORGANIZATION: ${POSTGRES_PASSWORD_ORGANIZATION:-rasta_organization_dev_password}
@@ -78,22 +90,6 @@ services:
       POSTGRES_PASSWORD_DOCUMENT: ${POSTGRES_PASSWORD_DOCUMENT:-rasta_document_dev_password}
       POSTGRES_PASSWORD_AUDIT: ${POSTGRES_PASSWORD_AUDIT:-rasta_audit_dev_password}
       POSTGRES_PASSWORD_ANALYTICS: ${POSTGRES_PASSWORD_ANALYTICS:-rasta_analytics_dev_password}
-      POSTGRES_PASSWORD_AUDIT_MIGRATOR: ${POSTGRES_PASSWORD_AUDIT_MIGRATOR:-rasta_audit_migrator_dev_password}
-      POSTGRES_PASSWORD_SUPPLIER_MIGRATOR: ${POSTGRES_PASSWORD_SUPPLIER_MIGRATOR:-rasta_supplier_migrator_dev_password}
-      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: ${POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR:-rasta_construction_migrator_dev_password}
-      POSTGRES_PASSWORD_IDENTITY_MIGRATOR: ${POSTGRES_PASSWORD_IDENTITY_MIGRATOR:-rasta_identity_migrator_dev_password}
-      POSTGRES_PASSWORD_NOTIFICATION_MIGRATOR: ${POSTGRES_PASSWORD_NOTIFICATION_MIGRATOR:-rasta_notification_migrator_dev_password}
-      POSTGRES_PASSWORD_ORGANIZATION_MIGRATOR: ${POSTGRES_PASSWORD_ORGANIZATION_MIGRATOR:-rasta_organization_migrator_dev_password}
-      POSTGRES_PASSWORD_ASSET_MIGRATOR: ${POSTGRES_PASSWORD_ASSET_MIGRATOR:-rasta_asset_migrator_dev_password}
-      POSTGRES_PASSWORD_FLEET_MIGRATOR: ${POSTGRES_PASSWORD_FLEET_MIGRATOR:-rasta_fleet_migrator_dev_password}
-      POSTGRES_PASSWORD_MAINTENANCE_MIGRATOR: ${POSTGRES_PASSWORD_MAINTENANCE_MIGRATOR:-rasta_maintenance_migrator_dev_password}
-      POSTGRES_PASSWORD_MARKETPLACE_MIGRATOR: ${POSTGRES_PASSWORD_MARKETPLACE_MIGRATOR:-rasta_marketplace_migrator_dev_password}
-      POSTGRES_PASSWORD_DOCUMENT_MIGRATOR: ${POSTGRES_PASSWORD_DOCUMENT_MIGRATOR:-rasta_document_migrator_dev_password}
-      POSTGRES_PASSWORD_PROCUREMENT_MIGRATOR: ${POSTGRES_PASSWORD_PROCUREMENT_MIGRATOR:-rasta_procurement_migrator_dev_password}
-      POSTGRES_PASSWORD_INVENTORY_MIGRATOR: ${POSTGRES_PASSWORD_INVENTORY_MIGRATOR:-rasta_inventory_migrator_dev_password}
-      POSTGRES_PASSWORD_CONTRACT_MIGRATOR: ${POSTGRES_PASSWORD_CONTRACT_MIGRATOR:-rasta_contract_migrator_dev_password}
-      POSTGRES_PASSWORD_ANALYTICS_MIGRATOR: ${POSTGRES_PASSWORD_ANALYTICS_MIGRATOR:-rasta_analytics_migrator_dev_password}
-      POSTGRES_PASSWORD_ECONOMIC_MIGRATOR: ${POSTGRES_PASSWORD_ECONOMIC_MIGRATOR:-rasta_economic_migrator_dev_password}
       LANG: C.UTF-8
     ports:
       - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432'
