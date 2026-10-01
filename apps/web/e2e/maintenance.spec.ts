@@ -178,7 +178,10 @@ test.describe('reporting maintenance through the live stack', () => {
     await form.locator('input[name="title"]').fill(BREAKDOWN_TITLE);
     await form.getByRole('button', { name: 'ثبت درخواست' }).click();
 
-    await expect(page).toHaveURL(/\/maintenance\/MNT[-_][^?]+\?created=1/);
+    // The confirmation is a signed flash (or, before it, a flag): this test is about
+    // the request existing, not about how the page was told to say so.
+    await expect(page).toHaveURL(/\/maintenance\/MNT[-_][^?/]+/);
+    await expect(page.getByText('درخواست ثبت شد')).toBeVisible();
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(BREAKDOWN_TITLE);
     const id = decodeURIComponent(new URL(page.url()).pathname.split('/').pop() ?? '');
 
@@ -212,7 +215,7 @@ test.describe('reporting maintenance through the live stack', () => {
     await again.getByRole('button', { name: 'ثبت درخواست' }).click();
 
     await expect(page.getByText(/همین حالا یک درخواست باز از همین نوع دارد/)).toBeVisible();
-    await expect(page).not.toHaveURL(/created=1/);
+    await expect(page).not.toHaveURL(/created=1|flash=/);
     expect(await openCorrective(request, accessToken)).toHaveLength(1);
   });
 
@@ -228,7 +231,7 @@ test.describe('reporting maintenance through the live stack', () => {
     await form.getByRole('button', { name: 'ثبت درخواست' }).click();
 
     await expect(page.getByText('برای خرابی، شدت را مشخص کنید')).toBeVisible();
-    await expect(page).not.toHaveURL(/created=1/);
+    await expect(page).not.toHaveURL(/created=1|flash=/);
     expect(await openCorrective(request, accessToken)).toHaveLength(0);
   });
 });
