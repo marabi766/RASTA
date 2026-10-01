@@ -97,6 +97,9 @@ function roleList(name: string, options: { min: number }) {
  *   _BACKOFF_SECONDS / _BACKOFF_MAX_SECONDS
  *                                       The sweeper that suspends policies a
  *                                       moved organization stranded (Q-83).
+ *   CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS
+ *                                       The sweeper that closes tenders past
+ *                                       their deadline (ADR-065 § 3).
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
  *                                       Q-68. Submitted needs a project must
  *                                       have before it may request approval.
@@ -242,6 +245,24 @@ export const constructionEnvSchema = baseEnvSchema
       .min(1)
       .max(86_400)
       .default(900),
+
+    /**
+     * The sweeper that closes tenders past `bid_closing_at` (ADR-065 § 3). A sweep
+     * every `INTERVAL_MS` claims at most `BATCH_SIZE` overdue tenders and closes each
+     * in one short transaction (no network call), so a tender is closed at most one
+     * interval late — which only delays the state: a bid after the deadline is refused
+     * by the database's clock whether or not the sweeper has run. `LEASE_SECONDS` must
+     * exceed one sweep (`BATCH_SIZE` × a close, milliseconds each); a tender whose
+     * close failed is claimed again when its lease runs out.
+     */
+    CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .default(5000),
+    CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
 
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),

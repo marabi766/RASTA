@@ -502,6 +502,15 @@ model Tender {
   publishedAt DateTime? @map("published_at")
   publishedBy String?   @map("published_by")
 
+  /// When and by whom it was closed (ADR-065 § 3); both or neither, present from CLOSED on.
+  closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
+  closedBy String?   @map("closed_by")
+
+  /// The close sweeper's claim: a lease and a fencing token, set and cleared together.
+  /// Housekeeping, not state: claiming changes neither `version` nor `updated_at`.
+  closeLeaseUntil DateTime? @map("close_lease_until") @db.Timestamptz(3)
+  closeFence      String?   @map("close_fence")
+
   criteria    TenderCriterion[]
   invitations TenderInvitation[]
   /// At most one (`tender_key.tender_id` is its primary key); a list because the
@@ -515,6 +524,7 @@ model Tender {
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
   @@index([organizationId, projectId, status], map: "ix_tender_org_project_status")
+  // SQL-only: `ix_tender_close_due` — PUBLISHED tenders by deadline, the close sweeper's scan.
   @@map("tender")
 }
 

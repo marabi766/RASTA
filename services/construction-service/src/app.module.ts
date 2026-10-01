@@ -76,12 +76,17 @@ import { TenderEvidenceClient } from './tender/tender-evidence.client';
 import { BidService } from './tender/bid.service';
 import { BidController } from './tender/bid.controller';
 import { DatabaseTenderClock, TenderClock } from './tender/tender-clock';
+import { TenderCloseRepository } from './tender/tender-close.repository';
+import { TenderCloseService } from './tender/tender-close.service';
+import { TenderCloseSweeper } from './tender/tender-close.sweeper';
 import { EnvKekProvider } from './tender/sealing/key-provider';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import {
   policyReconciliationBacklog,
   policyReconciliationOldestDueAgeSeconds,
+  tenderCloseBacklog,
+  tenderCloseOldestOverdueAgeSeconds,
 } from './observability/metrics';
 import {
   ENV,
@@ -177,6 +182,24 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     // ADR-065 § 2: the deadline is judged on the database's clock, read after the lock.
     { provide: TenderClock, useClass: DatabaseTenderClock },
     BidService,
+    // ADR-065 § 3: a bounded, leased, fenced sweep closes tenders past their deadline.
+    // The bids are refused by the clock whether or not it runs.
+    TenderCloseRepository,
+    TenderCloseService,
+    {
+      provide: TenderCloseSweeper,
+      inject: [TenderCloseRepository, TenderCloseService, ENV],
+      useFactory: (
+        repository: TenderCloseRepository,
+        service: TenderCloseService,
+        env: ConstructionEnv,
+      ) =>
+        new TenderCloseSweeper(repository, service, {
+          intervalMs: env.CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS,
+          batchSize: env.CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE,
+          leaseSeconds: env.CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS,
+        }),
+    },
     {
       // ADR-066 § 2. A malformed or half-set configuration stops the boot; an
       // absent one leaves a provider that publishes nothing (fail closed).
@@ -325,6 +348,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly bootstrap: StandingBootstrap,
     private readonly sweeper: PolicyReconciliationSweeper,
     private readonly reconciliations: PolicyReconciliationRepository,
+    private readonly tenderCloser: TenderCloseSweeper,
+    private readonly tenderCloses: TenderCloseRepository,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
   ) {}
@@ -347,6 +372,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // service serves while it loads, answering "not loaded" (fail closed) until done.
     this.bootstrap.start();
     this.sweeper.start();
+    this.tenderCloser.start();
     this.relay.start();
 
     const sample = async () => {
@@ -364,6 +390,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         policyReconciliationOldestDueAgeSeconds.set(
           { service: SERVICE_NAME },
           backlog.oldestDueAgeSeconds,
+        );
+        // Overdue tenders not yet closed (ADR-065 § 3): alert when the oldest keeps ageing.
+        const overdue = await this.tenderCloses.backlog();
+        tenderCloseBacklog.set({ service: SERVICE_NAME }, overdue.overdue);
+        tenderCloseOldestOverdueAgeSeconds.set(
+          { service: SERVICE_NAME },
+          overdue.oldestOverdueAgeSeconds,
         );
         // Expired idempotency records are unusable by definition; removing
         // them keeps the table bounded (docs/06 § 6.8).
@@ -385,6 +418,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.standing.stop();
     await this.bootstrap.stop();
     await this.sweeper.stop();
+    await this.tenderCloser.stop();
     await this.relay.stop();
   }
 }
