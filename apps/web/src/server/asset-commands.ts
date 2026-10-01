@@ -12,6 +12,7 @@ import {
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
 
 import { BIDI_CONTROL } from './drivers';
+import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 
@@ -82,6 +83,23 @@ const requiredDisplayText = (label: string, min: number, max: number) =>
         .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
         .regex(ASSET_DISPLAY_TEXT, UNSUPPORTED_CHARACTERS),
     );
+
+/**
+ * `model`, exactly as asset-service takes it: trimmed text of 1 to 120
+ * characters, with **no** character rule (`dto.ts`: `z.string().trim().min(1)
+ * .max(120)`, where `manufacturer` and `name` use `displayText`). Holding it to
+ * the display-text class refused models the service stores happily, and
+ * normalising its letters rewrote a value the person did not ask to change.
+ * `asset-commands.contract.spec.ts` pins the service's rule, so the day it
+ * tightens this copy fails a test rather than a person.
+ *
+ * Blank is blank: absent on register, `null` on edit.
+ */
+const MODEL_MAX = 120;
+const modelText = z
+  .string()
+  .transform((raw) => raw.trim())
+  .pipe(z.string().max(MODEL_MAX, `مدل حداکثر ${fa(MODEL_MAX)} نویسه است`));
 
 /** An optional name-like field: blank is absent on register, `null` on edit. */
 const optionalDisplayText = (label: string, max: number) =>
@@ -201,7 +219,7 @@ export const registerAssetFormSchema = z
     type: z.enum(ASSET_TYPES, { errorMap: () => ({ message: 'نوع ماشین را انتخاب کنید' }) }),
     assetTag: identifierText('شمارهٔ دارایی', 64).transform(blankTo(undefined)),
     manufacturer: optionalDisplayText('سازنده', 120).transform(blankTo(undefined)),
-    model: optionalDisplayText('مدل', 120).transform(blankTo(undefined)),
+    model: modelText.transform(blankTo(undefined)),
     serialNumber: identifierText('شمارهٔ سریال', 120)
       .refine((value) => value === '' || value.length >= 3, 'شمارهٔ سریال دست‌کم ۳ نویسه باشد')
       .transform(blankTo(undefined)),
@@ -278,25 +296,41 @@ export function updateAssetFormValues(form: FormData): UpdateAssetFormValues {
 }
 
 /**
- * Every field, always present, always a value or `null` — never omitted. This
- * form always shows the machine's current record, so "left blank" and "was
- * already blank" are the same signal, and asset-service reserves *omission*
- * for "an API caller did not mean to touch this field" (`dto.field !==
- * undefined`), which a form that renders every field can never honestly
- * claim. `name` is the exception: it cannot be cleared, only changed.
+ * What each editable field must satisfy **when it is being changed**.
+ *
+ * Only a changed field is parsed and sent (below). That is the point, twice
+ * over: an edit that names a field it did not change restores that field's old
+ * value over whatever somebody else saved since — the lost-update the review of
+ * #158 found — and a field the person never touched cannot block the save
+ * because the stored value predates a rule this portal now applies. A blanked
+ * field is sent as `null`, which on the service is "clear" (`name` cannot be
+ * cleared, only changed).
  */
-export const updateAssetFormSchema = z
-  .object({
-    name: requiredDisplayText('نام', 2, 200),
-    assetTag: identifierText('شمارهٔ دارایی', 64).transform(blankTo(null)),
-    manufacturer: optionalDisplayText('سازنده', 120).transform(blankTo(null)),
-    model: optionalDisplayText('مدل', 120).transform(blankTo(null)),
-    manufactureYear: yearOrBlank<null>(null),
-  })
-  .strict();
+const UPDATE_FIELD_SCHEMAS = {
+  name: requiredDisplayText('نام', 2, 200),
+  assetTag: identifierText('شمارهٔ دارایی', 64).transform(blankTo(null)),
+  manufacturer: optionalDisplayText('سازنده', 120).transform(blankTo(null)),
+  model: modelText.transform(blankTo(null)),
+  manufactureYear: yearOrBlank<null>(null),
+} as const satisfies Record<UpdateAssetField, z.ZodTypeAny>;
 
-/** What asset-service accepts on `PATCH /v1/assets/{id}`. */
-export type UpdateAssetRequest = z.infer<typeof updateAssetFormSchema>;
+/** What asset-service accepts on `PATCH /v1/assets/{id}`, less the version. */
+export type UpdateAssetRequest = {
+  readonly [F in UpdateAssetField]?: z.output<(typeof UPDATE_FIELD_SCHEMAS)[F]>;
+};
+
+/**
+ * The fields whose submitted text differs from the text the form was rendered
+ * with. Compared as text, before any normalisation, because the form is
+ * rendered from the stored value and an untouched input comes back byte for
+ * byte; a field is changed when the person changed it.
+ */
+export function changedUpdateFields(
+  submitted: UpdateAssetFormValues,
+  rendered: UpdateAssetFormValues,
+): UpdateAssetField[] {
+  return UPDATE_ASSET_FIELDS.filter((field) => submitted[field] !== rendered[field]);
+}
 
 export type ParsedUpdateAssetForm =
   | { readonly ok: true; readonly request: UpdateAssetRequest }
@@ -306,11 +340,31 @@ function isUpdateAssetField(value: string): value is UpdateAssetField {
   return (UPDATE_ASSET_FIELDS as readonly string[]).includes(value);
 }
 
-export function parseUpdateAssetForm(values: UpdateAssetFormValues): ParsedUpdateAssetForm {
-  const parsed = updateAssetFormSchema.safeParse(values);
-  if (parsed.success) return { ok: true, request: parsed.data };
+export function parseUpdateAssetForm(
+  values: UpdateAssetFormValues,
+  changed: readonly UpdateAssetField[],
+): ParsedUpdateAssetForm {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  const input: Record<string, string> = {};
+  for (const field of changed) {
+    shape[field] = UPDATE_FIELD_SCHEMAS[field];
+    input[field] = values[field];
+  }
+
+  const parsed = z.object(shape).strict().safeParse(input);
+  if (parsed.success) return { ok: true, request: parsed.data as UpdateAssetRequest };
   return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUpdateAssetField) };
 }
+
+/**
+ * Said when asset-service answers an edit's version with a 409: somebody saved
+ * this machine after the form was drawn. The action recognises the service's
+ * sentence (`OPTIMISTIC_LOCK_FAILED`, which the platform's error body carries as
+ * text and no rule code a client may read) and sends the person back to a fresh
+ * read; `asset-commands.contract.spec.ts` pins the sentence to its source.
+ */
+export const ASSET_EDIT_CONFLICT_MESSAGE =
+  'همین ماشین پس از باز شدن این فرم تغییر کرده است؛ ویرایش شما ذخیره نشد.';
 
 export const UPDATE_ASSET_FIELD_MAPPING: FieldMapping<UpdateAssetField> = {
   paths: {
@@ -320,13 +374,17 @@ export const UPDATE_ASSET_FIELD_MAPPING: FieldMapping<UpdateAssetField> = {
     model: 'model',
     manufactureYear: 'manufactureYear',
   },
-  messages: SERVICE_MESSAGES,
+  messages: {
+    ...SERVICE_MESSAGES,
+    'Asset was modified by another request; reload and retry': ASSET_EDIT_CONFLICT_MESSAGE,
+  },
 };
 
 export function updateAsset(
   session: WebSession,
   assetId: string,
   request: UpdateAssetRequest,
+  expectedVersion: number,
   submissionId: string,
   fetchImpl?: typeof fetch,
 ): Promise<WriteResult<WrittenAsset, UpdateAssetField>> {
@@ -335,10 +393,71 @@ export function updateAsset(
     // an id containing a slash would otherwise address a different endpoint.
     path: `/v1/assets/${encodeURIComponent(assetId)}`,
     method: 'PATCH',
-    body: request,
+    // The version the form was drawn from: asset-service applies the edit to
+    // that version only and answers 409 otherwise, so a stale form cannot
+    // restore what somebody else changed.
+    body: { ...request, expectedVersion },
     submissionId,
     schema: responseSchema,
     mapping: UPDATE_ASSET_FIELD_MAPPING,
     fetchImpl,
   });
+}
+
+// ---------------------------------------------------------------------------
+// What the edit form was drawn from
+// ---------------------------------------------------------------------------
+
+const BASELINE_PURPOSE = 'asset-edit-baseline';
+
+/** A form left open all working day is still a form; one left open overnight is not. */
+const BASELINE_TTL_SECONDS = 12 * 60 * 60;
+
+const baselineSchema = z.object({
+  assetId: z.string().min(1).max(200),
+  version: z.number().int().min(1),
+  values: z
+    .object({
+      name: z.string().max(1000),
+      assetTag: z.string().max(1000),
+      manufacturer: z.string().max(1000),
+      model: z.string().max(1000),
+      manufactureYear: z.string().max(10),
+    })
+    .strict(),
+});
+
+export interface AssetEditBaseline {
+  readonly version: number;
+  readonly values: UpdateAssetFormValues;
+}
+
+/**
+ * The values and version the edit form was drawn from, signed for this session
+ * and this machine and carried in a hidden field.
+ *
+ * The action diffs against **this**, not against anything the browser says it
+ * saw: a form field the person can edit is a form field a script can edit, and
+ * a diff against a claimed baseline would let a claim decide what is "unchanged"
+ * and so what is sent. Signed, the only thing the browser controls is what the
+ * person typed.
+ */
+export function sealAssetBaseline(
+  session: WebSession,
+  assetId: string,
+  version: number,
+  values: UpdateAssetFormValues,
+): string {
+  return signPayload(session, BASELINE_PURPOSE, { assetId, version, values }, BASELINE_TTL_SECONDS);
+}
+
+/** The baseline, if `token` is one this session was given for `assetId`; otherwise `null`. */
+export function openAssetBaseline(
+  session: WebSession,
+  token: unknown,
+  assetId: string,
+): AssetEditBaseline | null {
+  const payload = verifyPayload(session, BASELINE_PURPOSE, token, baselineSchema);
+  if (!payload || payload.assetId !== assetId) return null;
+  return { version: payload.version, values: payload.values };
 }

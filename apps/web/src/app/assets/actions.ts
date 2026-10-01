@@ -4,6 +4,8 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { mintFlash } from '@/server/flash';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   parseRegisterAssetForm,
@@ -57,7 +59,9 @@ export async function submitRegisterAsset(
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
-    redirect(`/assets/${encodeURIComponent(result.data.id)}?created=1`);
+    redirect(
+      `/assets/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+    );
   }
 
   switch (result.kind) {

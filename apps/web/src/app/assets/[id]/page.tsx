@@ -1,9 +1,12 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { fetchDossier } from '@/server/assets';
-import { canManageAssets } from '@/server/asset-commands';
+import { fetchDossier, type AssetSummary } from '@/server/assets';
+import type { UpdateAssetFormValues } from '@/lib/asset-form-fields';
+import { canManageAssets, sealAssetBaseline } from '@/server/asset-commands';
 import { fetchCurrentUser } from '@/server/identity';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
 import { PORTAL_NAV } from '@/app/nav';
 import { DossierScreen } from './DossierScreen';
@@ -19,6 +22,17 @@ import { UpdateAssetForm } from './UpdateAssetForm';
  * the difference, and could not be trusted with it if it did.
  */
 export const dynamic = 'force-dynamic';
+
+/** The machine's current record as the edit form's text — the one source for what it shows and what it signs. */
+function editValuesOf(asset: AssetSummary): UpdateAssetFormValues {
+  return {
+    name: asset.name,
+    assetTag: asset.assetTag ?? '',
+    manufacturer: asset.manufacturer ?? '',
+    model: asset.model ?? '',
+    manufactureYear: asset.manufactureYear === null ? '' : String(asset.manufactureYear),
+  };
+}
 
 export default async function AssetDossierPage({
   params,
@@ -60,23 +74,25 @@ export default async function AssetDossierPage({
       <DossierScreen
         result={result}
         assetId={id}
-        notice={query.created === '1' ? 'created' : query.updated === '1' ? 'updated' : undefined}
+        notice={readFlash(
+          session,
+          typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,
+          id,
+          ['created', 'updated', 'conflict'],
+        )}
         editForm={
-          manage && result.kind === 'OK' ? (
+          manage && result.kind === 'OK' && result.data.asset.version !== undefined ? (
             <UpdateAssetForm
               assetId={id}
               csrfToken={session.csrfToken}
               submissionId={mintSubmissionId(session)}
-              initialValues={{
-                name: result.data.asset.name,
-                assetTag: result.data.asset.assetTag ?? '',
-                manufacturer: result.data.asset.manufacturer ?? '',
-                model: result.data.asset.model ?? '',
-                manufactureYear:
-                  result.data.asset.manufactureYear === null
-                    ? ''
-                    : String(result.data.asset.manufactureYear),
-              }}
+              baseline={sealAssetBaseline(
+                session,
+                id,
+                result.data.asset.version,
+                editValuesOf(result.data.asset),
+              )}
+              initialValues={editValuesOf(result.data.asset)}
             />
           ) : undefined
         }

@@ -42,7 +42,7 @@ test.describe('the maintenance route', () => {
   });
 
   test('keeps a request detail closed, and its confirmation with it', async ({ page }) => {
-    await page.goto('/maintenance/MRQ_1?created=1');
+    await page.goto('/maintenance/MRQ_1?created=1&flash=forged');
 
     await expect(page).toHaveURL(/\/login/);
     await expect(page.getByText(/درخواست ثبت شد/)).toHaveCount(0);

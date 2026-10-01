@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_REGISTER_ASSET_FORM } from '@/lib/asset-form-fields';
 
 import { RegisterAssetForm } from './RegisterAssetForm';
@@ -213,6 +213,7 @@ describe('UpdateAssetForm', () => {
         assetId="AST_1"
         csrfToken={CSRF}
         submissionId={SUBMISSION}
+        baseline="signed-baseline-token"
         initialValues={INITIAL}
       />,
     );
@@ -229,6 +230,13 @@ describe('UpdateAssetForm', () => {
     const { container } = renderForm();
     expect(container.querySelector(`input[name="${CSRF_FIELD}"]`)).toHaveValue(CSRF);
     expect(container.querySelector(`input[name="${SUBMISSION_FIELD}"]`)).toHaveValue(SUBMISSION);
+  });
+
+  it('carries the signed baseline it was drawn from, which the action diffs against', () => {
+    const { container } = renderForm();
+    expect(container.querySelector(`input[name="${BASELINE_FIELD}"]`)).toHaveValue(
+      'signed-baseline-token',
+    );
   });
 
   it('offers no type and no serial number: the service cannot change either', () => {
@@ -276,6 +284,7 @@ describe('UpdateAssetForm', () => {
   it.each([
     [{ kind: 'REFUSED', reason: 'NO_SESSION' } as const, /نشست شما پایان یافته/],
     [{ kind: 'REFUSED', reason: 'CSRF' } as const, /معتبر شناخته نشد/],
+    [{ kind: 'REFUSED', reason: 'BASELINE' } as const, /این فرم منقضی شده است/],
     [{ kind: 'FORBIDDEN', correlationId: 'corr-403' } as const, /corr-403/],
     [{ kind: 'FAILED', status: 503, correlationId: 'corr-503' } as const, /corr-503/],
     [{ kind: 'UNCONFIRMED', correlationId: 'corr-unk' } as const, /corr-unk/],

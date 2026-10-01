@@ -48,17 +48,21 @@ export interface DossierScreenProps {
    */
   readonly editForm?: ReactNode;
   /**
-   * Set by the write that sent the person here (`?created=1`, `?updated=1`).
-   * Display only: the query is attacker-controllable, so it can at worst put a
-   * harmless confirmation on a page the viewer is already allowed to read —
-   * and it is not rendered at all when the read failed.
+   * What the write that sent the person here did — decided by the page, which
+   * accepts it only from a flash the server signed for this session and this
+   * machine (`server/flash.ts`), never from a bare query value. Not rendered at
+   * all when the read failed.
    */
-  readonly notice?: 'created' | 'updated';
+  readonly notice?: 'created' | 'updated' | 'conflict';
 }
 
 const NOTICES = {
-  created: 'ماشین ثبت شد.',
-  updated: 'مشخصات ماشین ذخیره شد.',
+  created: { tone: 'success', text: 'ماشین ثبت شد.' },
+  updated: { tone: 'success', text: 'مشخصات ماشین ذخیره شد.' },
+  conflict: {
+    tone: 'warning',
+    text: 'همین ماشین پس از باز شدن فرم ویرایش، توسط کسی تغییر کرده بود؛ ویرایش شما ذخیره نشد. مشخصات فعلی را در فرم ببینید و اگر هنوز لازم است دوباره ویرایش کنید.',
+  },
 } as const;
 
 function Compliance({ dossier }: { dossier: AssetDossier }) {
@@ -203,7 +207,7 @@ export function DossierScreen({ result, assetId, editForm, notice }: DossierScre
         }
       />
 
-      {notice ? <Alert tone="success">{NOTICES[notice]}</Alert> : null}
+      {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 
       <Section headingId="identity" title="شناسنامه">
         <Grid columns={2}>

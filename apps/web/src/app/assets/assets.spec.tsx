@@ -223,6 +223,17 @@ describe('the electronic dossier', () => {
       expect(getByText(words).closest('[role="status"]')).not.toBeNull();
     });
 
+    it('says that an edit was not saved because the machine changed, as a warning', () => {
+      const { getByText } = render(
+        <DossierScreen result={ok()} assetId="AST_1" notice="conflict" />,
+      );
+      const words = getByText(/ویرایش شما ذخیره نشد/);
+      expect(words).toBeInTheDocument();
+      // A warning is not a success: it must not read as one to a screen reader.
+      expect(words.closest('[role="status"]')).toBeNull();
+      expect(words.closest('[role="alert"]')).not.toBeNull();
+    });
+
     it('says nothing when the page was opened without one', () => {
       const { queryByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
       expect(queryByText(/ماشین ثبت شد|مشخصات ماشین ذخیره شد/)).toBeNull();
@@ -233,8 +244,8 @@ describe('the electronic dossier', () => {
       [{ kind: 'FORBIDDEN' }],
       [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }],
     ] as const)('never confirms anything on a page whose read failed (%j)', (failed) => {
-      // `?created=1` can be typed by anybody; it must not put a confirmation in
-      // front of a machine the viewer cannot read.
+      // Even a genuine flash must not put a confirmation in front of a machine
+      // the viewer cannot read.
       const { queryByText } = render(
         <DossierScreen result={failed} assetId="AST_X" notice="created" />,
       );

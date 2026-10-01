@@ -259,8 +259,8 @@ describe('the maintenance request detail', () => {
     });
 
     it('never confirms anything on a page whose read failed', () => {
-      // `?created=1` can be typed by anybody; it must not put a confirmation
-      // in front of a request the viewer cannot read.
+      // Even a genuine flash must not put a confirmation in front of a request
+      // the viewer cannot read.
       const { queryByText } = render(
         <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" notice="created" />,
       );

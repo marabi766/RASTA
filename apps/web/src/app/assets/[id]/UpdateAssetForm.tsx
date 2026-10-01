@@ -4,7 +4,7 @@ import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { UpdateAssetField, UpdateAssetFormValues } from '@/lib/asset-form-fields';
 
 import { submitUpdateAsset } from './actions';
@@ -35,6 +35,7 @@ export function UpdateAssetForm({
   assetId,
   csrfToken,
   submissionId,
+  baseline,
   initialValues,
 }: {
   assetId: string;
@@ -46,6 +47,11 @@ export function UpdateAssetForm({
    * of this reference.
    */
   submissionId: string;
+  /**
+   * Signed by the server: the values and version `initialValues` came from.
+   * The action diffs against it, so only what the person changes is sent.
+   */
+  baseline: string;
   /** The machine's current record, as form text. */
   initialValues: UpdateAssetFormValues;
 }) {
@@ -62,6 +68,7 @@ export function UpdateAssetForm({
     <form action={action} className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={currentSubmissionId} />
+      <input type="hidden" name={BASELINE_FIELD} value={baseline} />
 
       <FormBanner state={state} />
 
@@ -150,7 +157,9 @@ function FormBanner({ state }: { state: UpdateAssetFormState }) {
       <Alert tone="danger">
         {state.reason === 'NO_SESSION'
           ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
-          : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
+          : state.reason === 'BASELINE'
+            ? 'این فرم منقضی شده است. صفحه را تازه کنید و دوباره ویرایش کنید.'
+            : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
       </Alert>
     );
   }

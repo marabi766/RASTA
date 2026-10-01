@@ -5,7 +5,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 
-import { ASSET_DISPLAY_TEXT, REGISTER_ASSET_FIELD_MAPPING } from './asset-commands';
+import {
+  ASSET_DISPLAY_TEXT,
+  ASSET_EDIT_CONFLICT_MESSAGE,
+  REGISTER_ASSET_FIELD_MAPPING,
+  UPDATE_ASSET_FIELD_MAPPING,
+} from './asset-commands';
 
 /**
  * The character rule and the sentences the asset form depends on, pinned to
@@ -167,5 +172,86 @@ describe('the request bodies', () => {
         'addressLine',
       ]),
     );
+  });
+});
+
+describe("the service's rule for `model`", () => {
+  const source = parse(read('dto.ts'));
+  const text = (name: string, key: string): string => {
+    const schema = topLevelConst(source, name);
+    const property = collect(schema, ts.isPropertyAssignment).find(
+      (node) => node.name.getText() === key,
+    );
+    if (!property) throw new Error(`\`${name}\` has no \`${key}\``);
+    return property.initializer.getText();
+  };
+
+  // The portal sends a model under exactly this rule and no character class
+  // (`modelText`). If the service tightens it — a display-text class, a
+  // shorter bound — these fail, and the form's copy has to follow.
+  it.each(['createAssetSchema', 'updateAssetSchema'])(
+    'is still trimmed text of 1 to 120 characters in %s, with no character class',
+    (name) => {
+      expect(text(name, 'model')).toMatch(
+        /^z\s*\.string\(\)\s*\.trim\(\)\s*\.min\(1\)\s*\.max\(120\)(\s*\.nullable\(\))?\s*\.optional\(\)$/,
+      );
+    },
+  );
+
+  it('is still the rule `name` and `manufacturer` do not share', () => {
+    // If `model` ever moved to `displayText`, the portal's looser rule would be
+    // wrong in the other direction, and this is where somebody would notice.
+    expect(text('createAssetSchema', 'manufacturer')).toContain('displayText');
+    expect(text('createAssetSchema', 'model')).not.toContain('displayText');
+  });
+});
+
+describe('the edit version', () => {
+  const dto = parse(read('dto.ts'));
+
+  it('is still an optional `expectedVersion` on the update schema, the portal always sends it', () => {
+    const update = topLevelConst(dto, 'updateAssetSchema');
+    const keys = collect(update, ts.isPropertyAssignment).map((node) => node.name.getText());
+    expect(keys).toContain('expectedVersion');
+  });
+
+  it('is still carried by the asset view, which is what the form reads it from', () => {
+    const view = dto.statements.find(
+      (statement): statement is ts.InterfaceDeclaration =>
+        ts.isInterfaceDeclaration(statement) && statement.name.text === 'AssetView',
+    );
+    expect(view?.members.map((member) => member.name?.getText())).toContain('version');
+  });
+
+  it('is applied in the UPDATE itself, not only checked after a read', () => {
+    const service = read('asset.service.ts');
+    expect(service).toMatch(
+      /\.\.\.\(expectedVersion !== undefined \? \{ version: expectedVersion \} : \{\}\)/,
+    );
+  });
+
+  it("answers a stale version with the platform's optimistic-lock error, whose sentence the portal translates", () => {
+    const platform = readFileSync(
+      join(
+        __dirname,
+        '..',
+        '..',
+        '..',
+        '..',
+        'packages',
+        'nest-common',
+        'src',
+        'errors',
+        'rasta-error.ts',
+      ),
+      'utf8',
+    );
+    expect(platform).toContain('was modified by another request; reload and retry');
+    expect(read('asset.service.ts')).toContain("RastaError.optimisticLockFailed('Asset', id)");
+    expect(
+      UPDATE_ASSET_FIELD_MAPPING.messages?.[
+        'Asset was modified by another request; reload and retry'
+      ],
+    ).toBe(ASSET_EDIT_CONFLICT_MESSAGE);
   });
 });

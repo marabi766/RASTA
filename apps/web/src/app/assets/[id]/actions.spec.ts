@@ -1,7 +1,10 @@
 /**
  * @jest-environment node
  */
+import { BASELINE_FIELD } from '@/lib/form-fields';
+import { sealAssetBaseline, ASSET_EDIT_CONFLICT_MESSAGE } from '@/server/asset-commands';
 import { CSRF_FIELD } from '@/server/csrf';
+import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
@@ -52,7 +55,18 @@ const ASSET_ID = 'AST_01J00000000000000000000000';
 /** The right length and alphabet, but not issued by `mintSubmissionId`. */
 const UNMINTED_ID = `sub_${'A'.repeat(38)}`;
 
-const VALID = { name: 'لودر کوماتسو', assetTag: 'AB-12', manufactureYear: '2019' };
+/** What the form was drawn from: the machine's record at version 5. */
+const BASELINE = {
+  name: 'لودر کوماتسو',
+  assetTag: 'AB-12',
+  manufacturer: '',
+  model: '',
+  manufactureYear: '2019',
+};
+const VERSION = 5;
+
+/** The form as posted after the person changed the tag and nothing else. */
+const VALID = { ...BASELINE, assetTag: 'AB-13' };
 
 /** What the page does: bind the id the form does not collect. */
 const submit = (form: FormData, id = ASSET_ID) =>
@@ -60,7 +74,12 @@ const submit = (form: FormData, id = ASSET_ID) =>
 
 function formData(
   fields: Record<string, string>,
-  options: { csrf?: string | null; submission?: string | null } = {},
+  options: {
+    csrf?: string | null;
+    submission?: string | null;
+    /** `undefined`: the one this server signed for this machine. */
+    baseline?: string | null;
+  } = {},
 ): FormData {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -69,6 +88,11 @@ function formData(
   const submission =
     options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
+  const baseline =
+    options.baseline === undefined
+      ? sealAssetBaseline(SESSION, ASSET_ID, VERSION, BASELINE)
+      : options.baseline;
+  if (baseline !== null) form.set(BASELINE_FIELD, baseline);
   return form;
 }
 
@@ -152,9 +176,63 @@ describe('what is refused before anything is called', () => {
   });
 });
 
+describe('the baseline: what the form was drawn from', () => {
+  it('refuses a post with no baseline, and calls nothing', async () => {
+    expect(await submit(formData(VALID, { baseline: null }))).toEqual({
+      kind: 'REFUSED',
+      reason: 'BASELINE',
+    });
+    expect(updateAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a baseline the client wrote itself, even a well-shaped one', async () => {
+    const forged = Buffer.from(
+      JSON.stringify({ assetId: ASSET_ID, version: 1, values: BASELINE, exp: 4_000_000_000 }),
+    ).toString('base64url');
+    expect(await submit(formData(VALID, { baseline: `${forged}.${'A'.repeat(43)}` }))).toEqual({
+      kind: 'REFUSED',
+      reason: 'BASELINE',
+    });
+    expect(updateAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a baseline signed for another machine', async () => {
+    const other = sealAssetBaseline(SESSION, 'AST_OTHER', VERSION, BASELINE);
+    expect(await submit(formData(VALID, { baseline: other }))).toEqual({
+      kind: 'REFUSED',
+      reason: 'BASELINE',
+    });
+    expect(updateAsset).not.toHaveBeenCalled();
+  });
+
+  it('refuses a baseline signed for somebody else, or from an earlier login', async () => {
+    for (const session of [
+      { ...SESSION, subject: 'someone-else' },
+      { ...SESSION, csrfToken: 'the-token-before-re-login' },
+    ]) {
+      const token = sealAssetBaseline(session, ASSET_ID, VERSION, BASELINE);
+      expect(await submit(formData(VALID, { baseline: token }))).toEqual({
+        kind: 'REFUSED',
+        reason: 'BASELINE',
+      });
+    }
+    expect(updateAsset).not.toHaveBeenCalled();
+  });
+});
+
 describe('what the form itself catches', () => {
+  it('says so, and calls nothing, when nothing changed', async () => {
+    const state = await submit(formData(BASELINE));
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: {},
+      message: expect.stringContaining('چیزی تغییر نکرده'),
+    });
+    expect(updateAsset).not.toHaveBeenCalled();
+  });
+
   it('does not call the service when the name was cleared', async () => {
-    const state = await submit(formData({ ...VALID, name: '' }));
+    const state = await submit(formData({ ...BASELINE, name: '' }));
     expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { name: expect.any(String) } });
     expect(updateAsset).not.toHaveBeenCalled();
   });
@@ -162,7 +240,7 @@ describe('what the form itself catches', () => {
   it('keeps what the person typed, and the submission id it came with', async () => {
     const submission = mintSubmissionId(SESSION);
     const state = await submit(
-      formData({ ...VALID, manufactureYear: '99', model: 'WA320' }, { submission }),
+      formData({ ...BASELINE, manufactureYear: '99', model: 'WA320' }, { submission }),
     );
     expect(state).toMatchObject({
       kind: 'INVALID',
@@ -170,12 +248,30 @@ describe('what the form itself catches', () => {
       values: { name: 'لودر کوماتسو', model: 'WA320', manufactureYear: '99' },
     });
   });
+
+  it('does not let a field the person did not touch block the save', async () => {
+    // The stored manufacturer breaks a rule this portal now applies; the person
+    // is changing the tag, and the manufacturer is neither sent nor validated.
+    const stored = { ...BASELINE, manufacturer: 'a<b' };
+    const token = sealAssetBaseline(SESSION, ASSET_ID, VERSION, stored);
+    await expect(
+      submit(formData({ ...stored, assetTag: 'AB-13' }, { baseline: token })),
+    ).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(updateAsset.mock.calls[0][2]).toEqual({ assetTag: 'AB-13' });
+  });
 });
 
 describe('what reaches the service', () => {
-  it('redirects back to the dossier with the update confirmed', async () => {
+  it('redirects back to the dossier with a flash the server signed for this machine', async () => {
     await expect(submit(formData(VALID))).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith(`/assets/${ASSET_ID}?updated=1`);
+
+    const url = redirect.mock.calls[0][0] as string;
+    const [path, query] = url.split('?');
+    expect(path).toBe(`/assets/${ASSET_ID}`);
+    const flash = new URLSearchParams(query).get('flash');
+    expect(readFlash(SESSION, flash, ASSET_ID, ['updated'])).toBe('updated');
+    // A bare `?updated=1` is no longer what a write produces.
+    expect(url).not.toContain('updated=1');
   });
 
   it('redirects to the id it was bound to, percent-encoded, not to anything the service returned', async () => {
@@ -184,8 +280,9 @@ describe('what reaches the service', () => {
       data: { id: 'SOMETHING_ELSE' },
       correlationId: 'corr-sample',
     });
-    await expect(submit(formData(VALID), 'a/b?c')).rejects.toThrow();
-    expect(redirect).toHaveBeenCalledWith('/assets/a%2Fb%3Fc?updated=1');
+    const token = sealAssetBaseline(SESSION, 'a/b?c', VERSION, BASELINE);
+    await expect(submit(formData(VALID, { baseline: token }), 'a/b?c')).rejects.toThrow();
+    expect(redirect.mock.calls[0][0]).toMatch(/^\/assets\/a%2Fb%3Fc\?flash=/);
   });
 
   it('acts on the bound id, and a posted field of the same name cannot change it', async () => {
@@ -200,21 +297,31 @@ describe('what reaches the service', () => {
     expect(request).not.toHaveProperty('assetId');
   });
 
-  it('sends every field, as a value or null, under the session — not the raw form', async () => {
+  it('sends only the fields that changed, and the version the form was drawn from', async () => {
     const submission = mintSubmissionId(SESSION);
     await expect(
-      submit(formData({ ...VALID, manufactureYear: '۱۴۰۲' }, { submission })),
+      submit(
+        formData({ ...BASELINE, manufactureYear: '۱۴۰۲', manufacturer: 'کوماتسو' }, { submission }),
+      ),
     ).rejects.toThrow();
 
-    const [, , request, submissionId] = updateAsset.mock.calls[0];
-    expect(request).toEqual({
-      name: 'لودر کوماتسو',
-      assetTag: 'AB-12',
-      manufacturer: null,
-      model: null,
-      manufactureYear: 1402,
-    });
+    const [, , request, expectedVersion, submissionId] = updateAsset.mock.calls[0];
+    // `name` and `assetTag` came back as they were drawn, so they are not here.
+    expect(request).toEqual({ manufacturer: 'کوماتسو', manufactureYear: 1402 });
+    expect(expectedVersion).toBe(VERSION);
     expect(submissionId).toBe(submission);
+  });
+
+  it('sends a blanked field as null', async () => {
+    await expect(submit(formData({ ...BASELINE, assetTag: '' }))).rejects.toThrow();
+    expect(updateAsset.mock.calls[0][2]).toEqual({ assetTag: null });
+  });
+
+  it('takes the version from the signed baseline, never from a posted field', async () => {
+    await expect(
+      submit(formData({ ...VALID, version: '1', expectedVersion: '1' })),
+    ).rejects.toThrow();
+    expect(updateAsset.mock.calls[0][3]).toBe(VERSION);
   });
 
   it('carries the same reference when one rendered form is posted twice', async () => {
@@ -226,11 +333,29 @@ describe('what reaches the service', () => {
     await expect(submit(form())).rejects.toThrow(/NEXT_REDIRECT/);
     await expect(submit(form())).rejects.toThrow(/NEXT_REDIRECT/);
 
-    expect(updateAsset.mock.calls.map((args) => args[3])).toEqual([submission, submission]);
+    expect(updateAsset.mock.calls.map((args) => args[4])).toEqual([submission, submission]);
   });
 });
 
 describe('what the service refuses', () => {
+  it('sends the person to a fresh read, with a signed notice, when the machine changed after the form was drawn', async () => {
+    updateAsset.mockResolvedValue({
+      kind: 'INVALID',
+      fieldErrors: {},
+      message: ASSET_EDIT_CONFLICT_MESSAGE,
+      correlationId: 'corr-sample',
+    });
+
+    await expect(submit(formData(VALID))).rejects.toThrow(/NEXT_REDIRECT/);
+
+    const url = redirect.mock.calls[0][0] as string;
+    expect(url.startsWith(`/assets/${ASSET_ID}?flash=`)).toBe(true);
+    const flash = new URLSearchParams(url.split('?')[1]).get('flash');
+    // Not offered back for another try against the same stale baseline: that
+    // would only conflict again.
+    expect(readFlash(SESSION, flash, ASSET_ID, ['conflict'])).toBe('conflict');
+  });
+
   it('returns the service field errors with the values still in hand', async () => {
     updateAsset.mockResolvedValue({
       kind: 'INVALID',
@@ -242,7 +367,7 @@ describe('what the service refuses', () => {
     expect(await submit(formData(VALID))).toMatchObject({
       kind: 'INVALID',
       fieldErrors: { assetTag: 'شمارهٔ دارایی تکراری است' },
-      values: { assetTag: 'AB-12' },
+      values: { assetTag: 'AB-13' },
     });
     expect(redirect).not.toHaveBeenCalled();
   });

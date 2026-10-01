@@ -29,9 +29,11 @@ test.describe('the assets routes', () => {
   });
 
   test('keep a machine dossier, its edit form and its confirmations closed', async ({ page }) => {
-    // `?created=1` and `?updated=1` are attacker-controllable; they must not
-    // become a way to render a confirmation, a form or an id for a stranger.
-    await page.goto('/assets/AST_01J00000000000000000000000?created=1&updated=1');
+    // The query is attacker-controllable: neither the old bare flags nor a
+    // made-up flash may become a way to render a confirmation, a form or an id
+    // for a stranger. (A real flash is signed per session and is covered by
+    // `server/flash.spec.ts`; here nobody is signed in at all.)
+    await page.goto('/assets/AST_01J00000000000000000000000?created=1&updated=1&flash=forged');
 
     await expect(page).toHaveURL(/\/login/);
     await expect(page.getByText(/ماشین ثبت شد|مشخصات ماشین ذخیره شد/)).toHaveCount(0);
