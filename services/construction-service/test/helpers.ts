@@ -27,6 +27,11 @@ import {
 } from '../src/approval/policy-reconciliation.sweeper';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
+import { BidRepository } from '../src/tender/bid.repository';
+import { BidService } from '../src/tender/bid.service';
+import { TenderClock } from '../src/tender/tender-clock';
+import { decisionInstant } from '../src/shared/clock';
+import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { ContractorStandingRepository } from '../src/tender/contractor-standing.repository';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
@@ -147,7 +152,20 @@ export interface Wiring {
   /** Contractor standing (CON-002 PR 5): the read model and its consumer's handler. */
   standing: ContractorStandingRepository;
   supplierEvents: SupplierStandingConsumer;
+  /** CON-002 PR 6: bids, over a clock a test may pin (`clock.fixed`); unpinned it is the database's. */
+  bidRepository: BidRepository;
+  bids: BidService;
+  clock: TestTenderClock;
   close(): Promise<void>;
+}
+
+/** The tender clock with an optional pinned instant; the module's provider seam (ADR-065 § 2). */
+export class TestTenderClock extends TenderClock {
+  fixed: Date | undefined;
+
+  decisionInstant(tx: ExtendedPrismaClient): Promise<Date> {
+    return this.fixed ? Promise.resolve(this.fixed) : decisionInstant(tx);
+  }
 }
 
 /**
@@ -180,6 +198,8 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     tenderRepository,
   );
   const standing = new ContractorStandingRepository(prisma);
+  const bidRepository = new BidRepository(prisma);
+  const clock = new TestTenderClock();
   const reconciliations = new PolicyReconciliationRepository(prisma);
   const suspension = new PolicySuspensionService(
     prisma,
@@ -230,6 +250,9 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       standing,
       { info: () => undefined, warn: () => undefined, debug: () => undefined },
     ),
+    bidRepository,
+    clock,
+    bids: new BidService(prisma, bidRepository, standing, events, access, clock),
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
     tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
@@ -387,6 +410,24 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
       await tx.$executeRawUnsafe('ALTER TABLE "tender_key" DISABLE TRIGGER "tg_tender_key_guard"');
       await tx.tenderKey.deleteMany({ where });
       await tx.$executeRawUnsafe('ALTER TABLE "tender_key" ENABLE TRIGGER "tg_tender_key_guard"');
+      // A bid is never deleted, and its receipts and access log are append-only.
+      for (const [table, trigger] of [
+        ['bid', 'tg_bid_guard'],
+        ['bid_receipt', 'tg_bid_receipt_append_only'],
+        ['bid_access_log', 'tg_bid_access_log_append_only'],
+      ] as const) {
+        await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
+      }
+      await tx.bidAccessLog.deleteMany({ where });
+      await tx.bidReceipt.deleteMany({ where });
+      await tx.bid.deleteMany({ where });
+      for (const [table, trigger] of [
+        ['bid', 'tg_bid_guard'],
+        ['bid_receipt', 'tg_bid_receipt_append_only'],
+        ['bid_access_log', 'tg_bid_access_log_append_only'],
+      ] as const) {
+        await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
+      }
     });
     await owner.tenderInvitation.deleteMany({ where });
     await owner.tender.deleteMany({ where });
@@ -511,6 +552,85 @@ export function asUser<T>(
     fn,
   );
 }
+
+/** Runs `fn` as a contractor of `organizationId` (the bidder side, ADR-066 § 4). */
+export function asBidder<T>(organizationId: string, fn: () => T, userId = newUserId()): T {
+  return asUser(organizationId, ['CONTRACTOR'], fn, userId);
+}
+
+/** Makes `organizationId` an eligible contractor: qualified for CONTRACTING, not suspended (PR 5). */
+export async function qualify(w: Wiring, organizationId: string): Promise<void> {
+  await w.standing.recordQualified(organizationId, new Date(Date.now() - 60_000));
+}
+
+/**
+ * A PUBLISHED tender of a fresh organization that bidders may bid on right now:
+ * the window opened an hour ago and closes in two, criteria PRICE and LICENCE, and
+ * — when RESTRICTED — `invited` invited. Published through the approved core
+ * (`publishApproved`), since the route's approval gate is closed until PR 11.
+ */
+export async function publishedForBids(
+  w: Wiring,
+  organizationId: string,
+  options: { visibility?: 'PUBLIC' | 'RESTRICTED'; invited?: string[] } = {},
+): Promise<{ tenderId: string; keyId: string }> {
+  const project = await approvedProject(w, organizationId);
+  const visibility = options.visibility ?? 'PUBLIC';
+  const tender = await asAdmin(organizationId, () =>
+    w.tenders.create(project.id, {
+      title: 'Road resurfacing',
+      scopeOfWork: 'Two kilometres of the main road',
+      procurementNature: 'FORMAL_TENDER',
+      visibility,
+      bidOpeningAt: new Date(Date.now() - 3_600_000).toISOString(),
+      bidClosingAt: new Date(Date.now() + 2 * 3_600_000).toISOString(),
+    }),
+  );
+  const set = await asAdmin(organizationId, () =>
+    w.criteria.setCriteria(tender.id, {
+      expectedVersion: tender.version,
+      criteria: [
+        {
+          code: 'PRICE',
+          label: 'Price',
+          weightBp: 6000,
+          scoringMethod: 'MANUAL_SCORE',
+          maxScore: 100,
+        },
+        {
+          code: 'LICENCE',
+          label: 'Licence',
+          weightBp: 4000,
+          scoringMethod: 'PASS_FAIL',
+          maxScore: 1,
+        },
+      ],
+    }),
+  );
+  for (const invitee of options.invited ?? []) {
+    await asAdmin(organizationId, () =>
+      w.publication.invite(tender.id, { organizationId: invitee }),
+    );
+  }
+  const published = await asAdmin(organizationId, () =>
+    w.publication.publishApproved(tender.id, { expectedVersion: set.version }),
+  );
+  const key = await asAdmin(
+    organizationId,
+    async () => await w.prisma.client.tenderKey.findFirst({ where: { tenderId: published.id } }),
+  );
+  return { tenderId: published.id, keyId: key!.keyId };
+}
+
+/** A bid's content, with a price and an answer to the tender's two criteria. */
+export const bidContent = (priceMinor = '1250000000') => ({
+  priceMinor,
+  answers: [
+    { criterionCode: 'PRICE', response: 'Fixed price, materials included' },
+    { criterionCode: 'LICENCE', response: 'Licence 1234, valid' },
+  ],
+  note: 'Mobilisation within ten days',
+});
 
 /** Runs `fn` as the union administrator of `organizationId` (a policy author, Q-70 (7)). */
 export function asSetter<T>(organizationId: string, fn: () => T): T {

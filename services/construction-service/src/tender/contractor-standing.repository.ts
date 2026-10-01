@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 
 /** Why a suspension event could not be folded; both are verdicts on the event, not failures. */
 export type SuspensionRefusal = 'ORGANIZATION_MISMATCH' | 'EPISODE_OUT_OF_ORDER';
@@ -73,11 +73,14 @@ export class ContractorStandingRepository {
    * `CONTRACTING` and in no open suspension episode. An organization this
    * service has heard nothing about is **not** eligible (fail closed).
    */
-  async isEligible(organizationId: string): Promise<boolean> {
+  async isEligible(
+    organizationId: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<boolean> {
     const rows = await runUnscoped(
       "reading one contractor's standing for a bid, which belongs to that organization (ADR-067 § 4)",
       () =>
-        this.prisma.client.$queryRawUnsafe<{ eligible: boolean }[]>(
+        client.$queryRawUnsafe<{ eligible: boolean }[]>(
           `SELECT (s.contracting_qualified_at IS NOT NULL
                    AND NOT EXISTS (SELECT 1 FROM contractor_suspension x
                                     WHERE x.organization_id = s.organization_id
