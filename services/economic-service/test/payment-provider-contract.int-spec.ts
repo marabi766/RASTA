@@ -11,6 +11,7 @@ import type {
   PaymentProvider,
   ProviderPaymentStatus,
   RefundResult,
+  RefundStatusResult,
 } from '../src/payment/provider';
 
 /**
@@ -43,6 +44,7 @@ import type {
 class SilentlyRefusingProvider implements PaymentProvider {
   readonly name = 'silent-test-double';
   readonly simulated = true;
+  readonly authoritativeAbsence = false;
 
   constructor(private readonly refuse: 'authorize' | 'capture' | 'refund') {}
 
@@ -79,12 +81,17 @@ class SilentlyRefusingProvider implements PaymentProvider {
   async getStatus(): Promise<ProviderPaymentStatus> {
     return 'UNKNOWN';
   }
+
+  async getRefundStatus(): Promise<RefundStatusResult> {
+    return { refund: 'UNKNOWN', authoritative: false, simulated: true };
+  }
 }
 
 /** A provider that moves real money, so the disclosure must say so. */
 class LiveProvider implements PaymentProvider {
   readonly name = 'live-test-double';
   readonly simulated = false;
+  readonly authoritativeAbsence = false;
 
   async authorize(request: AuthorizeRequest): Promise<AuthorizeResult> {
     return {
@@ -101,6 +108,9 @@ class LiveProvider implements PaymentProvider {
   }
   async getStatus(): Promise<ProviderPaymentStatus> {
     return 'UNKNOWN';
+  }
+  async getRefundStatus(): Promise<RefundStatusResult> {
+    return { refund: 'UNKNOWN', authoritative: false, simulated: false };
   }
 }
 
