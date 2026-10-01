@@ -521,7 +521,15 @@ PATCH  /v1/rewards/rules/{id}                      اصلاح قاعده   (SYST
 GET    /v1/payment-intents                         فهرست پرداخت‌ها
 GET    /v1/payment-intents/{id}                    یک پرداخت
 POST   /v1/payment-intents/{id}/refund             بازگشت شارژ — با Reversal   [K]
+GET    /v1/payment-intents/{id}/reconciliation     تسک آشتی و پیشنهادهای حل انسانی   (حل‌کننده، ADR-064 B3)
+POST   /v1/payment-intents/{id}/reconciliation/requeue                          بازگرداندن تسک به آشتی‌دهنده   [K] (حل‌کننده)
+POST   /v1/payment-intents/{id}/reconciliation/resolutions                      پیشنهاد حل با شاهد الزامی — بی جابه‌جایی پول   [K] (حل‌کننده)
+POST   /v1/payment-intents/{id}/reconciliation/resolutions/{rid}/approve        تأیید نفر دوم — تنها گام جابه‌جایی پول   [K] (حل‌کننده، نه پیشنهاددهنده، نه سازنده)
+POST   /v1/payment-intents/{id}/reconciliation/resolutions/{rid}/reject         رد نفر دوم   [K] (حل‌کننده، نه پیشنهاددهنده، نه سازنده)
 ```
+
+«حل‌کننده» یعنی کاربر انسانی با یکی از نقش‌های `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES` (پیش‌فرض
+`SYSTEM_ADMIN`، Q-82)؛ جداسازی وظایف با `ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES` (پیش‌فرض روشن).
 
 **قابلیت‌های هدف — PLANNED، نه API موجود**
 

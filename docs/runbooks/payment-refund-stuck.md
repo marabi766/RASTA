@@ -56,7 +56,7 @@ Provider بیرون از تراکنش، (۳) برگرداندن Hold و معکو
 
 دو علامت دیگر روی Intent در `AUTHORIZED` (نه بازپرداخت اپراتور، بلکه Capture‌ای که اعتبار نگرفت) هم هست: `CAPTURED_NOT_CREDITED`
 (Provider بازپرداختِ جبرانی را **رد کرد**؛ تلاش دوبارهٔ Top-up با همان کلید اعتبار را ثبت می‌کند) و `CAPTURED_REFUND_UNKNOWN`
-(نامعلوم؛ **هیچ** تلاش دوباره‌ای اعتبار نمی‌دهد). دومی هم مثل § ۴ پاسخ Provider می‌خواهد و تا گام B راه API ندارد.
+(نامعلوم؛ **هیچ** تلاش دوباره‌ای اعتبار نمی‌دهد). دومی هم مثل § ۴ پاسخ Provider می‌خواهد و با همان مسیر § ۴-۲ حل می‌شود.
 
 ---
 
@@ -151,40 +151,53 @@ API این‌ها را **عمداً رد می‌کند**: بدون دانستن 
 - از Provider وضعیت **همان مرجع و همان کلید** را بپرس و پاسخ نوشته‌شدهٔ آن را (شناسهٔ تراکنش Provider، زمان، وضعیت) به‌عنوان شاهد
   نگه دار. بدون شاهد نوشته‌شده جلو نرو.
 - **با `MockPaymentProvider`:** حافظهٔ Mock درون فرایند است و پس از Restart هیچ نمی‌داند (`getStatus` پاسخ `UNKNOWN` می‌دهد).
-  آن پاسخ **شاهد نیست** — نه شاهد بازپرداخت، نه شاهد رد. روی دادهٔ شبیه‌سازی‌شده، Intent را در همین وضعیت (با Hold) بگذار تا گام B.
+  آن پاسخ **شاهد نیست** — نه شاهد بازپرداخت، نه شاهد رد. روی دادهٔ شبیه‌سازی‌شده بی شاهد پیشنهاد نده؛ Intent در همین وضعیت (با Hold) می‌ماند.
 
-### ۴-۲. با شاهد چه کنی (تا گام B)
+### ۴-۲. با شاهد: پیشنهاد، سپس تأیید نفر دوم (ADR-064 گام B3)
 
-تا گام B هیچ Endpoint حل انسانی وجود ندارد. **تنها** تغییری که این Runbook اجازه می‌دهد، تبدیل علامتِ نامعلوم به علامتِ
-معلوم متناظر است، تا خود سرویس با مسیر عادی § ۳ حلش کند — هیچ ردیف دفتر کل، Journal، Hold یا موجودی دستی تغییر نمی‌کند:
+هیچ ستونی دستی تغییر نمی‌کند — نه علامت، نه تسک، نه موجودی. حل انسانی فقط از این Endpointها می‌گذرد و هر کدام رویداد
+Audit می‌سازد. همه `Idempotency-Key` می‌خواهند. نقش مجاز با `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES` تعیین می‌شود
+(پیش‌فرض `SYSTEM_ADMIN`، Q-82) و فقط کاربر انسانی؛ `AUDITOR` هرگز.
 
-| شاهد Provider                     | علامت را به این تبدیل کن              | سپس         |
-| --------------------------------- | ------------------------------------- | ----------- |
-| بازپرداخت انجام شده است           | `REFUNDED_NOT_REVERSED`               | § ۳-الف     |
-| بازپرداخت انجام نشده / رد شده است | `REFUND_DECLINED_RELEASE_PENDING`     | § ۳-ب       |
-| Provider هم نمی‌داند              | **هیچ تغییری** — Hold بماند، تشدید کن | منتظر گام B |
-
-```sql
--- فقط با شاهد نوشته‌شدهٔ Provider، فقط یک ردیف، فقط از یکی از دو علامت نامعلوم.
--- مجوز (Q-82، تصمیم موقت): SYSTEM_ADMIN؛ نه کسی که Intent را ساخت (created_by).
-UPDATE payment_intent
-   SET failure_reason = '<REFUNDED_NOT_REVERSED | REFUND_DECLINED_RELEASE_PENDING>'
- WHERE id = '<payment_intent_id>'
-   AND organization_id = '<organization_id>'
-   AND status = 'CAPTURED'
-   AND failure_reason IN ('REFUND_REQUESTED', 'REFUND_UNKNOWN');
--- باید دقیقاً یک ردیف تغییر کند؛ اگر صفر بود، کس دیگری حلش کرده — توقف.
+```http
+GET  /v1/payment-intents/{id}/reconciliation                                      # تسک و همهٔ پیشنهادها
+POST /v1/payment-intents/{id}/reconciliation/resolutions                          # پیشنهاد (نفر اول)
+POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve   # تأیید (نفر دوم) — تنها گامی که پول جابه‌جا می‌کند
+POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject    # رد (نفر دوم)
+POST /v1/payment-intents/{id}/reconciliation/requeue                              # بازگرداندن به آشتی‌دهنده (یک نفر)
 ```
 
-تسک باز Intent را دست نزن: فراخوانی § ۳ آن را در همان تراکنشی می‌بندد که نتیجه را ثبت می‌کند (`resolution` = `REFUNDED` یا
-`REFUND_DECLINED`).
+1. **پیشنهاد** — بدنه:
+   `{ "providerOutcome": "REFUNDED" | "DECLINED" | "NOT_REACHED", "evidenceReference": "<شمارهٔ تیکت یا شناسهٔ سند>", "reason": "…" }`.
+   `evidenceReference` **الزامی** است و فقط یک مرجع است (۳ تا ۱۲۸ نویسه از حروف و رقم و `. _ : / -`)، نه متن آزاد و نه خودِ
+   صورت‌حساب Provider: آن را پیوست تیکت کن. پیشنهاد **هیچ چیز را جابه‌جا نمی‌کند** (`PENDING_APPROVAL`).
 
-این UPDATE خودش رویداد Audit نمی‌سازد. در تیکت ثبت کن: شناسهٔ Intent و سازمان، علامت قبلی و جدید، شاهد Provider (پیوست)، نام
-اجراکننده و زمان. پاسخ § ۳ رویدادهای عادی (`FUNDS_RELEASED`، `JOURNAL_POSTED`، …) را منتشر می‌کند و آن‌ها به `audit-service`
-می‌رسند.
+   | شاهد Provider                     | `providerOutcome` | پس از تأیید                                                                                                                  |
+   | --------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+   | بازپرداخت انجام شده است           | `REFUNDED`        | معکوس Top-up و برگشت Hold (`REFUNDED`)؛ برای `CAPTURED_REFUND_UNKNOWN`: Intent `FAILED` (`CAPTURE_NOT_CREDITED`)             |
+   | Provider رد کرده است              | `DECLINED`        | Hold به کیف پول برمی‌گردد (`REFUND_DECLINED`)؛ برای `CAPTURED_REFUND_UNKNOWN`: `CAPTURED_NOT_CREDITED` (تلاش دوبارهٔ Top-up) |
+   | Provider تأیید می‌کند هرگز نرسیده | `NOT_REACHED`     | مانند `DECLINED` (`REFUND_NOT_REACHED`)                                                                                      |
+   | Provider هم نمی‌داند              | — پیشنهاد نده     | Hold بماند؛ تسک `ESCALATED` می‌ماند                                                                                          |
 
-`CAPTURED_REFUND_UNKNOWN` (Intent در `AUTHORIZED`) با این جدول حل نمی‌شود — مسیر API ندارد. شاهد را بگیر، ثبت کن و تا گام B
-نگه دار.
+2. **تأیید یا رد** — نفر دوم، که **نه پیشنهاددهنده است و نه سازندهٔ Intent** (`created_by`؛ وگرنه `403`)، شاهد پیوست تیکت را با
+   پیشنهاد مقایسه می‌کند و با `{ "reason": "…" }` تأیید یا رد می‌کند. تأیید همان مسیر کد آشتی‌دهنده را زیر همان قفل‌ها اجرا
+   می‌کند و تسک را با `resolved_by` = تأییدکننده `DONE` می‌کند. پس از رد، پیشنهاد تازه‌ای مجاز است.
+3. **بازگرداندن** (`requeue`) — اگر Provider سوابقش را بازیافته، تسک را با تلاش‌های صفرشده به آشتی‌دهنده برگردان؛ پول جابه‌جا
+   نمی‌شود، پس یک نفر کافی است.
+
+| پاسخ                           | یعنی                                                                                                                                                       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `409 ALREADY_EXISTS`           | پیشنهاد دیگری منتظر تأیید است؛ اول آن را تأیید یا رد کن                                                                                                    |
+| `409 INVALID_STATE_TRANSITION` | آشتی‌دهنده همین حالا تسک را در دست دارد (کمی بعد دوباره)، تسک بازی نیست، پیشنهاد قبلاً تصمیم گرفته شده، یا Intent دیگر در آن وضعیت نیست (پیشنهاد را رد کن) |
+| `422 BUSINESS_RULE_VIOLATION`  | علامت معلوم است (§ ۳؛ یا `requeue`)، یا `REFUNDED` از کیف پول غیرفعال (§ ۲) — پیشنهاد منتظر می‌ماند                                                        |
+| `403`                          | نقش مجاز نیست، یا جداسازی وظایف (پیشنهاددهنده/سازنده)                                                                                                      |
+
+**جداسازی وظایف** (`ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES`) پیش‌فرض روشن است و سرویس خاموش‌بودنش را بیرون از
+`development` و `test` نمی‌پذیرد؛ وقتی خاموش است پیشنهاد بی‌درنگ با همان شخص تأیید و همین‌طور ثبت می‌شود (`fourEyes: false`).
+
+هر گام رویداد دارد: `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`REQUEUED`، `PROPOSED`، `REJECTED`) و برای تأیید
+`PAYMENT_RECONCILIATION_RESOLVED` با `proposedBy`، `approvedBy`، `evidenceReference` و `fourEyes` — هر دو به `audit-service`
+می‌رسند. تیکت را با شناسهٔ `resolutionId` ببند.
 
 ---
 
@@ -195,6 +208,8 @@ UPDATE payment_intent
 - هرگز ردیف `ledger_entry`، `journal`، `wallet_hold` یا ستون‌های موجودی `wallet` را دستی تغییر نده یا حذف نکن (AGENTS.md A-06؛
   Triggerهای تغییرناپذیری جلویش را می‌گیرند و درست هم هست). Hold فقط با مسیر کد برمی‌گردد.
 - هرگز `payment_intent.status` را دستی به `REFUNDED`، `FAILED` یا وضعیت دیگری تغییر نده.
+- هرگز `payment_intent.failure_reason` (علامت) یا ردیف `payment_reconciliation_resolution` را دستی تغییر نده؛ از گام B3 حل انسانی
+  فقط با Endpointهای § ۴-۲ است.
 - هرگز بازپرداخت را **با کلید Idempotency تازه** مستقیم از Provider نخواه — این همان پرداخت دوباره است.
 - هرگز Intent را بی شاهد Provider از `REFUND_REQUESTED`/`REFUND_UNKNOWN` بیرون نیاور، حتی اگر کاربر اصرار کند.
 - هرگز Hold را برای «آزاد کردن پول کاربر» دستی آزاد نکن؛ Hold همان چیزی است که جلوی دوبار برگشتن پول را می‌گیرد.
@@ -208,8 +223,7 @@ UPDATE payment_intent
 - موجودی کیف پول با دفتر کل می‌خواند؟ `LedgerBalanceAudit` را ببین ([ledger-imbalance](ledger-imbalance.md)).
 - تیکت را با شاهد و نتیجه ببند.
 
-## وقتی گام B کامل شود
+## گام B کامل است
 
-ADR-064 گام B سه بخش دارد. **B1** (صف تسک) و **B2** (آشتی‌دهنده، § ۰) آمده‌اند. **B3** Endpoint حل انسانی را می‌آورد
-(`SYSTEM_ADMIN`، شاهد الزامی، **تأیید دونفره**، Q-82). آن زمان § ۴-۲ (UPDATE دستی علامت) حذف می‌شود و این Runbook به آن Endpoint
-اشاره می‌کند.
+ADR-064 گام B سه بخش داشت: **B1** (صف تسک)، **B2** (آشتی‌دهنده، § ۰) و **B3** (حل انسانی با تأیید دونفره، § ۴-۲). UPDATE دستی
+علامت که پیش از B3 در § ۴-۲ بود حذف شده است و دیگر مجاز نیست.
