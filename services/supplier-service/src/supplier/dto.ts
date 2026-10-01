@@ -333,3 +333,63 @@ export type SupplierDirectoryView = z.infer<typeof supplierDirectoryViewSchema>;
 export type QualificationView = z.infer<typeof qualificationViewSchema>;
 export type SuspensionView = z.infer<typeof suspensionViewSchema>;
 export type SupplierDetailView = z.infer<typeof supplierDetailViewSchema>;
+
+// ---------------------------------------------------------------------------
+// The standing snapshot (construction-service's bootstrap, CON-002 PR 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * A page of the snapshot. Keyset on the supplier id, like every other list here;
+ * the limit is the platform's own bound.
+ */
+export const standingSnapshotQuerySchema = cursorPaginationSchema.strict();
+
+export type StandingSnapshotQuery = z.infer<typeof standingSnapshotQuerySchema>;
+
+/**
+ * What one supplier organization's standing is, and nothing else: when its
+ * CONTRACTING qualification was approved (the latest approval), and its
+ * suspension episodes by id with their instants. **No reason, no operator, no
+ * evidence, no note, no name** — the same facts the `rasta.supplier.v1` events
+ * carry, and no more (`docs/07` § 7.3; ADR-066-style minimisation).
+ */
+export const standingSnapshotItemSchema = z
+  .object({
+    organizationId: z.string(),
+    contractingApprovedAt: z.string().nullable(),
+    suspensions: z.array(
+      z
+        .object({
+          suspensionId: z.string(),
+          suspendedAt: z.string(),
+          reinstatedAt: z.string().nullable(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export type StandingSnapshotItem = z.infer<typeof standingSnapshotItemSchema>;
+
+export const standingSnapshotPageSchema = z
+  .object({
+    items: z.array(standingSnapshotItemSchema),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
+    /** The database's instant this page was read at. */
+    snapshotAt: z.string(),
+  })
+  .strict();
+
+export type StandingSnapshotPage = z.infer<typeof standingSnapshotPageSchema>;
+
+/**
+ * One organization's current standing, read at the moment of asking: the same
+ * shape as a snapshot item, plus the database instant it was read at. An
+ * organization with no supplier profile is a 200 with no approval and no episodes
+ * (not a 404: only the owner's own not-found means "there is none", ADR-061 § 4,
+ * and "nothing recorded" is already an answer — not qualified).
+ */
+export const standingOfSchema = standingSnapshotItemSchema.extend({ asOf: z.string() }).strict();
+
+export type StandingOf = z.infer<typeof standingOfSchema>;
