@@ -113,6 +113,14 @@ export const EXEMPTIONS = {
     audit_chain_head_pkey:
       'chain_scope separates the platform chain (organization_id = empty string) from tenant chains; lookups name all three columns',
     audit_chain_head_month_idx: 'which chains a month holds — asked across tenants by verification',
+    tender_receipt_link_pkey:
+      "one link per (tender, seq) — an invariant of one tender's chain; the chain is read by tender id alone through the tenant-less service token (ADR-066 § 2), and leading with organization_id would let two organizations each hold a chain for one tender",
+    ux_tender_receipt_link_receipt:
+      'a receipt is one link of its tender, whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    ux_tender_receipt_link_previous:
+      'a link has one successor per tender (no fork), whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    ix_bid_access_evidence_tender:
+      "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
   },
 };
 
