@@ -46,12 +46,34 @@ RASTA_SERVICES=(
   analytics
 )
 
+# Services whose runtime role owns nothing (D-045): `rasta_<svc>_migrator` owns
+# the database and every object in it and runs the migrations; `rasta_<svc>`,
+# the role the service connects as, gets only DML. lib/service-privilege-split.bash
+# applies it; scripts/check-db-runtime-privileges.mjs fails CI if it does not hold.
+# audit-service is split differently (its own schema, below in
+# 00-init-databases.sh) and has its migrator listed separately.
+PRIVILEGE_SPLIT_SERVICES=(
+  supplier
+  construction
+)
+
+# How a split service's runtime role gets its table rights
+# (lib/service-privilege-split.bash): `migration` when its own migrations grant
+# per table — supplier-service grants less than DML on its append-only tables —
+# `default` (DML on every table, by default privileges) otherwise.
+privilege_split_grants_mode() {
+  case "$1" in
+    supplier) printf 'migration' ;;
+    *) printf 'default' ;;
+  esac
+}
+
 # Every role this repository creates, in creation order.
 rasta_roles() {
   local svc
   for svc in "${RASTA_SERVICES[@]}"; do printf '%s\n' "rasta_${svc}"; done
   printf '%s\n' rasta_audit_migrator
-  printf '%s\n' rasta_supplier_migrator
+  for svc in "${PRIVILEGE_SPLIT_SERVICES[@]}"; do printf '%s\n' "rasta_${svc}_migrator"; done
 }
 
 role_password_var() {

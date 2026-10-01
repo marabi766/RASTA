@@ -72,6 +72,9 @@
     "test:outbox-b2-pg": "node --env-file=.env --test scripts/outbox-b2-backfill.pg.test.mjs",
     "test:outbox-b3": "node --env-file-if-exists=.env --test scripts/outbox-b3-protocol.pg.test.mjs",
     "test:supplier-privilege-split": "node --env-file-if-exists=.env --test scripts/supplier-privilege-split.pg.test.mjs",
+    "test:db-runtime-privileges": "node --env-file-if-exists=.env --test scripts/check-db-runtime-privileges.pg.test.mjs",
+    "test:db-runtime-privileges-lib": "node --test scripts/check-db-runtime-privileges-lib.test.mjs scripts/prisma-lib.test.mjs",
+    "check:db-runtime-privileges": "node --env-file-if-exists=.env scripts/check-db-runtime-privileges.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
     "progress:validate": "node scripts/progress.mjs validate",
     "progress:report": "node scripts/progress.mjs write",
@@ -79,7 +82,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
     "clean": "turbo run clean && rimraf node_modules",
-    "verify": "pnpm run progress:check && pnpm run test:progress && pnpm run ci:image-matrix && pnpm run test:image-matrix && pnpm run test:outbox-b1 && pnpm run test:outbox-b2 && pnpm run test:migration-lib && pnpm run test:audit-correction-lib && pnpm run test:service-boundaries-lib && pnpm run check:service-boundaries && pnpm run test:local-postgres-config && pnpm run check:local-postgres-config && pnpm run test:keycloak-dev-realm && pnpm run check:keycloak-dev-realm && pnpm run test:compose-ports && pnpm run check:compose-ports && pnpm run test:kafka-acl-lib && pnpm run test:kafka-credential-scope && pnpm run test:kafka-outbox-tables && pnpm run test:replay-dlq-lib && pnpm run check:kafka-credential-scope && pnpm run test:infra-preflight && pnpm run test:container-scope && pnpm run test:dockerfile-pins && pnpm run check:dockerfile-pins && pnpm run test:tenant-index-order && pnpm run check:tenant-index-order && pnpm run test:test-phases && pnpm run check:test-phases && pnpm run test:aggregation-evidence-lib && pnpm run test:grafana-dashboard-lib && pnpm run check:grafana-dashboard && pnpm run test:grafana-live-isolation-lib && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run test:seed-guard",
+    "verify": "pnpm run progress:check && pnpm run test:progress && pnpm run ci:image-matrix && pnpm run test:image-matrix && pnpm run test:outbox-b1 && pnpm run test:outbox-b2 && pnpm run test:migration-lib && pnpm run test:audit-correction-lib && pnpm run test:service-boundaries-lib && pnpm run check:service-boundaries && pnpm run test:local-postgres-config && pnpm run check:local-postgres-config && pnpm run test:keycloak-dev-realm && pnpm run check:keycloak-dev-realm && pnpm run test:compose-ports && pnpm run check:compose-ports && pnpm run test:kafka-acl-lib && pnpm run test:kafka-credential-scope && pnpm run test:kafka-outbox-tables && pnpm run test:replay-dlq-lib && pnpm run check:kafka-credential-scope && pnpm run test:infra-preflight && pnpm run test:db-runtime-privileges-lib && pnpm run test:container-scope && pnpm run test:dockerfile-pins && pnpm run check:dockerfile-pins && pnpm run test:tenant-index-order && pnpm run check:tenant-index-order && pnpm run test:test-phases && pnpm run check:test-phases && pnpm run test:aggregation-evidence-lib && pnpm run test:grafana-dashboard-lib && pnpm run check:grafana-dashboard && pnpm run test:grafana-live-isolation-lib && pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run test:seed-guard",
     "infra:up": "node scripts/infra-preflight.mjs && docker compose up -d && node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
     "infra:down": "docker compose down",
     "infra:reset": "node scripts/infra-preflight.mjs && docker compose down -v && docker compose up -d && node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs apply --profile development",
@@ -89,6 +92,7 @@
     "db:seed": "turbo run db:seed",
     "db:rotate-role-passwords": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/rotate-role-passwords.bash",
     "db:supplier-privilege-split": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/supplier-privilege-split.bash",
+    "db:privilege-split": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/service-privilege-split.bash",
     "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash"
   },
   "devDependencies": {

@@ -376,6 +376,9 @@ export const EXPECTED = {
    * the second `up` to fail on a name that already exists.
    */
   audit: {
+    // D-045: rasta_audit_migrator owns database rasta_audit, and the runtime
+    // role lost CREATE on it — the scratch schema is the migrator's to create.
+    connectAs: 'migrator',
     tables: [
       'audit_event',
       'audit_event_2026_09',
@@ -912,6 +915,10 @@ export const EXPECTED = {
    * area is valid geometry.
    */
   construction: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch
+    // database is created — and migrated — as the migrator, which owns
+    // rasta_construction (lib/service-privilege-split.bash).
+    connectAs: 'migrator',
     scratchDatabase: true,
     tables: [
       'approval',

@@ -29,11 +29,19 @@ const noValues = (messages, ...values) => {
 // infra:up preflight
 // ---------------------------------------------------------------------------
 
-test('reads all sixteen service roles and both migrators from the bash library', () => {
+test('reads all sixteen service roles and every migrator from the bash library', () => {
   const roles = rolesFromLibrary();
-  assert.equal(roles.length, 18);
+  assert.equal(roles.length, 19);
   assert.ok(roles.includes('rasta_identity'));
-  assert.deepEqual(roles.slice(-2), ['rasta_audit_migrator', 'rasta_supplier_migrator']);
+  assert.deepEqual(roles.slice(-3), [
+    'rasta_audit_migrator',
+    'rasta_supplier_migrator',
+    'rasta_construction_migrator',
+  ]);
+  assert.equal(
+    passwordVariable('rasta_construction_migrator'),
+    'POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR',
+  );
   assert.equal(passwordVariable('rasta_audit_migrator'), 'POSTGRES_PASSWORD_AUDIT_MIGRATOR');
   assert.equal(passwordVariable('rasta_supplier_migrator'), 'POSTGRES_PASSWORD_SUPPLIER_MIGRATOR');
 });
@@ -275,10 +283,14 @@ test('bootstrap: with distinct passwords it proceeds, and sets each role its own
   const { status, calls } = runWithStubPsql(BOOTSTRAP, {});
   assert.equal(status, 0);
   const alters = calls.filter((call) => /ALTER ROLE \w+ WITH LOGIN PASSWORD/.test(call));
-  // Sixteen service roles and two migrators (audit, supplier).
-  assert.equal(alters.length, 18);
+  // Sixteen service roles, audit's migrator and one per split service (D-045).
+  assert.equal(alters.length, rolesFromLibrary().length);
+  assert.deepEqual(
+    alters.map((call) => /ALTER ROLE (\w+) WITH/.exec(call)?.[1]).sort(),
+    [...rolesFromLibrary()].sort(),
+  );
   const passwords = alters.map((call) => /PASSWORD '([^']+)'/.exec(call)?.[1]);
-  assert.equal(new Set(passwords).size, 18);
+  assert.equal(new Set(passwords).size, rolesFromLibrary().length);
 });
 
 // ---------------------------------------------------------------------------

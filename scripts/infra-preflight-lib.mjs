@@ -41,21 +41,39 @@ export const KAFKA_PRINCIPALS = resolve(
   'infrastructure/docker/kafka/principals.development.txt',
 );
 
-/**
- * `rasta_<service>` for every entry of `RASTA_SERVICES=( … )`, then the two
- * migrators (audit, supplier) — the order `rasta_roles` prints them in.
- */
-export function rolesFromLibrary(text = readFileSync(ROLE_LIBRARY, 'utf8')) {
-  const block = /^RASTA_SERVICES=\(([\s\S]*?)^\)/m.exec(text);
-  if (!block) throw new Error('RASTA_SERVICES=( … ) not found in the role library');
-  const services = block[1]
+/** The entries of a bash array `NAME=( … )` in the role library. */
+function bashArray(text, name) {
+  const block = new RegExp(`^${name}=\\(([\\s\\S]*?)^\\)`, 'm').exec(text);
+  if (!block) throw new Error(`${name}=( … ) not found in the role library`);
+  return block[1]
     .split('\n')
     .map((line) => line.replace(/#.*/, '').trim())
     .filter(Boolean);
+}
+
+/** `RASTA_SERVICES`: every service with a database and a runtime role. */
+export function servicesFromLibrary(text = readFileSync(ROLE_LIBRARY, 'utf8')) {
+  return bashArray(text, 'RASTA_SERVICES');
+}
+
+/**
+ * `PRIVILEGE_SPLIT_SERVICES` (D-045): services whose runtime role owns nothing
+ * and whose `rasta_<svc>_migrator` owns the database.
+ */
+export function splitServicesFromLibrary(text = readFileSync(ROLE_LIBRARY, 'utf8')) {
+  return bashArray(text, 'PRIVILEGE_SPLIT_SERVICES');
+}
+
+/**
+ * `rasta_<service>` for every entry of `RASTA_SERVICES=( … )`, then audit's
+ * migrator, then one migrator per `PRIVILEGE_SPLIT_SERVICES` entry — the order
+ * `rasta_roles` prints them in.
+ */
+export function rolesFromLibrary(text = readFileSync(ROLE_LIBRARY, 'utf8')) {
   return [
-    ...services.map((service) => `rasta_${service}`),
+    ...servicesFromLibrary(text).map((service) => `rasta_${service}`),
     'rasta_audit_migrator',
-    'rasta_supplier_migrator',
+    ...splitServicesFromLibrary(text).map((service) => `rasta_${service}_migrator`),
   ];
 }
 

@@ -18,6 +18,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { ledgerRevoke } from './prisma-lib.mjs';
 
 const cwd = process.cwd();
 
@@ -48,8 +49,11 @@ const migratorKey = `${key}_MIGRATOR`;
 // and the runtime role gets only SELECT and INSERT. Migrations must therefore
 // connect as the owner, not as the service.
 //
-// Additive by construction: a service with no `DATABASE_URL_<SVC>_MIGRATOR`
-// resolves exactly as before, which is every other service today.
+// D-045 made it the rule rather than audit's exception: every service in
+// PRIVILEGE_SPLIT_SERVICES (lib/role-passwords.bash) is owned by
+// `rasta_<svc>_migrator`, and its runtime role cannot run DDL at all. A service
+// with no `DATABASE_URL_<SVC>_MIGRATOR` — one not split yet — resolves exactly
+// as before.
 const url = process.env[migratorKey] ?? process.env.DATABASE_URL ?? process.env[key];
 
 if (!url) {
@@ -66,5 +70,38 @@ const result = spawnSync('prisma', process.argv.slice(2), {
   stdio: 'inherit',
   shell: true,
 });
+
+if (result.status === 0) {
+  const revoke = ledgerRevoke({
+    migratorUrl: process.env[migratorKey],
+    runtimeUrl: process.env[key],
+  });
+  if (revoke) {
+    // D-045: the migration ledger is the migrator's alone. In a database split
+    // by lib/service-privilege-split.bash, the runtime role gets DML on every
+    // table the migrator creates — by default privileges — and on a fresh
+    // database `_prisma_migrations` is one of them, created by the run that
+    // just finished. A runtime role that could write the ledger could mark a
+    // guard-creating migration as already applied, so it loses it here, after
+    // every successful run (idempotent; a no-op where it holds nothing).
+    // Through the schema's datasource — `env("DATABASE_URL")`, the migrator's
+    // here — so no credential appears on a command line.
+    const after = spawnSync(
+      'prisma',
+      ['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'],
+      {
+        cwd,
+        env: { ...process.env, DATABASE_URL: url },
+        input: revoke,
+        stdio: ['pipe', 'inherit', 'inherit'],
+        shell: true,
+      },
+    );
+    if (after.status !== 0) {
+      console.error(`Could not revoke the runtime role's rights on the migration ledger.`);
+      process.exit(after.status ?? 1);
+    }
+  }
+}
 
 process.exit(result.status ?? 1);

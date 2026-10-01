@@ -1045,6 +1045,15 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `SELECT/INSERT/UPDATE` لازم؛ آزمونی که نبودنِ `ALTER TABLE` را با نقش اجرا ثابت کند (مثل `runtime-privileges.int-spec.ts`).
 - **اولویت:** بالا (RUN-002)
 - **ثبت‌شده:** 2026-10-01
+- **وضعیت:** در حال رفع (2026-10-01، `fix/d045-db-role-split`). سازوکار مشترک ساخته شد: `lib/service-privilege-split.bash`
+  برای هر سرویس در `PRIVILEGE_SPLIT_SERVICES` پایگاه داده و همهٔ اشیای آن را به `rasta_<svc>_migrator` می‌دهد و به نقش
+  اجرا فقط DML (با `ALTER DEFAULT PRIVILEGES`)؛ `scripts/prisma.mjs` حق نقش اجرا روی `_prisma_migrations` را پس از هر
+  Migration می‌گیرد؛ `scripts/check-db-runtime-privileges.mjs` در CI شکست می‌خورد اگر نقش اجرای یک سرویس تقسیم‌شده مالک
+  چیزی باشد یا `TRIGGER`/`TRUNCATE`/`REFERENCES`/`CREATE` داشته باشد. **construction-service** تقسیم شد (آزمون زندهٔ
+  `runtime-privileges.int-spec.ts`: `DISABLE TRIGGER`، `ALTER`، `DROP`، `TRUNCATE` → `42501`)؛ supplier به همان سازوکار
+  منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. **باقی‌مانده** (`PENDING_SPLIT`): identity،
+  notification، organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
+  هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری
 
