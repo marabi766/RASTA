@@ -4,18 +4,25 @@ import { HealthController } from './health.controller';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { DomainProjectorConsumer } from '../consumers/domain-projector.consumer';
 import type { AuditTrailConsumer } from '../consumers/audit-trail.consumer';
+import type { OpsReplayConsumer } from '../consumers/ops-replay.consumer';
 import { SERVICE_NAME } from '../config/env';
 
-function build(database: boolean, projectorRunning: boolean, trailRunning = true) {
+function build(
+  database: boolean,
+  projectorRunning: boolean,
+  trailRunning = true,
+  replayRunning = true,
+) {
   const prisma = { isHealthy: async () => database } as unknown as PrismaService;
   const projector = { isRunning: () => projectorRunning } as unknown as DomainProjectorConsumer;
   const trail = { isRunning: () => trailRunning } as unknown as AuditTrailConsumer;
+  const replay = { isRunning: () => replayRunning } as unknown as OpsReplayConsumer;
 
   let status: number | undefined;
   const response = { status: (code: number) => (status = code) } as unknown as Response;
 
   return {
-    controller: new HealthController(prisma, projector, trail),
+    controller: new HealthController(prisma, projector, trail, replay),
     response,
     statusOf: () => status,
   };
@@ -39,7 +46,7 @@ describe('audit-service health probes', () => {
     const ready = await controller.ready(response);
 
     expect(ready.status).toBe('ok');
-    expect(ready.checks).toEqual({ database: true, projector: true, trail: true });
+    expect(ready.checks).toEqual({ database: true, projector: true, trail: true, replay: true });
     expect(statusOf()).toBe(HttpStatus.OK);
   });
 
@@ -79,7 +86,7 @@ describe('audit-service health probes', () => {
     const ready = await controller.ready(response);
 
     expect(ready.status).toBe('unavailable');
-    expect(ready.checks).toEqual({ database: true, projector: true, trail: false });
+    expect(ready.checks).toEqual({ database: true, projector: true, trail: false, replay: true });
     expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
   });
 
@@ -88,7 +95,17 @@ describe('audit-service health probes', () => {
 
     const ready = await controller.ready(response);
 
-    expect(ready.checks).toEqual({ database: true, projector: false, trail: false });
+    expect(ready.checks).toEqual({ database: true, projector: false, trail: false, replay: true });
+    expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+  });
+
+  it('is not ready when the replay-record consumer is not running, however healthy the rest is', async () => {
+    const { controller, response, statusOf } = build(true, true, true, false);
+
+    const ready = await controller.ready(response);
+
+    expect(ready.status).toBe('unavailable');
+    expect(ready.checks).toEqual({ database: true, projector: true, trail: true, replay: false });
     expect(statusOf()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
   });
 

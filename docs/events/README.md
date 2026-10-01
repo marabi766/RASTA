@@ -867,6 +867,32 @@ DLQ اختصاصی `rasta.notification.v1.dlq`. **فقط دو Topic و سه رو
 
 ---
 
+## بازپخش DLQ — `rasta.ops.replay.v1`
+
+رکورد پلتفرم از هر بازپخش اجراشده (D-039، [`docs/runbooks/replay-dlq.md`](../runbooks/replay-dlq.md) گام ۳). **تنها
+ناشر** ابزار بازپخش اپراتور است، Principal `ops-replay` (`TOPIC_PRODUCERS`؛ ACL Broker هیچ سرویسی را اجازهٔ نوشتن
+نمی‌دهد)؛ **تنها مصرف‌کننده** audit-service با گروه ثابت `audit-service.ops-replay` که هر رکورد را فقط‌الحاقی در
+`audit_event` نگه می‌دارد. قرارداد: `packages/contracts/src/events/ops-replay.ts`.
+
+**یک رکورد برای هر رویداد بازپخش‌شده، در همان تراکنش Kafka که بازپخش را روی `.retry` می‌نویسد** (شناسهٔ تراکنشی
+`ops-replay.<reportId>`؛ مصرف‌کننده‌ها فقط Commit‌شده می‌خوانند): هر دو با هم Commit می‌شوند یا هیچ‌کدام دیده نمی‌شود — و بی
+رکورد جداگانهٔ «شروع». کلید
+پیام شناسهٔ گزارش اجرا است (یک اجرا روی یک پارتیشن، به ترتیب)؛ `correlationId` همان شناسه است تا یک اجرا با یک جست‌وجو
+بازسازی شود. `tenantId` مستأجرِ رویداد بازپخش‌شده است و باید با `replayedEvent.tenantId` یکی باشد — رویداد بی مستأجر
+رکورد پلتفرمی می‌سازد (فقط `SYSTEM_ADMIN`، ADR-053 § ۱۰). `actor` کاربری است به نام اپراتور (`REPLAY_OPERATOR`،
+ادعای دارندهٔ اعتبار `ops-replay`). **هرگز Payload رویداد بازپخش‌شده.**
+
+| رویداد            | نسخه | Payload (v1)                                                                                                                                                                           |
+| ----------------- | :--: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REPLAY_EXECUTED` |  ۱   | `reportId`، `operator`، `replayedEvent {eventId, eventName, tenantId?}`، `dlq {topic, partition, offset}`، `target {topic, partition, offset}`، `stale` (`false`\|`true`\|`'UNKNOWN'`) |
+
+Consumer هر رکوردی را که با خودش نخواند **رد** می‌کند (بازپخش و سپس DLQ `rasta.audit.v1.dlq`): نام یا نسخهٔ دیگر،
+ناشری جز `ops-replay`، Topic دیگر، Payload ناسازگار با Schema، `correlationId` ≠ `reportId`، `actor` ≠ اپراتور، و
+مستأجرِ ناهمخوان. ردیف: `action = REPLAY_EXECUTED`، `resourceType = Event` / `resourceId` = شناسهٔ رویداد بازپخش‌شده،
+و در `changes` جابه‌جایی رویداد (Topic، Partition، Offset از DLQ به `.retry`) و نام رویداد و حکم کهنگی.
+
+---
+
 ## افزودن رویداد جدید
 
 ```

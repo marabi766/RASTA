@@ -41,6 +41,7 @@ const RESOURCE = {
   TOPIC: AclResourceTypes.TOPIC,
   GROUP: AclResourceTypes.GROUP,
   CLUSTER: AclResourceTypes.CLUSTER,
+  TRANSACTIONAL_ID: AclResourceTypes.TRANSACTIONAL_ID,
 };
 const PATTERN = { LITERAL: ResourcePatternTypes.LITERAL, PREFIXED: ResourcePatternTypes.PREFIXED };
 const OPERATION = {
