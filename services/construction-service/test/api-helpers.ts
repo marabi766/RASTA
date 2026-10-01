@@ -17,6 +17,7 @@ import { FakeHierarchy, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
+import { StandingBootstrap } from '../src/tender/standing-bootstrap';
 import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
 
 /**
@@ -190,6 +191,10 @@ export async function startApi(): Promise<ApiHarness> {
     .useValue(inertRelay)
     // Likewise the supplier-standing consumer: supplier-standing.int-spec.ts drives handle().
     .overrideProvider(SupplierStandingConsumer)
+    .useValue(inertRelay)
+    // The bootstrap would call supplier-service; standing-bootstrap.int-spec.ts drives it
+    // with a page list, and the suites that need a loaded standing load it themselves.
+    .overrideProvider(StandingBootstrap)
     .useValue(inertRelay)
     // Nor does the sweeper tick: organization-moved.int-spec.ts drives runOnce().
     .overrideProvider(PolicyReconciliationSweeper)

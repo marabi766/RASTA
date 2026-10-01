@@ -65,7 +65,9 @@ export class BidController {
       'Refused 422 (BUSINESS_RULE_VIOLATION), naming every reason, outside `[bidOpeningAt, ' +
       'bidClosingAt)` judged on the database clock after the tender lock (a bid at the closing ' +
       'instant is refused), while the organization is not eligible (qualified for CONTRACTING and ' +
-      'not suspended; an organization unknown to this service is not eligible), for the owner’s own ' +
+      'not suspended; an organization unknown to this service is not eligible), while the contractor ' +
+      'standing has not yet been loaded from supplier-service (STANDING_NOT_LOADED: nobody is ' +
+      'eligible until it has), for the owner’s own ' +
       'tender, for an unknown criterion code, or for a bid over the size limit. A second bid is 409 ' +
       '(replace it with PUT). The content is sealed to the tender’s key and never returned: the ' +
       'answer is the receipt, the new head of the tender’s chain, also published on BID_SUBMITTED. ' +

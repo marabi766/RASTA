@@ -7,8 +7,9 @@ import type { WebSession } from './session';
  *
  * What is asserted here is that only this server can issue one and only to the
  * session it was issued for. Whether a repeated id produces one record is the
- * receiving service's decision (`usage-records` stores it; maintenance-service's
- * and asset-service's creates do not), so it is proven per service, in
+ * receiving service's decision (`usage-records` and, since issue 157,
+ * maintenance-service's create store it; asset-service's create does not), so
+ * it is proven per service, in
  * `write.spec.ts` against a real fetch and in the browser suite, never here.
  */
 describe('submission ids', () => {

@@ -35,6 +35,8 @@ export const BID_REFUSALS = [
   'BID_WINDOW_NOT_OPEN',
   'BID_WINDOW_CLOSED',
   'BIDDER_NOT_ELIGIBLE',
+  /** The contractor standing has not been loaded from supplier-service yet (fail closed). */
+  'STANDING_NOT_LOADED',
   'OWN_TENDER',
   'UNKNOWN_CRITERION',
   'BID_TOO_LARGE',
@@ -341,8 +343,13 @@ export class BidService {
     } else if (!insideWindow(at, tender.bidOpeningAt, tender.bidClosingAt)) {
       refusals.push('BID_WINDOW_CLOSED');
     }
-    if (options.checkEligibility && !(await this.standing.isEligible(bidder, tx))) {
-      refusals.push('BIDDER_NOT_ELIGIBLE');
+    if (options.checkEligibility) {
+      const verdict = await this.standing.eligibility(bidder, tx);
+      // Not loaded is its own reason: the service has not yet read what predates
+      // its supplier consumer (ADR-061 § 4), so it cannot say of anybody that they
+      // are eligible — and must not blame the contractor for it.
+      if (verdict === 'STANDING_NOT_LOADED') refusals.push('STANDING_NOT_LOADED');
+      else if (verdict !== 'ELIGIBLE') refusals.push('BIDDER_NOT_ELIGIBLE');
     }
     if (refusals.length > 0) throw this.refused(tenderId, refusals);
 

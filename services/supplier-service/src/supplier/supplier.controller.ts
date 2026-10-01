@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Roles, zodPipe } from '@rasta/nest-common';
+import { AllowService, Roles, zodPipe } from '@rasta/nest-common';
 import { SupplierService } from './supplier.service';
 import { QualificationService } from './qualification.service';
 import { SuspensionService } from './suspension.service';
@@ -12,6 +12,7 @@ import {
   rejectQualificationSchema,
   reviewQueueQuerySchema,
   searchSuppliersQuerySchema,
+  standingSnapshotQuerySchema,
   submitQualificationSchema,
   suspendSupplierSchema,
   type ApproveQualificationDto,
@@ -21,6 +22,7 @@ import {
   type RejectQualificationDto,
   type ReviewQueueQuery,
   type SearchSuppliersQuery,
+  type StandingSnapshotQuery,
   type SubmitQualificationDto,
   type SuspendSupplierDto,
 } from './dto';
@@ -98,6 +100,25 @@ export class SupplierController {
   })
   async search(@Query(zodPipe(searchSuppliersQuerySchema)) query: SearchSuppliersQuery) {
     return this.suppliers.search(query);
+  }
+
+  @Get('standing-snapshot')
+  @AllowService('construction-service')
+  @ApiOperation({
+    summary: 'The standing snapshot construction-service bootstraps from',
+    description:
+      'Service-to-service only (ADR-061 § 4, ADR-035): `construction-service` with a token signed ' +
+      'for no tenant. A person with any role, any other service, or a token signed for a ' +
+      'tenant is refused 403. Per supplier organization that has anything to say, keyset by ' +
+      'supplier id: the instant its CONTRACTING qualification was last approved, and its ' +
+      'suspension episodes by id with their instants (closed ones too). No reasons, notes, ' +
+      'evidence or names. `snapshotAt` is the database instant the page was read at. ' +
+      'Declared before `:id` so the literal segment is not swallowed by it.',
+  })
+  async standingSnapshot(
+    @Query(zodPipe(standingSnapshotQuerySchema)) query: StandingSnapshotQuery,
+  ) {
+    return this.suppliers.standingSnapshot(query);
   }
 
   @Get('qualified')

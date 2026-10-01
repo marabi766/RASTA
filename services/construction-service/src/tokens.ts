@@ -18,3 +18,9 @@ export const LOGGER = Symbol('CONSTRUCTION_LOGGER');
  * interface with one implementation today, so the seam is a token, not a class.
  */
 export const TENDER_KEY_PROVIDER = Symbol('CONSTRUCTION_TENDER_KEY_PROVIDER');
+
+/**
+ * Where the contractor-standing snapshot is read from (`StandingSnapshotSource`):
+ * supplier-service in production, a page list in tests.
+ */
+export const STANDING_SNAPSHOT_SOURCE = Symbol('CONSTRUCTION_STANDING_SNAPSHOT_SOURCE');

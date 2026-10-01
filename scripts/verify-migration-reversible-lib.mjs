@@ -933,6 +933,7 @@ export const EXPECTED = {
       // 20260930190000_contractor_standing, 20261001100000_tender_bids.
       'contractor_standing',
       'contractor_suspension',
+      'standing_bootstrap',
       'bid',
       'bid_receipt',
       'bid_access_log',
@@ -949,6 +950,7 @@ export const EXPECTED = {
       'tg_criteria_template_no_truncate',
       'tg_tender_key_guard',
       // 20261001100000_tender_bids: the bid's deadline and edges, and two append-only logs.
+      'tg_standing_bootstrap_guard',
       'tg_bid_guard',
       'tg_bid_receipt_append_only',
       'tg_bid_receipt_no_truncate',
@@ -961,6 +963,7 @@ export const EXPECTED = {
       'tender_status_transition_guard',
       'criteria_template_append_only',
       'tender_key_guard',
+      'standing_bootstrap_guard',
       'bid_guard',
       'bid_append_only',
     ],
@@ -1055,6 +1058,8 @@ export const EXPECTED = {
       'ck_standing_org_not_blank',
       'ck_suspension_text_not_blank',
       'ck_suspension_order',
+      'ck_standing_bootstrap_singleton',
+      'ck_standing_bootstrap_complete',
       'bid_organization_id_tender_id_fkey',
       'bid_receipt_organization_id_tender_id_fkey',
       'bid_access_log_organization_id_tender_id_fkey',

@@ -33,6 +33,11 @@ import { TenderClock } from '../src/tender/tender-clock';
 import { decisionInstant } from '../src/shared/clock';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { ContractorStandingRepository } from '../src/tender/contractor-standing.repository';
+import { StandingBootstrap } from '../src/tender/standing-bootstrap';
+import type {
+  StandingSnapshotPage,
+  StandingSnapshotSource,
+} from '../src/tender/supplier-snapshot.client';
 import { ExecutionService } from '../src/project/execution.service';
 import { ProgressService } from '../src/progress/progress.service';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
@@ -558,8 +563,13 @@ export function asBidder<T>(organizationId: string, fn: () => T, userId = newUse
   return asUser(organizationId, ['CONTRACTOR'], fn, userId);
 }
 
-/** Makes `organizationId` an eligible contractor: qualified for CONTRACTING, not suspended (PR 5). */
+/**
+ * Makes `organizationId` an eligible contractor: qualified for CONTRACTING, not
+ * suspended (PR 5) — and the standing loaded, since until the bootstrap has run
+ * nobody is eligible (ADR-061 § 4).
+ */
 export async function qualify(w: Wiring, organizationId: string): Promise<void> {
+  await loadStanding(w);
   await w.standing.recordQualified(organizationId, new Date(Date.now() - 60_000));
 }
 
@@ -631,6 +641,86 @@ export const bidContent = (priceMinor = '1250000000') => ({
   ],
   note: 'Mobilisation within ten days',
 });
+
+/** A snapshot page list for the bootstrap, with a hook between a fetch and the next (a live event arriving). */
+export class FakeSnapshot implements StandingSnapshotSource {
+  readonly fetched: (string | null)[] = [];
+  /** Throws on the n-th fetch (1-based), once. */
+  failOnFetch: number | undefined;
+  /** Runs after a page is handed out and before it is applied. */
+  afterFetch: ((pageIndex: number) => Promise<void>) | undefined;
+
+  constructor(
+    private readonly pages: Omit<StandingSnapshotPage, 'nextCursor' | 'hasMore'>[],
+    private readonly at = '2026-10-01T09:00:00.000Z',
+  ) {}
+
+  async fetchPage(cursor: string | null): Promise<StandingSnapshotPage> {
+    this.fetched.push(cursor);
+    if (this.failOnFetch === this.fetched.length) {
+      this.failOnFetch = undefined;
+      throw new Error('supplier-service is unavailable');
+    }
+    // The cursor is the 1-based index of the last page served: opaque to the caller.
+    const index = cursor ? Number(cursor) : 0;
+    const page = this.pages[index];
+    const hasMore = index + 1 < this.pages.length;
+    const result: StandingSnapshotPage = {
+      items: page?.items ?? [],
+      snapshotAt: page?.snapshotAt ?? this.at,
+      hasMore,
+      nextCursor: hasMore ? String(index + 1) : null,
+    };
+    // The page is read as it is now; whatever the hook does (a live event, say)
+    // happens while it is "in flight", before the caller applies it.
+    if (this.afterFetch) await this.afterFetch(index);
+    return result;
+  }
+}
+
+/** Builds the bootstrap over this wiring's database and a snapshot source. */
+export function bootstrapOf(w: Wiring, source: StandingSnapshotSource): StandingBootstrap {
+  return new StandingBootstrap(
+    w.prisma,
+    w.standing,
+    source,
+    { CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: 100 },
+    { info: () => undefined, warn: () => undefined },
+  );
+}
+
+/**
+ * Makes the standing "loaded" the way a real start would, from an empty snapshot,
+ * unless it already is. The suites that ask about eligibility need it: until the
+ * marker exists nobody is eligible (fail closed).
+ */
+export async function loadStanding(w: Wiring): Promise<void> {
+  await bootstrapOf(
+    w,
+    new FakeSnapshot([{ items: [], snapshotAt: '2026-10-01T09:00:00.000Z' }]),
+  ).runOnce();
+}
+
+/**
+ * Removes the bootstrap marker through the owner connection (the trigger forbids it
+ * for everybody else), so a suite can show the state before the standing is loaded.
+ */
+export async function forgetBootstrap(): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "standing_bootstrap" DISABLE TRIGGER "tg_standing_bootstrap_guard"',
+      );
+      await tx.standingBootstrap.deleteMany({});
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "standing_bootstrap" ENABLE TRIGGER "tg_standing_bootstrap_guard"',
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
 
 /** Runs `fn` as the union administrator of `organizationId` (a policy author, Q-70 (7)). */
 export function asSetter<T>(organizationId: string, fn: () => T): T {

@@ -4,6 +4,7 @@ import type { CursorPage } from '@rasta/contracts';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import {
+  assertCallerIsConstructionService,
   assertCanBrowseDirectory,
   assertCanRegisterSupplier,
   assertSupplierReadable,
@@ -16,6 +17,8 @@ import type {
   ListQualifiedForQuery,
   RegisterSupplierDto,
   SearchSuppliersQuery,
+  StandingSnapshotPage,
+  StandingSnapshotQuery,
   SupplierDetailView,
   SupplierDirectoryView,
 } from './dto';
@@ -181,6 +184,44 @@ export class SupplierService {
     });
 
     return page(rows as unknown as SupplierRow[], query.limit, toDirectoryView);
+  }
+
+  /**
+   * One page of the standing snapshot construction-service loads before it answers
+   * "may this contractor bid" (CON-002 PR 5, ADR-061 § 4): per supplier
+   * organization, when its CONTRACTING qualification was approved and its
+   * suspension episodes by id. Service-authenticated, construction-service only,
+   * and nothing a person typed.
+   *
+   * The events on `rasta.supplier.v1` keep it current afterwards; this is the
+   * state they apply to, which a consumer group starting at the end of a
+   * seven-day log can never learn from the log itself.
+   */
+  async standingSnapshot(query: StandingSnapshotQuery): Promise<StandingSnapshotPage> {
+    assertCallerIsConstructionService();
+
+    const snapshotAt = await this.repository.databaseInstant();
+    const rows = await this.repository.listStandingSnapshot({
+      ...(query.cursor ? { cursor: query.cursor } : {}),
+      limit: query.limit,
+    });
+    const hasMore = rows.length > query.limit;
+    const visible = hasMore ? rows.slice(0, query.limit) : rows;
+
+    return {
+      items: visible.map((row) => ({
+        organizationId: row.organizationId,
+        contractingApprovedAt: row.qualifications[0]?.decidedAt?.toISOString() ?? null,
+        suspensions: row.suspensions.map((episode) => ({
+          suspensionId: episode.id,
+          suspendedAt: episode.suspendedAt.toISOString(),
+          reinstatedAt: episode.reinstatedAt?.toISOString() ?? null,
+        })),
+      })),
+      nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
+      hasMore,
+      snapshotAt: snapshotAt.toISOString(),
+    };
   }
 }
 

@@ -427,6 +427,12 @@ Endpointها: `POST/GET /v1/projects`، `GET/PATCH /v1/projects/{id}`، `POST /v
 پر شدن هر نیمهٔ دوره حداکثر یک بار)، پس ترتیب و بازپخش پاسخ را عوض نمی‌کند. سازمانِ ناشناخته **واجد شرایط نیست** (بستهٔ
 شکست‌پذیر)؛ محتوای نامعتبر یا شناسهٔ دوره‌ای از سازمان دیگر به صف مرده می‌رود. وابستگی COM-005 فقط
 `SUPPLIER_QUALIFIED`/`SUSPENDED` است (تصمیم ۳). مصرف‌کننده: گام ۶ (پیشنهاد).
+**Bootstrap (بازبینی Codex روی #170):** گروه مصرف‌کننده از انتهای لاگ هفت‌روزه شروع می‌کند، پس آنچه پیش از آن بوده فقط از
+`supplier-service` خوانده می‌شود: `GET /v1/suppliers/standing-snapshot` (`@AllowService('construction-service')`، توکن بی مستأجر، صفحه‌بندی با
+Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ تعلیق، با شناسه و لحظه‌ها، بی هیچ متن). `construction-service` پس از شروع مصرف‌کننده آن را به
+همان شکل هم‌گرا در دو جدول می‌نویسد و نشانگر `standing_bootstrap` را ثبت می‌کند؛ **تا آن‌گاه هر پرسش صلاحیت `STANDING_NOT_LOADED` است**
+(Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. همین مسیر، بازسازی پس از `down.sql` است
+(`docs/runbooks/contractor-standing-bootstrap.md`).
 
 **CON-002 PR 6 (پیشنهاد).** سمت پیمانکار (نقش `CONTRACTOR` در سازمان خودش؛ نه `SYSTEM_ADMIN` و نه `AUDITOR`): `GET /v1/open-tenders[/{id}]`
 (عمومی یا دعوت‌شده، هرگز مناقصهٔ خودش)، `POST /v1/tenders/{id}/bids`، `PUT .../bids/{bidId}` (`revision` + ۱)، `POST .../withdraw`،

@@ -124,10 +124,11 @@ describe('supplier HTTP API', () => {
       ['post', '/v1/suppliers/SUP_X/qualifications/QLF_X/reject'],
       ['post', '/v1/suppliers/SUP_X/suspend'],
       ['post', '/v1/suppliers/SUP_X/reinstate'],
+      ['get', '/v1/suppliers/standing-snapshot'],
     ];
 
-    it('answers 401 without a token on all ten endpoints', async () => {
-      expect(routes).toHaveLength(10);
+    it('answers 401 without a token on all eleven endpoints', async () => {
+      expect(routes).toHaveLength(11);
       for (const [method, path] of routes) {
         const response = await http()[method](path);
         expect({ path, status: response.status }).toEqual({
@@ -137,10 +138,12 @@ describe('supplier HTTP API', () => {
       }
     });
 
-    it('refuses a service token on every endpoint — none carries @AllowService', async () => {
+    it('refuses a service token that is not construction-service on every endpoint', async () => {
       // ADR-020: a valid internal token proves which service is calling and by
-      // itself grants access to nothing. No supplier endpoint is opened to one,
-      // so the guard refuses before `access.ts` is even reached.
+      // itself grants access to nothing. Exactly one endpoint is opened to a
+      // service, and to one named service (the standing snapshot, ADR-061 § 4,
+      // `standing-snapshot.int-spec.ts`); for every other caller the guard refuses
+      // before `access.ts` is even reached.
       //
       // Sent in `x-internal-token`, which is the header the guard routes an
       // internal token by. The same token in `Authorization: Bearer` is not a

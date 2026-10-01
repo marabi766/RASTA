@@ -16,6 +16,8 @@ import {
   asBidder,
   bidContent,
   cleanup,
+  forgetBootstrap,
+  loadStanding,
   newOrganizationId,
   outboxFor,
   ownerDatabaseUrl,
@@ -77,8 +79,11 @@ describe('bids', () => {
       w.prisma.client.bidReceipt.findMany({ where: { tenderId }, orderBy: { seq: 'asc' } }),
     );
 
-  beforeAll(() => {
+  beforeAll(async () => {
     w = wire();
+    // Until the standing is loaded nobody is eligible (ADR-061 § 4); the suite that
+    // shows that state forgets the marker itself and loads it again.
+    await loadStanding(w);
   });
 
   afterEach(() => {
@@ -313,6 +318,20 @@ describe('bids', () => {
       );
       expect(await refusalsOf(submit(other, tenderId))).toContain('BIDDER_NOT_ELIGIBLE');
       expect(await linksOf(tenderId)).toEqual([]);
+    });
+
+    it('refuses everybody, with its own reason, until the standing has been loaded from supplier-service', async () => {
+      const { bidder, tenderId } = await setup();
+      await forgetBootstrap();
+      try {
+        const message = await refusalsOf(submit(bidder, tenderId));
+        expect(message).toContain('STANDING_NOT_LOADED');
+        expect(message).not.toContain('BIDDER_NOT_ELIGIBLE');
+        expect(await linksOf(tenderId)).toEqual([]);
+      } finally {
+        await loadStanding(w);
+      }
+      expect((await submit(bidder, tenderId)).revision).toBe(1);
     });
 
     it('follows a suspension and its reinstatement, and judges them when the bid is made', async () => {

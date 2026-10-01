@@ -84,8 +84,11 @@ export async function submitUsage(
       return { kind: 'FORBIDDEN', correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

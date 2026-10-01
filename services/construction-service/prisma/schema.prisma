@@ -749,6 +749,25 @@ model ContractorStanding {
   @@map("contractor_standing")
 }
 
+/// The bootstrap marker (ADR-061 § 4): one row. The standing is loaded from
+/// supplier-service's snapshot before anyone is eligible, because the consumer group
+/// starts at the end of a seven-day log and cannot learn what predates it. Until
+/// `completedAt` is set every eligibility question answers "not loaded" (fail closed).
+/// Not tenant data: it names no organization.
+model StandingBootstrap {
+  id               Int       @id @default(1) @db.SmallInt
+  startedAt        DateTime  @map("started_at")
+  /// The last supplier id of the last page applied; the next page starts after it.
+  cursor           String?
+  suppliersLoaded  Int       @default(0) @map("suppliers_loaded")
+  /// The database instant of the newest snapshot page read.
+  sourceSnapshotAt DateTime? @map("source_snapshot_at")
+  completedAt      DateTime? @map("completed_at")
+  updatedAt        DateTime  @map("updated_at")
+
+  @@map("standing_bootstrap")
+}
+
 /// One suspension episode (`suspensionId` is supplier-service's). The two
 /// timestamps arrive in separate events in either order; the episode is open
 /// while it was suspended and not yet reinstated.
