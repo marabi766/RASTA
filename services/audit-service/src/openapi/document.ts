@@ -10,6 +10,7 @@ import {
 import { auditEventPageSchema, auditEventViewSchema } from '../audit/audit.view';
 import { auditChainVerificationSchema } from '../audit/audit.verification.view';
 import { auditTargetLookupQuerySchema, auditTargetViewSchema } from '../audit/audit.lookup';
+import { tenderChainViewSchema } from '../audit/tender-evidence.service';
 
 /**
  * Fills in what Nest cannot see.
@@ -57,6 +58,10 @@ const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> =
   'GET /v1/audit-events/verify': { status: '200', schema: auditChainVerificationSchema },
   'GET /v1/audit-events/{id}': { status: '200', schema: auditEventViewSchema },
   'GET /v1/internal/audit-events/{id}': { status: '200', schema: auditTargetViewSchema },
+  'GET /v1/internal/tender-evidence/{tenderId}/chain': {
+    status: '200',
+    schema: tenderChainViewSchema,
+  },
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -151,7 +156,8 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
     name: 'x-internal-token',
     description:
       'A signed internal service token. The correction-target lookup accepts one ' +
-      'minted for audit-service by identity-service, and nothing else.',
+      'minted for audit-service by identity-service, and the tender-evidence chain read ' +
+      'one minted by construction-service for no tenant; nothing else.',
   } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {

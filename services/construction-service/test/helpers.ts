@@ -34,7 +34,10 @@ import { decisionInstant } from '../src/shared/clock';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { ContractorStandingRepository } from '../src/tender/contractor-standing.repository';
 import { StandingBootstrap } from '../src/tender/standing-bootstrap';
+import { StandingAuthority } from '../src/tender/standing-authority';
 import type {
+  StandingOfOrganization,
+  StandingOfSource,
   StandingSnapshotPage,
   StandingSnapshotSource,
 } from '../src/tender/supplier-snapshot.client';
@@ -257,7 +260,14 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     ),
     bidRepository,
     clock,
-    bids: new BidService(prisma, bidRepository, standing, events, access, clock),
+    bids: new BidService(
+      prisma,
+      bidRepository,
+      new StandingAuthority(SUPPLIER),
+      events,
+      access,
+      clock,
+    ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
     tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
@@ -564,13 +574,55 @@ export function asBidder<T>(organizationId: string, fn: () => T, userId = newUse
 }
 
 /**
- * Makes `organizationId` an eligible contractor: qualified for CONTRACTING, not
- * suspended (PR 5) — and the standing loaded, since until the bootstrap has run
- * nobody is eligible (ADR-061 § 4).
+ * supplier-service's own record of who is qualified and suspended, as a bid is decided
+ * against it (`StandingAuthority`, ADR-061 § 4). A module-level singleton, shared by
+ * every wiring and by the booted application of the API suites (which override the
+ * source with it), so `qualify` in a test is what the decision sees. Nothing known
+ * about an organization means no approval and no episodes: not qualified.
  */
-export async function qualify(w: Wiring, organizationId: string): Promise<void> {
-  await loadStanding(w);
-  await w.standing.recordQualified(organizationId, new Date(Date.now() - 60_000));
+export class FakeSupplier implements StandingOfSource {
+  private readonly approved = new Map<string, string>();
+  private readonly episodes = new Map<
+    string,
+    { suspensionId: string; suspendedAt: string; reinstatedAt: string | null }[]
+  >();
+  /** Makes every answer fail, as an unreachable supplier-service would. */
+  failure: Error | undefined;
+  readonly asked: string[] = [];
+
+  approve(organizationId: string, at = new Date(Date.now() - 60_000)): void {
+    this.approved.set(organizationId, at.toISOString());
+  }
+
+  suspend(organizationId: string, suspensionId: string): void {
+    const list = this.episodes.get(organizationId) ?? [];
+    list.push({ suspensionId, suspendedAt: new Date().toISOString(), reinstatedAt: null });
+    this.episodes.set(organizationId, list);
+  }
+
+  reinstate(organizationId: string, suspensionId: string): void {
+    for (const episode of this.episodes.get(organizationId) ?? []) {
+      if (episode.suspensionId === suspensionId) episode.reinstatedAt = new Date().toISOString();
+    }
+  }
+
+  async fetchStanding(organizationId: string): Promise<StandingOfOrganization> {
+    this.asked.push(organizationId);
+    if (this.failure) throw this.failure;
+    return {
+      organizationId,
+      contractingApprovedAt: this.approved.get(organizationId) ?? null,
+      suspensions: (this.episodes.get(organizationId) ?? []).map((e) => ({ ...e })),
+      asOf: new Date().toISOString(),
+    };
+  }
+}
+
+export const SUPPLIER = new FakeSupplier();
+
+/** Makes `organizationId` an eligible contractor: approved for CONTRACTING, not suspended. */
+export async function qualify(_w: Wiring, organizationId: string): Promise<void> {
+  SUPPLIER.approve(organizationId);
 }
 
 /**

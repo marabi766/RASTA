@@ -72,6 +72,7 @@ import { PublicationRepository } from './tender/publication.repository';
 import { PublicationService } from './tender/publication.service';
 import { PublicationController } from './tender/publication.controller';
 import { BidRepository } from './tender/bid.repository';
+import { TenderEvidenceClient } from './tender/tender-evidence.client';
 import { BidService } from './tender/bid.service';
 import { BidController } from './tender/bid.controller';
 import { DatabaseTenderClock, TenderClock } from './tender/tender-clock';
@@ -170,6 +171,9 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     PublicationRepository,
     PublicationService,
     BidRepository,
+    // ADR-066 § 2: the receipt chain and its head are read from audit-service, which
+    // holds them where this service cannot rewrite them; opening bids (PR 8) uses it.
+    TenderEvidenceClient,
     // ADR-065 § 2: the deadline is judged on the database's clock, read after the lock.
     { provide: TenderClock, useClass: DatabaseTenderClock },
     BidService,

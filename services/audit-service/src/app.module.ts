@@ -40,6 +40,11 @@ import {
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
 import { OpsReplayConsumer } from './consumers/ops-replay.consumer';
+import { TenderEvidenceConsumer } from './consumers/tender-evidence.consumer';
+import { TenderEvidenceController } from './audit/tender-evidence.controller';
+import { TenderEvidenceRepository } from './audit/tender-evidence.repository';
+import { TenderEvidenceService } from './audit/tender-evidence.service';
+import { CONSTRUCTION_TOPIC, TENDER_EVIDENCE_CONSUMER } from './audit/tender-evidence';
 import {
   AUDIT_DEAD_LETTER_TOPIC,
   DOMAIN_PROJECTOR_CONSUMER,
@@ -136,7 +141,13 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
  * that holds for the trail topic as much as for the ten domain topics.
  */
 @Module({
-  controllers: [HealthController, MetricsController, AuditController, AuditInternalController],
+  controllers: [
+    HealthController,
+    MetricsController,
+    AuditController,
+    AuditInternalController,
+    TenderEvidenceController,
+  ],
   providers: [
     { provide: ENV, useFactory: (): AuditEnv => loadAuditEnv() },
 
@@ -170,6 +181,10 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     // target (AUD-003 correction). Separate from the query service so general reads keep
     // refusing every service token unchanged.
     AuditTargetLookupService,
+    // The externally held receipt chain and the record of every bid read
+    // (CON-002 PR 6, ADR-066): written by its own consumer, read by construction-service alone.
+    TenderEvidenceRepository,
+    TenderEvidenceService,
 
     // Registered as classes, not as factory providers, because the controller
     // reaches them as `@Query(AuditEventQueryPipe)`. Nest resolves a
@@ -317,6 +332,36 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
         ),
     },
 
+    {
+      provide: TenderEvidenceConsumer,
+      inject: [ENV, LOGGER, TenderEvidenceRepository],
+      useFactory: (
+        env: AuditEnv,
+        logger: Logger,
+        repository: TenderEvidenceRepository,
+      ): TenderEvidenceConsumer =>
+        new TenderEvidenceConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, env.KAFKA_CLIENT_ID),
+                // Fixed: also this projection's `processed_event` key.
+                groupId: TENDER_EVIDENCE_CONSUMER,
+                // The construction topic alone; the domain projector reads it too, as audit rows.
+                topics: [CONSTRUCTION_TOPIC],
+                // Replay-safe: every write is idempotent on `(eventId, consumerName)`.
+                fromBeginning: true,
+                // A refused link is kept for an operator, never dropped.
+                deadLetterTopic: AUDIT_DEAD_LETTER_TOPIC,
+              },
+              handler,
+              consumerLogger(logger),
+            ),
+          repository,
+          logger,
+        ),
+    },
+
     // Authenticate, then authorize. Global, so an endpoint is closed unless it
     // opts out with `@Public` (AGENTS.md A-12, S-02).
     { provide: APP_GUARD, useClass: AuthGuard },
@@ -331,6 +376,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly projector: DomainProjectorConsumer,
     private readonly trail: AuditTrailConsumer,
     private readonly replay: OpsReplayConsumer,
+    private readonly evidence: TenderEvidenceConsumer,
     private readonly repository: AuditRepository,
     @Inject(ENV) private readonly env: AuditEnv,
     private readonly prisma: PrismaService,
@@ -357,6 +403,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.projector.start();
     await this.trail.start();
     await this.replay.start();
+    await this.evidence.start();
 
     // Sampled from the catalogue, never maintained by inc/dec: an arithmetic
     // gauge drifts on every restart, and a drifting capacity number is worse

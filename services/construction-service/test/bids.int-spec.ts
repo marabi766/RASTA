@@ -1,5 +1,12 @@
-import { ulid } from 'ulid';
-import { runUnscoped } from '@rasta/nest-common';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { randomBytes } from 'node:crypto';
+import { InternalTokenService, RastaError, runUnscoped } from '@rasta/nest-common';
+import {
+  TenderEvidenceClient,
+  trustedReceiptsOf,
+  type TenderChain,
+} from '../src/tender/tender-evidence.client';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { PrismaClient } from '../src/generated/prisma';
 import {
@@ -16,13 +23,14 @@ import {
   asBidder,
   bidContent,
   cleanup,
-  forgetBootstrap,
   loadStanding,
   newOrganizationId,
   outboxFor,
   ownerDatabaseUrl,
+  SUPPLIER,
   publishedForBids,
   qualify,
+  testEnv,
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
@@ -34,6 +42,20 @@ import {
  * the lock, eligibility at submit time (fail closed), visibility, the receipt chain
  * and its externally held head, and the audit of every read.
  */
+
+const SECRET = randomBytes(24).toString('hex');
+const tokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+
+interface AnnouncedLink {
+  tenderId: string;
+  bidId: string;
+  revision: number;
+  receivedAt: string;
+  ciphertextSha256: string;
+  contentCommitment: string;
+  previousReceipt: string;
+  receipt: string;
+}
 
 const payloadOf = (row: { payload: unknown }) => eventEnvelopeSchema.parse(row.payload).payload;
 const eventsOf = async (w: Wiring, owner: string, name: string) =>
@@ -195,6 +217,7 @@ describe('bids', () => {
         asAdmin(owner, () => w.bids.submit(tenderId, { content: bidContent() })),
       ).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
       // The owner's own contractor role is refused too: it cannot bid on its own tender.
+      await qualify(w, owner);
       expect(await refusalsOf(submit(owner, tenderId))).toContain('OWN_TENDER');
     });
   });
@@ -301,6 +324,58 @@ describe('bids', () => {
     });
   });
 
+  describe('a deadline that crosses between the decision and the write', () => {
+    const closeWindowForReal = (tenderId: string) =>
+      runUnscoped('the suite lets the real deadline pass', () =>
+        w.prisma.client.$executeRawUnsafe(
+          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
+        ),
+      );
+
+    it('is a 422 BID_WINDOW_CLOSED, not a 500, for a submission, a replacement and a withdrawal', async () => {
+      const first = await setup();
+      const second = await setup();
+      const submitted = await submit(second.bidder, second.tenderId);
+      const events = (await outboxFor(w.prisma, first.owner)).length;
+
+      await closeWindowForReal(first.tenderId);
+      await closeWindowForReal(second.tenderId);
+      // The application is told it is an hour ago (inside the window it reads), while the
+      // database's own clock — what `bid_guard` judges — has passed the deadline: the
+      // write is refused by the trigger after the application said yes.
+      w.clock.fixed = new Date(Date.now() - 3_600_000);
+
+      expect(await refusalsOf(submit(first.bidder, first.tenderId))).toContain('BID_WINDOW_CLOSED');
+      expect(
+        await refusalsOf(
+          asBidder(second.bidder, () =>
+            w.bids.revise(second.tenderId, submitted.bidId, {
+              expectedRevision: 1,
+              content: bidContent('5'),
+            }),
+          ),
+        ),
+      ).toContain('BID_WINDOW_CLOSED');
+      expect(
+        await refusalsOf(
+          asBidder(second.bidder, () =>
+            w.bids.withdraw(second.tenderId, submitted.bidId, { expectedRevision: 1 }),
+          ),
+        ),
+      ).toContain('BID_WINDOW_CLOSED');
+
+      // Nothing was committed: no bid, no receipt, no event beyond the first submission's.
+      expect(await linksOf(first.tenderId)).toEqual([]);
+      expect((await linksOf(second.tenderId)).length).toBe(1);
+      expect((await outboxFor(w.prisma, first.owner)).length).toBe(events);
+      const row = await runUnscoped('the suite reads the bid', () =>
+        w.prisma.client.bid.findFirstOrThrow({ where: { id: submitted.bidId } }),
+      );
+      expect([row.revision, row.status]).toEqual([1, 'SUBMITTED']);
+    });
+  });
+
   describe('eligibility, at submit time, fails closed', () => {
     it('refuses an organization this service has never heard of, and one only qualified for another capability', async () => {
       const owner = org();
@@ -309,61 +384,53 @@ describe('bids', () => {
 
       expect(await refusalsOf(submit(stranger, tenderId))).toContain('BIDDER_NOT_ELIGIBLE');
 
-      const other = org();
-      await w.supplierEvents.handle(
-        supplierEvent('SUPPLIER_QUALIFIED', other, {
-          qualifiedFor: ['EQUIPMENT_RENTAL'],
-          decidedAt: new Date().toISOString(),
-        }),
-      );
-      expect(await refusalsOf(submit(other, tenderId))).toContain('BIDDER_NOT_ELIGIBLE');
+      // Qualified for something else only: supplier-service has no CONTRACTING approval.
+      expect(await refusalsOf(submit(org(), tenderId))).toContain('BIDDER_NOT_ELIGIBLE');
       expect(await linksOf(tenderId)).toEqual([]);
     });
 
-    it('refuses everybody, with its own reason, until the standing has been loaded from supplier-service', async () => {
+    it('refuses with a 503 and writes nothing when supplier-service cannot say (fail closed)', async () => {
       const { bidder, tenderId } = await setup();
-      await forgetBootstrap();
+      SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
       try {
-        const message = await refusalsOf(submit(bidder, tenderId));
-        expect(message).toContain('STANDING_NOT_LOADED');
-        expect(message).not.toContain('BIDDER_NOT_ELIGIBLE');
+        await expect(submit(bidder, tenderId)).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
         expect(await linksOf(tenderId)).toEqual([]);
       } finally {
-        await loadStanding(w);
+        SUPPLIER.failure = undefined;
       }
       expect((await submit(bidder, tenderId)).revision).toBe(1);
+    });
+
+    it('decides from supplier-service, not from the read model: a stale one that says eligible does not let a suspended contractor bid', async () => {
+      const { bidder, tenderId } = await setup();
+      // The advisory read model, loaded and holding an approval, knows nothing of a
+      // suspension whose event expired (an outage beyond retention) or has not arrived.
+      await loadStanding(w);
+      await w.standing.recordQualified(bidder, new Date(Date.now() - 60_000));
+      expect(await w.standing.eligibility(bidder)).toBe('ELIGIBLE');
+      SUPPLIER.suspend(bidder, `SUS_STALE_${bidder}`);
+
+      expect(await refusalsOf(submit(bidder, tenderId))).toContain('BIDDER_NOT_ELIGIBLE');
+      expect(await linksOf(tenderId)).toEqual([]);
     });
 
     it('follows a suspension and its reinstatement, and judges them when the bid is made', async () => {
       const { bidder, tenderId } = await setup();
       const suspensionId = `SUS_${bidder}`;
 
-      await w.supplierEvents.handle(
-        supplierEvent('SUPPLIER_SUSPENDED', bidder, {
-          suspensionId,
-          suspendedAt: new Date().toISOString(),
-        }),
-      );
+      SUPPLIER.suspend(bidder, suspensionId);
       expect(await refusalsOf(submit(bidder, tenderId))).toContain('BIDDER_NOT_ELIGIBLE');
 
-      await w.supplierEvents.handle(
-        supplierEvent('SUPPLIER_REINSTATED', bidder, {
-          suspensionId,
-          reinstatedAt: new Date(Date.now() + 1000).toISOString(),
-        }),
-      );
+      SUPPLIER.reinstate(bidder, suspensionId);
       expect((await submit(bidder, tenderId)).revision).toBe(1);
     });
 
     it('lets a contractor suspended since take its bid back, but not replace it', async () => {
       const { bidder, tenderId } = await setup();
       const view = await submit(bidder, tenderId);
-      await w.supplierEvents.handle(
-        supplierEvent('SUPPLIER_SUSPENDED', bidder, {
-          suspensionId: `SUS2_${bidder}`,
-          suspendedAt: new Date().toISOString(),
-        }),
-      );
+      SUPPLIER.suspend(bidder, `SUS2_${bidder}`);
 
       expect(
         await refusalsOf(
@@ -559,13 +626,70 @@ describe('bids', () => {
   });
 
   describe('the receipt chain and its externally held head', () => {
-    /** The head an audit-service would hold: the newest receipt announced on BID_SUBMITTED / BID_REVISED. */
-    const announcedHead = async (owner: string, tenderId: string): Promise<string> => {
+    // What audit-service holds is built from the events it receives, not from this
+    // service's tables: so the stand-in below is built from the announced events, linked
+    // from the genesis by `previousReceipt` exactly as audit-service does on insert (not
+    // "the last one written": concurrent submissions commit in chain order but are not
+    // written in it). The real projection, its continuity rule and its endpoint are
+    // proven in `services/audit-service/test/tender-evidence.int-spec.ts`; the client is
+    // proven against its contract in `tender-evidence-client.int-spec.ts`.
+    const evidenceFromEvents = async (owner: string, tenderId: string): Promise<TenderChain> => {
       const announced = (await outboxFor(w.prisma, owner))
         .filter((row) => ['BID_SUBMITTED', 'BID_REVISED'].includes(row.eventName))
-        .map((row) => payloadOf(row) as { tenderId: string; receipt: string })
+        .map((row) => payloadOf(row) as AnnouncedLink)
         .filter((payload) => payload.tenderId === tenderId);
-      return announced[announced.length - 1]!.receipt;
+      const genesis = genesisReceipt(tenderId);
+      const links: TenderChain['links'] = [];
+      let previous = genesis;
+      for (let found = announced.find((p) => p.previousReceipt === previous); found;) {
+        links.push({
+          seq: links.length + 1,
+          bidId: found.bidId,
+          revision: found.revision,
+          receivedAt: found.receivedAt,
+          ciphertextSha256: found.ciphertextSha256,
+          contentCommitment: found.contentCommitment,
+          previousReceipt: found.previousReceipt,
+          receipt: found.receipt,
+        });
+        previous = found.receipt;
+        found = announced.find((p) => p.previousReceipt === previous);
+      }
+      return { tenderId, genesis, head: previous, links };
+    };
+
+    /** An audit-service stand-in serving one frozen chain, verifying the token as audit-service does. */
+    const serveEvidence = async (chain: TenderChain | undefined) => {
+      const server = createServer((req, res) => {
+        void (async () => {
+          const claims = await tokens
+            .verify((req.headers['x-internal-token'] as string | undefined) ?? '', 'audit-service')
+            .catch(() => null);
+          if (!claims || claims.callerService !== 'construction-service' || claims.organizationId) {
+            res.writeHead(403).end();
+            return;
+          }
+          if (!chain) {
+            res.writeHead(503).end();
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(chain));
+        })();
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      return {
+        client: new TenderEvidenceClient(
+          testEnv({ AUDIT_SERVICE_URL: url, INTERNAL_TOKEN_SECRET: SECRET }),
+          tokens,
+        ),
+        close: () =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections();
+            server.close(() => resolve());
+          }),
+      };
     };
 
     it('gives concurrent submissions distinct places in one verifying chain, ending at the announced head', async () => {
@@ -583,9 +707,9 @@ describe('bids', () => {
           index === 0 ? genesisReceipt(tenderId) : links[index - 1]!.receipt,
         );
       });
-      expect(verifyReceiptChain(tenderId, links, await announcedHead(owner, tenderId))).toEqual({
-        ok: true,
-      });
+      const evidence = await evidenceFromEvents(owner, tenderId);
+      expect(evidence.links.map((link) => link.receipt)).toEqual(links.map((link) => link.receipt));
+      expect(verifyReceiptChain(tenderId, links, evidence.head)).toEqual({ ok: true });
     });
 
     it('is not rescued by a rewritten chain: a consistent local forgery fails the head held elsewhere, and opening refuses it', async () => {
@@ -593,7 +717,12 @@ describe('bids', () => {
       const bidders = [org(), org(), org()];
       for (const bidder of bidders) await qualify(w, bidder);
       for (const bidder of bidders) await submit(bidder, tenderId, bidContent('1000'));
-      const externalHead = await announcedHead(owner, tenderId);
+      // What audit-service holds, frozen now: the bids were just made and nobody has
+      // touched anything yet. It is served over HTTP and read back through the client,
+      // the only way opening may learn the head.
+      const evidence = await serveEvidence(await evidenceFromEvents(owner, tenderId));
+      const external = await evidence.client.fetchChain(tenderId);
+      const externalHead = external.head;
       const original = await linksOf(tenderId);
       expect(verifyReceiptChain(tenderId, original, externalHead)).toEqual({ ok: true });
 
@@ -654,9 +783,52 @@ describe('bids', () => {
             receipts: { links: rewritten, head: externalHead },
           }),
         ).toThrow(expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }));
+
+        // And with the receipts themselves taken from the evidence — which is how opening
+        // reads them — the substituted bid does not match what was announced for it.
+        expect(() =>
+          openBid({
+            privateKey: privateKeyFromDer(der),
+            binding: {
+              tenderId,
+              bidId: target.bidId,
+              bidderOrganizationId: bidders[1]!,
+              revision: 1,
+              keyId,
+            },
+            sealed: forged,
+            receipts: trustedReceiptsOf(external),
+          }),
+        ).toThrow(expect.objectContaining({ code: 'RECEIPT_MISMATCH' }));
       } finally {
         der.fill(0);
+        await evidence.close();
       }
+    });
+
+    it('opens nothing when the evidence cannot be read or cannot be trusted (fail closed)', async () => {
+      const { owner, tenderId } = await setup();
+      const bidder = org();
+      await qualify(w, bidder);
+      await submit(bidder, tenderId);
+      const honest = await evidenceFromEvents(owner, tenderId);
+
+      // Unreachable: no head, no fallback to the local one.
+      const down = await serveEvidence(undefined);
+      await expect(down.client.fetchChain(tenderId)).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      await down.close();
+
+      // A chain whose head is not its newest link, or that does not start at this tender's
+      // genesis, is refused rather than used.
+      expect(() => trustedReceiptsOf({ ...honest, head: 'f'.repeat(64) })).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+      );
+      expect(() => trustedReceiptsOf({ ...honest, genesis: 'e'.repeat(64) })).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+      );
+      expect(trustedReceiptsOf(honest).head).toBe(honest.head);
     });
 
     /** Rewrites the stored chain from `fromSeq` on, as a database owner could: bid, digests, every later receipt. */
@@ -840,22 +1012,3 @@ describe('bids', () => {
     });
   });
 });
-
-/** A supplier-service event as the consumer receives it (PR 5), for the eligibility suite. */
-function supplierEvent(eventName: string, organizationId: string, payload: object) {
-  return eventEnvelopeSchemaParse({
-    eventId: ulid(),
-    eventName,
-    occurredAt: new Date().toISOString(),
-    producer: 'supplier-service',
-    aggregateType: 'Supplier',
-    aggregateId: 'SUP_1',
-    tenantId: organizationId,
-    correlationId: '01J0000000000000000000000B',
-    payload: { organizationId, ...payload },
-  });
-}
-
-function eventEnvelopeSchemaParse(value: unknown) {
-  return eventEnvelopeSchema.parse(value) as Parameters<Wiring['supplierEvents']['handle']>[0];
-}

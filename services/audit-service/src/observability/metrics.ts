@@ -191,6 +191,16 @@ export const INGESTION_FAILURE_REASONS = {
   REPLAY_INVALID_PAYLOAD: 'replay_invalid_payload',
   /** The replayed event's tenant and `envelope.tenantId` did not agree. */
   REPLAY_TENANT_MISMATCH: 'replay_tenant_mismatch',
+
+  // The tender-evidence projection (`rasta.construction.v1`, CON-002 PR 6): a bid
+  // receipt that does not continue its tender's chain. Two reasons, because a gap
+  // (an out-of-order delivery or a lost event) and a fork (a split chain — tampering
+  // or a producer fault) need different responses; neither is ever accepted.
+
+  /** The link names a predecessor this service has not seen. */
+  TENDER_CHAIN_GAP: 'tender_chain_gap',
+  /** The link's predecessor already has a successor, or its receipt is already recorded. */
+  TENDER_CHAIN_FORK: 'tender_chain_fork',
 } as const;
 
 export type IngestionFailureReason =

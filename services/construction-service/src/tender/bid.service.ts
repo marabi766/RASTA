@@ -10,7 +10,7 @@ import { SERVICE_NAME } from '../config/env';
 import { tenderTransitionsTotal, versionConflictsTotal } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
-import { ContractorStandingRepository } from './contractor-standing.repository';
+import { StandingAuthority } from './standing-authority';
 import { BidRepository, type LockedTenderForBid } from './bid.repository';
 import { TenderClock, insideWindow } from './tender-clock';
 import { SealingError } from './sealing/errors';
@@ -35,8 +35,6 @@ export const BID_REFUSALS = [
   'BID_WINDOW_NOT_OPEN',
   'BID_WINDOW_CLOSED',
   'BIDDER_NOT_ELIGIBLE',
-  /** The contractor standing has not been loaded from supplier-service yet (fail closed). */
-  'STANDING_NOT_LOADED',
   'OWN_TENDER',
   'UNKNOWN_CRITERION',
   'BID_TOO_LARGE',
@@ -61,9 +59,17 @@ const OWN_BID_RECEIPT = 'OWN_BID_RECEIPT';
  * tender the sweeper has not yet closed still refuses (the status is not what is
  * trusted, the clock is). The database's own `bid_guard` trigger judges again.
  *
- * Eligibility (qualified for CONTRACTING, not suspended, from the supplier events
- * of PR 5) is asked **at submit time**, in the same transaction, and fails closed:
- * an organization the service has never heard of cannot bid.
+ * Eligibility (qualified for CONTRACTING, not suspended) is an **authoritative
+ * decision**: asked of supplier-service for this one contractor at submit and
+ * replace time (`StandingAuthority`), never taken from this service's read model,
+ * which is advisory. It is asked **before** the transaction, so a slow
+ * supplier-service holds no tender lock, and it fails closed: unreachable is a
+ * 503/504, an organization nobody knows is not eligible.
+ *
+ * A bid the database refuses for the window after the application judged it inside
+ * (the deadline crossing between the decision and the write) is the same refusal,
+ * `422 BID_WINDOW_CLOSED`, not a 500: `bid_guard` is the second check, and what it
+ * refuses is a late bid.
  *
  * ## What is returned and published
  *
@@ -77,7 +83,7 @@ export class BidService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly bids: BidRepository,
-    private readonly standing: ContractorStandingRepository,
+    private readonly standing: StandingAuthority,
     private readonly events: EventPublisher,
     private readonly access: ProjectAccess,
     private readonly clock: TenderClock,
@@ -115,6 +121,7 @@ export class BidService {
   async submit(tenderId: string, dto: SubmitBidDto): Promise<BidReceiptView> {
     const { organizationId: bidder, actor } = this.access.assertCanBid();
     const bidId = newId(ID_PREFIX.bid);
+    await this.assertEligible(tenderId, bidder);
 
     try {
       const view = await withFinancialSpan(
@@ -166,7 +173,7 @@ export class BidService {
       return view;
     } catch (error) {
       if (isUniqueViolation(error)) throw RastaError.alreadyExists('Bid', tenderId);
-      throw error;
+      throw this.lateWrite(error, tenderId);
     }
   }
 
@@ -174,49 +181,54 @@ export class BidService {
 
   async revise(tenderId: string, bidId: string, dto: ReviseBidDto): Promise<BidReceiptView> {
     const { organizationId: bidder, actor } = this.access.assertCanBid();
+    await this.assertEligible(tenderId, bidder);
 
     const view = await withFinancialSpan(
       'construction.bid.revise',
       () =>
-        this.prisma.transaction(async (tx) => {
-          const { tender, at, criteria } = await this.decide(tx, tenderId, bidder);
-          const locked = await this.lockOwnBid(tx, tenderId, bidId, bidder);
-          this.assertRevision(locked, dto.expectedRevision);
-          this.assertAnswersKnown(dto.content, criteria);
-          const key = await this.bids.findKey(tx, tenderId);
-          if (!key)
-            throw RastaError.internal('A published tender has no key; no bid can be sealed');
+        this.prisma
+          .transaction(async (tx) => {
+            const { tender, at, criteria } = await this.decide(tx, tenderId, bidder);
+            const locked = await this.lockOwnBid(tx, tenderId, bidId, bidder);
+            this.assertRevision(locked, dto.expectedRevision);
+            this.assertAnswersKnown(dto.content, criteria);
+            const key = await this.bids.findKey(tx, tenderId);
+            if (!key)
+              throw RastaError.internal('A published tender has no key; no bid can be sealed');
 
-          const revision = dto.expectedRevision + 1;
-          const sealed = this.seal(key.publicKeyPem, content(dto), {
-            tenderId,
-            bidId,
-            bidderOrganizationId: bidder,
-            revision,
-            keyId: key.keyId,
-          });
-          const matched = await this.bids.replaceSeal(tx, {
-            bidId,
-            bidderOrganizationId: bidder,
-            expectedRevision: dto.expectedRevision,
-            sealed,
-            actor,
-            at,
-          });
-          if (matched === 0) throw this.conflict(bidId);
+            const revision = dto.expectedRevision + 1;
+            const sealed = this.seal(key.publicKeyPem, content(dto), {
+              tenderId,
+              bidId,
+              bidderOrganizationId: bidder,
+              revision,
+              keyId: key.keyId,
+            });
+            const matched = await this.bids.replaceSeal(tx, {
+              bidId,
+              bidderOrganizationId: bidder,
+              expectedRevision: dto.expectedRevision,
+              sealed,
+              actor,
+              at,
+            });
+            if (matched === 0) throw this.conflict(bidId);
 
-          return this.appendAndAnnounce(tx, {
-            eventName: 'BID_REVISED',
-            owner: tender.organizationId,
-            tenderId,
-            bidId,
-            bidder,
-            revision,
-            sealed,
-            actor,
-            at,
-          });
-        }),
+            return this.appendAndAnnounce(tx, {
+              eventName: 'BID_REVISED',
+              owner: tender.organizationId,
+              tenderId,
+              bidId,
+              bidder,
+              revision,
+              sealed,
+              actor,
+              at,
+            });
+          })
+          .catch((error: unknown) => {
+            throw this.lateWrite(error, tenderId);
+          }),
       { 'rasta.tender.command': 'bid-revise' },
     );
     tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'bid-revise' });
@@ -231,42 +243,44 @@ export class BidService {
     const view = await withFinancialSpan(
       'construction.bid.withdraw',
       () =>
-        this.prisma.transaction(async (tx) => {
-          // Withdrawing is judged like a submission: before the deadline only.
-          // Eligibility is not asked again: a contractor suspended since may still
-          // take its bid back.
-          const { tender, at } = await this.decide(tx, tenderId, bidder, {
-            checkEligibility: false,
-          });
-          const locked = await this.lockOwnBid(tx, tenderId, bidId, bidder);
-          this.assertRevision(locked, dto.expectedRevision);
+        this.prisma
+          .transaction(async (tx) => {
+            // Withdrawing is judged like a submission: before the deadline only.
+            // Eligibility is not asked again: a contractor suspended since may still
+            // take its bid back.
+            const { tender, at } = await this.decide(tx, tenderId, bidder);
+            const locked = await this.lockOwnBid(tx, tenderId, bidId, bidder);
+            this.assertRevision(locked, dto.expectedRevision);
 
-          const matched = await this.bids.withdraw(tx, {
-            bidId,
-            bidderOrganizationId: bidder,
-            expectedRevision: dto.expectedRevision,
-            actor,
-            at,
-          });
-          if (matched === 0) throw this.conflict(bidId);
-
-          await this.events.enqueue(tx, {
-            eventName: 'BID_WITHDRAWN',
-            aggregateId: tenderId,
-            organizationId: tender.organizationId,
-            payload: {
+            const matched = await this.bids.withdraw(tx, {
               bidId,
-              tenderId,
-              organizationId: tender.organizationId,
               bidderOrganizationId: bidder,
-              revision: dto.expectedRevision,
-              withdrawnAt: at.toISOString(),
-              withdrawnBy: actor,
-            },
-            occurredAt: at,
-          });
-          return this.ownView(tx, tenderId, bidder, bidId);
-        }),
+              expectedRevision: dto.expectedRevision,
+              actor,
+              at,
+            });
+            if (matched === 0) throw this.conflict(bidId);
+
+            await this.events.enqueue(tx, {
+              eventName: 'BID_WITHDRAWN',
+              aggregateId: tenderId,
+              organizationId: tender.organizationId,
+              payload: {
+                bidId,
+                tenderId,
+                organizationId: tender.organizationId,
+                bidderOrganizationId: bidder,
+                revision: dto.expectedRevision,
+                withdrawnAt: at.toISOString(),
+                withdrawnBy: actor,
+              },
+              occurredAt: at,
+            });
+            return this.ownView(tx, tenderId, bidder, bidId);
+          })
+          .catch((error: unknown) => {
+            throw this.lateWrite(error, tenderId);
+          }),
       { 'rasta.tender.command': 'bid-withdraw' },
     );
     tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'bid-withdraw' });
@@ -309,14 +323,13 @@ export class BidService {
   // -- helpers ------------------------------------------------------------------
 
   /**
-   * Locks the tender (shared), judges visibility, eligibility and the window on the
-   * decision instant read after the lock, and returns what the command needs.
+   * Locks the tender (shared), judges visibility and the window on the decision
+   * instant read after the lock, and returns what the command needs.
    */
   private async decide(
     tx: ExtendedPrismaClient,
     tenderId: string,
     bidder: string,
-    options: { checkEligibility: boolean } = { checkEligibility: true },
   ): Promise<{ tender: LockedTenderForBid; at: Date; criteria: TenderCriterion[] }> {
     const tender = await this.bids.lockTenderShared(tx, tenderId);
     // Not visible is not found: a draft, another's restricted tender, a stranger's —
@@ -343,17 +356,31 @@ export class BidService {
     } else if (!insideWindow(at, tender.bidOpeningAt, tender.bidClosingAt)) {
       refusals.push('BID_WINDOW_CLOSED');
     }
-    if (options.checkEligibility) {
-      const verdict = await this.standing.eligibility(bidder, tx);
-      // Not loaded is its own reason: the service has not yet read what predates
-      // its supplier consumer (ADR-061 § 4), so it cannot say of anybody that they
-      // are eligible — and must not blame the contractor for it.
-      if (verdict === 'STANDING_NOT_LOADED') refusals.push('STANDING_NOT_LOADED');
-      else if (verdict !== 'ELIGIBLE') refusals.push('BIDDER_NOT_ELIGIBLE');
-    }
     if (refusals.length > 0) throw this.refused(tenderId, refusals);
 
     return { tender, at, criteria: await this.bids.listCriteria(tx, tenderId) };
+  }
+
+  /**
+   * Is the contractor eligible right now? Asked of supplier-service, **outside** any
+   * transaction (see the class header). A tender the caller may not see is not
+   * judged here at all: the refusal order must not tell a stranger more than the
+   * 404 does, so an ineligible contractor on a tender it can see is refused, and
+   * the visibility rules still answer 404 inside the transaction.
+   */
+  private async assertEligible(tenderId: string, bidder: string): Promise<void> {
+    const verdict = await this.standing.verdictFor(bidder);
+    if (verdict !== 'ELIGIBLE') throw this.refused(tenderId, ['BIDDER_NOT_ELIGIBLE']);
+  }
+
+  /**
+   * The database refused a write for the window after the application judged it
+   * inside — the deadline crossed between the decision and the write. That is a late
+   * bid: `422 BID_WINDOW_CLOSED`, with nothing committed, not a 500.
+   */
+  private lateWrite(error: unknown, subject: string): unknown {
+    const message = (error as { message?: string } | null)?.message ?? '';
+    return message.includes('ck_bid_window') ? this.refused(subject, ['BID_WINDOW_CLOSED']) : error;
   }
 
   private async lockOwnBid(
