@@ -8,7 +8,13 @@ import {
 import { AssetService } from './asset.service';
 import type { AssetRepository } from './asset.repository';
 import { ASSET_EVENTS } from './events';
-import { updateAssetSchema, type CreateAssetDto, type TransferAssetDto } from './dto';
+import { AssetController } from './asset.controller';
+import {
+  updateAssetSchema,
+  type CreateAssetDto,
+  type TransferAssetDto,
+  type UpdateAssetDto,
+} from './dto';
 import type { ClearanceAnswer, TransferClearance, WorkOwner } from './transfer-clearance';
 import { transferClearanceTotal } from '../observability/metrics';
 
@@ -306,7 +312,9 @@ describe('AssetService', () => {
       const h = at(4);
 
       // An edit that changes nothing answers with the row as it is.
-      const view = await run(() => h.service.update(ASSET_ID, { name: 'کامیون حمل زباله' }));
+      const view = await run(() =>
+        h.service.update(ASSET_ID, { name: 'کامیون حمل زباله', expectedVersion: 4 }),
+      );
 
       expect(view.version).toBe(4);
     });
@@ -358,15 +366,6 @@ describe('AssetService', () => {
       expect(h.enqueued).toHaveLength(0);
     });
 
-    it('still applies an edit that names no version, as before', async () => {
-      const h = at(3);
-
-      await run(() => h.service.update(ASSET_ID, { name: 'نام تازه' }));
-
-      const call = h.tx.asset.updateMany.mock.calls[0]?.[0] as { where: Record<string, unknown> };
-      expect(call.where).not.toHaveProperty('version');
-    });
-
     it('writes and announces only the fields that really change', async () => {
       const h = at(1);
 
@@ -392,7 +391,9 @@ describe('AssetService', () => {
     it('counts clearing a field as a change, and leaving an empty one empty as none', async () => {
       const h = at(1, { manufacturer: 'ایسوزو', model: null });
 
-      await run(() => h.service.update(ASSET_ID, { manufacturer: null, model: null }));
+      await run(() =>
+        h.service.update(ASSET_ID, { manufacturer: null, model: null, expectedVersion: 1 }),
+      );
 
       expect(h.enqueued[0]?.payload).toMatchObject({ changedFields: ['manufacturer'] });
     });
@@ -451,14 +452,78 @@ describe('AssetService', () => {
         );
       });
 
+      it('requires a version: a request that does not say what it was made against is refused', () => {
+        const result = updateAssetSchema.safeParse({ name: 'نام تازه' });
+        expect(result.success).toBe(false);
+        expect(
+          !result.success && result.error.issues.map((issue) => issue.path.join('.')),
+        ).toContain('expectedVersion');
+      });
+
       it('does not accept a version alone as an edit', () => {
         expect(updateAssetSchema.safeParse({ expectedVersion: 2 }).success).toBe(false);
       });
 
-      it.each([0, -1, 1.5, 'x'])('does not accept %j as a version', (version) => {
-        expect(
-          updateAssetSchema.safeParse({ name: 'نام تازه', expectedVersion: version }).success,
-        ).toBe(false);
+      it.each([0, -1, 1.5, 'x', '2', true, null, [], {}])(
+        'does not accept %j as a version',
+        (version) => {
+          expect(
+            updateAssetSchema.safeParse({ name: 'نام تازه', expectedVersion: version }).success,
+          ).toBe(false);
+        },
+      );
+    });
+
+    describe('through the controller, as a direct API client reaches it', () => {
+      // The pipe the controller binds to `PATCH :id`'s body, found from its own
+      // route metadata, then the handler it hands the parsed body to. Nothing is
+      // reconstructed: if the controller stopped validating, or validated a
+      // different schema, this is what would notice.
+      const bodyPipe = (): { transform: (value: unknown, meta: { type: 'body' }) => unknown } => {
+        const args = Reflect.getMetadata('__routeArguments__', AssetController, 'update') as Record<
+          string,
+          { pipes: Array<{ transform: (value: unknown, meta: { type: 'body' }) => unknown }> }
+        >;
+        const found = Object.values(args).flatMap((entry) => entry.pipes);
+        expect(found).toHaveLength(1);
+        return found[0];
+      };
+
+      const patch = async (h: Harness, body: unknown) => {
+        const controller = new AssetController(h.service, undefined as never, undefined as never);
+        const parsed = bodyPipe().transform(body, { type: 'body' }) as UpdateAssetDto;
+        return controller.update(ASSET_ID, parsed);
+      };
+
+      it('refuses a PATCH that omits the version with a 400, whatever else it says, and writes nothing', async () => {
+        const h = harness({ findById: jest.fn(async () => assetRow({ version: 3 })) });
+
+        await expect(run(() => patch(h, { assetTag: 'OLD-TAG' }))).rejects.toMatchObject({
+          code: 'VALIDATION_FAILED',
+        });
+
+        expect(h.tx.asset.updateMany).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+      });
+
+      it('answers a PATCH made against a stale version with a 409 and writes nothing', async () => {
+        const h = harness({ findById: jest.fn(async () => assetRow({ version: 3 })) });
+
+        await expect(
+          run(() => patch(h, { assetTag: 'OLD-TAG', expectedVersion: 2 })),
+        ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+        expect(h.tx.asset.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('applies a PATCH made against the current version, guarded on it', async () => {
+        const h = harness({ findById: jest.fn(async () => assetRow({ version: 3 })) });
+
+        await run(() => patch(h, { assetTag: 'NEW-TAG', expectedVersion: 3 }));
+
+        expect(h.tx.asset.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ id: ASSET_ID, version: 3 }) }),
+        );
       });
     });
   });
@@ -615,7 +680,7 @@ describe('AssetService', () => {
       h.tx.asset.updateMany.mockResolvedValueOnce({ count: 0 });
 
       await expect(
-        run(() => h.service.update(ASSET_ID, { name: 'نام تازه' })),
+        run(() => h.service.update(ASSET_ID, { name: 'نام تازه', expectedVersion: 1 })),
       ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
       expect(h.tx.asset.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({

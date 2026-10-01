@@ -133,14 +133,15 @@ export const updateAssetSchema = z
     specifications: z.record(z.unknown()).optional(),
     /**
      * The version of the asset the caller's edit was made against — the
-     * `version` a read returned. Optional, so an existing caller is unchanged;
-     * when sent, the update applies only to that version and is otherwise
-     * refused with `409 OPTIMISTIC_LOCK_FAILED`. Without it a screen that was
-     * opened before somebody else's edit silently restores the old values of
-     * every field it sends (PR #158 review): the update has no other way to
-     * know what the editor saw.
+     * `version` a read returned. **Required**: the update applies only to that
+     * version (`UPDATE … WHERE version = ?`) and is otherwise refused with
+     * `409 OPTIMISTIC_LOCK_FAILED`, and a request that does not say which
+     * version it was made against is refused with `400`. Optional, it left a
+     * direct API client free to overwrite whatever is current, which is the lost
+     * update this field exists to prevent (PR #158 review, twice): a caller that
+     * does not know the version cannot know what it is about to overwrite.
      */
-    expectedVersion: z.coerce.number().int().min(1).optional(),
+    expectedVersion: z.number().int().min(1),
   })
   .strict()
   .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {

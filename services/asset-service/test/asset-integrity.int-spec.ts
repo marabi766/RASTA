@@ -256,12 +256,15 @@ describe('asset integrity', () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
 
+      const { version } = await asActor(manager(org.a), () => assets.get(assetId));
       const release = await holdRowLock(assetId);
       const decommission = asActor(manager(org.a), () =>
         assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
       );
       await waitForBlocked(1);
-      const edit = asActor(manager(org.a), () => assets.update(assetId, { name: 'نام تازه' }));
+      const edit = asActor(manager(org.a), () =>
+        assets.update(assetId, { name: 'نام تازه', expectedVersion: version }),
+      );
       await waitForBlocked(2);
       await release();
 
@@ -358,12 +361,11 @@ describe('asset integrity', () => {
         expect(await updatedEvents()).toHaveLength(1);
       });
 
-      it("answers an edit to another organization's machine as a missing one, with or without a version", async () => {
+      it("answers an edit to another organization's machine as a missing one, whatever version it names", async () => {
         const assetId = await machine(org.a);
         const opened = await read(assetId);
 
         for (const dto of [
-          { name: 'ربوده' },
           { name: 'ربوده', expectedVersion: opened.version },
           { name: 'ربوده', expectedVersion: opened.version + 7 },
         ]) {
@@ -1184,7 +1186,7 @@ describe('asset integrity', () => {
       );
 
       const attempts: Array<[string, () => Promise<unknown>]> = [
-        ['update', () => assets.update(assetId, { name: 'ربوده' })],
+        ['update', () => assets.update(assetId, { name: 'ربوده', expectedVersion: 1 })],
         ['changeStatus', () => assets.changeStatus(assetId, { status: 'IDLE', reason: 'x' })],
         ['decommission', () => assets.decommission(assetId, { reason: 'ربوده' })],
         ['activate', () => assets.activate(assetId, {})],

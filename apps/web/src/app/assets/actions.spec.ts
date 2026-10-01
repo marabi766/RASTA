@@ -297,6 +297,19 @@ describe('what the service refuses', () => {
     });
   });
 
+  it('treats another request still holding this submission id as the same unknown', async () => {
+    registerAsset.mockResolvedValue({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    expect(await submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData(VALID))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it('reports a sent-but-unconfirmed write as UNCONFIRMED, never as a failure', async () => {
     // The service may have registered the machine; "nothing was saved" would
     // invite a retry that reports a duplicate.

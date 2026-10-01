@@ -136,10 +136,11 @@ export class AssetController {
   @ApiOperation({
     summary: 'Update an asset',
     description:
-      'Send `expectedVersion` — the `version` the caller read — and the update applies only to ' +
-      'that version: if the asset has changed since, the answer is `409 OPTIMISTIC_LOCK_FAILED` ' +
-      'and nothing is written, so an edit made from an old screen cannot restore values somebody ' +
-      'else has since changed. Without it the update applies to whatever is current, as before. ' +
+      '`expectedVersion` is **required**: the `version` the caller read. The update applies only ' +
+      'to that version (`UPDATE … WHERE version = ?`); if the asset has changed since, the ' +
+      'answer is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written, so an edit made from an ' +
+      'old screen cannot restore values somebody else has since changed. A body without it is ' +
+      '`400`: a caller that does not know the version cannot know what it overwrites. ' +
       'Only fields whose value differs from the stored one are written and listed in ' +
       '`ASSET_UPDATED.changedFields`; an update that changes nothing writes nothing, publishes ' +
       'nothing and answers with the asset as it is. `null` clears an optional field. ' +

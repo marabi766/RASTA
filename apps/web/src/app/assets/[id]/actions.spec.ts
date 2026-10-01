@@ -390,6 +390,19 @@ describe('what the service refuses', () => {
     });
   });
 
+  it('treats another request still holding this submission id as the same unknown', async () => {
+    updateAsset.mockResolvedValue({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    expect(await submit(formData(VALID))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it('reports a sent-but-unconfirmed write as UNCONFIRMED, never as a failure', async () => {
     updateAsset.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'corr-sample' });
     expect(await submit(formData(VALID))).toEqual({

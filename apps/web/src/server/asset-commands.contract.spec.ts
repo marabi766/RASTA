@@ -209,10 +209,17 @@ describe("the service's rule for `model`", () => {
 describe('the edit version', () => {
   const dto = parse(read('dto.ts'));
 
-  it('is still an optional `expectedVersion` on the update schema, the portal always sends it', () => {
+  it('is still a **required** `expectedVersion` on the update schema; the portal always sends it', () => {
     const update = topLevelConst(dto, 'updateAssetSchema');
-    const keys = collect(update, ts.isPropertyAssignment).map((node) => node.name.getText());
-    expect(keys).toContain('expectedVersion');
+    const version = collect(update, ts.isPropertyAssignment).find(
+      (node) => node.name.getText() === 'expectedVersion',
+    );
+    expect(version).toBeDefined();
+    // Required: no `.optional()` and no default, or a direct client that omits
+    // it overwrites whatever is current — the lost update this field exists
+    // to prevent.
+    const initializer = version!.initializer.getText().replace(/\s+/g, '');
+    expect(initializer).toMatch(/^z\.(coerce\.)?number\(\)\.int\(\)\.min\(1\)$/);
   });
 
   it('is still carried by the asset view, which is what the form reads it from', () => {
@@ -225,8 +232,11 @@ describe('the edit version', () => {
 
   it('is applied in the UPDATE itself, not only checked after a read', () => {
     const service = read('asset.service.ts');
+    // Unconditionally, in the `where` of the one `updateMany`: a predicate that
+    // is only there when the caller sent a version is a lost update for a
+    // caller that did not.
     expect(service).toMatch(
-      /\.\.\.\(expectedVersion !== undefined \? \{ version: expectedVersion \} : \{\}\)/,
+      /where:\s*\{\s*id,\s*deletedAt: null,\s*status: \{ not: 'DECOMMISSIONED' \},\s*version: expectedVersion,\s*\}/,
     );
   });
 

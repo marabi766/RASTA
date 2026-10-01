@@ -353,7 +353,7 @@ export class AssetService {
     // else's edit landed first, and applying this one would put back what they
     // changed. Decided before anything else so the answer does not depend on
     // what the fields happen to hold.
-    if (expectedVersion !== undefined && asset.version !== expectedVersion) {
+    if (asset.version !== expectedVersion) {
       throw RastaError.optimisticLockFailed('Asset', id);
     }
 
@@ -383,7 +383,7 @@ export class AssetService {
             id,
             deletedAt: null,
             status: { not: 'DECOMMISSIONED' },
-            ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
+            version: expectedVersion,
           },
           data: {
             ...(changes.name !== undefined ? { name: changes.name } : {}),

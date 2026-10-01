@@ -82,8 +82,11 @@ export async function submitRegisterAsset(
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown (asset-service stores no submission id, so
+      // it never says this; the gateway's answer is handled all the same).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }
