@@ -32,11 +32,22 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
 import helmet from 'helmet';
 import { SwaggerModule } from '@nestjs/swagger';
-import { installGracefulShutdown } from '@rasta/nest-common';
+import { installGracefulShutdown, preflightRuntimeRole } from '@rasta/nest-common';
+import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
 import { buildNotificationOpenApiDocument } from './openapi/document';
 
 async function bootstrap(): Promise<void> {
+  // D-045: refuse to start as anything but the runtime role before Nest builds a
+  // single provider. Nest runs every provider's onModuleInit before AppModule's,
+  // and a consumer or a timer starts in its own — gated only there, it could take
+  // and commit work under an owner connection first (Codex on #178). A
+  // short-lived connection of its own; AppModule still checks, belt and braces.
+  await preflightRuntimeRole(
+    () => new PrismaClient({ datasources: { db: { url: env.DATABASE_URL } } }),
+    { service: SERVICE_NAME, runtimeVariable: 'DATABASE_URL_NOTIFICATION' },
+  );
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
     bufferLogs: true,

@@ -192,9 +192,11 @@ export {
   RuntimeRoleRefusedError,
   assertRuntimeRole,
   connectedRoleProblems,
+  preflightRuntimeRole,
 } from './database/runtime-role';
 export type {
   AssertRuntimeRoleOptions,
   ConnectedRoleFacts,
+  RuntimeRolePreflightClient,
   RuntimeRoleQueryClient,
 } from './database/runtime-role';
