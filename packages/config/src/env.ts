@@ -286,8 +286,15 @@ export const kafkaEnvSchema = z.object({
    * and abandons the row *without releasing it* — releasing a row that may
    * already have reached the broker guarantees a replay, whereas letting the
    * lease lapse replays only if it genuinely has to.
+   *
+   * Must be **shorter than `SHUTDOWN_TIMEOUT_MS`** (`loadEnv` refuses the
+   * combination otherwise): the process gives up and exits after that timeout,
+   * so a longer grace is a wait the process will never get to finish — the
+   * abandon-without-release path would be unreachable and every slow publish
+   * would end as a forced exit. The default, 20 s, sits under the default
+   * 25 s timeout; it was 30 s, which did not.
    */
-  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
+  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(20),
 });
 
 export type KafkaEnv = z.infer<typeof kafkaEnvSchema>;
@@ -368,7 +375,33 @@ export function loadEnv<S extends z.ZodTypeAny>(
   }
 
   assertKafkaPlaintextOptOut(source, result.data);
+  assertOutboxGraceWithinShutdown(result.data);
   return result.data;
+}
+
+/**
+ * The outbox relay's shutdown grace must end before the process's own shutdown
+ * timeout does. Two numbers from two schemas (`kafkaEnvSchema`,
+ * `baseEnvSchema`) cannot be compared by either, so the comparison is made
+ * here, on the merged result, and only for a service that has both.
+ */
+function assertOutboxGraceWithinShutdown(parsed: unknown): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const { OUTBOX_SHUTDOWN_GRACE_SECONDS: grace, SHUTDOWN_TIMEOUT_MS: timeoutMs } = parsed as {
+    OUTBOX_SHUTDOWN_GRACE_SECONDS?: unknown;
+    SHUTDOWN_TIMEOUT_MS?: unknown;
+  };
+  if (typeof grace !== 'number' || typeof timeoutMs !== 'number') return;
+  if (grace * 1000 < timeoutMs) return;
+  throw new EnvValidationError([
+    {
+      path: 'OUTBOX_SHUTDOWN_GRACE_SECONDS',
+      message:
+        `(${grace} s) must be shorter than SHUTDOWN_TIMEOUT_MS (${timeoutMs} ms): the process ` +
+        'exits when that timeout ends, so a longer grace could never finish. Lower the grace ' +
+        'or raise SHUTDOWN_TIMEOUT_MS (and keep it under the orchestrator’s termination period)',
+    },
+  ]);
 }
 
 /**
