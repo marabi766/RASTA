@@ -23,6 +23,19 @@ GO, with these answers. Where they differ from the plan below, they win.
   withdrawn and proposed again. Fail closed stands.
 - The sweep's conclusions on the organization-based and self-access sites are accepted.
 
+Codex review of A (PM ruling, 2026-10-02):
+
+- **HIGH 1.** Complete identities with different issuers compared as DISTINCT. After an issuer URL change, one Keycloak user
+  (the same `sub`, perhaps a new `rasta_uid`) therefore looked like "another person" against a stored actor. Now:
+  - equal userIds → SAME;
+  - equal issuers → the subjects decide (SAME or DISTINCT);
+  - **different issuers → UNKNOWN**, which fails closed.
+
+  There is no alias mapping. An issuer migration needs an explicit, audited mapping later. This is tested with an actor
+  persisted under the old issuer, through the real verifier and guard.
+
+- **HIGH 2.** Accepted as staged. #188 stays open until parts B and C merge, and part A claims no fix.
+
 As built in A: the helper module is `auth/separation-of-duties.ts`. It is not `actor-identity.ts`, because the A-03 import
 check in the guard specs refuses any import path that mentions `identity`. `UserClaims.issuer` is optional (`verifyUserToken`
 always sets it) so that the services' typed stub verifiers need no change in A. A missing issuer makes the stable identity

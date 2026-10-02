@@ -102,10 +102,10 @@ const internalTokens = new InternalTokenService(
   300,
 );
 
-function guard(): AuthGuard {
+function guard(issuer = ISSUER): AuthGuard {
   return new AuthGuard(new Reflector(), {
     serviceName: THIS_SERVICE,
-    tokenVerifier: new TokenVerifier({ jwksUri, issuer: ISSUER, audience: AUDIENCE }),
+    tokenVerifier: new TokenVerifier({ jwksUri, issuer, audience: AUDIENCE }),
     internalTokens,
   });
 }
@@ -133,10 +133,11 @@ const ANONYMOUS: RequestContext = {
 async function through(
   route: Route,
   headers: Record<string, string>,
+  configuredIssuer = ISSUER,
 ): Promise<{ context?: RequestContext; actor?: ActorIdentity; error?: RastaError }> {
   return runWithContext(ANONYMOUS, async () => {
     try {
-      await guard().canActivate(execution(route, headers));
+      await guard(configuredIssuer).canActivate(execution(route, headers));
     } catch (error) {
       if (error instanceof RastaError) return { error };
       throw error;
@@ -149,8 +150,12 @@ async function through(
   });
 }
 
-async function actorOf(token: string): Promise<ActorIdentity> {
-  const { actor, error } = await through(OPEN, { authorization: `Bearer ${token}` });
+async function actorOf(token: string, configuredIssuer = ISSUER): Promise<ActorIdentity> {
+  const { actor, error } = await through(
+    OPEN,
+    { authorization: `Bearer ${token}` },
+    configuredIssuer,
+  );
   if (!actor) throw error ?? new Error('no actor');
   return actor;
 }
@@ -223,6 +228,49 @@ describe('paired tokens for one subject compare as one person', () => {
     const approver = await actorOf(await userToken(BOB, 'USR_U3'));
     expect(compareActors(proposer, approver)).toBe('DISTINCT');
     expect(() => assertDistinctActors(proposer, approver, 'four eyes')).not.toThrow();
+  });
+});
+
+describe('a persisted actor across an issuer change (#192 review)', () => {
+  // The deployment's issuer URL changes (a realm renamed, a host moved). The
+  // Keycloak user is the same person — same `sub` — and may carry a new
+  // `rasta_uid`. No alias mapping from the old issuer to the new exists.
+  const RENAMED_ISSUER = 'https://auth.renamed.test/realms/rasta';
+
+  it('the same Keycloak user under the new issuer is UNKNOWN against the stored actor — refused', async () => {
+    // Recorded before the change, through the guard as it was configured then.
+    const stored = await actorOf(await userToken(ALICE, 'USR_U1'));
+    expect(stored).toEqual({ userId: 'USR_U1', issuer: ISSUER, subject: ALICE });
+
+    // After the change: the service now verifies the new issuer only.
+    const now = await actorOf(await userToken(ALICE, 'USR_U2', RENAMED_ISSUER), RENAMED_ISSUER);
+    expect(now).toEqual({ userId: 'USR_U2', issuer: RENAMED_ISSUER, subject: ALICE });
+
+    expect(compareActors(stored, now)).toBe('UNKNOWN');
+    expect(() => assertDistinctActors(stored, now, 'four eyes')).toThrow(
+      expect.objectContaining({ code: 'ACTOR_IDENTITY_UNKNOWN', status: 422 }),
+    );
+  });
+
+  it('a different Keycloak user under the new issuer is not provably someone else either', async () => {
+    const stored = await actorOf(await userToken(ALICE, 'USR_U1'));
+    const now = await actorOf(await userToken(BOB, 'USR_U3', RENAMED_ISSUER), RENAMED_ISSUER);
+    expect(compareActors(stored, now)).toBe('UNKNOWN');
+  });
+
+  it('the same platform id stays SAME across the change', async () => {
+    const stored = await actorOf(await userToken(ALICE, 'USR_U1'));
+    const now = await actorOf(await userToken(ALICE, 'USR_U1', RENAMED_ISSUER), RENAMED_ISSUER);
+    expect(compareActors(stored, now)).toBe('SAME');
+  });
+
+  it('a token from the old issuer is refused once the new one is configured', async () => {
+    const { error } = await through(
+      OPEN,
+      { authorization: `Bearer ${await userToken(ALICE, 'USR_U1')}` },
+      RENAMED_ISSUER,
+    );
+    expect(error).toMatchObject({ code: 'TOKEN_INVALID' });
   });
 });
 

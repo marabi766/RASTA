@@ -63,19 +63,27 @@ export function currentActor(options: { requirePlatformUserId?: boolean } = {}):
 /**
  * Whether `a` and `b` are one person, two, or cannot be told apart.
  *
- * **SAME** when any of these holds:
- *  - the user ids are equal;
- *  - both sides carry an issuer and subject, and the pairs are equal;
- *  - one side's user id is the other side's subject — a record written from a
- *    token without `rasta_uid`, whose user id *is* the subject.
+ * In this order:
  *
- * **DISTINCT** only when nothing above matched and both sides carry a user id,
- * an issuer and a subject. **UNKNOWN** otherwise.
+ *  1. **SAME** when the user ids are equal, or one side's user id is the other
+ *     side's subject — a record written from a token without `rasta_uid`, whose
+ *     user id *is* the subject.
+ *  2. When both sides carry a user id, an issuer and a subject:
+ *     - **same issuer** → the subjects decide: equal is **SAME**, different is
+ *       **DISTINCT**;
+ *     - **different issuers** → **UNKNOWN**. A subject is only unique within its
+ *       issuer, and the issuer URL can change (a realm renamed, a host moved)
+ *       while the Keycloak user — same `sub`, perhaps a new `rasta_uid` — stays
+ *       the same person. Nothing here maps one issuer to another; an issuer
+ *       migration needs an explicit, audited alias mapping, which does not
+ *       exist yet. Until then a stored actor from the old issuer cannot be
+ *       shown to be someone else.
+ *  3. **UNKNOWN** otherwise: at least one side has no recorded identity.
  *
- * The comparison leans one way on purpose: a false SAME refuses a legitimate
- * second person, a false DISTINCT lets one person approve their own work. So
- * the subject-as-user-id match ignores the issuer (there is one issuer per
- * deployment), and blank values count as absent.
+ * The comparison leans one way on purpose: a false SAME or UNKNOWN refuses a
+ * legitimate second person, a false DISTINCT lets one person approve their own
+ * work. So the subject-as-user-id match ignores the issuer, and blank values
+ * count as absent.
  */
 export function compareActors(a: ActorIdentity, b: ActorIdentity): ActorComparison {
   const userA = present(a.userId);
@@ -86,18 +94,21 @@ export function compareActors(a: ActorIdentity, b: ActorIdentity): ActorComparis
   const subjectB = present(b.subject);
 
   if (userA !== null && userA === userB) return 'SAME';
-  if (issuerA !== null && subjectA !== null && issuerA === issuerB && subjectA === subjectB) {
-    return 'SAME';
-  }
   if ((userA !== null && userA === subjectB) || (userB !== null && userB === subjectA)) {
     return 'SAME';
   }
-
-  const known = (user: string | null, issuer: string | null, subject: string | null) =>
-    user !== null && issuer !== null && subject !== null;
-  return known(userA, issuerA, subjectA) && known(userB, issuerB, subjectB)
-    ? 'DISTINCT'
-    : 'UNKNOWN';
+  if (
+    userA === null ||
+    userB === null ||
+    issuerA === null ||
+    issuerB === null ||
+    subjectA === null ||
+    subjectB === null
+  ) {
+    return 'UNKNOWN';
+  }
+  if (issuerA !== issuerB) return 'UNKNOWN';
+  return subjectA === subjectB ? 'SAME' : 'DISTINCT';
 }
 
 /** Fails closed: `true` unless `a` and `b` are **provably** two people. */

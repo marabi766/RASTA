@@ -20,6 +20,7 @@ import {
 
 const ISSUER = 'http://keycloak.test/realms/rasta';
 const SUBJECT = 'kc-subject-alice';
+const OTHER_ISSUER = 'https://auth.renamed.test/realms/rasta';
 
 const actor = (
   userId: string,
@@ -67,11 +68,25 @@ describe('compareActors', () => {
       actor('USR_U2', ISSUER, 'kc-subject-bob'),
       'DISTINCT',
     ],
+    // Across an issuer change (#192 review): a subject is unique only within its
+    // issuer, and no alias mapping exists, so a different issuer is never proof.
     [
-      'a subject from another issuer is another person',
+      'another issuer, the same subject (the issuer URL changed)',
       actor('USR_U1'),
-      actor('USR_U2', 'http://other.test/realms/x', 'kc-subject-bob'),
-      'DISTINCT',
+      actor('USR_U2', OTHER_ISSUER, SUBJECT),
+      'UNKNOWN',
+    ],
+    [
+      'another issuer, another subject: still not provably another person',
+      actor('USR_U1'),
+      actor('USR_U2', OTHER_ISSUER, 'kc-subject-bob'),
+      'UNKNOWN',
+    ],
+    [
+      'another issuer, but the same platform id',
+      actor('USR_U1'),
+      actor('USR_U1', OTHER_ISSUER, 'kc-subject-bob'),
+      'SAME',
     ],
     [
       'blank userId on one side is not provably distinct',
