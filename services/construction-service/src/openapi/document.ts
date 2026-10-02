@@ -35,6 +35,17 @@ import {
   submitBidSchema,
   withdrawBidSchema,
 } from '../tender/bid.dto';
+import { BidOpeningController } from '../tender/bid-opening.controller';
+import { TenderOpenService } from '../tender/tender-open.service';
+import {
+  bidAccessLogEntrySchema,
+  bidOpeningProposalViewSchema,
+  bidOpeningProposalWithdrawnViewSchema,
+  bidsOpenedViewSchema,
+  listBidAccessLogQuerySchema,
+  openedBidViewSchema,
+  tenderBidsViewSchema,
+} from '../tender/bid-opening.dto';
 import { CriteriaController } from '../tender/criteria.controller';
 import { CriteriaService } from '../tender/criteria.service';
 import {
@@ -190,6 +201,21 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/tenders/{id}/bids/mine': { status: '200', schema: bidReceiptViewSchema },
   'PUT /v1/tenders/{id}/bids/{bidId}': { status: '200', schema: bidReceiptViewSchema },
   'POST /v1/tenders/{id}/bids/{bidId}/withdraw': { status: '200', schema: bidReceiptViewSchema },
+  'POST /v1/tenders/{id}/open-bids': { status: '200', schema: bidsOpenedViewSchema },
+  'POST /v1/tenders/{id}/open-bids/proposal': {
+    status: '200',
+    schema: bidOpeningProposalViewSchema,
+  },
+  'POST /v1/tenders/{id}/open-bids/proposal/withdraw': {
+    status: '200',
+    schema: bidOpeningProposalWithdrawnViewSchema,
+  },
+  'GET /v1/tenders/{id}/bids': { status: '200', schema: tenderBidsViewSchema },
+  'GET /v1/tenders/{id}/bids/{bidId}': { status: '200', schema: openedBidViewSchema },
+  'GET /v1/tenders/{id}/bid-access-log': {
+    status: '200',
+    schema: cursorPageOf(bidAccessLogEntrySchema),
+  },
 };
 
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
@@ -236,6 +262,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/criteria-templates': listCriteriaTemplatesQuerySchema,
   'GET /v1/tenders/{id}/invitations': listInvitationsQuerySchema,
   'GET /v1/open-tenders': listOpenTendersQuerySchema,
+  'GET /v1/tenders/{id}/bid-access-log': listBidAccessLogQuerySchema,
 };
 
 /** The create endpoints that accept an optional `Idempotency-Key`. */
@@ -282,6 +309,10 @@ const LIFECYCLE_CREATES = new Set([
   'POST /v1/tenders/{id}/invitations',
   // The window, eligibility, the owner's own tender, an unknown criterion, size.
   'POST /v1/tenders/{id}/bids',
+  // Not closed, not opened, a conflict of interest, a chain or a bid that differs from the evidence.
+  'POST /v1/tenders/{id}/open-bids',
+  'GET /v1/tenders/{id}/bids',
+  'GET /v1/tenders/{id}/bids/{bidId}',
 ]);
 
 /**
@@ -305,6 +336,17 @@ const RACING_CREATES = new Set([
   'POST /v1/tenders/{id}/invitations',
   // A second bid by one organization: 409 ALREADY_EXISTS.
   'POST /v1/tenders/{id}/bids',
+  // The tender changed state between the evidence being read and the lock: 409, retry.
+  'POST /v1/tenders/{id}/open-bids',
+  'GET /v1/tenders/{id}/bids',
+  'GET /v1/tenders/{id}/bids/{bidId}',
+]);
+
+/** Opening and reading bids ask audit-service for the receipt chain; without it they answer 503/504. */
+const EVIDENCE_CHECKED = new Set([
+  'POST /v1/tenders/{id}/open-bids',
+  'GET /v1/tenders/{id}/bids',
+  'GET /v1/tenders/{id}/bids/{bidId}',
 ]);
 
 /** Publishing needs the tender key provider; without a key-encryption key it answers 503. */
@@ -329,10 +371,10 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use).',
   404: 'Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.',
   409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished.',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened.',
   500: 'Unexpected server error.',
-  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066).',
-  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused.',
+  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2).',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused. Opening or reading bids: audit-service did not answer in time.',
 };
 
 const DESCRIPTION =
@@ -380,10 +422,12 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     CriteriaController,
     PublicationController,
     BidController,
+    BidOpeningController,
   ],
   providers: [
     { provide: PublicationService, useValue: {} },
     { provide: BidService, useValue: {} },
+    { provide: TenderOpenService, useValue: {} },
     { provide: ProjectService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },
@@ -475,6 +519,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         if (
           (status === '503' || status === '504') &&
           !HIERARCHY_CHECKED.has(key) &&
+          !EVIDENCE_CHECKED.has(key) &&
           !(status === '503' && KEY_PROVIDER_CHECKED.has(key))
         ) {
           continue;

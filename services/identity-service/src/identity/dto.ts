@@ -106,6 +106,17 @@ export const listUsersQuerySchema = cursorPaginationSchema
 
 export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
 
+/**
+ * `GET /v1/users/:id/organizations`: no `from` is "now" (the live memberships, with their
+ * roles); with `from`, the organizations the user held a membership in at any time between
+ * `from` and the database's clock as the query ran.
+ */
+export const membershipWindowQuerySchema = z
+  .object({ from: z.string().datetime().optional() })
+  .strict();
+
+export type MembershipWindowQuery = z.infer<typeof membershipWindowQuerySchema>;
+
 // ---------------------------------------------------------------------------
 // Memberships
 // ---------------------------------------------------------------------------

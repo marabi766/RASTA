@@ -116,3 +116,33 @@ export const tenderCloseOldestOverdueAgeSeconds = new Gauge({
   labelNames: ['service'] as const,
   registers: [registry],
 });
+
+/**
+ * Opening or reading a tender's bids that was refused, by a closed reason
+ * (not_closed, not_opened, proposal_required, second_person_required, no_proposal,
+ * evidence_unavailable, evidence_behind, integrity, conflict_of_interest,
+ * identity_unavailable, key_unavailable). `integrity` is the one to look at: a stored bid,
+ * or the whole chain, did not match what audit-service holds (ADR-066 § 3);
+ * `identity_unavailable` says identity-service could not tell whom a reader belongs to, so
+ * nothing was shown. Never labelled by tender or tenant.
+ */
+export const bidOpeningRefusalsTotal = new Counter({
+  name: 'rasta_construction_bid_opening_refusals_total',
+  help: 'Openings and owner reads of bids refused, by reason',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});
+
+/**
+ * The detective control after an opening committed (ADR-066 § 4): identity-service was asked
+ * whether the proposer or the approver was a member of a bidding organization at the commit
+ * instant. `clear` is the usual answer; `conflict` is the race the approval cannot close and
+ * pages; `unavailable` says the check could not be made (it is not retried). Never labelled
+ * by tender, tenant or person.
+ */
+export const bidOpeningConflictChecksTotal = new Counter({
+  name: 'rasta_construction_bid_opening_conflict_checks_total',
+  help: 'Checks after an opening of whether its proposer or approver belonged to a bidder, by outcome',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});

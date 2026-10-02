@@ -96,6 +96,54 @@ describe('project roles (Q-69)', () => {
     );
   });
 
+  describe('who opens bids (ADR-066 § 4)', () => {
+    it('is empty by default, which means the owner role set', () => {
+      expect(load().CONSTRUCTION_TENDER_OPEN_ROLES).toEqual([]);
+    });
+
+    it('accepts a configured list, trimmed', () => {
+      expect(
+        load({ CONSTRUCTION_TENDER_OPEN_ROLES: 'ORGANIZATION_ADMIN, PROCUREMENT_USER' })
+          .CONSTRUCTION_TENDER_OPEN_ROLES,
+      ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+    });
+
+    it.each(['AUDITOR', 'SYSTEM_ADMIN', 'CONTRACTOR'])(
+      'refuses to start when it names %s',
+      (role) => {
+        expect(() =>
+          load({ CONSTRUCTION_TENDER_OPEN_ROLES: `ORGANIZATION_ADMIN,${role}` }),
+        ).toThrow(/CONSTRUCTION_TENDER_OPEN_ROLES/);
+      },
+    );
+
+    it('refuses an unknown role rather than ignoring it', () => {
+      expect(() => load({ CONSTRUCTION_TENDER_OPEN_ROLES: 'COMMITTEE_CHAIR' })).toThrow(
+        /Unknown role in CONSTRUCTION_TENDER_OPEN_ROLES/,
+      );
+    });
+  });
+
+  describe('four-eyes for opening bids (Q-91)', () => {
+    it('is on by default', () => {
+      expect(load().CONSTRUCTION_TENDER_OPEN_FOUR_EYES).toBe(true);
+      expect(load({ NODE_ENV: 'production' }).CONSTRUCTION_TENDER_OPEN_FOUR_EYES).toBe(true);
+    });
+
+    it.each(['development', 'test'])('may be switched off in %s', (NODE_ENV) => {
+      expect(
+        load({ NODE_ENV, CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' })
+          .CONSTRUCTION_TENDER_OPEN_FOUR_EYES,
+      ).toBe(false);
+    });
+
+    it.each(['staging', 'production'])('refuses to start switched off in %s', (NODE_ENV) => {
+      expect(() => load({ NODE_ENV, CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' })).toThrow(
+        /CONSTRUCTION_TENDER_OPEN_FOUR_EYES/,
+      );
+    });
+  });
+
   it('refuses an empty writer list: nobody could create a project', () => {
     expect(() => load({ CONSTRUCTION_PROJECT_ROLES: ' , ' })).toThrow(/at least 1 role/);
   });
