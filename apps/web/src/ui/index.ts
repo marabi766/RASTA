@@ -19,6 +19,7 @@ export { PageHeader } from './layout/PageHeader';
 export { Section } from './layout/Section';
 export { Sidebar } from './layout/Sidebar';
 export type { SidebarItem } from './layout/Sidebar';
+export { TableScroll } from './layout/TableScroll';
 export { TopBar } from './layout/TopBar';
 
 export { Button, ButtonLink } from './action/Button';

@@ -140,6 +140,22 @@ const ASSETS: SeedAsset[] = [
     commissionedAt: new Date(now - 150 * day),
     location: { siteName: 'دفتر اتحادیه', latitude: 31.8912, longitude: 54.3502 },
   },
+  {
+    // The browser suite's own machine (`apps/web/e2e/maintenance.spec.ts`):
+    // mirrored in maintenance-service's seed, with no history, so the suite
+    // never touches work carried by the machines the other scenarios read.
+    id: 'AST-SEED-E2E-0001',
+    organizationId: DEH_ONE,
+    assetTag: 'E2E-1',
+    name: 'ماشین آزمون مرورگر',
+    type: 'LOADER',
+    status: 'ACTIVE',
+    manufacturer: 'نمونه‌سازان',
+    model: 'E2E-1',
+    manufactureYear: 2022,
+    serialNumber: 'SEED-CHASSIS-E2E-0001',
+    commissionedAt: new Date(now - 30 * day),
+  },
 ];
 
 interface SeedPolicy {

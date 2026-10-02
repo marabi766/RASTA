@@ -8,6 +8,7 @@ import {
   PageHeader,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import {
   maintenanceRequestStatusLabel,
@@ -150,64 +151,68 @@ function RequestRows({
 }) {
   return (
     <>
-      <table className="w-full border-collapse text-sm">
-        <caption className="sr-only">فهرست درخواست‌های نگهداری و تعمیر</caption>
-        <thead>
-          <tr className="border-b border-border text-start text-content-muted">
-            <th scope="col" className="p-3 text-start font-medium">
-              عنوان
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              دارایی
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              نوع
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وخامت
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وضعیت
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              تاریخ گزارش
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {page.items.map((request) => (
-            <tr key={request.id} className="border-b border-border">
-              <td className="p-3">
-                <a
-                  href={`/maintenance/${encodeURIComponent(request.id)}`}
-                  className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                >
-                  {request.title}
-                </a>
-              </td>
-              <td className="p-3">
-                <a
-                  href={`/assets/${encodeURIComponent(request.assetId)}`}
-                  className="font-mono text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                >
-                  {request.assetId}
-                </a>
-              </td>
-              <td className="p-3 text-content-muted">{maintenanceTypeLabel(request.type)}</td>
-              <td className="p-3 text-content-muted">
-                {request.severity ? severityLabel(request.severity) : '—'}
-              </td>
-              <td className="p-3">
-                <StatusBadge
-                  status={request.status}
-                  label={maintenanceRequestStatusLabel(request.status)}
-                />
-              </td>
-              <td className="p-3 text-content-muted">{formatJalaliDateLong(request.reportedAt)}</td>
+      <TableScroll label="فهرست درخواست‌های نگهداری و تعمیر">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">فهرست درخواست‌های نگهداری و تعمیر</caption>
+          <thead>
+            <tr className="border-b border-border text-start text-content-muted">
+              <th scope="col" className="p-3 text-start font-medium">
+                عنوان
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                دارایی
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                نوع
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وخامت
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وضعیت
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                تاریخ گزارش
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {page.items.map((request) => (
+              <tr key={request.id} className="border-b border-border">
+                <td className="p-3">
+                  <a
+                    href={`/maintenance/${encodeURIComponent(request.id)}`}
+                    className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    {request.title}
+                  </a>
+                </td>
+                <td className="p-3">
+                  <a
+                    href={`/assets/${encodeURIComponent(request.assetId)}`}
+                    className="font-mono text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    {request.assetId}
+                  </a>
+                </td>
+                <td className="p-3 text-content-muted">{maintenanceTypeLabel(request.type)}</td>
+                <td className="p-3 text-content-muted">
+                  {request.severity ? severityLabel(request.severity) : '—'}
+                </td>
+                <td className="p-3">
+                  <StatusBadge
+                    status={request.status}
+                    label={maintenanceRequestStatusLabel(request.status)}
+                  />
+                </td>
+                <td className="p-3 text-content-muted">
+                  {formatJalaliDateLong(request.reportedAt)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
 
       {page.hasMore && page.nextCursor ? (
         <div className="mt-4 flex justify-start">
