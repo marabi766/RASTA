@@ -185,7 +185,11 @@ test.describe('tenant isolation through the live stack', () => {
 
       const edit = await request.patch(gatewayUrl(`/v1/assets/${OTHER_TENANT_ASSET}`), {
         headers,
-        data: { name: 'تغییر از مستأجر دیگر' },
+        // A well-formed edit: since #158 a PATCH must carry expectedVersion, and
+        // without it the gateway answers 400 for ANY id (no disclosure either
+        // way) — which would hide whether the tenant boundary held. With it, the
+        // request reaches the ownership check.
+        data: { name: 'تغییر از مستأجر دیگر', expectedVersion: 1 },
       });
       // The same answer a machine that does not exist gets.
       expect(edit.status()).toBe(404);
