@@ -9,6 +9,7 @@ import {
   PageHeader,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import {
   assetStatusLabel,
@@ -145,52 +146,54 @@ function Filters({ query }: { query: AssetListQuery }) {
 function AssetRows({ page, query }: { page: AssetPage; query: AssetListQuery }) {
   return (
     <>
-      <table className="w-full border-collapse text-sm">
-        <caption className="sr-only">فهرست ماشین‌آلات این سازمان</caption>
-        <thead>
-          <tr className="border-b border-border text-start text-content-muted">
-            <th scope="col" className="p-3 text-start font-medium">
-              نام
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              شماره
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              نوع
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وضعیت
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              بهره‌برداری
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {page.items.map((asset) => (
-            <tr key={asset.id} className="border-b border-border">
-              <td className="p-3">
-                <a
-                  href={`/assets/${encodeURIComponent(asset.id)}`}
-                  className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                >
-                  {asset.name}
-                </a>
-              </td>
-              <td className="p-3">
-                {asset.assetTag ? <Identifier>{asset.assetTag}</Identifier> : '—'}
-              </td>
-              <td className="p-3 text-content-muted">{assetTypeLabel(asset.type)}</td>
-              <td className="p-3">
-                <StatusBadge status={asset.status} label={assetStatusLabel(asset.status)} />
-              </td>
-              <td className="p-3 text-content-muted">
-                {asset.commissionedAt ? formatJalaliDateLong(asset.commissionedAt) : '—'}
-              </td>
+      <TableScroll label="فهرست ماشین‌آلات این سازمان">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">فهرست ماشین‌آلات این سازمان</caption>
+          <thead>
+            <tr className="border-b border-border text-start text-content-muted">
+              <th scope="col" className="p-3 text-start font-medium">
+                نام
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                شماره
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                نوع
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وضعیت
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                بهره‌برداری
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {page.items.map((asset) => (
+              <tr key={asset.id} className="border-b border-border">
+                <td className="p-3">
+                  <a
+                    href={`/assets/${encodeURIComponent(asset.id)}`}
+                    className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    {asset.name}
+                  </a>
+                </td>
+                <td className="p-3">
+                  {asset.assetTag ? <Identifier>{asset.assetTag}</Identifier> : '—'}
+                </td>
+                <td className="p-3 text-content-muted">{assetTypeLabel(asset.type)}</td>
+                <td className="p-3">
+                  <StatusBadge status={asset.status} label={assetStatusLabel(asset.status)} />
+                </td>
+                <td className="p-3 text-content-muted">
+                  {asset.commissionedAt ? formatJalaliDateLong(asset.commissionedAt) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
 
       {page.hasMore && page.nextCursor ? (
         <div className="mt-4 flex justify-start">

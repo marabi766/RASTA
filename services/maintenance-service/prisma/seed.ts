@@ -91,6 +91,18 @@ const ASSET_REFS = [
     assetTag: '۷',
     status: 'ACTIVE',
   },
+  {
+    // Belongs to the browser suite (`apps/web/e2e/maintenance.spec.ts`) and to
+    // nothing else: no schedule, no request, no usage. It reports breakdowns
+    // against this machine and cancels only the ones it created, so it neither
+    // depends on nor changes the work the other seeded machines carry.
+    id: 'AST-SEED-E2E-0001',
+    organizationId: DEH_ONE,
+    name: 'ماشین آزمون مرورگر',
+    assetType: 'LOADER',
+    assetTag: 'E2E-1',
+    status: 'ACTIVE',
+  },
 ];
 
 /**
