@@ -232,9 +232,17 @@ function prisma(argv, { stdin, env } = {}) {
   return { ok: true, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
 }
 
-/** Runs SQL and returns whether it succeeded. */
+/**
+ * Runs SQL and returns whether it succeeded. The url goes to Prisma in the
+ * child's environment, read through the schema's `env("DATABASE_URL")` — never
+ * as `--url`, where any local user could read the owner's password for as long
+ * as the process runs (`ps`, /proc/<pid>/cmdline).
+ */
 function sql(script, schema = targetSchema) {
-  return prisma(['db', 'execute', '--url', scratchUrl(schema), '--stdin'], { stdin: script });
+  return prisma(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], {
+    stdin: script,
+    env: { DATABASE_URL: scratchUrl(schema) },
+  });
 }
 
 /** Runs SQL that must succeed, and stops the whole verification if it does not. */

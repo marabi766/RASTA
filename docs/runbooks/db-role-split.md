@@ -75,6 +75,18 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 بی هیچ درخواستی به Keycloak) و Seedهای نمایشی، که فقط DML لازم دارند و بیرون از development/test هم رد می‌شوند.
 `scripts/service-boot-guard.test.mjs` چنین فایل‌هایی را می‌یابد و دروازه را از هر کدام می‌خواهد.
 
+**هرگز در argv.** آرگومان‌های هر فرایند را هر کاربر محلی، تا وقتی فرایند زنده است، می‌خواند (`ps`،
+`/proc/<pid>/cmdline`)؛ پس URL دارای گذرواژه — به‌ویژه URL مهاجر — هرگز آرگومان یک فرمان نیست. Prisma `db execute` با
+`--schema prisma/schema.prisma` اجرا می‌شود و URL را از `DATABASE_URL` در محیط فرزند می‌خواند (نه `--url`)؛ psql URL
+بی گذرواژه می‌گیرد و گذرواژه را از `PGPASSWORD` (`libpqInvocation` در `scripts/verify-migration-reversible-lib.mjs`)؛ در
+Workflowها URL دارای گذرواژه فقط در انتساب محیط (`KEY: value`) می‌آید. آزمون `no database url reaches a command line` در
+`scripts/verify-migration-reversible-lib.test.mjs` همهٔ اسکریپت‌ها، کد و آزمون سرویس‌ها و Workflowها را می‌کاود.
+**باقی‌مانده، بیرون از کد ما:** خود Prisma (6.19.3) در `migrate deploy`/`dev`/`reset`/`resolve`/`status` و `db push`
+پیش از کار، موتور Schema را برای آزمون اتصال با `schema-engine cli --datasource <url> can-connect-to-database` اجرا
+می‌کند؛ پس URL مهاجر برای چند میلی‌ثانیه در argv آن فرایند فرزند هست. چارهٔ کامل (Driver Adapter با `engine: 'js'` در
+`prisma.config.ts`، که این بررسی را دور می‌زند) تغییری جداگانه است؛ تا آن وقت Migration را فقط روی میزبانی اجرا کن که
+کاربر محلی نامطمئن ندارد.
+
 **عضویت هم مالکیت است.** نقش اجرایی که عضو مهاجر باشد — حتی `WITH INHERIT FALSE`، که چیزی به ارث نمی‌برد — با
 `SET ROLE` مهاجر می‌شود و هر نگهبان را برمی‌دارد. پس هر دو بررسی (`assertRuntimeRole` و `check:db-runtime-privileges`)
 مالکیت را با `pg_has_role … 'MEMBER'` می‌سنجند و هر عضویتی در نقشی که اینجا مالک چیزی است، نامش `*_migrator` است یا

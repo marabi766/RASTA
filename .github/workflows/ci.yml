@@ -1797,9 +1797,14 @@ jobs:
         # cutover is now. Without the row the reward consumer fails closed and
         # dead-letters every trigger (ADR-061 § 4.2). Production records it by
         # the runbook instead (docs/runbooks/reward-evaluation-cutover.md).
+        #
+        # The password goes to psql in its environment, never in the URL: an
+        # argument is readable by every local user while the process runs.
+        env:
+          PGPASSWORD: rasta_economic_dev_password
         run: >-
           psql -v ON_ERROR_STOP=1
-          "postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic"
+          "postgresql://rasta_economic@localhost:5432/rasta_economic"
           -c 'INSERT INTO reward_evaluation_cutover (singleton, cutover_at)
           VALUES (TRUE, CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING'
 
