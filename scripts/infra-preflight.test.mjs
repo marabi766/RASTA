@@ -218,7 +218,11 @@ test('KAFKA_ALLOW_PLAINTEXT alone, on an otherwise complete .env, is its own war
  * Runs `script` with a stub `psql` first on PATH that records each call and
  * succeeds. Returns the exit status, stderr and the recorded calls.
  */
-function runWithStubPsql(script, env, { existing = [], args = [], failWhen = null } = {}) {
+function runWithStubPsql(
+  script,
+  env,
+  { existing = [], args = [], failWhen = null, rolesExist = false } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'rasta-psql-stub-'));
   try {
     const log = join(dir, 'calls.log');
@@ -228,9 +232,11 @@ function runWithStubPsql(script, env, { existing = [], args = [], failWhen = nul
     const exists = existing.map((db) => `  *"datname='${db}'"*) echo 1 ;;\n`).join('');
     // A call whose arguments contain `failWhen` exits 2, as a refused login would.
     const fails = failWhen ? `  *"${failWhen}"*) exit 2 ;;\n` : '';
+    // `rolesExist`: every role-existence query answers 1, as on a cluster that has them all.
+    const roles = rolesExist ? `  *"FROM pg_roles WHERE rolname"*) echo 1 ;;\n` : '';
     writeFileSync(
       stub,
-      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${fails}${exists}esac\nexit 0\n`,
+      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${fails}${exists}${roles}esac\nexit 0\n`,
     );
     chmodSync(stub, 0o755);
     const result = spawnSync('bash', [script, ...args], {
@@ -291,14 +297,17 @@ for (const [label, script] of [
 test('bootstrap: with distinct passwords it proceeds, and sets each role its own', () => {
   const { status, calls } = runWithStubPsql(BOOTSTRAP, {});
   assert.equal(status, 0);
-  const alters = calls.filter((call) => /ALTER ROLE \w+ WITH LOGIN PASSWORD/.test(call));
+  // role → every password it was given (audit's migrator is set by ensure_role
+  // and again by its split — the same value both times).
+  const given = new Map();
+  for (const call of calls) {
+    const [, role, password] = /ALTER ROLE (\w+) WITH LOGIN PASSWORD '([^']+)'/.exec(call) ?? [];
+    if (role) given.set(role, new Set([...(given.get(role) ?? []), password]));
+  }
   // Sixteen service roles, audit's migrator and one per split service (D-045).
-  assert.equal(alters.length, rolesFromLibrary().length);
-  assert.deepEqual(
-    alters.map((call) => /ALTER ROLE (\w+) WITH/.exec(call)?.[1]).sort(),
-    [...rolesFromLibrary()].sort(),
-  );
-  const passwords = alters.map((call) => /PASSWORD '([^']+)'/.exec(call)?.[1]);
+  assert.deepEqual([...given.keys()].sort(), [...rolesFromLibrary()].sort());
+  for (const [role, passwords] of given) assert.equal(passwords.size, 1, role);
+  const passwords = [...given.values()].map((set) => [...set][0]);
   assert.equal(new Set(passwords).size, rolesFromLibrary().length);
 });
 
@@ -485,14 +494,85 @@ test('standalone split: in the compose container the development default still a
   );
 });
 
-test('standalone audit split sets no password, so needs none', () => {
-  const { status, calls } = runWithStubPsql(
+test('standalone audit split: the same credential step as every service — both passwords, distinct, set, and proven (Codex round 4)', () => {
+  const refused = runWithStubPsql(SPLIT, { RASTA_DB_BOOTSTRAP: undefined }, { args: ['audit'] });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /POSTGRES_PASSWORD_AUDIT is not set/);
+  assert.match(refused.stderr, /POSTGRES_PASSWORD_AUDIT_MIGRATOR is not set/);
+  assert.deepEqual(refused.calls, []);
+
+  const shared = 'one_password_for_audit_and_owner';
+  const equal = runWithStubPsql(
     SPLIT,
-    { RASTA_DB_BOOTSTRAP: undefined },
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_AUDIT: shared,
+      POSTGRES_PASSWORD_AUDIT_MIGRATOR: shared,
+    },
     { args: ['audit'] },
   );
+  assert.equal(equal.status, 1);
+  assert.match(equal.stderr, /POSTGRES_PASSWORD_AUDIT_MIGRATOR equals POSTGRES_PASSWORD_AUDIT/);
+  assert.deepEqual(equal.calls, []);
+  assert.ok(!equal.stderr.includes(shared));
+
+  const { status, stderr, calls } = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_AUDIT: 'explicit_audit_runtime_secret',
+      POSTGRES_PASSWORD_AUDIT_MIGRATOR: 'explicit_audit_migrator_secret',
+    },
+    { args: ['audit'] },
+  );
+  assert.equal(status, 0, stderr);
+  const at = (text) => calls.findIndex((call) => call.includes(text));
+  const migrator = at(
+    "ALTER ROLE rasta_audit_migrator WITH LOGIN PASSWORD 'explicit_audit_migrator_secret'",
+  );
+  const runtime = at("ALTER ROLE rasta_audit WITH LOGIN PASSWORD 'explicit_audit_runtime_secret'");
+  assert.ok(migrator >= 0, 'the migrator password was not set');
+  assert.ok(runtime >= 0, 'the runtime password was not set');
+  for (const role of ['rasta_audit', 'rasta_audit_migrator']) {
+    const login = at(`-h 127.0.0.1 -p 5432 --username ${role} --dbname rasta_audit -c SELECT 1`);
+    assert.ok(
+      login > Math.max(migrator, runtime),
+      `${role}: no TCP login after the passwords were set`,
+    );
+  }
+  // `public` is the migrator's before anything is revoked or the ledger created.
+  const owner = at('ALTER SCHEMA public OWNER TO rasta_audit_migrator');
+  assert.ok(owner >= 0 && owner < at('REVOKE ALL ON SCHEMA public FROM PUBLIC'));
+  assert.ok(owner < at('_prisma_migrations'));
+});
+
+test('standalone split: `public` is handed to the migrator before any revoke and before the ledger (Codex round 4)', () => {
+  const { status, calls } = runWithStubPsql(SPLIT, {}, { args: ['construction'] });
   assert.equal(status, 0);
-  assert.ok(!calls.some((call) => /PASSWORD/.test(call)));
+  const at = (text) => calls.findIndex((call) => call.includes(text));
+  const owner = at('ALTER SCHEMA public OWNER TO rasta_construction_migrator');
+  assert.ok(owner > at('REASSIGN OWNED BY rasta_construction TO rasta_construction_migrator'));
+  assert.ok(owner < at('REVOKE ALL ON SCHEMA public FROM PUBLIC'));
+  assert.ok(owner < at('_prisma_migrations'));
+});
+
+test('rotation: every migrator is checked against its service database — construction included (Codex round 4)', () => {
+  const { status, stderr, calls } = runWithStubPsql(ROTATE, {}, { rolesExist: true });
+  assert.equal(status, 0, stderr);
+  const logins = calls.filter((call) => call.includes('-h 127.0.0.1') && call.endsWith('SELECT 1'));
+  assert.equal(logins.length, rolesFromLibrary().length);
+  for (const role of rolesFromLibrary()) {
+    const database = role.replace(/_migrator$/, '');
+    assert.ok(
+      logins.some((call) => call.includes(`--username ${role} --dbname ${database} `)),
+      `${role} is not checked against ${database}`,
+    );
+  }
+  assert.ok(
+    logins.some((call) =>
+      call.includes('--username rasta_construction_migrator --dbname rasta_construction '),
+    ),
+  );
 });
 
 // ---------------------------------------------------------------------------
