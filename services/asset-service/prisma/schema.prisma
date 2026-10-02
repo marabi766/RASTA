@@ -649,14 +649,21 @@ model IdempotencyKey {
   organizationId String @map("organization_id")
   endpoint       String
 
+  /// SHA-256 over the canonical body and the caller (#169).
   requestHash String @map("request_hash")
+  /// Minted per claim; the create's transaction locks and completes the row by it.
+  claimToken  String @map("claim_token")
 
   responseStatus Int?   @map("response_status")
   responseBody   Json?  @map("response_body")
+  /// IN_PROGRESS | COMPLETED (CHECK ck_idempotency_state).
   state          String
 
-  createdAt DateTime @default(now()) @map("created_at")
-  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// While IN_PROGRESS: the claim's lease (ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS, 120 by
+  /// default), after which a retry may take the key over under a new token.
+  /// Once COMPLETED: ASSET_IDEMPOTENCY_TTL_HOURS after the response (24 by default).
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
 
   @@id([organizationId, endpoint, key])
   @@index([expiresAt])

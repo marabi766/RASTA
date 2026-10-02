@@ -490,7 +490,12 @@ describe('AssetService', () => {
       };
 
       const patch = async (h: Harness, body: unknown) => {
-        const controller = new AssetController(h.service, undefined as never, undefined as never);
+        const controller = new AssetController(
+          h.service,
+          undefined as never,
+          undefined as never,
+          undefined as never,
+        );
         const parsed = bodyPipe().transform(body, { type: 'body' }) as UpdateAssetDto;
         return controller.update(ASSET_ID, parsed);
       };

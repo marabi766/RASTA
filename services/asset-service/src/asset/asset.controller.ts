@@ -1,9 +1,20 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
-import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiBody, ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { ApiQueryFromSchema } from '../openapi/query-parameters';
 import { UPDATE_ASSET_BODY_SCHEMA } from '../openapi/update-asset-body';
 import { AssetService } from './asset.service';
+import { IdempotencyStore, requiredIdempotencyKey } from './idempotency';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
 import {
@@ -27,6 +38,7 @@ import {
   type ActivateAssetDto,
   type AttachDocumentDto,
   type ChangeStatusDto,
+  type AssetView,
   type CreateAssetDto,
   type CreateInspectionDto,
   type CreatePolicyDto,
@@ -42,6 +54,9 @@ import {
   type TransferAssetDto,
   type UpdateAssetDto,
 } from './dto';
+
+/** The route template an Idempotency-Key is stored under (#169). */
+export const CREATE_ASSET_ENDPOINT = 'POST /v1/assets';
 
 /**
  * HTTP surface for assets.
@@ -62,6 +77,7 @@ export class AssetController {
     private readonly assets: AssetService,
     private readonly insurance: InsuranceService,
     private readonly claims: ClaimService,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   // ---- Reads --------------------------------------------------------------
@@ -127,9 +143,37 @@ export class AssetController {
 
   @Post()
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Register an asset' })
-  create(@Body(zodPipe(createAssetSchema)) dto: CreateAssetDto) {
-    return this.assets.create(dto);
+  @ApiOperation({
+    summary: 'Register an asset',
+    description:
+      'Requires an `Idempotency-Key` (#169): without one, or with one outside 8 to 255 ' +
+      'characters, 400 VALIDATION_FAILED and nothing is registered. The same key with the ' +
+      'same body from the same user answers the original 201 — the same asset id — without ' +
+      'registering or publishing anything again, for 24 hours by default; the same key with a ' +
+      'different body or from another user answers 409 IDEMPOTENCY_KEY_REUSED; a duplicate ' +
+      'that arrives while the first is still being processed waits for its answer, and past ' +
+      'a few seconds answers 409 CONFLICT with Retry-After.',
+  })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: true,
+    description:
+      '8 to 255 characters. Scoped to the organization: the same key in two organizations ' +
+      'is two requests.',
+  })
+  async create(
+    @Body(zodPipe(createAssetSchema)) dto: CreateAssetDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<AssetView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<AssetView>(
+      CREATE_ASSET_ENDPOINT,
+      key,
+      dto,
+      201,
+      (fence) => this.assets.create(dto, fence),
+    );
+    return result;
   }
 
   @Patch(':id')
