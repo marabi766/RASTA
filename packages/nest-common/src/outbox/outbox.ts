@@ -402,7 +402,7 @@ export class OutboxRelay {
     this.owner = options.owner ?? `${process.pid}@${hostLabel()}`;
     this.leaseSeconds = options.leaseSeconds ?? 60;
     this.backoff = options.backoff ?? { baseSeconds: 5, maxSeconds: 3600 };
-    this.shutdownGraceMs = (options.shutdownGraceSeconds ?? 30) * 1000;
+    this.shutdownGraceMs = (options.shutdownGraceSeconds ?? 20) * 1000;
     this.now = options.now ?? Date.now;
   }
 

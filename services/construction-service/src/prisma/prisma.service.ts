@@ -40,7 +40,15 @@ export const TENANT_SCOPED_MODELS = [
  * drained by a relay that has no request context, and it carries its own tenant
  * column for filtering. The same exception every other service makes.
  */
-export const TENANT_SCOPE_EXEMPT_MODELS = ['OutboxMessage'] as const;
+export const TENANT_SCOPE_EXEMPTIONS = {
+  OutboxMessage:
+    'The outbox relay drains this table across every tenant with no request context, and each row names its own organization_id: platform plumbing, filtered by that column rather than by the guard.',
+} as const satisfies Readonly<Record<string, string>>;
+
+/** The names, for callers that only need to know what is exempt. */
+export const TENANT_SCOPE_EXEMPT_MODELS = Object.keys(TENANT_SCOPE_EXEMPTIONS) as ReadonlyArray<
+  keyof typeof TENANT_SCOPE_EXEMPTIONS
+>;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 

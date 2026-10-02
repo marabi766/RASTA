@@ -373,7 +373,9 @@ Fencing در SQL از خرابی داده جلوگیری می‌کند؛ این 
 طبیعی یعنی همان تکرار **فقط اگر** واقعاً لازم باشد و پس از تأخیری که در آن
 درخواست در پرواز فرصت تمام‌شدن داشته است.
 
-- **مهلت خاموشی:** `OUTBOX_SHUTDOWN_GRACE_SECONDS`، پیش‌فرض ۳۰، بازهٔ
+- **مهلت خاموشی:** `OUTBOX_SHUTDOWN_GRACE_SECONDS`، پیش‌فرض ۲۰ (پیش‌تر ۳۰؛ باید
+  **کوتاه‌تر از `SHUTDOWN_TIMEOUT_MS`** بماند و `loadEnv` ترکیب دیگر را در راه‌اندازی
+  رد می‌کند، چون فرایند با پایان آن مهلت خارج می‌شود)، بازهٔ
   `int, min(0), max(300)`. تا این مدت، Heartbeat برای ردیف‌های در پرواز ادامه
   می‌یابد تا مالکیت حفظ شود.
 - **خاموشی هرگز بی‌نهایت منتظر نمی‌ماند:** با پایان مهلت، رله تمدید را قطع
@@ -425,7 +427,7 @@ ownershipUnknownAt = lastSuccessfulRenewAt + leaseSeconds - renewalDeadline
 | `OUTBOX_CLAIM_LEASE_SECONDS`       | `60`    | `int`، `min(20)`، `max(3600)` |
 | `OUTBOX_CLAIM_BACKOFF_SECONDS`     | `5`     | `int`، `min(1)`، `max(3600)`  |
 | `OUTBOX_CLAIM_BACKOFF_MAX_SECONDS` | `3600`  | `int`، `min(1)`، `max(86400)` |
-| `OUTBOX_SHUTDOWN_GRACE_SECONDS`    | `30`    | `int`، `min(0)`، `max(300)`   |
+| `OUTBOX_SHUTDOWN_GRACE_SECONDS`    | `20`    | `int`، `min(0)`، `max(300)`   |
 
 ۶۰ ثانیه **پس از** تحلیل بالا انتخاب شد، نه پیش از آن: با تمدید، Lease دیگر
 لازم نیست از بدترین انتشار بلندتر باشد — فقط باید سه فاصلهٔ تمدید در آن جا شود
