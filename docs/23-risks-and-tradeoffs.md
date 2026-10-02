@@ -1064,10 +1064,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   تقسیم آن را لغو می‌کند؛ اجرای مستقل گذرواژهٔ نقش اجرا را به مقدار داده‌شده می‌چرخاند و ورود هر دو اعتبار را ثابت می‌کند؛
   و Verifier پیش از کار بررسی می‌کند که دقیقاً با مهاجر همان سرویس وصل است، نه Superuser. دور چهارم (مسیر ارتقای خوشهٔ موجود): تقسیم مستقل audit هم از همان گام اعتبار می‌گذرد (هر دو گذرواژه، متمایز، گذاشته و ورودشان ثابت)؛ `rotate-role-passwords.bash` هر `rasta_<svc>_migrator` را با پایگاه دادهٔ سرویسش می‌آزماید؛ و Schema `public`، هر که مالکش باشد (مثلاً Superuser پس از ارتقا از PostgreSQL 14)، پیش از Revokeها و ساخت دفتر به مهاجر داده می‌شود. آزمون زندهٔ «خوشهٔ قدیمی» بدترین حالت واقع‌بینانه را — `public` مال Superuser، نقش اجرا مالک همه‌چیز و عضو مهاجر با `SET`، یک گذرواژهٔ مشترک، audit هم — از ارتقای مستقل می‌گذراند و همهٔ ناورداها را می‌آزماید. سپس (Codex روی #178): چون Nest هوک Providerها را پیش از `AppModule` اجرا می‌کند، هر سرویس تقسیم‌شده پیش از `NestFactory.create` با اتصالی کوتاه‌عمر نقش وصل‌شده را می‌آزماید (`preflightRuntimeRole`) و با URL مالک پیش از ساخت هر Consumer یا Timer بیرون می‌رود؛ آزمون زندهٔ E2E با Kafka واقعی (`scripts/runtime-preflight.e2e.mjs`). همین دروازه در هر راه ورود دیگر (Codex روی #177): CLI بازتاب Keycloak در identity و Seedها؛ `service-boot-guard.test.mjs` هر فایلی را که خارج از سیم‌کشی برنامه پایگاه داده را باز می‌کند می‌یابد و دروازه را از آن می‌خواهد.
   سپس **identity** (نگهبان `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم
-  تقسیم شدند (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`).
-  **باقی‌مانده** (`PENDING_SPLIT`): organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه
-  دادهٔ بی‌جدول —
-  هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
+  تقسیم شدند (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس
+  از آن organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement،
+  inventory، contract، analytics) — `fix/d045-split-remaining`؛ Schema آزمایشی پروتکل Outbox در document اکنون با مهاجر
+  ساخته می‌شود. **باقی‌مانده** (`PENDING_SPLIT`): فقط **economic** (Helper آزمونش Triggerهای دفتر کل را با اتصال اجرا
+  برمی‌دارد؛ واگذاری آن با مدیر پروژه، issue #150)؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook:
+  `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری
 

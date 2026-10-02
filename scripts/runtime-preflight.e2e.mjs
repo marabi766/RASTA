@@ -26,7 +26,9 @@
 //              no record may exist (nothing consumed).
 //   consumed — the positive control, once the job has started the service with
 //              its runtime role: the very same queued event is consumed — the
-//              group's offset moves past it, and audit-service records it — or,
+//              group's offset moves past it, and audit-service and
+//              maintenance-service record it (an audit row; a processed
+//              marker and a usage meter) — or,
 //              with no event, the group forms. So the refusal is not vacuous:
 //              only the preflight kept the consumer from an owner connection.
 //
@@ -53,6 +55,44 @@ const { kafkaClientConfig, kafkaConnectionFor } = require(
 );
 const { kafkaPasswordVariable } = require(join(ROOT, 'packages', 'config', 'dist', 'index.js'));
 const serviceDir = (service) => join(ROOT, 'services', service);
+
+/**
+ * A USAGE_RECORDED exactly as fleet-service publishes it: built to fleet's own
+ * payload schema (`usageRecordedPayload`, its built events module) and parsed
+ * by it, so a consumer that rejects it is rejecting fleet's real event. It
+ * names an asset no service knows: asset-service skips it, maintenance-service
+ * folds it into a usage meter of its own (Codex on #178).
+ */
+const usageRecorded = (stamp) => {
+  const { usageRecordedPayload } = require(
+    join(serviceDir('fleet-service'), 'dist', 'fleet', 'events.js'),
+  );
+  const periodEnd = new Date();
+  const payload = usageRecordedPayload.parse({
+    usageRecordId: `USG-PREFLIGHT-${stamp}`,
+    assetId: `AST-PREFLIGHT-${stamp}`,
+    organizationId: `ORG-PREFLIGHT-${stamp}`,
+    driverId: null,
+    assignmentId: null,
+    periodStart: new Date(periodEnd.getTime() - 3_600_000).toISOString(),
+    periodEnd: periodEnd.toISOString(),
+    hours: '1.5',
+    kilometres: null,
+    hourMeter: null,
+    odometer: null,
+    source: 'runtime-preflight',
+  });
+  return {
+    eventName: 'USAGE_RECORDED',
+    aggregateType: 'UsageRecord',
+    aggregateId: payload.usageRecordId,
+    tenantId: payload.organizationId,
+    payload,
+  };
+};
+
+/** The stamp an event id was made from (`EVT-PREFLIGHT-<stamp>`). */
+const stampOf = (eventId) => eventId.replace(/^EVT-PREFLIGHT-/, '');
 
 /**
  * Per service: the consumer group that consumes the topic, the topic, and —
@@ -104,6 +144,51 @@ const SERVICES = {
     migrator: 'rasta_identity_migrator',
     group: () => 'identity-service.keycloak-projection', // its app.module.ts
     topic: 'rasta.identity.v1',
+  },
+  // Consumers that start in their own onModuleInit, the ones Codex named:
+  // asset-service's timeline and maintenance-service's usage projection, both
+  // from the beginning of rasta.fleet.v1, each sent fleet's real
+  // USAGE_RECORDED. asset-service's timeline skips an asset it does not know,
+  // and a skip commits, so its positive control is the offset moving past the
+  // event; maintenance-service folds it, so its positive control is the fold
+  // itself — the event marked processed and the usage meter written.
+  'asset-service': {
+    runtimeVariables: ['DATABASE_URL_ASSET', 'DATABASE_URL'],
+    migrator: 'rasta_asset_migrator',
+    group: () => 'asset-service.timeline', // its app.module.ts
+    topic: 'rasta.fleet.v1',
+    producer: 'fleet-service',
+    event: usageRecorded,
+  },
+  'maintenance-service': {
+    runtimeVariables: ['DATABASE_URL_MAINTENANCE', 'DATABASE_URL'],
+    migrator: 'rasta_maintenance_migrator',
+    group: () => 'maintenance-service.usage', // its app.module.ts
+    topic: 'rasta.fleet.v1',
+    producer: 'fleet-service',
+    event: usageRecorded,
+    /**
+     * Its real outcome, both halves of one transaction: the event marked
+     * processed by the usage consumer, and the asset's usage meter carrying
+     * this usage record. 0 unless both are there.
+     */
+    async records(eventId) {
+      const { PrismaClient } = require(
+        join(serviceDir('maintenance-service'), 'src', 'generated', 'prisma'),
+      );
+      const prisma = new PrismaClient({
+        datasources: { db: { url: required('DATABASE_URL_MAINTENANCE') } },
+      });
+      try {
+        const processed = await prisma.processedEvent.count({ where: { eventId } });
+        const meters = await prisma.assetUsageMeter.count({
+          where: { lastUsageRecordId: `USG-PREFLIGHT-${stampOf(eventId)}` },
+        });
+        return processed > 0 && meters > 0 ? 1 : 0;
+      } finally {
+        await prisma.$disconnect();
+      }
+    },
   },
 };
 
@@ -247,7 +332,9 @@ async function refused(service, spec) {
   const after = await groupView(service, group, spec.topic);
   assert.equal(after.state, 'Dead', `a consumer joined ${group} before the refusal`);
   assert.deepEqual(after.offsets, before.offsets, `${group} committed an offset`);
-  if (eventId) assert.equal(await spec.records(eventId), 0, `${eventId} was recorded`);
+  if (eventId && spec.records) {
+    assert.equal(await spec.records(eventId), 0, `${eventId} was recorded`);
+  }
   console.log(`${group}: never formed, offsets unchanged; nothing consumed`);
 }
 
@@ -259,7 +346,7 @@ async function consumed(service, spec) {
     const view = await groupView(service, state.group, spec.topic);
     if (!state.eventId) return view.state !== 'Dead';
     const moved = JSON.stringify(view.offsets) !== JSON.stringify(state.before);
-    return moved && (await spec.records(state.eventId)) > 0;
+    return moved && (!spec.records || (await spec.records(state.eventId)) > 0);
   };
   const what = state.eventId ? `${state.eventId} consumed` : `${state.group} formed`;
   const deadline = Date.now() + CONSUME_TIMEOUT_MS;
