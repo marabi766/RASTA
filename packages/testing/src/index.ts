@@ -23,6 +23,18 @@ export {
 export type { LedgerEntryLike, ApiErrorLike } from './matchers';
 
 export {
+  DML,
+  INSUFFICIENT_PRIVILEGE,
+  createAttempts,
+  expectedTablePrivileges,
+  liftAttempts,
+  runtimeRoleFacts,
+  schemaTriggers,
+  tablePrivileges,
+} from './runtime-role';
+export type { RawSqlClient, RuntimeRoleFacts } from './runtime-role';
+
+export {
   describeTenantScopeCoverage,
   tenantScopeProblems,
   MIN_REASON_LENGTH,

@@ -34,7 +34,7 @@
 //  12. assert everything is back; drop the scratch schema
 //
 // Usage:  node scripts/verify-security-event-outbox-migration.mjs [--schema NAME]
-// Connection: DATABASE_URL_IDENTITY (or DATABASE_URL).
+// Connection: DATABASE_URL_IDENTITY_MIGRATOR, else DATABASE_URL_IDENTITY (or DATABASE_URL).
 // -----------------------------------------------------------------------------
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -130,7 +130,12 @@ if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
   fail(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
 }
 
-const baseUrl = process.env.DATABASE_URL_IDENTITY ?? process.env.DATABASE_URL;
+// The scratch schema is DDL: identity's migrator (D-045 — the runtime role owns
+// nothing and can create nothing), else the runtime URL of an unsplit setup.
+const baseUrl =
+  process.env.DATABASE_URL_IDENTITY_MIGRATOR ??
+  process.env.DATABASE_URL_IDENTITY ??
+  process.env.DATABASE_URL;
 if (!baseUrl) fail('DATABASE_URL_IDENTITY is not set.');
 const url = new URL(baseUrl);
 url.searchParams.set('schema', scratchSchema);

@@ -20,12 +20,35 @@
 // AppModule.onModuleInit, delegating to @rasta/nest-common's shared check. The
 // live proof is each service's test/startup-role.int-spec.ts (audit:
 // runtime-role.int-spec.ts, supplier: runtime-privileges.int-spec.ts).
+//
+// And before that, in main.ts (Codex on #178): Nest runs every provider's
+// onModuleInit before AppModule's, and a consumer or a timer starts in its own,
+// so the gate that matters is `await preflightRuntimeRole(` first in
+// bootstrap(), before NestFactory.create, on a short-lived connection of its
+// own. The live proof — an owner URL, a queued Kafka event, the process gone and
+// the event neither consumed nor committed — is scripts/runtime-preflight.e2e.mjs
+// in CI's end-to-end job.
+//
+// And every other way in (Codex on #177): a CLI, a worker, a seed — any file of
+// a split service that builds a database client or a Nest context outside the
+// application's own wiring — skips both of those gates, so it must run the
+// preflight itself, as the first thing its entry function awaits. The scan
+// below finds them; services/identity-service/test/projection-cli.int-spec.ts
+// is the live refusal for the Keycloak backfill/reconcile CLI. No exemption: a
+// seed's first await is its gate too (assertDemoSeedRuntimeRole, the
+// preflight speaking the seed guard's refusal), before the marker probe.
+//
+// Its limit: a Nest app or context counts as opening the database only when
+// the file imports AppModule statically (`from './app.module'` or
+// `'../app.module'`). A dynamic `import()`, a re-export under another name or
+// a module that wraps AppModule would not be seen — a Prisma client
+// constructed in the file always is.
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
@@ -113,4 +136,123 @@ for (const service of ROLE_CHECKED) {
       /async assertRuntimeRole\(\): Promise<void> \{\n\s+const facts = await assertConnectedRuntimeRole\(/,
     );
   });
+}
+
+for (const service of ROLE_CHECKED) {
+  test(`${service}: main.ts refuses an owner role before Nest builds anything (Codex on #178)`, () => {
+    const main = readFileSync(join(ROOT, 'services', service, 'src', 'main.ts'), 'utf8');
+    assert.match(
+      main,
+      /^import \{[^}]*\bpreflightRuntimeRole\b[^}]*\} from '@rasta\/nest-common';$/m,
+      'does not import preflightRuntimeRole from @rasta/nest-common',
+    );
+    assert.match(main, /^import \{ PrismaClient \} from '\.\/generated\/prisma';$/m);
+    const bootstrap = /\nasync function bootstrap\(\): Promise<void> \{\n([\s\S]*?)\n\}\n/.exec(
+      main,
+    );
+    assert.ok(bootstrap, 'no bootstrap()');
+    const firstStatement = bootstrap[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('//'));
+    assert.equal(firstStatement, 'await preflightRuntimeRole(');
+    const preflight = bootstrap[1].indexOf('await preflightRuntimeRole(');
+    assert.ok(preflight < bootstrap[1].indexOf('NestFactory.create'));
+    const call = bootstrap[1].slice(preflight, bootstrap[1].indexOf(');', preflight));
+    assert.match(
+      call,
+      /new PrismaClient\(\{ datasources: \{ db: \{ url: env\.DATABASE_URL \} \} \}\)/,
+    );
+    const variable = `DATABASE_URL_${service.replace(/-service$/, '').toUpperCase()}`;
+    assert.match(call, new RegExp(`runtimeVariable: '${variable}'`));
+  });
+}
+
+/**
+ * Opens the database: builds a Prisma client, or a Nest application or context
+ * from the service's AppModule (whose providers do). A Nest app built from a
+ * documentation-only module with stub providers — the OpenAPI builders — does not.
+ */
+const opensDatabase = (source) =>
+  /new PrismaService\(|new PrismaClient\(/.test(source) ||
+  (/NestFactory\.create(ApplicationContext)?\(|createApplicationContext\(/.test(source) &&
+    /from '\.{1,2}(\/[\w.-]+)*\/app\.module'/.test(source));
+/** The application's own wiring, behind main.ts's preflight and AppModule's check. */
+const APPLICATION_WIRING = new Set([
+  'src/main.ts',
+  'src/app.module.ts',
+  'src/prisma/prisma.service.ts',
+]);
+
+function sourceFiles(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) {
+      return ['generated', 'node_modules', 'dist', 'test'].includes(name) ? [] : sourceFiles(path);
+    }
+    return /\.(ts|mts|cts|js|mjs|cjs)$/.test(name) && !/\.(spec|int-spec|test)\./.test(name)
+      ? [path]
+      : [];
+  });
+}
+
+/** Every file of a service, outside tests, that opens the database on its own. */
+function entryPoints(service) {
+  const root = join(ROOT, 'services', service);
+  return ['src', 'prisma', 'scripts']
+    .flatMap((dir) => sourceFiles(join(root, dir)))
+    .map((path) => relative(root, path))
+    .filter((path) => !APPLICATION_WIRING.has(path))
+    .filter((path) => opensDatabase(readFileSync(join(root, path), 'utf8')));
+}
+
+test('the entry-point scan sees the Keycloak projection CLI and the seeds, and not the OpenAPI builders', () => {
+  assert.ok(entryPoints('identity-service').includes('src/keycloak/projection.cli.ts'));
+  assert.ok(entryPoints('identity-service').includes('prisma/seed.ts'));
+  // A Nest app from a stub-only DocumentationModule: no Prisma, no database.
+  assert.ok(!entryPoints('construction-service').includes('src/openapi/document.ts'));
+  assert.ok(
+    opensDatabase(
+      "import { AppModule } from './app.module';\nNestFactory.createApplicationContext(AppModule)",
+    ),
+  );
+  assert.ok(
+    opensDatabase(
+      "import { AppModule } from '../app.module';\nawait NestFactory.create(AppModule)",
+    ),
+  );
+  assert.ok(opensDatabase('const prisma = new PrismaService(url);'));
+  assert.ok(
+    !opensDatabase(
+      "import { DocumentationModule } from './doc';\nNestFactory.create(DocumentationModule)",
+    ),
+  );
+});
+
+for (const service of ROLE_CHECKED) {
+  for (const entry of entryPoints(service)) {
+    test(`${service}: ${entry} runs the runtime-role preflight before anything else it awaits (Codex on #177)`, () => {
+      const source = readFileSync(join(ROOT, 'services', service, entry), 'utf8');
+      assert.match(
+        source,
+        /^import \{[^}]*\b(preflightRuntimeRole|assertDemoSeedRuntimeRole)\b[^}]*\} from '@rasta\/nest-common';$/m,
+        'imports neither preflightRuntimeRole nor assertDemoSeedRuntimeRole from @rasta/nest-common',
+      );
+      const body = /\nasync function (?:main|bootstrap)\([^)]*\)[^{]*\{\n([\s\S]*?)\n\}\n/.exec(
+        source,
+      );
+      assert.ok(body, 'no `async function main()` or `bootstrap()` entry function');
+      const firstAwait = body[1]
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => !line.startsWith('//') && /\bawait\b/.test(line));
+      assert.ok(
+        /^await (preflightRuntimeRole|assertDemoSeedRuntimeRole)\(/.test(firstAwait ?? ''),
+        `the first await is ${firstAwait}`,
+      );
+      const variable = `DATABASE_URL_${service.replace(/-service$/, '').toUpperCase()}`;
+      assert.match(source, new RegExp(`runtimeVariable: '${variable}'`));
+    });
+  }
 }

@@ -48,7 +48,10 @@ import {
  * memory, for the call that needs it.
  */
 
-const PRICES = ['1111', '2222', '3333'];
+// Long, distinctive figures: the leak checks below assert that no price appears anywhere in the
+// outbox, rows or views, and a short run such as '3333' can occur by chance inside a random ULID
+// or timestamp (seen on CI after #184), failing the check with no leak at all.
+const PRICES = ['918273645501', '918273645502', '918273645503'];
 const MARKERS = ['Fixed price, materials included', 'Licence 1234, valid'];
 
 const deferred = () => {
@@ -363,9 +366,9 @@ describe('opening the bids of a tender', () => {
       await qualify(w, keeps);
       await qualify(w, leaves);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(keeps, () => w.bids.submit(tenderId, { content: bidContent('1111') }));
+      await asBidder(keeps, () => w.bids.submit(tenderId, { content: bidContent(PRICES[0]!) }));
       const second = await asBidder(leaves, () =>
-        w.bids.submit(tenderId, { content: bidContent('2222') }),
+        w.bids.submit(tenderId, { content: bidContent(PRICES[1]!) }),
       );
       await asBidder(leaves, () =>
         w.bids.withdraw(tenderId, second.bidId, { expectedRevision: 1 }),
@@ -1000,7 +1003,7 @@ describe('opening the bids of a tender', () => {
 
       expect(view).toMatchObject({ opened: true, bidCount: 2 });
       expect(view.bids.map((bid) => bid.bidderOrganizationId).sort()).toEqual([...bidders].sort());
-      expect(view.bids.map((bid) => bid.content.priceMinor).sort()).toEqual(['1111', '2222']);
+      expect(view.bids.map((bid) => bid.content.priceMinor).sort()).toEqual([PRICES[0], PRICES[1]]);
       expect(view.bids.every((bid) => bid.status === 'OPENED')).toBe(true);
       expect(unwrap).toHaveBeenCalledTimes(1);
 
@@ -1026,9 +1029,9 @@ describe('opening the bids of a tender', () => {
       await qualify(w, keeps);
       await qualify(w, leaves);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(keeps, () => w.bids.submit(tenderId, { content: bidContent('1111') }));
+      await asBidder(keeps, () => w.bids.submit(tenderId, { content: bidContent(PRICES[0]!) }));
       const second = await asBidder(leaves, () =>
-        w.bids.submit(tenderId, { content: bidContent('2222') }),
+        w.bids.submit(tenderId, { content: bidContent(PRICES[1]!) }),
       );
       await asBidder(leaves, () =>
         w.bids.withdraw(tenderId, second.bidId, { expectedRevision: 1 }),
@@ -1038,7 +1041,7 @@ describe('opening the bids of a tender', () => {
       await open(owner, tenderId);
 
       const view = await asAdmin(owner, () => w.tenderOpen.listBids(tenderId));
-      expect(view.bids.map((bid) => bid.content.priceMinor)).toEqual(['1111']);
+      expect(view.bids.map((bid) => bid.content.priceMinor)).toEqual([PRICES[0]]);
       expect(
         await codeOf(asAdmin(owner, () => w.tenderOpen.getBid(tenderId, second.bidId))),
       ).toMatchObject({

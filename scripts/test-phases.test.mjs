@@ -393,7 +393,9 @@ test('calibration: deleting the manual entry point is rejected, not silently acc
 
 /** `validateInfraFreeTestTask` takes a packageDir -> scripts map. */
 const serviceScripts = (services) =>
-  Object.fromEntries(Object.entries(services).map(([packageDir, service]) => [packageDir, service.scripts]));
+  Object.fromEntries(
+    Object.entries(services).map(([packageDir, service]) => [packageDir, service.scripts]),
+  );
 
 test('phase one stays infra-free: every services/* "test" selects the unit project only', () => {
   // The real repository, which is the point: this rule guards `pnpm verify`.

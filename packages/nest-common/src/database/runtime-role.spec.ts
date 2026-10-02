@@ -1,8 +1,10 @@
 import {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
+  preflightRuntimeRole,
   type ConnectedRoleFacts,
   type RuntimeRoleQueryClient,
 } from './runtime-role';
@@ -113,5 +115,81 @@ describe('a service runs only as its runtime role (D-045)', () => {
     }
     // USAGE ignores a membership granted WITH INHERIT FALSE, which still allows SET ROLE.
     expect(CONNECTED_ROLE_SQL).not.toContain("'USAGE'");
+  });
+});
+
+describe('the preflight, before Nest builds anything (Codex on #178)', () => {
+  const opened = (facts: ConnectedRoleFacts | undefined, failWith?: Error) => {
+    const state = { disconnected: 0 };
+    const open = () => ({
+      $queryRawUnsafe: <T>() =>
+        failWith ? Promise.reject(failWith) : Promise.resolve((facts ? [facts] : []) as T),
+      $disconnect: () => {
+        state.disconnected += 1;
+        return Promise.resolve();
+      },
+    });
+    return { open, state };
+  };
+
+  it('lets the runtime role through, and closes its connection', async () => {
+    const { open, state } = opened(runtime);
+    await expect(preflightRuntimeRole(open, options)).resolves.toEqual(runtime);
+    expect(state.disconnected).toBe(1);
+  });
+
+  it('refuses an owner, and still closes its connection', async () => {
+    const { open, state } = opened({ ...runtime, memberOf: ['rasta_construction_migrator'] });
+    await expect(preflightRuntimeRole(open, options)).rejects.toBeInstanceOf(
+      RuntimeRoleRefusedError,
+    );
+    expect(state.disconnected).toBe(1);
+  });
+
+  it('fails closed when it cannot ask at all', async () => {
+    const { open, state } = opened(undefined, new Error('connection refused'));
+    await expect(preflightRuntimeRole(open, options)).rejects.toThrow('connection refused');
+    expect(state.disconnected).toBe(1);
+  });
+});
+
+describe('a demo seed refuses an owner as the seed guard does (Codex round 2 on #177)', () => {
+  const seed = { service: 'identity-service', runtimeVariable: 'DATABASE_URL_IDENTITY' };
+  const opener = (answer: () => Promise<unknown>) => () => ({
+    $queryRawUnsafe: <T>() => answer() as Promise<T>,
+    $disconnect: () => Promise.resolve(),
+  });
+
+  it('lets the runtime role through', async () => {
+    await expect(
+      assertDemoSeedRuntimeRole(
+        opener(() => Promise.resolve([runtime])),
+        seed,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses the migrator with the guard's refusal, naming the role and what it owns", async () => {
+    const migrator = { ...runtime, role: 'rasta_identity_migrator', ownsDatabase: true };
+    const error = await assertDemoSeedRuntimeRole(
+      opener(() => Promise.resolve([migrator])),
+      seed,
+    ).catch((e: unknown) => e);
+    expect((error as Error).name).toBe('DemoSeedRefusedError');
+    expect((error as Error).message).toMatch(
+      /^Refusing to seed identity-service: it is connected as rasta_identity_migrator, which is a migrator role/,
+    );
+    expect((error as Error).message).toMatch(/DATABASE_URL_IDENTITY/);
+  });
+
+  it('refuses a database it cannot ask, without echoing the driver error', async () => {
+    const error = await assertDemoSeedRuntimeRole(
+      opener(() => Promise.reject(new Error('connect ECONNREFUSED postgresql://u:secret@h:1/db'))),
+      seed,
+    ).catch((e: unknown) => e);
+    expect((error as Error).message).toMatch(
+      /^Refusing to seed identity-service: the role the target database connects as could not be checked/,
+    );
+    expect((error as Error).message).not.toMatch(/secret|ECONNREFUSED/);
   });
 });

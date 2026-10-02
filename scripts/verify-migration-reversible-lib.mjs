@@ -560,6 +560,9 @@ export const EXPECTED = {
    * `refuse_attempt_update()` behind that the second `up` then fails to CREATE.
    */
   notification: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_notification.
+    connectAs: 'migrator',
     tables: [
       'processed_event',
       'notification_intent',
@@ -1173,6 +1176,9 @@ export const EXPECTED = {
    * other object without having to be listed here.
    */
   identity: {
+    // D-045: the runtime role owns nothing and cannot create the scratch schema
+    // or database; the migrator owns rasta_identity.
+    connectAs: 'migrator',
     tables: [
       'audit_correction_command',
       'idempotency_key',

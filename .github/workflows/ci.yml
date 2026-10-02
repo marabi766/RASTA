@@ -434,6 +434,7 @@ jobs:
           pnpm --filter @rasta/maintenance-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
@@ -458,6 +459,7 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
@@ -954,6 +956,7 @@ jobs:
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -966,6 +969,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
@@ -986,6 +990,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -998,6 +1003,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
@@ -1181,6 +1187,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
 
       - name: Organization coverage gate
         # organization-service carried a 70% threshold in `jest.config.js` that
@@ -1277,6 +1284,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1289,6 +1297,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
           S3_ENDPOINT: http://localhost:9000
@@ -1343,6 +1352,7 @@ jobs:
           # audit-correction tables, which check behaviour the catalogue
           # comparison does not (constraints refusing rows, triggers firing).
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1355,6 +1365,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
@@ -1366,7 +1377,9 @@ jobs:
         # throwaway database; REQUIRED makes a missing URL an error, not a skip.
         run: pnpm run test:migration-lib
         env:
-          MIGRATION_LIB_TEST_DATABASE_URL: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity
+          # A role that may CREATE DATABASE: identity's migrator. Its runtime role
+          # lost CREATEDB with the owner split (D-045).
+          MIGRATION_LIB_TEST_DATABASE_URL: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity
           # A second role, connected to a scratch database while the first one
           # drops it: the case that made `DROP DATABASE … WITH (FORCE)` fail
           # here once (an autovacuum worker, on main cd0c39a). The scratch drop
@@ -1383,6 +1396,7 @@ jobs:
         run: pnpm run test:seed-guard:db
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1404,6 +1418,7 @@ jobs:
         run: pnpm run test:outbox-b3
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
@@ -1673,6 +1688,7 @@ jobs:
           pnpm --filter @rasta/organization-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
@@ -1714,6 +1730,7 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
 
       - name: Seed organization-service
         # Q-70 (7): construction-service asks organization-service whether an
@@ -1967,6 +1984,26 @@ jobs:
           unset KAFKA_SECRETS_DIR
           mkdir -p /tmp/rasta-logs
 
+          # D-045 (Codex on #178): started with its owner's URL, a service is gone
+          # before Nest builds a single provider. audit-service: a Kafka event
+          # queued for its domain projector is neither consumed nor committed.
+          # identity-service: its Keycloak re-projection consumer, which starts
+          # in its own onModuleInit, never joins its group. Before any service
+          # starts, so neither group has run. The positive controls are the step
+          # after this one. scripts/runtime-preflight.e2e.mjs.
+          ( audit_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service audit-service)" && \
+            asset_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service asset-service)" && \
+            eval "${audit_credentials}" && eval "${asset_credentials}" && \
+            PORT=3115 SERVICE_NAME=audit-service \
+            DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
+            PREFLIGHT_OWNER_URL=postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit \
+            node scripts/runtime-preflight.e2e.mjs refused audit-service )
+          ( identity_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
+            eval "${identity_credentials}" && \
+            PORT=3101 \
+            PREFLIGHT_OWNER_URL=postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public \
+            node scripts/runtime-preflight.e2e.mjs refused identity-service )
+
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
             eval "${kafka_credentials}" && \
             cd services/identity-service && \
@@ -2067,6 +2104,26 @@ jobs:
           cat /tmp/rasta-logs/organization.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
+
+      - name: What the owner-URL starts left alone happens through the runtime role
+        # The positive controls for the refusals above (D-045, Codex on #178):
+        # without them, an event that was never deliverable would pass as "not
+        # consumed", and a consumer that never runs as "never joined". Now
+        # audit-service runs as rasta_audit, the same event must become an audit
+        # row and the projector's offset must move; now identity-service runs as
+        # rasta_identity, its re-projection group must form.
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+        run: |
+          set -euo pipefail
+          audit_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service audit-service)"
+          identity_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)"
+          unset KAFKA_SECRETS_DIR
+          ( eval "${audit_credentials}" && node scripts/runtime-preflight.e2e.mjs consumed audit-service )
+          ( eval "${identity_credentials}" && node scripts/runtime-preflight.e2e.mjs consumed identity-service )
 
       - name: End-to-end tests
         # Playwright fails a run that matches no tests, and that default is kept

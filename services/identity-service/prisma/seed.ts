@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
+import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
 
 /**
  * Demo seed for identity-service.
@@ -285,6 +286,14 @@ async function main(): Promise<void> {
   // Before anything touches the database: this seed overwrites fixed ids with
   // demo values, so it runs only in an explicit development or test run.
   assertDemoSeedAllowed('identity-service');
+  // D-045: the first time this seed touches its database is to confirm it is
+  // connected as the runtime role, never an owner (Codex on #177) — before the
+  // disposable-marker probe and before any write. A refusal is the seed
+  // guard's refusal (DemoSeedRefusedError).
+  await assertDemoSeedRuntimeRole(
+    () => new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } }),
+    { service: 'identity-service', runtimeVariable: 'DATABASE_URL_IDENTITY' },
+  );
   // …and only into a database the development bootstrap marked disposable:
   // the shell's settings above cannot tell a production URL from a local one.
   await assertDemoSeedDatabase('identity-service', prisma);

@@ -14,7 +14,6 @@ import { servicesFromLibrary, splitServicesFromLibrary } from './infra-preflight
  * so this list only ever shrinks, until it is empty and D-045 is resolved.
  */
 export const PENDING_SPLIT = Object.freeze([
-  'identity',
   'organization',
   'asset',
   'fleet',
@@ -24,7 +23,6 @@ export const PENDING_SPLIT = Object.freeze([
   'inventory',
   'contract',
   'economic',
-  'notification',
   'document',
   'analytics',
 ]);

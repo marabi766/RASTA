@@ -190,11 +190,14 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
+  preflightRuntimeRole,
 } from './database/runtime-role';
 export type {
   AssertRuntimeRoleOptions,
   ConnectedRoleFacts,
+  RuntimeRolePreflightClient,
   RuntimeRoleQueryClient,
 } from './database/runtime-role';

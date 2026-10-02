@@ -55,22 +55,51 @@ describe('AppModule refusal-audit wiring', () => {
     expect(providers().some((provider) => provider.provide === SECURITY_EVENT_RELAY)).toBe(true);
   });
 
-  it('starts both relays on init and stops both on shutdown', async () => {
+  it('asserts the connected role first, then starts both relays on init and stops both on shutdown', async () => {
+    const order: string[] = [];
     const domain = relay();
     const security = relay();
+    domain.start.mockImplementation(() => order.push('domain relay'));
+    security.start.mockImplementation(() => order.push('security relay'));
+    const prisma = { assertRuntimeRole: jest.fn(async () => void order.push('role check')) };
     const module = new AppModule(
+      prisma as never,
       domain as never,
       store() as never,
       security as never,
       store() as never,
     );
 
-    module.onModuleInit();
+    await module.onModuleInit();
+    expect(order).toEqual(['role check', 'domain relay', 'security relay']);
     expect(domain.start).toHaveBeenCalledTimes(1);
     expect(security.start).toHaveBeenCalledTimes(1);
 
     await module.onApplicationShutdown();
     expect(domain.stop).toHaveBeenCalledTimes(1);
     expect(security.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts nothing when connected as anything but the runtime role (D-045)', async () => {
+    const domain = relay();
+    const security = relay();
+    const prisma = {
+      assertRuntimeRole: jest.fn(async () => {
+        throw new Error(
+          'identity-service refuses to start: it is connected as rasta_identity_migrator',
+        );
+      }),
+    };
+    const module = new AppModule(
+      prisma as never,
+      domain as never,
+      store() as never,
+      security as never,
+      store() as never,
+    );
+
+    await expect(module.onModuleInit()).rejects.toThrow(/refuses to start/);
+    expect(domain.start).not.toHaveBeenCalled();
+    expect(security.start).not.toHaveBeenCalled();
   });
 });

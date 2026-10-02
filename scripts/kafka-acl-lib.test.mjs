@@ -43,7 +43,11 @@ test('every development principal, and the admin, has its credential where it be
     compose: read('docker-compose.yml'),
   };
   const variables = [spec.admin, ...spec.principals].map(passwordVariable);
-  assert.equal(new Set(variables).size, variables.length, 'two principals share a password variable');
+  assert.equal(
+    new Set(variables).size,
+    variables.length,
+    'two principals share a password variable',
+  );
   for (const principal of [spec.admin, ...spec.principals]) {
     const variable = passwordVariable(principal);
     const home = principal.endsWith('-service')
@@ -68,7 +72,10 @@ for (const profile of ['development', 'deployment']) {
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith('#'));
     assert.deepEqual(listed, spec.principals);
-    assert.ok(!listed.includes(spec.admin), 'the admin is formatted separately, never from the list');
+    assert.ok(
+      !listed.includes(spec.admin),
+      'the admin is formatted separately, never from the list',
+    );
   });
 }
 
