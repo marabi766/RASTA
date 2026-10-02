@@ -50,6 +50,13 @@ export class GatewayRequestError extends Error {
     readonly correlationId: string,
     /** Present when the response carried a well-formed platform error. */
     readonly problem: GatewayProblem | null = null,
+    /**
+     * The response's `Retry-After`, in seconds, when it gave one as a number:
+     * the platform's way of saying "this will change if you wait" — an
+     * in-flight request with the same Idempotency-Key, an open circuit, a
+     * rate limit. `null` when absent or not a plain number.
+     */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(`The gateway answered ${status}`);
     this.name = 'GatewayRequestError';
@@ -210,6 +217,7 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
       response.status,
       correlationId,
       response.status < 500 ? await readProblem(response) : null,
+      parseRetryAfter(response.headers.get('retry-after')),
     );
   }
 
@@ -233,6 +241,16 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     // still a 2xx: a write it answers has most likely happened.
     throw new GatewayOutcomeUnknownError(502, correlationId, 'UNREADABLE_BODY');
   }
+}
+
+/**
+ * `Retry-After` as delay-seconds (RFC 9110 § 10.2.3), the only form the
+ * platform sends (`nest-common`'s exception filter). An HTTP-date, or
+ * anything else, is `null`: no wait this portal could honour exactly.
+ */
+export function parseRetryAfter(value: string | null): number | null {
+  if (value === null || !/^\d{1,9}$/.test(value.trim())) return null;
+  return Number(value.trim());
 }
 
 async function readProblem(response: Response): Promise<GatewayProblem | null> {

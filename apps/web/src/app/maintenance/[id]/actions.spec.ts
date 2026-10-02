@@ -250,6 +250,19 @@ describe.each(COMMANDS)('$name — what reaches the service', (command) => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
+  it('reports "still being processed" as UNCONFIRMED too: nothing here may say it did not happen', async () => {
+    command.service.mockResolvedValue({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    expect(await command.submit(formData(command.valid))).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it('reports an outage with its status, and never puts a token in what the page renders', async () => {
     command.service.mockResolvedValue({
       kind: 'UNAVAILABLE',

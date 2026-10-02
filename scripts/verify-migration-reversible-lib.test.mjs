@@ -171,12 +171,25 @@ test('the audit entry names every object AUD-003 adds', () => {
     'audit_event_chain_idx',
     // The correction half, added by 20260912120000_audit_event_correction_index.
     'audit_event_correction_idx',
+    // The tender-evidence projection, added by 20261001110000_tender_evidence.
+    'ix_bid_access_evidence_tender',
+    // The held receipts, added by 20261001130000_tender_receipt_pending.
+    'ix_tender_receipt_pending_held',
+    'ux_tender_receipt_link_event',
+    'ux_tender_receipt_link_previous',
+    'ux_tender_receipt_link_receipt',
+    'ux_tender_receipt_pending_previous',
+    'ux_tender_receipt_pending_receipt',
   ]);
   assert.deepEqual(types, ['audit_chain_scope']);
   // Both trigger functions, not only AUD-003's: the AUD-001 one carries the
   // append-only refusal and is dropped by the same chain reversal, so leaving
   // it unasserted would let a rollback orphan it unnoticed.
-  assert.deepEqual([...functions].sort(), ['refuse_chain_head_regression', 'refuse_mutation']);
+  assert.deepEqual([...functions].sort(), [
+    'refuse_chain_head_regression',
+    'refuse_mutation',
+    'tender_evidence_append_only',
+  ]);
 
   // The rules that make the head describe a chain something could actually
   // produce. Listed by name rather than by count so a future rename fails here

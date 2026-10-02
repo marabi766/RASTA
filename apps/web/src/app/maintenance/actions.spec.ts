@@ -3,10 +3,10 @@
  */
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
-import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
-import { IDLE_REPORT_REQUEST_FORM } from './form-state';
+import { EDIT_AS_NEW_INTENT, IDLE_REPORT_REQUEST_FORM, REPORT_INTENT_FIELD } from './form-state';
 
 /**
  * The `/maintenance` report form's write path, from a posted form to a call on
@@ -14,9 +14,10 @@ import { IDLE_REPORT_REQUEST_FORM } from './form-state';
  * each refusal proves nothing was called, and a retry of one rendered form is
  * shown to carry the same reference.
  *
- * It does **not** claim a retry is one request: maintenance-service's create
- * path does not store the reference, so a duplicate is stopped only by its
- * open-request rule. That is a property of the service, not of this action.
+ * It does **not** claim a retry is one request: that maintenance-service's
+ * create path answers a repeated key with the original 201 (issue 157) is a
+ * property of the service, proven in its own integration tests, not of this
+ * action.
  */
 
 const currentSession = jest.fn();
@@ -327,6 +328,59 @@ describe('what the service refuses', () => {
       correlationId: 'corr-sample',
     });
     expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('keeps a submission still in flight retryable: same values, same submission id, the wait', async () => {
+    // Round 1 on PR 171: a 409 CONFLICT with Retry-After is the first submission
+    // still being processed — not an invalid form. Sent again with the same
+    // id after the wait, it is answered with that first request's result.
+    reportMaintenanceRequest.mockResolvedValue({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    const submission = mintSubmissionId(SESSION);
+    const state = await submitReportRequest(
+      IDLE_REPORT_REQUEST_FORM,
+      formData(VALID, { submission }),
+    );
+    expect(state).toEqual({
+      kind: 'IN_PROGRESS',
+      submissionId: submission,
+      values: expect.objectContaining({ assetId: VALID.assetId, title: VALID.title }),
+      retryAfterSeconds: 1,
+      correlationId: 'corr-sample',
+    });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('answers "edit and send as new" with the values under a NEW bound submission id, sending nothing', async () => {
+    // Round 2 on PR 171: the edited form is a new request, never a changed body
+    // under the first submission's id.
+    const first = mintSubmissionId(SESSION);
+    const form = formData({ ...VALID, title: 'عنوانی دیگر' }, { submission: first });
+    form.set(REPORT_INTENT_FIELD, EDIT_AS_NEW_INTENT);
+
+    const state = await submitReportRequest(IDLE_REPORT_REQUEST_FORM, form);
+
+    expect(reportMaintenanceRequest).not.toHaveBeenCalled();
+    expect(state).toEqual({
+      kind: 'EDITING',
+      submissionId: expect.any(String),
+      values: expect.objectContaining({ title: 'عنوانی دیگر', assetId: VALID.assetId }),
+    });
+    const fresh = (state as { submissionId: string }).submissionId;
+    expect(fresh).not.toBe(first);
+    expect(isBoundSubmissionId(fresh, SESSION)).toBe(true);
+  });
+
+  it('still checks the session, CSRF and the submission id before "edit and send as new"', async () => {
+    const form = formData(VALID, { csrf: 'not-this-session' });
+    form.set(REPORT_INTENT_FIELD, EDIT_AS_NEW_INTENT);
+    expect(await submitReportRequest(IDLE_REPORT_REQUEST_FORM, form)).toEqual({
+      kind: 'REFUSED',
+      reason: 'CSRF',
+    });
   });
 
   it('reports an outage with its status and correlation id', async () => {

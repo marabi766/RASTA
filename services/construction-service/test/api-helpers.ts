@@ -13,9 +13,12 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
-import { FakeHierarchy, databaseUrl } from './helpers';
+import { FakeHierarchy, SUPPLIER, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
+import { STANDING_OF_SOURCE } from '../src/tokens';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
+import { StandingBootstrap } from '../src/tender/standing-bootstrap';
 import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
 
 /**
@@ -159,6 +162,10 @@ function applyEnvironment(): void {
   process.env.OIDC_AUDIENCE ??= 'rasta-api';
   process.env.INTERNAL_TOKEN_SECRET = INTERNAL_SECRET;
   process.env.KAFKA_BROKERS ??= 'localhost:9092';
+  // The key-encryption key the app publishes tenders with (ADR-066 § 2): the
+  // one minted for this process in helpers.ts.
+  process.env.CONSTRUCTION_TENDER_KEKS = `${TEST_KEK_ID}:${TEST_KEK}`;
+  process.env.CONSTRUCTION_TENDER_KEK_CURRENT = TEST_KEK_ID;
   // Nothing built here reaches the broker (the relay and consumers are
   // inert), so the app may be built without this service's broker
   // credential: the explicit opt-out, honoured only under NODE_ENV test
@@ -183,6 +190,17 @@ export async function startApi(): Promise<ApiHarness> {
     // organization-moved.int-spec.ts; nothing here subscribes.
     .overrideProvider(OrganizationMovedConsumer)
     .useValue(inertRelay)
+    // Likewise the supplier-standing consumer: supplier-standing.int-spec.ts drives handle().
+    .overrideProvider(SupplierStandingConsumer)
+    .useValue(inertRelay)
+    // The bootstrap would call supplier-service; standing-bootstrap.int-spec.ts drives it
+    // with a page list, and the suites that need a loaded standing load it themselves.
+    .overrideProvider(StandingBootstrap)
+    .useValue(inertRelay)
+    // A bid is decided against supplier-service's own record; here that record is the
+    // suites' `SUPPLIER` (what `qualify` sets), not a network call.
+    .overrideProvider(STANDING_OF_SOURCE)
+    .useValue(SUPPLIER)
     // Nor does the sweeper tick: organization-moved.int-spec.ts drives runOnce().
     .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inertRelay)

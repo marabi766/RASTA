@@ -22,6 +22,15 @@ export const TENANT_SCOPED_MODELS = [
   'Approval',
   'ProgressReport',
   'Tender',
+  'CriteriaTemplate',
+  'TenderCriterion',
+  'TenderInvitation',
+  'TenderKey',
+  'Bid',
+  'BidReceipt',
+  'BidAccessLog',
+  'ContractorStanding',
+  'ContractorSuspension',
 ] as const;
 
 /**
@@ -31,7 +40,15 @@ export const TENANT_SCOPED_MODELS = [
  * drained by a relay that has no request context, and it carries its own tenant
  * column for filtering. The same exception every other service makes.
  */
-export const TENANT_SCOPE_EXEMPT_MODELS = ['OutboxMessage'] as const;
+export const TENANT_SCOPE_EXEMPTIONS = {
+  OutboxMessage:
+    'The outbox relay drains this table across every tenant with no request context, and each row names its own organization_id: platform plumbing, filtered by that column rather than by the guard.',
+} as const satisfies Readonly<Record<string, string>>;
+
+/** The names, for callers that only need to know what is exempt. */
+export const TENANT_SCOPE_EXEMPT_MODELS = Object.keys(TENANT_SCOPE_EXEMPTIONS) as ReadonlyArray<
+  keyof typeof TENANT_SCOPE_EXEMPTIONS
+>;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
@@ -92,7 +109,19 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * The outbox pattern requires the state change and the outbox insert to
    * share one transaction (AGENTS.md A-08, ADR-021).
    */
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient));
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { isolationLevel: 'RepeatableRead' },
+  ): Promise<T> {
+    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+  }
+
+  /**
+   * Runs `fn` against one snapshot (REPEATABLE READ): every read in it sees the
+   * database as it was at the first query, so two reads of one aggregate (the
+   * tender and its criteria) cannot straddle a commit between them.
+   */
+  snapshot<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.transaction(fn, { isolationLevel: 'RepeatableRead' });
   }
 }

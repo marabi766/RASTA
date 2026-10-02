@@ -106,8 +106,11 @@ export async function submitUpdateOrganization(
       return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }
@@ -153,8 +156,11 @@ export async function submitUpdateMemberRoles(
       return { kind: 'NOT_FOUND' };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }
@@ -198,8 +204,11 @@ export async function submitRevokeMembership(
       return { kind: 'NOT_FOUND' };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown: another request with this submission id
+      // is still in flight (only the report form offers a timed retry).
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { APP_GUARD } from '@nestjs/core';
-import { AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_TRAIL_TOPIC, OPS_REPLAY_TOPIC } from '@rasta/contracts';
 import {
   AuthGuard,
   AUTH_OPTIONS,
@@ -12,9 +12,13 @@ import { AppModule } from './app.module';
 import { PrismaService } from './prisma/prisma.service';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
+import { OpsReplayConsumer } from './consumers/ops-replay.consumer';
+import { TenderEvidenceConsumer } from './consumers/tender-evidence.consumer';
+import { OPS_REPLAY_CONSUMER } from './audit/ops-replay.mapper';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
 import { AuditInternalController } from './audit/audit-internal.controller';
+import { TenderEvidenceController } from './audit/tender-evidence.controller';
 import {
   AuditEventDetailQueryPipe,
   AuditEventQueryPipe,
@@ -78,8 +82,10 @@ function providerFor(token: unknown): FactoryProvider {
  * builder it was handed — which is what constructs the `EventConsumer`, and
  * construction opens no socket.
  */
-function consumerOptions(token: typeof DomainProjectorConsumer | typeof AuditTrailConsumer): {
-  consumer: DomainProjectorConsumer | AuditTrailConsumer;
+function consumerOptions(
+  token: typeof DomainProjectorConsumer | typeof AuditTrailConsumer | typeof OpsReplayConsumer,
+): {
+  consumer: DomainProjectorConsumer | AuditTrailConsumer | OpsReplayConsumer;
   options: BuiltConsumerOptions;
 } {
   const env = providerFor(ENV).useFactory?.();
@@ -87,7 +93,7 @@ function consumerOptions(token: typeof DomainProjectorConsumer | typeof AuditTra
   const repository = new AuditRepository({} as PrismaService);
 
   const consumer = providerFor(token).useFactory?.(env, logger, repository) as
-    DomainProjectorConsumer | AuditTrailConsumer;
+    DomainProjectorConsumer | AuditTrailConsumer | OpsReplayConsumer;
 
   const built = (
     consumer as unknown as {
@@ -165,6 +171,7 @@ describe('audit-service composition root', () => {
       MetricsController,
       AuditController,
       AuditInternalController,
+      TenderEvidenceController,
     ]);
   });
 
@@ -352,6 +359,21 @@ describe('audit-service composition root', () => {
     expect(consumer.isRunning()).toBe(false);
   });
 
+  it('builds the replay-record consumer over exactly rasta.ops.replay.v1, as its own group', () => {
+    const { consumer, options } = consumerOptions(OpsReplayConsumer);
+
+    expect(consumer).toBeInstanceOf(OpsReplayConsumer);
+    expect(options.topics).toEqual([OPS_REPLAY_TOPIC]);
+    expect(options.topics).toEqual(['rasta.ops.replay.v1']);
+    expect(options.groupId).toBe(OPS_REPLAY_CONSUMER);
+    expect(options.groupId).toBe('audit-service.ops-replay');
+    expect(options.fromBeginning).toBe(true);
+    expect(options.deadLetterTopic).toBe(AUDIT_DEAD_LETTER_TOPIC);
+    // Never read by the projector too: two contracts for one record.
+    expect(consumerOptions(DomainProjectorConsumer).options.topics).not.toContain(OPS_REPLAY_TOPIC);
+    expect(consumer.isRunning()).toBe(false);
+  });
+
   it('keeps the two paths in separate groups over disjoint topics', () => {
     // One group over both would share a rebalance and one idempotency
     // namespace; overlapping topics would record the same message twice under
@@ -388,6 +410,7 @@ describe('audit-service composition root', () => {
       PrismaService,
       DomainProjectorConsumer,
       AuditTrailConsumer,
+      OpsReplayConsumer,
     ]);
   });
 
@@ -410,6 +433,8 @@ describe('audit-service composition root', () => {
     const module = new AppModule(
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
+      startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       asMigrator,
@@ -424,6 +449,8 @@ describe('audit-service composition root', () => {
     const module = new AppModule(
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
+      startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -432,7 +459,7 @@ describe('audit-service composition root', () => {
     await module.onModuleInit();
     await module.onApplicationShutdown();
 
-    expect(order).toEqual(['projector', 'trail']);
+    expect(order).toEqual(['projector', 'trail', 'replay', 'evidence']);
   });
 
   it('fails startup when the audit-trail consumer cannot start', async () => {
@@ -443,6 +470,8 @@ describe('audit-service composition root', () => {
     const module = new AppModule(
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order, true) as unknown as AuditTrailConsumer,
+      startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -454,6 +483,26 @@ describe('audit-service composition root', () => {
     expect(order).toEqual(['projector', 'trail']);
   });
 
+  it('fails startup when the replay-record consumer cannot start', async () => {
+    // The replay record silently absent would leave every executed replay
+    // unrecorded while both other paths looked healthy.
+    const order: string[] = [];
+    const module = new AppModule(
+      startable('projector', order) as unknown as DomainProjectorConsumer,
+      startable('trail', order) as unknown as AuditTrailConsumer,
+      startable('replay', order, true) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+      runtimeRole,
+    );
+
+    await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
+    await module.onApplicationShutdown();
+
+    expect(order).toEqual(['projector', 'trail', 'replay']);
+  });
+
   it('stops its capacity sampler on shutdown', async () => {
     // A timer left running keeps the process alive and keeps querying a
     // database that is shutting down.
@@ -463,6 +512,8 @@ describe('audit-service composition root', () => {
     const module = new AppModule(
       projector,
       startable('trail', order) as unknown as AuditTrailConsumer,
+      startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -488,6 +539,8 @@ describe('audit-service composition root', () => {
     const module = new AppModule(
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
+      startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       repository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -512,7 +565,7 @@ describe('audit-service composition root', () => {
     });
 
     it('injects the validated environment by its token', () => {
-      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 3, param: ENV }]);
+      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 5, param: ENV }]);
     });
 
     it('exports nothing for producer silence under the default empty set', async () => {
@@ -522,6 +575,8 @@ describe('audit-service composition root', () => {
       const module = new AppModule(
         startable('projector', order) as unknown as DomainProjectorConsumer,
         startable('trail', order) as unknown as AuditTrailConsumer,
+        startable('replay', order) as unknown as OpsReplayConsumer,
+        startable('evidence', order) as unknown as TenderEvidenceConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
         runtimeRole,
@@ -550,6 +605,8 @@ describe('audit-service composition root', () => {
       const module = new AppModule(
         recording('projector') as unknown as DomainProjectorConsumer,
         recording('trail') as unknown as AuditTrailConsumer,
+        recording('replay') as unknown as OpsReplayConsumer,
+        recording('evidence') as unknown as TenderEvidenceConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
         runtimeRole,

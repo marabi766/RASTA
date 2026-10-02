@@ -7,6 +7,7 @@ import {
   NoAccessState,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import { driverStatusLabel, driverStatusOptions } from '@/lib/labels';
 import { formatJalaliDateLong } from '@/lib/format';
@@ -91,69 +92,71 @@ function Filters({ query }: { query: DriverListQuery }) {
 function DriverRows({ page, query }: { page: DriverPage; query: DriverListQuery }) {
   return (
     <>
-      <table className="w-full border-collapse text-sm">
-        <caption className="sr-only">فهرست رانندگان این سازمان</caption>
-        <thead>
-          <tr className="border-b border-border text-start text-content-muted">
-            <th scope="col" className="p-3 text-start font-medium">
-              شمارهٔ پرسنلی
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              گواهینامه
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              اعتبار تا
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وضعیت
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {page.items.map((driver) => (
-            <tr key={driver.id} className="border-b border-border">
-              <td className="p-3">
-                <a
-                  href={`/drivers/${encodeURIComponent(driver.id)}`}
-                  // `<Identifier>` isolates the run for bidi (L5-06), but its
-                  // custom-component children are invisible to the linter's
-                  // static accessible-name check — `aria-label` states the
-                  // same text explicitly, which is also what a screen reader
-                  // should say regardless of the bdi isolation underneath.
-                  aria-label={driver.employeeNo ?? driver.userId}
-                  className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                >
-                  <Identifier>{driver.employeeNo ?? driver.userId}</Identifier>
-                </a>
-              </td>
-              <td className="p-3 text-content-muted">
-                {driver.licenceNumber ? (
-                  <>
-                    <Identifier>{driver.licenceNumber}</Identifier>
-                    {driver.licenceClass ? (
-                      <>
-                        {' ('}
-                        <Identifier>{driver.licenceClass}</Identifier>
-                        {')'}
-                      </>
-                    ) : (
-                      ''
-                    )}
-                  </>
-                ) : (
-                  '—'
-                )}
-              </td>
-              <td className="p-3 text-content-muted">
-                {driver.licenceValidTo ? formatJalaliDateLong(driver.licenceValidTo) : '—'}
-              </td>
-              <td className="p-3">
-                <StatusBadge status={driver.status} label={driverStatusLabel(driver.status)} />
-              </td>
+      <TableScroll label="فهرست رانندگان این سازمان">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">فهرست رانندگان این سازمان</caption>
+          <thead>
+            <tr className="border-b border-border text-start text-content-muted">
+              <th scope="col" className="p-3 text-start font-medium">
+                شمارهٔ پرسنلی
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                گواهینامه
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                اعتبار تا
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وضعیت
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {page.items.map((driver) => (
+              <tr key={driver.id} className="border-b border-border">
+                <td className="p-3">
+                  <a
+                    href={`/drivers/${encodeURIComponent(driver.id)}`}
+                    // `<Identifier>` isolates the run for bidi (L5-06), but its
+                    // custom-component children are invisible to the linter's
+                    // static accessible-name check — `aria-label` states the
+                    // same text explicitly, which is also what a screen reader
+                    // should say regardless of the bdi isolation underneath.
+                    aria-label={driver.employeeNo ?? driver.userId}
+                    className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    <Identifier>{driver.employeeNo ?? driver.userId}</Identifier>
+                  </a>
+                </td>
+                <td className="p-3 text-content-muted">
+                  {driver.licenceNumber ? (
+                    <>
+                      <Identifier>{driver.licenceNumber}</Identifier>
+                      {driver.licenceClass ? (
+                        <>
+                          {' ('}
+                          <Identifier>{driver.licenceClass}</Identifier>
+                          {')'}
+                        </>
+                      ) : (
+                        ''
+                      )}
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="p-3 text-content-muted">
+                  {driver.licenceValidTo ? formatJalaliDateLong(driver.licenceValidTo) : '—'}
+                </td>
+                <td className="p-3">
+                  <StatusBadge status={driver.status} label={driverStatusLabel(driver.status)} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
 
       {page.hasMore && page.nextCursor ? (
         <div className="mt-4 flex justify-start">

@@ -161,6 +161,14 @@ export const auditEnvSchema = baseEnvSchema
      * `expectedActiveProducersSchema` above for the validation contract.
      */
     AUDIT_EXPECTED_ACTIVE_PRODUCERS: expectedActiveProducersSchema,
+
+    /**
+     * How long a bid receipt may be held for a predecessor that has not arrived
+     * before the gap is counted and alerted (ADR-066 § 2). An out-of-order
+     * delivery resolves in seconds; one still open after this is a lost or
+     * withheld event, and the externally held head is behind because of it.
+     */
+    AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).default(300),
   });
 
 export type AuditEnv = z.infer<typeof auditEnvSchema>;

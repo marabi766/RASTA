@@ -1,4 +1,4 @@
-import { AUDIT_OUTCOMES, AUDIT_TRAIL_TOPIC } from '@rasta/contracts';
+import { AUDIT_OUTCOMES, AUDIT_TRAIL_TOPIC, OPS_REPLAY_TOPIC } from '@rasta/contracts';
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
 import { DOMAIN_TOPICS } from '../audit/audit.mapper';
 import { sourceTopicsOf, type AuditSourceService } from '../audit/audit-producer-topology';
@@ -17,7 +17,7 @@ import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
  * store's access controls. A metric naming an organization leaks the tenant
  * list to everyone who can read the dashboard.
  *
- * Every label below is drawn from a set fixed at deploy time: the eleven topics
+ * Every label below is drawn from a set fixed at deploy time: the topics
  * this service subscribes to, the services that produce them, and three
  * outcome values. That is what makes them safe.
  */
@@ -31,7 +31,7 @@ import { DIVERGENCE_REASON_VALUES } from '../audit/audit.verification.view';
  * from `audit-producer-topology.ts` instead — the delivery topic's owner when
  * the producer agrees (path A), a known trail producer (path B), otherwise
  * `unknown` — so it takes at most ten values (`AUDIT_SOURCE_SERVICE_LABELS`).
- * `source_topic` is the delivery topic, eleven values. `outcome` is the
+ * `source_topic` is the delivery topic, one of `AUDIT_INGESTION_SOURCE_TOPICS`. `outcome` is the
  * three-value enum. The stored row still keeps the producer's own claim.
  */
 export const auditRecordsIngestedTotal = new Counter({
@@ -96,13 +96,14 @@ export const auditIngestionLagSeconds = new Histogram({
 });
 
 /**
- * Every `source_topic` this service writes rows from: the ten path-A domain
- * topics and the path-B trail topic. Derived, never restated, so a topic added
- * to a subscription is exported here with it.
+ * Every `source_topic` this service writes rows from: the path-A domain
+ * topics, the path-B trail topic and the replay record. Derived, never
+ * restated, so a topic added to a subscription is exported here with it.
  */
 export const AUDIT_INGESTION_SOURCE_TOPICS: readonly string[] = Object.freeze([
   ...DOMAIN_TOPICS,
   AUDIT_TRAIL_TOPIC,
+  OPS_REPLAY_TOPIC,
 ]);
 
 /**
@@ -180,7 +181,60 @@ export const INGESTION_FAILURE_REASONS = {
   TRAIL_TENANT_MISMATCH: 'trail_tenant_mismatch',
   /** A `changes` entry for a `SENSITIVE_KEYS` field carried a raw value. */
   TRAIL_UNREDACTED_SENSITIVE_CHANGE: 'trail_unredacted_sensitive_change',
+
+  // The replay record (`rasta.ops.replay.v1`): a message the ops-replay
+  // consumer refuses to record, by what an operator would have to fix.
+
+  /** The envelope did not parse, or is not `REPLAY_EXECUTED` v1 from ops-replay on its topic. */
+  REPLAY_UNSUPPORTED_EVENT: 'replay_unsupported_event',
+  /** The payload failed the v1 contract, or disagreed with its own envelope. */
+  REPLAY_INVALID_PAYLOAD: 'replay_invalid_payload',
+  /** The replayed event's tenant and `envelope.tenantId` did not agree. */
+  REPLAY_TENANT_MISMATCH: 'replay_tenant_mismatch',
+
+  // The tender-evidence projection (`rasta.construction.v1`, CON-002 PR 6): a bid
+  // receipt that cannot be placed in its tender's chain. Three reasons, because a
+  // fork (a split chain — tampering or a producer fault), a gap that stayed open (a
+  // lost or withheld event) and an identity disagreement need different responses;
+  // none is ever accepted silently.
+
+  /** The link's predecessor already has a successor, or its receipt is already recorded. */
+  TENDER_CHAIN_FORK: 'tender_chain_fork',
+  /**
+   * A receipt held for its predecessor is still waiting after
+   * `AUDIT_TENDER_GAP_ALERT_SECONDS`: counted once per held receipt, so the
+   * ingestion-failure alert fires. (An out-of-order delivery itself is not a
+   * failure: it is held, and drained when the predecessor arrives.)
+   */
+  TENDER_CHAIN_GAP_OVERDUE: 'tender_chain_gap_overdue',
+  /**
+   * A bid event whose envelope and payload disagree about the tenant or the tender,
+   * or a receipt for a tender already held under another organization. Never stored
+   * under either identity; a tenant-isolation signal, like `trail_tenant_mismatch`.
+   */
+  TENDER_EVIDENCE_MISMATCH: 'tender_evidence_mismatch',
 } as const;
+
+/** Receipts held for a predecessor that has not arrived (sampled, never maintained by inc). */
+export const auditTenderPendingLinks = new Gauge({
+  name: 'rasta_audit_tender_pending_links',
+  help: 'Bid receipts held until their predecessor arrives',
+  registers: [registry],
+});
+
+/** Receipts held longer than AUDIT_TENDER_GAP_ALERT_SECONDS: an open gap; 0 when none. */
+export const auditTenderOverdueLinks = new Gauge({
+  name: 'rasta_audit_tender_overdue_links',
+  help: 'Bid receipts held past the gap alert time for a predecessor that has not arrived',
+  registers: [registry],
+});
+
+/** Age of the oldest held receipt; 0 when none is held. */
+export const auditTenderPendingOldestAgeSeconds = new Gauge({
+  name: 'rasta_audit_tender_pending_oldest_age_seconds',
+  help: 'Age in seconds of the oldest bid receipt held for its predecessor',
+  registers: [registry],
+});
 
 export type IngestionFailureReason =
   (typeof INGESTION_FAILURE_REASONS)[keyof typeof INGESTION_FAILURE_REASONS];

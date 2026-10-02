@@ -13,7 +13,7 @@ export const ORGANIZATION_SERVICE = 'organization-service';
 export const MAX_RESPONSE_BYTES = 1024;
 
 /** The body as text, or `null` once it exceeds `limit` bytes (reading stops). */
-async function readCapped(response: Response, limit: number): Promise<string | null> {
+export async function readCapped(response: Response, limit: number): Promise<string | null> {
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);
@@ -75,6 +75,17 @@ export class OrganizationDirectory {
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly tokens: InternalTokenService,
   ) {}
+
+  /**
+   * Does `organizationId` exist? The same call, signed for the organization
+   * itself: organization-service answers `{ id }` when the organization is the
+   * signed one (or beneath it), and 404 when there is no such organization.
+   * Used before inviting an organization to a tender (CON-002); fail closed like
+   * `isWithin` — an unconfirmed answer is an error, never "exists".
+   */
+  exists(organizationId: string): Promise<boolean> {
+    return this.isWithin(organizationId, organizationId);
+  }
 
   async isWithin(scopeOrganizationId: string, organizationId: string): Promise<boolean> {
     const token = await this.tokens.issue(

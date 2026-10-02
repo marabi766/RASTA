@@ -46,6 +46,8 @@ import type { ConstructionEnv } from '../config/env';
  */
 
 export const SUPER_ROLE = 'SYSTEM_ADMIN';
+/** The bidder's role in its own organization (ADR-060, ADR-066 § 4). */
+export const CONTRACTOR_ROLE = 'CONTRACTOR';
 const OVERSIGHT_ROLE = 'AUDITOR';
 
 /**
@@ -274,6 +276,31 @@ export class ProjectAccess {
    */
   assertCanWrite(): { organizationId: string; actor: string } {
     return this.assert(this.writers, 'change construction projects');
+  }
+
+  /**
+   * May the caller bid, and as whom? The bidder side (ADR-066 § 4): a user with the
+   * `CONTRACTOR` role in the organization they act for. **Not** `SYSTEM_ADMIN`: the
+   * platform administrator has no access to a bid through the API and does not bid
+   * for a contractor; the owner's staff do not bid either (their roles are not this
+   * one, and the database refuses a bid on one's own tender).
+   */
+  assertCanBid(): { organizationId: string; actor: string } {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (!context.roles.includes(CONTRACTOR_ROLE)) {
+      throw RastaError.insufficientRole([CONTRACTOR_ROLE], context.roles);
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden(
+        'A bid is made by the contractor organization the request acts for',
+      );
+    }
+    if (!context.userId) {
+      throw RastaError.forbidden('This operation records an actor and the request names none');
+    }
+    return { organizationId: context.organizationId, actor: context.userId };
   }
 
   /** May the caller read projects and needs in the organization they act for? */

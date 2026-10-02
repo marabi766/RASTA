@@ -129,8 +129,12 @@ async function run<V, B, F extends string>(
       return { kind: 'NOT_FOUND', correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
+    case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was changed".
+      // Sent, maybe committed, not confirmed: never "nothing was changed". In
+      // progress is the same unknown: maintenance-service keeps a submission id
+      // for creating a request only, so it never says this for a command; the
+      // gateway's answer is handled all the same.
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

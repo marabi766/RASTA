@@ -40,6 +40,7 @@ describe('payment outcomes that must not be guessed (real database)', () => {
       wiring.wallets,
       wiring.walletRepository,
       provider,
+      wiring.paymentReconciliation,
     );
   });
 
