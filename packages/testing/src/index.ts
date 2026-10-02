@@ -21,3 +21,10 @@ export {
   expectTenantIsolated,
 } from './matchers';
 export type { LedgerEntryLike, ApiErrorLike } from './matchers';
+
+export {
+  describeTenantScopeCoverage,
+  tenantScopeProblems,
+  MIN_REASON_LENGTH,
+} from './tenant-scope';
+export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
