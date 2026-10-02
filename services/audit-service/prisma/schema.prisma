@@ -372,3 +372,78 @@ model AuditChainHead {
   @@index([chainMonth, chainScope], map: "audit_chain_head_month_idx")
   @@map("audit_chain_head")
 }
+
+// ---------------------------------------------------------------------------
+// The tender-evidence projection (CON-002 PR 6, ADR-066 § 2-3, § 5)
+// ---------------------------------------------------------------------------
+
+/// One link of a tender's bid-receipt chain, as announced on `BID_SUBMITTED` /
+/// `BID_REVISED` when the bid was made. **The externally held head**: construction-
+/// service opens bids against what is stored here, which it cannot rewrite (it has
+/// no access to this database). Append-only; continuity is verified on insert
+/// (`previous_receipt` is the genesis or the current head, and a link has one
+/// successor), so a break is refused loudly rather than accepted. Digests only —
+/// never a price, content or ciphertext.
+model TenderReceiptLink {
+  tenderId             String   @map("tender_id") @db.VarChar(128)
+  /// Position in the tender's chain, assigned under a per-tender lock.
+  seq                  Int
+  organizationId       String   @map("organization_id") @db.VarChar(128)
+  bidderOrganizationId String   @map("bidder_organization_id") @db.VarChar(128)
+  bidId                String   @map("bid_id") @db.VarChar(128)
+  revision             Int
+  receivedAt           DateTime @map("received_at") @db.Timestamptz(3)
+  ciphertextSha256     String   @map("ciphertext_sha256") @db.Char(64)
+  contentCommitment    String   @map("content_commitment") @db.Char(64)
+  previousReceipt      String   @map("previous_receipt") @db.Char(64)
+  receipt              String   @db.Char(64)
+  sourceEventId        String   @unique(map: "ux_tender_receipt_link_event") @map("source_event_id") @db.VarChar(128)
+  recordedAt           DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@id([tenderId, seq])
+  @@unique([tenderId, receipt], map: "ux_tender_receipt_link_receipt")
+  @@unique([tenderId, previousReceipt], map: "ux_tender_receipt_link_previous")
+  @@map("tender_receipt_link")
+}
+
+/// A receipt announced before its predecessor arrived, held until it can be placed in the
+/// chain (and drained in order, in the transaction that appends the predecessor). A work
+/// queue, not evidence: rows are deleted when drained.
+model TenderReceiptPending {
+  sourceEventId        String   @id @map("source_event_id") @db.VarChar(128)
+  tenderId             String   @map("tender_id") @db.VarChar(128)
+  organizationId       String   @map("organization_id") @db.VarChar(128)
+  bidderOrganizationId String   @map("bidder_organization_id") @db.VarChar(128)
+  bidId                String   @map("bid_id") @db.VarChar(128)
+  revision             Int
+  receivedAt           DateTime @map("received_at") @db.Timestamptz(3)
+  ciphertextSha256     String   @map("ciphertext_sha256") @db.Char(64)
+  contentCommitment    String   @map("content_commitment") @db.Char(64)
+  previousReceipt      String   @map("previous_receipt") @db.Char(64)
+  receipt              String   @db.Char(64)
+  heldAt               DateTime @default(now()) @map("held_at") @db.Timestamptz(6)
+
+  @@unique([tenderId, previousReceipt], map: "ux_tender_receipt_pending_previous")
+  @@unique([tenderId, receipt], map: "ux_tender_receipt_pending_receipt")
+  @@index([heldAt], map: "ix_tender_receipt_pending_held")
+  @@map("tender_receipt_pending")
+}
+
+/// One read of a bid, granted or refused (`BID_ACCESSED`), with the **real outcome**.
+/// Identifiers and a closed purpose only. Append-only.
+model BidAccessEvidence {
+  sourceEventId          String   @id @map("source_event_id") @db.VarChar(128)
+  tenderId               String   @map("tender_id") @db.VarChar(128)
+  organizationId         String   @map("organization_id") @db.VarChar(128)
+  /// Null when the read named no bid that exists for the reader.
+  bidId                  String?  @map("bid_id") @db.VarChar(128)
+  accessorOrganizationId String   @map("accessor_organization_id") @db.VarChar(128)
+  accessedBy             String   @map("accessed_by") @db.VarChar(128)
+  purpose                String   @db.VarChar(64)
+  outcome                String   @db.VarChar(16)
+  accessedAt             DateTime @map("accessed_at") @db.Timestamptz(3)
+  recordedAt             DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@index([tenderId, accessedAt], map: "ix_bid_access_evidence_tender")
+  @@map("bid_access_evidence")
+}

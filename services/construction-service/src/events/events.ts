@@ -83,6 +83,13 @@ export const CONSTRUCTION_EVENTS = {
   // is added for S-06 (an invitation decides who may bid) and awaits acceptance.
   TENDER_PUBLISHED: 'TENDER_PUBLISHED',
   TENDER_BIDDER_INVITED: 'TENDER_BIDDER_INVITED',
+  // CON-002 PR 6 (ADR-066). `BID_SUBMITTED` is a catalogue event; `BID_REVISED`,
+  // `BID_WITHDRAWN` and `BID_ACCESSED` were accepted by the project manager
+  // (2026-09-30). Identifiers, digests and times only: never content, a price or a note.
+  BID_SUBMITTED: 'BID_SUBMITTED',
+  BID_REVISED: 'BID_REVISED',
+  BID_WITHDRAWN: 'BID_WITHDRAWN',
+  BID_ACCESSED: 'BID_ACCESSED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -502,6 +509,67 @@ export const tenderBidderInvitedPayload = z
   })
   .strict();
 
+const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
+
+const bidIdentity = {
+  bidId: identifier,
+  tenderId: identifier,
+  /** The tender's owner. */
+  organizationId: identifier,
+  bidderOrganizationId: identifier,
+};
+
+/**
+ * A bid was submitted (or replaced: `BID_REVISED`, the same shape with a higher
+ * `revision`). Carries the receipt the bidder is given and the chain it extends:
+ * `receipt` is the new **head** of the tender's chain, which audit-service keeps
+ * outside this service's database so that opening can be checked against it
+ * (ADR-066 § 2-3). Digests are safe to publish; the content, the price and the
+ * ciphertext never are.
+ */
+const bidSealedPayload = z
+  .object({
+    ...bidIdentity,
+    revision: z.number().int().positive(),
+    receivedAt: isoTimestamp,
+    contentCommitment: sha256Hex,
+    ciphertextSha256: sha256Hex,
+    previousReceipt: sha256Hex,
+    receipt: sha256Hex,
+    submittedBy: identifier,
+  })
+  .strict();
+
+export const bidSubmittedPayload = bidSealedPayload;
+export const bidRevisedPayload = bidSealedPayload;
+
+export const bidWithdrawnPayload = z
+  .object({
+    ...bidIdentity,
+    revision: z.number().int().positive(),
+    withdrawnAt: isoTimestamp,
+    withdrawnBy: identifier,
+  })
+  .strict();
+
+/** Closed codes for why a bid was read; owner-side purposes arrive with the opening (PR 8). */
+export const BID_ACCESS_PURPOSES = ['OWN_BID_RECEIPT'] as const;
+
+/** A read of a bid, granted or refused (ADR-066 § 5): who, which bid, why, the outcome — no content. */
+export const bidAccessedPayload = z
+  .object({
+    /** Null when the read named no bid that exists for the reader. */
+    bidId: identifier.nullable(),
+    tenderId: identifier,
+    organizationId: identifier,
+    accessorOrganizationId: identifier,
+    accessedBy: identifier,
+    purpose: z.enum(BID_ACCESS_PURPOSES),
+    outcome: z.enum(['GRANTED', 'REFUSED']),
+    accessedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -531,6 +599,10 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   TENDER_CRITERIA_SET: tenderCriteriaSetPayload,
   TENDER_PUBLISHED: tenderPublishedPayload,
   TENDER_BIDDER_INVITED: tenderBidderInvitedPayload,
+  BID_SUBMITTED: bidSubmittedPayload,
+  BID_REVISED: bidRevisedPayload,
+  BID_WITHDRAWN: bidWithdrawnPayload,
+  BID_ACCESSED: bidAccessedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

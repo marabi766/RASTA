@@ -458,22 +458,35 @@ export class SupplierRepository {
       'construction-service asks for one contractors current standing at the moment a bid ' +
         'is decided (ADR-061 § 4); identifiers and instants only, caller checked in access.ts',
       () =>
-        this.prisma.client.supplier.findUnique({
-          where: { organizationId },
-          select: {
-            organizationId: true,
-            qualifications: {
-              where: { capability: 'CONTRACTING', state: 'APPROVED' },
-              select: { decidedAt: true },
-              orderBy: { decidedAt: 'desc' },
-              take: 1,
-            },
-            suspensions: {
-              select: { id: true, suspendedAt: true, reinstatedAt: true },
-              orderBy: [{ suspendedAt: 'asc' }, { id: 'asc' }],
-            },
+        // One REPEATABLE READ snapshot for both: `asOf` is the transaction's start
+        // (`now()`), taken no later than the snapshot, so the standing returned is at
+        // least as new as the instant it claims. Two separate reads could report an
+        // instant that no state ever had (a suspension committed between them).
+        this.prisma.client.$transaction(
+          async (tx) => {
+            const instant = await tx.$queryRaw<{ now: Date }[]>`SELECT now() AS now`;
+            const asOf = instant[0]?.now;
+            if (!(asOf instanceof Date)) throw new Error('now() returned no timestamp');
+            const row = await tx.supplier.findUnique({
+              where: { organizationId },
+              select: {
+                organizationId: true,
+                qualifications: {
+                  where: { capability: 'CONTRACTING', state: 'APPROVED' },
+                  select: { decidedAt: true },
+                  orderBy: { decidedAt: 'desc' },
+                  take: 1,
+                },
+                suspensions: {
+                  select: { id: true, suspendedAt: true, reinstatedAt: true },
+                  orderBy: [{ suspendedAt: 'asc' }, { id: 'asc' }],
+                },
+              },
+            });
+            return { asOf, row };
           },
-        }),
+          { isolationLevel: 'RepeatableRead' },
+        ),
     );
   }
 
