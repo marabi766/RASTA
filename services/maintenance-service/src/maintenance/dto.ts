@@ -320,13 +320,15 @@ export const approveRequestSchema = z
     /**
      * The total the approver believes they are approving, echoed back.
      *
-     * Optional, but when supplied it must match the request's current total
-     * exactly. This is the one control the product document makes mandatory —
+     * **Required**, and it must match the request's current total exactly.
+     * This is the one control the product document makes mandatory —
      * "الزام تأیید کاربر پیش از تسویه نهایی" (docs/17) — and an approval that
      * silently covers a figure that changed between the screen and the button
-     * is not the control it claims to be.
+     * is not the control it claims to be. It used to be optional, which let a
+     * direct API client approve without ever stating the amount; a missing
+     * value is now a 400, the same as any other missing required field.
      */
-    expectedTotalCostMinor: amountMinorSchema.optional(),
+    expectedTotalCostMinor: amountMinorSchema,
   })
   .strict();
 

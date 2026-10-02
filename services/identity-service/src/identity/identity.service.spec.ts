@@ -98,6 +98,7 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
     lockUserProjection: jest.fn(async () => undefined),
+    revokeMembership: jest.fn(async () => undefined),
     lockUserMemberships: jest.fn(async () => ({
       activeOrganizationId: TEST_ORG_A,
       now: new Date(),

@@ -170,7 +170,10 @@ describe('maintenance request lifecycle', () => {
       expect(completed.downtimeMinutes).toBeGreaterThan(3 * 24 * 60 - 5);
 
       const approved = await asActor({ organizationId: org.a }, () =>
-        requests.approve(request.id, { notes: 'تأیید شد' }),
+        requests.approve(request.id, {
+          notes: 'تأیید شد',
+          expectedTotalCostMinor: completed.totalCostMinor,
+        }),
       );
       expect(approved.status).toBe('APPROVED');
       expect(approved.approvedBy).toBeTruthy();
@@ -183,7 +186,9 @@ describe('maintenance request lifecycle', () => {
       );
 
       await expect(
-        asActor({ organizationId: org.a }, () => requests.approve(request.id, {})),
+        asActor({ organizationId: org.a }, () =>
+          requests.approve(request.id, { expectedTotalCostMinor: '0' }),
+        ),
       ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
     });
 
@@ -199,7 +204,9 @@ describe('maintenance request lifecycle', () => {
       await asActor({ organizationId: org.a }, () =>
         repairOrders.complete(order.id, { workPerformed: 'انجام شد' }),
       );
-      await asActor({ organizationId: org.a }, () => requests.approve(request.id, {}));
+      await asActor({ organizationId: org.a }, () =>
+        requests.approve(request.id, { expectedTotalCostMinor: '0' }),
+      );
 
       await expect(
         asActor({ organizationId: org.a }, () =>
@@ -225,8 +232,12 @@ describe('maintenance request lifecycle', () => {
       );
 
       const attempts = await Promise.allSettled([
-        asActor({ organizationId: org.a }, () => requests.approve(request.id, {})),
-        asActor({ organizationId: org.a }, () => requests.approve(request.id, {})),
+        asActor({ organizationId: org.a }, () =>
+          requests.approve(request.id, { expectedTotalCostMinor: '0' }),
+        ),
+        asActor({ organizationId: org.a }, () =>
+          requests.approve(request.id, { expectedTotalCostMinor: '0' }),
+        ),
       ]);
 
       expect(attempts.filter((a) => a.status === 'fulfilled')).toHaveLength(1);

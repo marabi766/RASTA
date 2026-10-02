@@ -86,6 +86,14 @@ function roleList(name: string, options: { min: number }) {
  *                                       and logs a WARN at startup. Who writes
  *                                       a policy is not configurable: the owner
  *                                       decided that (Q-70 (7)).
+ *   CONSTRUCTION_TENDER_OPEN_FOUR_EYES  PROVISIONAL, pending the owner (Q-91): opening
+ *                                       a tender's bids is proposed by one user and
+ *                                       approved by a second. Default `true`; `false`
+ *                                       only in development and test.
+ *   IDENTITY_SERVICE_URL                Where the proposer's and the approver's current
+ *                                       organizations are read at the approval of an
+ *                                       opening (and CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS);
+ *                                       unreadable refuses the opening.
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
  *   SUPPLIER_SERVICE_URL                Where the contractor-standing snapshot is read
  *                                       (and CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
@@ -140,6 +148,30 @@ export const constructionEnvSchema = baseEnvSchema
       .string()
       .default('')
       .pipe(roleList('CONSTRUCTION_PROJECT_READER_ROLES', { min: 0 })),
+
+    /**
+     * ADR-066 § 4: who may open a tender's bids and read them afterwards. Empty (the
+     * default) means the tender owner's own role set, `CONSTRUCTION_PROJECT_ROLES`.
+     * `SYSTEM_ADMIN` and `CONTRACTOR` are refused at startup: the platform
+     * administrator has no access to a bid through the API (ADR-066 § 4), and the
+     * bidder's role is the other side of the table.
+     */
+    CONSTRUCTION_TENDER_OPEN_ROLES: z
+      .string()
+      .default('')
+      .pipe(roleList('CONSTRUCTION_TENDER_OPEN_ROLES', { min: 0 }))
+      .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
+        message:
+          'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
+      }),
+
+    /**
+     * Q-91, PROVISIONAL, pending the product owner (committee size and roles): opening a
+     * tender's bids needs a proposal by one authorised user and the approval of a second,
+     * neither a member of a bidding organization. Default `true`; `false` (one person
+     * opens) is accepted only where NODE_ENV is `development` or `test`.
+     */
+    CONSTRUCTION_TENDER_OPEN_FOUR_EYES: booleanEnv(true),
 
     CONSTRUCTION_CANCELLABLE_STATES: z
       .string()
@@ -201,6 +233,19 @@ export const constructionEnvSchema = baseEnvSchema
      * are not opened.
      */
     AUDIT_SERVICE_URL: z.string().url().default('http://localhost:3115'),
+    /**
+     * Where a user's current organizations are read (CON-002 PR 8, Q-91): `GET
+     * {IDENTITY_SERVICE_URL}/v1/users/{id}/organizations`, a service call with a token
+     * signed for no tenant. The conflict check at the approval of a bid opening uses it
+     * for the proposer and the approver; if it cannot be read, the opening is refused.
+     */
+    IDENTITY_SERVICE_URL: z.string().url().default('http://localhost:3101'),
+    CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
     CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -340,6 +385,18 @@ export const constructionEnvSchema = baseEnvSchema
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass
   // startup and fail only when a tender was first published. Judged together, here.
   .superRefine((env, ctx) => {
+    if (
+      !env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES &&
+      env.NODE_ENV !== 'development' &&
+      env.NODE_ENV !== 'test'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_TENDER_OPEN_FOUR_EYES'],
+        message:
+          'CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false is accepted only when NODE_ENV is development or test (Q-91)',
+      });
+    }
     try {
       parseKekEntries(env.CONSTRUCTION_TENDER_KEKS);
     } catch {

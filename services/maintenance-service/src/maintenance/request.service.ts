@@ -282,8 +282,8 @@ export class RequestService {
    *
    * The product document makes this mandatory before settlement, so it is
    * guarded three ways: the request must be `COMPLETED`, the update is
-   * conditional on it still being `COMPLETED` when it lands, and — when the
-   * caller states what they believe they are approving — the total must match
+   * conditional on it still being `COMPLETED` when it lands, and the caller
+   * must state what they believe they are approving — the total must match
    * exactly. An approval that silently covers a figure that changed between
    * the screen and the button is not the control it claims to be.
    */
@@ -293,10 +293,7 @@ export class RequestService {
 
     assertRequestTransition(request.status, 'APPROVED');
 
-    if (
-      dto.expectedTotalCostMinor !== undefined &&
-      dto.expectedTotalCostMinor !== request.totalCostMinor.toString()
-    ) {
+    if (dto.expectedTotalCostMinor !== request.totalCostMinor.toString()) {
       throw RastaError.businessRule(
         'The cost has changed since it was shown to you; review it again before approving.',
         {

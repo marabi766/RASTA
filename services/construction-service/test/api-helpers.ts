@@ -13,8 +13,16 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
-import { FakeHierarchy, SUPPLIER, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
-import { STANDING_OF_SOURCE } from '../src/tokens';
+import {
+  FakeHierarchy,
+  FakeMemberships,
+  FakeTenderEvidence,
+  SUPPLIER,
+  TEST_KEK,
+  TEST_KEK_ID,
+  databaseUrl,
+} from './helpers';
+import { MEMBERSHIP_SOURCE, STANDING_OF_SOURCE, TENDER_EVIDENCE_SOURCE } from '../src/tokens';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
@@ -39,6 +47,10 @@ export interface ApiHarness {
   publisher: InMemoryEventPublisher;
   /** organization-service's hierarchy, as this suite sees it (Q-70 (7)). */
   hierarchy: FakeHierarchy;
+  /** audit-service as opening bids sees it: the chain the events announced, unless a test serves another. */
+  evidence: FakeTenderEvidence;
+  /** identity-service as the approval of an opening sees it. */
+  memberships: FakeMemberships;
   close(): Promise<void>;
 }
 
@@ -208,6 +220,16 @@ export async function startApi(): Promise<ApiHarness> {
     // in organization-directory.int-spec.ts; here the hierarchy is given.
     .overrideProvider(OrganizationDirectory)
     .useValue(hierarchy)
+    // The receipt chain is audit-service's; the real client is proven against its contract in
+    // tender-evidence-client.int-spec.ts. Here it is what the events announced.
+    .overrideProvider(TENDER_EVIDENCE_SOURCE)
+    .useFactory({
+      factory: (prisma: PrismaService) => new FakeTenderEvidence(prisma),
+      inject: [PrismaService],
+    })
+    // identity-service answers who belongs where; the real client is proven in membership-client.int-spec.ts.
+    .overrideProvider(MEMBERSHIP_SOURCE)
+    .useValue(new FakeMemberships())
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -249,6 +271,8 @@ export async function startApi(): Promise<ApiHarness> {
     prisma: moduleRef.get(PrismaService),
     publisher,
     hierarchy,
+    evidence: moduleRef.get<FakeTenderEvidence>(TENDER_EVIDENCE_SOURCE),
+    memberships: moduleRef.get<FakeMemberships>(MEMBERSHIP_SOURCE),
     close: async () => {
       await app.close();
     },
