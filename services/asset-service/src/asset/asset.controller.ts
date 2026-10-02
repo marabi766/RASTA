@@ -2,6 +2,11 @@ import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nes
 import { ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { ApiQueryFromSchema } from '../openapi/query-parameters';
+import {
+  ACTIVATE_ASSET_BODY_SCHEMA,
+  CHANGE_STATUS_BODY_SCHEMA,
+  DECOMMISSION_BODY_SCHEMA,
+} from '../openapi/lifecycle-bodies';
 import { UPDATE_ASSET_BODY_SCHEMA } from '../openapi/update-asset-body';
 import { AssetService } from './asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
@@ -155,7 +160,16 @@ export class AssetController {
   @Post(':id/activate')
   @HttpCode(200)
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Commission the asset; requires a complete dossier' })
+  @ApiOperation({
+    summary: 'Commission the asset; requires a complete dossier',
+    description:
+      'REGISTERED → ACTIVE. `expectedVersion` is **required**: the `version` the caller read. ' +
+      'The command applies only to that version; if the asset has changed since — including by ' +
+      'this same command having already been applied — the answer is `409 OPTIMISTIC_LOCK_FAILED` ' +
+      'and nothing is written or published. A body without it is `400`. Returns 404 for an asset ' +
+      'in another organization — never 403 — whatever version is sent.',
+  })
+  @ApiBody({ schema: ACTIVATE_ASSET_BODY_SCHEMA })
   activate(@Param('id') id: string, @Body(zodPipe(activateAssetSchema)) dto: ActivateAssetDto) {
     return this.assets.activate(id, dto);
   }
@@ -163,7 +177,18 @@ export class AssetController {
   @Post(':id/status')
   @HttpCode(200)
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Change operational status' })
+  @ApiOperation({
+    summary: 'Change operational status',
+    description:
+      'Moves the asset to ACTIVE, IDLE or OUT_OF_SERVICE where the lifecycle allows it, with a ' +
+      'reason that is recorded on the event and the timeline. `expectedVersion` is **required**: ' +
+      'the `version` the caller read. The command applies only to that version; if the asset has ' +
+      'changed since — including by this same command having already been applied — the answer ' +
+      'is `409 OPTIMISTIC_LOCK_FAILED` and nothing is written or published. A body without it is ' +
+      '`400`. Returns 404 for an asset in another organization — never 403 — whatever version ' +
+      'is sent.',
+  })
+  @ApiBody({ schema: CHANGE_STATUS_BODY_SCHEMA })
   changeStatus(@Param('id') id: string, @Body(zodPipe(changeStatusSchema)) dto: ChangeStatusDto) {
     return this.assets.changeStatus(id, dto);
   }
@@ -181,7 +206,17 @@ export class AssetController {
   @Post(':id/decommission')
   @HttpCode(200)
   @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Retire the asset permanently' })
+  @ApiOperation({
+    summary: 'Retire the asset permanently',
+    description:
+      'Terminal: a decommissioned asset keeps its row and can never change status again. ' +
+      '`expectedVersion` is **required**: the `version` the caller read. The command applies ' +
+      'only to that version; if the asset has changed since — including by this same command ' +
+      'having already been applied — the answer is `409 OPTIMISTIC_LOCK_FAILED` and nothing is ' +
+      'written or published. A body without it is `400`. Returns 404 for an asset in another ' +
+      'organization — never 403 — whatever version is sent.',
+  })
+  @ApiBody({ schema: DECOMMISSION_BODY_SCHEMA })
   decommission(@Param('id') id: string, @Body(zodPipe(decommissionSchema)) dto: DecommissionDto) {
     return this.assets.decommission(id, dto);
   }

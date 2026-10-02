@@ -437,6 +437,7 @@ export class AssetService {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
+    this.assertVersion(asset, dto.expectedVersion);
     this.assertTransition(asset.status as AssetStatus, 'ACTIVE', 'USER');
 
     // Any in-force policy that counts for the current owner: under the project
@@ -468,11 +469,17 @@ export class AssetService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
-      const row = await this.compareAndSet(tx, id, asset.status, {
-        status: 'ACTIVE',
-        commissionedAt,
-        updatedBy: actor,
-      });
+      const row = await this.compareAndSet(
+        tx,
+        id,
+        asset.status,
+        {
+          status: 'ACTIVE',
+          commissionedAt,
+          updatedBy: actor,
+        },
+        { version: dto.expectedVersion },
+      );
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'Asset',
@@ -508,10 +515,11 @@ export class AssetService {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
+    this.assertVersion(asset, dto.expectedVersion);
     this.assertTransition(asset.status as AssetStatus, dto.status as AssetStatus, 'USER');
 
     const updated = await this.repository.transaction((tx) =>
-      this.writeStatusChange(tx, id, asset, dto.status, dto.reason),
+      this.writeStatusChange(tx, id, asset, dto.status, dto.reason, dto.expectedVersion),
     );
     return toView(updated);
   }
@@ -520,18 +528,25 @@ export class AssetService {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
+    this.assertVersion(asset, dto.expectedVersion);
     this.assertTransition(asset.status as AssetStatus, 'DECOMMISSIONED', 'USER');
 
     const decommissionedAt = dto.decommissionedAt ? new Date(dto.decommissionedAt) : new Date();
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
-      const row = await this.compareAndSet(tx, id, asset.status, {
-        status: 'DECOMMISSIONED',
-        decommissionedAt,
-        decommissionedReason: dto.reason,
-        updatedBy: actor,
-      });
+      const row = await this.compareAndSet(
+        tx,
+        id,
+        asset.status,
+        {
+          status: 'DECOMMISSIONED',
+          decommissionedAt,
+          decommissionedReason: dto.reason,
+          updatedBy: actor,
+        },
+        { version: dto.expectedVersion },
+      );
 
       await this.repository.enqueueEvent(tx, {
         aggregateType: 'Asset',
@@ -1020,6 +1035,19 @@ export class AssetService {
   // Internals
   // =========================================================================
 
+  /**
+   * Refuses a command made against a version that is no longer current, before
+   * anything else is judged: a replay of a command that already committed (a
+   * form sent twice, a retry after a lost answer) then reads as "the asset has
+   * changed" — a 409 the caller can act on — and not as whatever the new state
+   * makes of the same words, which for a terminal decommission is a 422 that
+   * hides the replay. The write is guarded on the version again, so this is the
+   * readable answer and the compare-and-set is the enforcement.
+   */
+  private assertVersion(asset: { id: string; version: number }, expected: number): void {
+    if (asset.version !== expected) throw RastaError.optimisticLockFailed('Asset', asset.id);
+  }
+
   private assertTransition(from: AssetStatus, to: AssetStatus, actor: TransitionActor): void {
     if (canTransition(from, to, actor)) return;
 
@@ -1030,7 +1058,8 @@ export class AssetService {
    * Writes a status change with its outbox event and timeline entry, in `tx`.
    *
    * `asset.status` is the status the transition was judged against, and the
-   * update matches on it (audit L3-07).
+   * update matches on it (audit L3-07). `expectedVersion`, when the caller has
+   * one, is matched too.
    */
   private async writeStatusChange(
     tx: ExtendedPrismaClient,
@@ -1038,14 +1067,20 @@ export class AssetService {
     asset: { organizationId: string; status: string },
     newStatus: AssetStatus,
     reason: string,
+    expectedVersion?: number,
   ) {
     const actor = getContext().userId ?? 'SYSTEM';
     const previousStatus = asset.status;
 
-    const row = await this.compareAndSet(tx, id, previousStatus, {
-      status: newStatus,
-      updatedBy: actor,
-    });
+    const row = await this.compareAndSet(
+      tx,
+      id,
+      previousStatus,
+      { status: newStatus, updatedBy: actor },
+      // A user's command names the version it was made against; an event from
+      // another service has none and is judged on the status alone.
+      expectedVersion === undefined ? {} : { version: expectedVersion },
+    );
 
     await this.repository.enqueueEvent(tx, {
       aggregateType: 'Asset',
@@ -1112,7 +1147,7 @@ export class AssetService {
     id: string,
     expectedStatus: string,
     data: Record<string, unknown>,
-    where: { organizationId?: string } = {},
+    where: { organizationId?: string; version?: number } = {},
   ) {
     const changed = await this.repository.compareAndSetStatus(tx, id, expectedStatus, data, where);
     if (changed === 0) throw RastaError.optimisticLockFailed('Asset', id);

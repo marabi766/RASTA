@@ -5,7 +5,12 @@ import { AssetController } from '../asset/asset.controller';
 import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
-import { updateAssetSchema } from '../asset/dto';
+import {
+  activateAssetSchema,
+  changeStatusSchema,
+  decommissionSchema,
+  updateAssetSchema,
+} from '../asset/dto';
 
 /**
  * The document this service actually serves.
@@ -143,5 +148,46 @@ describe('the served PATCH /v1/assets/{id} request body', () => {
     for (const [name, field] of Object.entries(shape)) {
       expect([name, body.properties[name]?.nullable === true]).toEqual([name, field.isNullable()]);
     }
+  });
+});
+
+describe.each([
+  ['activate', '/v1/assets/{id}/activate', activateAssetSchema],
+  ['change status', '/v1/assets/{id}/status', changeStatusSchema],
+  ['decommission', '/v1/assets/{id}/decommission', decommissionSchema],
+] as const)('the served POST %s request body', (_name, path, schema) => {
+  type Body = {
+    type: string;
+    additionalProperties?: boolean;
+    required?: string[];
+    properties: Record<string, { type?: string; minimum?: number }>;
+  };
+  let body: Body;
+
+  beforeAll(async () => {
+    const document = await buildDocument();
+    const operation = document.paths[path]?.post as unknown as {
+      requestBody?: { content: Record<string, { schema: Body }> };
+    };
+    expect(operation?.requestBody).toBeDefined();
+    body = operation.requestBody!.content['application/json']!.schema;
+  });
+
+  it('says expectedVersion is required, so a generated client cannot omit it', () => {
+    expect(body.required).toContain('expectedVersion');
+    expect(body.properties.expectedVersion).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(body.additionalProperties).toBe(false);
+  });
+
+  it('publishes every field the validator accepts, and nothing it would refuse', () => {
+    expect(Object.keys(body.properties).sort()).toEqual(Object.keys(schema.shape).sort());
+  });
+
+  it('marks required exactly the fields the validator does not make optional', () => {
+    const shape = schema.shape as Record<string, { isOptional(): boolean }>;
+    const required = Object.entries(shape)
+      .filter(([, field]) => !field.isOptional())
+      .map(([name]) => name);
+    expect([...(body.required ?? [])].sort()).toEqual(required.sort());
   });
 });

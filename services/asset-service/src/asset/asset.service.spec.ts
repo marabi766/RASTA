@@ -534,7 +534,7 @@ describe('AssetService', () => {
     it('refuses to activate an asset with no insurance', async () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
-      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(
+      await expect(run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }))).rejects.toThrow(
         /insurance policy currently in force/,
       );
     });
@@ -543,7 +543,7 @@ describe('AssetService', () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
       const error = (await run(() =>
-        h.service.activate(ASSET_ID, {}).catch((e: RastaError) => e),
+        h.service.activate(ASSET_ID, { expectedVersion: 1 }).catch((e: RastaError) => e),
       )) as RastaError;
 
       // An operator who fixes one blocker should not have to retry to discover
@@ -562,7 +562,7 @@ describe('AssetService', () => {
         kind: 'OWNERSHIP_TITLE',
       });
 
-      const result = await run(() => h.service.activate(ASSET_ID, {}));
+      const result = await run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }));
 
       expect(result.status).toBe('ACTIVE');
       expect(h.enqueued.map((e) => e.eventName)).toContain(ASSET_EVENTS.ASSET_ACTIVATED);
@@ -576,7 +576,9 @@ describe('AssetService', () => {
         ownershipGeneration: jest.fn(async () => 1),
       });
 
-      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(/insurance/);
+      await expect(run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }))).rejects.toThrow(
+        /insurance/,
+      );
       expect(h.repository.findActivePolicy).toHaveBeenCalledWith(
         ASSET_ID,
         expect.any(Date),
@@ -586,7 +588,9 @@ describe('AssetService', () => {
 
     it('refuses to activate an asset that is already active', async () => {
       const h = harness({ findById: jest.fn(async () => assetRow({ status: 'ACTIVE' })) });
-      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(RastaError);
+      await expect(run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }))).rejects.toThrow(
+        RastaError,
+      );
     });
   });
 
@@ -595,9 +599,13 @@ describe('AssetService', () => {
       const h = harness();
       await expect(
         run(() =>
-          // @ts-expect-error — ChangeStatusDto's schema already excludes ASSIGNED; this
-          // proves the service refuses it too if a caller bypasses the DTO.
-          h.service.changeStatus(ASSET_ID, { status: 'ASSIGNED', reason: 'دستی' }),
+          h.service.changeStatus(ASSET_ID, {
+            // @ts-expect-error — ChangeStatusDto's schema already excludes ASSIGNED; this
+            // proves the service refuses it too if a caller bypasses the DTO.
+            status: 'ASSIGNED',
+            reason: 'دستی',
+            expectedVersion: 1,
+          }),
         ),
       ).rejects.toThrow(/not done directly/);
     });
@@ -634,7 +642,13 @@ describe('AssetService', () => {
 
     it('records every status change on the timeline', async () => {
       const h = harness();
-      await run(() => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'فصل غیرکاری' }));
+      await run(() =>
+        h.service.changeStatus(ASSET_ID, {
+          status: 'IDLE',
+          reason: 'فصل غیرکاری',
+          expectedVersion: 1,
+        }),
+      );
 
       expect(h.timeline.map((t) => t.category)).toContain('LIFECYCLE');
       expect(h.timeline.at(-1)?.description).toBe('فصل غیرکاری');
@@ -644,23 +658,29 @@ describe('AssetService', () => {
   describe('compare-and-set on status (audit L3-07)', () => {
     it('matches the update on the status the transition was judged from', async () => {
       const h = harness();
-      await run(() => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }));
+      await run(() =>
+        h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x', expectedVersion: 1 }),
+      );
 
       expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
         h.tx,
         ASSET_ID,
         'ACTIVE',
         expect.objectContaining({ status: 'IDLE' }),
-        {},
+        { version: 1 },
       );
     });
 
     it.each<[string, (h: Harness) => Promise<unknown>]>([
       [
         'a user status change',
-        (h: Harness) => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }),
+        (h: Harness) =>
+          h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x', expectedVersion: 1 }),
       ],
-      ['a decommission', (h: Harness) => h.service.decommission(ASSET_ID, { reason: 'فرسوده' })],
+      [
+        'a decommission',
+        (h: Harness) => h.service.decommission(ASSET_ID, { reason: 'فرسوده', expectedVersion: 1 }),
+      ],
       [
         'an event-driven status change',
         (h: Harness) => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'),
@@ -699,6 +719,245 @@ describe('AssetService', () => {
       await expect(
         run(() => h.service.create({ ...CREATE, assetTag: 'T-1' })),
       ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+    });
+  });
+
+  describe('lifecycle commands are made against a version (EXP-002 slice 5)', () => {
+    const at = (version: number, status: string) =>
+      harness({
+        findById: jest.fn(async () => assetRow({ version, status })),
+        findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+      });
+
+    const commands: Array<[string, string, (h: Harness, version: number) => Promise<unknown>]> = [
+      [
+        'activate',
+        'REGISTERED',
+        (h, expectedVersion) => h.service.activate(ASSET_ID, { expectedVersion }),
+      ],
+      [
+        'change status',
+        'ACTIVE',
+        (h, expectedVersion) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'IDLE',
+            reason: 'فصل غیرکاری',
+            expectedVersion,
+          }),
+      ],
+      [
+        'decommission',
+        'ACTIVE',
+        (h, expectedVersion) =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+      ],
+    ];
+
+    it.each(commands)(
+      '%s: a stale version is a 409 and writes nothing, publishes nothing',
+      async (_name, status, command) => {
+        // The form was drawn at version 2; somebody's command made it 3.
+        const h = at(3, status);
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'D',
+        });
+
+        await expect(run(() => command(h, 2))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+
+        expect(h.repository.transaction).not.toHaveBeenCalled();
+        expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+      },
+    );
+
+    it.each(commands)(
+      '%s: a version from the future is refused the same way',
+      async (_name, status, command) => {
+        const h = at(3, status);
+        await expect(run(() => command(h, 4))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.enqueued).toHaveLength(0);
+      },
+    );
+
+    it.each(commands)(
+      '%s: the write is guarded on the version again, so a command that lost the race writes nothing',
+      async (_name, status, command) => {
+        // The read matched; another request committed before this one's update.
+        const h = harness({
+          findById: jest.fn(async () => assetRow({ version: 3, status })),
+          findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+          compareAndSetStatus: jest.fn(async () => 0),
+        });
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'D',
+        });
+
+        await expect(run(() => command(h, 3))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+
+        expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+          h.tx,
+          ASSET_ID,
+          status,
+          expect.any(Object),
+          { version: 3 },
+        );
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+      },
+    );
+
+    it('a decommission sent twice answers the replay with a 409, not a 422, and writes once', async () => {
+      // The first request commits: DECOMMISSIONED at version 4. The same form,
+      // still carrying version 3, arrives again.
+      let row = assetRow({ version: 3, status: 'ACTIVE' });
+      const h = harness({
+        findById: jest.fn(async () => row),
+        compareAndSetStatus: jest.fn(
+          async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+            row = { ...row, ...data, version: row.version + 1 } as typeof row;
+            return 1;
+          },
+        ),
+      });
+      const sent = { reason: 'فرسودگی کامل ماشین', expectedVersion: 3 };
+
+      await expect(run(() => h.service.decommission(ASSET_ID, sent))).resolves.toMatchObject({
+        status: 'DECOMMISSIONED',
+      });
+      await expect(run(() => h.service.decommission(ASSET_ID, sent))).rejects.toMatchObject({
+        code: 'OPTIMISTIC_LOCK_FAILED',
+      });
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledTimes(1);
+      expect(h.enqueued.map((event) => event.eventName)).toEqual([
+        ASSET_EVENTS.ASSET_DECOMMISSIONED,
+      ]);
+      expect(h.timeline).toHaveLength(1);
+    });
+
+    it('a status change sent twice does not apply again after the asset moved back', async () => {
+      // ACTIVE → IDLE (v1 → v2), somebody returns it IDLE → ACTIVE (v3). A bare
+      // status check would let the stale ACTIVE → IDLE form land a second time.
+      let row = assetRow({ version: 1, status: 'ACTIVE' });
+      const h = harness({
+        findById: jest.fn(async () => row),
+        compareAndSetStatus: jest.fn(
+          async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+            row = { ...row, ...data, version: row.version + 1 } as typeof row;
+            return 1;
+          },
+        ),
+      });
+      const sent = { status: 'IDLE' as const, reason: 'فصل غیرکاری', expectedVersion: 1 };
+
+      await run(() => h.service.changeStatus(ASSET_ID, sent));
+      await run(() =>
+        h.service.changeStatus(ASSET_ID, {
+          status: 'ACTIVE',
+          reason: 'بازگشت',
+          expectedVersion: 2,
+        }),
+      );
+      expect(row).toMatchObject({ status: 'ACTIVE', version: 3 });
+
+      await expect(run(() => h.service.changeStatus(ASSET_ID, sent))).rejects.toMatchObject({
+        code: 'OPTIMISTIC_LOCK_FAILED',
+      });
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledTimes(2);
+      expect(h.enqueued).toHaveLength(2);
+    });
+
+    it('an activation sent twice is a 409 and publishes one event', async () => {
+      let row = assetRow({ version: 1, status: 'REGISTERED' });
+      const h = harness({
+        findById: jest.fn(async () => row),
+        findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        compareAndSetStatus: jest.fn(
+          async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+            row = { ...row, ...data, version: row.version + 1 } as typeof row;
+            return 1;
+          },
+        ),
+      });
+      (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({ id: 'D' });
+
+      await run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }));
+      await expect(
+        run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect(h.enqueued.map((event) => event.eventName)).toEqual([ASSET_EVENTS.ASSET_ACTIVATED]);
+    });
+
+    it('an event from another service is still judged on the status alone, with no version', async () => {
+      const h = harness();
+      await run(() => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'));
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+        h.tx,
+        ASSET_ID,
+        'ACTIVE',
+        expect.any(Object),
+        {},
+      );
+    });
+
+    it('still answers an asset in another organization as missing, whatever version is named', async () => {
+      const h = harness({ findById: jest.fn(async () => null) });
+
+      for (const [, , command] of commands) {
+        await expect(run(() => command(h, 1))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+        await expect(run(() => command(h, 999))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      }
+      expect(h.enqueued).toHaveLength(0);
+    });
+
+    describe('the request bodies, as a direct API client reaches them', () => {
+      const bodyPipe = (handler: string) => {
+        const args = Reflect.getMetadata('__routeArguments__', AssetController, handler) as Record<
+          string,
+          { pipes: Array<{ transform: (value: unknown, meta: { type: 'body' }) => unknown }> }
+        >;
+        const found = Object.values(args).flatMap((entry) => entry.pipes);
+        expect(found).toHaveLength(1);
+        return found[0]!;
+      };
+
+      it.each([
+        ['activate', {}],
+        ['changeStatus', { status: 'IDLE', reason: 'فصل غیرکاری' }],
+        ['decommission', { reason: 'فرسودگی کامل ماشین' }],
+      ])('%s without a version is a 400', (handler, body) => {
+        expect(() => bodyPipe(handler).transform(body, { type: 'body' })).toThrow(
+          expect.objectContaining({ code: 'VALIDATION_FAILED' }),
+        );
+      });
+
+      it.each([
+        ['activate', {}],
+        ['changeStatus', { status: 'IDLE', reason: 'فصل غیرکاری' }],
+        ['decommission', { reason: 'فرسودگی کامل ماشین' }],
+      ])('%s refuses a version of 0, a fraction or a string', (handler, body) => {
+        for (const expectedVersion of [0, -1, 1.5, '3', null]) {
+          expect(() =>
+            bodyPipe(handler).transform({ ...body, expectedVersion }, { type: 'body' }),
+          ).toThrow(expect.objectContaining({ code: 'VALIDATION_FAILED' }));
+        }
+      });
+
+      it('accepts each command with a version', () => {
+        expect(() =>
+          bodyPipe('activate').transform({ expectedVersion: 1 }, { type: 'body' }),
+        ).not.toThrow();
+      });
     });
   });
 

@@ -75,6 +75,15 @@ describe('asset integrity', () => {
     return { status: rows[0]!.status, organizationId: rows[0]!.organization_id };
   }
 
+  /** The version a read would show now: what a command is made against. */
+  async function versionOf(assetId: string): Promise<number> {
+    const rows = await prisma.client.$queryRawUnsafe<{ version: number }[]>(
+      `SELECT version FROM asset WHERE id = $1`,
+      assetId,
+    );
+    return rows[0]!.version;
+  }
+
   /** Holds the asset's row lock until released, so contenders queue behind it. */
   async function holdRowLock(assetId: string) {
     let release!: () => void;
@@ -201,14 +210,20 @@ describe('asset integrity', () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
 
+      const version = await versionOf(assetId);
       const release = await holdRowLock(assetId);
-      // Both requests read ACTIVE now and then block on the row lock.
+      // Both requests read ACTIVE, at the same version, now and then block on
+      // the row lock.
       const decommission = asActor(manager(org.a), () =>
-        assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
+        assets.decommission(assetId, { reason: 'فرسودگی کامل', expectedVersion: version }),
       );
       await waitForBlocked(1);
       const idle = asActor(manager(org.a), () =>
-        assets.changeStatus(assetId, { status: 'IDLE', reason: 'فصل غیرکاری' }),
+        assets.changeStatus(assetId, {
+          status: 'IDLE',
+          reason: 'فصل غیرکاری',
+          expectedVersion: version,
+        }),
       );
       // Settle-tracking starts before the release: the loser can be refused
       // while release() still awaits the holder's commit, and an expected
@@ -234,9 +249,10 @@ describe('asset integrity', () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
 
+      const version = await versionOf(assetId);
       const release = await holdRowLock(assetId);
       const decommission = asActor(manager(org.a), () =>
-        assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
+        assets.decommission(assetId, { reason: 'فرسودگی کامل', expectedVersion: version }),
       );
       await waitForBlocked(1);
       // The consumer locks the row before it reads, so it waits behind the
@@ -263,7 +279,7 @@ describe('asset integrity', () => {
       const { version } = await asActor(manager(org.a), () => assets.get(assetId));
       const release = await holdRowLock(assetId);
       const decommission = asActor(manager(org.a), () =>
-        assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
+        assets.decommission(assetId, { reason: 'فرسودگی کامل', expectedVersion: version }),
       );
       await waitForBlocked(1);
       const edit = asActor(manager(org.a), () =>
@@ -702,7 +718,9 @@ describe('asset integrity', () => {
         approvalCeilingMinor: null,
       });
       await expect(
-        asActor(manager(org.b), () => narrowAssets.activate(assetId, {})),
+        asActor(manager(org.b), async () =>
+          narrowAssets.activate(assetId, { expectedVersion: await versionOf(assetId) }),
+        ),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
         internalContext: expect.objectContaining({
@@ -786,7 +804,9 @@ describe('asset integrity', () => {
         [own.id]: 1,
       });
 
-      const activated = await asActor(manager(org.b), () => assets.activate(assetId, {}));
+      const activated = await asActor(manager(org.b), async () =>
+        assets.activate(assetId, { expectedVersion: await versionOf(assetId) }),
+      );
       expect(activated.status).toBe('ACTIVE');
     });
 
@@ -1193,9 +1213,15 @@ describe('asset integrity', () => {
 
       const attempts: Array<[string, () => Promise<unknown>]> = [
         ['update', () => assets.update(assetId, { name: 'ربوده', expectedVersion: 1 })],
-        ['changeStatus', () => assets.changeStatus(assetId, { status: 'IDLE', reason: 'x' })],
-        ['decommission', () => assets.decommission(assetId, { reason: 'ربوده' })],
-        ['activate', () => assets.activate(assetId, {})],
+        [
+          'changeStatus',
+          () => assets.changeStatus(assetId, { status: 'IDLE', reason: 'x', expectedVersion: 1 }),
+        ],
+        [
+          'decommission',
+          () => assets.decommission(assetId, { reason: 'ربوده', expectedVersion: 1 }),
+        ],
+        ['activate', () => assets.activate(assetId, { expectedVersion: 1 })],
         [
           'transfer',
           () =>
