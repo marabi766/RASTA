@@ -640,6 +640,25 @@ describe('AssetService', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('does not let a plain status change commission a REGISTERED asset around the dossier check', async () => {
+      const h = harness({ findById: jest.fn(async () => assetRow({ status: 'REGISTERED' })) });
+
+      await expect(
+        run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'ACTIVE',
+            reason: 'دور زدن',
+            expectedVersion: 1,
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'INVALID_STATE_TRANSITION',
+        message: expect.stringContaining('activate command'),
+      });
+      expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+    });
+
     it('records every status change on the timeline', async () => {
       const h = harness();
       await run(() =>

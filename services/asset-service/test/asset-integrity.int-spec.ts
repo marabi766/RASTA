@@ -1194,6 +1194,182 @@ describe('asset integrity', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Lifecycle commands are made against a version (EXP-002 slice 5)
+  // ---------------------------------------------------------------------------
+
+  describe('a lifecycle command sent twice', () => {
+    /** The events and timeline entries a machine holds, by name — what actually happened to it. */
+    async function history(assetId: string) {
+      const outbox = (await outboxFor(assetId)).map((event) => event.eventName);
+      const timeline = await asActor(manager(org.a), () =>
+        assets.timeline(assetId, { limit: 50 } as never),
+      );
+      return { outbox, timeline: timeline.items.map((entry) => entry.eventName) };
+    }
+    const count = (names: string[], name: string) => names.filter((n) => n === name).length;
+
+    async function withDossier(assetId: string) {
+      await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - day).toISOString(),
+          validTo: new Date(Date.now() + 300 * day).toISOString(),
+        }),
+      );
+      await asActor(manager(org.a), () =>
+        assets.attachDocument(assetId, {
+          documentId: id('DOC'),
+          kind: 'OWNERSHIP_TITLE',
+          title: 'سند مالکیت',
+        }),
+      );
+    }
+
+    it('applies a decommission once: the replay is a 409 and writes no second event or entry', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const expectedVersion = await versionOf(assetId);
+      const command = { reason: 'فرسودگی کامل ماشین', expectedVersion };
+
+      await asActor(admin(org.a), () => assets.decommission(assetId, command));
+      const afterFirst = await versionOf(assetId);
+      await expect(
+        asActor(admin(org.a), () => assets.decommission(assetId, command)),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect(await versionOf(assetId)).toBe(afterFirst);
+      expect(afterFirst).toBe(expectedVersion + 1);
+      const { outbox, timeline } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_DECOMMISSIONED)).toBe(1);
+      expect(count(timeline, ASSET_EVENTS.ASSET_DECOMMISSIONED)).toBe(1);
+    });
+
+    it('applies a status change once, and a stale one cannot apply it again after the machine moved back', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const first = await versionOf(assetId);
+      const idle = { status: 'IDLE' as const, reason: 'فصل غیرکاری', expectedVersion: first };
+
+      await asActor(manager(org.a), () => assets.changeStatus(assetId, idle));
+      // The identical form again, at once: refused.
+      await expect(
+        asActor(manager(org.a), () => assets.changeStatus(assetId, idle)),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      // Somebody returns the machine to service; now the old "mark idle" form,
+      // whose status check alone (ACTIVE → IDLE is legal) would pass, is sent.
+      await asActor(manager(org.a), async () =>
+        assets.changeStatus(assetId, {
+          status: 'ACTIVE',
+          reason: 'بازگشت به سرویس',
+          expectedVersion: await versionOf(assetId),
+        }),
+      );
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      await expect(
+        asActor(manager(org.a), () => assets.changeStatus(assetId, idle)),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      expect(await versionOf(assetId)).toBe(first + 2);
+      const { outbox, timeline } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_STATUS_CHANGED)).toBe(2);
+      expect(count(timeline, ASSET_EVENTS.ASSET_STATUS_CHANGED)).toBe(2);
+    });
+
+    it('applies an activation once', async () => {
+      const assetId = await machine(org.a);
+      await withDossier(assetId);
+      const expectedVersion = await versionOf(assetId);
+
+      await asActor(manager(org.a), () => assets.activate(assetId, { expectedVersion }));
+      await expect(
+        asActor(manager(org.a), () => assets.activate(assetId, { expectedVersion })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      const { outbox, timeline } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_ACTIVATED)).toBe(1);
+      expect(count(timeline, ASSET_EVENTS.ASSET_ACTIVATED)).toBe(1);
+    });
+
+    it('lets one of two identical commands that race win, and the other writes nothing', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const expectedVersion = await versionOf(assetId);
+
+      const release = await holdRowLock(assetId);
+      // Both read the same version, then queue behind the lock on the UPDATE.
+      const send = () =>
+        asActor(manager(org.a), () =>
+          assets.changeStatus(assetId, { status: 'IDLE', reason: 'فصل غیرکاری', expectedVersion }),
+        );
+      const first = send();
+      await waitForBlocked(1);
+      const second = send();
+      const settled = Promise.allSettled([first, second]); // before release(), as above
+      await waitForBlocked(2);
+      await release();
+
+      const [won, lost] = await settled;
+      expect(won.status).toBe('fulfilled');
+      expect(lost).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'OPTIMISTIC_LOCK_FAILED' },
+      });
+      expect(await versionOf(assetId)).toBe(expectedVersion + 1);
+      const { outbox } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_STATUS_CHANGED)).toBe(1);
+    });
+
+    it('refuses a stale version before it judges the transition, so a replayed decommission is not a 422', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const expectedVersion = await versionOf(assetId);
+      await asActor(admin(org.a), () =>
+        assets.decommission(assetId, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+      );
+
+      // A different command, same stale version, against a terminal asset.
+      await expect(
+        asActor(manager(org.a), () =>
+          assets.changeStatus(assetId, { status: 'IDLE', reason: 'دیرهنگام', expectedVersion }),
+        ),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+    });
+
+    it('does not let a plain status change commission a REGISTERED machine around the dossier check', async () => {
+      const assetId = await machine(org.a);
+      const expectedVersion = await versionOf(assetId);
+
+      await expect(
+        asActor(manager(org.a), () =>
+          assets.changeStatus(assetId, { status: 'ACTIVE', reason: 'دور زدن', expectedVersion }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+      expect((await statusOf(assetId)).status).toBe('REGISTERED');
+      expect(await versionOf(assetId)).toBe(expectedVersion);
+      expect((await history(assetId)).outbox).not.toContain(ASSET_EVENTS.ASSET_STATUS_CHANGED);
+    });
+
+    it('still lets an event from another service move the status, with no version', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const before = await versionOf(assetId);
+
+      await asActor(manager(org.a), () =>
+        consumer.handle(envelope('ASSET_ASSIGNED', assetId, org.a)),
+      );
+
+      expect((await statusOf(assetId)).status).toBe('ASSIGNED');
+      expect(await versionOf(assetId)).toBe(before + 1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Tenant isolation of every changed write path
   // ---------------------------------------------------------------------------
 

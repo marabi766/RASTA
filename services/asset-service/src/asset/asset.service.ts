@@ -50,6 +50,10 @@ import type {
   UpdateAssetDto,
 } from './dto';
 
+/** Said when a plain status change asks for what only commissioning may do. */
+const ACTIVATE_INSTEAD =
+  'A registered asset is commissioned with the activate command, which checks that its dossier is complete.';
+
 @Injectable()
 export class AssetService {
   private readonly logger = new Logger(AssetService.name);
@@ -516,6 +520,14 @@ export class AssetService {
     if (!asset) throw RastaError.notFound('Asset', id);
 
     this.assertVersion(asset, dto.expectedVersion);
+
+    // Commissioning is `activate`, which refuses an asset whose dossier is
+    // incomplete. The table allows REGISTERED → ACTIVE for a user, so without
+    // this the plain status route was a way round that check.
+    if (asset.status === 'REGISTERED' && dto.status === 'ACTIVE') {
+      throw RastaError.invalidStateTransition('Asset', 'REGISTERED', 'ACTIVE', ACTIVATE_INSTEAD);
+    }
+
     this.assertTransition(asset.status as AssetStatus, dto.status as AssetStatus, 'USER');
 
     const updated = await this.repository.transaction((tx) =>

@@ -10,14 +10,22 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
-        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts"
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.controller.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.repository.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/lifecycle.ts",
+        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts"
       ]
     },
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
-        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts"
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.controller.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.repository.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/lifecycle.ts",
+        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts"
       ]
     }
   }
