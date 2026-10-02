@@ -108,7 +108,14 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 4. **بررسی:** `pnpm check:db-runtime-privileges` (Superuser در `PG*`) — باید برای `<svc>` بگوید
    `runtime role owns nothing`.
 
-audit (یک بار، برای خوشه‌ای که پیش از D-045 ساخته شده): `bash …/service-privilege-split.bash audit`.
+audit (یک بار، برای خوشه‌ای که پیش از D-045 ساخته شده): `bash …/service-privilege-split.bash audit` — با همان گام اعتبار
+هر سرویس: `POSTGRES_PASSWORD_AUDIT` و `POSTGRES_PASSWORD_AUDIT_MIGRATOR` هر دو Export‌شده و متمایز؛ هر دو روی نقش‌ها گذاشته
+و ورودشان ثابت می‌شود، پس خوشه‌ای که دو نقش audit یک گذرواژه داشتند با آن نمی‌ماند.
+
+Schema `public` هر که مالکش باشد — نقش اجرا، `pg_database_owner`، یا Superuser روی خوشه‌ای که از PostgreSQL 14 ارتقا یافته
+(که `REASSIGN OWNED` به آن نمی‌رسد) — پیش از Revokeها و ساخت دفتر به مهاجر داده می‌شود؛ وگرنه مهاجر در آن `CREATE`
+نداشت و نه دفتر ساخته می‌شد نه Migration. `pnpm db:rotate-role-passwords` هر `rasta_<svc>_migrator` را با پایگاه دادهٔ
+`rasta_<svc>` می‌آزماید.
 
 ## ۶. Production
 

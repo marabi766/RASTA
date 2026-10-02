@@ -17,7 +17,15 @@
 // scripts/prisma.mjs's revoke. The pre-created ledger is Prisma's shape, column
 // for column. The split runs a second time to prove it is idempotent.
 //
-// The roles are throwaway too (`rasta_d045t<pid>` and its migrator), so the
+// Last, a legacy cluster (Codex round 4 on #176): a service database and an
+// audit database in the worst realistic pre-split state — `public` owned by
+// the superuser (a PostgreSQL 14 upgrade), the runtime role owning everything
+// else and a member of its migrator WITH SET, both roles sharing one password
+// — go through the standalone upgrade exactly as an operator runs it, and
+// every invariant must hold afterwards.
+//
+// The roles are throwaway too (`rasta_d045t<pid>` and its migrator, and the
+// legacy fixture's `rasta_d045l<pid>` and `rasta_d045a<pid>` pairs), so the
 // test never touches a real service's roles. Needs `psql` and a superuser:
 // PGHOST, PGPORT, PGUSER, PGPASSWORD.
 // -----------------------------------------------------------------------------
@@ -35,6 +43,7 @@ import { ledgerRevoke } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
+const ROLE_PASSWORDS = join(ROOT, 'infrastructure/docker/postgres/lib/role-passwords.bash');
 // The services' own startup check, exactly as built (`pnpm build` first).
 const { CONNECTED_ROLE_SQL, connectedRoleProblems } = createRequire(import.meta.url)(
   join(ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
@@ -405,4 +414,290 @@ test('a standalone split rotates the runtime password to the supplied one and pr
   assert.equal(wrong.status, 1);
   assert.match(wrong.stderr, new RegExp(`${MIGRATOR} cannot log in`));
   assert.ok(!wrong.stderr.includes('not_the_migrators_password_x'));
+});
+
+// ---------------------------------------------------------------------------
+// A legacy cluster, the worst realistic pre-split state, through the
+// standalone upgrade (Codex round 4 on #176)
+// ---------------------------------------------------------------------------
+
+const LEGACY = [
+  { kind: 'service', service: `d045l${process.pid}`, mode: 'default' },
+  { kind: 'audit', service: `d045a${process.pid}`, mode: 'audit' },
+].map((fixture) => ({
+  ...fixture,
+  db: `rasta_${fixture.service}`,
+  runtime: `rasta_${fixture.service}`,
+  migrator: `rasta_${fixture.service}_migrator`,
+  variable: `POSTGRES_PASSWORD_${fixture.service.toUpperCase()}`,
+  // What the operator supplies: distinct, as resolve_role_passwords demands.
+  supplied: {
+    runtime: `lrt_${randomBytes(12).toString('hex')}`,
+    migrator: `lmg_${randomBytes(12).toString('hex')}`,
+  },
+}));
+// The one password both roles of each pair share before the upgrade.
+const SHARED = `shared_${randomBytes(12).toString('hex')}`;
+
+function legacyFindings({ db, runtime }) {
+  return ok(FINDINGS_SQL, { database: db, variables: { runtime } }).split('\n').filter(Boolean);
+}
+
+function legacyStartupProblems({ db, runtime }) {
+  const json = ok(`SELECT row_to_json(f) FROM (${CONNECTED_ROLE_SQL}) f`, {
+    role: runtime,
+    database: db,
+  });
+  return connectedRoleProblems(JSON.parse(json));
+}
+
+/** `bash service-privilege-split.bash <svc>` as an operator runs it, for a throwaway pair. */
+function upgrade({ service, db, mode, variable }, passwords) {
+  const env = { ...process.env, POSTGRES_USER: process.env.PGUSER };
+  delete env.RASTA_DB_BOOTSTRAP; // a real cluster: no development fallback
+  env[variable] = passwords.runtime;
+  env[`${variable}_MIGRATOR`] = passwords.migrator;
+  return spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail; source "${ROLE_PASSWORDS}"; source "${SPLIT}"; ` +
+        `upgrade_service_split ${service} ${db} ${mode}`,
+    ],
+    { env, encoding: 'utf8' },
+  );
+}
+
+function legacyLogsIn(role, password, database) {
+  return (
+    spawnSync('psql', ['-X', '-q', '-tA', '-d', database, '-c', 'SELECT 1'], {
+      env: {
+        ...process.env,
+        PGHOST: process.env.PGHOST?.startsWith('/')
+          ? '127.0.0.1'
+          : (process.env.PGHOST ?? '127.0.0.1'),
+        PGUSER: role,
+        PGPASSWORD: password,
+      },
+      encoding: 'utf8',
+    }).status === 0
+  );
+}
+
+after(() => {
+  for (const { db, runtime, migrator } of LEGACY) {
+    psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
+    for (const role of [runtime, migrator])
+      psql(`DROP ROLE IF EXISTS ${role}`, { database: 'postgres' });
+  }
+});
+
+test('a legacy cluster — public owned by the superuser, the runtime role owning everything and a member of its migrator WITH SET, one shared password, audit included — leaves the upgrade with every invariant true (Codex round 4)', () => {
+  const [service, audit] = LEGACY;
+  for (const { db, runtime, migrator } of LEGACY) {
+    PASSWORD[runtime] = SHARED;
+    PASSWORD[migrator] = SHARED;
+    // As the bootstrap before D-045 made them — and with one password between them.
+    ok(
+      `CREATE ROLE ${runtime} LOGIN CREATEDB PASSWORD '${SHARED}';
+       CREATE ROLE ${migrator} LOGIN CREATEDB PASSWORD '${SHARED}';
+       GRANT ${migrator} TO ${runtime} WITH INHERIT FALSE, SET TRUE;`,
+      { database: 'postgres' },
+    );
+    ok(`CREATE DATABASE ${db} OWNER ${runtime}`, { database: 'postgres' });
+    ok(`GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${runtime}`, { database: 'postgres' });
+    // A cluster upgraded from PostgreSQL 14: `public` is the superuser's, open to all.
+    ok(
+      `ALTER SCHEMA public OWNER TO CURRENT_USER;
+       GRANT ALL ON SCHEMA public TO PUBLIC;
+       GRANT ALL ON SCHEMA public TO ${runtime};`,
+      { database: db },
+    );
+  }
+
+  // The service database: the runtime role made everything, the ledger included.
+  ok(
+    `CREATE TYPE stage AS ENUM ('open', 'frozen');
+     CREATE TABLE guarded (id integer PRIMARY KEY, frozen boolean NOT NULL DEFAULT false, s stage);
+     CREATE FUNCTION refuse_frozen() RETURNS trigger LANGUAGE plpgsql AS $$
+     BEGIN IF OLD.frozen THEN RAISE EXCEPTION 'frozen'; END IF; RETURN NEW; END $$;
+     CREATE TRIGGER tg_guarded BEFORE UPDATE ON guarded FOR EACH ROW EXECUTE FUNCTION refuse_frozen();
+     CREATE SEQUENCE guarded_seq;
+     INSERT INTO guarded VALUES (1, true, 'frozen'), (2, false, 'open');
+     CREATE TABLE _prisma_migrations (id varchar(36) PRIMARY KEY, migration_name varchar(255) NOT NULL);
+     INSERT INTO _prisma_migrations VALUES ('m1', '20250101000000_init');`,
+    { role: service.runtime, database: service.db },
+  );
+  // The audit database as ADR-053 left it — schema `audit` and its table the
+  // migrator's, INSERT and SELECT for the runtime role — plus what the runtime
+  // role, owning the database, made in `public`.
+  ok(
+    `CREATE SCHEMA audit AUTHORIZATION ${audit.migrator};
+     GRANT USAGE ON SCHEMA audit TO ${audit.runtime};`,
+    { database: audit.db },
+  );
+  ok(
+    `CREATE TABLE audit.audit_event (id integer PRIMARY KEY, payload text NOT NULL);
+     GRANT SELECT, INSERT ON audit.audit_event TO ${audit.runtime};
+     CREATE TABLE audit._prisma_migrations (id varchar(36) PRIMARY KEY, migration_name varchar(255) NOT NULL);
+     INSERT INTO audit._prisma_migrations VALUES ('a1', '20250101000000_audit');`,
+    { role: audit.migrator, database: audit.db },
+  );
+  ok(
+    `INSERT INTO audit.audit_event VALUES (1, 'before the upgrade');
+     CREATE TABLE stray (id integer);`,
+    { role: audit.runtime, database: audit.db },
+  );
+
+  // Before: both checks see the hole, and the runtime role really can take the owner's place.
+  for (const fixture of LEGACY) {
+    assert.ok(legacyFindings(fixture).length > 0);
+    assert.ok(
+      legacyStartupProblems(fixture).some((p) =>
+        p.startsWith(`is a member of ${fixture.migrator}`),
+      ),
+    );
+    assert.ok(
+      legacyLogsIn(fixture.migrator, SHARED, fixture.db),
+      "the shared password is the owner's",
+    );
+  }
+  assert.equal(
+    ok(`SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'public'`, {
+      database: service.db,
+    }),
+    process.env.PGUSER,
+  );
+
+  // The operator cannot carry the shared password over: supplied equal, nothing runs.
+  const same = upgrade(service, { runtime: SHARED, migrator: SHARED });
+  assert.equal(same.status, 1);
+  assert.match(same.stderr, new RegExp(`${service.variable}_MIGRATOR equals ${service.variable}`));
+  assert.ok(!same.stderr.includes(SHARED));
+  assert.equal(
+    ok(`SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = '${service.db}'`, {
+      database: 'postgres',
+    }),
+    service.runtime,
+    'a refused run changed the cluster',
+  );
+
+  // The upgrade, then once more: it converges.
+  for (const run of [1, 2]) {
+    for (const fixture of LEGACY) {
+      const result = upgrade(fixture, fixture.supplied);
+      assert.equal(
+        result.status,
+        0,
+        `${fixture.kind}, run ${run}:\n${result.stdout}${result.stderr}`,
+      );
+      PASSWORD[fixture.runtime] = fixture.supplied.runtime;
+      PASSWORD[fixture.migrator] = fixture.supplied.migrator;
+    }
+  }
+
+  for (const fixture of LEGACY) {
+    const { kind, db, runtime, migrator, supplied } = fixture;
+    const as = (role, sql) => psql(sql, { role, database: db });
+    const owners = ok(
+      `SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database();
+       SELECT string_agg(nspname || '=' || pg_get_userbyid(nspowner), ',' ORDER BY nspname)
+         FROM pg_namespace WHERE nspname IN ('public', 'audit');`,
+      { database: db },
+    ).split('\n');
+    assert.equal(owners[0], migrator, `${kind}: the database`);
+    assert.equal(
+      owners[1],
+      kind === 'audit' ? `audit=${migrator},public=${migrator}` : `public=${migrator}`,
+      `${kind}: the schemas`,
+    );
+
+    // Neither check finds anything; the service would start.
+    assert.deepEqual(legacyFindings(fixture), [], kind);
+    assert.deepEqual(legacyStartupProblems(fixture), [], kind);
+
+    // No membership left, and SET ROLE to the owner is refused.
+    assert.equal(
+      ok(`SELECT count(*) FROM pg_auth_members WHERE member = '${runtime}'::regrole`, {
+        database: 'postgres',
+      }),
+      '0',
+    );
+    assert.match(as(runtime, `SET ROLE ${migrator}`).stderr, /permission denied/);
+
+    // The credentials: the supplied ones work, the shared one works for neither role.
+    assert.ok(legacyLogsIn(runtime, supplied.runtime, db), `${kind}: runtime, supplied`);
+    assert.ok(legacyLogsIn(migrator, supplied.migrator, db), `${kind}: migrator, supplied`);
+    assert.ok(
+      !legacyLogsIn(runtime, SHARED, db),
+      `${kind}: the shared password still logs in as ${runtime}`,
+    );
+    assert.ok(
+      !legacyLogsIn(migrator, SHARED, db),
+      `${kind}: the shared password still logs in as ${migrator}`,
+    );
+
+    // The ledger kept its history, is the migrator's, and grants the runtime role nothing.
+    const schema = kind === 'audit' ? 'audit' : 'public';
+    assert.equal(
+      ok(
+        `SELECT pg_get_userbyid(relowner) || ':' || (SELECT count(*) FROM "${schema}"._prisma_migrations)
+           FROM pg_class WHERE oid = '"${schema}"._prisma_migrations'::regclass`,
+        { database: db },
+      ),
+      `${migrator}:1`,
+    );
+    assert.match(
+      as(runtime, `SELECT * FROM "${schema}"._prisma_migrations`).stderr,
+      /permission denied/,
+    );
+
+    // The migrator can migrate: CREATE in its schema, as `public` now is its own.
+    ok(`BEGIN; CREATE TABLE "${schema}".probe_after_upgrade (id integer); ROLLBACK;`, {
+      role: migrator,
+      database: db,
+    });
+    // The runtime role cannot create, anywhere.
+    assert.match(as(runtime, 'CREATE TABLE public.probe (id integer)').stderr, /permission denied/);
+  }
+
+  // The service's data survived and is writable; its guard is out of reach.
+  const asServiceRuntime = (sql) => psql(sql, { role: service.runtime, database: service.db });
+  assert.equal(
+    ok('SELECT count(*) FROM guarded', { role: service.runtime, database: service.db }),
+    '2',
+  );
+  ok("UPDATE guarded SET s = 'open' WHERE id = 2; SELECT nextval('guarded_seq')", {
+    role: service.runtime,
+    database: service.db,
+  });
+  assert.match(asServiceRuntime("UPDATE guarded SET s = 'open' WHERE id = 1").stderr, /frozen/);
+  for (const sql of [
+    'ALTER TABLE guarded DISABLE TRIGGER tg_guarded',
+    'DROP TABLE guarded',
+    'TRUNCATE guarded',
+    'DROP TYPE stage CASCADE',
+  ]) {
+    assert.match(asServiceRuntime(sql).stderr, /must be owner|permission denied/, sql);
+  }
+
+  // audit: appends still work, nothing else does — and its `public` table is no longer the runtime role's.
+  const asAuditRuntime = (sql) => psql(sql, { role: audit.runtime, database: audit.db });
+  ok("INSERT INTO audit.audit_event VALUES (2, 'after the upgrade')", {
+    role: audit.runtime,
+    database: audit.db,
+  });
+  assert.equal(
+    ok('SELECT count(*) FROM audit.audit_event', { role: audit.runtime, database: audit.db }),
+    '2',
+  );
+  for (const sql of [
+    "UPDATE audit.audit_event SET payload = 'rewritten'",
+    'DELETE FROM audit.audit_event',
+    'DROP TABLE audit.audit_event',
+    'DROP TABLE public.stray',
+    'CREATE TABLE audit.probe (id integer)',
+  ]) {
+    assert.match(asAuditRuntime(sql).stderr, /must be owner|permission denied/, sql);
+  }
 });
