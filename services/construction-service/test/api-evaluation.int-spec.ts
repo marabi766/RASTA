@@ -10,6 +10,7 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import {
+  outboxFor,
   asAdmin,
   asBidder,
   bidContent,
@@ -83,19 +84,25 @@ describe('evaluation API', () => {
     await api.close();
   });
 
-  it('is closed without a token and to every role the configuration did not grant', async () => {
-    const a = org('closed');
+  it('is closed without a token, and refuses and audits every role the configuration did not grant on the owner’s own tender', async () => {
+    const { owner: a, tenderId, bids } = await evaluating('closed');
+    const bidId = bids[0]!.bidId;
     const routes: [string, string, object | undefined][] = [
-      ['post', '/v1/tenders/TND_x/bids/BID_x/qualification', { decision: 'QUALIFIED' }],
-      ['post', '/v1/tenders/TND_x/bids/BID_x/recusal', { reasonCode: 'OTHER' }],
+      ['post', `/v1/tenders/${tenderId}/bids/${bidId}/qualification`, { decision: 'QUALIFIED' }],
+      ['post', `/v1/tenders/${tenderId}/bids/${bidId}/recusal`, { reasonCode: 'OTHER' }],
       [
         'post',
-        '/v1/tenders/TND_x/bids/BID_x/scores',
+        `/v1/tenders/${tenderId}/bids/${bidId}/scores`,
         { scores: [{ criterionCode: 'PRICE', scoreScaled: 1 }] },
       ],
-      ['post', '/v1/tenders/TND_x/evaluate', {}],
-      ['get', '/v1/tenders/TND_x/evaluation', undefined],
+      ['post', `/v1/tenders/${tenderId}/evaluate`, {}],
+      ['get', `/v1/tenders/${tenderId}/evaluation`, undefined],
     ];
+    const refusedRows = () =>
+      runUnscoped('the suite reads the log', () =>
+        w.prisma.client.bidAccessLog.findMany({ where: { tenderId, outcome: 'REFUSED' } }),
+      );
+    expect(await refusedRows()).toHaveLength(0);
     for (const [method, path, body] of routes) {
       const call = (token?: string) => {
         const req = (http() as unknown as Record<string, (p: string) => request.Test>)[method]!(
@@ -112,6 +119,55 @@ describe('evaluation API', () => {
       expect((await call(actor(a, ['CONTRACTOR', 'ORGANIZATION_ADMIN']))).status).toBe(403);
       expect((await call(actor(a, ['FLEET_MANAGER']))).status).toBe(403);
     }
+
+    // Every one of those refusals, AUDITOR and a caller with no granted role included, was stopped
+    // by the service (the routes name no role at the guard) and left a REFUSED row with its closed
+    // code and a BID_ACCESSED event, before the 403: 5 routes × 6 refused callers (the 401 is no caller).
+    const rows = await refusedRows();
+    expect(rows).toHaveLength(5 * 6);
+    expect(new Set(rows.map((r) => r.purpose))).toEqual(
+      new Set(['QUALIFY_BID', 'RECUSE', 'SCORE_BID', 'EVALUATE_BIDS', 'READ_EVALUATION']),
+    );
+    expect(new Set(rows.map((r) => r.refusalCode))).toEqual(
+      new Set(['FORBIDDEN', 'INSUFFICIENT_ROLE']),
+    );
+    expect(rows.every((r) => r.organizationId === a && r.accessorOrganizationId === a)).toBe(true);
+    const events = (await outboxFor(api.prisma, a)).filter(
+      (e) =>
+        e.eventName === 'BID_ACCESSED' &&
+        (e.payload as { payload: { outcome: string } }).payload.outcome === 'REFUSED',
+    );
+    expect(events).toHaveLength(rows.length);
+
+    // The same callers on a tender that is not their organization's, or that does not exist: 404 for
+    // every role, and nothing is logged anywhere.
+    const stranger = org('closed-stranger');
+    const before = (await refusedRows()).length;
+    const eventsBefore = (await outboxFor(api.prisma, a)).length;
+    for (const [method, path, body] of routes) {
+      const call = (token: string) => {
+        const req = (http() as unknown as Record<string, (p: string) => request.Test>)[method]!(
+          path,
+        ).set(as(token));
+        return body ? req.send(body) : req;
+      };
+      for (const token of [
+        auditorActor(stranger),
+        actor(stranger, ['FLEET_MANAGER']),
+        actor(stranger, ['SYSTEM_ADMIN']),
+        orgAdmin(stranger),
+      ]) {
+        const res = await call(token);
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('NOT_FOUND');
+      }
+    }
+    for (const token of [auditorActor(a), orgAdmin(a)]) {
+      const res = await http().get('/v1/tenders/TND_missing/evaluation').set(as(token));
+      expect(res.status).toBe(404);
+    }
+    expect((await refusedRows()).length).toBe(before);
+    expect((await outboxFor(api.prisma, a)).length).toBe(eventsBefore);
   });
 
   it('decides, scores, completes and reads the matrix with the real status codes', async () => {
@@ -272,7 +328,8 @@ describe('evaluation API', () => {
     const refusals = await runUnscoped('the suite reads the log', () =>
       w.prisma.client.bidAccessLog.findMany({ where: { tenderId, outcome: 'REFUSED' } }),
     );
-    expect(refusals.filter((r) => r.refusalCode === 'NOT_FOUND')).toHaveLength(5);
+    // Another organization's tender is an unaudited 404.
+    expect(refusals.filter((r) => r.refusalCode === 'NOT_FOUND')).toHaveLength(0);
     expect(refusals.filter((r) => r.refusalCode === 'CONFLICT_OF_INTEREST')).toHaveLength(5);
   });
 

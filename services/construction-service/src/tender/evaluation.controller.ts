@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { AuditorSelfService, zodPipe } from '@rasta/nest-common';
 import { EvaluationService } from './evaluation.service';
 import {
   qualifyBidSchema,
@@ -18,9 +18,21 @@ const EVALUATOR_NOTE =
   'judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of ' +
   'any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is ' +
   'said about the tender; with CONSTRUCTION_COI_RULES naming EVALUATOR_NOT_TENDER_AUTHOR, so is the ' +
-  'user who created or published it (403 `EVALUATOR_IS_TENDER_AUTHOR`). A tender of another ' +
-  'organization answers 404, never 403. Every refusal is audited: a REFUSED row in the bid access log, ' +
-  'with its closed code, and BID_ACCESSED.';
+  'user who created or published it (403 `EVALUATOR_IS_TENDER_AUTHOR`). The routes name no role at the ' +
+  'guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s ' +
+  'organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. ' +
+  'On the caller’s own tender every refusal is audited, whatever role the caller holds (AUDITOR and ' +
+  'SYSTEM_ADMIN included): a REFUSED row in the bid access log with its closed code, and BID_ACCESSED, ' +
+  'before the 403.';
+
+/**
+ * Why the evaluation routes let the oversight role past the global guard: the guard refuses an
+ * AUDITOR on any handler that does not name it, **before** the service runs, which would leave no
+ * audit row for the refusal. Here the service refuses it itself (`assertCanEvaluate`: never AUDITOR)
+ * and audits the refusal on the caller's own tender; this grants the AUDITOR nothing.
+ */
+const REFUSED_AND_AUDITED_BY_THE_SERVICE =
+  'the service refuses AUDITOR itself and audits the refusal on the owner’s own tender (ADR-067 § 4); no data is served';
 
 /**
  * The owner's evaluators at work on the opened bids of a tender (ADR-067 § 2, § 4). HTTP ↔ DTO and
@@ -31,6 +43,7 @@ const EVALUATOR_NOTE =
 export class EvaluationController {
   constructor(private readonly evaluation: EvaluationService) {}
 
+  @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/bids/:bidId/qualification')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -54,6 +67,7 @@ export class EvaluationController {
     return this.evaluation.qualify(id, bidId, dto);
   }
 
+  @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/bids/:bidId/recusal')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -74,6 +88,7 @@ export class EvaluationController {
     return this.evaluation.recuse(id, bidId, dto);
   }
 
+  @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/bids/:bidId/scores')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -96,6 +111,7 @@ export class EvaluationController {
     return this.evaluation.score(id, bidId, dto);
   }
 
+  @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/evaluate')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -113,6 +129,7 @@ export class EvaluationController {
     return this.evaluation.evaluate(id);
   }
 
+  @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Get('tenders/:id/evaluation')
   @ApiOperation({
     summary: 'The evaluation matrix and the ranking',

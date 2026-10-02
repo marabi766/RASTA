@@ -550,52 +550,50 @@ export class EvaluationService {
   // -- the envelope and its checks --------------------------------------------------------
 
   /**
-   * The roles check of an evaluation route. A refusal of a caller who acts for the tender's **own**
-   * organization is audited (a REFUSED row with the closed code, before the answer); a tender the
-   * caller cannot see answers what a missing one does and is **not** logged: nothing is disclosed
-   * about it and nobody's log learns of a stranger's probing by role (ADR-066 § 5, ADR-067 § 4).
+   * The single, fail-closed decision of who may touch an evaluation route. **The routes name no
+   * role** (the global guard admits any authenticated caller, and `@AuditorSelfService` lets the
+   * oversight role through to here), so this is where every refusal is made and audited:
+   *
+   *  1. **Ownership first.** A tender that does not exist, is another organization's, or is asked
+   *     for with no organization to act for, answers 404 — what a missing one answers — and is
+   *     **not logged**: nothing is disclosed about it, and nobody's log learns of a stranger's
+   *     probing.
+   *  2. **Then the roles** (`assertCanEvaluate`: the configured roles; never `SYSTEM_ADMIN`,
+   *     `AUDITOR`, `CONTRACTOR` or a service token) — **and, in `guarded`, the conflict rules.** On the
+   *     caller's own tender a refusal commits a REFUSED row with its closed code and
+   *     `BID_ACCESSED` before the 403 (ADR-066 § 5, ADR-067 § 4).
    */
   private async authorize(tenderId: string, purpose: BidAccessPurpose): Promise<Principal> {
+    const context = getContext();
+    const found = await this.opens.findOwnership(tenderId);
+    if (!found || !context.organizationId || found.organizationId !== context.organizationId) {
+      throw RastaError.notFound('Tender', tenderId);
+    }
     try {
       return this.access.assertCanEvaluate();
     } catch (error) {
-      if (error instanceof RastaError) await this.recordOwnRefusal(tenderId, purpose, error);
+      // Nobody to attribute it to when the token names no actor: no row can name one that is not there.
+      if (error instanceof RastaError && context.authType !== 'SERVICE' && context.userId) {
+        await this.recordRefusal(
+          found.organizationId,
+          tenderId,
+          {
+            organizationId: context.organizationId,
+            actor: context.userId,
+            organizationIds: context.organizationIds ?? [],
+          },
+          purpose,
+          error,
+        );
+      }
       throw error;
     }
   }
 
-  private async recordOwnRefusal(
-    tenderId: string,
-    purpose: BidAccessPurpose,
-    error: RastaError,
-  ): Promise<void> {
-    const context = getContext();
-    // Nobody to attribute it to: no log row can name an actor that is not there.
-    if (context.authType === 'SERVICE' || !context.organizationId || !context.userId) return;
-    let found;
-    try {
-      found = await this.opens.findOwnership(tenderId);
-    } catch {
-      return;
-    }
-    if (!found || found.organizationId !== context.organizationId) return;
-    await this.recordRefusal(
-      found.organizationId,
-      tenderId,
-      {
-        organizationId: context.organizationId,
-        actor: context.userId,
-        organizationIds: context.organizationIds ?? [],
-      },
-      purpose,
-      error,
-    );
-  }
-
   /**
-   * Finds the tender, tells another organization's from a missing one without telling the
-   * caller, runs `work`, and — when it refuses — commits a REFUSED row (with the closed code)
-   * for the attempt before the error is answered (ADR-066 § 5, ADR-067 § 4).
+   * Runs `work` for a caller `authorize` has already shown to act for the tender's owner, and —
+   * when it refuses — commits a REFUSED row (with the closed code) for the attempt before the
+   * error is answered (ADR-066 § 5, ADR-067 § 4).
    */
   private async guarded<T>(
     principal: Principal,
@@ -603,20 +601,12 @@ export class EvaluationService {
     purpose: BidAccessPurpose,
     work: () => Promise<T>,
   ): Promise<T> {
-    const found = await this.opens.findOwnership(tenderId);
-    if (!found) throw RastaError.notFound('Tender', tenderId);
-    if (found.organizationId !== principal.organizationId) {
-      // Not theirs: they are told what a missing tender is told, and the owner is told who asked.
-      const error = RastaError.notFound('Tender', tenderId);
-      await this.recordRefusal(found.organizationId, tenderId, principal, purpose, error);
-      throw error;
-    }
     try {
       return await work();
     } catch (error) {
       // The bid the caller named is not stored: it is not looked up for a refusal.
       if (error instanceof RastaError) {
-        await this.recordRefusal(found.organizationId, tenderId, principal, purpose, error);
+        await this.recordRefusal(principal.organizationId, tenderId, principal, purpose, error);
       }
       throw error;
     }

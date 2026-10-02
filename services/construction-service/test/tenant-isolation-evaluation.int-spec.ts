@@ -106,18 +106,10 @@ describe('tenant isolation — evaluation', () => {
         }),
       )
     ).sort((x, y) => (x.purpose < y.purpose ? -1 : 1));
-    expect(refused.map((r) => [r.purpose, r.outcome, r.refusalCode])).toEqual(
-      ['EVALUATE_BIDS', 'QUALIFY_BID', 'READ_EVALUATION', 'RECUSE', 'SCORE_BID'].map((p) => [
-        p,
-        'REFUSED',
-        'NOT_FOUND',
-      ]),
-    );
-    for (const row of refused) {
-      expect(row).toMatchObject({ organizationId: a.owner, accessorOrganizationId: b.owner });
-    }
-    // The attempt leaves BID_ACCESSED for A; B's own stream has none of it, and A's evaluation events did not grow.
-    expect((await outboxFor(w.prisma, a.owner)).length).toBe(outboxBefore + 5);
+    // Another organization's tender is an unaudited 404 (non-disclosure): A's log and A's event
+    // stream learn nothing of the attempts, and B's own stream has none of it either.
+    expect(refused).toEqual([]);
+    expect((await outboxFor(w.prisma, a.owner)).length).toBe(outboxBefore);
     const bOutbox = JSON.stringify(await outboxFor(w.prisma, b.owner), (_k, v: unknown) =>
       typeof v === 'bigint' ? v.toString() : v,
     );
@@ -177,7 +169,8 @@ describe('tenant isolation — evaluation', () => {
       () => asContractor(() => w.evaluation.score(a.tenderId, a.bids[0]!.bidId, { scores: FULL })),
       () => asContractor(() => w.evaluation.evaluate(a.tenderId)),
     ]) {
-      expect(await codeOf(call())).toBe('FORBIDDEN');
+      // The contractor acts for its own organization, not the tender's owner: ownership first, so 404.
+      expect(await codeOf(call())).toBe('NOT_FOUND');
     }
     // It reads its own bid; the other contractor's is not reachable by any argument.
     const view = await asContractor(() => w.ownBids.getMineOpened(a.tenderId));

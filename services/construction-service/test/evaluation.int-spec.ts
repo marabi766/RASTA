@@ -819,7 +819,8 @@ describe('evaluating the opened bids of a tender', () => {
         }),
         () => w.evaluation.getMatrix(tenderId),
       );
-      expect((await codeOf(strangerWithoutRole)).code).toBe('INSUFFICIENT_ROLE');
+      // Ownership first: the 404 does not depend on the caller's roles, and says nothing of the tender.
+      expect((await codeOf(strangerWithoutRole)).code).toBe('NOT_FOUND');
       expect((await logOf(tenderId)).length).toBe(before);
 
       const stranger = asAdmin('ORG_STRANGER_EVAL', () =>
@@ -829,13 +830,8 @@ describe('evaluating the opened bids of a tender', () => {
       const refusals = (await logOf(tenderId)).filter(
         (row) => row.accessorOrganizationId === 'ORG_STRANGER_EVAL',
       );
-      expect(refusals).toEqual([
-        expect.objectContaining({
-          purpose: 'QUALIFY_BID',
-          outcome: 'REFUSED',
-          refusalCode: 'NOT_FOUND',
-        }),
-      ]);
+      // Another organization's tender is an unaudited 404: nobody's log learns of the probe.
+      expect(refusals).toEqual([]);
       expect((await bidRow(bids[0]!.bidId)).status).toBe('OPENED');
     });
 
