@@ -1059,7 +1059,10 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). دور دوم Codex روی #176: گذرواژهٔ مهاجر
   برابر با گذرواژهٔ نقش اجرا یا هر نقش شناخته‌شدهٔ دیگر رد می‌شود (تقسیم مستقل هر دو گذرواژه را می‌خواهد)؛ و هر سرویس
   تقسیم‌شده پیش از کار، نقشِ واقعاً وصل‌شده را از Catalogue می‌پرسد (`assertRuntimeRole` مشترک در `@rasta/nest-common`) و
-  با Superuser، مهاجر، مالک یا دارندهٔ `CREATE` بالا نمی‌آید — پس `DATABASE_URL`ی که به مهاجر اشاره کند هم گرفته می‌شود. **باقی‌مانده** (`PENDING_SPLIT`): identity،
+  با Superuser، مهاجر، مالک یا دارندهٔ `CREATE` بالا نمی‌آید — پس `DATABASE_URL`ی که به مهاجر اشاره کند هم گرفته می‌شود. دور سوم: عضویت در مهاجر (حتی `INHERIT FALSE`، که
+  `SET ROLE` را باز می‌گذارد) در هر دو بررسی مالکیت حساب می‌شود و تقسیم آن را لغو می‌کند؛ اجرای مستقل گذرواژهٔ نقش اجرا را
+  به مقدار داده‌شده می‌چرخاند و ورود هر دو اعتبار را ثابت می‌کند؛ و Verifier پیش از کار بررسی می‌کند که دقیقاً با مهاجر همان
+  سرویس وصل است، نه Superuser. **باقی‌مانده** (`PENDING_SPLIT`): identity،
   notification، organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
   هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
 

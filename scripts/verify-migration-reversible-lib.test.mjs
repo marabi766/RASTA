@@ -22,6 +22,7 @@ import {
   sqlstateFrom,
   staleScratchDatabases,
   verifierConnection,
+  verifierRoleProblem,
 } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -1337,4 +1338,29 @@ test('a runtime-verified service keeps its order: DATABASE_URL, then DATABASE_UR
   });
   assert.deepEqual(verifierConnection(runtimeService, { [key]: 'b' }), { key, url: 'b' });
   assert.match(verifierConnection(runtimeService, {}).error, new RegExp(`${key} is not set`));
+});
+
+test('a migrator-verified service is verified only as exactly its migrator — never a superuser or another role (Codex round 3)', () => {
+  assert.equal(
+    verifierRoleProblem(
+      'construction',
+      'rasta_construction_migrator|rasta_construction_migrator|f\n',
+    ),
+    null,
+  );
+  assert.match(
+    verifierRoleProblem('construction', 'rasta|rasta|t'),
+    /rasta, a superuser — not rasta_construction_migrator/,
+  );
+  assert.match(
+    verifierRoleProblem('construction', 'rasta_construction|rasta_construction|f'),
+    /connected as rasta_construction — not rasta_construction_migrator/,
+  );
+  assert.match(
+    verifierRoleProblem('construction', 'rasta_construction_migrator|rasta_construction|f'),
+    /rasta_construction \(SET ROLE rasta_construction_migrator\) — not/,
+  );
+  assert.match(verifierRoleProblem('construction', ''), /could not tell/);
+  const runtimeService = Object.entries(EXPECTED).find(([, entry]) => !entry.connectAs)?.[0];
+  if (runtimeService) assert.equal(verifierRoleProblem(runtimeService, 'rasta|rasta|t'), null);
 });
