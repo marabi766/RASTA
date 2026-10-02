@@ -67,7 +67,7 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 `preflightRuntimeRole` (`@rasta/nest-common`) می‌کند: اتصالی کوتاه‌عمر با URL اجرای سرویس، همان بررسی‌ها، و در رد شدن خروج
 با کد ناصفر. بررسی `AppModule` هم می‌ماند. آزمون زنده در کار E2E CI: `scripts/runtime-preflight.e2e.mjs` — audit با URL
 مهاجر و رویدادی در صف: فرایند می‌میرد، رویداد مصرف و Commit نمی‌شود و گروه هرگز شکل نمی‌گیرد؛ identity با URL مهاجر: Consumer
-بازتاب Keycloak (که در هوک خودش شروع می‌شود) هرگز به گروهش نمی‌پیوندد؛ و کنترل مثبت پس از راه‌اندازی درست.
+بازتاب Keycloak (که در هوک خودش شروع می‌شود) هرگز به گروهش نمی‌پیوندد؛ در کار مرورگر، asset و maintenance (Consumerهای timeline و usage، هر دو در هوک خودشان) با URL مهاجر و `USAGE_RECORDED`ی در صف؛ و کنترل مثبت پس از راه‌اندازی درست.
 
 **هر راه ورود دیگر هم.** CLI، Worker یا Seedی که خودش PrismaClient، PrismaService یا Context Nest از `AppModule` می‌سازد از
 هر دو دروازه می‌گذرد، پس خودش `preflightRuntimeRole` را نخستین `await` تابع ورودش می‌کند (Codex روی #177): CLIهای

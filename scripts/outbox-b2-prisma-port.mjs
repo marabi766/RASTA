@@ -14,6 +14,10 @@ import { join, resolve } from 'node:path';
 import { B2RefusalError } from './outbox-b2-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
+// The services' own startup gate (@rasta/nest-common runtime-role.ts), as built.
+const { preflightRuntimeRole } = createRequire(import.meta.url)(
+  join(REPO_ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
+);
 
 /**
  * A port over one service's own generated Prisma client.
@@ -52,6 +56,17 @@ export function prismaPort(service, url) {
 
   return {
     ...wrap(client),
+    /**
+     * D-045 (Codex on #178): before the first query, a short-lived client on
+     * the same URL proves it is the service's runtime role — not its migrator,
+     * an owner or a superuser — exactly as the service's own main.ts does.
+     * Rejects with RuntimeRoleRefusedError, which names the role, never the URL.
+     */
+    preflight: (runtimeVariable) =>
+      preflightRuntimeRole(() => new PrismaClient({ datasources: { db: { url } } }), {
+        service: `${service}-service`,
+        runtimeVariable,
+      }),
     execute: (sql) => client.$executeRawUnsafe(sql),
     transaction: (fn) => client.$transaction((tx) => fn(wrap(tx))),
     close: () => client.$disconnect(),
