@@ -366,6 +366,10 @@ export class AppModule implements NestModule, OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    // First of all (D-045): nothing is served, relayed or consumed as a role
+    // that could lift this service's database guards.
+    await this.prisma.assertRuntimeRole();
+
     // First, and before anything can try to render: the template catalogue.
     // A published version whose text changed without its number **refuses the
     // boot** rather than sending a message nobody can account for later

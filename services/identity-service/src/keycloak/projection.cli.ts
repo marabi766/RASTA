@@ -1,4 +1,7 @@
+import { assertNoMigratorCredentials } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
+import { preflightRuntimeRole } from '@rasta/nest-common';
+import { PrismaClient } from '../generated/prisma';
 import { loadIdentityEnv, SERVICE_NAME } from '../config/env';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdentityRepository } from '../identity/identity.repository';
@@ -13,6 +16,13 @@ import { isClean, runProjectionCommand, type ProjectionCommandMode } from './pro
  * starts the outbox relays and the Kafka consumers, and a one-off sweep must
  * not become a second instance of the service. Exits non-zero when anything
  * diverged or failed, so it can gate the next migration step.
+ *
+ * Built by hand, it also skips both of the service's runtime-role gates —
+ * main.ts's preflight and AppModule's check — so it runs the same preflight
+ * itself, before it reads a row or calls Keycloak (D-045, Codex on #177):
+ * pointed at the migrator, it would otherwise read identity data and write
+ * Keycloak attributes as the database owner. A refusal exits 2, naming the
+ * role, never the URL.
  */
 async function main(): Promise<number> {
   const mode = process.argv[2];
@@ -20,7 +30,12 @@ async function main(): Promise<number> {
     throw new Error('usage: projection.cli.ts <reconcile|backfill>');
   }
 
+  assertNoMigratorCredentials(process.env);
   const env = loadIdentityEnv();
+  await preflightRuntimeRole(
+    () => new PrismaClient({ datasources: { db: { url: env.DATABASE_URL } } }),
+    { service: SERVICE_NAME, runtimeVariable: 'DATABASE_URL_IDENTITY' },
+  );
   const logger = createLogger({ serviceName: `${SERVICE_NAME}-keycloak-${mode}` });
   if (!env.KEYCLOAK_SYNC_ENABLED) {
     logger.error('KEYCLOAK_SYNC_ENABLED is false: there is no Keycloak to reconcile against');

@@ -342,6 +342,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
   constructor(
+    private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     @Inject(SECURITY_EVENT_RELAY) private readonly securityRelay: OutboxRelay,
@@ -354,7 +355,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     consumer.apply(RequestContextMiddleware).forRoutes('*');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // First of all (D-045): nothing is served, relayed or consumed as a role
+    // that could lift this service's database guards.
+    await this.prisma.assertRuntimeRole();
+
     this.relay.start();
     this.securityRelay.start();
     this.startOutboxGauges();

@@ -274,7 +274,10 @@ function verify(service) {
   }
 
   const envKey = `DATABASE_URL_${service.toUpperCase()}`;
-  const baseUrl = process.env[envKey] ?? process.env.DATABASE_URL;
+  // DDL, in place or in a scratch schema: the migrator where the service has
+  // one (D-045 — its runtime role owns nothing and can create nothing).
+  const baseUrl =
+    process.env[`${envKey}_MIGRATOR`] ?? process.env[envKey] ?? process.env.DATABASE_URL;
   if (!baseUrl) throw new Error(`${envKey} is not set`);
 
   const url = new URL(baseUrl);
