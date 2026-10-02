@@ -61,6 +61,12 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 هر Relationی باشد، روی پایگاه داده یا Schemaی `CREATE` داشته باشد، یا `CREATEDB`/`CREATEROLE`/`BYPASSRLS` داشته باشد.
 آزمون زنده: `test/startup-role.int-spec.ts` هر سرویس (URL مهاجر در جای `DATABASE_URL` → رد).
 
+**عضویت هم مالکیت است.** نقش اجرایی که عضو مهاجر باشد — حتی `WITH INHERIT FALSE`، که چیزی به ارث نمی‌برد — با
+`SET ROLE` مهاجر می‌شود و هر نگهبان را برمی‌دارد. پس هر دو بررسی (`assertRuntimeRole` و `check:db-runtime-privileges`)
+مالکیت را با `pg_has_role … 'MEMBER'` می‌سنجند و هر عضویتی در نقشی که اینجا مالک چیزی است، نامش `*_migrator` است یا
+`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`BYPASSRLS` دارد را رد می‌کنند؛ و اسکریپت تقسیم هر عضویت مستقیم نقش اجرا در چنین
+نقشی (یا در نقشی که به آن می‌رسد) را، هر که داده باشد، `REVOKE … GRANTED BY … CASCADE` می‌کند.
+
 ## ۴. خوشهٔ تازه
 
 `cp .env.migrator.example .env.migrator`، سپس هیچ کار دیگری. `00-init-databases.sh` (Compose و CI) برای هر سرویس در
@@ -79,7 +85,10 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
    `.env.migrator.example`؛ هر محیط واقعی: مقدار خودش، یکتا) و `DATABASE_URL_<SVC>_MIGRATOR` با همان. برای اجرای مستقیم
    روی هر خوشه، `POSTGRES_PASSWORD_<SVC>` (نقش اجرا) و `POSTGRES_PASSWORD_<SVC>_MIGRATOR` هر دو باید **Export** شده باشند —
    بی آن‌ها اسکریپت رد می‌کند — و اگر گذرواژهٔ مهاجر با گذرواژهٔ نقش اجرا، یا با هر گذرواژهٔ نقش دیگری که در محیط هست،
-   یکی باشد هم رد می‌کند (آن اعتبار اجرا می‌توانست با نام مهاجر وارد شود).
+   یکی باشد هم رد می‌کند (آن اعتبار اجرا می‌توانست با نام مهاجر وارد شود). گذرواژهٔ Export‌شدهٔ نقش اجرا ممکن است کهنه باشد،
+   پس اجرای مستقل همان را **روی نقش اجرا می‌گذارد** (گذرواژهٔ قبلی دیگر کار نمی‌کند) و سپس با هر دو اعتبار از راه TCP وارد
+   می‌شود؛ اگر یکی وارد نشود اجرا شکست می‌خورد. پس از گام ۲، `DATABASE_URL_<SVC>` سرویس باید همین گذرواژهٔ تازه را داشته
+   باشد.
 2. **تقسیم، به‌عنوان Superuser:**
 
    ```bash

@@ -1275,6 +1275,30 @@ export function verifierConnection(service, env = process.env) {
   };
 }
 
+/** Who a verification is connected as; `psql -At` prints `current|session|superuser`. */
+export const CONNECTED_ROLE_PROBE =
+  'SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user';
+
+/**
+ * For a `connectAs: 'migrator'` service, the reason the connection behind
+ * `probeOutput` (CONNECTED_ROLE_PROBE's) is not exactly that service's
+ * migrator, or null when it is (Codex round 3 on #176). A superuser — or any
+ * other role the URL happened to name — would make the scratch schemas and pass
+ * checks the migrator itself might fail, so the verification would prove
+ * nothing about the role migrations really run as. Other services: always null.
+ */
+export function verifierRoleProblem(service, probeOutput) {
+  if (EXPECTED[service]?.connectAs !== 'migrator') return null;
+  const expected = `rasta_${service.replaceAll('-', '_')}_migrator`;
+  const [current, session, superuser] = String(probeOutput).trim().split('|');
+  if (!current) return `could not tell which role the ${service} verification is connected as`;
+  if (superuser === 't') return `connected as ${current}, a superuser — not ${expected}`;
+  if (current !== expected || session !== expected) {
+    return `connected as ${session === current ? current : `${session} (SET ROLE ${current})`} — not ${expected}`;
+  }
+  return null;
+}
+
 export function assertionScript(expected, present, schema) {
   const {
     tables,

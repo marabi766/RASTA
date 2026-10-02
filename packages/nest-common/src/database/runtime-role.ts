@@ -12,7 +12,9 @@
  * superuser or any role holding owner powers would pass it. So, before a
  * split service serves, relays or consumes anything, it asks the catalogue who
  * it is connected as ({@link assertRuntimeRole}) and refuses to start if that
- * role — directly or through membership (`pg_has_role … 'USAGE'`):
+ * role — directly or through membership of any kind (`pg_has_role … 'MEMBER'`,
+ * which counts a grant WITH INHERIT FALSE too: such a member still can
+ * `SET ROLE` to the owner; Codex round 3 on #176):
  *
  *   * is a superuser, or holds CREATEDB, CREATEROLE or BYPASSRLS;
  *   * is a migrator role by name (`current_user` or `session_user` ending in
@@ -20,7 +22,9 @@
  *   * owns the database, any non-system schema, or any relation in one — the
  *     owner can DISABLE a trigger, DROP a constraint or a table;
  *   * holds CREATE on the database or on any non-system schema — it could make
- *     objects it would own.
+ *     objects it would own;
+ *   * is a member of any role that owns something here, is named `*_migrator`,
+ *     or is superuser-capable (SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS).
  *
  * Infrastructure, not business logic: it decides whether a process may start,
  * never what it does. Each service calls it first in `AppModule.onModuleInit`;
@@ -47,6 +51,8 @@ export interface ConnectedRoleFacts {
   ownsRelationIn: string[];
   createOnDatabase: boolean;
   createOnSchemas: string[];
+  /** Roles it is a member of — SET or INHERIT, either — that are owners or superuser-capable. */
+  memberOf: string[];
 }
 
 /** Read by {@link assertRuntimeRole}; exported so a live test runs exactly this. */
@@ -65,17 +71,28 @@ export const CONNECTED_ROLE_SQL = `
          r.rolbypassrls AS "bypassRls",
          EXISTS (SELECT 1 FROM pg_database d
                   WHERE d.datname = current_database()
-                    AND pg_has_role(current_user, d.datdba, 'USAGE')) AS "ownsDatabase",
+                    AND pg_has_role(current_user, d.datdba, 'MEMBER')) AS "ownsDatabase",
          ARRAY(SELECT n.nspname::text FROM user_ns n
-                WHERE pg_has_role(current_user, n.nspowner, 'USAGE')
+                WHERE pg_has_role(current_user, n.nspowner, 'MEMBER')
                 ORDER BY 1) AS "ownedSchemas",
          ARRAY(SELECT DISTINCT n.nspname::text FROM pg_class c JOIN user_ns n ON n.oid = c.relnamespace
-                WHERE pg_has_role(current_user, c.relowner, 'USAGE')
+                WHERE pg_has_role(current_user, c.relowner, 'MEMBER')
                 ORDER BY 1) AS "ownsRelationIn",
          has_database_privilege(current_database(), 'CREATE') AS "createOnDatabase",
          ARRAY(SELECT n.nspname::text FROM user_ns n
                 WHERE has_schema_privilege(n.oid, 'CREATE')
-                ORDER BY 1) AS "createOnSchemas"
+                ORDER BY 1) AS "createOnSchemas",
+         ARRAY(SELECT m.rolname::text FROM pg_roles m
+                WHERE m.rolname <> current_user
+                  AND pg_has_role(current_user, m.oid, 'MEMBER')
+                  AND (m.rolsuper OR m.rolcreatedb OR m.rolcreaterole OR m.rolbypassrls
+                       OR m.rolname LIKE '%\\_migrator'
+                       OR EXISTS (SELECT 1 FROM pg_database d
+                                   WHERE d.datname = current_database() AND d.datdba = m.oid)
+                       OR EXISTS (SELECT 1 FROM user_ns n WHERE n.nspowner = m.oid)
+                       OR EXISTS (SELECT 1 FROM pg_class c JOIN user_ns n ON n.oid = c.relnamespace
+                                   WHERE c.relowner = m.oid))
+                ORDER BY 1) AS "memberOf"
     FROM pg_roles r
    WHERE r.rolname = current_user`;
 
@@ -98,6 +115,11 @@ export function connectedRoleProblems(facts: ConnectedRoleFacts): string[] {
   }
   if (facts.createOnDatabase) problems.push(`holds CREATE on database ${facts.database}`);
   for (const schema of facts.createOnSchemas) problems.push(`holds CREATE on schema ${schema}`);
+  for (const role of facts.memberOf) {
+    problems.push(
+      `is a member of ${role}, an owner or superuser-capable role it could SET ROLE to`,
+    );
+  }
   return problems;
 }
 

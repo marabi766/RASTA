@@ -29,11 +29,16 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { FINDINGS_SQL } from './check-db-runtime-privileges-lib.mjs';
 import { ledgerRevoke } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
+// The services' own startup check, exactly as built (`pnpm build` first).
+const { CONNECTED_ROLE_SQL, connectedRoleProblems } = createRequire(import.meta.url)(
+  join(ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
+);
 // Any service's Prisma CLI: the version every service migrates with.
 const PRISMA = join(ROOT, 'services/construction-service/node_modules/.bin/prisma');
 
@@ -286,4 +291,118 @@ test('belt and braces: a ledger Prisma re-creates (a reset) inherits DML, and th
   });
   ok(revoke, { role: MIGRATOR });
   assert.deepEqual(findings(), []);
+});
+
+/** What the services' startup check (@rasta/nest-common assertRuntimeRole) says, connected as the runtime role. */
+function startupProblems() {
+  const json = ok(`SELECT row_to_json(f) FROM (${CONNECTED_ROLE_SQL}) f`, { role: RUNTIME });
+  return connectedRoleProblems(JSON.parse(json));
+}
+
+const asRuntime = (sql) => psql(sql, { role: RUNTIME });
+
+test('a runtime role granted its migrator WITH INHERIT FALSE, SET TRUE is caught by both checks and its membership revoked by the split (Codex round 3)', () => {
+  assert.deepEqual(startupProblems(), []);
+  ok(`GRANT ${MIGRATOR} TO ${RUNTIME} WITH INHERIT FALSE, SET TRUE`);
+  // The shape inherits nothing — yet SET ROLE makes it the owner, and the guard comes off.
+  assert.equal(
+    ok(`SELECT pg_has_role('${RUNTIME}', '${MIGRATOR}', 'USAGE')`),
+    'f',
+    'a USAGE-based check would see nothing',
+  );
+  const lifted = asRuntime(
+    `BEGIN; SET ROLE ${MIGRATOR}; ALTER TABLE guarded DISABLE TRIGGER tg_guarded; ROLLBACK;`,
+  );
+  assert.equal(
+    lifted.status,
+    0,
+    `the grant shape no longer reproduces the hole:\n${lifted.stderr}`,
+  );
+
+  assert.ok(
+    findings().some((finding) => finding.startsWith(`member of ${MIGRATOR}`)),
+    findings().join('\n'),
+  );
+  assert.ok(
+    startupProblems().some((problem) => problem.startsWith(`is a member of ${MIGRATOR}`)),
+    startupProblems().join('\n'),
+  );
+
+  split();
+  assert.equal(
+    ok(`SELECT count(*) FROM pg_auth_members WHERE member = '${RUNTIME}'::regrole`),
+    '0',
+  );
+  assert.match(asRuntime(`SET ROLE ${MIGRATOR}`).stderr, /permission denied/);
+  assert.deepEqual(findings(), []);
+  assert.deepEqual(startupProblems(), []);
+});
+
+test("…and through an intermediate role too: the split revokes the runtime role's way in", () => {
+  const via = `${RUNTIME}_via`;
+  try {
+    ok(
+      `CREATE ROLE ${via} NOLOGIN; GRANT ${MIGRATOR} TO ${via}; GRANT ${via} TO ${RUNTIME} WITH INHERIT FALSE`,
+    );
+    assert.ok(findings().some((finding) => finding.startsWith(`member of ${MIGRATOR}`)));
+    assert.ok(
+      startupProblems().some((problem) => problem.startsWith(`is a member of ${MIGRATOR}`)),
+    );
+    split();
+    assert.deepEqual(findings(), []);
+    assert.deepEqual(startupProblems(), []);
+  } finally {
+    psql(`DROP ROLE IF EXISTS ${via}`, { database: 'postgres' });
+  }
+});
+
+/** A TCP login as `role` with `password`, as the split's own verification makes it. */
+function logsIn(role, password) {
+  return (
+    spawnSync('psql', ['-X', '-q', '-tA', '-d', DB, '-c', 'SELECT 1'], {
+      env: {
+        ...process.env,
+        PGHOST: process.env.PGHOST?.startsWith('/')
+          ? '127.0.0.1'
+          : (process.env.PGHOST ?? '127.0.0.1'),
+        PGUSER: role,
+        PGPASSWORD: password,
+      },
+      encoding: 'utf8',
+    }).status === 0
+  );
+}
+
+test('a standalone split rotates the runtime password to the supplied one and proves both logins; the old one stops working (Codex round 3)', () => {
+  const stale = PASSWORD[RUNTIME];
+  const fresh = `rt2_${randomBytes(12).toString('hex')}`;
+  assert.ok(logsIn(RUNTIME, stale), 'the runtime role should still have its original password');
+  const script =
+    `source "${SPLIT}"; ` +
+    `declare -gA ROLE_PASSWORDS=([${RUNTIME}]=${fresh} [${MIGRATOR}]=${PASSWORD[MIGRATOR]}); ` +
+    `rotate_and_verify_split_logins ${SERVICE} ${DB}`;
+  const result = spawnSync('bash', ['-c', script], {
+    env: { ...process.env, POSTGRES_USER: process.env.PGUSER },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(logsIn(RUNTIME, fresh), 'the supplied runtime password does not log in');
+  assert.ok(!logsIn(RUNTIME, stale), 'the old runtime password still logs in');
+  assert.ok(logsIn(MIGRATOR, PASSWORD[MIGRATOR]));
+  PASSWORD[RUNTIME] = fresh;
+
+  // A supplied credential that does not work fails the run, naming the role only.
+  const wrong = spawnSync(
+    'bash',
+    [
+      '-c',
+      `source "${SPLIT}"; ` +
+        `declare -gA ROLE_PASSWORDS=([${RUNTIME}]=${fresh} [${MIGRATOR}]=not_the_migrators_password_x); ` +
+        `rotate_and_verify_split_logins ${SERVICE} ${DB}`,
+    ],
+    { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
+  );
+  assert.equal(wrong.status, 1);
+  assert.match(wrong.stderr, new RegExp(`${MIGRATOR} cannot log in`));
+  assert.ok(!wrong.stderr.includes('not_the_migrators_password_x'));
 });

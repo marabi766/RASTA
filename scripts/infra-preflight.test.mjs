@@ -218,7 +218,7 @@ test('KAFKA_ALLOW_PLAINTEXT alone, on an otherwise complete .env, is its own war
  * Runs `script` with a stub `psql` first on PATH that records each call and
  * succeeds. Returns the exit status, stderr and the recorded calls.
  */
-function runWithStubPsql(script, env, { existing = [], args = [] } = {}) {
+function runWithStubPsql(script, env, { existing = [], args = [], failWhen = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rasta-psql-stub-'));
   try {
     const log = join(dir, 'calls.log');
@@ -226,9 +226,11 @@ function runWithStubPsql(script, env, { existing = [], args = [] } = {}) {
     // `existing` databases answer the bootstrap's existence query with 1, as
     // a cluster that already holds them would.
     const exists = existing.map((db) => `  *"datname='${db}'"*) echo 1 ;;\n`).join('');
+    // A call whose arguments contain `failWhen` exits 2, as a refused login would.
+    const fails = failWhen ? `  *"${failWhen}"*) exit 2 ;;\n` : '';
     writeFileSync(
       stub,
-      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${exists}esac\nexit 0\n`,
+      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${fails}${exists}esac\nexit 0\n`,
     );
     chmodSync(stub, 0o755);
     const result = spawnSync('bash', [script, ...args], {
@@ -378,6 +380,50 @@ test('standalone split: no fallback — the runtime and migrator passwords must 
     ),
   );
   assert.ok(!given.calls.some((call) => call.includes('_dev_password')));
+});
+
+test('standalone split: rotates the runtime password to the supplied one, then proves both logins over TCP (Codex round 3)', () => {
+  const { status, stderr, calls } = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      PGHOST: '/var/run/postgresql', // a socket directory: the logins still go over TCP
+      POSTGRES_PASSWORD_CONSTRUCTION: 'explicit_construction_runtime_secret',
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: 'explicit_construction_migrator_secret',
+    },
+    { args: ['construction'] },
+  );
+  assert.equal(status, 0, stderr);
+  const rotate = calls.findIndex((call) =>
+    call.includes(
+      "ALTER ROLE rasta_construction WITH LOGIN PASSWORD 'explicit_construction_runtime_secret'",
+    ),
+  );
+  assert.ok(rotate >= 0, 'the runtime password was not set to the supplied value');
+  for (const role of ['rasta_construction', 'rasta_construction_migrator']) {
+    const login = calls.findIndex(
+      (call) =>
+        call.includes(`--username ${role} `) &&
+        call.includes('-h 127.0.0.1') &&
+        call.includes('SELECT 1'),
+    );
+    assert.ok(login > rotate, `${role}: no TCP login check after the rotation`);
+  }
+});
+
+test('standalone split: a supplied credential that cannot log in fails the run', () => {
+  const { status, stderr } = runWithStubPsql(
+    SPLIT,
+    {
+      RASTA_DB_BOOTSTRAP: undefined,
+      POSTGRES_PASSWORD_CONSTRUCTION: 'explicit_construction_runtime_secret',
+      POSTGRES_PASSWORD_CONSTRUCTION_MIGRATOR: 'explicit_construction_migrator_secret',
+    },
+    { args: ['construction'], failWhen: '--username rasta_construction_migrator' },
+  );
+  assert.equal(status, 1);
+  assert.match(stderr, /rasta_construction_migrator cannot log in to rasta_construction/);
+  assert.ok(!stderr.includes('explicit_construction_migrator_secret'));
 });
 
 test("standalone split: a migrator password equal to its runtime role's aborts before any psql call (Codex on #176)", () => {

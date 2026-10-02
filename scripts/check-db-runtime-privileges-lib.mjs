@@ -67,13 +67,16 @@ export function classifyServices({
 /**
  * One row per thing the runtime role holds that it must not, in the database
  * psql is connected to. Feed to `psql -v runtime=<role>` on stdin. Ownership
- * counts through membership (`pg_has_role … USAGE`): a role that inherits the
- * owner's rights is the owner for every purpose here.
+ * counts through membership of any kind (`pg_has_role … MEMBER`): a member
+ * granted WITH INHERIT FALSE inherits nothing but can still SET ROLE to the
+ * owner (Codex round 3 on #176), so it is the owner for every purpose here.
  *
  *   * role attributes: SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS;
  *   * owns the database, any non-system schema, relation, function or type;
  *   * CREATE on the database or on any non-system schema;
  *   * TRUNCATE, REFERENCES or TRIGGER on any table;
+ *   * membership in any role that owns something here, is named `*_migrator`,
+ *     or is superuser-capable;
  *   * any right on the migration ledger `_prisma_migrations`, table or column.
  */
 export const FINDINGS_SQL = String.raw`
@@ -99,13 +102,13 @@ SELECT finding FROM (
    WHERE held
   UNION ALL
   SELECT 'owns database ' || d.datname FROM pg_database d, me
-   WHERE d.datname = current_database() AND pg_has_role(me.oid, d.datdba, 'USAGE')
+   WHERE d.datname = current_database() AND pg_has_role(me.oid, d.datdba, 'MEMBER')
   UNION ALL
   SELECT 'CREATE on database ' || current_database() FROM me
    WHERE has_database_privilege(me.oid, current_database(), 'CREATE')
   UNION ALL
   SELECT 'owns schema ' || n.nspname FROM user_ns n, me
-   WHERE pg_has_role(me.oid, n.nspowner, 'USAGE')
+   WHERE pg_has_role(me.oid, n.nspowner, 'MEMBER')
   UNION ALL
   SELECT 'CREATE on schema ' || n.nspname FROM user_ns n, me
    WHERE has_schema_privilege(me.oid, n.oid, 'CREATE')
@@ -114,19 +117,29 @@ SELECT finding FROM (
                        WHEN 'I' THEN 'index' WHEN 'v' THEN 'view'
                        WHEN 'm' THEN 'materialized view' ELSE 'table' END
          || ' ' || t.nspname || '.' || t.relname
-    FROM user_tables t, me WHERE pg_has_role(me.oid, t.relowner, 'USAGE')
+    FROM user_tables t, me WHERE pg_has_role(me.oid, t.relowner, 'MEMBER')
   UNION ALL
   SELECT 'owns function ' || p.oid::regprocedure::text FROM pg_proc p
     JOIN user_ns n ON n.oid = p.pronamespace, me
-   WHERE pg_has_role(me.oid, p.proowner, 'USAGE')
+   WHERE pg_has_role(me.oid, p.proowner, 'MEMBER')
   UNION ALL
   SELECT 'owns type ' || n.nspname || '.' || ty.typname FROM pg_type ty
     JOIN user_ns n ON n.oid = ty.typnamespace, me
-   WHERE ty.typrelid = 0 AND ty.typelem = 0 AND pg_has_role(me.oid, ty.typowner, 'USAGE')
+   WHERE ty.typrelid = 0 AND ty.typelem = 0 AND pg_has_role(me.oid, ty.typowner, 'MEMBER')
   UNION ALL
   SELECT priv || ' on ' || t.nspname || '.' || t.relname
     FROM user_tables t, me, unnest(ARRAY['TRUNCATE', 'REFERENCES', 'TRIGGER']) priv
    WHERE t.relkind IN ('r', 'p') AND has_table_privilege(me.oid, t.oid, priv)
+  UNION ALL
+  SELECT 'member of ' || m.rolname || ' (could SET ROLE to an owner or superuser-capable role)'
+    FROM pg_roles m, me
+   WHERE m.oid <> me.oid AND pg_has_role(me.oid, m.oid, 'MEMBER')
+     AND (m.rolsuper OR m.rolcreatedb OR m.rolcreaterole OR m.rolbypassrls
+          OR m.rolname LIKE '%\_migrator'
+          OR EXISTS (SELECT 1 FROM pg_database d
+                      WHERE d.datname = current_database() AND d.datdba = m.oid)
+          OR EXISTS (SELECT 1 FROM user_ns n WHERE n.nspowner = m.oid)
+          OR EXISTS (SELECT 1 FROM user_tables t WHERE t.relowner = m.oid))
   UNION ALL
   SELECT 'a right on ' || t.nspname || '._prisma_migrations' FROM user_tables t, me
    WHERE t.relname = '_prisma_migrations'

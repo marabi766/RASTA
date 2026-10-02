@@ -20,6 +20,7 @@ const runtime: ConnectedRoleFacts = {
   ownsRelationIn: [],
   createOnDatabase: false,
   createOnSchemas: [],
+  memberOf: [],
 };
 
 const client = (facts: ConnectedRoleFacts | undefined): RuntimeRoleQueryClient => ({
@@ -83,23 +84,34 @@ describe('a service runs only as its runtime role (D-045)', () => {
     ]);
   });
 
+  it('refuses a member of the migrator even WITH INHERIT FALSE — it could SET ROLE (Codex round 3)', () => {
+    expect(
+      connectedRoleProblems({ ...runtime, memberOf: ['rasta_construction_migrator'] }),
+    ).toEqual([
+      'is a member of rasta_construction_migrator, an owner or superuser-capable role it could SET ROLE to',
+    ]);
+  });
+
   it('fails closed when the catalogue says nothing', async () => {
     await expect(assertRuntimeRole(client(undefined), options)).rejects.toThrow(
       /could not read the role it is connected as/,
     );
   });
 
-  it('asks about membership, every non-system schema, and both user names', () => {
+  it('asks about any membership, every non-system schema, and both user names', () => {
     for (const fragment of [
       'session_user',
-      "pg_has_role(current_user, d.datdba, 'USAGE')",
-      "pg_has_role(current_user, n.nspowner, 'USAGE')",
-      "pg_has_role(current_user, c.relowner, 'USAGE')",
+      "pg_has_role(current_user, d.datdba, 'MEMBER')",
+      "pg_has_role(current_user, n.nspowner, 'MEMBER')",
+      "pg_has_role(current_user, c.relowner, 'MEMBER')",
+      "pg_has_role(current_user, m.oid, 'MEMBER')",
       "has_database_privilege(current_database(), 'CREATE')",
       "has_schema_privilege(n.oid, 'CREATE')",
       'rolbypassrls',
     ]) {
       expect(CONNECTED_ROLE_SQL).toContain(fragment);
     }
+    // USAGE ignores a membership granted WITH INHERIT FALSE, which still allows SET ROLE.
+    expect(CONNECTED_ROLE_SQL).not.toContain("'USAGE'");
   });
 });
