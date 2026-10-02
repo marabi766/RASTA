@@ -281,3 +281,25 @@ describe('the tender key-encryption keys (ADR-066 § 2)', () => {
     );
   });
 });
+
+describe('the tender close sweeper (ADR-065 § 3)', () => {
+  it('is bounded by default: a short interval, a small batch, a lease longer than a sweep', () => {
+    const env = load();
+    expect(env.CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS).toBe(5000);
+    expect(env.CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE).toBe(20);
+    expect(env.CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS).toBe(60);
+    expect(env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS).toBe(10);
+    expect(env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS).toBe(900);
+  });
+
+  it('may be tuned, and refuses a value that would spin or never end', () => {
+    expect(
+      load({ CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: '100' }).CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE,
+    ).toBe(100);
+    expect(() => load({ CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS: '10' })).toThrow();
+    expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: '0' })).toThrow();
+    expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: '100000' })).toThrow();
+    expect(() => load({ CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '1' })).toThrow();
+    expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: '0' })).toThrow();
+  });
+});
