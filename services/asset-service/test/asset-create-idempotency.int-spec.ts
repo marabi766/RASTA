@@ -13,7 +13,7 @@ import { AllExceptionsFilter, RolesGuard, runWithContext } from '@rasta/nest-com
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
 import { AssetController, CREATE_ASSET_ENDPOINT } from '../src/asset/asset.controller';
-import { IdempotencyStore } from '../src/asset/idempotency';
+import { IN_FLIGHT_WAIT_MS, IdempotencyStore } from '../src/asset/idempotency';
 import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
 import type { AssetView, CreateAssetDto } from '../src/asset/dto';
@@ -220,6 +220,27 @@ describe('asset registration under an Idempotency-Key', () => {
       expect((await assetsNamed(dto.name)).map((row) => row.id)).toEqual([original.id]);
     });
 
+    it.each(['__proto__', 'constructor'])(
+      'is refused when only a %s key in the free JSON differs, and registers nothing',
+      async (name) => {
+        // JSON.parse makes `name` an own key, as the request body parser does.
+        const withValue = (x: number): CreateAssetDto => ({
+          ...dto,
+          specifications: { engine: JSON.parse(`{"${name}":{"x":${x}}}`) as unknown },
+        });
+        const dto = machine();
+        const key = id('KEY');
+        const original = await create(withValue(1), key);
+
+        await expect(create(withValue(2), key)).rejects.toMatchObject({
+          code: 'IDEMPOTENCY_KEY_REUSED',
+        });
+        expect((await assetsNamed(dto.name)).map((row) => row.id)).toEqual([original.id]);
+        // The same body is still recognised as the retry it is.
+        expect(await create(withValue(1), key)).toEqual(original);
+      },
+    );
+
     it('is refused from another user of the same organization, who learns nothing of the first', async () => {
       const dto = machine();
       const key = id('KEY');
@@ -344,6 +365,48 @@ describe('asset registration under an Idempotency-Key', () => {
       await holder;
       expect((await keyRow(org.a, key))[0]?.state).toBe('IN_PROGRESS');
     }, 20_000);
+
+    it('bounds the takeover of a lapsed claim too: a holder that keeps its lock gets a retryable 409, not a hang', async () => {
+      const dto = machine();
+      const key = id('KEY');
+      await asActor(manager, () => store.claim(CREATE_ASSET_ENDPOINT, key, dto));
+      await lapse(key);
+      const held = gate();
+
+      // A holder that keeps the lapsed claim's row lock past any request's
+      // budget. The retry sees the lapsed row and tries to remove it; that
+      // removal waits on the lock — for the remaining budget, never longer.
+      const holder = prisma.transaction(
+        async (tx) => {
+          await tx.$queryRawUnsafe(
+            `SELECT 1 FROM idempotency_key
+             WHERE organization_id = $1 AND endpoint = $2 AND key = $3 FOR UPDATE`,
+            org.a,
+            CREATE_ASSET_ENDPOINT,
+            key,
+          );
+          held.reach();
+          await held.opened;
+        },
+        { timeoutMs: 30_000 },
+      );
+      await held.reached;
+
+      const started = Date.now();
+      const refused = create(dto, key).catch((error: unknown) => error);
+      await untilBlocked('DELETE FROM%idempotency_key%');
+      expect(await refused).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+      const waited = Date.now() - started;
+      expect(waited).toBeGreaterThanOrEqual(4_000);
+      expect(waited).toBeLessThan(IN_FLIGHT_WAIT_MS + 2_500);
+      expect(await assetsNamed(dto.name)).toEqual([]);
+
+      // Once the holder lets go, the next retry takes the lapsed claim over.
+      held.open();
+      await holder;
+      const taken = await create(dto, key);
+      expect((await assetsNamed(dto.name)).map((row) => row.id)).toEqual([taken.id]);
+    }, 30_000);
 
     it('lets two Promise.all submits register exactly one asset', async () => {
       const dto = machine();
@@ -545,6 +608,26 @@ describe('asset registration under an Idempotency-Key', () => {
       expect(second.status).toBe(201);
       expect(second.body).toEqual(first.body);
       expect((await assetsNamed(dto.name)).map((row) => row.id)).toEqual([first.body.id]);
+    });
+
+    it('refuses a body that differs only in a nested __proto__ key: 409 IDEMPOTENCY_KEY_REUSED, one asset', async () => {
+      const name = `لودر ${ulid().slice(-6)}`;
+      const raw = (x: number) =>
+        `{"name":"${name}","type":"LOADER","specifications":{"engine":{"__proto__":{"x":${x}}}}}`;
+      const key = id('KEY');
+      const send = (x: number) =>
+        request(http.getHttpServer())
+          .post('/v1/assets')
+          .set('Idempotency-Key', key)
+          .set('content-type', 'application/json')
+          .send(raw(x));
+
+      const first = await send(1);
+      expect(first.status).toBe(201);
+      const second = await send(2);
+      expect(second.status).toBe(409);
+      expect(second.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect((await assetsNamed(name)).map((row) => row.id)).toEqual([first.body.id]);
     });
 
     it('answers another user’s reuse of a key 409 with no trace of the stored response', async () => {

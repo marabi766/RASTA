@@ -164,8 +164,10 @@ export type IdempotencyEnv = Pick<
  *   and a retry re-took the key, `hold` finds no row with this token and the
  *   whole registration aborts — the token fences the work, not only the row;
  * - a claim whose lease lapses while its work holds the lock cannot be re-taken
- *   under it: the retry's removal of the lapsed row waits for the lock, then
- *   finds the row completed with a fresh lifetime, and replays it;
+ *   under it: the retry's removal of the lapsed row waits for the lock — for
+ *   what is left of the request's budget, never longer (`409 CONFLICT` with
+ *   `Retry-After` past it) — then finds the row completed with a fresh
+ *   lifetime, and replays it;
  * - the response cannot fail to be stored after the asset committed.
  *
  * Any failure of the work releases the claim, but only this claim's own
@@ -307,7 +309,7 @@ export class IdempotencyStore {
     const deadline = Date.now() + IN_FLIGHT_WAIT_MS;
     let retries = 0;
     for (;;) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
       if (outcome === RETRY_CLAIM) {
         retries += 1;
         if (retries >= CLAIM_ATTEMPTS) throw inFlight(endpoint);
@@ -329,29 +331,38 @@ export class IdempotencyStore {
    * nothing and tries again. A lapsed row is removed only while it is still
    * lapsed — the removal waits for a holder's lock and re-checks — never a
    * fresh claim or a response that replaced it.
+   *
+   * Every statement here that can wait on another transaction's lock — the
+   * insert, behind an uncommitted removal of the same key; the removal,
+   * behind a holder still in its transaction — waits only for what remains of
+   * the request's {@link IN_FLIGHT_WAIT_MS} budget ({@link withinBudget}),
+   * and running out is the retryable `409 CONFLICT`, never a hang.
    */
   private async claimOnce(
     endpoint: string,
     key: string,
     requestHash: string,
+    deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
     const now = new Date();
 
     const token = randomUUID();
     try {
-      await this.prisma.client.idempotencyKey.create({
-        data: {
-          organizationId,
-          endpoint,
-          key,
-          requestHash,
-          claimToken: token,
-          state: 'IN_PROGRESS',
-          // The lease, not the response's lifetime: `storeResponse` moves it to that.
-          expiresAt: this.lease(now),
-        },
-      });
+      await this.withinBudget(endpoint, deadline, (tx) =>
+        tx.idempotencyKey.create({
+          data: {
+            organizationId,
+            endpoint,
+            key,
+            requestHash,
+            claimToken: token,
+            state: 'IN_PROGRESS',
+            // The lease, not the response's lifetime: `storeResponse` moves it to that.
+            expiresAt: this.lease(now),
+          },
+        }),
+      );
       return { kind: 'PROCEED', token };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
@@ -363,9 +374,14 @@ export class IdempotencyStore {
     if (!existing) return RETRY_CLAIM;
 
     if (existing.expiresAt <= now) {
-      await this.prisma.client.idempotencyKey.deleteMany({
-        where: { organizationId, endpoint, key, expiresAt: { lte: now } },
-      });
+      // Waits for a holder still in its transaction — within the budget only.
+      await this.withinBudget(
+        endpoint,
+        deadline,
+        (tx) => tx.$executeRaw`DELETE FROM idempotency_key
+          WHERE organization_id = ${organizationId} AND endpoint = ${endpoint} AND key = ${key}
+            AND expires_at <= ${now}`,
+      );
       return RETRY_CLAIM;
     }
 
@@ -381,6 +397,34 @@ export class IdempotencyStore {
       status: existing.responseStatus ?? 200,
       body: existing.responseBody,
     };
+  }
+
+  /**
+   * Runs one claim-side statement in a short transaction of its own, whose
+   * `lock_timeout` is what is left of the request's budget: a lock it cannot
+   * get in that time is the retryable `409 CONFLICT` (`Retry-After: 1`), never
+   * an unbounded wait. A budget already spent refuses before asking.
+   */
+  private async withinBudget<R>(
+    endpoint: string,
+    deadline: number,
+    statement: (tx: ExtendedPrismaClient) => Promise<R>,
+  ): Promise<R> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw inFlight(endpoint);
+    const waitMs = Math.max(1, Math.ceil(remaining));
+    try {
+      return await this.prisma.transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`;
+          return statement(tx);
+        },
+        { timeoutMs: waitMs + WAIT_TRANSACTION_SLACK_MS },
+      );
+    } catch (error) {
+      if (isLockTimeout(error)) throw inFlight(endpoint);
+      throw error;
+    }
   }
 
   /**
@@ -460,6 +504,13 @@ function isLockTimeout(error: unknown): boolean {
 /**
  * Canonical SHA-256 of a request: object keys sorted recursively, so the same
  * request serialised in another key order is recognised as a retry.
+ *
+ * Every own key is hashed, whatever its name. The sorted copies have no
+ * prototype (`Object.create(null)`): assigning `"__proto__"` into a plain `{}`
+ * would set its prototype instead of creating a key, and `JSON.stringify`
+ * would then drop it — two different bodies (`specifications` is free JSON)
+ * would hash alike and the second would replay the first's 201 instead of
+ * being refused as `IDEMPOTENCY_KEY_REUSED`.
  */
 export function hashRequest(value: unknown): string {
   return createHash('sha256')
@@ -471,7 +522,7 @@ function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) sorted[key] = sortKeys(source[key]);
     return sorted;
   }
