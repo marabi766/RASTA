@@ -1048,7 +1048,8 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   `SELECT/INSERT/UPDATE` لازم؛ آزمونی که نبودنِ `ALTER TABLE` را با نقش اجرا ثابت کند (مثل `runtime-privileges.int-spec.ts`).
 - **اولویت:** بالا (RUN-002)
 - **ثبت‌شده:** 2026-10-01
-- **وضعیت:** در حال رفع (2026-10-01، `fix/d045-db-role-split`). سازوکار مشترک ساخته شد: `lib/service-privilege-split.bash`
+- **وضعیت:** **رفع‌شده** (2026-10-01؛ چهار PR: `fix/d045-db-role-split`، `fix/d045-split-identity-notification`،
+  `fix/d045-split-remaining`، `fix/d045-split-economic`). سازوکار مشترک ساخته شد: `lib/service-privilege-split.bash`
   برای هر سرویس در `PRIVILEGE_SPLIT_SERVICES` پایگاه داده و همهٔ اشیای آن را به `rasta_<svc>_migrator` می‌دهد و به نقش
   اجرا فقط DML (با `ALTER DEFAULT PRIVILEGES`)؛ `scripts/prisma.mjs` حق نقش اجرا روی `_prisma_migrations` را پس از هر
   Migration می‌گیرد؛ `scripts/check-db-runtime-privileges.mjs` در CI شکست می‌خورد اگر نقش اجرای یک سرویس تقسیم‌شده مالک
@@ -1067,10 +1068,15 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   تقسیم آن را لغو می‌کند؛ اجرای مستقل گذرواژهٔ نقش اجرا را به مقدار داده‌شده می‌چرخاند و ورود هر دو اعتبار را ثابت می‌کند؛
   و Verifier پیش از کار بررسی می‌کند که دقیقاً با مهاجر همان سرویس وصل است، نه Superuser. دور چهارم (مسیر ارتقای خوشهٔ موجود): تقسیم مستقل audit هم از همان گام اعتبار می‌گذرد (هر دو گذرواژه، متمایز، گذاشته و ورودشان ثابت)؛ `rotate-role-passwords.bash` هر `rasta_<svc>_migrator` را با پایگاه دادهٔ سرویسش می‌آزماید؛ و Schema `public`، هر که مالکش باشد (مثلاً Superuser پس از ارتقا از PostgreSQL 14)، پیش از Revokeها و ساخت دفتر به مهاجر داده می‌شود. آزمون زندهٔ «خوشهٔ قدیمی» بدترین حالت واقع‌بینانه را — `public` مال Superuser، نقش اجرا مالک همه‌چیز و عضو مهاجر با `SET`، یک گذرواژهٔ مشترک، audit هم — از ارتقای مستقل می‌گذراند و همهٔ ناورداها را می‌آزماید. سپس (Codex روی #178): چون Nest هوک Providerها را پیش از `AppModule` اجرا می‌کند، هر سرویس تقسیم‌شده پیش از `NestFactory.create` با اتصالی کوتاه‌عمر نقش وصل‌شده را می‌آزماید (`preflightRuntimeRole`) و با URL مالک پیش از ساخت هر Consumer یا Timer بیرون می‌رود؛ آزمون زندهٔ E2E با Kafka واقعی (`scripts/runtime-preflight.e2e.mjs`). همین دروازه در هر راه ورود دیگر (Codex روی #177): CLI بازتاب Keycloak در identity و Seedها؛ `service-boot-guard.test.mjs` هر فایلی را که خارج از سیم‌کشی برنامه پایگاه داده را باز می‌کند می‌یابد و دروازه را از آن می‌خواهد.
   سپس **identity** (نگهبان `tg_security_event_outbox_guard`) و **notification** (سه Trigger فقط‌افزودنی/یک‌بارنویس) هم
-  تقسیم شدند (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`).
-  **باقی‌مانده** (`PENDING_SPLIT`): organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه
-  دادهٔ بی‌جدول —
-  هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
+  تقسیم شدند (`fix/d045-split-identity-notification`؛ پروب‌های مشترک آزمون در `@rasta/testing` `runtime-role.ts`)، و پس
+  از آن organization، asset، fleet، maintenance، marketplace و document و چهار پایگاه دادهٔ بی‌جدول (procurement،
+  inventory، contract، analytics) — `fix/d045-split-remaining`؛ Schema آزمایشی پروتکل Outbox در document اکنون با مهاجر
+  ساخته می‌شود. آخر **economic** (`fix/d045-split-economic`): هفت Trigger دفتر کل و برش پاداش و CHECK
+  `ck_wallet_balances` در برابر نقش اجرا `42501` می‌دهند؛ پاک‌سازی آزمون‌ها Triggerهای دفتر کل را فقط با اتصال مهاجر
+  (`DATABASE_URL_ECONOMIC_MIGRATOR`، بی بازگشت) برمی‌دارد. اکنون **هر** سرویس در `PRIVILEGE_SPLIT_SERVICES` است (audit با
+  تقسیم خودش)؛ فهرست «در انتظار» حذف شد و `check:db-runtime-privileges` هر سرویس تازه‌ای را که تقسیم نشده رد می‌کند.
+  Runbook:
+  `docs/runbooks/db-role-split.md`.
 
 ### D-046 · سابقهٔ حسابرسی حل انسانی آشتی پرداخت کنشگر دوم و شاهد را ندارد
 

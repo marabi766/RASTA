@@ -33,7 +33,16 @@
 //   --batch-size <n>    rows per transaction, 1..5000 (default 5000)
 //   --max-batches <n>   stop after n batches — a bounded, resumable slice.
 //                       If work remains the run reports `incomplete` and exits 1.
-//   --vacuum-every <n>  VACUUM (ANALYZE) every n completed batches (default 1)
+//
+// No VACUUM (D-045, Codex on #180). The backfill connects as the service's
+// runtime role, which owns no table, and PostgreSQL skips such a role's VACUUM
+// with a warning while reporting success. So it never vacuums: an apply that
+// wrote anything emits `vacuum` with `status: "required"` and the table, and
+// `scripts/outbox-b2-vacuum.mjs --service <name>` — with the migrator's
+// credential in its environment, never in this process — runs
+// `VACUUM (ANALYZE)` and proves it from the table's counters. For a large
+// table, slice the apply with --max-batches and run it between the slices.
+// `--vacuum-every` is refused by name.
 //
 // Output is NDJSON on stdout: one object per event, counts only. No payload,
 // no credential and no connection string is ever printed — the events carry
@@ -47,7 +56,8 @@
 // Target selection, option parsing or the environment check fails, before any
 // service is iterated: no target, an unknown or repeated service, `--dry-run`
 // with `--apply`, a bad or out-of-range numeric option, an unknown option,
-// `NODE_ENV=production`, or an unrecognised `NODE_ENV`.
+// `NODE_ENV=production`, an unrecognised `NODE_ENV`, or a database owner's
+// credential (`*_MIGRATOR`) anywhere in the environment (D-045).
 //
 //   Output:  exactly one `refused` event, and nothing else.
 //   Scope:   **unscoped** — it carries no `service` field, because no valid
@@ -62,14 +72,16 @@
 //
 //   `plan`         the counts a run would act on. First event for a service
 //                  that got as far as opening its database.
-//   `batch`,       one pair per batch of an apply: rows assigned, then the
-//   `vacuum`       maintenance between batches.
+//   `batch`        one per batch of an apply: rows assigned.
 //   `counters`,    written once, only when the run converged.
 //   `heads`
+//   `vacuum`       `status: "required"` with the table, once, after an apply
+//                  that wrote anything — the maintenance this run did not do.
 //   `verify`       the post-run counts, read back from the database.
 //   `done`         emitted by the service backfill for any attempt that ran to
-//                  the end — a dry run or an apply — carrying `converged` and
-//                  `mutated`.
+//                  the end — a dry run or an apply — carrying `converged`,
+//                  `mutated` and, for an apply, `vacuum` (`required` or
+//                  `not-required`).
 //
 // **`mode` and `mutated` are not the same thing, and the difference matters
 // for evidence.** `mode: "apply"` says writing was *authorised*. `mutated`
@@ -88,8 +100,11 @@
 //                  remain. Everything already assigned is committed and a
 //                  re-run resumes from it. Counted in `summary.incomplete`.
 //   `refused`      emitted *instead of* `done` when the attempt failed:
-//                  `DATABASE_URL_<SERVICE>` unset, a B1 precondition failed,
-//                  the ordering guard tripped, or VACUUM failed. Scoped to
+//                  `DATABASE_URL_<SERVICE>` unset, it connects as anything but
+//                  the service's runtime role (D-045: a split service's URL is
+//                  proven before the first query, so a migrator, owner or
+//                  superuser URL never writes), a B1 precondition failed,
+//                  or the ordering guard tripped. Scoped to
 //                  that one service — every later selected service is still
 //                  attempted and the summary is still emitted. Counted in
 //                  `summary.refused`.
@@ -105,11 +120,20 @@
 // -----------------------------------------------------------------------------
 import {
   B2RefusalError,
+  databaseUrlKey,
   parseOptions,
   resolveDatabaseUrl,
   runServiceBackfill,
 } from './outbox-b2-lib.mjs';
 import { prismaPort } from './outbox-b2-prisma-port.mjs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
+
+// The same owner-credential rule every service entry point runs (D-045).
+const { assertNoMigratorCredentials } = createRequire(import.meta.url)(
+  join(import.meta.dirname, '..', 'packages', 'config', 'dist', 'index.js'),
+);
 
 const emit = (event) => {
   process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
@@ -132,7 +156,15 @@ function converged(result) {
 }
 
 async function main() {
+  // D-045 (Codex on #178): this command writes to a service's database, so it
+  // is held to the rule every entry point is held to. No owner's credential in
+  // its environment at all — a global refusal, before any service — and, below,
+  // each split service's URL proven to be its runtime role before the first
+  // query: `--apply` with a migrator URL in DATABASE_URL_<SERVICE> would
+  // otherwise write as the database owner.
+  assertNoMigratorCredentials(process.env);
   const options = parseOptions(process.argv.slice(2), process.env);
+  const split = new Set(splitServicesFromLibrary());
   let ok = 0;
   let incomplete = 0;
   let refused = 0;
@@ -148,6 +180,8 @@ async function main() {
       // service's refusal, not the whole run's.
       const url = resolveDatabaseUrl(service, process.env);
       db = prismaPort(service, url);
+      // Before the first query; a refusal is this service's `refused` event.
+      if (split.has(service)) await db.preflight(databaseUrlKey(service));
       const result = await runServiceBackfill({ service, db, options, emit });
       if (converged(result)) {
         ok += 1;
@@ -172,7 +206,7 @@ async function main() {
     } catch (error) {
       refused += 1;
       // Every way one service can fail lands here: an unresolvable connection,
-      // a B1 precondition, the ordering guard, a failed VACUUM. The message,
+      // a B1 precondition, the ordering guard. The message,
       // never the stack and never the URL — a stack from a Prisma client can
       // carry the datasource in it, and `resolveDatabaseUrl` deliberately
       // names the environment variable rather than its value.

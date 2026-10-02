@@ -6,8 +6,8 @@ import { AssetService } from '../src/asset/asset.service';
 import { canonicalIdentifier } from '../src/asset/identifier';
 import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
-import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, newPrisma, tenants } from './helpers';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { asActor, newPrisma, ownerDatabaseUrl, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
 
 /**
@@ -45,21 +45,27 @@ describe('legacy data migration (20260925110000)', () => {
     userId: `USR-ADMIN-${organizationId.slice(-4)}`,
   });
 
+  /**
+   * `prisma db execute` on `file`, as the owner. The owner's URL — a credential
+   * — goes in the child's environment and reaches Prisma through the schema's
+   * datasource (`env("DATABASE_URL")`), never on its command line, where any
+   * process listing would show it (Codex review of #178).
+   */
+  const prismaExecute = (file: string) =>
+    [
+      require.resolve('prisma/build/index.js'),
+      'db',
+      'execute',
+      '--file',
+      file,
+      '--schema',
+      path.join(__dirname, '..', 'prisma', 'schema.prisma'),
+    ] as const;
+  const ownerEnv = () => ({ ...process.env, DATABASE_URL: ownerDatabaseUrl() });
+
   /** Runs a shipped SQL file through `prisma db execute`. */
   function runFile(file: string): void {
-    execFileSync(
-      process.execPath,
-      [
-        require.resolve('prisma/build/index.js'),
-        'db',
-        'execute',
-        '--file',
-        file,
-        '--url',
-        databaseUrl(),
-      ],
-      { stdio: 'pipe' },
-    );
+    execFileSync(process.execPath, [...prismaExecute(file)], { stdio: 'pipe', env: ownerEnv() });
   }
 
   /** Runs the shipped migration file, as a deploy would. */
@@ -74,19 +80,14 @@ describe('legacy data migration (20260925110000)', () => {
     return new Promise((resolve) => {
       execFile(
         process.execPath,
-        [
-          require.resolve('prisma/build/index.js'),
-          'db',
-          'execute',
-          '--file',
-          file,
-          '--url',
-          databaseUrl(),
-        ],
+        [...prismaExecute(file)],
+        { env: ownerEnv() },
         (error, _stdout, stderr) => resolve(error ? String(stderr || error) : ''),
       );
     });
   }
+
+  let lockWatcher: PrismaService | undefined;
 
   /**
    * Until another session is waiting on a lock: the file just started, which
@@ -95,8 +96,11 @@ describe('legacy data migration (20260925110000)', () => {
    * text is one statement, not the file.
    */
   async function fileWaitingOnLock(): Promise<void> {
+    // Asked as the owner, the role the file runs as (D-045): pg_stat_activity
+    // shows a non-superuser the wait events of its own role's sessions only.
+    lockWatcher ??= new PrismaService(ownerDatabaseUrl());
     for (let tries = 0; tries < 400; tries += 1) {
-      const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+      const rows = await lockWatcher.client.$queryRawUnsafe<{ n: number }[]>(
         `SELECT count(*)::int AS n FROM pg_stat_activity
           WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()
             AND datname = current_database()`,
@@ -149,6 +153,7 @@ describe('legacy data migration (20260925110000)', () => {
   });
 
   afterAll(async () => {
+    await lockWatcher?.onModuleDestroy();
     const orgs = [org.a, org.b, orgC];
     await prisma.client.$executeRawUnsafe(
       `DELETE FROM outbox_message WHERE organization_id = ANY($1::text[])`,
@@ -187,15 +192,22 @@ describe('legacy data migration (20260925110000)', () => {
       'ABC-12',
       '　lead and trail ',
     ];
-    for (const sample of samples) {
-      const rows = await prisma.client.$queryRawUnsafe<{ value: string }[]>(
-        `SELECT canonical_identifier($1) AS value`,
-        sample,
-      );
-      expect({ sample, value: rows[0]!.value }).toEqual({
-        sample,
-        value: canonicalIdentifier(sample),
-      });
+    // As the owner: the function is the migration's, and since D-045 the
+    // runtime role may not execute the migrator's functions (it has no need to).
+    const owner = new PrismaService(ownerDatabaseUrl());
+    try {
+      for (const sample of samples) {
+        const rows = await owner.client.$queryRawUnsafe<{ value: string }[]>(
+          `SELECT canonical_identifier($1) AS value`,
+          sample,
+        );
+        expect({ sample, value: rows[0]!.value }).toEqual({
+          sample,
+          value: canonicalIdentifier(sample),
+        });
+      }
+    } finally {
+      await owner.onModuleDestroy();
     }
   });
 

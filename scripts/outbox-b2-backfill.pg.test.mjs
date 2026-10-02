@@ -64,6 +64,23 @@ function baseUrl(service) {
   return url;
 }
 
+/**
+ * The URL the CLI is given (D-045, Codex on #178). It refuses anything but a
+ * split service's runtime role, as every entry point does, so for a split
+ * service it gets `DATABASE_URL_<SERVICE>` — the runtime role — while the
+ * scratch schema is made and torn down through the migrator above.
+ */
+function cliUrl(service, schema) {
+  const split = splitServicesFromLibrary().includes(service);
+  const key = `DATABASE_URL_${service.toUpperCase()}`;
+  if (split && !process.env[key]) throw new Error(`${key} is not set (see .env.example).`);
+  return urlWithSchema(split ? process.env[key] : baseUrl(service), schema);
+}
+
+/** Owner credentials the CLI refuses outright: never passed to it unless a test means to. */
+const withoutOwnerCredentials = (env) =>
+  Object.fromEntries(Object.entries(env).filter(([key]) => !/_MIGRATOR$/.test(key)));
+
 const admins = new Map();
 
 before(() => {
@@ -87,10 +104,22 @@ async function withOutbox(service, fn) {
   const admin = admins.get(service);
   const schema = nextSchema();
   await createOutboxSchema(admin, schema);
-  const url = urlWithSchema(baseUrl(service), schema);
-  const db = prismaPort(service, url);
+  const db = prismaPort(service, urlWithSchema(baseUrl(service), schema));
+  const url = cliUrl(service, schema);
   try {
     await deployOutboxSchema(db);
+    // The scratch schema is the migrator's; give the runtime role what the
+    // split gives it in `public` — USAGE and DML, nothing more.
+    const runtime = decodeURIComponent(new URL(url).username);
+    if (runtime !== decodeURIComponent(new URL(baseUrl(service)).username)) {
+      await admin.execute(`GRANT USAGE ON SCHEMA "${schema}" TO "${runtime}"`);
+      await admin.execute(
+        `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "${schema}" TO "${runtime}"`,
+      );
+      await admin.execute(
+        `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "${schema}" TO "${runtime}"`,
+      );
+    }
     return await fn({ db, url, schema, service });
   } finally {
     await db.close();
@@ -144,7 +173,12 @@ const fingerprint = async (db) => (await db.query(FINGERPRINT))[0].f;
  * value — an operator's shell sees this number and nothing else.
  */
 function runCli(argv, env = {}) {
-  const childEnv = { ...process.env, NODE_ENV: 'test', DATABASE_URL: '', ...env };
+  const childEnv = {
+    ...withoutOwnerCredentials(process.env),
+    NODE_ENV: 'test',
+    DATABASE_URL: '',
+    ...env,
+  };
   // An explicit `undefined` *removes* the variable rather than setting it to
   // the string "undefined". That is how a test omits one service's connection
   // while the repo-root .env has supplied all eight to this process.
@@ -248,7 +282,11 @@ test('a stream larger than one batch is numbered with no duplicate, gap or reord
 
     const { events, result } = await backfill(db, ['--apply']);
     assert.ok(result.batches.length >= 2, 'the fixture did not span a batch boundary');
-    assert.equal(events.filter((e) => e.type === 'vacuum').length, result.batches.length);
+    // No vacuum between batches (D-045): one `required`, after the last.
+    assert.deepEqual(
+      events.filter((e) => e.type === 'vacuum').map((e) => [e.status, e.table]),
+      [['required', 'outbox_message']],
+    );
 
     const hot = await rows(
       db,
@@ -663,60 +701,42 @@ test('rows written during the backfill trip the ordering guard and nothing is as
   });
 });
 
-test('a VACUUM failure stops the run and says so', async () => {
+test('the backfill issues no VACUUM through its port, and says one is required', async () => {
   await withOutbox('document', async ({ db }) => {
     await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 8 }));
 
-    // Fault injection on the port's maintenance call only. Everything else —
-    // the batch transaction, the SQL, the database — is real, so what is being
-    // tested is the tool's reaction to a maintenance failure and not a
-    // simulation of the backfill.
-    const failing = {
+    // Every statement the port is asked to execute outside a transaction is
+    // recorded. Since D-045 the backfill runs as the runtime role, whose
+    // VACUUM PostgreSQL skips while reporting success; it must not try.
+    const executed = [];
+    const recording = {
       ...db,
       execute: (sql) => {
-        if (sql === vacuumSql()) throw new Error('disk full');
+        executed.push(sql);
         return db.execute(sql);
       },
     };
+    const events = [];
+    const result = await runServiceBackfill({
+      service: 'document',
+      db: recording,
+      options: options(['--apply', '--batch-size', '3']),
+      emit: (event) => events.push(event),
+    });
 
-    await assert.rejects(
-      () =>
-        runServiceBackfill({
-          service: 'document',
-          db: failing,
-          options: options(['--apply', '--batch-size', '3']),
-          emit: () => {},
-        }),
-      (error) => {
-        assert.match(error.message, /VACUUM \(ANALYZE\) failed after batch 1: disk full/);
-        assert.match(error.message, /stopping rather than/);
-        return true;
-      },
+    assert.ok(result.batches.length >= 3, 'the fixture did not span several batches');
+    assert.deepEqual(
+      executed.filter((sql) => sql === vacuumSql() || /\bVACUUM\b/i.test(sql)),
+      [],
     );
-
-    // The first batch's assignment is committed — the run is resumable, which
-    // is the reason the failure is reported rather than swallowed.
-    assert.equal(
-      await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "stream_seq" IS NOT NULL`),
-      3,
+    const vacuum = events.filter((event) => event.type === 'vacuum');
+    assert.deepEqual(
+      vacuum.map((event) => [event.status, event.table, event.ok]),
+      [['required', 'outbox_message', undefined]],
     );
+    assert.equal(result.vacuum, 'required');
   });
 });
-
-// ---------------------------------------------------------------------------
-// `mutated` means the database changed, not that writing was authorised.
-//
-// The field used to be hard-coded `true` on every apply. The local-development
-// operational gate then reported `mutated: true` on all eight services while
-// provably changing nothing — zero batches, zero counter writes, zero head
-// changes, byte-identical fingerprints. The value said "apply mode was
-// authorised", which is what `mode` already says.
-//
-// It is now derived from the three write counts the run actually observes:
-// rows assigned across committed batches, `counters.written`, and
-// `heads.changed`. These tests pin every path, against real PostgreSQL and
-// real counts — nothing here mocks a write result.
-// ---------------------------------------------------------------------------
 
 test('mutated is false for a dry run and for an apply that writes nothing', async () => {
   await withOutbox('document', async ({ db }) => {
@@ -1114,7 +1134,7 @@ test('a backfill of one service database cannot reach another', async () => {
           cwd: REPO_ROOT,
           encoding: 'utf8',
           env: {
-            ...process.env,
+            ...withoutOwnerCredentials(process.env),
             NODE_ENV: 'test',
             DATABASE_URL: '',
             DATABASE_URL_DOCUMENT: documentScratch.url,
@@ -1262,5 +1282,55 @@ test('a plan run through the CLI exits 0, emits a summary and writes nothing', a
     assert.deepEqual(tally(plan), { ok: 1, incomplete: 0, refused: 0 });
     assert.equal(plan.events.find((event) => event.type === 'done').mutated, false);
     assert.equal(await fingerprint(db), before, 'a plan run mutated the database');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-045 (Codex on #178): the backfill writes only as the runtime role
+// ---------------------------------------------------------------------------
+
+test("--apply with a split service's migrator URL is refused before the first query, naming the role and never the URL", async () => {
+  await withOutbox('document', async ({ db, schema }) => {
+    await db.execute(insertRowsSql({ prefix: 'O', topic: 't.o', partitionKey: 'K1', count: 4 }));
+    const before = await fingerprint(db);
+    const owner = urlWithSchema(baseUrl('document'), schema);
+
+    const run = runCli(['--service', 'document', '--apply'], { DATABASE_URL_DOCUMENT: owner });
+
+    assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+    const [refusal] = run.of('refused');
+    assert.equal(refusal?.service, 'document');
+    assert.match(
+      refusal.reason,
+      /document-service refuses to start: it is connected as rasta_document_migrator/,
+    );
+    // Nothing was planned, let alone written.
+    assert.deepEqual(run.of('plan'), []);
+    assert.deepEqual(run.of('batch'), []);
+    assert.deepEqual(tally(run), { ok: 0, incomplete: 0, refused: 1 });
+    assert.ok(!run.stdout.includes(owner), 'the URL was printed');
+    assert.ok(!run.stdout.includes(decodeURIComponent(new URL(owner).password)));
+    assert.equal(await fingerprint(db), before, 'the database changed');
+  });
+});
+
+test('an owner credential anywhere in its environment is a global refusal: one unscoped event, nothing touched', async () => {
+  await withOutbox('document', async ({ db, url, schema }) => {
+    await db.execute(insertRowsSql({ prefix: 'P', topic: 't.p', partitionKey: 'K1', count: 2 }));
+    const before = await fingerprint(db);
+    const owner = urlWithSchema(baseUrl('document'), schema);
+
+    const run = runCli(['--service', 'document', '--apply'], {
+      DATABASE_URL_DOCUMENT: url,
+      DATABASE_URL_DOCUMENT_MIGRATOR: owner,
+    });
+
+    assert.equal(run.status, 1);
+    assert.equal(run.events.length, 1, run.stdout);
+    assert.equal(run.events[0].type, 'refused');
+    assert.equal(run.events[0].service, undefined);
+    assert.match(run.events[0].reason, /DATABASE_URL_DOCUMENT_MIGRATOR/);
+    assert.ok(!run.stdout.includes(owner), 'the URL was printed');
+    assert.equal(await fingerprint(db), before, 'the database changed');
   });
 });

@@ -1,5 +1,5 @@
 import { PrismaService } from '../src/prisma/prisma.service';
-import { databaseUrl } from './helpers';
+import { databaseUrl, ownerDatabaseUrl } from './helpers';
 
 /**
  * An isolated `outbox_message` for the ADR-050 protocol suite.
@@ -30,13 +30,20 @@ export function newProtocolPrisma(): PrismaService {
   return new PrismaService(schemaUrl(PROTOCOL_SCHEMA));
 }
 
+/** The role the service — and so every protocol "replica" — connects as. */
+const runtimeRole = () => decodeURIComponent(new URL(databaseUrl()).username);
+
 /**
- * Creates the isolated schema and table.
+ * Creates the isolated schema and table, as the owner (D-045: the runtime role
+ * can create nothing), and gives the runtime role exactly what it has on
+ * `public.outbox_message` — USAGE on the schema and DML on the table — so the
+ * replicas run the protocol under the same privileges the service does.
  *
  * Run against `public`, because the schema it creates does not exist yet.
  */
 export async function createProtocolSchema(): Promise<void> {
-  const admin = new PrismaService(databaseUrl());
+  const admin = new PrismaService(ownerDatabaseUrl());
+  const runtime = runtimeRole();
   try {
     await admin.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${PROTOCOL_SCHEMA}" CASCADE`);
     await admin.client.$executeRawUnsafe(`CREATE SCHEMA "${PROTOCOL_SCHEMA}"`);
@@ -44,13 +51,19 @@ export async function createProtocolSchema(): Promise<void> {
       `CREATE TABLE "${PROTOCOL_SCHEMA}".outbox_message
          (LIKE public.outbox_message INCLUDING ALL)`,
     );
+    await admin.client.$executeRawUnsafe(
+      `GRANT USAGE ON SCHEMA "${PROTOCOL_SCHEMA}" TO "${runtime}"`,
+    );
+    await admin.client.$executeRawUnsafe(
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON "${PROTOCOL_SCHEMA}".outbox_message TO "${runtime}"`,
+    );
   } finally {
     await admin.onModuleDestroy();
   }
 }
 
 export async function dropProtocolSchema(): Promise<void> {
-  const admin = new PrismaService(databaseUrl());
+  const admin = new PrismaService(ownerDatabaseUrl());
   try {
     await admin.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${PROTOCOL_SCHEMA}" CASCADE`);
   } finally {
@@ -118,8 +131,9 @@ export async function readRow(prisma: PrismaService, id: string): Promise<RowSta
   return row;
 }
 
+/** Empties the isolated table — DELETE, the right the runtime role has (D-045). */
 export async function truncate(prisma: PrismaService): Promise<void> {
-  await prisma.client.$executeRawUnsafe(`TRUNCATE outbox_message`);
+  await prisma.client.$executeRawUnsafe(`DELETE FROM outbox_message`);
 }
 
 /** A publisher whose completion the test controls, for the long-publish cases. */

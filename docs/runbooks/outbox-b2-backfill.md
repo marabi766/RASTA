@@ -37,17 +37,17 @@ B1 در ۲۰۲۶-۰۹-۰۵ سه چیز افزود و هر سه را **بی‌ا�
 ابزار پیش از هر نوشتنی این‌ها را الزام می‌کند و در صورت نقض **با دلیل صریح
 امتناع می‌کند** — هرگز حدس نمی‌زند:
 
-| قفل                     | رفتار                                                                 |
-| ----------------------- | --------------------------------------------------------------------- |
-| هدف صریح                | بدون `--service <name>` یا `--all` اجرا نمی‌شود؛ پیش‌فرضی وجود ندارد  |
-| نوشتن صریح              | بدون `--apply` فقط Plan است؛ `--dry-run` و `--apply` با هم رد می‌شوند |
-| محیط                    | `NODE_ENV=production` رد می‌شود؛ هر `NODE_ENV` ناشناخته هم رد می‌شود  |
-| اتصال                   | فقط `DATABASE_URL_<SERVICE>`؛ **هرگز** بازگشت به `DATABASE_URL` مشترک |
-| سرویس ناشناخته          | رد می‌شود (فقط هشت سرویس دارای Schema B1)                             |
-| اندازهٔ دسته            | عدد صحیح مثبت و حداکثر **۵٬۰۰۰** (سقف ADR-051 § B2)                   |
-| Schema B1               | هر ستون/جدول/Index باید با **تعریف** دقیق موجود باشد، نه فقط با نام   |
-| ردیف تازه حین اجرا      | تشخیص داده و کل دسته Rollback می‌شود (§ «شرط سکون» پایین)             |
-| شکست `VACUUM (ANALYZE)` | خطای عملیاتی گزارش می‌شود و اجرا می‌ایستد — ادامهٔ خاموش وجود ندارد   |
+| قفل                | رفتار                                                                                         |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| هدف صریح           | بدون `--service <name>` یا `--all` اجرا نمی‌شود؛ پیش‌فرضی وجود ندارد                          |
+| نوشتن صریح         | بدون `--apply` فقط Plan است؛ `--dry-run` و `--apply` با هم رد می‌شوند                         |
+| محیط               | `NODE_ENV=production` رد می‌شود؛ هر `NODE_ENV` ناشناخته هم رد می‌شود                          |
+| اتصال              | فقط `DATABASE_URL_<SERVICE>`؛ **هرگز** بازگشت به `DATABASE_URL` مشترک                         |
+| سرویس ناشناخته     | رد می‌شود (فقط هشت سرویس دارای Schema B1)                                                     |
+| اندازهٔ دسته       | عدد صحیح مثبت و حداکثر **۵٬۰۰۰** (سقف ADR-051 § B2)                                           |
+| Schema B1          | هر ستون/جدول/Index باید با **تعریف** دقیق موجود باشد، نه فقط با نام                           |
+| ردیف تازه حین اجرا | تشخیص داده و کل دسته Rollback می‌شود (§ «شرط سکون» پایین)                                     |
+| `VACUUM` (D-045)   | Backfill هرگز Vacuum نمی‌زند و ادعایش را نمی‌کند: `vacuum: required` (§ «Vacuum پس از Apply») |
 
 خروجی **NDJSON** روی stdout است: فقط شمارش‌ها. هیچ Payload، Credential یا رشتهٔ
 اتصالی چاپ نمی‌شود؛ پیام خطا نام متغیر محیطی را می‌گوید، نه مقدارش.
@@ -123,22 +123,23 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service document --apply
 node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply --max-batches 10
 ```
 
-گزینه‌ها: `--batch-size <n>` (۱ تا ۵۰۰۰، پیش‌فرض ۵۰۰۰) ·
-`--max-batches <n>` · `--vacuum-every <n>` (پیش‌فرض ۱).
+گزینه‌ها: `--batch-size <n>` (۱ تا ۵۰۰۰، پیش‌فرض ۵۰۰۰) · `--max-batches <n>`.
+`--vacuum-every` حذف شده و با نام رد می‌شود (§ «Vacuum پس از Apply»).
 
 ### پیشرفت مورد انتظار
 
 ```json
 { "type": "batch", "service": "document", "batch": 1, "selected": 216, "updated": 216,
   "streams": 41, "remaining": 0, "elapsedMs": 48 }
-{ "type": "vacuum", "service": "document", "batch": 1, "ok": true }
 { "type": "counters", "service": "document", "streams": 41, "written": 41 }
 { "type": "heads", "service": "document", "changed": 41, "heads": 41 }
+{ "type": "vacuum", "service": "document", "status": "required", "table": "outbox_message",
+  "reason": "the runtime role cannot VACUUM a table it does not own, so this run did not; …" }
 { "type": "verify", "service": "document", "remaining": 0, "sequenced": 216, "heads": 41,
   "streams": 41, "counter_rows": 41, "counter_next_mismatch": 0,
   "counter_published_mismatch": 0, "head_mismatch": 0 }
-{ "type": "done", "service": "document", "mode": "apply", "mutated": true, "batches": 1,
-  "truncated": false, "converged": true }
+{ "type": "done", "service": "document", "mode": "apply", "mutated": true,
+  "vacuum": "required", "batches": 1, "truncated": false, "converged": true }
 ```
 
 **همگرایی یعنی این سه با هم:** `converged: true` · `remaining: 0` · و هر سه
@@ -194,21 +195,22 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 گزینه‌ها و محیط سالم‌اند، پس **هر سرویس انتخاب‌شده به‌ترتیب امتحان می‌شود** و
 آخرین خط، `summary` تجمیعی است. به‌ازای هر سرویس:
 
-| رویداد               | چه وقت                                                                      |
-| -------------------- | --------------------------------------------------------------------------- |
-| `plan`               | شمارش‌هایی که اجرا رویشان کار می‌کند؛ نخستین رویداد هر سرویس                |
-| `batch` و `vacuum`   | یک جفت به‌ازای هر دستهٔ Apply                                               |
-| `counters` و `heads` | فقط وقتی اجرا همگرا شد                                                      |
-| `verify`             | شمارش‌های پس از اجرا، خوانده‌شده از پایگاه داده                             |
-| `done`               | برای هر تلاشی که تا آخر رفت — Dry-Run یا Apply — با `converged` و `mutated` |
+| رویداد               | چه وقت                                                                                       |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `plan`               | شمارش‌هایی که اجرا رویشان کار می‌کند؛ نخستین رویداد هر سرویس                                 |
+| `batch`              | یکی به‌ازای هر دستهٔ Apply                                                                   |
+| `counters` و `heads` | فقط وقتی اجرا همگرا شد                                                                       |
+| `vacuum`             | `status: "required"` با نام جدول، یک بار، پس از Applyی که چیزی نوشت (§ «Vacuum پس از Apply») |
+| `verify`             | شمارش‌های پس از اجرا، خوانده‌شده از پایگاه داده                                              |
+| `done`               | برای هر تلاشی که تا آخر رفت — Dry-Run یا Apply — با `converged` و `mutated`                  |
 
 و سپس **دقیقاً یک نتیجهٔ سطح CLI** برای همان سرویس:
 
-| نتیجه        | رویداد                        | شمارندهٔ `summary` | معنا                                                                               |
-| ------------ | ----------------------------- | ------------------ | ---------------------------------------------------------------------------------- |
-| همگرا شد     | ندارد (فقط همان `done`)       | `ok`               | `done.converged: true`                                                             |
-| ناتمام       | `incomplete` **پس از** `done` | `incomplete`       | بودجهٔ `--max-batches` تمام شد یا ردیف بدون توالی مانده                            |
-| امتناع سرویس | `refused` **به‌جای** `done`   | `refused`          | `DATABASE_URL_<SERVICE>` تنظیم نشده، نقض پیش‌شرط B1، Guard ترتیب، یا شکست `VACUUM` |
+| نتیجه        | رویداد                        | شمارندهٔ `summary` | معنا                                                                                      |
+| ------------ | ----------------------------- | ------------------ | ----------------------------------------------------------------------------------------- |
+| همگرا شد     | ندارد (فقط همان `done`)       | `ok`               | `done.converged: true`                                                                    |
+| ناتمام       | `incomplete` **پس از** `done` | `incomplete`       | بودجهٔ `--max-batches` تمام شد یا ردیف بدون توالی مانده                                   |
+| امتناع سرویس | `refused` **به‌جای** `done`   | `refused`          | `DATABASE_URL_<SERVICE>` تنظیم نشده، نقش اجرا نیست (D-045)، نقض پیش‌شرط B1 یا Guard ترتیب |
 
 `incomplete` **خطا نیست** و عمداً از `refused` جداست: چیزی خراب نشده، اجرا
 مرزدار بوده. مثل هر رویداد دیگری فقط شمارش دارد — بدون Payload، URL یا Stack.
@@ -248,6 +250,42 @@ node --env-file=.env scripts/outbox-b2-backfill.mjs --service economic --apply -
 | `--service document --apply --max-batches 1` (ناتمام) | بله       | **۱**   |
 | امتناع یک سرویس (مسیر ۲)                              | بله       | **۱**   |
 | امتناع Preflight سراسری (مسیر ۱)                      | **خیر**   | **۱**   |
+
+---
+
+## Vacuum پس از Apply (D-045)
+
+هر Update یک Tuple تازه می‌سازد (ADR-051 § R7: حدود دو برابر رشد جدول) و آمار
+`stream_seq` از «همه NULL» به توزیع واقعی می‌رود؛ پس پس از هر Applyی که چیزی نوشت،
+`VACUUM (ANALYZE)` روی `outbox_message` **لازم** است. Backfill آن را **نمی‌زند**: با
+نقش اجرای سرویس وصل است که مالک هیچ جدولی نیست، و PostgreSQL ۱۶ Vacuum چنین نقشی را
+با یک WARNING **رد می‌شود و موفقیت گزارش می‌کند** (Codex روی #180). پس Backfill فقط
+می‌گوید چه بدهکار است — `{"type":"vacuum","status":"required","table":"outbox_message"}`
+و `done.vacuum: "required"` — و هرگز Vacuumی را که نکرده گزارش نمی‌کند.
+
+بدهی را دستور نگه‌داری جداگانه می‌پردازد، با اعتبار مهاجر سرویس از **محیط**
+(`DATABASE_URL_<SERVICE>_MIGRATOR` در `.env.migrator`؛ هرگز آرگومان، هرگز فرایند Backfill):
+
+```bash
+node --env-file=.env.migrator scripts/outbox-b2-vacuum.mjs --service document
+```
+
+پیش از Vacuum بررسی می‌کند نقش وصل‌شده مالک جدول باشد (وگرنه `refused`، بی هیچ کاری)؛
+پس از آن `vacuum_count` و `analyze_count` جدول در `pg_stat_user_tables` را دوباره
+می‌خواند و فقط اگر **هر دو** بالا رفته باشند `status: "verified"` می‌دهد — با شمارش پیش و
+پس — وگرنه `refused` و کد خروج ۱. این دو شمارنده فقط اجرای دستی را می‌شمارند، پس
+Autovacuum هم‌زمان جای آن را نمی‌گیرد.
+
+```json
+{ "type": "vacuum", "service": "document", "status": "verified", "role": "rasta_document_migrator",
+  "table": "public.outbox_message", "vacuumCount": { "before": 0, "after": 1 },
+  "analyzeCount": { "before": 0, "after": 1 } }
+{ "type": "summary", "services": 1, "verified": 1, "refused": 0 }
+```
+
+برای صف بزرگ، Apply را با `--max-batches` برش بزن و **میان برش‌ها** همین دستور را اجرا
+کن؛ این جای Vacuum میانی‌ای است که ADR-051 § R7 تجویز می‌کند. `--vacuum-every` حذف شده
+و با پیامی که به این بخش اشاره می‌کند رد می‌شود.
 
 ---
 
@@ -326,7 +364,10 @@ Rollback امن B2 این است: **داده را بی‌اثر رها کن.** �
 ```bash
 pnpm test:outbox-b2        # قفل‌های ایمنی و شکل SQL — بدون پایگاه داده
 pnpm test:outbox-b2-pg     # صحت، روی PostgreSQL واقعی (نیازمند pnpm infra:up)
+pnpm test:outbox-b2-vacuum-pg   # D-045: Backfill «required» می‌گوید و Vacuum نمی‌زند؛ دستور نگه‌داری با شمارنده‌ها اثبات می‌کند
 ```
+
+`test:outbox-b2-vacuum-pg` در CI (کار «Integration and security tests») اجرا می‌شود.
 
 آزمون‌های PostgreSQL هر کدام Schema یک‌بارمصرف خودشان را می‌سازند و در پایان
 حذف می‌کنند؛ هیچ‌کدام به `public` دست نمی‌زند. عمداً در `pnpm verify` نیستند،

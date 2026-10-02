@@ -22,6 +22,25 @@ export function databaseUrl(): string {
   return url;
 }
 
+/**
+ * The owner of rasta_asset (`DATABASE_URL_ASSET_MIGRATOR`), for the suite that
+ * re-runs a shipped migration file and calls the SQL function it creates.
+ * **Required, with no fallback** to the runtime URL: since D-045 the runtime
+ * role owns nothing, can create nothing and may not execute the migrator's
+ * functions — falling back would only fail later, for a reason that hides the
+ * missing variable.
+ */
+export function ownerDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL_ASSET_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_ASSET_MIGRATOR is not set. Migration files run as the owner, never the ' +
+        'runtime role; see .env.migrator.example (docs/23 D-045).',
+    );
+  }
+  return url;
+}
+
 export function newPrisma(): PrismaService {
   return new PrismaService(databaseUrl());
 }

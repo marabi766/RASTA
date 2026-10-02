@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaClient } from '../src/generated/prisma';
 import { LedgerRepository } from '../src/ledger/ledger.repository';
 import { LedgerService } from '../src/ledger/ledger.service';
 import { WalletRepository } from '../src/wallet/wallet.repository';
@@ -65,6 +66,25 @@ export function databaseUrl(): string {
     throw new Error(
       'DATABASE_URL_ECONOMIC is not set. These tests run against a real PostgreSQL; ' +
         'start it with `pnpm infra:up` and copy .env.example to .env.',
+    );
+  }
+  return url;
+}
+
+/**
+ * The owner connection `cleanup` alone uses to lift the ledger's immutability
+ * and balance triggers (`DATABASE_URL_ECONOMIC_MIGRATOR`,
+ * `rasta_economic_migrator`). **Required, with no fallback** to the runtime
+ * URL: since D-045 the runtime role owns nothing and cannot lift a trigger at
+ * all, and a suite that fell back would fail for a reason that hides the real
+ * one — a missing variable.
+ */
+export function ownerDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL_ECONOMIC_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_ECONOMIC_MIGRATOR is not set. The suites lift a ledger trigger only ' +
+        'through the owner connection, never the runtime one; see .env.migrator.example (docs/23 D-045).',
     );
   }
   return url;
@@ -424,58 +444,72 @@ export async function cleanup(
     //
     // Everything that does not need the triggers off is kept outside, so the
     // window is three statements rather than fifteen.
+    //
+    // And the window is opened by the **owner** connection, never by the
+    // runtime `PrismaService` under test (D-045): the runtime role cannot
+    // disable a trigger at all, and a suite that did it with the service's
+    // own connection would be teaching the code to.
     if (journalIds.length > 0) {
-      await prisma.transaction(async (tx) => {
-        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE. It is bounded
-        // instead by this transaction, which reverts it on every exit path.
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE ledger_entry DISABLE TRIGGER trg_ledger_entry_immutable',
-        );
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe('ALTER TABLE journal DISABLE TRIGGER trg_journal_immutable');
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe('ALTER TABLE ledger_entry DISABLE TRIGGER trg_journal_balanced');
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      try {
+        await owner.$transaction(async (tx) => {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE. It is bounded
+          // instead by this transaction, which reverts it on every exit path.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE ledger_entry DISABLE TRIGGER trg_ledger_entry_immutable',
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe('ALTER TABLE journal DISABLE TRIGGER trg_journal_immutable');
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE ledger_entry DISABLE TRIGGER trg_journal_balanced',
+          );
 
-        // Entries are removed by **journal**, never by organization.
-        //
-        // A settlement journal has legs belonging to the payer, the payee and
-        // the platform. Deleting only the legs whose organization is in this
-        // list leaves the journal behind with the rest of its legs —
-        // permanently unbalanced, and picked up by the "every journal
-        // balances" assertion in the next suite. That is exactly how this
-        // helper first failed.
-        await tx.$executeRawUnsafe(
-          `DELETE FROM ledger_entry WHERE journal_id = ANY($1::text[])`,
-          journalIds,
-        );
-        // Reversals first: `journal.reverses_id` is a self-referencing foreign
-        // key with ON DELETE RESTRICT, so a reversal has to go before the
-        // journal it points at.
-        //
-        // The `NOT IN` guard is kept as a safety net — a journal that somehow
-        // still has legs is left alone rather than dragged out from under
-        // them — but the delete is now bound to this run's own journal ids,
-        // which is what makes it safe in a database every run shares.
-        await tx.$executeRawUnsafe(
-          `DELETE FROM journal
-            WHERE id = ANY($1::text[])
-              AND reverses_id IS NOT NULL
-              AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
-          journalIds,
-        );
-        await tx.$executeRawUnsafe(
-          `DELETE FROM journal
-            WHERE id = ANY($1::text[])
-              AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
-          journalIds,
-        );
+          // Entries are removed by **journal**, never by organization.
+          //
+          // A settlement journal has legs belonging to the payer, the payee and
+          // the platform. Deleting only the legs whose organization is in this
+          // list leaves the journal behind with the rest of its legs —
+          // permanently unbalanced, and picked up by the "every journal
+          // balances" assertion in the next suite. That is exactly how this
+          // helper first failed.
+          await tx.$executeRawUnsafe(
+            `DELETE FROM ledger_entry WHERE journal_id = ANY($1::text[])`,
+            journalIds,
+          );
+          // Reversals first: `journal.reverses_id` is a self-referencing foreign
+          // key with ON DELETE RESTRICT, so a reversal has to go before the
+          // journal it points at.
+          //
+          // The `NOT IN` guard is kept as a safety net — a journal that somehow
+          // still has legs is left alone rather than dragged out from under
+          // them — but the delete is now bound to this run's own journal ids,
+          // which is what makes it safe in a database every run shares.
+          await tx.$executeRawUnsafe(
+            `DELETE FROM journal
+              WHERE id = ANY($1::text[])
+                AND reverses_id IS NOT NULL
+                AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
+            journalIds,
+          );
+          await tx.$executeRawUnsafe(
+            `DELETE FROM journal
+              WHERE id = ANY($1::text[])
+                AND id NOT IN (SELECT DISTINCT journal_id FROM ledger_entry)`,
+            journalIds,
+          );
 
-        await tx.$executeRawUnsafe(
-          'ALTER TABLE ledger_entry ENABLE TRIGGER trg_ledger_entry_immutable',
-        );
-        await tx.$executeRawUnsafe('ALTER TABLE journal ENABLE TRIGGER trg_journal_immutable');
-        await tx.$executeRawUnsafe('ALTER TABLE ledger_entry ENABLE TRIGGER trg_journal_balanced');
-      });
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE ledger_entry ENABLE TRIGGER trg_ledger_entry_immutable',
+          );
+          await tx.$executeRawUnsafe('ALTER TABLE journal ENABLE TRIGGER trg_journal_immutable');
+          await tx.$executeRawUnsafe(
+            'ALTER TABLE ledger_entry ENABLE TRIGGER trg_journal_balanced',
+          );
+        });
+      } finally {
+        await owner.$disconnect();
+      }
     }
 
     // Legs first, and by *transaction* rather than by organization: a leg
