@@ -6,6 +6,7 @@ import {
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
+import { liveMembershipWhere } from './membership-window';
 import { assertTopicFor, resolvePartitionKey, type OutboundEventName } from './routing';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
@@ -226,6 +227,20 @@ export class IdentityRepository {
   async findMembershipById(id: string, tx?: ExtendedPrismaClient) {
     const db = tx ?? this.client;
     return db.membership.findFirst({ where: { id, deletedAt: null } });
+  }
+
+  /** The organizations a user holds a live membership in at `now`, ids only. */
+  async findLiveOrganizationIds(userId: string, now: Date): Promise<string[]> {
+    const rows = await runUnscoped(
+      'a service asks which organizations a user belongs to; a membership spans tenants',
+      () =>
+        this.client.membership.findMany({
+          where: { userId, ...liveMembershipWhere(now) },
+          select: { organizationId: true },
+          orderBy: { organizationId: 'asc' },
+        }),
+    );
+    return rows.map((row) => row.organizationId);
   }
 
   async findMembership(userId: string, organizationId: string, tx?: ExtendedPrismaClient) {

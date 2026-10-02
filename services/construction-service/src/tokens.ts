@@ -34,3 +34,9 @@ export const STANDING_SNAPSHOT_SOURCE = Symbol('CONSTRUCTION_STANDING_SNAPSHOT_S
 
 /** Where one contractor's current standing is asked (`StandingOfSource`), authoritatively. */
 export const STANDING_OF_SOURCE = Symbol('CONSTRUCTION_STANDING_OF_SOURCE');
+
+/**
+ * Where a user's current organizations are read from (`MembershipSource`): identity-service
+ * in production, a map in tests. Fails closed; used at the approval of a bid opening.
+ */
+export const MEMBERSHIP_SOURCE = Symbol('CONSTRUCTION_MEMBERSHIP_SOURCE');

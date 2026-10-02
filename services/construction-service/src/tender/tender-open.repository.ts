@@ -34,6 +34,7 @@ export interface TenderOwnership {
   organizationId: string;
   status: TenderStateName;
   openedAt: Date | null;
+  openingProposedBy: string | null;
 }
 
 interface LockRow {
@@ -78,7 +79,13 @@ export class TenderOpenRepository {
       async () => {
         const row = await this.prisma.client.tender.findFirst({
           where: { id: tenderId },
-          select: { id: true, organizationId: true, status: true, openedAt: true },
+          select: {
+            id: true,
+            organizationId: true,
+            status: true,
+            openedAt: true,
+            openingProposedBy: true,
+          },
         });
         return row ? { ...row, status: row.status as TenderStateName } : null;
       },

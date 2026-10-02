@@ -15,11 +15,12 @@ import {
   versionConflictsTotal,
 } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
-import { ENV, TENDER_EVIDENCE_SOURCE, TENDER_KEY_PROVIDER } from '../tokens';
+import { ENV, MEMBERSHIP_SOURCE, TENDER_EVIDENCE_SOURCE, TENDER_KEY_PROVIDER } from '../tokens';
 import { BidAccessAudit } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
 import { TenderOpenRepository, type TenderForOpening } from './tender-open.repository';
 import { compareChains } from './chain-agreement';
+import type { MembershipSource } from './membership.client';
 import { SealingError } from './sealing/errors';
 import type { TenderKeyProvider } from './sealing/key-provider';
 import {
@@ -61,6 +62,12 @@ export type OpeningRefusal = (typeof OPENING_REFUSALS)[number];
 /** Bids that have been opened: everything past SUBMITTED, except the ones taken back. */
 const NOT_OPENED_STATES: readonly string[] = ['SUBMITTED', 'WITHDRAWN'];
 const isOpened = (bid: Bid): boolean => !NOT_OPENED_STATES.includes(bid.status);
+
+/** Who proposed, and every organization the proposer and the approver belong to now. */
+interface ApprovalPeople {
+  proposedBy: string;
+  organizationIds: readonly string[];
+}
 
 interface Principal {
   organizationId: string;
@@ -135,6 +142,13 @@ interface Evidence {
  * `open` and whom the opening is recorded under; neither is a member of a bidding
  * organization. Committee size and roles are the product owner's to confirm.
  *
+ * The conflict is judged at the **approval**, on both people as they are *now*: their
+ * organizations are read from identity-service (`MembershipSource`, fail closed), not taken
+ * from the proposal or only from the approver's token — a proposer who has since joined a
+ * bidding organization no longer stands. The proposal itself leaves an access row and
+ * `BID_ACCESSED` (`PROPOSE_OPENING`, ids only) in its transaction. A conflicted user is
+ * refused **before** anything is said of the tender's state (not closed, not opened).
+ *
  * ## The event is bounded
  *
  * `BIDS_OPENED` carries a count and a digest of the bid ids, never the ids: a tender may
@@ -155,6 +169,7 @@ export class TenderOpenService {
     private readonly clock: TenderClock,
     @Inject(TENDER_EVIDENCE_SOURCE) private readonly evidence: TenderEvidenceSource,
     @Inject(TENDER_KEY_PROVIDER) private readonly keys: TenderKeyProvider,
+    @Inject(MEMBERSHIP_SOURCE) private readonly memberships: MembershipSource,
   ) {}
 
   // -- open ---------------------------------------------------------------------
@@ -162,17 +177,22 @@ export class TenderOpenService {
   async open(tenderId: string): Promise<BidsOpenedView> {
     const principal = this.access.assertCanOpenBids();
     const view = await this.guarded(principal, tenderId, 'OPEN_BIDS', async (found) => {
+      // First: a conflicted user is told nothing of the tender's state, not even that it is not closed.
+      await this.assertNotConflicted(principal, tenderId);
       // Outside any transaction and before any lock (see the class header). A tender
       // already open needs no evidence; one that is not closed has none to ask for.
       let evidence: Evidence | undefined;
+      let people: ApprovalPeople | undefined;
       if (found.status === 'CLOSED') {
+        people = await this.readApprovalPeople(principal, found.openingProposedBy);
         evidence = await this.readEvidence(principal.organizationId, tenderId);
       } else if (found.openedAt === null) {
         throw this.refused('NOT_CLOSED');
       }
       return withFinancialSpan(
         'construction.bid.open',
-        () => this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence)),
+        () =>
+          this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence, people)),
         { 'rasta.tender.command': 'open-bids' },
       );
     });
@@ -187,6 +207,7 @@ export class TenderOpenService {
     principal: Principal,
     tenderId: string,
     evidence: Evidence | undefined,
+    people: ApprovalPeople | undefined,
   ): Promise<BidsOpenedView> {
     const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
     if (!locked) throw RastaError.notFound('Tender', tenderId);
@@ -194,7 +215,7 @@ export class TenderOpenService {
     const bids = await this.opens.listBids(tx, tenderId);
     // Before any answer, the already-opened one included: it says how many bids there were.
     this.assertNoConflict(
-      principal,
+      principal.organizationIds,
       bids.map((bid) => bid.bidderOrganizationId),
     );
     if (locked.openedAt !== null && locked.openedBy !== null) {
@@ -218,6 +239,16 @@ export class TenderOpenService {
       if (locked.openingProposedBy === null) throw this.refused('PROPOSAL_REQUIRED');
       if (locked.openingProposedBy === principal.actor)
         throw this.refused('SECOND_PERSON_REQUIRED');
+      // Both people as they are NOW, not as they were at the proposal: someone who has since
+      // joined a bidding organization neither proposes nor approves. Read before the lock
+      // (the proposal never changes once made); no read, or one of another proposer, fails closed.
+      if (!people || people.proposedBy !== locked.openingProposedBy) {
+        throw RastaError.optimisticLockFailed('Tender', tenderId);
+      }
+      this.assertNoConflict(
+        people.organizationIds,
+        bids.map((bid) => bid.bidderOrganizationId),
+      );
     }
     // It was PUBLISHED when the evidence was to be read, and has been closed since: ask again.
     if (!evidence) throw RastaError.optimisticLockFailed('Tender', tenderId);
@@ -292,13 +323,14 @@ export class TenderOpenService {
    */
   async proposeOpening(tenderId: string): Promise<BidOpeningProposalView> {
     const principal = this.access.assertCanOpenBids();
-    return this.guarded(principal, tenderId, 'OPEN_BIDS', async (found) => {
+    return this.guarded(principal, tenderId, 'PROPOSE_OPENING', async (found) => {
+      await this.assertNotConflicted(principal, tenderId);
       if (found.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
       return this.prisma.transaction(async (tx) => {
         const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
         if (!locked) throw RastaError.notFound('Tender', tenderId);
         const bidders = await this.opens.listBidderOrganizationIds(tx, tenderId);
-        this.assertNoConflict(principal, bidders);
+        this.assertNoConflict(principal.organizationIds, bidders);
         const at = await this.clock.decisionInstant(tx);
         if (
           locked.status !== 'CLOSED' ||
@@ -309,6 +341,7 @@ export class TenderOpenService {
           throw this.refused('NOT_CLOSED');
         }
         if (locked.openingProposedBy !== null) {
+          await this.recordProposal(tx, principal, tenderId, at);
           return { tenderId, proposedBy: locked.openingProposedBy, alreadyProposed: true };
         }
         const matched = await this.opens.proposeOpening(tx, {
@@ -317,6 +350,8 @@ export class TenderOpenService {
           at,
         });
         if (matched === 0) throw RastaError.optimisticLockFailed('Tender', tenderId);
+        // The evidence of the proposal, in the transaction that makes it: who proposed what, and when.
+        await this.recordProposal(tx, principal, tenderId, at);
         return { tenderId, proposedBy: principal.actor, alreadyProposed: false };
       });
     });
@@ -348,6 +383,7 @@ export class TenderOpenService {
   async getBid(tenderId: string, bidId: string): Promise<OpenedBidView> {
     const principal = this.access.assertCanOpenBids();
     return this.guarded(principal, tenderId, 'READ_BID', async (found) => {
+      await this.assertNotConflicted(principal, tenderId);
       if (found.openedAt === null) throw this.refused('NOT_OPENED');
       const evidence = await this.readEvidence(principal.organizationId, tenderId);
       return this.prisma.transaction(async (tx) => {
@@ -372,7 +408,10 @@ export class TenderOpenService {
       if (!(await this.opens.ownsTender(tx, tenderId)))
         throw RastaError.notFound('Tender', tenderId);
       // The log names who read which bid and when: not for a member of a bidder's organization.
-      this.assertNoConflict(principal, await this.opens.listBidderOrganizationIds(tx, tenderId));
+      this.assertNoConflict(
+        principal.organizationIds,
+        await this.opens.listBidderOrganizationIds(tx, tenderId),
+      );
       return this.opens.listAccessLog(tx, tenderId, query);
     });
     const hasMore = rows.length > query.limit;
@@ -407,7 +446,7 @@ export class TenderOpenService {
     const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
     // Before any answer: the counts and receipt times of a bidder's own competitors are not for it.
     this.assertNoConflict(
-      principal,
+      principal.organizationIds,
       bids.map((bid) => bid.bidderOrganizationId),
     );
 
@@ -492,7 +531,11 @@ export class TenderOpenService {
     principal: Principal,
     tenderId: string,
     purpose: BidAccessPurpose,
-    work: (found: { status: string; openedAt: Date | null }) => Promise<T>,
+    work: (found: {
+      status: string;
+      openedAt: Date | null;
+      openingProposedBy: string | null;
+    }) => Promise<T>,
   ): Promise<T> {
     const found = await this.opens.findOwnership(tenderId);
     if (!found) throw RastaError.notFound('Tender', tenderId);
@@ -586,10 +629,61 @@ export class TenderOpenService {
     throw this.refused('INTEGRITY');
   }
 
+  /** The conflict check before anything is said about the tender's state: the bidders are read on their own. */
+  private async assertNotConflicted(principal: Principal, tenderId: string): Promise<void> {
+    const bidders = await this.prisma.transaction((tx) =>
+      this.opens.listBidderOrganizationIds(tx, tenderId),
+    );
+    this.assertNoConflict(principal.organizationIds, bidders);
+  }
+
+  /**
+   * The proposer's and the approver's organizations as identity-service holds them now,
+   * read once, outside the transaction. Only when four-eyes applies and a proposal stands.
+   * Fails closed: unreachable or malformed refuses the opening (502/504).
+   */
+  private async readApprovalPeople(
+    principal: Principal,
+    proposedBy: string | null,
+  ): Promise<ApprovalPeople | undefined> {
+    if (!this.env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES || proposedBy === null) return undefined;
+    const [proposer, approver] = await Promise.all([
+      this.memberships.fetchOrganizationIds(proposedBy),
+      this.memberships.fetchOrganizationIds(principal.actor),
+    ]);
+    // What the token says as well: the stricter of the two.
+    return {
+      proposedBy,
+      organizationIds: [...new Set([...proposer, ...approver, ...principal.organizationIds])],
+    };
+  }
+
+  /** The proposal's evidence: an append-only access row and its event, in the caller's transaction. */
+  private async recordProposal(
+    tx: ExtendedPrismaClient,
+    principal: Principal,
+    tenderId: string,
+    at: Date,
+  ): Promise<void> {
+    await this.audit.record(tx, {
+      owner: principal.organizationId,
+      tenderId,
+      bidId: null,
+      accessorOrganizationId: principal.organizationId,
+      accessorUserId: principal.actor,
+      purpose: 'PROPOSE_OPENING',
+      outcome: 'GRANTED',
+      at,
+    });
+  }
+
   /** Refuses a member of any organization that bid (withdrawn bids included) on the tender. */
-  private assertNoConflict(principal: Principal, bidderOrganizationIds: readonly string[]): void {
+  private assertNoConflict(
+    memberOf: readonly string[],
+    bidderOrganizationIds: readonly string[],
+  ): void {
     const bidders = new Set(bidderOrganizationIds);
-    if (principal.organizationIds.some((organization) => bidders.has(organization))) {
+    if (memberOf.some((organization) => bidders.has(organization))) {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
       throw RastaError.forbidden(
         'A member of an organization that bid on this tender does not open or read its bids',

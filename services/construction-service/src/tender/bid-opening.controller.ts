@@ -93,7 +93,7 @@ export class BidOpeningController {
     summary: 'Who read the tender’s bids, and why',
     description:
       'The append-only log of every read, granted or refused, newest first: the reader, a closed ' +
-      'purpose (OPEN_BIDS, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never ' +
+      'purpose (OPEN_BIDS, PROPOSE_OPENING, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never ' +
       `content. Reading the log is not itself logged. ${OWNER_NOTE}`,
   })
   async accessLog(

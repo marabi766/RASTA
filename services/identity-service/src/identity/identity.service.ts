@@ -135,6 +135,33 @@ export class IdentityService {
     };
   }
 
+  /**
+   * The organizations a user belongs to **now**, for construction-service's conflict-of-
+   * interest check at the approval of a bid opening (CON-002 PR 8, Q-91). Service-only:
+   * `construction-service` with a token signed for no tenant; anyone else is refused.
+   * Ids only, live memberships only (`isMembershipLive`'s predicate).
+   */
+  async getLiveOrganizationIds(
+    userId: string,
+  ): Promise<{ userId: string; organizationIds: string[]; asOf: string }> {
+    const context = getContext();
+    if (
+      context.authType !== 'SERVICE' ||
+      context.callerService !== 'construction-service' ||
+      context.organizationId !== undefined
+    ) {
+      throw RastaError.forbidden(
+        'Only construction-service may read which organizations a user belongs to',
+      );
+    }
+    const now = new Date();
+    return {
+      userId,
+      organizationIds: await this.repository.findLiveOrganizationIds(userId, now),
+      asOf: now.toISOString(),
+    };
+  }
+
   async getUser(id: string): Promise<UserView> {
     // Object-level authorization: a user is visible only through a membership
     // in the requesting organization. Checking the membership rather than the

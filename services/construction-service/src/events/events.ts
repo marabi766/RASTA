@@ -573,12 +573,13 @@ export const bidWithdrawnPayload = z
 
 /**
  * Closed codes for why a bid was read (ADR-066 § 5): the bidder's own receipt; the owner
- * opening the bids; the owner counting the bids before the opening (no identity, no
+ * opening the bids, or proposing to (four eyes, Q-91; no bid is read); the owner counting the bids before the opening (no identity, no
  * content); the owner reading them afterwards, listed or one by one.
  */
 export const BID_ACCESS_PURPOSES = [
   'OWN_BID_RECEIPT',
   'OPEN_BIDS',
+  'PROPOSE_OPENING',
   'COUNT_BIDS',
   'LIST_BIDS',
   'READ_BID',

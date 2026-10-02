@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
@@ -1217,9 +1219,159 @@ describe('opening the bids of a tender', () => {
       await expectNothingOpened(owner, tenderId);
     });
 
+    describe('who they are NOW, at the approval', () => {
+      afterEach(() => {
+        w4.memberships.failure = undefined;
+        w4.memberships.of.clear();
+        w4.memberships.asked.length = 0;
+      });
+
+      it('refuses when the proposer has joined a bidding organization since proposing', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.of.set(alice, [owner, bidders[0]!]);
+
+        expect(await codeOf(approve(owner, tenderId, bob))).toMatchObject({ code: 'FORBIDDEN' });
+
+        await expectNothingOpened(owner, tenderId);
+        expect(w4.memberships.asked).toEqual(expect.arrayContaining([alice, bob]));
+      });
+
+      it('refuses when the approver has joined one, though the token says otherwise', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.of.set(bob, [bidders[1]!]);
+
+        expect(await codeOf(approve(owner, tenderId, bob))).toMatchObject({ code: 'FORBIDDEN' });
+
+        await expectNothingOpened(owner, tenderId);
+      });
+
+      it('opens when neither belongs to a bidding organization now', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.of.set(alice, [owner]);
+        w4.memberships.of.set(bob, [owner]);
+
+        expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
+      });
+
+      it('fails closed when identity-service cannot say: 502, nothing opened', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.failure = RastaError.upstreamUnavailable('identity-service');
+
+        expect(await codeOf(approve(owner, tenderId, bob))).toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+
+        await expectNothingOpened(owner, tenderId);
+        w4.memberships.failure = undefined;
+        expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
+      });
+    });
+
+    it('leaves the evidence of a proposal: an access row and BID_ACCESSED, ids only, in its transaction', async () => {
+      const { owner, tenderId } = await closedTender();
+
+      await propose(owner, tenderId, alice);
+      await propose(owner, tenderId, bob);
+
+      const rows = (await logOf(tenderId)).filter((row) => row.purpose === 'PROPOSE_OPENING');
+      expect(rows.map((row) => `${row.accessorUserId}:${row.outcome}:${row.bidId}`)).toEqual([
+        `${alice}:GRANTED:null`,
+        `${bob}:GRANTED:null`,
+      ]);
+      const events = (await eventsOf(owner, 'BID_ACCESSED', tenderId)).map((row) => payloadOf(row));
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          purpose: 'PROPOSE_OPENING',
+          accessedBy: alice,
+          outcome: 'GRANTED',
+          bidId: null,
+        }),
+      );
+    });
+
+    it('tells a member of a bidding organization nothing of the tender’s state: conflict before NOT_CLOSED / NOT_OPENED', async () => {
+      const owner = org();
+      const bidder = org();
+      await qualify(w, bidder);
+      const { tenderId } = await publishedForBids(w, owner);
+      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+      const asMember = <T>(fn: () => T) =>
+        runWithContext(
+          context({
+            organizationId: owner,
+            organizationIds: [owner, bidder],
+            userId: alice,
+            roles: ['ORGANIZATION_ADMIN'],
+          }),
+          fn,
+        );
+
+      // The tender is PUBLISHED: anyone else is told NOT_CLOSED, this member is told FORBIDDEN.
+      expect(await codeOf(asMember(() => w4.tenderOpen.open(tenderId)))).toMatchObject({
+        code: 'FORBIDDEN',
+      });
+      expect(await codeOf(asMember(() => w4.tenderOpen.proposeOpening(tenderId)))).toMatchObject({
+        code: 'FORBIDDEN',
+      });
+      expect(
+        await codeOf(asMember(() => w4.tenderOpen.getBid(tenderId, 'BID_NONE'))),
+      ).toMatchObject({ code: 'FORBIDDEN' });
+      expect(await refusalOf(propose(owner, tenderId, bob))).toContain('NOT_CLOSED');
+    });
+
     it('is not needed where the setting is off (development and test only)', async () => {
       const { owner, tenderId } = await closedTender();
       expect((await open(owner, tenderId)).status).toBe('EVALUATING');
+    });
+  });
+
+  describe('the migration’s rollback', () => {
+    it('refuses while a proposal is pending, and while an opening is recorded, and touches nothing', async () => {
+      const text = readFileSync(
+        join(
+          __dirname,
+          '..',
+          'prisma',
+          'migrations',
+          '20261002100000_tender_open_bids',
+          'down.sql',
+        ),
+        'utf8',
+      );
+      const lock = /^LOCK TABLE [^;]+;/m.exec(text)?.[0];
+      const check = new RegExp('DO \\$preflight_opening\\$[\\s\\S]*?\\$preflight_opening\\$;').exec(
+        text,
+      )?.[0];
+      expect(lock).toContain('ACCESS EXCLUSIVE');
+      expect(check).toBeDefined();
+      expect(text.indexOf(lock!)).toBeLessThan(text.indexOf(check!));
+      expect(text.indexOf(check!)).toBeLessThan(text.indexOf('DROP COLUMN'));
+      const runAfterLock = () =>
+        w.prisma.client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(lock!.replace(/;$/, ''));
+          await tx.$executeRawUnsafe(check!.replace(/;$/, ''));
+        });
+
+      // A proposal and nothing else: the columns would be dropped with it.
+      const { owner, tenderId } = await closedTender();
+      await sql(
+        'the suite records a proposal, as the proposal command does',
+        `UPDATE "tender" SET "opening_proposed_at" = now(), "opening_proposed_by" = 'USR_ROLLBACK'
+          WHERE "id" = '${tenderId}'`,
+      );
+      await expect(runAfterLock()).rejects.toThrow(
+        /down refused: \d+ tender\(s\) hold a pending proposal/,
+      );
+      expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: 'USR_ROLLBACK' });
+
+      // The opening is recorded too: refused (by whichever of the two reads it first).
+      await open(owner, tenderId);
+      await expect(runAfterLock()).rejects.toThrow(/down refused/);
+      expect(await rowOf(tenderId)).toMatchObject({ status: 'EVALUATING' });
     });
   });
 });

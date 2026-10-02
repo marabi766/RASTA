@@ -71,6 +71,19 @@ export class UserController {
     return this.identity.listUsers(query);
   }
 
+  @Get(':id/organizations')
+  @AllowService('construction-service')
+  @ApiOperation({
+    summary: 'The organizations a user belongs to now (ids only)',
+    description:
+      'Service-to-service only: `construction-service` with a token signed for no tenant; a ' +
+      'person, any other service, or a token signed for a tenant is refused 403. Live ' +
+      'memberships only. Used to re-check a conflict of interest when a bid opening is approved.',
+  })
+  liveOrganizations(@Param('id') id: string) {
+    return this.identity.getLiveOrganizationIds(id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one user' })
   get(@Param('id') id: string) {

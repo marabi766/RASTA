@@ -34,6 +34,7 @@ import { TenderClock } from '../src/tender/tender-clock';
 import { TenderOpenRepository } from '../src/tender/tender-open.repository';
 import { TenderOpenService } from '../src/tender/tender-open.service';
 import { BidAccessAudit } from '../src/tender/bid-access-audit';
+import type { MembershipSource } from '../src/tender/membership.client';
 import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
 import { genesisReceipt } from '../src/tender/sealing/sealing';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
@@ -183,6 +184,8 @@ export interface Wiring {
   tenderCloseSweeperWith(overrides?: Partial<TenderCloseSweeperOptions>): TenderCloseSweeper;
   /** CON-002 PR 8: opening the bids, over an evidence source a test controls (what audit-service holds). */
   evidence: FakeTenderEvidence;
+  /** identity-service as the approval of an opening sees it: who belongs to which organization now. */
+  memberships: FakeMemberships;
   tenderOpens: TenderOpenRepository;
   tenderOpen: TenderOpenService;
   close(): Promise<void>;
@@ -270,6 +273,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const tenderCloses = new TenderCloseRepository(prisma);
   const bidAudit = new BidAccessAudit(bidRepository, events);
   const evidence = new FakeTenderEvidence(prisma);
+  const memberships = new FakeMemberships();
   const tenderOpens = new TenderOpenRepository(prisma);
   const tenderClose = new TenderCloseService(prisma, tenderCloses, events, clock);
   const tenderCloseSweeperWith = (overrides: Partial<TenderCloseSweeperOptions> = {}) =>
@@ -287,6 +291,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     repository,
     projects,
     evidence,
+    memberships,
     tenderOpens,
     tenderOpen: new TenderOpenService(
       prisma,
@@ -298,6 +303,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       clock,
       evidence,
       keys,
+      memberships,
     ),
     tenderCloses,
     tenderClose,
@@ -455,6 +461,23 @@ export class FakeTenderEvidence implements TenderEvidenceSource {
     this.afterRead = undefined;
     if (hook) await hook();
     return chain;
+  }
+}
+
+/**
+ * identity-service as the approval of an opening sees it: by default nobody belongs to
+ * anything (the token's own organizations are checked besides); a test sets who belongs
+ * where now, or makes the read fail.
+ */
+export class FakeMemberships implements MembershipSource {
+  failure: Error | undefined;
+  readonly of = new Map<string, readonly string[]>();
+  readonly asked: string[] = [];
+
+  async fetchOrganizationIds(userId: string): Promise<readonly string[]> {
+    this.asked.push(userId);
+    if (this.failure) throw this.failure;
+    return this.of.get(userId) ?? [];
   }
 }
 

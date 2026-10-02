@@ -72,6 +72,7 @@ import { PublicationRepository } from './tender/publication.repository';
 import { PublicationService } from './tender/publication.service';
 import { PublicationController } from './tender/publication.controller';
 import { BidRepository } from './tender/bid.repository';
+import { MembershipClient } from './tender/membership.client';
 import { TenderEvidenceClient } from './tender/tender-evidence.client';
 import { BidService } from './tender/bid.service';
 import { BidController } from './tender/bid.controller';
@@ -96,6 +97,7 @@ import {
 import {
   ENV,
   LOGGER,
+  MEMBERSHIP_SOURCE,
   STANDING_OF_SOURCE,
   STANDING_SNAPSHOT_SOURCE,
   TENDER_EVIDENCE_SOURCE,
@@ -187,6 +189,9 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     // holds them where this service cannot rewrite them; opening bids (PR 8) uses it.
     TenderEvidenceClient,
     { provide: TENDER_EVIDENCE_SOURCE, useExisting: TenderEvidenceClient },
+    // Q-91: who belongs to which organization now, asked of identity-service at the approval of an opening.
+    MembershipClient,
+    { provide: MEMBERSHIP_SOURCE, useExisting: MembershipClient },
     // ADR-065 § 2: the deadline is judged on the database's clock, read after the lock.
     { provide: TenderClock, useClass: DatabaseTenderClock },
     BidService,

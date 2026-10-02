@@ -90,6 +90,10 @@ function roleList(name: string, options: { min: number }) {
  *                                       a tender's bids is proposed by one user and
  *                                       approved by a second. Default `true`; `false`
  *                                       only in development and test.
+ *   IDENTITY_SERVICE_URL                Where the proposer's and the approver's current
+ *                                       organizations are read at the approval of an
+ *                                       opening (and CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS);
+ *                                       unreadable refuses the opening.
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
  *   SUPPLIER_SERVICE_URL                Where the contractor-standing snapshot is read
  *                                       (and CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
@@ -229,6 +233,19 @@ export const constructionEnvSchema = baseEnvSchema
      * are not opened.
      */
     AUDIT_SERVICE_URL: z.string().url().default('http://localhost:3115'),
+    /**
+     * Where a user's current organizations are read (CON-002 PR 8, Q-91): `GET
+     * {IDENTITY_SERVICE_URL}/v1/users/{id}/organizations`, a service call with a token
+     * signed for no tenant. The conflict check at the approval of a bid opening uses it
+     * for the proposer and the approver; if it cannot be read, the opening is refused.
+     */
+    IDENTITY_SERVICE_URL: z.string().url().default('http://localhost:3101'),
+    CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
     CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()

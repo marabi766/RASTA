@@ -11850,7 +11850,7 @@
     },
     "/v1/tenders/{id}/bid-access-log": {
       "get": {
-        "description": "The append-only log of every read, granted or refused, newest first: the reader, a closed purpose (OPEN_BIDS, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never content. Reading the log is not itself logged. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
+        "description": "The append-only log of every read, granted or refused, newest first: the reader, a closed purpose (OPEN_BIDS, PROPOSE_OPENING, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never content. Reading the log is not itself logged. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
         "operationId": "BidOpeningController_accessLog_v1",
         "parameters": [
           {
@@ -11916,6 +11916,7 @@
                             "enum": [
                               "OWN_BID_RECEIPT",
                               "OPEN_BIDS",
+                              "PROPOSE_OPENING",
                               "COUNT_BIDS",
                               "LIST_BIDS",
                               "READ_BID"

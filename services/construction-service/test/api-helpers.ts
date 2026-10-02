@@ -15,13 +15,14 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import {
   FakeHierarchy,
+  FakeMemberships,
   FakeTenderEvidence,
   SUPPLIER,
   TEST_KEK,
   TEST_KEK_ID,
   databaseUrl,
 } from './helpers';
-import { STANDING_OF_SOURCE, TENDER_EVIDENCE_SOURCE } from '../src/tokens';
+import { MEMBERSHIP_SOURCE, STANDING_OF_SOURCE, TENDER_EVIDENCE_SOURCE } from '../src/tokens';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
@@ -48,6 +49,8 @@ export interface ApiHarness {
   hierarchy: FakeHierarchy;
   /** audit-service as opening bids sees it: the chain the events announced, unless a test serves another. */
   evidence: FakeTenderEvidence;
+  /** identity-service as the approval of an opening sees it. */
+  memberships: FakeMemberships;
   close(): Promise<void>;
 }
 
@@ -224,6 +227,9 @@ export async function startApi(): Promise<ApiHarness> {
       factory: (prisma: PrismaService) => new FakeTenderEvidence(prisma),
       inject: [PrismaService],
     })
+    // identity-service answers who belongs where; the real client is proven in membership-client.int-spec.ts.
+    .overrideProvider(MEMBERSHIP_SOURCE)
+    .useValue(new FakeMemberships())
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -266,6 +272,7 @@ export async function startApi(): Promise<ApiHarness> {
     publisher,
     hierarchy,
     evidence: moduleRef.get<FakeTenderEvidence>(TENDER_EVIDENCE_SOURCE),
+    memberships: moduleRef.get<FakeMemberships>(MEMBERSHIP_SOURCE),
     close: async () => {
       await app.close();
     },
