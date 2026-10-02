@@ -1,0 +1,36 @@
+# Alert rules for the tender close sweeper (CON-002 PR 7, ADR-065 § 3), evaluated by
+# the local Prometheus in docker-compose.yml (`observability` profile).
+#
+# Local-only, like the audit, notification and economic rules next door: there is no
+# Alertmanager in this repository, so a firing alert is visible at
+# http://localhost:9090/alerts and nowhere else. Production routing is a deployment
+# concern this file does not provide.
+#
+# Behaviour is proven by tests/rasta-construction-alerts.test.yml:
+#   promtool test rules /etc/prometheus/tests/rasta-construction-alerts.test.yml
+#
+# What is at stake: a bid is refused after the deadline by the database's clock whether
+# or not the sweeper runs, so a tender that cannot be closed is not a correctness
+# problem — but it stays PUBLISHED, so nobody can open the bids, evaluate or award it.
+# The sweeper backs off a failing tender (bounded exponential) so it cannot starve the
+# others; this alert is how a person hears that one keeps failing.
+#
+# No label carries a tender or a tenant: the gauge is a count, and the rows are in the
+# database under authorization (AGENTS.md S-09).
+
+groups:
+  - name: rasta-construction-tender-close
+    rules:
+      # More than five failed close attempts of one overdue tender: with the default
+      # backoff (10 s base, 15 min cap) that is a tender that has been failing for
+      # minutes, not a transient database blip. The gauge is sampled every upkeep
+      # tick, so a short `for` rides out one sample.
+      - alert: RastaConstructionTenderCloseRetriesHigh
+        expr: max(rasta_construction_tender_close_max_attempts) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'An overdue tender cannot be closed ({{ $value }} failed attempts)'
+          description: 'At least one PUBLISHED tender past its deadline has failed more than 5 close attempts. Bids on it are already refused, but it stays PUBLISHED, so it cannot be opened, evaluated or awarded. The sweeper keeps retrying with a growing backoff; the construction-service log names the tender and the closed error code. This alert deliberately carries neither.'
+          runbook: docs/runbooks/tender-close-stuck.md

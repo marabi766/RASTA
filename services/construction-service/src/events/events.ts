@@ -90,6 +90,8 @@ export const CONSTRUCTION_EVENTS = {
   BID_REVISED: 'BID_REVISED',
   BID_WITHDRAWN: 'BID_WITHDRAWN',
   BID_ACCESSED: 'BID_ACCESSED',
+  // CON-002 PR 7 (ADR-065 § 3). Accepted by the project manager (2026-09-30).
+  TENDER_CLOSED: 'TENDER_CLOSED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -499,6 +501,21 @@ export const tenderPublishedPayload = z
   })
   .strict();
 
+/**
+ * A tender stopped taking bids: its deadline passed and the sweeper (or a person)
+ * closed it. `bidCount` is the bids standing at that moment (withdrawn ones are
+ * not counted); nothing about them is carried. `closedBy` is the system actor for
+ * the sweeper.
+ */
+export const tenderClosedPayload = z
+  .object({
+    ...tenderIdentity,
+    bidCount: z.number().int().nonnegative(),
+    closedAt: isoTimestamp,
+    closedBy: identifier,
+  })
+  .strict();
+
 /** An organization was invited to a RESTRICTED tender. */
 export const tenderBidderInvitedPayload = z
   .object({
@@ -603,6 +620,7 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BID_REVISED: bidRevisedPayload,
   BID_WITHDRAWN: bidWithdrawnPayload,
   BID_ACCESSED: bidAccessedPayload,
+  TENDER_CLOSED: tenderClosedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<
