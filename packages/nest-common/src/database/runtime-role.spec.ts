@@ -3,6 +3,7 @@ import {
   RuntimeRoleRefusedError,
   assertRuntimeRole,
   connectedRoleProblems,
+  preflightRuntimeRole,
   type ConnectedRoleFacts,
   type RuntimeRoleQueryClient,
 } from './runtime-role';
@@ -113,5 +114,40 @@ describe('a service runs only as its runtime role (D-045)', () => {
     }
     // USAGE ignores a membership granted WITH INHERIT FALSE, which still allows SET ROLE.
     expect(CONNECTED_ROLE_SQL).not.toContain("'USAGE'");
+  });
+});
+
+describe('the preflight, before Nest builds anything (Codex on #178)', () => {
+  const opened = (facts: ConnectedRoleFacts | undefined, failWith?: Error) => {
+    const state = { disconnected: 0 };
+    const open = () => ({
+      $queryRawUnsafe: <T>() =>
+        failWith ? Promise.reject(failWith) : Promise.resolve((facts ? [facts] : []) as T),
+      $disconnect: () => {
+        state.disconnected += 1;
+        return Promise.resolve();
+      },
+    });
+    return { open, state };
+  };
+
+  it('lets the runtime role through, and closes its connection', async () => {
+    const { open, state } = opened(runtime);
+    await expect(preflightRuntimeRole(open, options)).resolves.toEqual(runtime);
+    expect(state.disconnected).toBe(1);
+  });
+
+  it('refuses an owner, and still closes its connection', async () => {
+    const { open, state } = opened({ ...runtime, memberOf: ['rasta_construction_migrator'] });
+    await expect(preflightRuntimeRole(open, options)).rejects.toBeInstanceOf(
+      RuntimeRoleRefusedError,
+    );
+    expect(state.disconnected).toBe(1);
+  });
+
+  it('fails closed when it cannot ask at all', async () => {
+    const { open, state } = opened(undefined, new Error('connection refused'));
+    await expect(preflightRuntimeRole(open, options)).rejects.toThrow('connection refused');
+    expect(state.disconnected).toBe(1);
   });
 });

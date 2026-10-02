@@ -35,10 +35,21 @@ import { VersioningType } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
-import { installGracefulShutdown } from '@rasta/nest-common';
+import { installGracefulShutdown, preflightRuntimeRole } from '@rasta/nest-common';
+import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
+  // D-045: refuse to start as anything but the runtime role before Nest builds a
+  // single provider. Nest runs every provider's onModuleInit before AppModule's,
+  // and a consumer or a timer starts in its own — gated only there, it could take
+  // and commit work under an owner connection first (Codex on #178). A
+  // short-lived connection of its own; AppModule still checks, belt and braces.
+  await preflightRuntimeRole(
+    () => new PrismaClient({ datasources: { db: { url: env.DATABASE_URL } } }),
+    { service: SERVICE_NAME, runtimeVariable: 'DATABASE_URL_IDENTITY' },
+  );
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Nest's own logger is replaced by pino at the module level; this keeps
     // bootstrap noise out of the structured stream.

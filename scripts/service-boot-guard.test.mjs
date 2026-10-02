@@ -20,6 +20,14 @@
 // AppModule.onModuleInit, delegating to @rasta/nest-common's shared check. The
 // live proof is each service's test/startup-role.int-spec.ts (audit:
 // runtime-role.int-spec.ts, supplier: runtime-privileges.int-spec.ts).
+//
+// And before that, in main.ts (Codex on #178): Nest runs every provider's
+// onModuleInit before AppModule's, and a consumer or a timer starts in its own,
+// so the gate that matters is `await preflightRuntimeRole(` first in
+// bootstrap(), before NestFactory.create, on a short-lived connection of its
+// own. The live proof — an owner URL, a queued Kafka event, the process gone and
+// the event neither consumed nor committed — is scripts/runtime-preflight.e2e.mjs
+// in CI's end-to-end job.
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -112,5 +120,35 @@ for (const service of ROLE_CHECKED) {
       prisma,
       /async assertRuntimeRole\(\): Promise<void> \{\n\s+const facts = await assertConnectedRuntimeRole\(/,
     );
+  });
+}
+
+for (const service of ROLE_CHECKED) {
+  test(`${service}: main.ts refuses an owner role before Nest builds anything (Codex on #178)`, () => {
+    const main = readFileSync(join(ROOT, 'services', service, 'src', 'main.ts'), 'utf8');
+    assert.match(
+      main,
+      /^import \{[^}]*\bpreflightRuntimeRole\b[^}]*\} from '@rasta\/nest-common';$/m,
+      'does not import preflightRuntimeRole from @rasta/nest-common',
+    );
+    assert.match(main, /^import \{ PrismaClient \} from '\.\/generated\/prisma';$/m);
+    const bootstrap = /\nasync function bootstrap\(\): Promise<void> \{\n([\s\S]*?)\n\}\n/.exec(
+      main,
+    );
+    assert.ok(bootstrap, 'no bootstrap()');
+    const firstStatement = bootstrap[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('//'));
+    assert.equal(firstStatement, 'await preflightRuntimeRole(');
+    const preflight = bootstrap[1].indexOf('await preflightRuntimeRole(');
+    assert.ok(preflight < bootstrap[1].indexOf('NestFactory.create'));
+    const call = bootstrap[1].slice(preflight, bootstrap[1].indexOf(');', preflight));
+    assert.match(
+      call,
+      /new PrismaClient\(\{ datasources: \{ db: \{ url: env\.DATABASE_URL \} \} \}\)/,
+    );
+    const variable = `DATABASE_URL_${service.replace(/-service$/, '').toUpperCase()}`;
+    assert.match(call, new RegExp(`runtimeVariable: '${variable}'`));
   });
 }
