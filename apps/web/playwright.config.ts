@@ -13,14 +13,6 @@ import { defineConfig, devices } from '@playwright/test';
  * a browser job that ran against no screens would have asserted nothing, and
  * `/login` is the first real surface.
  */
-/**
- * One id for this whole Playwright invocation, set before any worker starts so
- * every worker (and a retry, which is a new worker) reads the same one. The
- * live maintenance scenarios put it in the titles they file, which is how they
- * tell their own requests from another run's on the shared machine.
- */
-process.env.WEB_E2E_RUN_ID ??= `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-
 /** The specs that also run at a phone's viewport: read-only, see the project. */
 const MOBILE_SPECS = /(accessibility|tenant-isolation)\.spec\.ts$/;
 

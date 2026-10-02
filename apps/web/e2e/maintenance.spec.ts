@@ -17,6 +17,18 @@ import { installLiveSession } from './live-session';
  * the desktop project only: the phone project runs the read-only scenarios
  * (`playwright.config.ts`), and a write that creates a record belongs once,
  * not once per viewport.
+ *
+ * ## One run per stack
+ *
+ * **The live block assumes it is the only run using its stack.** CI gives every
+ * job a fresh stack; a local run uses a stack nobody else is writing to. It does
+ * not try to share the suite's machine (`AST-SEED-E2E-0001`) with another run:
+ * it does not tell its requests from a concurrent run's, and it does not guess
+ * whether an open request belongs to a run that is still going. Instead it
+ * states the assumption and checks it — before each test the machine must have
+ * no open corrective request, or the test stops with a message saying so — and
+ * it cancels only the requests this run created, by the ids it recorded.
+ * See `e2e/README.md`.
  */
 
 test.describe('the maintenance route', () => {
@@ -90,20 +102,9 @@ test.describe('the maintenance route', () => {
  */
 const MACHINE = 'AST-SEED-E2E-0001';
 
-/** What every request this suite files starts with, so its own can be told from anyone else's. */
+/** What every request this suite files starts with: readable in a failure, not a way to find them again. */
 const TITLE_PREFIX = 'آزمون مرورگر';
-/**
- * This run's own marker, the same in every worker and retry of one Playwright
- * invocation (`playwright.config.ts`) and different in any other run — so two
- * runs against one stack never see each other's requests as their own. The
- * fallback is for a spec started some other way.
- */
-const RUN = process.env.WEB_E2E_RUN_ID ?? `${Date.now().toString(36)}${process.pid}`;
-/** Where a run's id begins its title: the time it started, in base 36, eight characters. */
-const RUN_TIME_CHARS = 8;
-/** An open request this old, under the suite's prefix, belongs to a run that is long gone. */
-const STALE_AFTER_MS = 30 * 60 * 1000;
-const titled = (what: string): string => `${TITLE_PREFIX} ${RUN} - ${what}`;
+const titled = (what: string): string => `${TITLE_PREFIX} - ${what}`;
 
 const BREAKDOWN_TITLE = titled('نشتی روغن هیدرولیک');
 
@@ -150,40 +151,35 @@ async function cancel(request: APIRequestContext, accessToken: string, id: strin
 }
 
 /**
- * Cancels what this suite filed and nothing else: the ids it saw created, and
- * any open request on its own machine whose title carries `marker`. The marker
- * is how a request the form committed but the test never saw (the attempt failed
- * after the service answered) is still found — by what the test wrote into it,
- * not by "everything open".
+ * Cancels the requests this run created, by the ids it recorded, and nothing
+ * else: no title, prefix or age is used to decide what is "ours". A recorded id
+ * that is no longer open (a test that cancelled its own request through the
+ * page) is skipped, because cancelling it again would be a conflict, not a
+ * cleanup.
  */
-async function cancelOwn(
-  request: APIRequestContext,
-  accessToken: string,
-  marker: string,
-): Promise<void> {
-  const open = await openCorrective(request, accessToken);
-  const own = open.filter((record) => created.has(record.id) || record.title.startsWith(marker));
-  for (const record of own) await cancel(request, accessToken, record.id);
+async function cancelCreated(request: APIRequestContext, accessToken: string): Promise<void> {
+  if (created.size === 0) return;
+  const open = new Set((await openCorrective(request, accessToken)).map((record) => record.id));
+  for (const id of created) if (open.has(id)) await cancel(request, accessToken, id);
   created.clear();
 }
 
 /**
- * Requests filed by a run that started more than `STALE_AFTER_MS` ago and never
- * cleaned up (a killed job, a local run interrupted). Told apart by the start
- * time every title carries, so a run in progress somewhere else is not mistaken
- * for one that is long gone; a title that does not parse is left alone.
+ * The assumption this suite is built on, checked rather than hoped for: the
+ * machine has no open corrective request before a test starts. If it has one, a
+ * previous run on this stack left it (or another run is using the stack), and
+ * the duplicate rule would turn that into a confusing failure inside a test.
+ * Nothing is cancelled here — what is open is not this run's to remove.
  */
-async function cancelStale(request: APIRequestContext, accessToken: string): Promise<void> {
+async function assertMachineIsOurs(request: APIRequestContext, accessToken: string): Promise<void> {
   const open = await openCorrective(request, accessToken);
-  for (const record of open) {
-    if (!record.title.startsWith(`${TITLE_PREFIX} `)) continue;
-    const startedAt = parseInt(
-      record.title.slice(TITLE_PREFIX.length + 1, TITLE_PREFIX.length + 1 + RUN_TIME_CHARS),
-      36,
+  if (open.length > 0) {
+    throw new Error(
+      `${MACHINE} already has ${open.length} open corrective request(s) ` +
+        `(${open.map((record) => record.id).join(', ')}). The live browser suite assumes it is ` +
+        'the only run on its stack and starts from a machine with none; reset the stack ' +
+        '(or cancel those requests yourself) and run it again. See apps/web/e2e/README.md.',
     );
-    if (Number.isFinite(startedAt) && Date.now() - startedAt > STALE_AFTER_MS) {
-      await cancel(request, accessToken, record.id);
-    }
   }
 }
 
@@ -202,17 +198,12 @@ test.describe('reporting maintenance through the live stack', () => {
   test.beforeEach(async ({ context, request }) => {
     const session = await installLiveSession(context, 'orgAdmin');
     accessToken = session.accessToken;
-    // What an earlier attempt of *this run* left (a crashed worker, a failed
-    // teardown) — and only that — plus what a run long gone left. Another run's
-    // live requests are never touched: they carry its id, and a run that started
-    // minutes ago is not long gone.
-    await cancelOwn(request, accessToken, `${TITLE_PREFIX} ${RUN}`);
-    await cancelStale(request, accessToken);
+    await assertMachineIsOurs(request, accessToken);
   });
 
   test.afterEach(async ({ request }) => {
-    // Only what this test filed.
-    if (accessToken) await cancelOwn(request, accessToken, `${TITLE_PREFIX} ${RUN}`);
+    // Only the ids this run recorded.
+    if (accessToken) await cancelCreated(request, accessToken);
   });
 
   test('a breakdown reported in the form is held by maintenance-service, and a second one is refused by it', async ({
