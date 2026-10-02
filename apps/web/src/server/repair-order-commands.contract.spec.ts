@@ -180,7 +180,6 @@ describe('the request bodies', () => {
   it.each([
     ['startRepairSchema', 'workSummary', 'displayText(2, 1000).optional()'],
     ['completeRepairSchema', 'workPerformed', 'displayText(2, 2000)'],
-    ['completeRepairSchema', 'expectedTotalCostMinor', 'amountMinorSchema.optional()'],
     ['cancelRepairSchema', 'reason', 'displayText(3, 500)'],
     ['recordPartSchema', 'partName', 'displayText(2, 200)'],
     ['recordPartSchema', 'partReference', 'z.string().trim().min(1).max(128).optional()'],
@@ -199,6 +198,17 @@ describe('the request bodies', () => {
     ['recordCostSchema', 'description', 'displayText(2, 500)'],
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
     expect(squash(schemaProperties(schema).get(key))).toBe(expected);
+  });
+
+  it('still takes the completion’s total as an optional amount, and publishes it as optional for API clients and always sent by the portal', () => {
+    const initializer = squash(
+      schemaProperties('completeRepairSchema').get('expectedTotalCostMinor'),
+    );
+    expect(initializer).toContain('amountMinorSchema .optional() .describe(');
+    // The published sentence is written across concatenated literals.
+    expect(initializer?.replace(/'\s*\+\s*'/g, '')).toContain(
+      'Optional for API clients and always sent by the portal',
+    );
   });
 
   it('still reads a part quantity as a positive number of at most three decimals and nine integer digits', () => {

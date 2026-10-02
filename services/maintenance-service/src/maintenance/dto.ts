@@ -398,7 +398,13 @@ export const completeRepairSchema = z
      * mandatory control: that is the owner's approval of the request's total,
      * which still states its amount and is checked after this one.
      */
-    expectedTotalCostMinor: amountMinorSchema.optional(),
+    expectedTotalCostMinor: amountMinorSchema
+      .optional()
+      .describe(
+        'The repair order total the caller was shown, in minor units. Optional for API ' +
+          'clients and always sent by the portal: when present and different from the ' +
+          'current total, the completion is refused with 422 and nothing changes.',
+      ),
   })
   .strict();
 
