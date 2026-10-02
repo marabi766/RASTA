@@ -69,6 +69,12 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 مهاجر و رویدادی در صف: فرایند می‌میرد، رویداد مصرف و Commit نمی‌شود و گروه هرگز شکل نمی‌گیرد؛ identity با URL مهاجر: Consumer
 بازتاب Keycloak (که در هوک خودش شروع می‌شود) هرگز به گروهش نمی‌پیوندد؛ در کار مرورگر، asset و maintenance (Consumerهای timeline و usage، هر دو در هوک خودشان) با URL مهاجر و `USAGE_RECORDED`ی در صف؛ و کنترل مثبت پس از راه‌اندازی درست.
 
+**هر راه ورود دیگر هم.** CLI، Worker یا Seedی که خودش PrismaClient، PrismaService یا Context Nest از `AppModule` می‌سازد از
+هر دو دروازه می‌گذرد، پس خودش `preflightRuntimeRole` را نخستین `await` تابع ورودش می‌کند (Codex روی #177): CLIهای
+`keycloak:backfill`/`keycloak:reconcile` در identity (آزمون زنده: `test/projection-cli.int-spec.ts` — با URL مهاجر خروج 2
+بی هیچ درخواستی به Keycloak) و Seedهای نمایشی، که فقط DML لازم دارند و بیرون از development/test هم رد می‌شوند.
+`scripts/service-boot-guard.test.mjs` چنین فایل‌هایی را می‌یابد و دروازه را از هر کدام می‌خواهد.
+
 **عضویت هم مالکیت است.** نقش اجرایی که عضو مهاجر باشد — حتی `WITH INHERIT FALSE`، که چیزی به ارث نمی‌برد — با
 `SET ROLE` مهاجر می‌شود و هر نگهبان را برمی‌دارد. پس هر دو بررسی (`assertRuntimeRole` و `check:db-runtime-privileges`)
 مالکیت را با `pg_has_role … 'MEMBER'` می‌سنجند و هر عضویتی در نقشی که اینجا مالک چیزی است، نامش `*_migrator` است یا

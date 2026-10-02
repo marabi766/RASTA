@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
+import { preflightRuntimeRole } from '@rasta/nest-common';
 import { recordCutoverIfMissing } from '../src/reward/evaluation-cutover';
 
 /**
@@ -174,6 +175,14 @@ async function main(): Promise<void> {
   // …and only into a database the development bootstrap marked disposable:
   // the shell's settings above cannot tell a production URL from a local one.
   await assertDemoSeedDatabase('economic-service', prisma);
+  // D-045: the demo data is written as the runtime role, never an owner — the
+  // gate every entry point of this service runs (Codex on #177). After the
+  // guard's read-only marker check, so a refused seed still refuses as the
+  // guard (scripts/verify-seed-guard.mjs), and before anything is written.
+  await preflightRuntimeRole(
+    () => new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } }),
+    { service: 'economic-service', runtimeVariable: 'DATABASE_URL_ECONOMIC' },
+  );
 
   console.log('==> Seeding economic-service');
   console.log(`    platform organization: ${PLATFORM_ORGANIZATION_ID}`);
