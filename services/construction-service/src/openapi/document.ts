@@ -39,6 +39,7 @@ import { BidOpeningController } from '../tender/bid-opening.controller';
 import { TenderOpenService } from '../tender/tender-open.service';
 import {
   bidAccessLogEntrySchema,
+  bidOpeningProposalViewSchema,
   bidsOpenedViewSchema,
   listBidAccessLogQuerySchema,
   openedBidViewSchema,
@@ -200,6 +201,10 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'PUT /v1/tenders/{id}/bids/{bidId}': { status: '200', schema: bidReceiptViewSchema },
   'POST /v1/tenders/{id}/bids/{bidId}/withdraw': { status: '200', schema: bidReceiptViewSchema },
   'POST /v1/tenders/{id}/open-bids': { status: '200', schema: bidsOpenedViewSchema },
+  'POST /v1/tenders/{id}/open-bids/proposal': {
+    status: '200',
+    schema: bidOpeningProposalViewSchema,
+  },
   'GET /v1/tenders/{id}/bids': { status: '200', schema: tenderBidsViewSchema },
   'GET /v1/tenders/{id}/bids/{bidId}': { status: '200', schema: openedBidViewSchema },
   'GET /v1/tenders/{id}/bid-access-log': {

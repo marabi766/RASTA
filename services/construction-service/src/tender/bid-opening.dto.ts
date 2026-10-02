@@ -30,6 +30,18 @@ export const bidsOpenedViewSchema = z
   .strict();
 export type BidsOpenedView = z.infer<typeof bidsOpenedViewSchema>;
 
+/** The answer to `open-bids/proposal`: who proposed the opening (four-eyes, Q-91). */
+export const bidOpeningProposalViewSchema = z
+  .object({
+    tenderId: z.string(),
+    proposedBy: z.string(),
+    alreadyProposed: z
+      .boolean()
+      .describe('True when the opening had been proposed before; the first proposal stands.'),
+  })
+  .strict();
+export type BidOpeningProposalView = z.infer<typeof bidOpeningProposalViewSchema>;
+
 /** One bid, opened: identity, state and the content the receipts vouch for. */
 export const openedBidViewSchema = z
   .object({

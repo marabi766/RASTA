@@ -76,6 +76,7 @@ describe('open-bids API', () => {
     const a = org('closed');
     const routes: [string, string, object | undefined][] = [
       ['post', '/v1/tenders/TND_x/open-bids', {}],
+      ['post', '/v1/tenders/TND_x/open-bids/proposal', {}],
       ['get', '/v1/tenders/TND_x/bids', undefined],
       ['get', '/v1/tenders/TND_x/bids/BID_x', undefined],
       ['get', '/v1/tenders/TND_x/bid-access-log', undefined],
@@ -93,6 +94,9 @@ describe('open-bids API', () => {
       expect((await call(actor(a, ['CONTRACTOR']))).status).toBe(403);
       // The platform administrator has no access to a bid through the API, super-role or not.
       expect((await call(actor(a, ['SYSTEM_ADMIN']))).status).toBe(403);
+      // ... and not made harmless by also holding the owner's role.
+      expect((await call(actor(a, ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN']))).status).toBe(403);
+      expect((await call(actor(a, ['CONTRACTOR', 'ORGANIZATION_ADMIN']))).status).toBe(403);
     }
   });
 
@@ -113,6 +117,22 @@ describe('open-bids API', () => {
           .set(as(orgAdmin(owner)))
       ).status,
     ).toBe(422);
+
+    // Four eyes (Q-91, on by default): a proposal by one user, the approval of a second.
+    const noProposal = await http()
+      .post(`/v1/tenders/${tenderId}/open-bids`)
+      .set(as(orgAdmin(owner)));
+    expect(noProposal.status).toBe(422);
+    expect(noProposal.body.message).toContain('PROPOSAL_REQUIRED');
+    const proposer = orgAdmin(owner);
+    const proposal = await http()
+      .post(`/v1/tenders/${tenderId}/open-bids/proposal`)
+      .set(as(proposer));
+    expect(proposal.status).toBe(200);
+    expect(proposal.body).toMatchObject({ tenderId, alreadyProposed: false });
+    const self = await http().post(`/v1/tenders/${tenderId}/open-bids`).set(as(proposer));
+    expect(self.status).toBe(422);
+    expect(self.body.message).toContain('SECOND_PERSON_REQUIRED');
 
     const opened = await http()
       .post(`/v1/tenders/${tenderId}/open-bids`)
@@ -174,6 +194,7 @@ describe('open-bids API', () => {
 
     for (const [method, path] of [
       ['post', `/v1/tenders/${tenderId}/open-bids`],
+      ['post', `/v1/tenders/${tenderId}/open-bids/proposal`],
       ['get', `/v1/tenders/${tenderId}/bids`],
       ['get', `/v1/tenders/${tenderId}/bids/${bidId}`],
       ['get', `/v1/tenders/${tenderId}/bid-access-log`],
@@ -216,6 +237,14 @@ describe('open-bids API', () => {
     expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
     api.evidence.failure = undefined;
 
+    // Proposed, so that it is the evidence that refuses and not the missing second person.
+    expect(
+      (
+        await http()
+          .post(`/v1/tenders/${tenderId}/open-bids/proposal`)
+          .set(as(orgAdmin(o2)))
+      ).status,
+    ).toBe(200);
     const honest = await api.evidence.fetchChain(o2, tenderId);
     api.evidence.served.set(tenderId, { ...honest, head: 'f'.repeat(64) });
     const forged = await http()

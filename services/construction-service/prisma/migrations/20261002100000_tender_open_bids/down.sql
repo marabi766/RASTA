@@ -28,6 +28,9 @@ BEGIN
 END
 $preflight_opening$;
 
+ALTER TABLE "tender" DROP CONSTRAINT IF EXISTS "ck_tender_opening_proposal_complete";
+ALTER TABLE "tender" DROP COLUMN IF EXISTS "opening_proposed_by";
+ALTER TABLE "tender" DROP COLUMN IF EXISTS "opening_proposed_at";
 ALTER TABLE "tender" DROP CONSTRAINT IF EXISTS "ck_tender_opening_complete";
 ALTER TABLE "tender" DROP COLUMN IF EXISTS "opened_by";
 ALTER TABLE "tender" DROP COLUMN IF EXISTS "opened_at";

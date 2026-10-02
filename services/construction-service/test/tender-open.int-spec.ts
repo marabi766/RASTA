@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
@@ -199,7 +200,8 @@ describe('opening the bids of a tender', () => {
     });
 
   beforeAll(async () => {
-    w = wire();
+    // One person opens: the four-eyes rule (Q-91) has its own describe, below.
+    w = wire(testEnv({ CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' }));
     await loadStanding(w);
   });
 
@@ -225,7 +227,7 @@ describe('opening the bids of a tender', () => {
   // ---------------------------------------------------------------------------------------------
 
   describe('opening', () => {
-    it('opens a CLOSED tender: every standing bid OPENED, the tender EVALUATING, one BIDS_OPENED with ids and counts only', async () => {
+    it('opens a CLOSED tender: every standing bid OPENED, the tender EVALUATING, one BIDS_OPENED with a count and a digest of the ids only', async () => {
       const { owner, bidders, tenderId } = await closedTender();
       const before = await rowOf(tenderId);
       const chain = await w.evidence.fetchChain(owner, tenderId);
@@ -264,10 +266,18 @@ describe('opening the bids of a tender', () => {
         projectId: before.projectId,
         organizationId: owner,
         bidCount: 2,
-        bidIds: bids.map((bid) => bid.id),
+        bidIdsDigest: createHash('sha256')
+          .update(
+            bids
+              .map((bid) => bid.id)
+              .sort()
+              .join('\n'),
+          )
+          .digest('hex'),
         receiptHead: chain.head,
         openedAt: row.openedAt!.toISOString(),
         openedBy: view.openedBy,
+        proposedBy: null,
       });
     });
 
@@ -330,6 +340,15 @@ describe('opening the bids of a tender', () => {
       expect(view).toMatchObject({ status: 'EVALUATING', bidCount: 0, alreadyOpened: false });
       expect(unwrap).not.toHaveBeenCalled();
       expect(await eventsOf(owner, 'BIDS_OPENED', tenderId)).toHaveLength(1);
+      // No bid was opened, and the opening is on the record all the same: a tender-level row.
+      expect(await logOf(tenderId)).toEqual([
+        expect.objectContaining({ purpose: 'OPEN_BIDS', outcome: 'GRANTED', bidId: null }),
+      ]);
+      expect(
+        (await eventsOf(owner, 'BID_ACCESSED', tenderId)).map((event) => payloadOf(event)),
+      ).toEqual([
+        expect.objectContaining({ purpose: 'OPEN_BIDS', outcome: 'GRANTED', bidId: null }),
+      ]);
     });
 
     it('leaves a withdrawn bid withdrawn, and opens the rest', async () => {
@@ -740,7 +759,16 @@ describe('opening the bids of a tender', () => {
     it('refuses the bidder role, the platform administrator, the oversight role and a service token', async () => {
       const { owner, tenderId } = await closedTender();
 
-      for (const roles of [['CONTRACTOR'], ['SYSTEM_ADMIN'], ['AUDITOR'], ['UNION_ADMIN']]) {
+      for (const roles of [
+        ['CONTRACTOR'],
+        ['SYSTEM_ADMIN'],
+        ['AUDITOR'],
+        ['UNION_ADMIN'],
+        // Refused whenever present: the owner's own role does not make them harmless.
+        ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN'],
+        ['CONTRACTOR', 'ORGANIZATION_ADMIN'],
+        ['AUDITOR', 'ORGANIZATION_ADMIN'],
+      ]) {
         expect(await codeOf(asUser(owner, roles, () => w.tenderOpen.open(tenderId)))).toMatchObject(
           {
             code: expect.stringMatching(/FORBIDDEN|INSUFFICIENT_ROLE/),
@@ -782,8 +810,56 @@ describe('opening the bids of a tender', () => {
       expect((await logOf(tenderId)).map((row) => row.outcome)).toEqual(['REFUSED']);
     });
 
+    it('refuses that member on every owner route, before and after the opening, before any answer about the bids', async () => {
+      const { owner, bidders, tenderId } = await closedTender();
+      const asMember = <T>(fn: () => T) =>
+        runWithContext(
+          context({
+            organizationId: owner,
+            organizationIds: [owner, bidders[0]!],
+            userId: newUserId(),
+            roles: ['ORGANIZATION_ADMIN'],
+          }),
+          fn,
+        );
+      const granted = async () =>
+        (await logOf(tenderId)).filter((row) => row.outcome === 'GRANTED').length;
+      const [bid] = await bidRows(tenderId);
+
+      // Before the opening: not the opening, the proposal, the counts and receipt times, nor the log.
+      const beforeCalls: (() => Promise<unknown>)[] = [
+        () => w.tenderOpen.open(tenderId),
+        () => w.tenderOpen.proposeOpening(tenderId),
+        () => w.tenderOpen.listBids(tenderId),
+        () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
+      ];
+      for (const call of beforeCalls) {
+        expect(await codeOf(asMember(call))).toMatchObject({ code: 'FORBIDDEN' });
+      }
+      expect(await granted()).toBe(0);
+
+      // After it: not the already-opened answer, the opened view, one bid's content, nor the log.
+      await open(owner, tenderId);
+      const grantedByOpening = await granted();
+      const afterCalls: (() => Promise<unknown>)[] = [
+        () => w.tenderOpen.open(tenderId),
+        () => w.tenderOpen.listBids(tenderId),
+        () => w.tenderOpen.getBid(tenderId, bid!.id),
+        () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
+      ];
+      for (const call of afterCalls) {
+        expect(await codeOf(asMember(call))).toMatchObject({ code: 'FORBIDDEN' });
+      }
+      expect(await granted()).toBe(grantedByOpening);
+    });
+
     it('takes its roles from configuration, by default the owner role set', async () => {
-      const configured = wire(testEnv({ CONSTRUCTION_TENDER_OPEN_ROLES: 'PROCUREMENT_USER' }));
+      const configured = wire(
+        testEnv({
+          CONSTRUCTION_TENDER_OPEN_ROLES: 'PROCUREMENT_USER',
+          CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false',
+        }),
+      );
       try {
         const { owner, tenderId } = await closedTender();
 
@@ -813,6 +889,7 @@ describe('opening the bids of a tender', () => {
 
       const calls: (() => Promise<unknown>)[] = [
         () => w.tenderOpen.open(tenderId),
+        () => w.tenderOpen.proposeOpening(tenderId),
         () => w.tenderOpen.listBids(tenderId),
         () => w.tenderOpen.getBid(tenderId, 'BID_X'),
         () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
@@ -873,6 +950,25 @@ describe('opening the bids of a tender', () => {
       expect(await logOf(tenderId)).toEqual([
         expect.objectContaining({ purpose: 'COUNT_BIDS', outcome: 'GRANTED', bidId: null }),
       ]);
+    });
+
+    it('records a tender-level access (no bid named) when a read finds no bid to show', async () => {
+      const { owner, tenderId } = await closedTender([]);
+      await open(owner, tenderId);
+
+      const view = await asAdmin(owner, () => w.tenderOpen.listBids(tenderId));
+
+      expect(view).toMatchObject({ opened: true, bidCount: 0, bids: [] });
+      expect((await logOf(tenderId)).filter((row) => row.purpose === 'LIST_BIDS')).toEqual([
+        expect.objectContaining({ bidId: null, outcome: 'GRANTED', accessorOrganizationId: owner }),
+      ]);
+      const accessed = (await eventsOf(owner, 'BID_ACCESSED', tenderId)).map(
+        (event) => payloadOf(event) as { purpose: string; bidId: string | null },
+      );
+      expect(accessed.filter((p) => p.purpose === 'LIST_BIDS')).toEqual([
+        expect.objectContaining({ bidId: null }),
+      ]);
+      expect(unwrap).not.toHaveBeenCalled();
     });
 
     it('refuses to read one bid before the opening: 422, logged, and the key is not touched', async () => {
@@ -1010,6 +1106,120 @@ describe('opening the bids of a tender', () => {
       const ids = [...first.items, ...second.items].map((item) => item.id);
       expect([...ids].sort().reverse()).toEqual(ids);
       expect((await logOf(tenderId)).length).toBe(total);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+
+  describe('four eyes (Q-91): a proposal by one user, the approval of a second', () => {
+    let w4: Wiring;
+    const [alice, bob] = [newUserId(), newUserId()];
+
+    beforeAll(() => {
+      w4 = wire(testEnv({ CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'true' }));
+    });
+    afterAll(async () => {
+      await w4.close();
+    });
+
+    const propose = (owner: string, tenderId: string, user: string) =>
+      asAdmin(owner, () => w4.tenderOpen.proposeOpening(tenderId), user);
+    const approve = (owner: string, tenderId: string, user: string) =>
+      asAdmin(owner, () => w4.tenderOpen.open(tenderId), user);
+
+    it('refuses to open with no proposal: 422 PROPOSAL_REQUIRED, nothing opened', async () => {
+      const { owner, tenderId } = await closedTender();
+
+      expect(await refusalOf(approve(owner, tenderId, alice))).toContain('PROPOSAL_REQUIRED');
+
+      await expectNothingOpened(owner, tenderId);
+    });
+
+    it('refuses the proposer approving their own proposal: 422 SECOND_PERSON_REQUIRED', async () => {
+      const { owner, tenderId } = await closedTender();
+      expect(await propose(owner, tenderId, alice)).toEqual({
+        tenderId,
+        proposedBy: alice,
+        alreadyProposed: false,
+      });
+
+      expect(await refusalOf(approve(owner, tenderId, alice))).toContain('SECOND_PERSON_REQUIRED');
+
+      await expectNothingOpened(owner, tenderId);
+      expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: alice });
+    });
+
+    it('opens on a second user’s approval, records both, and says so on BIDS_OPENED', async () => {
+      const { owner, tenderId } = await closedTender();
+      await propose(owner, tenderId, alice);
+
+      const view = await approve(owner, tenderId, bob);
+
+      expect(view).toMatchObject({ status: 'EVALUATING', openedBy: bob, alreadyOpened: false });
+      const row = await rowOf(tenderId);
+      expect(row).toMatchObject({ openedBy: bob, openingProposedBy: alice });
+      expect(row.openingProposedAt!.getTime()).toBeLessThanOrEqual(row.openedAt!.getTime());
+      const [event] = await eventsOf(owner, 'BIDS_OPENED', tenderId);
+      expect(payloadOf(event!)).toMatchObject({ openedBy: bob, proposedBy: alice });
+    });
+
+    it('keeps the first proposal: a second proposer is answered with it, and may then approve', async () => {
+      const { owner, tenderId } = await closedTender();
+      await propose(owner, tenderId, alice);
+
+      expect(await propose(owner, tenderId, bob)).toEqual({
+        tenderId,
+        proposedBy: alice,
+        alreadyProposed: true,
+      });
+      expect(await propose(owner, tenderId, alice)).toMatchObject({ alreadyProposed: true });
+
+      expect((await approve(owner, tenderId, bob)).openedBy).toBe(bob);
+    });
+
+    it('proposes only a CLOSED tender, and not one already opened', async () => {
+      const owner = org();
+      const bidder = org();
+      await qualify(w, bidder);
+      const { tenderId } = await publishedForBids(w, owner);
+      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+      await makeOverdue(tenderId);
+
+      expect(await refusalOf(propose(owner, tenderId, alice))).toContain('NOT_CLOSED');
+
+      await w.tenderClose.close({ organizationId: owner, tenderId });
+      await propose(owner, tenderId, alice);
+      await approve(owner, tenderId, bob);
+      expect(await refusalOf(propose(owner, tenderId, alice))).toContain('NOT_CLOSED');
+    });
+
+    it('refuses a member of a bidding organization as proposer and as approver', async () => {
+      const { owner, bidders, tenderId } = await closedTender();
+      const asMember = <T>(fn: () => T, userId: string) =>
+        runWithContext(
+          context({
+            organizationId: owner,
+            organizationIds: [owner, bidders[0]!],
+            userId,
+            roles: ['ORGANIZATION_ADMIN'],
+          }),
+          fn,
+        );
+
+      expect(
+        await codeOf(asMember(() => w4.tenderOpen.proposeOpening(tenderId), alice)),
+      ).toMatchObject({ code: 'FORBIDDEN' });
+      await propose(owner, tenderId, bob);
+      expect(await codeOf(asMember(() => w4.tenderOpen.open(tenderId), alice))).toMatchObject({
+        code: 'FORBIDDEN',
+      });
+
+      await expectNothingOpened(owner, tenderId);
+    });
+
+    it('is not needed where the setting is off (development and test only)', async () => {
+      const { owner, tenderId } = await closedTender();
+      expect((await open(owner, tenderId)).status).toBe('EVALUATING');
     });
   });
 });

@@ -601,19 +601,26 @@ export const bidAccessedPayload = z
   .strict();
 
 /**
- * The bids of a tender were opened (CLOSED → EVALUATING). Identifiers, a count and the
- * head of the receipt chain they were verified against — never a price, an answer, a
- * note, a ciphertext or a key. `receiptHead` is a digest and already public (it is the
- * head audit-service holds).
+ * The bids of a tender were opened (CLOSED → EVALUATING). A count, a digest of the bids'
+ * identifiers and the head of the receipt chain they were verified against — never a
+ * price, an answer, a note, a ciphertext or a key. Bounded by design: the event does not
+ * grow with the number of bids (a list of them could exceed any cap, and a tender with
+ * more bids than the cap could then never be opened); the identifiers themselves are read
+ * through the owner's API (`GET /v1/tenders/:id/bids`). `bidIdsDigest` is SHA-256, in
+ * hex, of the opened bids' identifiers sorted ascending and joined with `\n`, so a
+ * consumer holding the list can check it against the event. `receiptHead` is a digest
+ * and already public (it is the head audit-service holds). `proposedBy` is the first of
+ * the two people when four-eyes applies (Q-91), null when it is switched off.
  */
 export const bidsOpenedPayload = z
   .object({
     ...tenderIdentity,
     bidCount: z.number().int().nonnegative(),
-    bidIds: z.array(identifier).max(1000),
+    bidIdsDigest: z.string().regex(/^[0-9a-f]{64}$/),
     receiptHead: z.string().regex(/^[0-9a-f]{64}$/),
     openedAt: isoTimestamp,
     openedBy: identifier,
+    proposedBy: identifier.nullable(),
   })
   .strict();
 

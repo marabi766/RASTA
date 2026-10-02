@@ -230,10 +230,11 @@ Object.assign(VALID, {
   BIDS_OPENED: {
     ...TENDER,
     bidCount: 2,
-    bidIds: ['BID_1', 'BID_2'],
+    bidIdsDigest: 'b'.repeat(64),
     receiptHead: 'a'.repeat(64),
     openedAt: AT,
     openedBy: 'USR_1',
+    proposedBy: 'USR_2',
   },
   CRITERIA_TEMPLATE_CREATED: {
     templateId: 'CTP_1',
@@ -490,6 +491,9 @@ describe('payload rules', () => {
     // An opening names the bids and counts them; what they say is read, audited, from the API.
     ['BIDS_OPENED', { bids: [{ priceMinor: '1250000000' }] }],
     ['BIDS_OPENED', { receiptHead: 'the head, in words' }],
+    // Bounded by design: no list of ids that grows with the bids, only its digest.
+    ['BIDS_OPENED', { bidIds: ['BID_1', 'BID_2'] }],
+    ['BIDS_OPENED', { bidIdsDigest: 'BID_1,BID_2' }],
   ])('refuses free text on %s (%j)', (name, prose) => {
     expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...prose })).toThrow();
   });

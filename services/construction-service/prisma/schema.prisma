@@ -510,6 +510,12 @@ model Tender {
   openedAt DateTime? @map("opened_at") @db.Timestamptz(3)
   openedBy String?   @map("opened_by")
 
+  /// Four-eyes for opening (Q-91, provisional): who proposed it and when; both or neither.
+  /// Housekeeping, not state: proposing changes neither `status` nor `version`. The opener
+  /// (`opened_by`) is a second person, checked by the service.
+  openingProposedAt DateTime? @map("opening_proposed_at") @db.Timestamptz(3)
+  openingProposedBy String?   @map("opening_proposed_by")
+
   /// The close sweeper's claim: a lease and a fencing token, set and cleared together.
   /// Housekeeping, not state: claiming changes neither `version` nor `updated_at`.
   closeLeaseUntil DateTime? @map("close_lease_until") @db.Timestamptz(3)

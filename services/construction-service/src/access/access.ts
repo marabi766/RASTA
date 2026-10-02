@@ -314,7 +314,8 @@ export class ProjectAccess {
    * owner's side (ADR-066 § 4): the configured roles (`CONSTRUCTION_TENDER_OPEN_ROLES`,
    * by default the tender owner's own role set) in the organization the request acts
    * for. **`SYSTEM_ADMIN` is not accepted** — not even as the super-role: it has no
-   * access to a bid through the API — and neither is `AUDITOR` or a service token.
+   * access to a bid through the API — and neither are `AUDITOR`, `CONTRACTOR` or a service
+   * token, **each refused whenever present**, whatever other role the user also holds.
    * `organizationIds` is every organization the user is a member of, for the conflict
    * of interest the caller checks against the bidders (ADR-067 § 4).
    */
@@ -326,6 +327,13 @@ export class ProjectAccess {
     assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
+    // Refused whenever present, whatever else the user holds: a role that must never see
+    // a bid is not made harmless by a second, granted one.
+    for (const refused of [SUPER_ROLE, CONTRACTOR_ROLE]) {
+      if (context.roles.includes(refused)) {
+        throw RastaError.forbidden(`The ${refused} role does not open or read bids`);
+      }
+    }
     if (!this.bidOpeners.some((role) => context.roles.includes(role))) {
       throw RastaError.insufficientRole(this.bidOpeners, context.roles);
     }

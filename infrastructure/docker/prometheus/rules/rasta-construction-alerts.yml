@@ -1,4 +1,5 @@
-# Alert rules for the tender close sweeper (CON-002 PR 7, ADR-065 § 3), evaluated by
+# Alert rules for the tender close sweeper (CON-002 PR 7, ADR-065 § 3) and for bid
+# opening refused on integrity grounds (PR 8, ADR-066 § 3), evaluated by
 # the local Prometheus in docker-compose.yml (`observability` profile).
 #
 # Local-only, like the audit, notification and economic rules next door: there is no
@@ -34,3 +35,21 @@ groups:
           summary: 'An overdue tender cannot be closed ({{ $value }} failed attempts)'
           description: 'At least one PUBLISHED tender past its deadline has failed more than 5 close attempts. Bids on it are already refused, but it stays PUBLISHED, so it cannot be opened, evaluated or awarded. The sweeper keeps retrying with a growing backoff; the construction-service log names the tender and the closed error code. This alert deliberately carries neither.'
           runbook: docs/runbooks/tender-close-stuck.md
+
+  - name: rasta-construction-bid-opening
+    rules:
+      # Page-level, and on the first occurrence: an opening or an owner read was refused
+      # because a stored bid, or the whole receipt chain, did not match the evidence that
+      # audit-service holds (ADR-066 § 3). That is either tampering with the bid store or
+      # a defect in the chain; either way the tender's bids stay sealed until a person has
+      # looked. The counter only exists once it has been incremented, so the plain value
+      # (not a rate) is what catches the first one; it clears when the service restarts,
+      # by which time the runbook has been followed.
+      - alert: RastaConstructionBidOpeningIntegrityRefused
+        expr: sum(rasta_construction_bid_opening_refusals_total{reason="integrity"}) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Bids did not match the receipt evidence and were not opened ({{ $value }} refusals)'
+          description: 'An opening or an owner read of bids was refused with reason "integrity": a stored bid, or the receipt chain, differs from what audit-service holds. Nothing was opened or shown. Treat as possible tampering until proven otherwise; the construction-service log says the sealing failure code, and this alert deliberately carries neither tender nor tenant.'
+          runbook: docs/runbooks/bid-opening-integrity.md

@@ -43,3 +43,28 @@ tests:
       - eval_time: 9m
         alertname: RastaConstructionTenderCloseRetriesHigh
         exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaConstructionBidOpeningIntegrityRefused
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Other reasons never page; integrity appears at 1 (a counter is born when first
+      # incremented) and stays there.
+      - series: 'rasta_construction_bid_opening_refusals_total{service="construction-service",reason="not_closed",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '3 3 3 3 3 3'
+      - series: 'rasta_construction_bid_opening_refusals_total{service="construction-service",reason="integrity",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '_ _ 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaConstructionBidOpeningIntegrityRefused
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaConstructionBidOpeningIntegrityRefused
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Bids did not match the receipt evidence and were not opened (1 refusals)'
+              description: 'An opening or an owner read of bids was refused with reason "integrity": a stored bid, or the receipt chain, differs from what audit-service holds. Nothing was opened or shown. Treat as possible tampering until proven otherwise; the construction-service log says the sealing failure code, and this alert deliberately carries neither tender nor tenant.'
+              runbook: docs/runbooks/bid-opening-integrity.md

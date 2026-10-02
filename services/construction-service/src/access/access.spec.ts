@@ -152,18 +152,18 @@ describe('opening and reading bids (ADR-066 § 4)', () => {
       ).toEqual({ organizationId: ORG, actor: 'USR_1', organizationIds: [ORG, 'ORG-B'] });
     });
 
-    it.each(['CONTRACTOR', 'FLEET_MANAGER', 'PROCUREMENT_USER', 'UNION_ADMIN', 'SUPPLIER'])(
+    it.each(['FLEET_MANAGER', 'PROCUREMENT_USER', 'UNION_ADMIN', 'SUPPLIER'])(
       'refuses %s',
       (role) => {
         expect(outcome(access, { roles: [role] })).toBe('INSUFFICIENT_ROLE');
       },
     );
 
-    it('refuses SYSTEM_ADMIN, which has no access to a bid through the API, even with an organization selected', () => {
-      expect(outcome(access, { roles: ['SYSTEM_ADMIN'] })).toBe('INSUFFICIENT_ROLE');
-      expect(outcome(access, { roles: ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN'] })).toMatchObject({
-        organizationId: ORG,
-      });
+    it('refuses SYSTEM_ADMIN and CONTRACTOR whenever present, even alongside the owner role and with an organization selected', () => {
+      expect(outcome(access, { roles: ['SYSTEM_ADMIN'] })).toBe('FORBIDDEN');
+      expect(outcome(access, { roles: ['CONTRACTOR'] })).toBe('FORBIDDEN');
+      expect(outcome(access, { roles: ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN'] })).toBe('FORBIDDEN');
+      expect(outcome(access, { roles: ['ORGANIZATION_ADMIN', 'CONTRACTOR'] })).toBe('FORBIDDEN');
     });
 
     it('refuses the oversight role even alongside a granted one, a service token, a missing organization and a missing actor', () => {

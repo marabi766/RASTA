@@ -25,6 +25,7 @@ export interface TenderForOpening {
   closedAt: Date | null;
   openedAt: Date | null;
   openedBy: string | null;
+  openingProposedBy: string | null;
 }
 
 /** Who owns a tender and how far it has got, found by id alone. */
@@ -45,6 +46,7 @@ interface LockRow {
   closed_at: Date | null;
   opened_at: Date | null;
   opened_by: string | null;
+  opening_proposed_by: string | null;
 }
 
 const toLocked = (row: LockRow): TenderForOpening => ({
@@ -57,6 +59,7 @@ const toLocked = (row: LockRow): TenderForOpening => ({
   closedAt: row.closed_at,
   openedAt: row.opened_at,
   openedBy: row.opened_by,
+  openingProposedBy: row.opening_proposed_by,
 });
 
 @Injectable()
@@ -94,7 +97,7 @@ export class TenderOpenRepository {
   ): Promise<TenderForOpening | null> {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
-             "bid_closing_at", "closed_at", "opened_at", "opened_by"
+             "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR UPDATE`;
@@ -112,11 +115,26 @@ export class TenderOpenRepository {
   ): Promise<TenderForOpening | null> {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
-             "bid_closing_at", "closed_at", "opened_at", "opened_by"
+             "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR SHARE`;
     return rows[0] ? toLocked(rows[0]) : null;
+  }
+
+  /**
+   * Records the proposal to open (four-eyes, Q-91) on a CLOSED tender, in the lock the
+   * caller holds: the first proposal stands. Returns the rows matched: 0 or 1.
+   */
+  async proposeOpening(
+    tx: ExtendedPrismaClient,
+    input: { tenderId: string; actor: string; at: Date },
+  ): Promise<number> {
+    const result = await tx.tender.updateMany({
+      where: { id: input.tenderId, status: 'CLOSED', openedAt: null, openingProposedBy: null },
+      data: { openingProposedAt: input.at, openingProposedBy: input.actor },
+    });
+    return result.count;
   }
 
   /** The tender's key row, wrapped: the private half is useless without the KEK. */
@@ -127,6 +145,16 @@ export class TenderOpenRepository {
   /** Every bid of the tender — withdrawn ones too — in a stable order. */
   listBids(tx: ExtendedPrismaClient, tenderId: string): Promise<Bid[]> {
     return tx.bid.findMany({ where: { tenderId }, orderBy: { id: 'asc' } });
+  }
+
+  /** Every organization that bid on the tender, withdrawn bids included: for the conflict of interest. */
+  async listBidderOrganizationIds(tx: ExtendedPrismaClient, tenderId: string): Promise<string[]> {
+    const rows = await tx.bid.findMany({
+      where: { tenderId },
+      distinct: ['bidderOrganizationId'],
+      select: { bidderOrganizationId: true },
+    });
+    return rows.map((row) => row.bidderOrganizationId);
   }
 
   /** This service's own copy of the chain, in the order issued. Compared with the evidence, never trusted. */

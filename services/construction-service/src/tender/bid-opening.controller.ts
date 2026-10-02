@@ -6,8 +6,10 @@ import { listBidAccessLogQuerySchema, type ListBidAccessLogQuery } from './bid-o
 
 const OWNER_NOTE =
   'Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set ' +
-  '(CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR, a service token and ' +
-  'a member of any organization that bid on the tender are refused. A tender of another organization ' +
+  '(CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each ' +
+  'refused whenever present, whatever other role the user holds), a service token and a member of any ' +
+  'organization that bid on the tender (on every route here, the access log included) are refused. A ' +
+  'tender of another organization ' +
   'answers 404, never 403, and the attempt is logged under its owner.';
 
 const AUDIT_NOTE =
@@ -35,12 +37,31 @@ export class BidOpeningController {
       'never against this service’s own: audit-service unreachable is 503/504 (UPSTREAM_UNAVAILABLE), ' +
       'not yet caught up with the newest receipts is 503 (retry), and a chain or a bid that differs ' +
       'from the evidence is 422 `INTEGRITY` — nothing is opened in any of them. Opening is atomic: ' +
-      'every standing bid becomes OPENED and the tender EVALUATING, with BIDS_OPENED (ids and counts ' +
-      'only). Opening again answers the same view with `alreadyOpened: true` and writes nothing. ' +
+      'every standing bid becomes OPENED and the tender EVALUATING, with BIDS_OPENED (a count and a ' +
+      'digest of the bid ids only; the ids are read with GET /tenders/:id/bids). With four-eyes on ' +
+      '(CONSTRUCTION_TENDER_OPEN_FOUR_EYES, default true — Q-91, provisional) this call is the ' +
+      'second person’s approval of a proposal another user made: no proposal is 422 ' +
+      '`PROPOSAL_REQUIRED`, the proposer approving their own is 422 `SECOND_PERSON_REQUIRED`. ' +
+      'Opening again answers the same view with `alreadyOpened: true` and writes nothing. ' +
       `${AUDIT_NOTE} ${OWNER_NOTE}`,
   })
   async open(@Param('id') id: string) {
     return this.opening.open(id);
+  }
+
+  @Post('tenders/:id/open-bids/proposal')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Propose opening the bids of a CLOSED tender (four-eyes, the first person)',
+    description:
+      'Records that the caller proposes opening the bids; a second authorised user then approves with ' +
+      '`POST /tenders/:id/open-bids`. The first proposal stands: proposing again answers it with ' +
+      '`alreadyProposed: true`. Neither proposer nor approver may be a member of an organization that ' +
+      'bid. Reads and opens nothing; a tender not yet CLOSED is 422 `NOT_CLOSED`. ' +
+      OWNER_NOTE,
+  })
+  async propose(@Param('id') id: string) {
+    return this.opening.proposeOpening(id);
   }
 
   @Get('tenders/:id/bids')

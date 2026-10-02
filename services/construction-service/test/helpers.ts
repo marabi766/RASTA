@@ -294,6 +294,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       bidAudit,
       events,
       access,
+      env,
       clock,
       evidence,
       keys,

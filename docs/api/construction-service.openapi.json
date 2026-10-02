@@ -10661,7 +10661,7 @@
         }
       },
       "get": {
-        "description": "Before the opening: how many bids stand and when each was received — not who, not what; the key is not touched. After it: every opened bid with its content, read again from the sealed bytes against audit-service’s receipts on every call (same refusals as opening). Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR, a service token and a member of any organization that bid on the tender are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
+        "description": "Before the opening: how many bids stand and when each was received — not who, not what; the key is not touched. After it: every opened bid with its content, read again from the sealed bytes against audit-service’s receipts on every call (same refusals as opening). Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
         "operationId": "BidOpeningController_list_v1",
         "parameters": [
           {
@@ -11218,7 +11218,7 @@
         }
       },
       "get": {
-        "description": "Before the opening there is nothing to read: 422 `NOT_OPENED`. A bid that does not exist, or was withdrawn, is 404. Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR, a service token and a member of any organization that bid on the tender are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
+        "description": "Before the opening there is nothing to read: 422 `NOT_OPENED`. A bid that does not exist, or was withdrawn, is 404. Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
         "operationId": "BidOpeningController_get_v1",
         "parameters": [
           {
@@ -11595,7 +11595,7 @@
     },
     "/v1/tenders/{id}/open-bids": {
       "post": {
-        "description": "Only after the tender is CLOSED, judged on the database clock after the tender lock; a tender still PUBLISHED, even past its deadline, is 422 (BUSINESS_RULE_VIOLATION, `NOT_CLOSED`) — closing is the sweeper’s. The receipt chain and its head are read from audit-service (a request signed for the owner’s organization and the tender) and every bid is opened against **those** receipts, never against this service’s own: audit-service unreachable is 503/504 (UPSTREAM_UNAVAILABLE), not yet caught up with the newest receipts is 503 (retry), and a chain or a bid that differs from the evidence is 422 `INTEGRITY` — nothing is opened in any of them. Opening is atomic: every standing bid becomes OPENED and the tender EVALUATING, with BIDS_OPENED (ids and counts only). Opening again answers the same view with `alreadyOpened: true` and writes nothing. Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR, a service token and a member of any organization that bid on the tender are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
+        "description": "Only after the tender is CLOSED, judged on the database clock after the tender lock; a tender still PUBLISHED, even past its deadline, is 422 (BUSINESS_RULE_VIOLATION, `NOT_CLOSED`) — closing is the sweeper’s. The receipt chain and its head are read from audit-service (a request signed for the owner’s organization and the tender) and every bid is opened against **those** receipts, never against this service’s own: audit-service unreachable is 503/504 (UPSTREAM_UNAVAILABLE), not yet caught up with the newest receipts is 503 (retry), and a chain or a bid that differs from the evidence is 422 `INTEGRITY` — nothing is opened in any of them. Opening is atomic: every standing bid becomes OPENED and the tender EVALUATING, with BIDS_OPENED (a count and a digest of the bid ids only; the ids are read with GET /tenders/:id/bids). With four-eyes on (CONSTRUCTION_TENDER_OPEN_FOUR_EYES, default true — Q-91, provisional) this call is the second person’s approval of a proposal another user made: no proposal is 422 `PROPOSAL_REQUIRED`, the proposer approving their own is 422 `SECOND_PERSON_REQUIRED`. Opening again answers the same view with `alreadyOpened: true` and writes nothing. Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, with the purpose and the outcome; a refused call commits a REFUSED row and then answers the refusal. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
         "operationId": "BidOpeningController_open_v1",
         "parameters": [
           {
@@ -11749,9 +11749,108 @@
         ]
       }
     },
+    "/v1/tenders/{id}/open-bids/proposal": {
+      "post": {
+        "description": "Records that the caller proposes opening the bids; a second authorised user then approves with `POST /tenders/:id/open-bids`. The first proposal stands: proposing again answers it with `alreadyProposed: true`. Neither proposer nor approver may be a member of an organization that bid. Reads and opens nothing; a tender not yet CLOSED is 422 `NOT_CLOSED`. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
+        "operationId": "BidOpeningController_propose_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tenderId": {
+                      "type": "string"
+                    },
+                    "proposedBy": {
+                      "type": "string"
+                    },
+                    "alreadyProposed": {
+                      "type": "boolean",
+                      "description": "True when the opening had been proposed before; the first proposal stands."
+                    }
+                  },
+                  "required": ["tenderId", "proposedBy", "alreadyProposed"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Propose opening the bids of a CLOSED tender (four-eyes, the first person)",
+        "tags": ["bids"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/tenders/{id}/bid-access-log": {
       "get": {
-        "description": "The append-only log of every read, granted or refused, newest first: the reader, a closed purpose (OPEN_BIDS, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never content. Reading the log is not itself logged. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR, a service token and a member of any organization that bid on the tender are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
+        "description": "The append-only log of every read, granted or refused, newest first: the reader, a closed purpose (OPEN_BIDS, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never content. Reading the log is not itself logged. Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds), a service token and a member of any organization that bid on the tender (on every route here, the access log included) are refused. A tender of another organization answers 404, never 403, and the attempt is logged under its owner.",
         "operationId": "BidOpeningController_accessLog_v1",
         "parameters": [
           {

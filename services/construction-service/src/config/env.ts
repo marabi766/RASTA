@@ -86,6 +86,10 @@ function roleList(name: string, options: { min: number }) {
  *                                       and logs a WARN at startup. Who writes
  *                                       a policy is not configurable: the owner
  *                                       decided that (Q-70 (7)).
+ *   CONSTRUCTION_TENDER_OPEN_FOUR_EYES  PROVISIONAL, pending the owner (Q-91): opening
+ *                                       a tender's bids is proposed by one user and
+ *                                       approved by a second. Default `true`; `false`
+ *                                       only in development and test.
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
  *   SUPPLIER_SERVICE_URL                Where the contractor-standing snapshot is read
  *                                       (and CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
@@ -156,6 +160,14 @@ export const constructionEnvSchema = baseEnvSchema
         message:
           'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
       }),
+
+    /**
+     * Q-91, PROVISIONAL, pending the product owner (committee size and roles): opening a
+     * tender's bids needs a proposal by one authorised user and the approval of a second,
+     * neither a member of a bidding organization. Default `true`; `false` (one person
+     * opens) is accepted only where NODE_ENV is `development` or `test`.
+     */
+    CONSTRUCTION_TENDER_OPEN_FOUR_EYES: booleanEnv(true),
 
     CONSTRUCTION_CANCELLABLE_STATES: z
       .string()
@@ -356,6 +368,18 @@ export const constructionEnvSchema = baseEnvSchema
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass
   // startup and fail only when a tender was first published. Judged together, here.
   .superRefine((env, ctx) => {
+    if (
+      !env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES &&
+      env.NODE_ENV !== 'development' &&
+      env.NODE_ENV !== 'test'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_TENDER_OPEN_FOUR_EYES'],
+        message:
+          'CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false is accepted only when NODE_ENV is development or test (Q-91)',
+      });
+    }
     try {
       parseKekEntries(env.CONSTRUCTION_TENDER_KEKS);
     } catch {

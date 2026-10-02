@@ -524,7 +524,7 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `BID_SUBMITTED`                      | audit (مهر زمانی و رسید)                                   | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `revision`, `receivedAt`, `contentCommitment`, `receipt`                               |
 | `BID_REVISED`                        | audit                                                      | همان `BID_SUBMITTED` با `revision` بالاتر                                                                                                             |
 | `BID_WITHDRAWN`                      | audit                                                      | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `withdrawnAt`                                                                          |
-| `BIDS_OPENED`                        | audit · notification                                       | `tenderId`, `projectId`, `organizationId`, `bidCount`, `bidIds`, `receiptHead`, `openedBy`, `openedAt`                                                |
+| `BIDS_OPENED`                        | audit · notification                                       | `tenderId`, `projectId`, `organizationId`, `bidCount`, `bidIdsDigest`, `receiptHead`, `openedBy`, `proposedBy`, `openedAt`                            |
 | `BID_ACCESSED`                       | audit                                                      | `bidId`, `tenderId`, `organizationId`, `accessorOrganizationId`, `purpose` (بسته), `outcome`, `accessedAt`                                            |
 | `BID_QUALIFIED` / `BID_DISQUALIFIED` | audit                                                      | `bidId`, `tenderId`, `organizationId`, `reasonCode` (بسته، فقط رد), `decidedBy`, `decidedAt`                                                          |
 | `BIDS_EVALUATED`                     | audit · analytics                                          | `tenderId`, `organizationId`, `evaluatedBidCount`, `evaluatedBy`, `evaluatedAt`                                                                       |
@@ -553,10 +553,13 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 (`CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS`) کران می‌خورد و درستی پذیرش پیشنهاد به آن وابسته نیست (ADR-065 § ۲-۳).
 
 **پیاده‌شده در CON-002 PR 8 (بازگشایی):** `BIDS_OPENED` (`aggregateType = Tender`، کلید `tenderId`؛ `projectId`، `organizationId`، `bidCount` —
-پیشنهادهای ایستاده که باز شدند، نه انصراف‌یافته‌ها — `bidIds`، `receiptHead` (سرِ زنجیرهٔ رسید که پیشنهادها با آن سنجیده شدند؛ Digest و پیشتر
-عمومی)، `openedBy`، `openedAt`). هیچ قیمت، پاسخ، یادداشت، رمزنوشته یا کلیدی نمی‌آید (`.strict()`). هر مناقصه **یک** `BIDS_OPENED` دارد.
+پیشنهادهای ایستاده که باز شدند، نه انصراف‌یافته‌ها — `bidIdsDigest` (SHA-256 به‌صورت hex از شناسهٔ پیشنهادهای بازشده، مرتب‌شدهٔ صعودی و
+پیوسته با `\n`؛ رویداد **کران‌دار** است و با شمار پیشنهادها بزرگ نمی‌شود، خود شناسه‌ها با `GET /v1/tenders/:id/bids` خوانده می‌شوند)،
+`receiptHead` (سرِ زنجیرهٔ رسید که پیشنهادها با آن سنجیده شدند؛ Digest و پیشتر عمومی)، `openedBy`، `proposedBy` (نفر نخستِ چهارچشمی، Q-91؛
+در غیاب آن `null`)، `openedAt`). هیچ قیمت، پاسخ، یادداشت، رمزنوشته یا کلیدی نمی‌آید (`.strict()`). هر مناقصه **یک** `BIDS_OPENED` دارد.
 هدف‌های `BID_ACCESSED` اکنون: `OWN_BID_RECEIPT` (پیمانکار)، و سمت کارفرما `OPEN_BIDS` (به‌ازای هر پیشنهاد بازشده)، `COUNT_BIDS` (شمار پیش
-از بازگشایی؛ بی `bidId`)، `LIST_BIDS`، `READ_BID`؛ ردشده‌ها `outcome = REFUSED` و `bidId = null`.
+از بازگشایی؛ بی `bidId`)، `LIST_BIDS`، `READ_BID`؛ ردشده‌ها `outcome = REFUSED` و `bidId = null`. بازگشایی یا خواندنی که پیشنهادی برای
+نشان‌دادن ندارد (مناقصه‌ای بی پیشنهاد) هم یک ردیف سطح مناقصه (`bidId = null`، `outcome = GRANTED`) می‌گذارد.
 
 **مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
 `tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
