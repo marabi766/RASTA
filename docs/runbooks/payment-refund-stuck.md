@@ -157,7 +157,9 @@ API این‌ها را **عمداً رد می‌کند**: بدون دانستن 
 
 هیچ ستونی دستی تغییر نمی‌کند — نه علامت، نه تسک، نه موجودی. حل انسانی فقط از این Endpointها می‌گذرد و هر کدام رویداد
 Audit می‌سازد. همه `Idempotency-Key` می‌خواهند. نقش مجاز با `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES` تعیین می‌شود
-(پیش‌فرض `SYSTEM_ADMIN`، Q-82) و فقط کاربر انسانی؛ `AUDITOR` هرگز.
+(پیش‌فرض `SYSTEM_ADMIN`، Q-82) و فقط کاربر انسانی؛ `AUDITOR` هرگز. Token حل‌کننده باید شناسهٔ کاربری پلتفرم (`rasta_uid`) داشته
+باشد؛ Token بی آن با `403` رد می‌شود. کلید Idempotency به خود فرستنده بسته است: همان کلید از شخص دیگر `409 IDEMPOTENCY_KEY_REUSED`
+می‌گیرد، نه پاسخ ذخیره‌شده.
 
 ```http
 GET  /v1/payment-intents/{id}/reconciliation                                      # تسک و همهٔ پیشنهادها
@@ -195,9 +197,13 @@ POST /v1/payment-intents/{id}/reconciliation/requeue                            
 **جداسازی وظایف** (`ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES`) پیش‌فرض روشن است و سرویس خاموش‌بودنش را بیرون از
 `development` و `test` نمی‌پذیرد؛ وقتی خاموش است پیشنهاد بی‌درنگ با همان شخص تأیید و همین‌طور ثبت می‌شود (`fourEyes: false`).
 
-هر گام رویداد دارد: `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`REQUEUED`، `PROPOSED`، `REJECTED`) و برای تأیید
+جداسازی هم با شناسهٔ کاربری پلتفرم و هم با Issuer و Subject Token سنجیده می‌شود: دو Token یک شخص یک شخص‌اند.
+
+هر گام رویداد دارد: `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`REQUEUED` با `requeueId`، `PROPOSED`، `REJECTED`) و برای تأیید
 `PAYMENT_RECONCILIATION_RESOLVED` با `proposedBy`، `approvedBy`، `evidenceReference` و `fourEyes` — هر دو به `audit-service`
-می‌رسند. تیکت را با شناسهٔ `resolutionId` ببند.
+می‌رسند. دلیل‌های متنی در رویداد و Log نیستند: پیشنهاد و تصمیم در `payment_reconciliation_resolution` و دلیل بازگرداندن در
+`payment_reconciliation_requeue` می‌مانند، هر دو فقط‌افزودنی در خود پایگاه داده، و `GET …/reconciliation` آن‌ها را نشان می‌دهد.
+تیکت را با شناسهٔ `resolutionId` (یا `requeueId`) ببند.
 
 ---
 
@@ -208,8 +214,9 @@ POST /v1/payment-intents/{id}/reconciliation/requeue                            
 - هرگز ردیف `ledger_entry`، `journal`، `wallet_hold` یا ستون‌های موجودی `wallet` را دستی تغییر نده یا حذف نکن (AGENTS.md A-06؛
   Triggerهای تغییرناپذیری جلویش را می‌گیرند و درست هم هست). Hold فقط با مسیر کد برمی‌گردد.
 - هرگز `payment_intent.status` را دستی به `REFUNDED`، `FAILED` یا وضعیت دیگری تغییر نده.
-- هرگز `payment_intent.failure_reason` (علامت) یا ردیف `payment_reconciliation_resolution` را دستی تغییر نده؛ از گام B3 حل انسانی
-  فقط با Endpointهای § ۴-۲ است.
+- هرگز `payment_intent.failure_reason` (علامت) یا ردیف `payment_reconciliation_resolution` و `payment_reconciliation_requeue` را
+  دستی تغییر نده؛ از گام B3 حل انسانی فقط با Endpointهای § ۴-۲ است. آن دو جدول فقط‌افزودنی‌اند (Trigger) و `down.sql` مهاجرتشان
+  تا وقتی ردیفی دارند — حتی تصمیم‌گرفته — رد می‌کند: تنها سابقهٔ شاهد و دلیل‌اند.
 - هرگز بازپرداخت را **با کلید Idempotency تازه** مستقیم از Provider نخواه — این همان پرداخت دوباره است.
 - هرگز Intent را بی شاهد Provider از `REFUND_REQUESTED`/`REFUND_UNKNOWN` بیرون نیاور، حتی اگر کاربر اصرار کند.
 - هرگز Hold را برای «آزاد کردن پول کاربر» دستی آزاد نکن؛ Hold همان چیزی است که جلوی دوبار برگشتن پول را می‌گیرد.

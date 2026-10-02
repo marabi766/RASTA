@@ -347,6 +347,8 @@ export const paymentReconciliationOperatorActionPayload = z.object({
   kind: reconciliationKind,
   action: z.enum(['REQUEUED', 'PROPOSED', 'REJECTED']),
   actor: z.string().min(1),
+  /** For `REQUEUED`: the requeue row that keeps the reason (never on the event). */
+  requeueId: z.string().nullable(),
   resolutionId: z.string().nullable(),
   providerOutcome: z.enum(['REFUNDED', 'DECLINED', 'NOT_REACHED']).nullable(),
   evidenceReference: evidenceReference.nullable(),

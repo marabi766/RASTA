@@ -144,6 +144,7 @@ const PAYLOADS = {
     kind: 'REFUND',
     action: 'PROPOSED',
     actor: 'USR_PROPOSER',
+    requeueId: null,
     resolutionId: 'PRR_1',
     providerOutcome: 'DECLINED',
     evidenceReference: 'TICKET-1234',

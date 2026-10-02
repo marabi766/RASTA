@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
 import type { RefundRequest, RefundResult } from '../src/payment/provider';
-import { admin, apiTenant, auditor, startApi, type ApiHarness } from './api-helpers';
+import { admin, apiTenant, auditor, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 
 /**
@@ -198,6 +198,96 @@ describe('payment reconciliation operator routes (HTTP)', () => {
       .set('authorization', as(alice))
       .send({ reason: 'no key' })
       .expect(400);
+  });
+
+  /** A SYSTEM_ADMIN token for one IdP subject; `rastaUserId` omitted = no `rasta_uid`. */
+  const tokenFor = (sub: string, rastaUserId?: string) =>
+    bearer({
+      sub,
+      ...(rastaUserId ? { rastaUserId } : {}),
+      organizationId: org,
+      organizationIds: [org],
+      roles: ['SYSTEM_ADMIN'],
+      username: `api-test-${sub}`,
+    });
+
+  it('treats two tokens of one subject as one person, and refuses a token without rasta_uid', async () => {
+    const intentId = await escalated();
+    const withUid = tokenFor('sub-carol', 'USR-APITEST-CAROL');
+    const otherUid = tokenFor('sub-carol', 'USR-APITEST-CAROL-2');
+    const noUid = tokenFor('sub-carol');
+
+    // Without `rasta_uid` the guard's user id is the subject: every resolver route refuses.
+    await request(http).get(base(intentId)).set('authorization', as(noUid)).expect(403);
+    await request(http)
+      .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(noUid))
+      .set('idempotency-key', id('recon-op-nouid'))
+      .send(proposal)
+      .expect(403);
+
+    const proposed = await request(http)
+      .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(withUid))
+      .set('idempotency-key', id('recon-op-carol'))
+      .send(proposal)
+      .expect(200);
+
+    // The same subject under another platform id, or under none, cannot decide it.
+    for (const token of [otherUid, noUid]) {
+      for (const verb of ['approve', 'reject']) {
+        await request(http)
+          .post(`${base(intentId)}/resolutions/${proposed.body.id}/${verb}`)
+          .set('authorization', as(token))
+          .set('idempotency-key', id('recon-op-alias'))
+          .send({ reason: 'Deciding my own' })
+          .expect(403);
+      }
+    }
+    const view = await request(http).get(base(intentId)).set('authorization', as(bob)).expect(200);
+    expect(view.body.resolutions).toEqual([
+      expect.objectContaining({ id: proposed.body.id, status: 'PENDING_APPROVAL' }),
+    ]);
+  });
+
+  it('answers a replay only to the resolver who made the request', async () => {
+    const intentId = await escalated();
+    const key = id('recon-op-bound');
+    const first = await request(http)
+      .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(alice))
+      .set('idempotency-key', key)
+      .send(proposal)
+      .expect(200);
+
+    // A caller outside the resolver roles is refused before any replay: no cached body.
+    const outsider = await request(http)
+      .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(refunder))
+      .set('idempotency-key', key)
+      .send(proposal)
+      .expect(403);
+    expect(JSON.stringify(outsider.body)).not.toContain(first.body.id);
+    expect(JSON.stringify(outsider.body)).not.toContain(proposal.evidenceReference);
+
+    // Another resolver with the same key and body: a different request, 409, no body.
+    const other = await request(http)
+      .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(bob))
+      .set('idempotency-key', key)
+      .send(proposal)
+      .expect(409);
+    expect(other.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(JSON.stringify(other.body)).not.toContain(first.body.id);
+
+    // The original resolver still gets the original answer.
+    const replayed = await request(http)
+      .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(alice))
+      .set('idempotency-key', key)
+      .send(proposal)
+      .expect(200);
+    expect(replayed.body.id).toBe(first.body.id);
   });
 
   it('refuses AUDITOR and a role below the ceiling, and answers 404 across tenants', async () => {

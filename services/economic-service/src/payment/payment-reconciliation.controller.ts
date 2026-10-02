@@ -4,7 +4,10 @@ import { Roles, zodPipe } from '@rasta/nest-common';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
-import { PaymentReconciliationOperator } from './payment-reconciliation.operator';
+import {
+  PaymentReconciliationOperator,
+  type OperatorActor,
+} from './payment-reconciliation.operator';
 import {
   operatorDecisionSchema,
   proposeResolutionSchema,
@@ -57,12 +60,14 @@ export class PaymentReconciliationController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
   ) {
-    assertNotAuditor();
+    // Authorization first, then the replay (Codex on #175, MED 3): a cached
+    // answer goes only to a resolver, and only to the one who made it.
+    const actor = this.operator.authorize();
     const key = requireIdempotencyKey(idempotencyKey);
     return this.idempotency.run(
       'POST /v1/payment-intents/:id/reconciliation/requeue',
       key,
-      targeted(id, dto),
+      targeted(id, boundTo(actor, dto)),
       200,
       () => this.operator.requeue(id, dto.reason),
     );
@@ -86,12 +91,14 @@ export class PaymentReconciliationController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(proposeResolutionSchema)) dto: ProposeResolutionDto,
   ) {
-    assertNotAuditor();
+    // Authorization first, then the replay (Codex on #175, MED 3): a cached
+    // answer goes only to a resolver, and only to the one who made it.
+    const actor = this.operator.authorize();
     const key = requireIdempotencyKey(idempotencyKey);
     return this.idempotency.run(
       'POST /v1/payment-intents/:id/reconciliation/resolutions',
       key,
-      targeted(id, dto),
+      targeted(id, boundTo(actor, dto)),
       200,
       () => this.operator.propose(id, dto),
     );
@@ -114,12 +121,14 @@ export class PaymentReconciliationController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
   ) {
-    assertNotAuditor();
+    // Authorization first, then the replay (Codex on #175, MED 3): a cached
+    // answer goes only to a resolver, and only to the one who made it.
+    const actor = this.operator.authorize();
     const key = requireIdempotencyKey(idempotencyKey);
     return this.idempotency.run(
       'POST /v1/payment-intents/:id/reconciliation/resolutions/:resolutionId/approve',
       key,
-      targeted(`${id}/${resolutionId}`, dto),
+      targeted(`${id}/${resolutionId}`, boundTo(actor, dto)),
       200,
       () => this.operator.approve(id, resolutionId, dto.reason),
     );
@@ -138,14 +147,25 @@ export class PaymentReconciliationController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(operatorDecisionSchema)) dto: OperatorDecisionDto,
   ) {
-    assertNotAuditor();
+    // Authorization first, then the replay (Codex on #175, MED 3): a cached
+    // answer goes only to a resolver, and only to the one who made it.
+    const actor = this.operator.authorize();
     const key = requireIdempotencyKey(idempotencyKey);
     return this.idempotency.run(
       'POST /v1/payment-intents/:id/reconciliation/resolutions/:resolutionId/reject',
       key,
-      targeted(`${id}/${resolutionId}`, dto),
+      targeted(`${id}/${resolutionId}`, boundTo(actor, dto)),
       200,
       () => this.operator.reject(id, resolutionId, dto.reason),
     );
   }
+}
+
+/**
+ * The request a key is bound to: the body and who sent it. The same key from
+ * another person is then a different request — `409 IDEMPOTENCY_KEY_REUSED`,
+ * with no body — never a replay of someone else's answer.
+ */
+function boundTo(actor: OperatorActor, body: unknown): unknown {
+  return { by: { userId: actor.userId, issuer: actor.issuer, subject: actor.subject }, body };
 }

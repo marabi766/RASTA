@@ -70,6 +70,14 @@ export interface ReconciliationTaskView {
   createdAt: string;
 }
 
+export interface RequeueView {
+  id: string;
+  taskId: string;
+  reason: string;
+  requestedBy: string;
+  createdAt: string;
+}
+
 export interface ReconciliationView {
   paymentIntentId: string;
   failureReason: string | null;
@@ -77,6 +85,25 @@ export interface ReconciliationView {
   task: ReconciliationTaskView | null;
   /** Newest first. */
   resolutions: ResolutionView[];
+  /** Newest first. */
+  requeues: RequeueView[];
+}
+
+/**
+ * Who acts on the operator path: the platform user id, and the token's stable
+ * identity — its issuer and subject (Codex on #175, HIGH 1).
+ *
+ * The auth guard sets `userId` from the `rasta_uid` claim and falls back to the
+ * IdP subject when the claim is absent, so one person could otherwise carry
+ * two user ids. A resolver must therefore carry `rasta_uid`, and separation of
+ * duties compares the issuer and subject as well as the user id. The guard
+ * verifies tokens against exactly one issuer (`OIDC_ISSUER_URL`), so that is
+ * the issuer of every token it accepts.
+ */
+export interface OperatorActor {
+  userId: string;
+  issuer: string;
+  subject: string;
 }
 
 /**
@@ -133,15 +160,15 @@ export class PaymentReconciliationOperator {
     return this.env.ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES;
   }
 
-  /** The intent's reconciliation as an operator needs it: the task and every resolution. */
+  /** The intent's reconciliation as an operator needs it: the task, every resolution and requeue. */
   async view(paymentIntentId: string): Promise<ReconciliationView> {
-    this.resolver();
+    this.authorize();
     const organizationId = getOrganizationId();
     const intent = await this.prisma.client.paymentIntent.findFirst({
       where: { id: paymentIntentId, organizationId },
     });
     if (!intent) throw RastaError.notFound('PaymentIntent', paymentIntentId);
-    const [task, resolutions] = await Promise.all([
+    const [task, resolutions, requeues] = await Promise.all([
       this.prisma.client.paymentReconciliationTask.findFirst({
         where: { paymentIntentId, organizationId },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -150,20 +177,36 @@ export class PaymentReconciliationOperator {
         where: { paymentIntentId, organizationId },
         orderBy: [{ proposedAt: 'desc' }, { id: 'desc' }],
       }),
+      this.prisma.client.paymentReconciliationRequeue.findMany({
+        where: { paymentIntentId, organizationId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      }),
     ]);
     return {
       paymentIntentId,
       failureReason: intent.failureReason,
       task: task ? toTaskView(task) : null,
       resolutions: resolutions.map(toResolutionView),
+      requeues: requeues.map((row) => ({
+        id: row.id,
+        taskId: row.taskId,
+        reason: row.reason,
+        requestedBy: row.requestedBy,
+        createdAt: row.createdAt.toISOString(),
+      })),
     };
   }
 
-  /** Puts the open task back for the sweeper, due now, attempts reset. Moves nothing. */
+  /**
+   * Puts the open task back for the sweeper, due now, attempts reset. Moves
+   * nothing. The reason is kept in an append-only, tenant-scoped requeue row
+   * in the same transaction — never in a log or the event (S-09; Codex on
+   * #175, MED 4).
+   */
   async requeue(paymentIntentId: string, reason: string): Promise<ReconciliationTaskView> {
-    const actor = this.resolver();
+    const actor = this.authorize();
     const organizationId = getOrganizationId();
-    const taskId = await this.prisma.transaction(async (tx) => {
+    const { taskId, requeueId } = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
       const task = await this.tasks.lockOpenTask(tx, organizationId, paymentIntentId);
       if (!task) throw noOpenTask('REQUEUED');
@@ -177,19 +220,32 @@ export class PaymentReconciliationOperator {
         );
       }
       if ((await this.tasks.requeue(tx, task)) !== 1) throw sweeperHolds('REQUEUED');
+      const requeued = await tx.paymentReconciliationRequeue.create({
+        data: {
+          id: `PRQ_${ulid()}`,
+          organizationId,
+          paymentIntentId,
+          taskId: task.id,
+          reason,
+          requestedBy: actor.userId,
+          requestedByIssuer: actor.issuer,
+          requestedBySubject: actor.subject,
+          correlationId: getContext().correlationId,
+          createdAt: new Date(),
+        },
+      });
       await this.enqueueAction(tx, intent, task.kind, {
         action: 'REQUEUED',
-        actor,
+        actor: actor.userId,
+        requeueId: requeued.id,
         resolutionId: null,
         providerOutcome: null,
         evidenceReference: null,
         proposedBy: null,
       });
-      return task.id;
+      return { taskId: task.id, requeueId: requeued.id };
     });
-    this.logger.warn(
-      `Reconciliation of payment intent ${paymentIntentId} requeued by ${actor}: ${oneLine(reason)}`,
-    );
+    this.logAction('REQUEUED', paymentIntentId, requeueId, actor.userId);
     const row = await this.prisma.client.paymentReconciliationTask.findFirstOrThrow({
       where: { id: taskId, organizationId },
     });
@@ -203,12 +259,12 @@ export class PaymentReconciliationOperator {
    * is not active for a refund, a second pending proposal.
    */
   async propose(paymentIntentId: string, input: ProposeResolution): Promise<ResolutionView> {
-    const actor = this.resolver();
+    const actor = this.authorize();
     const organizationId = getOrganizationId();
     const fourEyes = this.fourEyes;
     const { resolution, verdict } = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
-      if (intent.createdBy === actor) throw separation('the payment’s creator may not resolve it');
+      if (isCreator(intent, actor)) throw separation('the payment’s creator may not resolve it');
       const [wallet] = await this.walletRepository.lock(tx, [intent.walletId]);
       if (!wallet) throw RastaError.internal('Wallet vanished while locking it');
       const task = await this.tasks.lockOpenTask(tx, organizationId, paymentIntentId);
@@ -246,7 +302,9 @@ export class PaymentReconciliationOperator {
           evidenceReference: input.evidenceReference,
           reason: input.reason,
           fourEyes,
-          proposedBy: actor,
+          proposedBy: actor.userId,
+          proposedByIssuer: actor.issuer,
+          proposedBySubject: actor.subject,
           proposedAt: now,
           correlationId: getContext().correlationId,
           createdAt: now,
@@ -255,21 +313,23 @@ export class PaymentReconciliationOperator {
       });
       await this.enqueueAction(tx, intent, task.kind, {
         action: 'PROPOSED',
-        actor,
+        actor: actor.userId,
+        requeueId: null,
         resolutionId: proposed.id,
         providerOutcome: proposed.providerOutcome,
         evidenceReference: proposed.evidenceReference,
-        proposedBy: actor,
+        proposedBy: actor.userId,
       });
       if (fourEyes) return { resolution: proposed, verdict: null };
       // Separation of duties configured off (development and test only): the
       // proposer is the approver, and the record says so.
       return this.approveLocked(tx, task, proposed, actor, input.reason);
     });
-    this.logger.warn(
-      `Reconciliation of payment intent ${paymentIntentId}: resolution ${resolution.id} ` +
-        `(${resolution.providerOutcome}) proposed by ${actor}` +
-        (fourEyes ? '; awaiting approval' : '; applied at once (four-eyes is off)'),
+    this.logAction(
+      fourEyes ? 'PROPOSED' : 'PROPOSED_AND_APPLIED',
+      paymentIntentId,
+      resolution.id,
+      actor.userId,
     );
     this.countFailure(verdict);
     return toResolutionView(resolution);
@@ -281,7 +341,7 @@ export class PaymentReconciliationOperator {
     resolutionId: string,
     reason: string,
   ): Promise<ResolutionView> {
-    const actor = this.resolver();
+    const actor = this.authorize();
     const organizationId = getOrganizationId();
     const { resolution, verdict } = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
@@ -291,10 +351,7 @@ export class PaymentReconciliationOperator {
       });
       return this.approveLocked(tx, task, proposed, actor, reason);
     });
-    this.logger.warn(
-      `Reconciliation of payment intent ${paymentIntentId}: resolution ${resolution.id} ` +
-        `approved by ${actor} (proposed by ${resolution.proposedBy})`,
-    );
+    this.logAction('APPROVED', paymentIntentId, resolution.id, actor.userId);
     this.countFailure(verdict);
     return toResolutionView(resolution);
   }
@@ -305,7 +362,7 @@ export class PaymentReconciliationOperator {
     resolutionId: string,
     reason: string,
   ): Promise<ResolutionView> {
-    const actor = this.resolver();
+    const actor = this.authorize();
     const organizationId = getOrganizationId();
     const resolution = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
@@ -316,7 +373,8 @@ export class PaymentReconciliationOperator {
       });
       await this.enqueueAction(tx, intent, task.kind, {
         action: 'REJECTED',
-        actor,
+        actor: actor.userId,
+        requeueId: null,
         resolutionId: decided.id,
         providerOutcome: decided.providerOutcome,
         evidenceReference: decided.evidenceReference,
@@ -325,10 +383,7 @@ export class PaymentReconciliationOperator {
       });
       return decided;
     });
-    this.logger.warn(
-      `Reconciliation of payment intent ${paymentIntentId}: resolution ${resolution.id} ` +
-        `rejected by ${actor} (proposed by ${resolution.proposedBy})`,
-    );
+    this.logAction('REJECTED', paymentIntentId, resolution.id, actor.userId);
     return toResolutionView(resolution);
   }
 
@@ -346,7 +401,7 @@ export class PaymentReconciliationOperator {
       'id' | 'organizationId' | 'paymentIntentId' | 'kind' | 'attempts'
     >,
     proposed: PaymentReconciliationResolution,
-    actor: string,
+    actor: OperatorActor,
     reason: string,
   ): Promise<{ resolution: PaymentReconciliationResolution; verdict: Verdict }> {
     let verdict: Verdict;
@@ -363,12 +418,12 @@ export class PaymentReconciliationOperator {
         this.tasks.operatorOwnershipOf(task),
         answerOf(proposed.providerOutcome),
         {
-          actor,
+          actor: actor.userId,
           because: `approved operator resolution ${proposed.id} (evidence ${proposed.evidenceReference})`,
           operator: {
             resolutionId: proposed.id,
             proposedBy: proposed.proposedBy,
-            approvedBy: actor,
+            approvedBy: actor.userId,
             evidenceReference: proposed.evidenceReference,
             fourEyes: proposed.fourEyes,
           },
@@ -388,7 +443,7 @@ export class PaymentReconciliationOperator {
     tx: ExtendedPrismaClient,
     intent: PaymentIntent,
     resolutionId: string,
-    actor: string,
+    actor: OperatorActor,
     to: 'APPROVED' | 'REJECTED',
   ): Promise<PaymentReconciliationResolution> {
     const proposed = await tx.paymentReconciliationResolution.findFirst({
@@ -399,10 +454,15 @@ export class PaymentReconciliationOperator {
       },
     });
     if (!proposed) throw RastaError.notFound('PaymentReconciliationResolution', resolutionId);
-    if (proposed.fourEyes && proposed.proposedBy === actor) {
+    if (
+      proposed.fourEyes &&
+      (proposed.proposedBy === actor.userId ||
+        (proposed.proposedByIssuer === actor.issuer &&
+          proposed.proposedBySubject === actor.subject))
+    ) {
       throw separation('a resolution is decided by someone other than its proposer');
     }
-    if (intent.createdBy === actor) throw separation('the payment’s creator may not resolve it');
+    if (isCreator(intent, actor)) throw separation('the payment’s creator may not resolve it');
     if (proposed.status !== 'PENDING_APPROVAL') {
       throw RastaError.invalidStateTransition(
         'PaymentReconciliationResolution',
@@ -418,22 +478,30 @@ export class PaymentReconciliationOperator {
     tx: ExtendedPrismaClient,
     proposed: PaymentReconciliationResolution,
     status: 'APPROVED' | 'REJECTED',
-    actor: string,
+    actor: OperatorActor,
     reason: string,
   ): Promise<PaymentReconciliationResolution> {
     const now = new Date();
+    const decision = {
+      status,
+      decidedBy: actor.userId,
+      decidedByIssuer: actor.issuer,
+      decidedBySubject: actor.subject,
+      decidedAt: now,
+      decisionReason: reason,
+    };
     const { count } = await tx.paymentReconciliationResolution.updateMany({
       where: {
         id: proposed.id,
         organizationId: proposed.organizationId,
         status: 'PENDING_APPROVAL',
       },
-      data: { status, decidedBy: actor, decidedAt: now, decisionReason: reason, updatedAt: now },
+      data: { ...decision, updatedAt: now },
     });
     if (count !== 1) {
       throw RastaError.invalidStateTransition('PaymentReconciliationResolution', 'DECIDED', status);
     }
-    return { ...proposed, status, decidedBy: actor, decidedAt: now, decisionReason: reason };
+    return { ...proposed, ...decision, updatedAt: now };
   }
 
   /** The intent, row-locked first (the one lock order), in the caller's organization. */
@@ -460,6 +528,7 @@ export class PaymentReconciliationOperator {
     action: {
       action: 'REQUEUED' | 'PROPOSED' | 'REJECTED';
       actor: string;
+      requeueId: string | null;
       resolutionId: string | null;
       providerOutcome: OperatorProviderOutcome | null;
       evidenceReference: string | null;
@@ -489,9 +558,16 @@ export class PaymentReconciliationOperator {
 
   /**
    * The caller, if they may resolve: a person (never a service), not the
-   * oversight role, holding one of the configured resolver roles.
+   * oversight role, holding one of the configured resolver roles — and
+   * carrying the platform user id (`rasta_uid`). Fails closed otherwise.
+   *
+   * Without `rasta_uid` the auth guard falls back to the IdP subject for
+   * `userId`, which is how one person comes to hold two user ids (Codex on
+   * #175, HIGH 1). That fallback shows as `userId === subject`, or as no
+   * subject at all; either is refused here. Public so the controller can ask
+   * it before an idempotent replay is answered (MED 3).
    */
-  private resolver(): string {
+  authorize(): OperatorActor {
     const context = getContext();
     assertNotAuditor();
     const allowed = this.env.ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES;
@@ -502,7 +578,20 @@ export class PaymentReconciliationOperator {
     ) {
       throw RastaError.forbidden('Only a payment reconciliation resolver may do this');
     }
-    return context.userId;
+    if (!context.subject || context.userId === context.subject) {
+      throw RastaError.forbidden(
+        'A payment reconciliation resolver must be signed in with a platform user id',
+      );
+    }
+    return { userId: context.userId, issuer: this.env.OIDC_ISSUER_URL, subject: context.subject };
+  }
+
+  /** Ids and a fixed action code only: no reason, no evidence text (S-09). */
+  private logAction(action: string, paymentIntentId: string, recordId: string, actor: string) {
+    this.logger.warn(
+      `Payment reconciliation operator action ${action}: payment intent ${paymentIntentId}, ` +
+        `record ${recordId}, actor ${actor}`,
+    );
   }
 
   /** An approved uncreditable capture failed: the same count the sweeper keeps. */
@@ -574,8 +663,13 @@ function separation(why: string): RastaError {
   return RastaError.forbidden(`Separation of duties: ${why}`);
 }
 
-function oneLine(text: string): string {
-  return text.replace(/\s+/g, ' ').slice(0, 200);
+/**
+ * Whether `actor` created the intent. `created_by` holds the creator's user id
+ * — the IdP subject when their token carried no `rasta_uid` — so both of the
+ * actor's identifiers are compared.
+ */
+function isCreator(intent: PaymentIntent, actor: OperatorActor): boolean {
+  return intent.createdBy === actor.userId || intent.createdBy === actor.subject;
 }
 
 function toResolutionView(row: PaymentReconciliationResolution): ResolutionView {

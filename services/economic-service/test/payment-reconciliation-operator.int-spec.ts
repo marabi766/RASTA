@@ -87,13 +87,17 @@ describe('the payment reconciliation operator path (real database)', () => {
     );
   };
 
-  /** A SYSTEM_ADMIN of the tenant, by name, so separation can be shown. */
+  /**
+   * A SYSTEM_ADMIN of the tenant, by name, so separation can be shown. Their
+   * token carries the platform id (`userId`) and an IdP subject of its own.
+   */
   const as = <T>(
     organizationId: string,
     userId: string,
     fn: () => Promise<T>,
     roles = ['SYSTEM_ADMIN'],
-  ) => asActor({ organizationId, userId, roles }, fn);
+    subject = `sub-${userId.toLowerCase()}`,
+  ) => asActor({ organizationId, userId, roles, subject }, fn);
 
   const intentOf = (id: string) =>
     runUnscoped('the suite reads the intent', () =>
@@ -375,6 +379,90 @@ describe('the payment reconciliation operator path (real database)', () => {
       expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 360n });
     });
 
+    it('treats two tokens of one subject as one person (Codex on #175, HIGH 1)', async () => {
+      const organizationId = `${org.b}-ALIAS`;
+      const made = await escalatedUnknown(organizationId, 365n);
+      const operator = operatorWith();
+      const proposed = await as(
+        organizationId,
+        'USR-ALICE',
+        () => operator.propose(made.intentId, proposal('DECLINED')),
+        ['SYSTEM_ADMIN'],
+        'sub-alice',
+      );
+
+      // The same IdP subject under another platform id may neither approve nor reject.
+      for (const decide of [
+        () => operator.approve(made.intentId, proposed.id, 'Approving my own'),
+        () => operator.reject(made.intentId, proposed.id, 'Rejecting my own'),
+      ]) {
+        await expect(
+          as(organizationId, 'USR-ALICE-2', decide, ['SYSTEM_ADMIN'], 'sub-alice'),
+        ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      }
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 365n });
+
+      // Another person approves; the record names both identities.
+      await as(organizationId, 'USR-BOB', () =>
+        operator.approve(made.intentId, proposed.id, 'Checked against the provider'),
+      );
+      const row = await runUnscoped('the suite reads the resolution', () =>
+        prisma.client.paymentReconciliationResolution.findUniqueOrThrow({
+          where: { id: proposed.id },
+        }),
+      );
+      expect(row).toMatchObject({
+        proposedBySubject: 'sub-alice',
+        proposedByIssuer: env.OIDC_ISSUER_URL,
+        decidedBy: 'USR-BOB',
+        decidedBySubject: 'sub-usr-bob',
+        decidedByIssuer: env.OIDC_ISSUER_URL,
+      });
+    });
+
+    it('fails closed for a token without the platform user id, on every method', async () => {
+      const organizationId = `${org.b}-NO-UID`;
+      const made = await escalatedUnknown(organizationId, 366n);
+      const operator = operatorWith();
+      const proposed = await as(organizationId, 'USR-ALICE', () =>
+        operator.propose(made.intentId, proposal('DECLINED')),
+      );
+
+      // The guard's fallback (`userId` = the subject), and no subject at all.
+      for (const actor of [
+        { userId: 'sub-bob', subject: 'sub-bob' },
+        { userId: 'USR-BOB', subject: undefined },
+      ]) {
+        for (const attempt of [
+          (): Promise<unknown> => operator.view(made.intentId),
+          () => operator.propose(made.intentId, proposal('DECLINED')),
+          () => operator.approve(made.intentId, proposed.id, 'Checked'),
+          () => operator.reject(made.intentId, proposed.id, 'Checked'),
+          () => operator.requeue(made.intentId, 'Ask again'),
+        ]) {
+          await expect(
+            asActor({ organizationId, roles: ['SYSTEM_ADMIN'], ...actor }, attempt),
+          ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+        }
+      }
+    });
+
+    it('recognises the creator by the subject their intent was created under', async () => {
+      const organizationId = `${org.b}-CREATOR-ALIAS`;
+      // Created by a token without `rasta_uid`: `created_by` holds the subject.
+      const made = await escalatedUnknown(organizationId, 367n, 'sub-zed');
+      const operator = operatorWith();
+      await expect(
+        as(
+          organizationId,
+          'USR-ZED',
+          () => operator.propose(made.intentId, proposal('DECLINED')),
+          ['SYSTEM_ADMIN'],
+          'sub-zed',
+        ),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
     it('refuses anyone outside the configured resolver roles, and a service caller', async () => {
       const organizationId = `${org.b}-ROLES`;
       const made = await escalatedUnknown(organizationId, 370n);
@@ -618,9 +706,47 @@ describe('the payment reconciliation operator path (real database)', () => {
       expect(row).toMatchObject({ status: 'PENDING', attempts: 0, lastOutcome: 'REQUEUED' });
       expect(row!.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
       expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 420n });
-      expect(
-        await eventsOf(organizationId, ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_OPERATOR_ACTION),
-      ).toEqual([expect.objectContaining({ action: 'REQUEUED', actor: 'USR-ALICE' })]);
+
+      // The reason is kept in a requeue row — tenant-scoped, append-only — and
+      // the event carries its id, never the text (Codex on #175, MED 4).
+      const [requeue] = await runUnscoped('the suite reads the requeue rows', () =>
+        prisma.client.paymentReconciliationRequeue.findMany({
+          where: { paymentIntentId: made.intentId },
+        }),
+      );
+      expect(requeue).toMatchObject({
+        organizationId,
+        taskId: row!.id,
+        reason: 'The provider has its records back',
+        requestedBy: 'USR-ALICE',
+        requestedBySubject: 'sub-usr-alice',
+      });
+      const events = await eventsOf(
+        organizationId,
+        ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_OPERATOR_ACTION,
+      );
+      expect(events).toEqual([
+        expect.objectContaining({ action: 'REQUEUED', actor: 'USR-ALICE', requeueId: requeue!.id }),
+      ]);
+      expect(JSON.stringify(events)).not.toContain('records back');
+
+      // Append-only at the database.
+      for (const statement of [
+        `UPDATE payment_reconciliation_requeue SET reason = 'rewritten' WHERE id = $1`,
+        `DELETE FROM payment_reconciliation_requeue WHERE id = $1`,
+      ]) {
+        await expect(
+          runUnscoped('the suite tries to rewrite history', () =>
+            prisma.client.$executeRawUnsafe(statement, requeue!.id),
+          ),
+        ).rejects.toThrow(/append-only/);
+      }
+
+      // The owner's view lists it.
+      const view = await as(organizationId, 'USR-BOB', () => operatorWith().view(made.intentId));
+      expect(view.requeues).toEqual([
+        expect.objectContaining({ id: requeue!.id, reason: 'The provider has its records back' }),
+      ]);
     });
 
     it('refuses a requeue while a resolution awaits approval', async () => {
@@ -703,15 +829,23 @@ describe('the payment reconciliation operator path (real database)', () => {
       const organizationId = `${org.c}-CHECKS`;
       const made = await escalatedUnknown(organizationId, 440n);
       const task = await taskOf(made.intentId);
-      const insert = (evidence: string, decidedBy: string | null, fourEyes = true) =>
+      const insert = (
+        evidence: string,
+        decidedBy: string | null,
+        fourEyes = true,
+        decidedBySubject = 'sub-other',
+      ) =>
         runUnscoped('the suite writes a resolution directly', () =>
           prisma.client.$executeRawUnsafe(
             `INSERT INTO payment_reconciliation_resolution
                (id, organization_id, payment_intent_id, task_id, status, provider_outcome,
-                evidence_reference, reason, four_eyes, proposed_by, proposed_at, decided_by,
-                decided_at, correlation_id, created_at, updated_at)
+                evidence_reference, reason, four_eyes, proposed_by, proposed_by_issuer,
+                proposed_by_subject, proposed_at, decided_by, decided_by_issuer,
+                decided_by_subject, decided_at, correlation_id, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5::"PaymentResolutionStatus", 'DECLINED', $6,
-                     'a reason', $7, 'USR-ALICE', now(), $8,
+                     'a reason', $7, 'USR-ALICE', 'https://idp.test', 'sub-alice', now(), $8,
+                     CASE WHEN $8::text IS NULL THEN NULL ELSE 'https://idp.test' END,
+                     CASE WHEN $8::text IS NULL THEN NULL ELSE $9 END,
                      CASE WHEN $8::text IS NULL THEN NULL ELSE now() END, 'COR', now(), now())`,
             `PRR_${ulid()}`,
             organizationId,
@@ -721,6 +855,7 @@ describe('the payment reconciliation operator path (real database)', () => {
             evidence,
             fourEyes,
             decidedBy,
+            decidedBySubject,
           ),
         );
 
@@ -730,7 +865,29 @@ describe('the payment reconciliation operator path (real database)', () => {
       await expect(insert('TICKET-1', 'USR-ALICE')).rejects.toThrow(
         /ck_payment_resolution_four_eyes|23514/,
       );
-      await expect(insert('TICKET-2', 'USR-ALICE', false)).resolves.toBe(1);
+      // Another platform id on the proposer's own issuer and subject: one person.
+      await expect(insert('TICKET-3', 'USR-ALICE-2', true, 'sub-alice')).rejects.toThrow(
+        /ck_payment_resolution_four_eyes|23514/,
+      );
+      await expect(insert('TICKET-2', 'USR-ALICE', false, 'sub-alice')).resolves.toBe(1);
+
+      // History: a resolution is never deleted, and a decided one never changes.
+      const decided = await runUnscoped('the suite reads the decided row', () =>
+        prisma.client.paymentReconciliationResolution.findFirstOrThrow({
+          where: { organizationId, evidenceReference: 'TICKET-2' },
+        }),
+      );
+      for (const statement of [
+        `DELETE FROM payment_reconciliation_resolution WHERE id = $1`,
+        `UPDATE payment_reconciliation_resolution SET status = 'REJECTED' WHERE id = $1`,
+        `UPDATE payment_reconciliation_resolution SET evidence_reference = 'TICKET-9' WHERE id = $1`,
+      ]) {
+        await expect(
+          runUnscoped('the suite tries to rewrite history', () =>
+            prisma.client.$executeRawUnsafe(statement, decided.id),
+          ),
+        ).rejects.toThrow(/append-only/);
+      }
     });
   });
 });

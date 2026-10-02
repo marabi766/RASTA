@@ -324,6 +324,11 @@ points at this endpoint and the escalation alert.
   `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`NEVER_AUTO_REPLAY`). The evidence reference is on the resolution row, not
   the task.
 - **Requeue** resets attempts and makes the task due now; refused while a sweeper holds it or a resolution is pending.
+  Its reason is kept in an append-only `payment_reconciliation_requeue` row; the event carries `requeueId`, never the text.
+- **Codex on #175 (round 1):** a resolver must carry `rasta_uid` (403 otherwise), and separation compares the token's
+  issuer and subject as well as the user id, stored on the proposal and the decision. Authorization runs before an
+  idempotent replay, and the key is bound to its sender. `down.sql` refuses while any resolution or requeue row exists,
+  and both tables are append-only at the database.
 - **Not built:** "contradicts a provider answer already on record" — no definitive provider answer is stored (one would
   have resolved the task), so there is nothing to contradict.
 

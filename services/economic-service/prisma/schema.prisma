@@ -85,8 +85,8 @@ model LedgerAccount {
 
   organizationId String @map("organization_id")
 
-  accountType AccountType @map("account_type")
-  accountCode String      @map("account_code")
+  accountType AccountType    @map("account_type")
+  accountCode String         @map("account_code")
   /// What this account is *for*, as a closed set. The code is the human
   /// label; this is what code branches on, so a renamed code cannot silently
   /// change behaviour.
@@ -186,7 +186,7 @@ model Journal {
   /// UNIQUE: a posted journal may be reversed exactly once. A second attempt
   /// is refused by the database, which is what makes concurrent reversal
   /// requests safe without an application lock.
-  reversesId String? @unique @map("reverses_id")
+  reversesId     String? @unique @map("reverses_id")
   /// Why it was reversed. Required when `reversesId` is set — enforced by a
   /// CHECK constraint in the migration.
   reversalReason String? @map("reversal_reason")
@@ -235,8 +235,8 @@ model LedgerEntry {
   /// `LGE_<ULID>`.
   id String @id
 
-  journalId String @map("journal_id")
-  accountId String @map("account_id")
+  journalId      String @map("journal_id")
+  accountId      String @map("account_id")
   /// The organization that owns *this leg*. A settlement journal has legs
   /// belonging to the payer, the payee and the platform, and each sees only
   /// its own.
@@ -298,9 +298,9 @@ model Wallet {
 
   /// Σ(ledger entries on the wallet account). Never negative: the platform
   /// does not owe a user a negative amount.
-  ledgerBalanceMinor BigInt @default(0) @map("ledger_balance_minor")
+  ledgerBalanceMinor    BigInt @default(0) @map("ledger_balance_minor")
   /// Σ(active holds).
-  pendingBalanceMinor BigInt @default(0) @map("pending_balance_minor")
+  pendingBalanceMinor   BigInt @default(0) @map("pending_balance_minor")
   /// `ledger − pending`. Stored so the spend check is one indexed read, and
   /// constrained so it can never disagree with the other two.
   availableBalanceMinor BigInt @default(0) @map("available_balance_minor")
@@ -409,7 +409,7 @@ model Transaction {
   id String @id
 
   /// The payer, and the tenant that owns this row.
-  organizationId String @map("organization_id")
+  organizationId             String  @map("organization_id")
   /// The payee. Null for a top-up, where the counterparty is the platform.
   counterpartyOrganizationId String? @map("counterparty_organization_id")
 
@@ -418,12 +418,12 @@ model Transaction {
 
   /// What is owed. Fixed at creation and never recomputed — for a maintenance
   /// obligation this is exactly the figure the owner approved (ADR-028).
-  grossAmountMinor BigInt @map("gross_amount_minor")
+  grossAmountMinor      BigInt @map("gross_amount_minor")
   /// Computed at settlement from the rule in force at `occurredAt`, not now.
   commissionAmountMinor BigInt @default(0) @map("commission_amount_minor")
   /// `gross − commission`. Zero until settled.
-  netAmountMinor BigInt @default(0) @map("net_amount_minor")
-  currency       String @default("IRR")
+  netAmountMinor        BigInt @default(0) @map("net_amount_minor")
+  currency              String @default("IRR")
 
   /// When the underlying business event happened. **This is the timestamp the
   /// commission rule is selected against**, so a transaction recorded late is
@@ -444,9 +444,9 @@ model Transaction {
   /// The event that caused this, for the causal chain across services.
   causationId   String? @map("causation_id")
 
-  disputedAt     DateTime? @map("disputed_at")
-  disputedBy     String?   @map("disputed_by")
-  disputeReason  String?   @map("dispute_reason")
+  disputedAt        DateTime? @map("disputed_at")
+  disputedBy        String?   @map("disputed_by")
+  disputeReason     String?   @map("dispute_reason")
   disputeResolvedAt DateTime? @map("dispute_resolved_at")
   disputeResolvedBy String?   @map("dispute_resolved_by")
 
@@ -528,7 +528,7 @@ model TransactionLeg {
   /// `TXL_<ULID>`.
   id String @id
 
-  transactionId String @map("transaction_id")
+  transactionId  String @map("transaction_id")
   /// The party. Not tenant-scoped away from the payee: a leg carries the
   /// organization it belongs to and the payee sees its own.
   organizationId String @map("organization_id")
@@ -567,14 +567,14 @@ model PaymentIntent {
   /// `PAY_<ULID>`.
   id String @id
 
-  organizationId String @map("organization_id")
-  walletId       String @map("wallet_id")
+  organizationId String  @map("organization_id")
+  walletId       String  @map("wallet_id")
   /// The ledger transaction this payment funds, once captured.
   transactionId  String? @unique @map("transaction_id")
 
   /// The provider that handled it, recorded on the row so a historical
   /// payment still names its origin after the platform switches providers.
-  provider String
+  provider  String
   /// Whether the money movement was real. Always `true` today (ADR-024).
   simulated Boolean @default(true)
 
@@ -587,15 +587,15 @@ model PaymentIntent {
   providerReference String? @map("provider_reference")
   /// A provider-supplied failure code. Never contains an account number, a
   /// card reference or anything else that must not be logged (AGENTS.md S-09).
-  failureReason String? @map("failure_reason")
+  failureReason     String? @map("failure_reason")
 
   /// Required. A retried top-up must not charge twice (docs/06 § 6.8).
-  idempotencyKey String @map("idempotency_key")
+  idempotencyKey String  @map("idempotency_key")
   /// SHA-256 of the canonical request (wallet, amount, currency, instrument),
   /// in the IdempotencyStore's canonical form. A same-key retry resumes this
   /// intent only when it is the same request (Codex round 3 on #121, H2).
   /// NULL on rows written before it existed: such an intent is never resumed.
-  requestHash String? @map("request_hash")
+  requestHash    String? @map("request_hash")
 
   correlationId String @map("correlation_id")
 
@@ -607,9 +607,10 @@ model PaymentIntent {
   createdBy    String    @map("created_by")
 
   /// The reconciliation tasks of its refunds (ADR-064 step B): at most one open.
-  reconciliationTasks PaymentReconciliationTask[]
+  reconciliationTasks       PaymentReconciliationTask[]
   /// Operator resolutions of its unknown refunds (ADR-064 step B3).
   reconciliationResolutions PaymentReconciliationResolution[]
+  reconciliationRequeues    PaymentReconciliationRequeue[]
 
   @@unique([organizationId, idempotencyKey])
   /// The target of the reconciliation task's composite foreign key.
@@ -672,6 +673,7 @@ model PaymentReconciliationTask {
 
   /// Operator resolutions proposed for this task (ADR-064 step B3).
   resolutions PaymentReconciliationResolution[]
+  requeues    PaymentReconciliationRequeue[]
 
   /// The target of the resolution's composite foreign key.
   @@unique([organizationId, id])
@@ -720,12 +722,17 @@ model PaymentReconciliationResolution {
   /// Whether separation of duties applied (false only where configuration allows it).
   fourEyes          Boolean                  @map("four_eyes")
 
-  proposedBy     String    @map("proposed_by")
-  proposedAt     DateTime  @map("proposed_at")
-  decidedBy      String?   @map("decided_by")
-  decidedAt      DateTime? @map("decided_at")
-  decisionReason String?   @map("decision_reason")
-  correlationId  String    @map("correlation_id")
+  proposedBy        String    @map("proposed_by")
+  /// The proposer's token issuer and subject: one person, whatever their token (Codex on #175).
+  proposedByIssuer  String    @map("proposed_by_issuer")
+  proposedBySubject String    @map("proposed_by_subject")
+  proposedAt        DateTime  @map("proposed_at")
+  decidedBy         String?   @map("decided_by")
+  decidedByIssuer   String?   @map("decided_by_issuer")
+  decidedBySubject  String?   @map("decided_by_subject")
+  decidedAt         DateTime? @map("decided_at")
+  decisionReason    String?   @map("decision_reason")
+  correlationId     String    @map("correlation_id")
 
   createdAt DateTime @map("created_at")
   updatedAt DateTime @map("updated_at")
@@ -733,8 +740,35 @@ model PaymentReconciliationResolution {
   task          PaymentReconciliationTask @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   paymentIntent PaymentIntent             @relation(fields: [organizationId, paymentIntentId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
-  // SQL-only: `ux_payment_resolution_pending` — at most one pending per task.
+  // SQL-only: `ux_payment_resolution_pending` — at most one pending per task;
+  // `trg_payment_resolution_append_only` — never deleted, decided once.
   @@map("payment_reconciliation_resolution")
+}
+
+/// Who put a reconciliation task back for the reconciler, and why (ADR-064 B3;
+/// Codex on #175). Append-only at the database (`trg_payment_requeue_append_only`):
+/// the free-text reason lives here, never in a log or an event.
+model PaymentReconciliationRequeue {
+  /// `PRQ_<ULID>`.
+  id String @id
+
+  organizationId  String @map("organization_id")
+  paymentIntentId String @map("payment_intent_id")
+  taskId          String @map("task_id")
+
+  reason             String
+  requestedBy        String @map("requested_by")
+  requestedByIssuer  String @map("requested_by_issuer")
+  requestedBySubject String @map("requested_by_subject")
+  correlationId      String @map("correlation_id")
+
+  createdAt DateTime @map("created_at")
+
+  task          PaymentReconciliationTask @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  paymentIntent PaymentIntent             @relation(fields: [organizationId, paymentIntentId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([organizationId, paymentIntentId, createdAt], map: "ix_payment_reconciliation_requeue_intent")
+  @@map("payment_reconciliation_requeue")
 }
 
 /// `CREATED → AUTHORIZED → CAPTURED | FAILED | REFUNDED` (ADR-024).
@@ -930,10 +964,10 @@ model Reward {
   organizationId String @map("organization_id")
   /// The user whose behaviour earned it, from the triggering event's actor.
   /// A trigger with no user actor grants nothing (ADR-033).
-  userId String @map("user_id")
+  userId         String @map("user_id")
 
-  ruleId       String @map("rule_id")
-  triggerEvent String @map("trigger_event")
+  ruleId          String @map("rule_id")
+  triggerEvent    String @map("trigger_event")
   /// The aggregate that caused it — a usage record id, a maintenance request
   /// id. Half of the uniqueness constraint above.
   sourceReference String @map("source_reference")
@@ -988,7 +1022,7 @@ model RewardSourceEvaluation {
   origin  String
   /// The event that evaluated it. Null exactly when `origin` is `BACKFILL`,
   /// so no envelope's event id can ever match a backfilled row.
-  eventId String? @map("event_id")
+  eventId String?  @map("event_id")
   /// `NO_RULE`, `NO_SUBJECT` or `EVALUATED`: what the first evaluation found.
   outcome String
   /// The rules the first evaluation found applicable. A redelivery after a
@@ -1032,7 +1066,7 @@ model RewardLevel {
   name      String
   /// Ordering. Rank 0 is the entry level.
   rank      Int
-  minPoints Int @map("min_points")
+  minPoints Int    @map("min_points")
 
   /// Configuration only, empty until Q-13 is answered.
   benefits Json?
@@ -1131,8 +1165,8 @@ model IdempotencyKey {
   /// response.
   requestHash String @map("request_hash")
 
-  responseStatus Int?  @map("response_status")
-  responseBody   Json? @map("response_body")
+  responseStatus Int?             @map("response_status")
+  responseBody   Json?            @map("response_body")
   state          IdempotencyState
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -1195,8 +1229,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   @@index([createdAt], map: "idx_outbox_pending")
   @@map("outbox_message")
