@@ -353,6 +353,57 @@ export const ECONOMIC_DATA_ROLLBACK = {
       mustFail: 'append-only',
     },
     {
+      // Codex round 3 on #175: newest-first, the creator-identity rollbacks
+      // run before B3's. Each refuses first, so the sequence stops before
+      // changing anything — never a half-rolled-back schema.
+      label:
+        'up again: the newest-first rollback refuses at its first script while operator history exists',
+      runDownScript: [
+        '20261002100100_payment_intent_creator_identity_validate',
+        '20261002100000_payment_intent_creator_identity',
+        '20261001100000_payment_reconciliation_resolution',
+      ],
+      mustFail: 'refusing to roll back beneath it',
+    },
+    {
+      label: 'up again: the creator-identity rollback refuses on its own as well',
+      runDownScript: ['20261002100000_payment_intent_creator_identity'],
+      mustFail: 'refusing to roll back beneath it',
+    },
+    {
+      label:
+        'up again: the schema is intact — creator columns, validated CHECK, both migrations applied',
+      sql: `
+        DO $$
+        DECLARE found INT;
+        BEGIN
+          SELECT count(*) INTO found FROM information_schema.columns
+           WHERE table_schema = current_schema() AND table_name = 'payment_intent'
+             AND column_name IN ('created_by_issuer', 'created_by_subject');
+          IF found <> 2 THEN
+            RAISE EXCEPTION 'the creator columns were dropped (found %)', found;
+          END IF;
+          SELECT count(*) INTO found FROM pg_constraint
+           WHERE conname = 'ck_payment_intent_creator_identity' AND convalidated
+             AND conrelid = 'payment_intent'::regclass;
+          IF found <> 1 THEN
+            RAISE EXCEPTION 'the creator CHECK is no longer validated';
+          END IF;
+          SELECT count(*) INTO found FROM "_prisma_migrations"
+           WHERE migration_name IN ('20261002100000_payment_intent_creator_identity',
+                                    '20261002100100_payment_intent_creator_identity_validate')
+             AND finished_at IS NOT NULL AND rolled_back_at IS NULL;
+          IF found <> 2 THEN
+            RAISE EXCEPTION 'a creator-identity migration left the ledger (found %)', found;
+          END IF;
+          SELECT count(*) INTO found FROM "payment_reconciliation_resolution" WHERE id = 'PRR_MIGCHECK';
+          IF found <> 1 THEN
+            RAISE EXCEPTION 'the operator history is gone';
+          END IF;
+        END
+        $$;`,
+    },
+    {
       label: 'cleanup: the probe rows are removed before the chain reversal',
       // The append-only trigger is lifted for the probe's own row only, in this
       // one script; the owner may do that, the service's runtime role may not.
