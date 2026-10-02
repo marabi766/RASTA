@@ -194,6 +194,100 @@ export class PaymentReconciliationRepository {
     };
   }
 
+  // ==========================================================================
+  // The operator's side (ADR-064 § 6, step B3)
+  // ==========================================================================
+
+  /**
+   * The intent's open task (PENDING or ESCALATED), row-locked, or undefined.
+   * Called after the intent's lock and the wallet's — the one lock order.
+   * `leased`: a sweeper holds it now, so nothing that moves money may run.
+   */
+  async lockOpenTask(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    paymentIntentId: string,
+  ): Promise<OpenTaskRow | undefined> {
+    const [row] = await runUnscoped('a raw row lock names the task and its tenant', () =>
+      tx.$queryRawUnsafe<OpenTaskRow[]>(
+        `SELECT id,
+                organization_id AS "organizationId",
+                payment_intent_id AS "paymentIntentId",
+                kind::text AS kind,
+                status::text AS status,
+                attempts,
+                (lease_until IS NOT NULL AND lease_until > now()) AS leased
+           FROM payment_reconciliation_task
+          WHERE organization_id = $1 AND payment_intent_id = $2 AND status <> 'DONE'
+            FOR UPDATE`,
+        organizationId,
+        paymentIntentId,
+      ),
+    );
+    return row;
+  }
+
+  /**
+   * What an approved operator resolution asks of the task: still open and
+   * held by no sweeper (checked with the row locked, before anything moves),
+   * and how to finish it there. A sweeper that holds the lease keeps it: the
+   * approval is refused rather than racing it.
+   */
+  operatorOwnershipOf(task: {
+    id: string;
+    organizationId: string;
+  }): Pick<TaskOwnership, 'verify' | 'finish'> {
+    return {
+      verify: async (tx) => {
+        const rows = await runUnscoped('a raw row lock names the task and its tenant', () =>
+          tx.$queryRawUnsafe<{ id: string }[]>(
+            `SELECT id FROM payment_reconciliation_task
+              WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
+                AND (lease_until IS NULL OR lease_until <= now())
+                FOR UPDATE`,
+            task.organizationId,
+            task.id,
+          ),
+        );
+        return rows.length === 1;
+      },
+      finish: (tx, resolution, resolvedBy) =>
+        runUnscoped('a guarded write names the task and its tenant', () =>
+          tx.$executeRawUnsafe(
+            `UPDATE payment_reconciliation_task
+                SET status = 'DONE', done_at = now(), updated_at = now(),
+                    resolution = $3, resolved_by = $4,
+                    lease_until = NULL, lease_token = NULL
+              WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
+                AND (lease_until IS NULL OR lease_until <= now())`,
+            task.organizationId,
+            task.id,
+            resolution,
+            resolvedBy,
+          ),
+        ),
+    };
+  }
+
+  /**
+   * Puts an open task back for the sweeper, due now, its attempts reset
+   * (`REQUEUED`). Not while a sweeper holds it. `escalated_at` stays, as
+   * history. Returns the rows moved: 1, or 0 when it was not free.
+   */
+  async requeue(tx: ExtendedPrismaClient, task: { id: string; organizationId: string }) {
+    return runUnscoped('a guarded write names the task and its tenant', () =>
+      tx.$executeRawUnsafe(
+        `UPDATE payment_reconciliation_task
+            SET status = 'PENDING', attempts = 0, next_attempt_at = now(),
+                last_outcome = 'REQUEUED', updated_at = now()
+          WHERE organization_id = $1 AND id = $2 AND status IN ('PENDING', 'ESCALATED')
+            AND (lease_until IS NULL OR lease_until <= now())`,
+        task.organizationId,
+        task.id,
+      ),
+    );
+  }
+
   /**
    * Puts the task back for later with what was observed. `countAttempt`:
    * true for an unanswered question, false for a deferral that asked nothing
@@ -441,6 +535,18 @@ export interface TaskOwnership {
   verify(tx: ExtendedPrismaClient): Promise<boolean>;
   finish(tx: ExtendedPrismaClient, resolution: string, resolvedBy: string): Promise<number>;
   escalate(tx: ExtendedPrismaClient, outcome: string, countAttempt: boolean): Promise<number>;
+}
+
+/** An open task as an operator sees it under lock (step B3). */
+export interface OpenTaskRow {
+  id: string;
+  organizationId: string;
+  paymentIntentId: string;
+  kind: PaymentReconciliationKind;
+  status: 'PENDING' | 'ESCALATED';
+  attempts: number;
+  /** A sweeper holds it now. */
+  leased: boolean;
 }
 
 export interface Backlog {

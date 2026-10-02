@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { amountMinorSchema } from '@rasta/contracts';
+import { EVIDENCE_REFERENCE_PATTERN } from '../events/events';
 
 /**
  * Payment request shapes (ADR-024).
@@ -44,6 +45,32 @@ export const refundPaymentSchema = z
   .strict();
 
 export type RefundPaymentDto = z.infer<typeof refundPaymentSchema>;
+
+/** Why an operator acts: kept in this service, never on an event. */
+const operatorReason = z.string().trim().min(3).max(500);
+
+/**
+ * An operator's proposed resolution of an unfinished refund (ADR-064 § 6,
+ * step B3). The evidence is mandatory (Q-82) and a reference — a ticket or a
+ * document id the provider's statement is filed under — never the statement
+ * itself, and never free text: it travels on the event to audit-service.
+ */
+export const proposeResolutionSchema = z
+  .object({
+    providerOutcome: z.enum(['REFUNDED', 'DECLINED', 'NOT_REACHED']),
+    evidenceReference: z.string().trim().regex(EVIDENCE_REFERENCE_PATTERN, {
+      message: 'An evidence reference is 3–128 letters, digits and . _ : / -',
+    }),
+    reason: operatorReason,
+  })
+  .strict();
+
+export type ProposeResolutionDto = z.infer<typeof proposeResolutionSchema>;
+
+/** Approving, rejecting or requeueing: why, in words a second person can check. */
+export const operatorDecisionSchema = z.object({ reason: operatorReason }).strict();
+
+export type OperatorDecisionDto = z.infer<typeof operatorDecisionSchema>;
 
 export const listPaymentsQuerySchema = z
   .object({

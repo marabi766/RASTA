@@ -422,9 +422,16 @@ if (expected.dataRollback) {
   const probe = expected.dataRollback;
   console.log(`\n  rolling back ${probe.migration} over ${probe.label}:`);
 
-  const downScript = readFileSync(join(migrationsDir, probe.migration, 'down.sql'), 'utf8');
+  const downOf = (name) => readFileSync(join(migrationsDir, name, 'down.sql'), 'utf8');
+  // `true` rolls back the probe's migration; a list rolls back those, in order —
+  // for a later migration that depends on it and must go first.
+  const downScriptFor = (step) =>
+    Array.isArray(step.runDownScript)
+      ? step.runDownScript.map(downOf).join('\n')
+      : downOf(probe.migration);
 
   for (const step of probe.steps) {
+    const downScript = step.runDownScript ? downScriptFor(step) : '';
     if (step.runDownScript && step.mustFail) {
       // A down script that must refuse the data in front of it.
       mustFail(step.label, downScript, step.mustFail);

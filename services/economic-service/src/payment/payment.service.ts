@@ -20,8 +20,8 @@ import {
   paymentIntentsTotal,
   transactionsCreatedTotal,
 } from '../observability/metrics';
-import { PAYMENT_PROVIDER } from '../tokens';
-import { SERVICE_NAME } from '../config/env';
+import { ENV, PAYMENT_PROVIDER } from '../tokens';
+import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import type { PaymentProvider, RefundResult } from './provider';
 import type { TopUpDto } from './dto';
 import { hashRequestBody } from '../shared/idempotency';
@@ -65,6 +65,7 @@ export class PaymentService {
     private readonly walletRepository: WalletRepository,
     @Inject(PAYMENT_PROVIDER) private readonly provider: PaymentProvider,
     private readonly reconciliation: PaymentReconciliationRepository,
+    @Inject(ENV) private readonly env: EconomicEnv,
   ) {}
 
   /**
@@ -161,6 +162,7 @@ export class PaymentService {
           requestHash,
           correlationId: getContext().correlationId,
           createdBy: actor,
+          ...this.creatorIdentity(),
         },
       });
     });
@@ -339,6 +341,19 @@ export class PaymentService {
       return row;
     });
     return intent ? this.capturedView(intent) : null;
+  }
+
+  /**
+   * The creator's stable identity — the token's issuer and IdP subject —
+   * recorded beside `created_by` (ADR-064 § 6; Codex round 2 on #175). The
+   * operator path proves separation of duties against it, because one person
+   * can carry two platform user ids. The guard verifies exactly one issuer
+   * (`OIDC_ISSUER_URL`). A caller with no subject (a service) records none,
+   * and such an intent fails closed on the operator path.
+   */
+  private creatorIdentity(): { createdByIssuer?: string; createdBySubject?: string } {
+    const subject = getContext().subject;
+    return subject ? { createdByIssuer: this.env.OIDC_ISSUER_URL, createdBySubject: subject } : {};
   }
 
   /**
