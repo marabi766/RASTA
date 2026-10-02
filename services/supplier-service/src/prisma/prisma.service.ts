@@ -1,5 +1,8 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { createTenantGuardExtension } from '@rasta/nest-common';
+import {
+  createTenantGuardExtension,
+  assertRuntimeRole as assertConnectedRuntimeRole,
+} from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 
 /**
@@ -78,29 +81,6 @@ export const PLATFORM_SCOPED_MODELS = {
 /** Relay and consumer bookkeeping with no tenant meaning (ADR-021, ADR-032, ADR-051). */
 export const PLUMBING_MODELS = ['OutboxStreamSequence', 'ProcessedEvent'] as const;
 
-/** What `assertRuntimeRole` reads about the connected role. */
-export interface RuntimeRoleFacts {
-  role: string;
-  database: string;
-  schema: string;
-  superuser: boolean;
-  createDb: boolean;
-  createRole: boolean;
-  databaseOwner: boolean;
-  schemaOwner: boolean;
-}
-
-/** Every reason the connected role may not run the service; empty when it may. */
-export function runtimeRoleProblems(facts: RuntimeRoleFacts): string[] {
-  const problems: string[] = [];
-  if (facts.superuser) problems.push('is a superuser');
-  if (facts.createDb) problems.push('holds CREATEDB');
-  if (facts.createRole) problems.push('holds CREATEROLE');
-  if (facts.databaseOwner) problems.push(`can act as the owner of database ${facts.database}`);
-  if (facts.schemaOwner) problems.push(`can act as an owner in schema ${facts.schema}`);
-  return problems;
-}
-
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
@@ -149,58 +129,21 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * database and every object in it belong to `rasta_supplier_migrator`
    * (infrastructure/docker/postgres/lib/supplier-privilege-split.bash); this
    * service must connect as `rasta_supplier`, which owns nothing. So startup
-   * asks the catalogue who it is and stops if that role:
-   *
-   *   * is a superuser;
-   *   * holds CREATEDB or CREATEROLE;
-   *   * can act as the owner of this database — it could DROP DATABASE;
-   *   * can act as the owner of the schema it is connected to, or of any
-   *     relation in it — it could disable a trigger, alter or drop a table.
+   * asks the catalogue who it is and stops if that role is a superuser or a
+   * migrator, owns the database, a schema or any relation, holds CREATE, or
+   * holds CREATEDB, CREATEROLE or BYPASSRLS — the shared check every split
+   * service runs (@rasta/nest-common runtime-role.ts, D-045).
    *
    * Called by `AppModule` before the relay starts. Not in `onModuleInit`
    * here: tests open owner connections through this class on purpose.
    */
   async assertRuntimeRole(): Promise<void> {
-    const rows = await this.base.$queryRaw<RuntimeRoleFacts[]>`
-      SELECT current_user::text AS role,
-             current_database()::text AS database,
-             current_schema()::text AS schema,
-             r.rolsuper AS superuser,
-             r.rolcreatedb AS "createDb",
-             r.rolcreaterole AS "createRole",
-             EXISTS (
-               SELECT 1 FROM pg_database d
-                WHERE d.datname = current_database()
-                  AND pg_has_role(current_user, d.datdba, 'USAGE')
-             ) AS "databaseOwner",
-             (
-               EXISTS (
-                 SELECT 1 FROM pg_namespace n
-                  WHERE n.nspname = current_schema()
-                    AND pg_has_role(current_user, n.nspowner, 'USAGE')
-               )
-               OR EXISTS (
-                 SELECT 1 FROM pg_class c
-                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  WHERE n.nspname = current_schema()
-                    AND pg_has_role(current_user, c.relowner, 'USAGE')
-               )
-             ) AS "schemaOwner"
-        FROM pg_roles r
-       WHERE r.rolname = current_user
-    `;
-    const row = rows[0];
-    if (!row) throw new Error('supplier-service could not read the role it is connected as');
-    const reasons = runtimeRoleProblems(row);
-    if (reasons.length > 0) {
-      throw new Error(
-        `supplier-service refuses to start: it is connected as ${row.role}, which ` +
-          `${reasons.join(', ')}. Only the runtime role (DATABASE_URL_SUPPLIER) may run the ` +
-          'service; the migrator (DATABASE_URL_SUPPLIER_MIGRATOR) is for migration tooling only.',
-      );
-    }
+    const facts = await assertConnectedRuntimeRole(this.base, {
+      service: 'supplier-service',
+      runtimeVariable: 'DATABASE_URL_SUPPLIER',
+    });
     this.logger.log(
-      `Connected as ${row.role}: not a superuser, no CREATEDB, owns nothing in ${row.database}`,
+      `Connected as ${facts.role}: not a superuser or a migrator, owns nothing, no CREATE`,
     );
   }
 

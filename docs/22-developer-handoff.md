@@ -62,6 +62,7 @@
 git clone <repo-url> rasta && cd rasta
 pnpm install
 cp .env.example .env
+cp .env.migrator.example .env.migrator   # database owner credentials, migrations only (D-045)
 pnpm infra:up
 pnpm db:migrate
 pnpm db:mark-disposable                   # once, for a volume created before the seed marker

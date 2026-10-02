@@ -31,7 +31,7 @@ describe('audit-service refuses to run as a role that owns the audit schema', ()
   it('refuses the migrator, naming it', async () => {
     const migrator = await open(migratorUrl());
     await expect(migrator.assertRuntimeRole()).rejects.toThrow(
-      /refuses to start: it is connected as rasta_audit_migrator, which can act as the owner of schema audit/,
+      /refuses to start: it is connected as rasta_audit_migrator, which is a migrator role.*can act as the owner of schema audit/,
     );
   });
 });
