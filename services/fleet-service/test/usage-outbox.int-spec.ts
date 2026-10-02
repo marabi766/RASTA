@@ -469,6 +469,10 @@ describe('usage recording', () => {
       const attempt = asActor({ organizationId: org.a }, () =>
         service.record(reading({ assetId: racedAsset, clientReference: `race-t-${id('R')}` })),
       );
+      // The refusal can settle before `await transfer` returns, so observe it
+      // now; otherwise Node reports an unhandled rejection and Jest fails the
+      // test with the expected error.
+      attempt.catch(() => undefined);
       for (let tries = 0; tries < 400; tries++) {
         const rows = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
           `SELECT count(*)::int AS n FROM pg_stat_activity
