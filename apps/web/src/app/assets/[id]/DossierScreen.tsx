@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import {
   Alert,
   ButtonLink,
@@ -41,7 +42,28 @@ import type { AssetDossier, ReadResult } from '@/server/assets';
 export interface DossierScreenProps {
   readonly result: ReadResult<AssetDossier>;
   readonly assetId: string;
+  /**
+   * The edit form, when this person may use it. Built by the page from the
+   * read this screen renders, so its pre-filled values are the ones on show.
+   */
+  readonly editForm?: ReactNode;
+  /**
+   * What the write that sent the person here did — decided by the page, which
+   * accepts it only from a flash the server signed for this session and this
+   * machine (`server/flash.ts`), never from a bare query value. Not rendered at
+   * all when the read failed.
+   */
+  readonly notice?: 'created' | 'updated' | 'conflict';
 }
+
+const NOTICES = {
+  created: { tone: 'success', text: 'ماشین ثبت شد.' },
+  updated: { tone: 'success', text: 'مشخصات ماشین ذخیره شد.' },
+  conflict: {
+    tone: 'warning',
+    text: 'همین ماشین پس از باز شدن فرم ویرایش، توسط کسی تغییر کرده بود؛ ویرایش شما ذخیره نشد. مشخصات فعلی را در فرم ببینید و اگر هنوز لازم است دوباره ویرایش کنید.',
+  },
+} as const;
 
 function Compliance({ dossier }: { dossier: AssetDossier }) {
   const { compliance } = dossier;
@@ -121,7 +143,7 @@ function expiryWording(days: number): string {
   return `${toPersianDigits(String(Math.abs(days)))} روز از انقضا گذشته`;
 }
 
-export function DossierScreen({ result, assetId }: DossierScreenProps) {
+export function DossierScreen({ result, assetId, editForm, notice }: DossierScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
       <>
@@ -184,6 +206,8 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
           </ButtonLink>
         }
       />
+
+      {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 
       <Section headingId="identity" title="شناسنامه">
         <Grid columns={2}>
@@ -292,6 +316,12 @@ export function DossierScreen({ result, assetId }: DossierScreenProps) {
           </ol>
         )}
       </Section>
+
+      {editForm ? (
+        <Section headingId="edit-asset" title="ویرایش مشخصات">
+          {editForm}
+        </Section>
+      ) : null}
     </>
   );
 }

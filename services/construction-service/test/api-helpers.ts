@@ -13,7 +13,8 @@ import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
-import { FakeHierarchy, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
+import { FakeHierarchy, SUPPLIER, TEST_KEK, TEST_KEK_ID, databaseUrl } from './helpers';
+import { STANDING_OF_SOURCE } from '../src/tokens';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
@@ -196,6 +197,10 @@ export async function startApi(): Promise<ApiHarness> {
     // with a page list, and the suites that need a loaded standing load it themselves.
     .overrideProvider(StandingBootstrap)
     .useValue(inertRelay)
+    // A bid is decided against supplier-service's own record; here that record is the
+    // suites' `SUPPLIER` (what `qualify` sets), not a network call.
+    .overrideProvider(STANDING_OF_SOURCE)
+    .useValue(SUPPLIER)
     // Nor does the sweeper tick: organization-moved.int-spec.ts drives runOnce().
     .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inertRelay)

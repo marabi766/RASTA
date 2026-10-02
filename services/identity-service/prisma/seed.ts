@@ -244,6 +244,21 @@ const USERS = [
     roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER'],
   },
   {
+    // The second tenant's administrator as the Keycloak realm fixture defines
+    // them (`dehyari.admin.b`, rasta_user_id USR-SEED-DEHYARI-ADMIN-B): without
+    // this row a token for that person named a user identity-service had never
+    // heard of, and `/v1/users/me` answered 404. The browser suite signs in as
+    // them and requires `/users/me` to answer before it trusts the session.
+    // `src/seed-realm-agreement.spec.ts` fails if this and the realm disagree.
+    id: 'USR-SEED-DEHYARI-ADMIN-B',
+    username: 'dehyari.admin.b',
+    email: 'dehyari.admin.b@rasta.local',
+    firstName: 'دهیار',
+    lastName: 'نمونه دو',
+    organizationId: ORG.dehyari2,
+    roles: ['ORGANIZATION_ADMIN'],
+  },
+  {
     id: 'USR-SEED-OPERATOR',
     username: 'operator.one',
     email: 'operator.one@rasta.local',

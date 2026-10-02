@@ -10,6 +10,8 @@ import {
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
+import { TenderEvidenceConsumer } from '../src/consumers/tender-evidence.consumer';
+import { OpsReplayConsumer } from '../src/consumers/ops-replay.consumer';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { runtimeUrl } from './helpers';
@@ -126,11 +128,14 @@ export const unlistedRole = (organizationId: string): string =>
 export function internalToken(
   callerService = 'economic-service',
   purpose: 'SERVICE' | 'RELAY' = 'SERVICE',
+  /** Signed into the token: a tenant-scoped call. Omitted, the token is platform-wide. */
+  organizationId?: string,
 ): Promise<string> {
   return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).issue(
     callerService,
     SERVICE_NAME,
     purpose,
+    organizationId,
   );
 }
 
@@ -205,6 +210,13 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     .overrideProvider(DomainProjectorConsumer)
     .useValue(inertConsumer)
     .overrideProvider(AuditTrailConsumer)
+    .useValue(inertConsumer)
+    // The tender-evidence projection is driven through `handle()` by its own suite.
+    .overrideProvider(TenderEvidenceConsumer)
+    .useValue(inertConsumer)
+    // As the other two: the HTTP suites need no broker, and a host whose broker ACLs
+    // predate the replay topic must not fail every one of them at boot.
+    .overrideProvider(OpsReplayConsumer)
     .useValue(inertConsumer)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
