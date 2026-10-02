@@ -3816,6 +3816,13 @@ DML ای در Migration موجود نگذاشت؛ آنچه افزود
 `is_stream_head` را فقط برای پایین‌ترین توالی منتشرنشدهٔ هر جریان می‌گذارد.
 میان دسته‌ها `VACUUM (ANALYZE)` می‌زند و شکستش را خطای عملیاتی می‌شمارد.
 
+> **به‌روز 2026-10-02 (D-045، Codex روی #180):** دیگر Vacuum نمی‌زند. Backfill با نقش اجرا
+> وصل است که مالک جدولی نیست و PostgreSQL ۱۶ Vacuum آن را با WARNING رد می‌شود و موفقیت
+> گزارش می‌کند؛ پس پس از Applyی که چیزی نوشت `vacuum: required` (با نام جدول) می‌دهد، و
+> `scripts/outbox-b2-vacuum.mjs` با اعتبار مهاجر از محیط `VACUUM (ANALYZE)` را می‌زند و با
+> `vacuum_count`/`analyze_count` در `pg_stat_user_tables` اثبات می‌کند (وگرنه رد).
+> `--vacuum-every` حذف شد. آزمون: `pnpm test:outbox-b2-vacuum-pg` (در CI).
+
 قفل‌های ایمنی، همه Fail-Closed: هدف صریح (`--service`/`--all`، بدون پیش‌فرض) ·
 نوشتن فقط با `--apply` · رد `NODE_ENV=production` و هر `NODE_ENV` ناشناخته ·
 فقط `DATABASE_URL_<SERVICE>` و هرگز بازگشت به `DATABASE_URL` مشترک (A-01) ·

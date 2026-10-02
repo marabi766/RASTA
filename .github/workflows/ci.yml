@@ -1467,6 +1467,19 @@ jobs:
           MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization
           MIGRATION_LIB_TEST_DATABASE_REQUIRED: 'true'
 
+      - name: Outbox B2 vacuum is the owner's, and verified (D-045)
+        # The B2 backfill runs as the runtime role, whose VACUUM PostgreSQL
+        # skips while reporting success, so it reports `vacuum: required`
+        # instead; scripts/outbox-b2-vacuum.mjs runs VACUUM (ANALYZE) with the
+        # migrator's credential from its environment and proves it from
+        # pg_stat_user_tables (Codex on #180). Both CLIs run as processes, in a
+        # throwaway schema on document's database.
+        run: pnpm run test:outbox-b2-vacuum-pg
+        env:
+          NODE_ENV: test
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+
       - name: Demo seeds refuse outside development and test
         # Every service's prisma/seed.ts upserts fixed ids with demo values; run
         # with production credentials it would overwrite real tenants. Each seed
