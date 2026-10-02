@@ -449,6 +449,25 @@ export class RepairOrderService {
       // it not resting on the last write having got it right.
       const totals = await this.recomputeTotals(tx, order.organizationId, id, request.id);
 
+      // The cost writes take this request's lock before they touch a line, and
+      // this transaction holds it, so the total just recomputed is the final
+      // one: no line can land between this comparison and the commit. A
+      // mismatch rolls the whole completion back.
+      if (
+        dto.expectedTotalCostMinor !== undefined &&
+        dto.expectedTotalCostMinor !== totals.orderTotal.toString()
+      ) {
+        throw RastaError.businessRule(
+          'The cost has changed since it was shown to you; review it again before completing.',
+          {
+            rule: 'COMPLETION_TOTAL_MISMATCH',
+            repairOrderId: id,
+            expected: dto.expectedTotalCostMinor,
+            actual: totals.orderTotal.toString(),
+          },
+        );
+      }
+
       const requestResult = await tx.maintenanceRequest.updateMany({
         where: { id: request.id, status: 'IN_PROGRESS' },
         data: {

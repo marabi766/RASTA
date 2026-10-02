@@ -75,6 +75,59 @@ const repairOrderSchema = z.object({
 
 export type RepairOrderSummary = z.infer<typeof repairOrderSchema>;
 
+/**
+ * A part fitted during a repair, as `GET /v1/repair-orders/{id}` lists it. Who
+ * recorded it (`recordedBy`) is dropped: no screen shows a user id.
+ */
+const partLineSchema = z.object({
+  id: z.string(),
+  partName: z.string(),
+  partReference: z.string().nullable().default(null),
+  quantity: z.string(),
+  unit: z.string(),
+  unitCostMinor: z.string(),
+  totalCostMinor: z.string(),
+  source: z.string(),
+  recordedAt: z.string(),
+});
+
+const labourLineSchema = z.object({
+  id: z.string(),
+  description: z.string(),
+  technician: z.string().nullable().default(null),
+  hours: z.string(),
+  hourlyRateMinor: z.string(),
+  totalCostMinor: z.string(),
+  performedAt: z.string(),
+});
+
+/**
+ * A cost line. `partUsageId` and `laborEntryId` are kept only to tell a line a
+ * person entered directly (both null) from one written by recording a part or
+ * labour, which the screen already lists above it.
+ */
+const costLineEntrySchema = z.object({
+  id: z.string(),
+  category: z.string(),
+  amountMinor: z.string(),
+  description: z.string().nullable().default(null),
+  partUsageId: z.string().nullable().default(null),
+  laborEntryId: z.string().nullable().default(null),
+  recordedAt: z.string(),
+});
+
+/** A repair order with what was recorded under it. */
+const repairOrderDetailSchema = repairOrderSchema.extend({
+  parts: z.array(partLineSchema).default([]),
+  labour: z.array(labourLineSchema).default([]),
+  costs: z.array(costLineEntrySchema).default([]),
+});
+
+export type RepairOrderDetail = z.infer<typeof repairOrderDetailSchema>;
+export type RepairPartLine = z.infer<typeof partLineSchema>;
+export type RepairLabourLine = z.infer<typeof labourLineSchema>;
+export type RepairCostLine = z.infer<typeof costLineEntrySchema>;
+
 const requestDetailSchema = requestSummarySchema.extend({
   description: z.string().nullable().default(null),
   reportedBy: z.string(),
@@ -158,5 +211,16 @@ export function fetchMaintenanceRequest(
     session,
     `/v1/maintenance-requests/${encodeURIComponent(requestId)}`,
     requestDetailSchema,
+  );
+}
+
+export function fetchRepairOrder(
+  session: WebSession,
+  repairOrderId: string,
+): Promise<ReadResult<RepairOrderDetail>> {
+  return read(
+    session,
+    `/v1/repair-orders/${encodeURIComponent(repairOrderId)}`,
+    repairOrderDetailSchema,
   );
 }

@@ -149,6 +149,14 @@ const COST_CATEGORIES: Readonly<Record<string, string>> = {
   OTHER: 'سایر',
 };
 
+/** `PART_SOURCES`, same file: where a fitted part came from. */
+const PART_SOURCES: Readonly<Record<string, string>> = {
+  INVENTORY: 'انبار',
+  MARKETPLACE: 'بازار',
+  WORKSHOP_SUPPLIED: 'تأمین‌شده توسط تعمیرگاه',
+  OTHER: 'سایر',
+};
+
 /** `DRIVER_STATUSES`, `services/fleet-service/src/fleet/driver-lifecycle.ts`. */
 const DRIVER_STATUSES: Readonly<Record<string, string>> = {
   ACTIVE: 'فعال',
@@ -230,6 +238,7 @@ export const repairOrderStatusLabel = (value: string): string =>
   lookup(REPAIR_ORDER_STATUSES, value);
 export const severityLabel = (value: string): string => lookup(SEVERITIES, value);
 export const costCategoryLabel = (value: string): string => lookup(COST_CATEGORIES, value);
+export const partSourceLabel = (value: string): string => lookup(PART_SOURCES, value);
 export const driverStatusLabel = (value: string): string => lookup(DRIVER_STATUSES, value);
 export const assignmentEndReasonLabel = (value: string): string =>
   lookup(ASSIGNMENT_END_REASONS, value);

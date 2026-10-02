@@ -29,6 +29,13 @@ import { installLiveSession } from './live-session';
  * no open corrective request, or the test stops with a message saying so — and
  * it cancels only the requests this run created, by the ids it recorded.
  * See `e2e/README.md`.
+ *
+ * ## What the repair-order scenarios leave behind
+ *
+ * One of them takes a request all the way to a completed repair, which is
+ * final: a COMPLETED request is not open, so it does not trip the check above on
+ * a re-run, and it is left as the record it is. The suite never approves it —
+ * approval authorises settlement, and nothing here may start money moving.
  */
 
 test.describe('the maintenance route', () => {
@@ -308,6 +315,252 @@ test.describe('reporting maintenance through the live stack', () => {
       expect.objectContaining({ id, organizationId: 'ORG-DEH-0001', status: 'CANCELLED' }),
     );
     expect(await openCorrective(request, accessToken)).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // The repair order on a request
+  // -------------------------------------------------------------------------
+
+  const WORKSHOP = 'ORG-WORKSHOP-E2E-0001';
+
+  const authorised = () => ({ authorization: `Bearer ${accessToken}` });
+
+  /** A corrective request filed straight at the owning service, its id recorded for cleanup. */
+  async function file(request: APIRequestContext, what: string): Promise<string> {
+    const filed = await request.post(maintenanceUrl('/v1/maintenance-requests'), {
+      headers: authorised(),
+      data: { assetId: MACHINE, type: 'CORRECTIVE', severity: 'LOW', title: titled(what) },
+    });
+    expect(filed.status()).toBe(201);
+    const { id } = (await filed.json()) as RequestRecord;
+    created.add(id);
+    return id;
+  }
+
+  /** The request's one repair order, referred straight at the owning service. */
+  async function refer(request: APIRequestContext, requestId: string): Promise<string> {
+    const assigned = await request.post(
+      maintenanceUrl(`/v1/maintenance-requests/${requestId}/assign`),
+      {
+        headers: authorised(),
+        data: { workshopOrganizationId: WORKSHOP, workshopName: 'تعمیرگاه آزمون' },
+      },
+    );
+    expect(assigned.status()).toBe(201);
+    return ((await assigned.json()) as { id: string }).id;
+  }
+
+  interface OrderRecord {
+    id: string;
+    status: string;
+    partsCostMinor: string;
+    labourCostMinor: string;
+    otherCostMinor: string;
+    totalCostMinor: string;
+    parts?: { partName: string; quantity: string; totalCostMinor: string }[];
+    labour?: { description: string; hours: string; totalCostMinor: string }[];
+    costs?: { category: string; amountMinor: string }[];
+  }
+
+  /** What the owning service holds for the order, asked with the same token. */
+  async function orderOf(request: APIRequestContext, orderId: string): Promise<OrderRecord> {
+    const read = await request.get(maintenanceUrl(`/v1/repair-orders/${orderId}`), {
+      headers: authorised(),
+    });
+    expect(read.status()).toBe(200);
+    return (await read.json()) as OrderRecord;
+  }
+
+  async function requestOf(request: APIRequestContext, id: string): Promise<RequestRecord> {
+    const read = await request.get(maintenanceUrl(`/v1/maintenance-requests/${id}`), {
+      headers: authorised(),
+    });
+    expect(read.status()).toBe(200);
+    return (await read.json()) as RequestRecord & { totalCostMinor: string };
+  }
+
+  /** A form on the page, found by a control only it has. */
+  const formWith = (page: import('@playwright/test').Page, field: string) =>
+    page.locator('form').filter({ has: page.locator(`[name="${field}"]`) });
+
+  /** Opens a form that stays closed until asked for. */
+  const openDisclosure = async (page: import('@playwright/test').Page, summary: string) => {
+    await page.locator('summary', { hasText: summary }).click();
+  };
+
+  test('a request goes from referral to a completed repair through its page, and maintenance-service holds every step', async ({
+    page,
+    request,
+  }) => {
+    test.setTimeout(180_000);
+
+    const id = await file(request, 'تعمیر کامل از صفحه');
+    const detail = `/maintenance/${encodeURIComponent(id)}`;
+    const flashed = new RegExp(`/maintenance/${encodeURIComponent(id)}\\?flash=`);
+
+    // Refer it to a workshop from the page.
+    await page.goto(detail);
+    const assign = formWith(page, 'workshopOrganizationId');
+    await assign.locator('input[name="workshopOrganizationId"]').fill(WORKSHOP);
+    await assign.locator('input[name="workshopName"]').fill('تعمیرگاه آزمون');
+    await assign.getByRole('button', { name: 'ارجاع به تعمیرگاه' }).click();
+    await expect(page).toHaveURL(flashed);
+    await expect(page.getByText('کار به تعمیرگاه ارجاع شد.')).toBeVisible();
+
+    const detailOf = await requestOf(request, id);
+    const orderId = (detailOf as unknown as { repairOrders: { id: string; status: string }[] })
+      .repairOrders[0]?.id;
+    expect(orderId).toBeTruthy();
+    expect((await orderOf(request, orderId!)).status).toBe('OPEN');
+
+    // Start it.
+    await page.getByRole('button', { name: 'آغاز تعمیر' }).click();
+    await expect(page).toHaveURL(flashed);
+    await expect(page.getByRole('status').filter({ hasText: 'تعمیر آغاز شد' })).toBeVisible();
+    expect((await orderOf(request, orderId!)).status).toBe('IN_PROGRESS');
+    expect((await requestOf(request, id)).status).toBe('IN_PROGRESS');
+
+    // A part, labour, and a charge that is neither.
+    await openDisclosure(page, 'ثبت قطعه');
+    const part = formWith(page, 'partName');
+    await part.locator('input[name="partName"]').fill('فیلتر روغن');
+    await part.locator('input[name="quantity"]').fill('۲');
+    await part.locator('input[name="unitCostMinor"]').fill('۳۵۰٬۰۰۰');
+    await part.getByRole('button', { name: 'ثبت قطعه' }).click();
+    await expect(page.getByText('قطعه ثبت شد.')).toBeVisible();
+
+    await openDisclosure(page, 'ثبت اجرت');
+    const labour = formWith(page, 'hourlyRateMinor');
+    await labour.locator('input[name="description"]').fill('تعویض شیلنگ');
+    await labour.locator('input[name="hours"]').fill('۱٫۵');
+    await labour.locator('input[name="hourlyRateMinor"]').fill('800000');
+    await labour.getByRole('button', { name: 'ثبت اجرت' }).click();
+    await expect(page.getByText('اجرت ثبت شد.')).toBeVisible();
+
+    await openDisclosure(page, 'ثبت هزینهٔ دیگر');
+    const charge = formWith(page, 'amountMinor');
+    await charge.locator('select[name="category"]').selectOption('SERVICE');
+    await charge.locator('input[name="amountMinor"]').fill('500000');
+    await charge.locator('input[name="description"]').fill('ایاب و ذهاب');
+    await charge.getByRole('button', { name: 'ثبت هزینه' }).click();
+    await expect(page.getByText('هزینه ثبت شد.')).toBeVisible();
+
+    // Money is minor-unit strings in the service, however it was typed: 2 × 350 000,
+    // 1.5 h × 800 000, 500 000.
+    const recorded = await orderOf(request, orderId!);
+    expect(recorded).toEqual(
+      expect.objectContaining({
+        status: 'IN_PROGRESS',
+        partsCostMinor: '700000',
+        labourCostMinor: '1200000',
+        otherCostMinor: '500000',
+        totalCostMinor: '2400000',
+      }),
+    );
+    expect(recorded.parts).toEqual([
+      expect.objectContaining({ partName: 'فیلتر روغن', quantity: '2', totalCostMinor: '700000' }),
+    ]);
+    expect(recorded.labour).toEqual([
+      expect.objectContaining({ description: 'تعویض شیلنگ', hours: '1.5' }),
+    ]);
+    // And the page lists them as read back, in the reader's digits.
+    await expect(page.getByText(/فیلتر روغن — ۲ عدد/)).toBeVisible();
+    await expect(page.getByText(/تعویض شیلنگ — ۱٫۵ ساعت/)).toBeVisible();
+
+    // The page was drawn at 2 400 000. Somebody else records a charge before the
+    // button is pressed: the completion is refused by the service, whole, and the
+    // person is sent to a page that shows the new total.
+    const late = await request.post(maintenanceUrl(`/v1/repair-orders/${orderId}/costs`), {
+      headers: authorised(),
+      data: {
+        category: 'SERVICE',
+        amountMinor: '400000',
+        currency: 'IRR',
+        description: 'هزینه دیرهنگام',
+      },
+    });
+    expect(late.status()).toBe(201);
+
+    const complete = formWith(page, 'workPerformed');
+    await complete.locator('textarea[name="workPerformed"]').fill('شیلنگ و فیلتر تعویض شد');
+    await complete.getByRole('button', { name: 'تکمیل تعمیر' }).click();
+    await expect(page).toHaveURL(flashed);
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'هزینهٔ ارجاع از زمان نمایش تغییر کرده بود' }),
+    ).toBeVisible();
+    expect((await orderOf(request, orderId!)).status).toBe('IN_PROGRESS');
+    expect((await requestOf(request, id)).status).toBe('IN_PROGRESS');
+
+    // At the total it now shows, it goes through.
+    await page.goto(detail);
+    const again = formWith(page, 'workPerformed');
+    await again.locator('textarea[name="workPerformed"]').fill('شیلنگ و فیلتر تعویض شد');
+    await again.getByRole('button', { name: 'تکمیل تعمیر' }).click();
+    await expect(page).toHaveURL(flashed);
+    await expect(page.getByRole('status').filter({ hasText: 'تعمیر تکمیل شد' })).toBeVisible();
+
+    const done = await orderOf(request, orderId!);
+    expect(done).toEqual(
+      expect.objectContaining({ status: 'COMPLETED', totalCostMinor: '2800000' }),
+    );
+    const completed = (await requestOf(request, id)) as RequestRecord & { totalCostMinor: string };
+    expect(completed.status).toBe('COMPLETED');
+    expect(completed.totalCostMinor).toBe('2800000');
+
+    // What is left is the owner's approval of that total — offered, never pressed.
+    await expect(page.getByRole('heading', { name: 'تأیید هزینه' })).toBeVisible();
+    await expect(page.getByText(/۲٬۸۰۰٬۰۰۰ ریال/).first()).toBeVisible();
+  });
+
+  test('a referral is withdrawn from its page, the request stays open, and a form carrying another command’s baseline is refused', async ({
+    page,
+    request,
+  }) => {
+    test.setTimeout(120_000);
+
+    const id = await file(request, 'ارجاع پس‌گرفته');
+    const orderId = await refer(request, id);
+    const detail = `/maintenance/${encodeURIComponent(id)}`;
+
+    await page.goto(detail);
+
+    // The start form and the withdraw form each carry a baseline signed for that
+    // command. Put the withdraw form's into the start form, as a script could.
+    const start = page
+      .locator('form')
+      .filter({ has: page.getByRole('button', { name: 'آغاز تعمیر' }) });
+    await page.locator('summary', { hasText: 'پس‌گرفتن این ارجاع' }).click();
+    const withdraw = formWith(page, 'reason').filter({
+      has: page.getByRole('button', { name: 'پس‌گرفتن ارجاع' }),
+    });
+    const withdrawBaseline = await withdraw.locator('input[name="baseline"]').inputValue();
+    await start.locator('input[name="baseline"]').evaluate((input, value) => {
+      (input as HTMLInputElement).value = value;
+    }, withdrawBaseline);
+    await start.getByRole('button', { name: 'آغاز تعمیر' }).click();
+
+    await expect(
+      page.getByText(/این فرم منقضی شده است یا با صفحهٔ نمایش‌داده‌شده نمی‌خواند/),
+    ).toBeVisible();
+    expect((await orderOf(request, orderId)).status).toBe('OPEN');
+
+    // The withdrawal itself.
+    await page.goto(detail);
+    await page.locator('summary', { hasText: 'پس‌گرفتن این ارجاع' }).click();
+    const form = formWith(page, 'reason').filter({
+      has: page.getByRole('button', { name: 'پس‌گرفتن ارجاع' }),
+    });
+    await form.locator('textarea[name="reason"]').fill('تعمیرگاه کار را نپذیرفت');
+    await form.getByRole('button', { name: 'پس‌گرفتن ارجاع' }).click();
+
+    await expect(page).toHaveURL(new RegExp(`${encodeURIComponent(id)}\\?flash=`));
+    await expect(page.getByRole('status').filter({ hasText: 'ارجاع پس گرفته شد' })).toBeVisible();
+
+    const withdrawn = await orderOf(request, orderId);
+    expect(withdrawn.status).toBe('CANCELLED');
+    // The request is not the job going away: it is open, and can be referred again.
+    expect((await requestOf(request, id)).status).toBe('OPEN');
+    await expect(formWith(page, 'workshopOrganizationId')).toBeVisible();
   });
 
   test('a breakdown without a severity is refused at the form and reaches no service', async ({

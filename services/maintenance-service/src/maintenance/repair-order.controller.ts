@@ -89,7 +89,9 @@ export class RepairOrderController {
       'Publishes REPAIR_COMPLETED with what this workshop charged, and MAINTENANCE_COMPLETED, ' +
       'which returns the machine to service. The request moves to COMPLETED, not APPROVED — ' +
       'nothing settles until an owner has looked at the bill. Set `returnedToServiceAt` when ' +
-      'the machine was collected later than it was repaired; downtime counts to that moment.',
+      'the machine was collected later than it was repaired; downtime counts to that moment. ' +
+      'Optionally send `expectedTotalCostMinor`, the order total you were shown: if a part or ' +
+      'a charge was recorded since, the completion is refused with 422 and nothing changes.',
   })
   complete(@Param('id') id: string, @Body(zodPipe(completeRepairSchema)) dto: CompleteRepairDto) {
     return this.repairOrders.complete(id, dto);

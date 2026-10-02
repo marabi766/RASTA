@@ -3,8 +3,6 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
-import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
-import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatMoney } from '@/lib/format';
 import {
   EMPTY_ASSIGN_WORKSHOP_FORM,
@@ -18,6 +16,7 @@ import {
 } from '@/lib/maintenance-fields';
 
 import { submitApproveRequest, submitAssignWorkshop, submitCancelRequest } from './actions';
+import { CommandBanner, Hidden, submissionOf, type Identity } from './command-form-parts';
 import { IDLE_COMMAND_FORM, type RequestCommandFormState } from './form-state';
 
 /**
@@ -31,28 +30,6 @@ import { IDLE_COMMAND_FORM, type RequestCommandFormState } from './form-state';
  * have landed is `UnconfirmedWriteAlert`, which tells the person to look at the
  * request before trying again.
  */
-
-interface Identity {
-  readonly csrfToken: string;
-  /** Minted for this render and bound to this session. */
-  readonly submissionId: string;
-  readonly requestId: string;
-}
-
-function Hidden({ csrfToken, submissionId, requestId }: Identity) {
-  return (
-    <>
-      <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
-      <input type="hidden" name={SUBMISSION_FIELD} value={submissionId} />
-      <input type="hidden" name="requestId" value={requestId} />
-    </>
-  );
-}
-
-/** A retry of the same form carries the same reference. */
-function submissionOf(state: { kind: string; submissionId?: string }, minted: string): string {
-  return state.kind === 'INVALID' && state.submissionId ? state.submissionId : minted;
-}
 
 // ---------------------------------------------------------------------------
 // Refer to a workshop
@@ -156,8 +133,11 @@ export function ApproveRequestForm({
 
   return (
     <form action={action} className="flex flex-col gap-4">
-      <Hidden {...identity} submissionId={submissionOf(state, identity.submissionId)} />
-      <input type="hidden" name={BASELINE_FIELD} value={baseline} />
+      <Hidden
+        {...identity}
+        submissionId={submissionOf(state, identity.submissionId)}
+        baseline={baseline}
+      />
 
       <CommandBanner state={state} forbidden="اجازهٔ تأیید هزینه به شما داده نشده است." />
       {errors.expectedTotalCostMinor ? (
@@ -242,50 +222,4 @@ export function CancelRequestForm(identity: Identity) {
       </form>
     </details>
   );
-}
-
-// ---------------------------------------------------------------------------
-// What every attempt can say
-// ---------------------------------------------------------------------------
-
-function CommandBanner({
-  state,
-  forbidden,
-}: {
-  state: RequestCommandFormState<unknown, string>;
-  forbidden: string;
-}) {
-  switch (state.kind) {
-    case 'INVALID':
-      return state.message ? <Alert tone="warning">{state.message}</Alert> : null;
-    case 'REFUSED':
-      return (
-        <Alert tone="danger">
-          {state.reason === 'NO_SESSION'
-            ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
-            : state.reason === 'BASELINE'
-              ? 'این فرم منقضی شده است یا با مبلغ نمایش‌داده‌شده نمی‌خواند. صفحه را تازه کنید و دوباره تأیید کنید.'
-              : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
-        </Alert>
-      );
-    case 'FORBIDDEN':
-      return (
-        <Alert tone="danger">
-          {forbidden} کد پیگیری: {state.correlationId}
-        </Alert>
-      );
-    case 'NOT_FOUND':
-      // The platform answers "no such request" and "somebody else's" the same way.
-      return <Alert tone="danger">این درخواست پیدا نشد یا در سازمان فعال شما نیست.</Alert>;
-    case 'UNCONFIRMED':
-      return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
-    case 'FAILED':
-      return (
-        <Alert tone="danger">
-          انجام نشد و چیزی تغییر نکرد. می‌توانید دوباره بفرستید. کد پیگیری: {state.correlationId}
-        </Alert>
-      );
-    case 'IDLE':
-      return null;
-  }
 }

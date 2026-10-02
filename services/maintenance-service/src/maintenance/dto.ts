@@ -388,6 +388,17 @@ export const completeRepairSchema = z
      * without it for the whole of that.
      */
     returnedToServiceAt: z.string().datetime().optional(),
+    /**
+     * The repair order's total the caller was looking at, echoed back.
+     *
+     * Optional, unlike the approval's (`approveRequestSchema`): completing
+     * closes the order's cost lines, so a client that shows the bill first —
+     * the portal does — states what it showed and has the completion refused,
+     * atomically, if a part or a charge was recorded in between. It is not the
+     * mandatory control: that is the owner's approval of the request's total,
+     * which still states its amount and is checked after this one.
+     */
+    expectedTotalCostMinor: amountMinorSchema.optional(),
   })
   .strict();
 
