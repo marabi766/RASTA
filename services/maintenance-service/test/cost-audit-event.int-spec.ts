@@ -457,6 +457,9 @@ describe('cost-line audit events (L7-14)', () => {
         cancelling = asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
           requests.cancel(requestId, { reason: 'منصرف شدیم' }),
         );
+        // Refused before the assertion below attaches; observe it now so it
+        // is never an unhandled rejection.
+        cancelling.catch(() => undefined);
         await someoneWaitsOnALock();
         return sum(...args);
       });
