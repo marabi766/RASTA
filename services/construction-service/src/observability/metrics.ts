@@ -103,6 +103,13 @@ export const tenderCloseBacklog = new Gauge({
   registers: [registry],
 });
 
+export const tenderCloseMaxAttempts = new Gauge({
+  name: 'rasta_construction_tender_close_max_attempts',
+  help: 'The most failed close attempts of any overdue PUBLISHED tender; 0 when none failed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const tenderCloseOldestOverdueAgeSeconds = new Gauge({
   name: 'rasta_construction_tender_close_oldest_overdue_age_seconds',
   help: 'Seconds the oldest overdue PUBLISHED tender has waited past its deadline; 0 when none',

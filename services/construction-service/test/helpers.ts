@@ -264,6 +264,8 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       intervalMs: 60_000,
       batchSize: 500,
       leaseSeconds: 60,
+      retryBackoffBaseSeconds: 10,
+      retryBackoffMaxSeconds: 900,
       ...overrides,
     });
   return {

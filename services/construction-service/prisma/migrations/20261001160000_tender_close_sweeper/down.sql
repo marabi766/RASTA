@@ -29,9 +29,14 @@ BEGIN
 END
 $preflight_closure$;
 
+DROP TRIGGER IF EXISTS "tg_tender_leave_published_clears_close_claim" ON "tender";
+DROP FUNCTION IF EXISTS "tender_leave_published_clears_close_claim"();
+ALTER TABLE "tender" DROP CONSTRAINT IF EXISTS "ck_tender_close_attempts";
 ALTER TABLE "tender" DROP CONSTRAINT IF EXISTS "ck_tender_close_lease";
 ALTER TABLE "tender" DROP CONSTRAINT IF EXISTS "ck_tender_closure_complete";
 DROP INDEX IF EXISTS "ix_tender_close_due";
+ALTER TABLE "tender" DROP COLUMN IF EXISTS "close_next_attempt_at";
+ALTER TABLE "tender" DROP COLUMN IF EXISTS "close_attempts";
 ALTER TABLE "tender" DROP COLUMN IF EXISTS "close_fence";
 ALTER TABLE "tender" DROP COLUMN IF EXISTS "close_lease_until";
 ALTER TABLE "tender" DROP COLUMN IF EXISTS "closed_by";

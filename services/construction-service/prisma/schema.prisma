@@ -511,7 +511,13 @@ model Tender {
   closeLeaseUntil DateTime? @map("close_lease_until") @db.Timestamptz(3)
   closeFence      String?   @map("close_fence")
 
-  criteria    TenderCriterion[]
+  /// Failed close attempts, and when the sweeper may try again (bounded exponential
+  /// backoff). Housekeeping like the lease; the database zeroes both when the tender
+  /// leaves PUBLISHED.
+  closeAttempts      Int       @default(0) @map("close_attempts")
+  closeNextAttemptAt DateTime? @map("close_next_attempt_at") @db.Timestamptz(3)
+
+  criteria   TenderCriterion[]
   invitations TenderInvitation[]
   /// At most one (`tender_key.tender_id` is its primary key); a list because the
   /// relation is keyed by the (organization, tender) pair, which Prisma cannot

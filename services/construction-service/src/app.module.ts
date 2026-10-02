@@ -86,6 +86,7 @@ import {
   policyReconciliationBacklog,
   policyReconciliationOldestDueAgeSeconds,
   tenderCloseBacklog,
+  tenderCloseMaxAttempts,
   tenderCloseOldestOverdueAgeSeconds,
 } from './observability/metrics';
 import {
@@ -198,6 +199,8 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
           intervalMs: env.CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS,
           batchSize: env.CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE,
           leaseSeconds: env.CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS,
+          retryBackoffBaseSeconds: env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS,
+          retryBackoffMaxSeconds: env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS,
         }),
     },
     {
@@ -398,6 +401,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
           { service: SERVICE_NAME },
           overdue.oldestOverdueAgeSeconds,
         );
+        tenderCloseMaxAttempts.set({ service: SERVICE_NAME }, overdue.maxCloseAttempts);
         // Expired idempotency records are unusable by definition; removing
         // them keeps the table bounded (docs/06 § 6.8).
         await this.idempotency.purgeExpired();

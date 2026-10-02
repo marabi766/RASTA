@@ -17,12 +17,19 @@ function sweeperWith(claimed: ClaimedTender[], results: Record<string, CloseResu
     if (result instanceof Error) throw result;
     return result;
   });
+  const recordFailure = jest.fn().mockResolvedValue(undefined);
   const sweeper = new TenderCloseSweeper(
     { claimDue } as unknown as TenderCloseRepository,
-    { close } as unknown as TenderCloseService,
-    { intervalMs: 5000, batchSize: 7, leaseSeconds: 45 },
+    { close, recordFailure } as unknown as TenderCloseService,
+    {
+      intervalMs: 5000,
+      batchSize: 7,
+      leaseSeconds: 45,
+      retryBackoffBaseSeconds: 10,
+      retryBackoffMaxSeconds: 900,
+    },
   );
-  return { sweeper, claimDue, close };
+  return { sweeper, claimDue, close, recordFailure };
 }
 
 describe('TenderCloseSweeper', () => {
@@ -60,6 +67,31 @@ describe('TenderCloseSweeper', () => {
 
     expect(close).toHaveBeenCalledTimes(5);
     expect(outcome).toEqual({ claimed: 5, closed: 1, noop: 1, notDue: 1, lost: 1, failed: 1 });
+  });
+
+  it('records a failure with the configured backoff, only for the tender that failed', async () => {
+    const { sweeper, recordFailure } = sweeperWith([claim('A'), claim('B')], {
+      B: new Error('boom'),
+    });
+
+    await sweeper.runOnce();
+
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith(
+      { organizationId: 'ORG_B', tenderId: 'B', fence: 'F1' },
+      { baseSeconds: 10, maxSeconds: 900 },
+    );
+  });
+
+  it('survives a failure that cannot even be recorded', async () => {
+    const { sweeper, recordFailure } = sweeperWith([claim('A'), claim('B')], {
+      A: new Error('boom'),
+    });
+    recordFailure.mockRejectedValueOnce(new Error('still down'));
+
+    const outcome = await sweeper.runOnce();
+
+    expect(outcome).toEqual({ claimed: 2, closed: 1, noop: 0, notDue: 0, lost: 0, failed: 1 });
   });
 
   it('does nothing when nothing is overdue', async () => {

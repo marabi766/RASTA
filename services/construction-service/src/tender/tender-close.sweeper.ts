@@ -13,6 +13,9 @@ export interface TenderCloseSweeperOptions {
   batchSize: number;
   /** How long a claim holds before another sweeper may take the tender back. */
   leaseSeconds: number;
+  /** A failed tender waits `min(max, base × 2^attempts)` seconds before it is claimed again. */
+  retryBackoffBaseSeconds: number;
+  retryBackoffMaxSeconds: number;
 }
 
 export interface TenderCloseOutcome {
@@ -24,7 +27,7 @@ export interface TenderCloseOutcome {
   notDue: number;
   /** The claim was taken back before the write: nothing was changed. */
   lost: number;
-  /** Failed; the claim stays until its lease runs out, then the tender is taken again. */
+  /** Failed; counted, and the tender is taken again only after its backoff. */
   failed: number;
 }
 
@@ -52,8 +55,11 @@ const METRIC_RESULT: Record<CloseResult, string> = {
  * own short transaction, in the tender's own tenant, via `TenderCloseService`.
  *
  * Bounded by configuration: the batch size and the interval, with a close costing one
- * transaction and no network call. One tender failing never stalls the batch; its
- * claim simply stays until the lease runs out and it is taken again. Nothing here is
+ * transaction and no network call. One tender failing never stalls the batch, and
+ * never starves the queue: its attempts are counted and it is not claimed again until
+ * a bounded exponential backoff has passed, so later overdue tenders get their turn
+ * (`rasta_construction_tender_close_max_attempts` alerts on a tender that keeps
+ * failing). Nothing here is
  * required for a bid to be refused after the deadline — that is the database's clock
  * (see `TenderCloseService`) — so a sweeper that is down delays only the state.
  */
@@ -122,8 +128,22 @@ export class TenderCloseSweeper {
         outcome.failed += 1;
         tenderCloseTotal.inc({ service: SERVICE_NAME, result: 'failed' });
         this.logger.warn(
-          `Closing tender ${tender.id} failed: ${codeOf(error)}; retried after its lease`,
+          `Closing tender ${tender.id} failed: ${codeOf(error)}; retried after a backoff`,
         );
+        try {
+          await this.service.recordFailure(
+            { organizationId: tender.organizationId, tenderId: tender.id, fence: tender.fence },
+            {
+              baseSeconds: this.options.retryBackoffBaseSeconds,
+              maxSeconds: this.options.retryBackoffMaxSeconds,
+            },
+          );
+        } catch (recordError) {
+          // The lease running out is the fallback retry.
+          this.logger.warn(
+            `Recording the failed close of tender ${tender.id} failed: ${codeOf(recordError)}`,
+          );
+        }
       }
     }
 

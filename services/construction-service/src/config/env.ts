@@ -97,7 +97,8 @@ function roleList(name: string, options: { min: number }) {
  *   _BACKOFF_SECONDS / _BACKOFF_MAX_SECONDS
  *                                       The sweeper that suspends policies a
  *                                       moved organization stranded (Q-83).
- *   CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS
+ *   CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS /
+ *   _BACKOFF_BASE_SECONDS / _BACKOFF_MAX_SECONDS
  *                                       The sweeper that closes tenders past
  *                                       their deadline (ADR-065 § 3).
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
@@ -263,6 +264,24 @@ export const constructionEnvSchema = baseEnvSchema
       .default(5000),
     CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
     CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+    /**
+     * A tender whose close failed is not claimed again for
+     * `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^failures)` — so a tender that
+     * cannot be closed neither takes every sweep's first slot nor starves the later
+     * overdue ones. `RastaConstructionTenderCloseRetriesHigh` fires past 5 failures.
+     */
+    CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(10),
+    CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
 
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),

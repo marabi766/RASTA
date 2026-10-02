@@ -335,6 +335,188 @@ describe('tender close sweeper', () => {
     });
   });
 
+  describe('a claim against an owner who cancels first', () => {
+    it('lets the cancel succeed, drops the claim, and turns the sweeper into a fenced no-op', async () => {
+      const { owner, tenderId } = await setup();
+      await makeOverdue(tenderId);
+      const claim = await claimOnly(tenderId, ulid());
+      const claimed = await rowOf(tenderId);
+      expect(claimed.closeFence).toBe(claim.fence);
+
+      // The owner cancels while the sweeper holds the claim: it must not be rejected.
+      const cancelled = await asAdmin(owner, () =>
+        w.tenders.cancel(tenderId, {
+          expectedVersion: claimed.version,
+          reason: 'Funding withdrawn',
+        }),
+      );
+      expect(cancelled.status).toBe('CANCELLED');
+      expect(await rowOf(tenderId)).toMatchObject({
+        status: 'CANCELLED',
+        closeFence: null,
+        closeLeaseUntil: null,
+        closeAttempts: 0,
+        closeNextAttemptAt: null,
+      });
+
+      // The sweeper, still holding its fence, finds nothing to do and writes nothing.
+      expect(
+        await w.tenderClose.close({ organizationId: owner, tenderId, fence: claim.fence }),
+      ).toBe('NOT_OWNER');
+      expect(await rowOf(tenderId)).toMatchObject({ status: 'CANCELLED', closedAt: null });
+      expect(await closedEvents(owner)).toHaveLength(0);
+      const cancelEvents = (await outboxFor(w.prisma, owner)).filter(
+        (row) => row.eventName === 'TENDER_CANCELLED',
+      );
+      expect(cancelEvents).toHaveLength(1);
+    });
+
+    it('clears the claim and the retry schedule on any move out of PUBLISHED, in the database', async () => {
+      const { tenderId } = await setup();
+      await makeOverdue(tenderId);
+      await claimOnly(tenderId, ulid());
+      await sql(
+        'the suite schedules a retry',
+        `UPDATE "tender" SET "close_attempts" = 3, "close_next_attempt_at" = now() + interval '1 hour'
+          WHERE "id" = '${tenderId}'`,
+      );
+
+      // A bare status change, naming none of the claim's columns.
+      await sql(
+        'the suite moves the tender out of PUBLISHED by hand',
+        `UPDATE "tender" SET "status" = 'CANCELLED', "status_reason" = 'by hand',
+           "status_reason_code" = 'OWNER_REQUEST', "status_changed_at" = now() WHERE "id" = '${tenderId}'`,
+      );
+
+      expect(await rowOf(tenderId)).toMatchObject({
+        status: 'CANCELLED',
+        closeFence: null,
+        closeLeaseUntil: null,
+        closeAttempts: 0,
+        closeNextAttemptAt: null,
+      });
+    });
+  });
+
+  describe('a tender that keeps failing', () => {
+    it('is not claimed again until its backoff passes, and does not hold up the others', async () => {
+      const failing = await setup();
+      const waiting = await setup();
+      await makeOverdue(failing.tenderId);
+      await makeOverdue(waiting.tenderId);
+      const claim = await claimOnly(failing.tenderId, ulid());
+
+      await w.tenderClose.recordFailure(
+        { organizationId: failing.owner, tenderId: failing.tenderId, fence: claim.fence },
+        { baseSeconds: 60, maxSeconds: 900 },
+      );
+
+      const after = await rowOf(failing.tenderId);
+      expect(after).toMatchObject({ status: 'PUBLISHED', closeFence: null, closeAttempts: 1 });
+      expect(after.closeNextAttemptAt!.getTime()).toBeGreaterThan(Date.now() + 30_000);
+
+      // The next sweep leaves it alone and serves the one behind it.
+      const swept = await w.tenderCloses.claimDue(500, 600, ulid());
+      expect(swept.map((c) => c.id)).toContain(waiting.tenderId);
+      expect(swept.map((c) => c.id)).not.toContain(failing.tenderId);
+      await sql(
+        'the suite gives the claims back',
+        `UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL
+          WHERE "id" IN ('${waiting.tenderId}')`,
+      );
+
+      // Due again once the backoff has passed.
+      await sql(
+        'the suite lets the backoff pass',
+        `UPDATE "tender" SET "close_next_attempt_at" = now() - interval '1 second'
+          WHERE "id" = '${failing.tenderId}'`,
+      );
+      await w.tenderCloseSweeper.runOnce();
+      expect(await rowOf(failing.tenderId)).toMatchObject({
+        status: 'CLOSED',
+        closeAttempts: 0,
+        closeNextAttemptAt: null,
+      });
+    });
+
+    it('backs off exponentially up to the bound, and a stale fence changes nothing', async () => {
+      const { owner, tenderId } = await setup();
+      await makeOverdue(tenderId);
+      const backoff = { baseSeconds: 10, maxSeconds: 50 };
+      const seconds = async () => {
+        const row = await rowOf(tenderId);
+        return {
+          attempts: row.closeAttempts,
+          wait: Math.round((row.closeNextAttemptAt!.getTime() - Date.now()) / 10_000) * 10,
+        };
+      };
+
+      const waits: number[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        await sql(
+          'the suite makes the tender claimable',
+          `UPDATE "tender" SET "close_next_attempt_at" = NULL WHERE "id" = '${tenderId}'`,
+        );
+        const claim = await claimOnly(tenderId, ulid());
+        await w.tenderClose.recordFailure(
+          { organizationId: owner, tenderId, fence: claim.fence },
+          backoff,
+        );
+        waits.push((await seconds()).wait);
+      }
+      // 10, 20, 40, then 80 capped at 50 (each read has already lost a little time).
+      expect(waits).toEqual([10, 20, 40, 50]);
+      expect((await rowOf(tenderId)).closeAttempts).toBe(4);
+
+      await w.tenderClose.recordFailure(
+        { organizationId: owner, tenderId, fence: 'STALE' },
+        backoff,
+      );
+      expect((await rowOf(tenderId)).closeAttempts).toBe(4);
+    });
+
+    it('reports the worst retry count among the overdue tenders', async () => {
+      const { tenderId } = await setup();
+      await makeOverdue(tenderId);
+      await sql(
+        'the suite records many failures',
+        `UPDATE "tender" SET "close_attempts" = 9, "close_next_attempt_at" = now() + interval '1 hour'
+          WHERE "id" = '${tenderId}'`,
+      );
+
+      expect((await w.tenderCloses.backlog()).maxCloseAttempts).toBeGreaterThanOrEqual(9);
+    });
+  });
+
+  describe('the queries the sweeper runs', () => {
+    /** The plan of `statement` with sequential scans discouraged, as the planner would choose it on a large table. */
+    const planOf = (statement: string) =>
+      runUnscoped('the suite reads a query plan', () =>
+        w.prisma.transaction(async (tx) => {
+          await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+          const rows = await tx.$queryRawUnsafe<Record<string, string>[]>(`EXPLAIN ${statement}`);
+          return rows.map((r) => r['QUERY PLAN']).join('\n');
+        }),
+      );
+
+    const claimScan = (predicate: string) =>
+      `SELECT "id" FROM "tender" WHERE ${predicate} AND "bid_closing_at" <= clock_timestamp()
+        ORDER BY "bid_closing_at", "id" LIMIT 20`;
+
+    it('use the partial index on PUBLISHED tenders, which the text-cast form cannot', async () => {
+      expect(await planOf(claimScan(`"status" = 'PUBLISHED'`))).toContain('ix_tender_close_due');
+      expect(
+        await planOf(
+          `SELECT count(*) FROM "tender" WHERE "status" = 'PUBLISHED' AND "bid_closing_at" <= clock_timestamp()`,
+        ),
+      ).toContain('ix_tender_close_due');
+      // Why the repository never writes `"status"::text = 'PUBLISHED'`.
+      expect(await planOf(claimScan(`"status"::text = 'PUBLISHED'`))).not.toContain(
+        'ix_tender_close_due',
+      );
+    });
+  });
+
   describe('closing against a last-second bid', () => {
     it('a bid that committed before the deadline is counted when the tender is closed', async () => {
       const { owner, bidder, tenderId } = await setup();

@@ -288,6 +288,8 @@ describe('the tender close sweeper (ADR-065 § 3)', () => {
     expect(env.CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS).toBe(5000);
     expect(env.CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE).toBe(20);
     expect(env.CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS).toBe(60);
+    expect(env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS).toBe(10);
+    expect(env.CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS).toBe(900);
   });
 
   it('may be tuned, and refuses a value that would spin or never end', () => {
@@ -298,5 +300,6 @@ describe('the tender close sweeper (ADR-065 § 3)', () => {
     expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: '0' })).toThrow();
     expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: '100000' })).toThrow();
     expect(() => load({ CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: '1' })).toThrow();
+    expect(() => load({ CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: '0' })).toThrow();
   });
 });

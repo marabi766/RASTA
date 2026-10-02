@@ -41,6 +41,8 @@ export interface CloseBacklog {
   overdue: number;
   /** How long the oldest has been past it, in seconds; 0 when none. */
   oldestOverdueAgeSeconds: number;
+  /** The most failed close attempts any overdue tender has; 0 when none failed. */
+  maxCloseAttempts: number;
 }
 
 @Injectable()
@@ -56,6 +58,13 @@ export class TenderCloseRepository {
    * before it reads or writes anything. `version` and `updated_at` are not touched:
    * a claim is not a change of the tender.
    *
+   * A tender whose earlier attempts failed is not due until its `close_next_attempt_at`
+   * (bounded exponential backoff, `recordFailure`), so one tender that cannot be closed
+   * does not take the head of the queue on every sweep and starve the ones behind it.
+   *
+   * The status predicate is the enum comparison, spelled as `ix_tender_close_due`
+   * spells it: `"status"::text = …` would not match the partial index.
+   *
    * This is a first cut, not the decision: the deadline is judged again after the
    * tender is locked, on a clock read then (ADR-065 § 2).
    */
@@ -69,9 +78,10 @@ export class TenderCloseRepository {
                   "close_fence" = $3
             WHERE "id" IN (
                   SELECT "id" FROM "tender"
-                   WHERE "status"::text = 'PUBLISHED'
+                   WHERE "status" = 'PUBLISHED'
                      AND "bid_closing_at" <= clock_timestamp()
                      AND ("close_lease_until" IS NULL OR "close_lease_until" <= clock_timestamp())
+                     AND ("close_next_attempt_at" IS NULL OR "close_next_attempt_at" <= clock_timestamp())
                    ORDER BY "bid_closing_at", "id"
                    LIMIT $1
                      FOR UPDATE SKIP LOCKED)
@@ -146,6 +156,8 @@ export class TenderCloseRepository {
         closedBy: input.actor,
         closeLeaseUntil: null,
         closeFence: null,
+        closeAttempts: 0,
+        closeNextAttemptAt: null,
         statusChangedAt: input.at,
         statusChangedBy: input.actor,
         updatedAt: input.at,
@@ -172,22 +184,54 @@ export class TenderCloseRepository {
          AND "close_fence" = ${fence}`;
   }
 
-  /** Sampled for the gauges: what is overdue, and for how long. */
+  /**
+   * A failed attempt: counted, the claim given back, and the next try pushed out by
+   * `min(maxSeconds, baseSeconds × 2^attempts)` on the database's clock. Only the
+   * holder's fence matches. Runs in the tender's own tenant, in its own transaction
+   * (the closing one rolled back).
+   */
+  async recordFailure(
+    tx: ExtendedPrismaClient,
+    input: {
+      organizationId: string;
+      tenderId: string;
+      fence: string;
+      baseSeconds: number;
+      maxSeconds: number;
+    },
+  ): Promise<void> {
+    await tx.$executeRaw`
+      UPDATE "tender"
+         SET "close_attempts" = "close_attempts" + 1,
+             "close_next_attempt_at" = clock_timestamp() + interval '1 second'
+                 * LEAST(${input.maxSeconds}::double precision,
+                         ${input.baseSeconds}::double precision * power(2, LEAST("close_attempts", 30))),
+             "close_lease_until" = NULL,
+             "close_fence" = NULL
+       WHERE "organization_id" = ${input.organizationId} AND "id" = ${input.tenderId}
+         AND "close_fence" = ${input.fence} AND "status" = 'PUBLISHED'`;
+  }
+
+  /** Sampled for the gauges: what is overdue, for how long, and the worst retry count. */
   async backlog(): Promise<CloseBacklog> {
     const rows = await runUnscoped(
       'the close backlog gauge counts the overdue tenders of every tenant (ADR-065 § 3)',
       () =>
-        this.prisma.client.$queryRawUnsafe<{ overdue: bigint; oldest: number | null }[]>(
+        this.prisma.client.$queryRawUnsafe<
+          { overdue: bigint; oldest: number | null; attempts: number | null }[]
+        >(
           `SELECT count(*) AS overdue,
-                  extract(epoch FROM clock_timestamp() - min("bid_closing_at")) AS oldest
+                  extract(epoch FROM clock_timestamp() - min("bid_closing_at")) AS oldest,
+                  max("close_attempts") AS attempts
              FROM "tender"
-            WHERE "status"::text = 'PUBLISHED' AND "bid_closing_at" <= clock_timestamp()`,
+            WHERE "status" = 'PUBLISHED' AND "bid_closing_at" <= clock_timestamp()`,
         ),
     );
     const row = rows[0];
     return {
       overdue: Number(row?.overdue ?? 0),
       oldestOverdueAgeSeconds: Math.max(0, Number(row?.oldest ?? 0)),
+      maxCloseAttempts: Number(row?.attempts ?? 0),
     };
   }
 }

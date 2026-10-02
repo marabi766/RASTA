@@ -89,6 +89,25 @@ export class TenderCloseService {
     });
   }
 
+  /**
+   * A close attempt failed: count it and schedule the next one with backoff, in the
+   * tender's own tenant. Best effort — if this write fails too, the lease running out
+   * is still the fallback retry.
+   */
+  recordFailure(
+    target: { organizationId: string; tenderId: string; fence: string },
+    backoff: { baseSeconds: number; maxSeconds: number },
+  ): Promise<void> {
+    const context = createSystemContext({
+      correlationId: ulid(),
+      organizationId: target.organizationId,
+      callerService: SERVICE_NAME,
+    });
+    return runWithContext(context, () =>
+      this.prisma.transaction((tx) => this.closes.recordFailure(tx, { ...target, ...backoff })),
+    );
+  }
+
   private async closeIn(tx: ExtendedPrismaClient, target: CloseTarget): Promise<CloseResult> {
     const { organizationId, tenderId, fence } = target;
     const locked = await this.closes.lockForClose(tx, organizationId, tenderId);
