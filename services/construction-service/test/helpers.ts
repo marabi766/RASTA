@@ -88,18 +88,17 @@ export const TEST_KEK_ID = 'itest-1';
 
 /**
  * The owner connection the suites' cleanup alone may use to lift a trigger
- * (`DATABASE_URL_CONSTRUCTION_MIGRATOR`). **Required, with no fallback** to the
- * runtime URL: a suite that quietly fell back would be switching guards off with
- * the service's own credentials, which is what the owner connection exists to
- * keep apart. Construction's runtime role still owns its tables today (docs/23
- * D-045), so the value may name the same role — but it must be named on purpose.
+ * (`DATABASE_URL_CONSTRUCTION_MIGRATOR`, `rasta_construction_migrator`).
+ * **Required, with no fallback** to the runtime URL: since D-045 the runtime
+ * role owns nothing and cannot lift a trigger at all, and a suite that fell
+ * back would fail for a reason that hides the real one — a missing variable.
  */
 export function ownerDatabaseUrl(): string {
   const url = process.env.DATABASE_URL_CONSTRUCTION_MIGRATOR;
   if (!url) {
     throw new Error(
       'DATABASE_URL_CONSTRUCTION_MIGRATOR is not set. The suites lift an integrity trigger only ' +
-        'through the owner connection, never the runtime one; see .env.example (docs/23 D-045).',
+        'through the owner connection, never the runtime one; see .env.migrator.example (docs/23 D-045).',
     );
   }
   return url;

@@ -1,6 +1,7 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
+import { PrismaClient } from '../src/generated/prisma';
 import type { CriterionInput } from '../src/tender/criteria.dto';
 import {
   approvedProject,
@@ -8,6 +9,7 @@ import {
   cleanup,
   newOrganizationId,
   outboxFor,
+  ownerDatabaseUrl,
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
@@ -595,9 +597,20 @@ describe('evaluation criteria', () => {
           `DELETE FROM "criteria_template" WHERE "id" = '${template.id}'`,
         ),
       ).rejects.toThrow(/ck_criteria_template_immutable/);
+      // The service's role may not truncate at all (D-045: it holds DML only)…
       await expect(
         w.prisma.client.$executeRawUnsafe('TRUNCATE "criteria_template"'),
-      ).rejects.toThrow(/ck_criteria_template_immutable/);
+      ).rejects.toThrow(/permission denied/);
+      // …and the trigger still refuses the owner, whose TRUNCATE would be a
+      // migration's or an operator's.
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      try {
+        await expect(owner.$executeRawUnsafe('TRUNCATE "criteria_template"')).rejects.toThrow(
+          /ck_criteria_template_immutable/,
+        );
+      } finally {
+        await owner.$disconnect();
+      }
       expect((await asAdmin(a, () => w.criteria.getTemplate(template.id))).label).toBe(
         'Frozen label',
       );

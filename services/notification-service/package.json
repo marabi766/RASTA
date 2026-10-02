@@ -16,8 +16,8 @@
     "test:integration": "jest --selectProjects integration --runInBand",
     "test:coverage": "jest --coverage --runInBand",
     "db:generate": "prisma generate",
-    "db:migrate": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate deploy",
-    "db:migrate:dev": "node --env-file-if-exists=../../.env ../../scripts/prisma.mjs migrate dev",
+    "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",
+    "db:migrate:dev": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate dev",
     "openapi:generate": "node -r @swc-node/register src/openapi/generate.ts"
   },
   "dependencies": {

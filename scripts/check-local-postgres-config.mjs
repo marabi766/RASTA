@@ -2,7 +2,7 @@
 /**
  * Fails if the committed local PostgreSQL defaults stop naming `127.0.0.1`.
  *
- *   node scripts/check-local-postgres-config.mjs                  # .env.example
+ *   node scripts/check-local-postgres-config.mjs                  # .env.example + .env.migrator.example
  *   node scripts/check-local-postgres-config.mjs --file PATH      # another file
  *
  * A configuration contract, not a network probe: the file is read as text and
@@ -12,18 +12,27 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { REQUIRED_HOST, validateLocalPostgresConfig } from './check-local-postgres-config-lib.mjs';
+import {
+  COMMITTED_CONFIG_FILES,
+  REQUIRED_HOST,
+  validateLocalPostgresConfig,
+} from './check-local-postgres-config-lib.mjs';
 
 const args = process.argv.slice(2);
 const fileFlag = args.indexOf('--file');
-const target =
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// By default the two committed files, as one: the migrators' URLs moved to
+// .env.migrator.example (D-045) and are held to the same host and port as the
+// POSTGRES_HOST / POSTGRES_PORT in .env.example.
+const targets =
   fileFlag >= 0 && args[fileFlag + 1]
-    ? resolve(args[fileFlag + 1])
-    : resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env.example');
+    ? [resolve(args[fileFlag + 1])]
+    : COMMITTED_CONFIG_FILES.map((name) => resolve(root, name));
+const target = targets.join(' + ');
 
 let text;
 try {
-  text = readFileSync(target, 'utf8');
+  text = targets.map((file) => readFileSync(file, 'utf8')).join('\n');
 } catch {
   console.error(`local postgres config: cannot read ${target} — refusing to pass`);
   process.exit(1);

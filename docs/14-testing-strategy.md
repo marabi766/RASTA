@@ -949,10 +949,11 @@ Export شود. CI همین متغیرها را صریح در `env:` هر گام 
 
 ```bash
 cp .env.example .env            # یک بار؛ پس از هر تغییر .env.example دوباره مقایسه کن
+cp .env.migrator.example .env.migrator   # اعتبار مالک پایگاه داده (D-045)؛ هیچ سرویسی آن را بار نمی‌کند
 pnpm infra:up                   # تغییر قالب Broker (مثل #131): pnpm infra:reset — Volumeها پاک می‌شوند
 pnpm db:migrate
 pnpm exec turbo run build --filter="./packages/*"   # پس از هر Pull؛ Suiteها dist بسته‌ها را می‌خوانند
-set -a; . ./.env
+set -a; . ./.env; . ./.env.migrator   # پاک‌سازی Suiteها Trigger را فقط با اتصال مالک برمی‌دارد
 eval "$(grep '^KAFKA_SASL_PASSWORD_ITEST_OBSERVER=' infrastructure/docker/kafka/bootstrap.env.example)"
 set +a
 pnpm --filter @rasta/identity-service test:integration

@@ -55,7 +55,8 @@ describe(`${MIGRATION}: rollback with data, then re-apply and replay`, () => {
   let consumer: PerformanceConsumer;
 
   beforeAll(async () => {
-    if (!ownerUrl) throw new Error('DATABASE_URL_SUPPLIER_MIGRATOR is not set; see .env.example');
+    if (!ownerUrl)
+      throw new Error('DATABASE_URL_SUPPLIER_MIGRATOR is not set; see .env.migrator.example');
     const url = new URL(ownerUrl);
     url.searchParams.set('schema', schema);
     scratchUrl = url.toString();
