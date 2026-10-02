@@ -6,7 +6,6 @@ import {
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
-import { liveMembershipWhere } from './membership-window';
 import { assertTopicFor, resolvePartitionKey, type OutboundEventName } from './routing';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
@@ -229,18 +228,54 @@ export class IdentityRepository {
     return db.membership.findFirst({ where: { id, deletedAt: null } });
   }
 
-  /** The organizations a user holds a live membership in at `now`, ids only. */
-  async findLiveOrganizationIds(userId: string, now: Date): Promise<string[]> {
+  /**
+   * The organizations a user holds a live membership in **now**, ids only, and the instant
+   * that was. "Now" is the **database's** clock, in the one statement that selects: a
+   * membership's `validFrom` defaults to the database's `now()`, so judging it by an
+   * application clock that lags would miss a membership created a moment ago.
+   */
+  async findLiveOrganizationIds(
+    userId: string,
+  ): Promise<{ organizationIds: string[]; asOf: Date }> {
     const rows = await runUnscoped(
       'a service asks which organizations a user belongs to; a membership spans tenants',
       () =>
-        this.client.membership.findMany({
-          where: { userId, ...liveMembershipWhere(now) },
-          select: { organizationId: true },
-          orderBy: { organizationId: 'asc' },
-        }),
+        this.client.$queryRaw<Array<{ organization_ids: string[]; as_of: Date }>>`
+          SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS as_of,
+                 ARRAY(
+                   SELECT organization_id FROM membership
+                    WHERE user_id = ${userId}
+                      AND status = 'ACTIVE'
+                      AND deleted_at IS NULL
+                      AND valid_from <= (clock_timestamp() AT TIME ZONE 'UTC')
+                      AND (valid_until IS NULL
+                           OR valid_until > (clock_timestamp() AT TIME ZONE 'UTC'))
+                    ORDER BY organization_id ASC
+                 ) AS organization_ids`,
     );
-    return rows.map((row) => row.organizationId);
+    const row = rows[0];
+    if (!row) throw new Error('the database did not answer its own clock');
+    return { organizationIds: row.organization_ids, asOf: row.as_of };
+  }
+
+  /**
+   * The organizations a user was a member of at `at`, ids only (history, for the detective
+   * control after a bid opening). Wider than "live": a suspended membership counts, since
+   * when it was suspended is not recorded; only a revocation ends one, at its `deletedAt`.
+   */
+  async findOrganizationIdsAt(userId: string, at: Date): Promise<string[]> {
+    const rows = await runUnscoped(
+      'a service asks which organizations a user belonged to at an instant; a membership spans tenants',
+      () =>
+        this.client.$queryRaw<Array<{ organization_id: string }>>`
+          SELECT DISTINCT organization_id FROM membership
+           WHERE user_id = ${userId}
+             AND valid_from <= ${at}
+             AND (valid_until IS NULL OR valid_until > ${at})
+             AND (deleted_at IS NULL OR deleted_at > ${at})
+           ORDER BY organization_id ASC`,
+    );
+    return rows.map((row) => row.organization_id);
   }
 
   async findMembership(userId: string, organizationId: string, tx?: ExtendedPrismaClient) {

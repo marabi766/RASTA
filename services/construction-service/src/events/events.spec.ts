@@ -236,6 +236,25 @@ Object.assign(VALID, {
     openedBy: 'USR_1',
     proposedBy: 'USR_2',
   },
+  BID_OPENING_PROPOSAL_WITHDRAWN: {
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    proposedBy: 'USR_2',
+    withdrawnBy: 'USR_1',
+    reason: 'PROPOSER_CONFLICTED',
+    withdrawnAt: AT,
+  },
+  BID_OPENING_CONFLICT_DETECTED: {
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    openedAt: AT,
+    openedBy: 'USR_1',
+    proposedBy: 'USR_2',
+    checkedAt: AT,
+    conflicts: [
+      { userId: 'USR_2', role: 'PROPOSER', organizationIds: ['ORG_B'], organizationCount: 1 },
+    ],
+  },
   CRITERIA_TEMPLATE_CREATED: {
     templateId: 'CTP_1',
     organizationId: 'ORG_A',
@@ -261,6 +280,8 @@ const TENDER_EVENTS = [
   'BID_WITHDRAWN',
   'BID_ACCESSED',
   'BIDS_OPENED',
+  'BID_OPENING_PROPOSAL_WITHDRAWN',
+  'BID_OPENING_CONFLICT_DETECTED',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -292,6 +313,8 @@ describe('the construction event catalogue', () => {
       'APPROVAL_REQUESTED',
       'BIDS_OPENED',
       'BID_ACCESSED',
+      'BID_OPENING_CONFLICT_DETECTED',
+      'BID_OPENING_PROPOSAL_WITHDRAWN',
       'BID_REVISED',
       'BID_SUBMITTED',
       'BID_WITHDRAWN',
@@ -364,6 +387,8 @@ describe('the construction event catalogue', () => {
     'BID_WITHDRAWN',
     'BID_ACCESSED',
     'BIDS_OPENED',
+    'BID_OPENING_PROPOSAL_WITHDRAWN',
+    'BID_OPENING_CONFLICT_DETECTED',
   ] as typeof NAMES)(
     '%s carries no content, price or ciphertext, however it is dressed',
     (name) => {

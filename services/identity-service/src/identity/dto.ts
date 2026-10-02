@@ -106,6 +106,13 @@ export const listUsersQuerySchema = cursorPaginationSchema
 
 export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
 
+/** `GET /v1/users/:id/organizations`: no `at` is "now"; with `at`, the memberships held at that instant. */
+export const membershipInstantQuerySchema = z
+  .object({ at: z.string().datetime().optional() })
+  .strict();
+
+export type MembershipInstantQuery = z.infer<typeof membershipInstantQuerySchema>;
+
 // ---------------------------------------------------------------------------
 // Memberships
 // ---------------------------------------------------------------------------

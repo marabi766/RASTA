@@ -42,6 +42,15 @@ export const bidOpeningProposalViewSchema = z
   .strict();
 export type BidOpeningProposalView = z.infer<typeof bidOpeningProposalViewSchema>;
 
+/** The answer to `open-bids/proposal/withdraw`: whose proposal was taken back; anyone eligible may now propose. */
+export const bidOpeningProposalWithdrawnViewSchema = z
+  .object({
+    tenderId: z.string(),
+    withdrawnProposal: z.string().describe('The proposer, who is the caller.'),
+  })
+  .strict();
+export type BidOpeningProposalWithdrawnView = z.infer<typeof bidOpeningProposalWithdrawnViewSchema>;
+
 /** One bid, opened: identity, state and the content the receipts vouch for. */
 export const openedBidViewSchema = z
   .object({

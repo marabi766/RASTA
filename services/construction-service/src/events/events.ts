@@ -94,6 +94,11 @@ export const CONSTRUCTION_EVENTS = {
   TENDER_CLOSED: 'TENDER_CLOSED',
   // CON-002 PR 8 (ADR-066). Accepted by the project manager (2026-09-30). Ids and counts only.
   BIDS_OPENED: 'BIDS_OPENED',
+  // CON-002 PR 8, Codex #184 R4. `BID_OPENING_CONFLICT_DETECTED` is named by the project
+  // manager (2026-10-02); `BID_OPENING_PROPOSAL_WITHDRAWN` is added for S-06 (a proposal
+  // taken back, or cleared, is a state change audit must hear about) and awaits acceptance.
+  BID_OPENING_PROPOSAL_WITHDRAWN: 'BID_OPENING_PROPOSAL_WITHDRAWN',
+  BID_OPENING_CONFLICT_DETECTED: 'BID_OPENING_CONFLICT_DETECTED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -580,6 +585,7 @@ export const BID_ACCESS_PURPOSES = [
   'OWN_BID_RECEIPT',
   'OPEN_BIDS',
   'PROPOSE_OPENING',
+  'WITHDRAW_PROPOSAL',
   'COUNT_BIDS',
   'LIST_BIDS',
   'READ_BID',
@@ -625,6 +631,54 @@ export const bidsOpenedPayload = z
   })
   .strict();
 
+/**
+ * The proposal to open a tender's bids (four-eyes, Q-91) was taken back by its proposer, or
+ * cleared by the approval that found the proposer a member of a bidding organization — so
+ * another eligible user can propose afresh. Ids only.
+ */
+export const bidOpeningProposalWithdrawnPayload = z
+  .object({
+    tenderId: identifier,
+    organizationId: identifier,
+    proposedBy: identifier,
+    /** Who took it back (the proposer) or whose approval found the proposer conflicted. */
+    withdrawnBy: identifier,
+    reason: z.enum(['WITHDRAWN_BY_PROPOSER', 'PROPOSER_CONFLICTED']),
+    withdrawnAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * After an opening committed, identity-service said that the proposer or the approver was a
+ * member of a bidding organization at that very instant — the race the conflict check at the
+ * approval cannot close (ADR-066 § 4, residual). The detective control: ids only, who and
+ * which of the bidding organizations (at most 100 each; `organizationCount` is the whole).
+ */
+export const bidOpeningConflictDetectedPayload = z
+  .object({
+    tenderId: identifier,
+    organizationId: identifier,
+    openedAt: isoTimestamp,
+    openedBy: identifier,
+    proposedBy: identifier.nullable(),
+    /** The instant identity-service was asked about: the opening's commit. */
+    checkedAt: isoTimestamp,
+    conflicts: z
+      .array(
+        z
+          .object({
+            userId: identifier,
+            role: z.enum(['PROPOSER', 'APPROVER']),
+            organizationIds: z.array(identifier).min(1).max(100),
+            organizationCount: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(2),
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -660,6 +714,8 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BID_ACCESSED: bidAccessedPayload,
   TENDER_CLOSED: tenderClosedPayload,
   BIDS_OPENED: bidsOpenedPayload,
+  BID_OPENING_PROPOSAL_WITHDRAWN: bidOpeningProposalWithdrawnPayload,
+  BID_OPENING_CONFLICT_DETECTED: bidOpeningConflictDetectedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

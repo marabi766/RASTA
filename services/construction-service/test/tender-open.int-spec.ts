@@ -5,6 +5,10 @@ import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
 import {
+  bidOpeningConflictChecksTotal,
+  bidOpeningRefusalsTotal,
+} from '../src/observability/metrics';
+import {
   EnvKekProvider,
   type KeyContext,
   type WrappedKey,
@@ -1113,6 +1117,94 @@ describe('opening the bids of a tender', () => {
 
   // ---------------------------------------------------------------------------------------------
 
+  describe('who the reader is NOW (identity-service), on every owner read', () => {
+    const carol = newUserId();
+    const identityRefusals = async (): Promise<number> =>
+      (await bidOpeningRefusalsTotal.get()).values
+        .filter((value) => value.labels.reason === 'identity_unavailable')
+        .reduce((sum, value) => sum + value.value, 0);
+    const asCarol = <T>(owner: string, fn: () => T) => asAdmin(owner, fn, carol);
+
+    afterEach(() => w.memberships.reset());
+
+    it('refuses a reader who joined a bidding organization after their token was issued: every route, before and after the opening', async () => {
+      const { owner, bidders, tenderId } = await closedTender();
+      // Before the opening: the counts and receipt times are not for a bidder's member either.
+      w.memberships.of.set(carol, [bidders[0]!]);
+      expect(await codeOf(asCarol(owner, () => w.tenderOpen.listBids(tenderId)))).toMatchObject({
+        code: 'FORBIDDEN',
+      });
+      w.memberships.of.clear();
+      await open(owner, tenderId);
+      const [bid] = await bidRows(tenderId);
+      const logged = (await logOf(tenderId)).length;
+
+      // The token names only the owner; identity-service says she belongs to a bidder.
+      w.memberships.of.set(carol, [bidders[0]!]);
+      const calls: Array<() => Promise<unknown>> = [
+        () => w.tenderOpen.listBids(tenderId),
+        () => w.tenderOpen.getBid(tenderId, bid!.id),
+        () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
+        () => w.tenderOpen.open(tenderId),
+      ];
+      for (const call of calls) {
+        expect(await codeOf(asCarol(owner, call))).toMatchObject({ code: 'FORBIDDEN' });
+      }
+
+      // Nothing was shown or granted her: only refusals under her name.
+      const rows = (await logOf(tenderId)).slice(logged);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows)
+        expect(row).toMatchObject({ accessorUserId: carol, outcome: 'REFUSED' });
+      // And once she belongs to none of them she reads.
+      w.memberships.of.set(carol, [owner]);
+      expect((await asCarol(owner, () => w.tenderOpen.listBids(tenderId))).bids).toHaveLength(2);
+    });
+
+    it('fails closed on every owner read when identity-service cannot say: nothing shown, counted as identity_unavailable', async () => {
+      const { owner, tenderId } = await closedTender();
+      await open(owner, tenderId);
+      const [bid] = await bidRows(tenderId);
+      const before = await identityRefusals();
+      w.memberships.failure = RastaError.upstreamUnavailable('identity-service');
+
+      const calls: Array<() => Promise<unknown>> = [
+        () => w.tenderOpen.listBids(tenderId),
+        () => w.tenderOpen.getBid(tenderId, bid!.id),
+        () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
+        () => w.tenderOpen.open(tenderId),
+        () => w.tenderOpen.proposeOpening(tenderId),
+        () => w.tenderOpen.withdrawProposal(tenderId),
+      ];
+      for (const call of calls) {
+        expect(await codeOf(asCarol(owner, call))).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      }
+
+      expect(await identityRefusals()).toBe(before + 6);
+      w.memberships.failure = undefined;
+      expect((await asCarol(owner, () => w.tenderOpen.listBids(tenderId))).opened).toBe(true);
+    });
+
+    it('asks identity-service about the caller, whoever the caller is, and the owner’s 404 comes first', async () => {
+      const { owner, tenderId } = await closedTender();
+      await open(owner, tenderId);
+      w.memberships.asked.length = 0;
+
+      await asCarol(owner, () => w.tenderOpen.listBids(tenderId));
+      expect(w.memberships.asked).toEqual([carol]);
+
+      // Another organization's tender is a 404 and identity-service is not troubled.
+      w.memberships.asked.length = 0;
+      w.memberships.failure = RastaError.upstreamUnavailable('identity-service');
+      expect(
+        await codeOf(asCarol(org(), () => w.tenderOpen.listAccessLog(tenderId, { limit: 5 }))),
+      ).toMatchObject({ code: 'NOT_FOUND' });
+      expect(w.memberships.asked).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+
   describe('four eyes (Q-91): a proposal by one user, the approval of a second', () => {
     let w4: Wiring;
     const [alice, bob] = [newUserId(), newUserId()];
@@ -1220,13 +1312,9 @@ describe('opening the bids of a tender', () => {
     });
 
     describe('who they are NOW, at the approval', () => {
-      afterEach(() => {
-        w4.memberships.failure = undefined;
-        w4.memberships.of.clear();
-        w4.memberships.asked.length = 0;
-      });
+      afterEach(() => w4.memberships.reset());
 
-      it('refuses when the proposer has joined a bidding organization since proposing', async () => {
+      it('refuses when the proposer has joined a bidding organization since proposing, and CLEARS the proposal so another user can propose', async () => {
         const { owner, bidders, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
         w4.memberships.of.set(alice, [owner, bidders[0]!]);
@@ -1235,6 +1323,38 @@ describe('opening the bids of a tender', () => {
 
         await expectNothingOpened(owner, tenderId);
         expect(w4.memberships.asked).toEqual(expect.arrayContaining([alice, bob]));
+        // Cleared, audited, with its event: no one is stuck behind alice.
+        expect(await rowOf(tenderId)).toMatchObject({
+          openingProposedBy: null,
+          openingProposedAt: null,
+        });
+        const [event] = await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId);
+        expect(payloadOf(event!)).toMatchObject({
+          proposedBy: alice,
+          withdrawnBy: bob,
+          reason: 'PROPOSER_CONFLICTED',
+        });
+        expect(
+          (await logOf(tenderId)).filter((row) => row.purpose === 'WITHDRAW_PROPOSAL'),
+        ).toEqual([expect.objectContaining({ accessorUserId: bob, outcome: 'GRANTED' })]);
+        // Afresh: bob proposes, carol approves, and the conflicted alice has nothing to do with it.
+        const carol = newUserId();
+        expect(await propose(owner, tenderId, bob)).toMatchObject({
+          proposedBy: bob,
+          alreadyProposed: false,
+        });
+        expect((await approve(owner, tenderId, carol)).status).toBe('EVALUATING');
+      });
+
+      it('leaves a proposal standing when only the approver is conflicted', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.of.set(bob, [bidders[0]!]);
+
+        expect(await codeOf(approve(owner, tenderId, bob))).toMatchObject({ code: 'FORBIDDEN' });
+
+        expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: alice });
+        expect(await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId)).toHaveLength(0);
       });
 
       it('refuses when the approver has joined one, though the token says otherwise', async () => {
@@ -1268,6 +1388,158 @@ describe('opening the bids of a tender', () => {
         await expectNothingOpened(owner, tenderId);
         w4.memberships.failure = undefined;
         expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
+      });
+    });
+
+    describe('a proposal withdrawn by its proposer', () => {
+      afterEach(() => w4.memberships.reset());
+      const withdraw = (owner: string, tenderId: string, user: string) =>
+        asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId), user);
+
+      it('is cleared, audited and announced; anyone eligible may then propose afresh', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+
+        expect(await withdraw(owner, tenderId, alice)).toEqual({
+          tenderId,
+          withdrawnProposal: alice,
+        });
+
+        expect(await rowOf(tenderId)).toMatchObject({
+          openingProposedBy: null,
+          openingProposedAt: null,
+        });
+        const [event] = await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId);
+        expect(payloadOf(event!)).toMatchObject({
+          proposedBy: alice,
+          withdrawnBy: alice,
+          reason: 'WITHDRAWN_BY_PROPOSER',
+        });
+        expect(
+          (await logOf(tenderId)).filter((row) => row.purpose === 'WITHDRAW_PROPOSAL'),
+        ).toEqual([expect.objectContaining({ accessorUserId: alice, outcome: 'GRANTED' })]);
+        expect(await refusalOf(approve(owner, tenderId, bob))).toContain('PROPOSAL_REQUIRED');
+        expect((await propose(owner, tenderId, bob)).alreadyProposed).toBe(false);
+        expect((await approve(owner, tenderId, alice)).openedBy).toBe(alice);
+      });
+
+      it('is the proposer’s alone: another user is refused 403 and the proposal stands', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+
+        expect(await codeOf(withdraw(owner, tenderId, bob))).toMatchObject({ code: 'FORBIDDEN' });
+
+        expect(await rowOf(tenderId)).toMatchObject({ openingProposedBy: alice });
+        expect(await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId)).toHaveLength(0);
+      });
+
+      it('has something to withdraw, and a tender to withdraw it from: NO_PROPOSAL, NOT_CLOSED', async () => {
+        const { owner, tenderId } = await closedTender();
+        expect(await refusalOf(withdraw(owner, tenderId, alice))).toContain('NO_PROPOSAL');
+
+        await propose(owner, tenderId, alice);
+        await approve(owner, tenderId, bob);
+        expect(await refusalOf(withdraw(owner, tenderId, alice))).toContain('NOT_CLOSED');
+      });
+
+      it('is refused for a member of a bidding organization, like every owner route', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.of.set(alice, [bidders[0]!]);
+
+        expect(await codeOf(withdraw(owner, tenderId, alice))).toMatchObject({ code: 'FORBIDDEN' });
+      });
+    });
+
+    describe('after the commit: a membership created in the race (the residual, ADR-066 § 4)', () => {
+      const checks = async (outcome: string): Promise<number> =>
+        (await bidOpeningConflictChecksTotal.get()).values
+          .filter((value) => value.labels.outcome === outcome)
+          .reduce((sum, value) => sum + value.value, 0);
+      afterEach(() => w4.memberships.reset());
+
+      it('raises the alert and BID_OPENING_CONFLICT_DETECTED, ids only, when the approver or the proposer belonged to a bidder at the commit; the opening stands', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        // At the approval identity-service said nobody belongs to a bidder (the default answer);
+        // by the commit instant, as its history now has it, both did.
+        w4.memberships.at.set(bob, [owner, bidders[1]!]);
+        w4.memberships.at.set(alice, [bidders[0]!, bidders[1]!]);
+        const before = await checks('conflict');
+
+        const view = await approve(owner, tenderId, bob);
+
+        expect(view).toMatchObject({ status: 'EVALUATING', openedBy: bob });
+        expect(await checks('conflict')).toBe(before + 1);
+        const row = await rowOf(tenderId);
+        expect(w4.memberships.askedAt.map((ask) => ask.userId).sort()).toEqual([alice, bob].sort());
+        for (const ask of w4.memberships.askedAt) {
+          // The instant it committed: not before the decision.
+          expect(ask.at.getTime()).toBeGreaterThanOrEqual(row.openedAt!.getTime());
+        }
+        const [event] = await eventsOf(owner, 'BID_OPENING_CONFLICT_DETECTED', tenderId);
+        const payload = payloadOf(event!) as { conflicts: unknown[] };
+        expect(payload).toMatchObject({
+          tenderId,
+          organizationId: owner,
+          openedBy: bob,
+          proposedBy: alice,
+          openedAt: row.openedAt!.toISOString(),
+        });
+        expect(payload.conflicts).toEqual(
+          expect.arrayContaining([
+            {
+              userId: bob,
+              role: 'APPROVER',
+              organizationIds: [bidders[1]!],
+              organizationCount: 1,
+            },
+            {
+              userId: alice,
+              role: 'PROPOSER',
+              organizationIds: [...bidders].sort(),
+              organizationCount: 2,
+            },
+          ]),
+        );
+        // Ids only: nothing of any bid.
+        expect(JSON.stringify(payload)).not.toContain('priceMinor');
+      });
+
+      it('says nothing when neither belonged to a bidder at the commit', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.at.set(alice, [owner]);
+        const [clear, conflict] = [await checks('clear'), await checks('conflict')];
+
+        await approve(owner, tenderId, bob);
+
+        expect(await checks('clear')).toBe(clear + 1);
+        expect(await checks('conflict')).toBe(conflict);
+        expect(await eventsOf(owner, 'BID_OPENING_CONFLICT_DETECTED', tenderId)).toHaveLength(0);
+      });
+
+      it('does not undo or fail the opening when the check cannot be made: counted and logged', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        w4.memberships.atFailure = RastaError.upstreamUnavailable('identity-service');
+        const before = await checks('unavailable');
+
+        expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
+
+        expect(await checks('unavailable')).toBe(before + 1);
+        expect(await eventsOf(owner, 'BID_OPENING_CONFLICT_DETECTED', tenderId)).toHaveLength(0);
+      });
+
+      it('does not ask again when the bids were already open', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        await approve(owner, tenderId, bob);
+        w4.memberships.askedAt.length = 0;
+
+        expect((await approve(owner, tenderId, bob)).alreadyOpened).toBe(true);
+
+        expect(w4.memberships.askedAt).toEqual([]);
       });
     });
 

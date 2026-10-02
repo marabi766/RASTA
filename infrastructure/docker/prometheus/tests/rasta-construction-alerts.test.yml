@@ -68,3 +68,54 @@ tests:
               summary: 'Bids did not match the receipt evidence and were not opened (1 refusals)'
               description: 'An opening or an owner read of bids was refused with reason "integrity": a stored bid, or the receipt chain, differs from what audit-service holds. Nothing was opened or shown. Treat as possible tampering until proven otherwise; the construction-service log says the sealing failure code, and this alert deliberately carries neither tender nor tenant.'
               runbook: docs/runbooks/bid-opening-integrity.md
+
+  # ---------------------------------------------------------------------------
+  # RastaConstructionBidOpeningConflictDetected
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Clear checks never page; the first conflict does.
+      - series: 'rasta_construction_bid_opening_conflict_checks_total{service="construction-service",outcome="clear",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '4 4 4 4'
+      - series: 'rasta_construction_bid_opening_conflict_checks_total{service="construction-service",outcome="conflict",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '_ _ 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaConstructionBidOpeningConflictDetected
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaConstructionBidOpeningConflictDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'A bid opening was made by a member of a bidding organization (1 detected)'
+              description: 'After an opening committed, identity-service said its proposer or approver belonged to an organization that bid on the tender at that instant: a membership was created between the check at the approval and the commit. The opening was not undone. BID_OPENING_CONFLICT_DETECTED names the tender, the person and the organizations (ids only); this alert deliberately carries none of them.'
+              runbook: docs/runbooks/bid-opening-conflict.md
+
+  # ---------------------------------------------------------------------------
+  # RastaConstructionBidOpeningIdentityUnavailable
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # A refusal for another reason never fires it; identity_unavailable does, on the
+      # opening or the owner read; so does a check after an opening that could not be made.
+      - series: 'rasta_construction_bid_opening_refusals_total{service="construction-service",reason="not_closed",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '3 3 3 3 3 3 3 3'
+      - series: 'rasta_construction_bid_opening_refusals_total{service="construction-service",reason="identity_unavailable",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '_ _ 2 2 2 2 2 2'
+      - series: 'rasta_construction_bid_opening_conflict_checks_total{service="construction-service",outcome="unavailable",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '_ _ _ _ _ _ 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaConstructionBidOpeningIdentityUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaConstructionBidOpeningIdentityUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service could not say whom a reader of bids belongs to (2)'
+              description: 'An opening or an owner read of bids was refused with reason "identity_unavailable" (identity-service unreachable, slow or answering outside its contract; nothing was shown), or the check made after an opening could not be made. Neither names a tender or a tenant here; the construction-service log says which.'
+              runbook: docs/runbooks/bid-opening-identity-unavailable.md

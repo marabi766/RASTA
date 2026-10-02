@@ -8,7 +8,8 @@ const OWNER_NOTE =
   'Owner side: the roles of CONSTRUCTION_TENDER_OPEN_ROLES, by default the tender owner’s role set ' +
   '(CONSTRUCTION_PROJECT_ROLES) — docs/24 Q-85, ADR-066 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each ' +
   'refused whenever present, whatever other role the user holds), a service token and a member of any ' +
-  'organization that bid on the tender (on every route here, the access log included) are refused. A ' +
+  'organization that bid on the tender (on every route here, the access log included; judged on the ' +
+  'token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A ' +
   'tender of another organization ' +
   'answers 404, never 403, and the attempt is logged under its owner.';
 
@@ -64,6 +65,22 @@ export class BidOpeningController {
     return this.opening.proposeOpening(id);
   }
 
+  @Post('tenders/:id/open-bids/proposal/withdraw')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Withdraw the proposal to open the bids (four-eyes; the proposer only)',
+    description:
+      'The proposer takes their proposal back, so another eligible user can propose afresh; nobody ' +
+      'else may (403). No proposal is 422 `NO_PROPOSAL`; a tender not CLOSED, or already opened, is ' +
+      '422 `NOT_CLOSED`. Audited like the proposal (an access row, BID_ACCESSED) with ' +
+      '`BID_OPENING_PROPOSAL_WITHDRAWN`. An approval that finds the proposer a member of a bidding ' +
+      'organization refuses (403) and clears the proposal the same way. ' +
+      OWNER_NOTE,
+  })
+  async withdrawProposal(@Param('id') id: string) {
+    return this.opening.withdrawProposal(id);
+  }
+
   @Get('tenders/:id/bids')
   @ApiOperation({
     summary: 'The tender’s bids as the owner may see them',
@@ -93,7 +110,7 @@ export class BidOpeningController {
     summary: 'Who read the tender’s bids, and why',
     description:
       'The append-only log of every read, granted or refused, newest first: the reader, a closed ' +
-      'purpose (OPEN_BIDS, PROPOSE_OPENING, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never ' +
+      'purpose (OPEN_BIDS, PROPOSE_OPENING, WITHDRAW_PROPOSAL, COUNT_BIDS, LIST_BIDS, READ_BID, OWN_BID_RECEIPT) and the outcome — never ' +
       `content. Reading the log is not itself logged. ${OWNER_NOTE}`,
   })
   async accessLog(

@@ -561,6 +561,17 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 از بازگشایی؛ بی `bidId`)، `LIST_BIDS`، `READ_BID`؛ ردشده‌ها `outcome = REFUSED` و `bidId = null`. بازگشایی یا خواندنی که پیشنهادی برای
 نشان‌دادن ندارد (مناقصه‌ای بی پیشنهاد) هم یک ردیف سطح مناقصه (`bidId = null`، `outcome = GRANTED`) می‌گذارد.
 
+**افزوده در دور چهارم Codex #184 (تضاد منفعت):** هدف `BID_ACCESSED` تازه: `WITHDRAW_PROPOSAL` (پس‌گرفتن یا پاک‌شدن پیشنهادِ بازگشایی؛ بی `bidId`).
+دو رویداد (`aggregateType = Tender`، کلید `tenderId`؛ هیچ‌کدام `projectId` ندارند؛ فقط شناسه، `.strict()`):
+
+- `BID_OPENING_CONFLICT_DETECTED` — **نام را مدیر پروژه داد (2026-10-02).** پس از Commit بازگشایی، identity گفت پیشنهاددهنده یا
+  تأییدکننده در همان لحظه عضو سازمانی پیشنهاددهنده بوده است (باقیماندهٔ ADR-066 § ۴): `tenderId`، `organizationId`، `openedAt`، `openedBy`،
+  `proposedBy` (یا `null`)، `checkedAt` (لحظهٔ Commit) و `conflicts` (۱ تا ۲ مورد: `userId`، `role` = `PROPOSER | APPROVER`، `organizationIds`
+  حداکثر ۱۰۰ و `organizationCount`). بازگشایی پس گرفته نمی‌شود.
+- `BID_OPENING_PROPOSAL_WITHDRAWN` — **افزودهٔ CON-002 برای S-06؛ در انتظار پذیرش.** پیشنهادِ بازگشایی را پیشنهاددهنده پس گرفت یا تأییدی که او را
+  عضو پیشنهاددهنده یافت پاکش کرد: `tenderId`، `organizationId`، `proposedBy`، `withdrawnBy`، `reason`
+  (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED`)، `withdrawnAt`.
+
 **مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
 `tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
 (`tender_receipt_pending`) و در تراکنشِ الحاق پیشینش به ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_TENDER_GAP_ALERT_SECONDS` هشدار

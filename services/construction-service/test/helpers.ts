@@ -473,11 +473,33 @@ export class FakeMemberships implements MembershipSource {
   failure: Error | undefined;
   readonly of = new Map<string, readonly string[]>();
   readonly asked: string[] = [];
+  /** Who belonged where at an instant, for the check after an opening; absent = as `of`. */
+  readonly at = new Map<string, readonly string[]>();
+  readonly askedAt: { userId: string; at: Date }[] = [];
 
   async fetchOrganizationIds(userId: string): Promise<readonly string[]> {
     this.asked.push(userId);
     if (this.failure) throw this.failure;
     return this.of.get(userId) ?? [];
+  }
+
+  /** Back to the default: nobody belongs to anything, nothing fails, nothing asked. */
+  reset(): void {
+    this.failure = undefined;
+    this.atFailure = undefined;
+    this.of.clear();
+    this.at.clear();
+    this.asked.length = 0;
+    this.askedAt.length = 0;
+  }
+
+  /** Fails only the history read (the check after an opening), leaving the live reads working. */
+  atFailure: Error | undefined;
+
+  async fetchOrganizationIdsAt(userId: string, at: Date): Promise<readonly string[]> {
+    this.askedAt.push({ userId, at });
+    if (this.failure ?? this.atFailure) throw (this.failure ?? this.atFailure)!;
+    return this.at.get(userId) ?? this.of.get(userId) ?? [];
   }
 }
 

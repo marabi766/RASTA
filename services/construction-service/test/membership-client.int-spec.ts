@@ -34,7 +34,7 @@ describe('MembershipClient against the identity-service contract', () => {
           .verify(String(req.headers['x-internal-token'] ?? ''), 'identity-service')
           .catch(() => null);
         seen.push({ url: req.url ?? '', claims });
-        const userId = decodeURIComponent((req.url ?? '').split('/')[3] ?? '');
+        const userId = decodeURIComponent((req.url ?? '').split('?')[0]!.split('/')[3] ?? '');
         const send = (status: number, body: unknown) => {
           res.writeHead(status, { 'content-type': 'application/json' });
           res.end(typeof body === 'string' ? body : JSON.stringify(body));
@@ -90,6 +90,12 @@ describe('MembershipClient against the identity-service contract', () => {
       },
     ]);
     expect(seen[0]!.claims!.organizationId).toBeUndefined();
+  });
+
+  it('asks for the memberships held at an instant with `at`', async () => {
+    const at = new Date('2026-10-01T12:00:00.000Z');
+    expect(await client().fetchOrganizationIdsAt('USR_ONE', at)).toEqual(['ORG_A', 'ORG_B']);
+    expect(seen[0]!.url).toBe('/v1/users/USR_ONE/organizations?at=2026-10-01T12%3A00%3A00.000Z');
   });
 
   it.each<[Behaviour, string]>([

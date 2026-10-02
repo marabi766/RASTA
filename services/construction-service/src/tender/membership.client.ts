@@ -23,6 +23,8 @@ const membershipsSchema = z
 export interface MembershipSource {
   /** The organizations `userId` belongs to **now** (live memberships). Throws when it cannot say. */
   fetchOrganizationIds(userId: string): Promise<readonly string[]>;
+  /** The organizations `userId` belonged to at `at` (history, for the detective control). Throws when it cannot say. */
+  fetchOrganizationIdsAt(userId: string, at: Date): Promise<readonly string[]>;
 }
 
 /**
@@ -42,11 +44,19 @@ export class MembershipClient implements MembershipSource {
     private readonly tokens: InternalTokenService,
   ) {}
 
-  async fetchOrganizationIds(userId: string): Promise<readonly string[]> {
+  fetchOrganizationIds(userId: string): Promise<readonly string[]> {
+    return this.read(userId, '');
+  }
+
+  fetchOrganizationIdsAt(userId: string, at: Date): Promise<readonly string[]> {
+    return this.read(userId, `?at=${encodeURIComponent(at.toISOString())}`);
+  }
+
+  private async read(userId: string, query: string): Promise<readonly string[]> {
     const token = await this.tokens.issue(SERVICE_NAME, IDENTITY_SERVICE, 'SERVICE');
     const url =
       `${this.env.IDENTITY_SERVICE_URL.replace(/\/+$/, '')}` +
-      `/v1/users/${encodeURIComponent(userId)}/organizations`;
+      `/v1/users/${encodeURIComponent(userId)}/organizations${query}`;
 
     const timeoutMs = this.env.CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS;
     const controller = new AbortController();

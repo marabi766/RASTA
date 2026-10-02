@@ -139,10 +139,15 @@ export class IdentityService {
    * The organizations a user belongs to **now**, for construction-service's conflict-of-
    * interest check at the approval of a bid opening (CON-002 PR 8, Q-91). Service-only:
    * `construction-service` with a token signed for no tenant; anyone else is refused.
-   * Ids only, live memberships only (`isMembershipLive`'s predicate).
+   * Ids only, live memberships only (`isMembershipLive`'s predicate), judged on the
+   * **database's** clock, which is the one that stamps `validFrom`.
+   *
+   * With `at`: the organizations the user was a member of at that instant instead — the
+   * history the detective control after an opening asks for (ADR-066 § 3).
    */
   async getLiveOrganizationIds(
     userId: string,
+    at?: Date,
   ): Promise<{ userId: string; organizationIds: string[]; asOf: string }> {
     const context = getContext();
     if (
@@ -154,12 +159,15 @@ export class IdentityService {
         'Only construction-service may read which organizations a user belongs to',
       );
     }
-    const now = new Date();
-    return {
-      userId,
-      organizationIds: await this.repository.findLiveOrganizationIds(userId, now),
-      asOf: now.toISOString(),
-    };
+    if (at) {
+      return {
+        userId,
+        organizationIds: await this.repository.findOrganizationIdsAt(userId, at),
+        asOf: at.toISOString(),
+      };
+    }
+    const live = await this.repository.findLiveOrganizationIds(userId);
+    return { userId, organizationIds: live.organizationIds, asOf: live.asOf.toISOString() };
   }
 
   async getUser(id: string): Promise<UserView> {

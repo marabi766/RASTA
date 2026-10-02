@@ -40,6 +40,7 @@ import { TenderOpenService } from '../tender/tender-open.service';
 import {
   bidAccessLogEntrySchema,
   bidOpeningProposalViewSchema,
+  bidOpeningProposalWithdrawnViewSchema,
   bidsOpenedViewSchema,
   listBidAccessLogQuerySchema,
   openedBidViewSchema,
@@ -204,6 +205,10 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/tenders/{id}/open-bids/proposal': {
     status: '200',
     schema: bidOpeningProposalViewSchema,
+  },
+  'POST /v1/tenders/{id}/open-bids/proposal/withdraw': {
+    status: '200',
+    schema: bidOpeningProposalWithdrawnViewSchema,
   },
   'GET /v1/tenders/{id}/bids': { status: '200', schema: tenderBidsViewSchema },
   'GET /v1/tenders/{id}/bids/{bidId}': { status: '200', schema: openedBidViewSchema },

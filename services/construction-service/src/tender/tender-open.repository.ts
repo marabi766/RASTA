@@ -144,6 +144,26 @@ export class TenderOpenRepository {
     return result.count;
   }
 
+  /**
+   * Clears the proposal of `proposedBy` on a CLOSED, unopened tender, in the lock the caller
+   * holds, so another eligible user can propose afresh. Returns the rows matched: 0 or 1.
+   */
+  async clearProposal(
+    tx: ExtendedPrismaClient,
+    input: { tenderId: string; proposedBy: string },
+  ): Promise<number> {
+    const result = await tx.tender.updateMany({
+      where: {
+        id: input.tenderId,
+        status: 'CLOSED',
+        openedAt: null,
+        openingProposedBy: input.proposedBy,
+      },
+      data: { openingProposedAt: null, openingProposedBy: null },
+    });
+    return result.count;
+  }
+
   /** The tender's key row, wrapped: the private half is useless without the KEK. */
   findKey(tx: ExtendedPrismaClient, tenderId: string): Promise<TenderKey | null> {
     return tx.tenderKey.findFirst({ where: { tenderId } });

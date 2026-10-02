@@ -77,6 +77,7 @@ describe('open-bids API', () => {
     const routes: [string, string, object | undefined][] = [
       ['post', '/v1/tenders/TND_x/open-bids', {}],
       ['post', '/v1/tenders/TND_x/open-bids/proposal', {}],
+      ['post', '/v1/tenders/TND_x/open-bids/proposal/withdraw', {}],
       ['get', '/v1/tenders/TND_x/bids', undefined],
       ['get', '/v1/tenders/TND_x/bids/BID_x', undefined],
       ['get', '/v1/tenders/TND_x/bid-access-log', undefined],
@@ -133,6 +134,19 @@ describe('open-bids API', () => {
     const self = await http().post(`/v1/tenders/${tenderId}/open-bids`).set(as(proposer));
     expect(self.status).toBe(422);
     expect(self.body.message).toContain('SECOND_PERSON_REQUIRED');
+    // Only the proposer may take it back; then anyone eligible proposes afresh.
+    const stranger = await http()
+      .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
+      .set(as(orgAdmin(owner)));
+    expect(stranger.status).toBe(403);
+    const withdrawn = await http()
+      .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
+      .set(as(proposer));
+    expect(withdrawn.status).toBe(200);
+    expect(withdrawn.body).toMatchObject({ tenderId });
+    expect(
+      (await http().post(`/v1/tenders/${tenderId}/open-bids/proposal`).set(as(proposer))).body,
+    ).toMatchObject({ alreadyProposed: false });
 
     const opened = await http()
       .post(`/v1/tenders/${tenderId}/open-bids`)

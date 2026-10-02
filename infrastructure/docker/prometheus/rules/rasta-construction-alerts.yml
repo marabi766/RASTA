@@ -53,3 +53,31 @@ groups:
           summary: 'Bids did not match the receipt evidence and were not opened ({{ $value }} refusals)'
           description: 'An opening or an owner read of bids was refused with reason "integrity": a stored bid, or the receipt chain, differs from what audit-service holds. Nothing was opened or shown. Treat as possible tampering until proven otherwise; the construction-service log says the sealing failure code, and this alert deliberately carries neither tender nor tenant.'
           runbook: docs/runbooks/bid-opening-integrity.md
+
+      # Page-level, first occurrence: after an opening committed, identity-service says the
+      # proposer or the approver was a member of a bidding organization at that very instant
+      # (ADR-066 § 4, the residual of the conflict check at the approval). The opening stands;
+      # a person decides. Same counter semantics as above (born at its first increment).
+      - alert: RastaConstructionBidOpeningConflictDetected
+        expr: sum(rasta_construction_bid_opening_conflict_checks_total{outcome="conflict"}) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'A bid opening was made by a member of a bidding organization ({{ $value }} detected)'
+          description: 'After an opening committed, identity-service said its proposer or approver belonged to an organization that bid on the tender at that instant: a membership was created between the check at the approval and the commit. The opening was not undone. BID_OPENING_CONFLICT_DETECTED names the tender, the person and the organizations (ids only); this alert deliberately carries none of them.'
+          runbook: docs/runbooks/bid-opening-conflict.md
+
+      # Warning: identity-service could not say whom someone belongs to, so an opening or an
+      # owner read of bids was refused (fail closed), or the check after an opening could not
+      # be made (and is not retried). Nothing is shown in the first case; the second needs a
+      # person to do the check by hand.
+      - alert: RastaConstructionBidOpeningIdentityUnavailable
+        expr: >-
+          sum(rasta_construction_bid_opening_refusals_total{reason="identity_unavailable"}) > 0
+          or sum(rasta_construction_bid_opening_conflict_checks_total{outcome="unavailable"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'identity-service could not say whom a reader of bids belongs to ({{ $value }})'
+          description: 'An opening or an owner read of bids was refused with reason "identity_unavailable" (identity-service unreachable, slow or answering outside its contract; nothing was shown), or the check made after an opening could not be made. Neither names a tender or a tenant here; the construction-service log says which.'
+          runbook: docs/runbooks/bid-opening-identity-unavailable.md
