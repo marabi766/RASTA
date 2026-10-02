@@ -152,6 +152,12 @@ Object.assign(VALID, {
     cancelledBy: 'USR_1',
     cancelledAt: AT,
   },
+  TENDER_CLOSED: {
+    ...TENDER,
+    bidCount: 3,
+    closedAt: AT,
+    closedBy: 'system:construction-service',
+  },
   TENDER_CRITERIA_SET: {
     ...TENDER,
     criteriaCount: 3,
@@ -237,6 +243,7 @@ const TENDER_EVENTS = [
   'TENDER_CREATED',
   'TENDER_UPDATED',
   'TENDER_CANCELLED',
+  'TENDER_CLOSED',
   'TENDER_CRITERIA_SET',
   'TENDER_PUBLISHED',
   'TENDER_BIDDER_INVITED',
@@ -292,6 +299,7 @@ describe('the construction event catalogue', () => {
       'PROJECT_UPDATED',
       'TENDER_BIDDER_INVITED',
       'TENDER_CANCELLED',
+      'TENDER_CLOSED',
       'TENDER_CREATED',
       'TENDER_CRITERIA_SET',
       'TENDER_PUBLISHED',
@@ -460,6 +468,9 @@ describe('payload rules', () => {
     ['TENDER_CREATED', { scopeOfWork: 'Private specification' }],
     ['TENDER_UPDATED', { title: 'New title' }],
     ['TENDER_CANCELLED', { reason: 'Funding withdrawn' }],
+    // A closure counts bids and says nothing about them.
+    ['TENDER_CLOSED', { bids: [{ bidderOrganizationId: 'ORG_B' }] }],
+    ['TENDER_CLOSED', { priceMinor: '1250000000' }],
   ])('refuses free text on %s (%j)', (name, prose) => {
     expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...prose })).toThrow();
   });

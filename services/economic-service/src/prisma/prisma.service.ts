@@ -51,6 +51,23 @@ export const TENANT_SCOPED_MODELS = [
   'IdempotencyKey',
 ] as const;
 
+/**
+ * Models that carry an `organization_id` column and are deliberately **not** guarded, each
+ * with the reason. Named rather than left out, so `tenant-scope.spec.ts` can hold the
+ * guarded list against the Prisma schema exactly: an exemption has to be written down
+ * to exist, and one without a reason fails that spec.
+ */
+export const TENANT_SCOPE_EXEMPTIONS = {
+  CommissionRule:
+    "organization_id is nullable: a NULL row is a platform-wide rule that every tenant is matched against, and the guard's organization_id = X filter would hide it. Rule matching states the organization itself and is tested in commission.repository.ts.",
+  RewardRule:
+    "organization_id is nullable: a NULL row is a platform-wide rule that applies to every tenant, which the guard's organization_id = X filter would hide. Matching states the organization itself.",
+  RewardLevel:
+    "organization_id is nullable: a NULL row is a platform-wide level that applies to every tenant, which the guard's organization_id = X filter would hide. Level lookups state the organization themselves.",
+  OutboxMessage:
+    'The outbox relay drains this table across every tenant with no request context, and each row names its own organization_id: platform plumbing, filtered by that column rather than by the guard.',
+} as const satisfies Readonly<Record<string, string>>;
+
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()

@@ -33,3 +33,10 @@ export {
   tablePrivileges,
 } from './runtime-role';
 export type { RawSqlClient, RuntimeRoleFacts } from './runtime-role';
+
+export {
+  describeTenantScopeCoverage,
+  tenantScopeProblems,
+  MIN_REASON_LENGTH,
+} from './tenant-scope';
+export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
