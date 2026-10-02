@@ -537,6 +537,22 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `TENDER_CANCELLED` — را مدیر پروژه با همین نام‌ها پذیرفت (2026-09-30).** `BID_ACCESSED` هرگز محتوای پیشنهاد حمل نمی‌کند: فقط
 شناسه‌ها، بازیگر، زمان و هدف بسته (`.strict()` هر فیلد دیگر را رد می‌کند).
 
+**پیاده‌شده در CON-002 PR 6 (پیشنهاد):** `BID_SUBMITTED` و `BID_REVISED` علاوه بر ستون بالا `ciphertextSha256`، `previousReceipt`،
+`receipt` و `submittedBy` دارند: `receipt` **سرِ تازهٔ زنجیرهٔ رسید** همان مناقصه است و `audit-service` آن را بیرون از
+پایگاه دادهٔ این سرویس نگه می‌دارد؛ بازگشایی (گام ۸) سر را از آنجا می‌گیرد، نه از جدول `bid_receipt` (ADR-066 § ۲). Digestها
+امن‌اند؛ محتوا، قیمت و رمزنوشته هرگز نمی‌آیند. `BID_WITHDRAWN` شامل `revision` و `withdrawnBy` است. `BID_ACCESSED` برای هر خواندن
+پیشنهاد (رد شده هم) در همان تراکنش نوشته می‌شود: `bidId` (یا `null` اگر پیشنهادی برای خواننده نبود)، `accessorOrganizationId`،
+`accessedBy`، `purpose` (بسته: `OWN_BID_RECEIPT`؛ هدف‌های سمت کارفرما با گام ۸)، `outcome` (`GRANTED | REFUSED`)، `accessedAt`.
+هیچ‌کدام `projectId` ندارند؛ کلید پارتیشن `tenderId` است.
+
+**مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
+`tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
+(`tender_receipt_pending`) و در تراکنشِ الحاق پیشینش به ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_TENDER_GAP_ALERT_SECONDS` هشدار
+می‌دهد. دوشاخه‌شدن و ناسازگاری `tenantId` پاکت با `payload.organizationId` (یا `aggregateId` با `payload.tenderId`) پذیرفته
+نمی‌شود (DLQ و هشدار). `BID_ACCESSED` با فیلدهای شناسه‌ای و `outcome` واقعی (`GRANTED | REFUSED`) در `bid_access_evidence` می‌ماند.
+سرِ زنجیره را فقط `GET /v1/internal/tender-evidence/{tenderId}/chain` (`@AllowService('construction-service')`، با توکن امضاشده برای
+سازمان مالکِ Tender؛ جستجو با سازمان و Tender) می‌دهد.
+
 **پیاده‌شده در CON-002 PR 2:** `TENDER_CREATED` و `TENDER_CANCELLED` (`from` وضعیت پیشین، `reasonCode` از مجموعهٔ بستهٔ
 `OWNER_REQUEST | NO_QUALIFIED_BID`؛ دلیل نوشتاری فقط در پایگاه داده) و **`TENDER_UPDATED`** (`changedFields[]`، فقط نام فیلدها؛ مثل
 `PROJECT_UPDATED`، برای پوشش S-06 از ویرایش پیش‌نویس) — **`TENDER_UPDATED` در فهرست هشت‌تایی نبود؛ مدیر پروژه آن را پذیرفت (2026-09-30) — فقط نام فیلدها، هرگز مقدارشان.**

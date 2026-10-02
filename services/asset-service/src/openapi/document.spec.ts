@@ -5,6 +5,7 @@ import { AssetController } from '../asset/asset.controller';
 import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
+import { updateAssetSchema } from '../asset/dto';
 
 /**
  * The document this service actually serves.
@@ -97,5 +98,50 @@ describe('the served OpenAPI document', () => {
     });
     expect(parameters.type).toMatchObject({ required: false });
     expect((parameters.type?.schema as { type: string }).type).toBe('string');
+  });
+});
+
+describe('the served PATCH /v1/assets/{id} request body', () => {
+  type Body = {
+    type: string;
+    required?: string[];
+    properties: Record<string, { type?: string; minimum?: number; nullable?: boolean }>;
+  };
+  let body: Body;
+
+  beforeAll(async () => {
+    const document = await buildDocument();
+    const operation = document.paths['/v1/assets/{id}']?.patch as unknown as {
+      requestBody?: { required?: boolean; content: Record<string, { schema: Body }> };
+    };
+    expect(operation).toBeDefined();
+    expect(operation.requestBody).toBeDefined();
+    body = operation.requestBody!.content['application/json']!.schema;
+  });
+
+  it('says expectedVersion is required, so a generated client cannot omit it', () => {
+    expect(body.required).toEqual(['expectedVersion']);
+    expect(body.properties.expectedVersion).toMatchObject({ type: 'integer', minimum: 1 });
+  });
+
+  it('publishes every field the validator accepts, and nothing it would refuse', () => {
+    expect(Object.keys(body.properties).sort()).toEqual(
+      Object.keys(updateAssetSchema.innerType().shape).sort(),
+    );
+  });
+
+  it('marks required exactly the fields the validator does not make optional', () => {
+    const shape = updateAssetSchema.innerType().shape as Record<string, { isOptional(): boolean }>;
+    const required = Object.entries(shape)
+      .filter(([, field]) => !field.isOptional())
+      .map(([name]) => name);
+    expect(body.required).toEqual(required);
+  });
+
+  it('marks a field nullable where the validator accepts null, since null clears it', () => {
+    const shape = updateAssetSchema.innerType().shape as Record<string, { isNullable(): boolean }>;
+    for (const [name, field] of Object.entries(shape)) {
+      expect([name, body.properties[name]?.nullable === true]).toEqual([name, field.isNullable()]);
+    }
   });
 });

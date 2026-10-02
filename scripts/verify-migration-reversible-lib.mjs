@@ -405,8 +405,18 @@ export const EXPECTED = {
       // AUD-003. The chain's tip, and the one object in this service the
       // runtime role may UPDATE.
       'audit_chain_head',
+      // 20261001110000_tender_evidence: the externally held receipt chain and the
+      // record of who read which bid.
+      'tender_receipt_link',
+      'bid_access_evidence',
+      // 20261001130000_tender_receipt_pending: receipts held until their predecessor arrives.
+      'tender_receipt_pending',
     ],
     triggers: [
+      'tg_tender_receipt_link_append_only',
+      'tg_tender_receipt_link_no_truncate',
+      'tg_bid_access_evidence_append_only',
+      'tg_bid_access_evidence_no_truncate',
       'audit_event_append_only',
       'audit_event_append_only_truncate',
       // AUD-003, and the same asymmetry as above: the row-level trigger is what
@@ -428,6 +438,14 @@ export const EXPECTED = {
       // one index and nothing else, so an inventory that does not name it
       // makes that whole migration invisible to the up → down → up proof.
       'audit_event_correction_idx',
+      // A receipt is one link and a link has one successor: the fork refusal is an index.
+      'ux_tender_receipt_link_receipt',
+      'ux_tender_receipt_link_previous',
+      'ux_tender_receipt_link_event',
+      'ix_bid_access_evidence_tender',
+      'ux_tender_receipt_pending_previous',
+      'ux_tender_receipt_pending_receipt',
+      'ix_tender_receipt_pending_held',
     ],
     types: ['audit_chain_scope'],
     // The two trigger functions, named separately from the triggers that call
@@ -436,7 +454,7 @@ export const EXPECTED = {
     // `DROP FUNCTION` the forward migration forgets to restore leaves a trigger
     // definition pointing at nothing -- which PostgreSQL refuses to create, so
     // the rollback and the re-apply are the only place either shows up.
-    functions: ['refuse_mutation', 'refuse_chain_head_regression'],
+    functions: ['refuse_mutation', 'refuse_chain_head_regression', 'tender_evidence_append_only'],
     constraints: [
       'audit_event_source_event_id_not_blank',
       'audit_event_source_topic_not_blank',
@@ -468,6 +486,9 @@ export const EXPECTED = {
       'audit_chain_head_segment_start_ordered',
       'audit_chain_head_single_record_segment',
       'audit_chain_head_hash_is_sha256',
+      'ck_tender_receipt_link_shape',
+      'ck_bid_access_evidence_shape',
+      'ck_tender_receipt_pending_shape',
     ],
   },
   /**
@@ -949,6 +970,13 @@ export const EXPECTED = {
       'tender_criterion',
       'tender_invitation',
       'tender_key',
+      // 20260930190000_contractor_standing, 20261001100000_tender_bids.
+      'contractor_standing',
+      'contractor_suspension',
+      'standing_bootstrap',
+      'bid',
+      'bid_receipt',
+      'bid_access_log',
     ],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
     // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
@@ -961,6 +989,13 @@ export const EXPECTED = {
       'tg_criteria_template_append_only',
       'tg_criteria_template_no_truncate',
       'tg_tender_key_guard',
+      // 20261001100000_tender_bids: the bid's deadline and edges, and two append-only logs.
+      'tg_standing_bootstrap_guard',
+      'tg_bid_guard',
+      'tg_bid_receipt_append_only',
+      'tg_bid_receipt_no_truncate',
+      'tg_bid_access_log_append_only',
+      'tg_bid_access_log_no_truncate',
     ],
     functions: [
       'tender_criterion_freeze',
@@ -968,6 +1003,9 @@ export const EXPECTED = {
       'tender_status_transition_guard',
       'criteria_template_append_only',
       'tender_key_guard',
+      'standing_bootstrap_guard',
+      'bid_guard',
+      'bid_append_only',
     ],
     constraints: [
       'ck_project_text_not_blank',
@@ -1057,6 +1095,22 @@ export const EXPECTED = {
       'tender_key_organization_id_tender_id_fkey',
       'ck_tender_key_wrap_shape',
       'ck_tender_key_text_not_blank',
+      'ck_standing_org_not_blank',
+      'ck_suspension_text_not_blank',
+      'ck_suspension_order',
+      'ck_standing_bootstrap_singleton',
+      'ck_standing_bootstrap_complete',
+      'bid_organization_id_tender_id_fkey',
+      'bid_receipt_organization_id_tender_id_fkey',
+      'bid_access_log_organization_id_tender_id_fkey',
+      'ck_bid_not_own_tender',
+      'ck_bid_revision_positive',
+      'ck_bid_seal_shape',
+      'ck_bid_text_not_blank',
+      'ck_bid_withdrawal_recorded',
+      'ck_bid_received_after_submitted',
+      'ck_bid_receipt_shape',
+      'ck_bid_access_outcome',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

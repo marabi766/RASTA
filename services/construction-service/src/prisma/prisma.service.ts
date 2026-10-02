@@ -30,6 +30,9 @@ export const TENANT_SCOPED_MODELS = [
   'TenderCriterion',
   'TenderInvitation',
   'TenderKey',
+  'Bid',
+  'BidReceipt',
+  'BidAccessLog',
   'ContractorStanding',
   'ContractorSuspension',
 ] as const;

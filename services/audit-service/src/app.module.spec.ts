@@ -13,10 +13,12 @@ import { PrismaService } from './prisma/prisma.service';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
 import { OpsReplayConsumer } from './consumers/ops-replay.consumer';
+import { TenderEvidenceConsumer } from './consumers/tender-evidence.consumer';
 import { OPS_REPLAY_CONSUMER } from './audit/ops-replay.mapper';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
 import { AuditInternalController } from './audit/audit-internal.controller';
+import { TenderEvidenceController } from './audit/tender-evidence.controller';
 import {
   AuditEventDetailQueryPipe,
   AuditEventQueryPipe,
@@ -169,6 +171,7 @@ describe('audit-service composition root', () => {
       MetricsController,
       AuditController,
       AuditInternalController,
+      TenderEvidenceController,
     ]);
   });
 
@@ -431,6 +434,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       asMigrator,
@@ -446,6 +450,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -454,7 +459,7 @@ describe('audit-service composition root', () => {
     await module.onModuleInit();
     await module.onApplicationShutdown();
 
-    expect(order).toEqual(['projector', 'trail', 'replay']);
+    expect(order).toEqual(['projector', 'trail', 'replay', 'evidence']);
   });
 
   it('fails startup when the audit-trail consumer cannot start', async () => {
@@ -466,6 +471,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order, true) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -485,6 +491,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order, true) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -506,6 +513,7 @@ describe('audit-service composition root', () => {
       projector,
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -532,6 +540,7 @@ describe('audit-service composition root', () => {
       startable('projector', order) as unknown as DomainProjectorConsumer,
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
       repository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -556,7 +565,7 @@ describe('audit-service composition root', () => {
     });
 
     it('injects the validated environment by its token', () => {
-      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 4, param: ENV }]);
+      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 5, param: ENV }]);
     });
 
     it('exports nothing for producer silence under the default empty set', async () => {
@@ -567,6 +576,7 @@ describe('audit-service composition root', () => {
         startable('projector', order) as unknown as DomainProjectorConsumer,
         startable('trail', order) as unknown as AuditTrailConsumer,
         startable('replay', order) as unknown as OpsReplayConsumer,
+        startable('evidence', order) as unknown as TenderEvidenceConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
         runtimeRole,
@@ -596,6 +606,7 @@ describe('audit-service composition root', () => {
         recording('projector') as unknown as DomainProjectorConsumer,
         recording('trail') as unknown as AuditTrailConsumer,
         recording('replay') as unknown as OpsReplayConsumer,
+        recording('evidence') as unknown as TenderEvidenceConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
         runtimeRole,

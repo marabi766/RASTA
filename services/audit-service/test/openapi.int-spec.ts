@@ -59,6 +59,8 @@ describe('the published OpenAPI contract (real application)', () => {
    * authenticated differently and answers to a different caller.
    */
   const INTERNAL = '/v1/internal/audit-events/{id}';
+  /** The tender's receipt chain and head, for construction-service alone (ADR-066 § 2). */
+  const EVIDENCE = '/v1/internal/tender-evidence/{tenderId}/chain';
 
   beforeAll(async () => {
     migrator = newMigratorPrisma();
@@ -97,12 +99,14 @@ describe('the published OpenAPI contract (real application)', () => {
   };
 
   describe('the routes it describes', () => {
-    it('publishes exactly the three read endpoints and the one internal lookup', () => {
+    it('publishes exactly the three read endpoints and the two internal reads', () => {
       // Sorted on both sides, so this asserts the *set* of published paths and
       // not the order Nest happened to register them in. `LIST` sorts before
       // `DETAIL` because `/v1/audit-events` is a prefix of
       // `/v1/audit-events/{id}`.
-      expect(Object.keys(document.paths ?? {}).sort()).toEqual([...PATHS, INTERNAL].sort());
+      expect(Object.keys(document.paths ?? {}).sort()).toEqual(
+        [...PATHS, INTERNAL, EVIDENCE].sort(),
+      );
     });
 
     it('publishes the internal lookup as a read, under the internal-token scheme', () => {
@@ -169,7 +173,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
       expect(paths).not.toContain('/metrics');
       expect(paths.some((path) => path.includes('metrics') || path.includes('health'))).toBe(false);
-      expect(paths.sort()).toEqual([...PATHS, INTERNAL].sort());
+      expect(paths.sort()).toEqual([...PATHS, INTERNAL, EVIDENCE].sort());
     });
   });
 

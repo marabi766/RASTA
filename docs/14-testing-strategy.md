@@ -978,7 +978,7 @@ pnpm --filter @rasta/identity-service test:integration
 **پیکربندی و قواعد هشدار Prometheus.** Job مستقل `prometheus-rules` در CI (روی هر PR و `main`، بی وابستگی Node و بیرون از
 Job سریع `quality`) همان Image سرویس `prometheus` در `docker-compose.yml` را با کل پوشهٔ
 `infrastructure/docker/prometheus` به‌صورت فقط‌خواندنی در `/etc/prometheus` اجرا می‌کند؛ پس مسیر `rule_files` همان است که در
-زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار سیزده هشدار و یک Recording Rule (چهارده قاعده) را،
+زمان اجرا. `check config` نحو پیکربندی و قواعد را با هم و وجود فایل نام‌برده را می‌سنجد؛ `test rules` رفتار چهارده هشدار و یک Recording Rule (چهارده قاعده) را،
 با افزایش واقعی شمارنده (نه مقدار مطلق) و کنترل‌های منفی (`outcome="recorded"`/`"skipped"` هشدار نمی‌دهد، سن پشتهٔ بسته ≤ ۶۰
 هشدار نمی‌دهد، `pending_age` ورودی هشدار نیست)، گذار Series صادرشده با صفر به نخستین رخداد (که هشدار می‌دهد) و Labelهای
 دقیق هر هشدار. برای Kafka همان Fixture با نام و Labelهای واقعی `danielqsj/kafka-exporter:v1.9.0`
@@ -1108,7 +1108,7 @@ Port میزبان منتشر نمی‌کند (آزمایش 2026-09-13)، پس As
 inspect` دقیقاً یک شبکه با همان نام و `Internal` بولی `true` برمی‌گرداند؛ و `docker container inspect` هر سه Container را فقط به همان
 شبکه (و `NetworkMode` همان) وصل و بی هیچ Binding در `HostConfig.PortBindings`، `NetworkSettings.Ports` یا `PublishAllPorts`
 نشان می‌دهد — یک بار پیش از شروع Probe و دوباره، همراه با Inspect دوبارهٔ شبکه، پس از خروج آن؛ Probe باید با کد خروج `0` تمام شود
-و Prometheus و Grafana هنوز در حال اجرا باشند. Probe اثبات می‌کند: Prometheus سیزده هشدار و یک Recording Rule را بار کرد؛ Datasource با UID ‏`rasta-prometheus`، URL
+و Prometheus و Grafana هنوز در حال اجرا باشند. Probe اثبات می‌کند: Prometheus چهارده هشدار و یک Recording Rule را بار کرد؛ Datasource با UID ‏`rasta-prometheus`، URL
 `http://prometheus:9090`، پیش‌فرض و `proxy` است و Health آن از Grafana `OK` است؛ داشبورد با UID و عنوان دقیق، `provisioned=true`،
 در پوشهٔ `Rasta` با تعداد Panel/Target فایل برمی‌گردد و هر Target برگشتی همان UID را دارد؛ `DELETE` داشبورد با `400` رد می‌شود و
 داشبورد می‌ماند؛ هر ۱۴ Query (با جایگزینی `$__rate_interval` با `5m` فقط در Harness) در `/api/v1/query` Prometheus و از راه
