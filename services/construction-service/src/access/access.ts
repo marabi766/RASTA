@@ -51,6 +51,21 @@ export const CONTRACTOR_ROLE = 'CONTRACTOR';
 const OVERSIGHT_ROLE = 'AUDITOR';
 
 /**
+ * Roles that never open or read a bid, refused whenever present whatever else the user holds.
+ * ONE list, for the token's roles and for the live roles identity-service reports alike, so
+ * the two checks cannot drift apart.
+ */
+const BID_EXCLUDED_ROLES: readonly string[] = [SUPER_ROLE, CONTRACTOR_ROLE, OVERSIGHT_ROLE];
+
+function assertNoBidExcludedRole(roles: readonly string[]): void {
+  for (const refused of BID_EXCLUDED_ROLES) {
+    if (roles.includes(refused)) {
+      throw RastaError.forbidden(`The ${refused} role does not open or read bids`);
+    }
+  }
+}
+
+/**
  * Q-70 (7), decided 2026-09-26: the union administrator writes approval
  * policies for the organizations under its union; the platform administrator
  * may write one for any organization and is the only one who puts a policy in
@@ -86,9 +101,15 @@ export class ProjectAccess {
   private readonly writers: readonly string[];
   private readonly readers: readonly string[];
   private readonly policyReaders: readonly string[];
+  private readonly bidOpeners: readonly string[];
 
   constructor(@Inject(ENV) env: ConstructionEnv) {
     this.writers = [SUPER_ROLE, ...env.CONSTRUCTION_PROJECT_ROLES];
+    this.bidOpeners = (
+      env.CONSTRUCTION_TENDER_OPEN_ROLES.length > 0
+        ? env.CONSTRUCTION_TENDER_OPEN_ROLES
+        : env.CONSTRUCTION_PROJECT_ROLES
+    ).filter((role) => !BID_EXCLUDED_ROLES.includes(role));
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
     this.policyReaders = [...new Set([...this.readers, UNION_ROLE])];
   }
@@ -301,6 +322,56 @@ export class ProjectAccess {
       throw RastaError.forbidden('This operation records an actor and the request names none');
     }
     return { organizationId: context.organizationId, actor: context.userId };
+  }
+
+  /**
+   * May the caller open a tender's bids and read them afterwards, and as whom? The
+   * owner's side (ADR-066 § 4): the configured roles (`CONSTRUCTION_TENDER_OPEN_ROLES`,
+   * by default the tender owner's own role set) in the organization the request acts
+   * for. **`SYSTEM_ADMIN` is not accepted** — not even as the super-role: it has no
+   * access to a bid through the API — and neither are `AUDITOR`, `CONTRACTOR` or a service
+   * token, **each refused whenever present**, whatever other role the user also holds.
+   * `organizationIds` is every organization the user is a member of, for the conflict
+   * of interest the caller checks against the bidders (ADR-067 § 4).
+   */
+  assertCanOpenBids(): {
+    organizationId: string;
+    actor: string;
+    organizationIds: readonly string[];
+  } {
+    assertNotServiceCaller();
+    const context = getContext();
+    // Refused whenever present, whatever else the user holds: a role that must never see
+    // a bid is not made harmless by a second, granted one.
+    assertNoBidExcludedRole(context.roles);
+    if (!this.bidOpeners.some((role) => context.roles.includes(role))) {
+      throw RastaError.insufficientRole(this.bidOpeners, context.roles);
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('Select an organization with X-Organization-Id to open its bids');
+    }
+    if (!context.userId) {
+      throw RastaError.forbidden('This operation records an actor and the request names none');
+    }
+    return {
+      organizationId: context.organizationId,
+      actor: context.userId,
+      organizationIds: context.organizationIds,
+    };
+  }
+
+  /**
+   * The same rule as `assertCanOpenBids`, on the roles identity-service says the caller holds
+   * **now** in the organization they act for, not the token's: a token outlives a revocation
+   * or a demotion, and a bid's content is not read on a stale claim. The token may only narrow.
+   */
+  assertLiveRolesMayOpenBids(liveRoles: readonly string[]): void {
+    assertNoBidExcludedRole(liveRoles);
+    if (!this.bidOpeners.some((role) => liveRoles.includes(role))) {
+      throw RastaError.forbidden(
+        'The caller no longer holds a role that opens or reads bids in this organization',
+      );
+    }
   }
 
   /** May the caller read projects and needs in the organization they act for? */

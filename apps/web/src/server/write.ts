@@ -78,6 +78,14 @@ export const MAX_IN_PROGRESS_WAIT_SECONDS = 30;
 export interface FieldMapping<F extends string> {
   readonly paths: Readonly<Record<string, F>>;
   readonly messages?: Readonly<Record<string, string>>;
+  /**
+   * What is said for a sentence `messages` does not know, keyed by the
+   * platform error code of the response (`INVALID_STATE_TRANSITION`, …). The
+   * code is the part of an error body a client may rely on; the sentence is
+   * not. A code with no entry keeps the old rule: the sentence is shown as it
+   * arrived.
+   */
+  readonly byCode?: Readonly<Record<string, string>>;
 }
 
 export function mapProblemToFields<F extends string>(
@@ -86,10 +94,12 @@ export function mapProblemToFields<F extends string>(
 ): { fieldErrors: FieldErrors<F>; message: string | null } {
   const fieldErrors: FieldErrors<F> = {};
   const unplaced: string[] = [];
+  const textOf = (message: string): string =>
+    mapping.messages?.[message] ?? mapping.byCode?.[problem.code] ?? message;
 
   for (const detail of problem.details ?? []) {
     const field = mapping.paths[detail.path];
-    const text = mapping.messages?.[detail.message] ?? detail.message;
+    const text = textOf(detail.message);
     if (field === undefined) {
       unplaced.push(text);
       continue;
@@ -103,7 +113,7 @@ export function mapProblemToFields<F extends string>(
   if (unplaced.length > 0) return { fieldErrors, message: unplaced.join(' ') };
   if (hasFieldErrors) return { fieldErrors, message: null };
   // No details at all — a business rule, a 422 with only a sentence.
-  return { fieldErrors, message: mapping.messages?.[problem.message] ?? problem.message };
+  return { fieldErrors, message: textOf(problem.message) };
 }
 
 export interface WriteCall<S extends z.ZodTypeAny, F extends string> {

@@ -1,4 +1,5 @@
-# Alert rules for the tender close sweeper (CON-002 PR 7, ADR-065 § 3), evaluated by
+# Alert rules for the tender close sweeper (CON-002 PR 7, ADR-065 § 3) and for bid
+# opening refused on integrity grounds (PR 8, ADR-066 § 3), evaluated by
 # the local Prometheus in docker-compose.yml (`observability` profile).
 #
 # Local-only, like the audit, notification and economic rules next door: there is no
@@ -34,3 +35,51 @@ groups:
           summary: 'An overdue tender cannot be closed ({{ $value }} failed attempts)'
           description: 'At least one PUBLISHED tender past its deadline has failed more than 5 close attempts. Bids on it are already refused, but it stays PUBLISHED, so it cannot be opened, evaluated or awarded. The sweeper keeps retrying with a growing backoff; the construction-service log names the tender and the closed error code. This alert deliberately carries neither.'
           runbook: docs/runbooks/tender-close-stuck.md
+
+  - name: rasta-construction-bid-opening
+    rules:
+      # Page-level, and on the first occurrence: an opening or an owner read was refused
+      # because a stored bid, or the whole receipt chain, did not match the evidence that
+      # audit-service holds (ADR-066 § 3). That is either tampering with the bid store or
+      # a defect in the chain; either way the tender's bids stay sealed until a person has
+      # looked. The counter only exists once it has been incremented, so the plain value
+      # (not a rate) is what catches the first one; it clears when the service restarts,
+      # by which time the runbook has been followed.
+      - alert: RastaConstructionBidOpeningIntegrityRefused
+        expr: sum(rasta_construction_bid_opening_refusals_total{reason="integrity"}) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Bids did not match the receipt evidence and were not opened ({{ $value }} refusals)'
+          description: 'An opening or an owner read of bids was refused with reason "integrity": a stored bid, or the receipt chain, differs from what audit-service holds. Nothing was opened or shown. Treat as possible tampering until proven otherwise; the construction-service log says the sealing failure code, and this alert deliberately carries neither tender nor tenant.'
+          runbook: docs/runbooks/bid-opening-integrity.md
+
+      # Page-level, first occurrence: after an opening committed, identity-service says the
+      # proposer or the approver MAY have been a member of a bidding organization: a possible
+      # conflict over the window windowStart..checkedAt, checked conservatively, so a false
+      # positive is an alert and nothing more (ADR-066 § 4, the residual of the conflict check
+      # at the approval). The opening stands; a person decides. Same counter semantics as
+      # above (born at its first increment).
+      - alert: RastaConstructionBidOpeningConflictDetected
+        expr: sum(rasta_construction_bid_opening_conflict_checks_total{outcome="conflict"}) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'A bid opening may have been made by a member of a bidding organization (possible conflict, {{ $value }} detected)'
+          description: 'A POSSIBLE conflict of interest: after an opening committed, identity-service said its proposer or approver held a membership of an organization that bid on the tender at some time in the window windowStart to checkedAt (windowStart is the earliest of the identity reads at the approval and the decision instant; checkedAt is the clock of identity-service as it answered, after the commit). The check is conservative: a membership that came and went inside the window, or began after the commit, is a false positive, which is an alert and nothing more. The opening was not undone. BID_OPENING_CONFLICT_DETECTED names the tender, the person and the organizations (ids only); this alert deliberately carries none of them.'
+          runbook: docs/runbooks/bid-opening-conflict.md
+
+      # Warning: identity-service could not say whom someone belongs to, so an opening or an
+      # owner read of bids was refused (fail closed), or the check after an opening could not
+      # be made (and is not retried). Nothing is shown in the first case; the second needs a
+      # person to do the check by hand.
+      - alert: RastaConstructionBidOpeningIdentityUnavailable
+        expr: >-
+          sum(rasta_construction_bid_opening_refusals_total{reason="identity_unavailable"}) > 0
+          or sum(rasta_construction_bid_opening_conflict_checks_total{outcome="unavailable"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'identity-service could not say whom a reader of bids belongs to ({{ $value }})'
+          description: 'An opening or an owner read of bids was refused with reason "identity_unavailable" (identity-service unreachable, slow or answering outside its contract; nothing was shown), or the check made after an opening could not be made. Neither names a tender or a tenant here; the construction-service log says which.'
+          runbook: docs/runbooks/bid-opening-identity-unavailable.md
