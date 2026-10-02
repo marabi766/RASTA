@@ -35,7 +35,7 @@ export function ownerDatabaseUrl(): string {
   if (!url) {
     throw new Error(
       'DATABASE_URL_ASSET_MIGRATOR is not set. Migration files run as the owner, never the ' +
-        'runtime role; see .env.example (docs/23 D-045).',
+        'runtime role; see .env.migrator.example (docs/23 D-045).',
     );
   }
   return url;

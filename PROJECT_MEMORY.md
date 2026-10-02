@@ -2734,11 +2734,12 @@ FROM PUBLIC` روی هر پایگاه داده. Extension ها (`postgis`, `ltre
 `pgcrypto`) در `template1` نصب شده‌اند تا Shadow DB های Prisma هم آن‌ها را
 داشته باشند.
 
-> **به‌روز 2026-10-01 (D-045، `fix/d045-db-role-split`):** نقش اجرای سرویس‌های `PRIVILEGE_SPLIT_SERVICES`
-> (`lib/role-passwords.bash` — اکنون همهٔ سرویس‌ها جز economic) مالک هیچ چیز نیست: `rasta_<svc>_migrator` مالک پایگاه داده و
+> **به‌روز 2026-10-01 (D-045 رفع‌شده؛ `fix/d045-db-role-split` تا `fix/d045-split-economic`):** نقش اجرای سرویس‌های
+> `PRIVILEGE_SPLIT_SERVICES` (`lib/role-passwords.bash` — اکنون **همهٔ** سرویس‌ها؛ audit تقسیم خودش را دارد) مالک هیچ چیز نیست: `rasta_<svc>_migrator` مالک پایگاه داده و
 > همهٔ اشیا است و Migrationها را اجرا می‌کند (`DATABASE_URL_<SVC>_MIGRATOR`)؛ نقش اجرا فقط DML دارد
 > (`lib/service-privilege-split.bash`). پایگاه دادهٔ `rasta_audit` هم به مهاجرش رسید. `pnpm check:db-runtime-privileges`
-> در CI هر یافته را رد می‌کند؛ سرویس‌های باقی‌مانده در `PENDING_SPLIT` هستند. Runbook: `docs/runbooks/db-role-split.md`.
+> در CI هر یافته را رد می‌کند، و هر سرویس تازه‌ای را که در `PRIVILEGE_SPLIT_SERVICES` نیست. Runbook:
+> `docs/runbooks/db-role-split.md`.
 
 Migration State: هر سه سرویس پیاده‌شده دقیقاً **یک** Migration دارند
 (`..._init_<service>`) — یعنی Schema هرکدام یک‌باره کامل طراحی و اعمال شده،
@@ -3814,6 +3815,13 @@ DML ای در Migration موجود نگذاشت؛ آنچه افزود
 (`next_seq = max + 1`، `published_seq = سرصف - 1`، هر دو با `GREATEST`)، و
 `is_stream_head` را فقط برای پایین‌ترین توالی منتشرنشدهٔ هر جریان می‌گذارد.
 میان دسته‌ها `VACUUM (ANALYZE)` می‌زند و شکستش را خطای عملیاتی می‌شمارد.
+
+> **به‌روز 2026-10-02 (D-045، Codex روی #180):** دیگر Vacuum نمی‌زند. Backfill با نقش اجرا
+> وصل است که مالک جدولی نیست و PostgreSQL ۱۶ Vacuum آن را با WARNING رد می‌شود و موفقیت
+> گزارش می‌کند؛ پس پس از Applyی که چیزی نوشت `vacuum: required` (با نام جدول) می‌دهد، و
+> `scripts/outbox-b2-vacuum.mjs` با اعتبار مهاجر از محیط `VACUUM (ANALYZE)` را می‌زند و با
+> `vacuum_count`/`analyze_count` در `pg_stat_user_tables` اثبات می‌کند (وگرنه رد).
+> `--vacuum-every` حذف شد. آزمون: `pnpm test:outbox-b2-vacuum-pg` (در CI).
 
 قفل‌های ایمنی، همه Fail-Closed: هدف صریح (`--service`/`--all`، بدون پیش‌فرض) ·
 نوشتن فقط با `--apply` · رد `NODE_ENV=production` و هر `NODE_ENV` ناشناخته ·
