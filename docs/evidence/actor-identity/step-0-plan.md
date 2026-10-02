@@ -1,7 +1,32 @@
 # Stable actor identity for separation of duties (#188): STEP 0 plan
 
-> Branch `fix/platform-stable-actor-identity`, cut from `origin/main` @ `71bac91`. No code yet; this file is the plan the PM
-> rules on before any is written. Line numbers are at `71bac91`.
+> Branch `fix/platform-stable-actor-identity`, cut from `origin/main` @ `71bac91`. This file is the plan the PM
+> ruled on before any code was written. Line numbers are at `71bac91`.
+
+## 0. Rulings (PM, on this plan, 2026-10-02)
+
+GO, with these answers. Where they differ from the plan below, they win.
+
+- **Q1:** a note in ADR-060 plus docs/09 § 9.2 and § 9.3. No new ADR.
+- **Q2:**
+  - (a) A generic `ACTOR_IDENTITY_UNKNOWN` (422). Folding #175's `CREATOR_IDENTITY_UNKNOWN` into it is part C.
+  - (b) A missing `rasta_uid` → `403 FORBIDDEN`, fixed message, no claim values.
+- **Q3:** migration names are timestamps and need no reservation: `<timestamp>_actor_stable_identity`.
+- **Q4:** three PRs.
+  - **A (#192):** `@rasta/nest-common` only, plus unit tests with paired tokens through the real AuthGuard, plus the
+    ADR-060 and docs/09 notes. No service changes.
+  - **B:** after #190 merges: construction A1, B1 and C1, plus the migration and paired-token tests.
+  - **C:** after #175 merges: economic D1 on the shared helper, with `CREATOR_IDENTITY_UNKNOWN` folded in.
+  - No construction or economic file is touched before those merges.
+- **Q5:** acceptable, with no operator path. The remedy is documented: a pending or draft policy whose author identity
+  predates the migration is withdrawn and submitted again, which records the new identity; an old bid-opening proposal is
+  withdrawn and proposed again. Fail closed stands.
+- The sweep's conclusions on the organization-based and self-access sites are accepted.
+
+As built in A: the helper module is `auth/separation-of-duties.ts`. It is not `actor-identity.ts`, because the A-03 import
+check in the guard specs refuses any import path that mentions `identity`. `UserClaims.issuer` is optional (`verifyUserToken`
+always sets it) so that the services' typed stub verifiers need no change in A. A missing issuer makes the stable identity
+unknown.
 
 ## 1. The defect
 
@@ -33,7 +58,7 @@ A route or class decorator. On a route that carries it, the `AuthGuard` refuses 
 a 403, before the handler runs. Service and anonymous callers are not affected; `@AllowService` and `@Public` still decide
 for them.
 
-### `auth/actor-identity.ts`
+### `auth/separation-of-duties.ts` (planned as `auth/actor-identity.ts`)
 
 ```ts
 export interface ActorIdentity {

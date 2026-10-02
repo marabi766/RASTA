@@ -213,7 +213,7 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 | 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                        |
 | 404   | `NOT_FOUND`                                                                                                      |
 | 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED` |
-| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED`                                         |
+| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `ACTOR_IDENTITY_UNKNOWN`              |
 | 429   | `RATE_LIMIT_EXCEEDED`                                                                                            |
 | 500   | `INTERNAL_ERROR`                                                                                                 |
 | 503   | `UPSTREAM_UNAVAILABLE`                                                                                           |
