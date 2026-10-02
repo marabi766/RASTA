@@ -15,7 +15,7 @@ import {
   START_REPAIR_FIELD_MAPPING,
 } from './repair-order-commands';
 import { canManageMaintenance, REQUEST_STATE_MESSAGES } from './maintenance-commands';
-import { DIRECT_COST_CATEGORIES, PART_SOURCES } from '@/lib/repair-order-fields';
+import { DIRECT_COST_CATEGORIES, MAX_AMOUNT_MINOR, PART_SOURCES } from '@/lib/repair-order-fields';
 
 /**
  * What the six repair-order commands depend on, pinned to maintenance-service's
@@ -185,15 +185,15 @@ describe('the request bodies', () => {
     ['recordPartSchema', 'partReference', 'z.string().trim().min(1).max(128).optional()'],
     ['recordPartSchema', 'quantity', 'partQuantity'],
     ['recordPartSchema', 'unit', 'displayText(1, 32)'],
-    ['recordPartSchema', 'unitCostMinor', 'amountMinorSchema'],
+    ['recordPartSchema', 'unitCostMinor', 'boundedAmountMinorSchema'],
     ['recordPartSchema', 'source', "partSourceSchema.default('WORKSHOP_SUPPLIED')"],
     ['recordPartSchema', 'sourceReference', 'z.string().trim().min(1).max(128).optional()'],
     ['recordLabourSchema', 'description', 'displayText(2, 500)'],
     ['recordLabourSchema', 'technician', 'displayText(2, 120).optional()'],
     ['recordLabourSchema', 'hours', 'quantity(6)'],
-    ['recordLabourSchema', 'hourlyRateMinor', 'amountMinorSchema'],
+    ['recordLabourSchema', 'hourlyRateMinor', 'boundedAmountMinorSchema'],
     ['recordCostSchema', 'category', 'directCostCategorySchema'],
-    ['recordCostSchema', 'amountMinor', 'amountMinorSchema'],
+    ['recordCostSchema', 'amountMinor', 'boundedAmountMinorSchema'],
     ['recordCostSchema', 'currency', "currencySchema.default('IRR')"],
     ['recordCostSchema', 'description', 'displayText(2, 500)'],
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
@@ -226,6 +226,24 @@ describe('the request bodies', () => {
 
   it('still refuses a direct cost of zero, which records nothing', () => {
     expect(squash(dto.text)).toContain("dto.amountMinor !== '0'");
+  });
+
+  it('still bounds every amount a caller states at the figure the portal mirrors: the BIGINT maximum', () => {
+    const literal = topLevelConst(dto, 'MAX_AMOUNT_MINOR').getText().replace(/[_n]/g, '');
+    expect(literal).toBe(MAX_AMOUNT_MINOR);
+    expect(BigInt(MAX_AMOUNT_MINOR)).toBe(2n ** 63n - 1n);
+    // The schema the three amounts share is the platform's, narrowed by that bound.
+    const bounded = squash(topLevelConst(dto, 'boundedAmountMinorSchema').getText()) ?? '';
+    expect(bounded).toContain('amountMinorSchema');
+    expect(bounded).toContain('BigInt(value) <= MAX_AMOUNT_MINOR');
+  });
+
+  it('still checks a computed line and every stored total against that bound, as refusals', () => {
+    const service = squash(read('repair-order.service.ts')) ?? '';
+    for (const rule of ['AMOUNT_TOO_LARGE', 'LINE_TOTAL_TOO_LARGE', 'COST_TOTAL_TOO_LARGE']) {
+      expect(service).toContain(`rule: '${rule}'`);
+    }
+    expect(service).toContain('figure > MAX_AMOUNT_MINOR');
   });
 
   it('still reads a typed amount as a Latin-digit string of 1 to 30 digits', () => {

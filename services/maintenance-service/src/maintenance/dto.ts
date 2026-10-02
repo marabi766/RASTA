@@ -58,6 +58,25 @@ export const COST_CATEGORIES = ['PART', 'LABOUR', 'SERVICE', 'EXTERNAL_REPAIR', 
  */
 export const DIRECT_COST_CATEGORIES = ['SERVICE', 'EXTERNAL_REPAIR', 'OTHER'] as const;
 
+/**
+ * The largest amount, in minor units, any column here can hold: PostgreSQL's
+ * `BIGINT` maximum (2^63 − 1). Named so that every input amount, every computed
+ * line total and every stored aggregate is checked against the same figure
+ * rather than against whatever the database happens to refuse — which is a 500.
+ * `contract.spec` in the portal pins this literal, because the portal mirrors it.
+ */
+export const MAX_AMOUNT_MINOR = 9_223_372_036_854_775_807n;
+
+/**
+ * An amount a caller states, in minor units: the platform's string-of-digits
+ * (`amountMinorSchema`) and no larger than {@link MAX_AMOUNT_MINOR}.
+ */
+export const boundedAmountMinorSchema = amountMinorSchema
+  .refine((value) => BigInt(value) <= MAX_AMOUNT_MINOR, {
+    message: 'Amount is larger than the maximum this system can hold (9223372036854775807)',
+  })
+  .describe('Minor units, as a string of digits, at most 9223372036854775807.');
+
 export const maintenanceTypeSchema = z.enum(MAINTENANCE_TYPES);
 export const scheduleRecurrenceSchema = z.enum(SCHEDULE_RECURRENCES);
 export const scheduleStatusSchema = z.enum(SCHEDULE_STATUSES);
@@ -426,7 +445,7 @@ export const recordPartSchema = z
     quantity: partQuantity,
     /** The workshop's own unit — عدد, لیتر, متر. */
     unit: displayText(1, 32),
-    unitCostMinor: amountMinorSchema,
+    unitCostMinor: boundedAmountMinorSchema,
     source: partSourceSchema.default('WORKSHOP_SUPPLIED'),
     /**
      * The order or stock movement this came from, when it came from another
@@ -446,7 +465,7 @@ export const recordLabourSchema = z
     /** Free text: a village workshop's mechanic has no account here. */
     technician: displayText(2, 120).optional(),
     hours: quantity(6),
-    hourlyRateMinor: amountMinorSchema,
+    hourlyRateMinor: boundedAmountMinorSchema,
     performedAt: z.string().datetime().optional(),
     recordedAt: z.string().datetime().optional(),
   })
@@ -461,7 +480,7 @@ export type RecordLabourDto = z.infer<typeof recordLabourSchema>;
 export const recordCostSchema = z
   .object({
     category: directCostCategorySchema,
-    amountMinor: amountMinorSchema,
+    amountMinor: boundedAmountMinorSchema,
     currency: currencySchema.default('IRR'),
     description: displayText(2, 500),
     recordedAt: z.string().datetime().optional(),

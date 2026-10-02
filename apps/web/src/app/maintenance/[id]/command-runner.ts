@@ -146,9 +146,10 @@ export async function run<V, B, F extends string, C = undefined>(
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was changed". In
-      // progress is the same unknown: maintenance-service keeps a submission id
-      // for creating a request only, so it never says this for a command; the
-      // gateway's answer is handled all the same.
+      // progress is the same unknown: the first request with this submission id
+      // is still working (409 + Retry-After, which maintenance-service answers
+      // for a repair-order write as well as for creating a request), and
+      // pressing the button again after the wait is answered with its result.
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

@@ -47,6 +47,19 @@ export type CancelRepairFormValues = Readonly<Record<CancelRepairField, string>>
 export const EMPTY_CANCEL_REPAIR_FORM: CancelRepairFormValues = { reason: '' };
 
 // ---------------------------------------------------------------------------
+// The largest amount the ledger holds
+// ---------------------------------------------------------------------------
+
+/**
+ * `MAX_AMOUNT_MINOR`, `services/maintenance-service/src/maintenance/dto.ts`:
+ * PostgreSQL's BIGINT maximum, in minor units (rials). A string, because it is
+ * past `Number.MAX_SAFE_INTEGER`. The form refuses anything larger as a courtesy;
+ * the service refuses it again, along with a line total or a stored total that
+ * would pass it, and the contract spec pins the two to one figure.
+ */
+export const MAX_AMOUNT_MINOR = '9223372036854775807';
+
+// ---------------------------------------------------------------------------
 // Cost: a part, labour, any other charge
 // ---------------------------------------------------------------------------
 

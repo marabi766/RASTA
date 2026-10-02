@@ -512,6 +512,52 @@ test.describe('reporting maintenance through the live stack', () => {
     await expect(page.getByText(/۲٬۸۰۰٬۰۰۰ ریال/).first()).toBeVisible();
   });
 
+  test('a cost posted twice with one Idempotency-Key is one line, through the gateway the portal uses', async ({
+    request,
+  }) => {
+    test.setTimeout(120_000);
+
+    const gateway = process.env.API_GATEWAY_URL;
+    if (!gateway) throw new Error('The live portal browser test requires API_GATEWAY_URL');
+    const costs = (orderId: string) =>
+      `${gateway.replace(/\/+$/, '')}/v1/repair-orders/${orderId}/costs`;
+
+    const id = await file(request, 'ثبت دوباره یک هزینه');
+    const orderId = await refer(request, id);
+    const body = {
+      category: 'SERVICE',
+      amountMinor: '500000',
+      currency: 'IRR',
+      description: 'ایاب و ذهاب',
+    };
+    const post = (data: object, key?: string) =>
+      request.post(costs(orderId), {
+        headers: { ...authorised(), ...(key ? { 'idempotency-key': key } : {}) },
+        data,
+      });
+
+    // The gateway refuses a write that carries no key, before it reaches the service.
+    expect((await post(body)).status()).toBe(400);
+    expect((await orderOf(request, orderId)).totalCostMinor).toBe('0');
+
+    // The same form twice is one line: the second answer is the first, replayed.
+    const key = `e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const first = await post(body, key);
+    const second = await post(body, key);
+    expect(first.status()).toBe(201);
+    expect(second.status()).toBe(201);
+    expect(((await second.json()) as { id: string }).id).toBe(
+      ((await first.json()) as { id: string }).id,
+    );
+    const recorded = await orderOf(request, orderId);
+    expect(recorded.costs).toHaveLength(1);
+    expect(recorded.totalCostMinor).toBe('500000');
+
+    // The same key for a different amount is not that request.
+    expect((await post({ ...body, amountMinor: '600000' }, key)).status()).toBe(409);
+    expect((await orderOf(request, orderId)).totalCostMinor).toBe('500000');
+  });
+
   test('a referral is withdrawn from its page, the request stays open, and a form carrying another command’s baseline is refused', async ({
     page,
     request,

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
 import { installLiveSession, type LiveSession } from './live-session';
@@ -233,9 +235,12 @@ test.describe('tenant isolation through the live stack', () => {
   });
 
   test.describe('repair orders', () => {
+    // Every repair-order write needs an Idempotency-Key at the gateway; each
+    // call here is its own request, so each gets its own.
     const headers = (token: string) => ({
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
+      'idempotency-key': `e2e-${randomUUID()}`,
     });
 
     test('ORG-DEH-0001’s own completed order is refused by its state, so the 404s below are the tenant boundary', async ({

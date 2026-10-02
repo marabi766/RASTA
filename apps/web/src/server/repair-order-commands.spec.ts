@@ -311,9 +311,53 @@ describe('recording any other cost', () => {
     }
   });
 
-  it('refuses an amount longer than the 30 digits the service reads', () => {
+  it('refuses an amount longer than the 30 digits the platform reads', () => {
     expect(parseRecordCostForm(cost({ amountMinor: '1'.repeat(31) }))).toMatchObject({ ok: false });
-    expect(parseRecordCostForm(cost({ amountMinor: '1'.repeat(30) }))).toMatchObject({ ok: true });
+  });
+});
+
+describe('the largest amount the ledger holds', () => {
+  const MAX = '9223372036854775807';
+  const PAST = '9223372036854775808';
+
+  it('is accepted, to the last digit, in every amount a form takes', () => {
+    expect(parseRecordCostForm(cost({ amountMinor: MAX }))).toMatchObject({
+      ok: true,
+      body: { amountMinor: MAX },
+    });
+    expect(parseRecordPartForm(part({ unitCostMinor: MAX }))).toMatchObject({
+      ok: true,
+      body: { unitCostMinor: MAX },
+    });
+    expect(parseRecordLabourForm(labour({ hourlyRateMinor: MAX }))).toMatchObject({
+      ok: true,
+      body: { hourlyRateMinor: MAX },
+    });
+  });
+
+  it('is refused one unit past, at the field, in every amount a form takes', () => {
+    expect(parseRecordCostForm(cost({ amountMinor: PAST }))).toMatchObject({
+      ok: false,
+      fieldErrors: { amountMinor: expect.any(String) },
+    });
+    expect(parseRecordPartForm(part({ unitCostMinor: PAST }))).toMatchObject({
+      ok: false,
+      fieldErrors: { unitCostMinor: expect.any(String) },
+    });
+    expect(parseRecordLabourForm(labour({ hourlyRateMinor: PAST }))).toMatchObject({
+      ok: false,
+      fieldErrors: { hourlyRateMinor: expect.any(String) },
+    });
+  });
+
+  it('is judged on the amount as typed, in Persian digits and with grouping too', () => {
+    expect(parseRecordCostForm(cost({ amountMinor: '۹٬۲۲۳٬۳۷۲٬۰۳۶٬۸۵۴٬۷۷۵٬۸۰۷' }))).toMatchObject({
+      ok: true,
+      body: { amountMinor: MAX },
+    });
+    expect(parseRecordCostForm(cost({ amountMinor: '۹٬۲۲۳٬۳۷۲٬۰۳۶٬۸۵۴٬۷۷۵٬۸۰۸' }))).toMatchObject({
+      ok: false,
+    });
   });
 });
 
@@ -514,12 +558,27 @@ describe('writing', () => {
       'این ماشین به سازمان دیگری منتقل شده است و کار نمی‌تواند پیش برود.',
     ],
     [
+      'an amount past the ledger’s bound',
+      'That amount is larger than the maximum this system can hold.',
+      'این مبلغ از بیشینهٔ مبلغی که سامانه نگه می‌دارد بزرگ‌تر است.',
+    ],
+    [
+      'a line whose total passes the bound',
+      'That line is larger than the maximum this system can hold; reduce the quantity or the price.',
+      'جمع این ردیف از بیشینهٔ مبلغ سامانه بزرگ‌تر می‌شود؛ تعداد یا بها را کمتر کنید.',
+    ],
+    [
+      'a stored total that would pass the bound',
+      'The total would be larger than the maximum this system can hold; nothing was recorded.',
+      'با این ردیف، جمع هزینه از بیشینهٔ مبلغ سامانه بزرگ‌تر می‌شود؛ چیزی ثبت نشد.',
+    ],
+    [
       'a total that moved before the completion',
       'The cost has changed since it was shown to you; review it again before completing.',
       REPAIR_TOTAL_CHANGED_MESSAGE,
     ],
   ])('%s', (_name, sentence, persian) => {
-    const code = /cannot be priced|Cost cannot|cost has changed/.test(sentence)
+    const code = /cannot be priced|Cost cannot|cost has changed|maximum this system/.test(sentence)
       ? 'BUSINESS_RULE_VIOLATION'
       : 'INVALID_STATE_TRANSITION';
 

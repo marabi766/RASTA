@@ -4,6 +4,7 @@ import request from 'supertest';
 import { AllExceptionsFilter } from '@rasta/nest-common';
 import { RepairOrderController } from './repair-order.controller';
 import { RepairOrderService } from './repair-order.service';
+import { IdempotencyStore } from './idempotency';
 
 /**
  * `POST /v1/repair-orders/:id/complete` over HTTP, through the real controller,
@@ -23,7 +24,10 @@ describe('POST /v1/repair-orders/:id/complete', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [RepairOrderController],
-      providers: [{ provide: RepairOrderService, useValue: { complete } }],
+      providers: [
+        { provide: RepairOrderService, useValue: { complete } },
+        { provide: IdempotencyStore, useValue: {} },
+      ],
     }).compile();
     app = moduleRef.createNestApplication();
     app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
@@ -49,7 +53,7 @@ describe('POST /v1/repair-orders/:id/complete', () => {
     const response = await post({ workPerformed: 'شیلنگ تعویض شد' });
 
     expect(response.status).toBe(200);
-    expect(complete).toHaveBeenCalledWith('RPR-1', { workPerformed: 'شیلنگ تعویض شد' });
+    expect(complete).toHaveBeenCalledWith('RPR-1', { workPerformed: 'شیلنگ تعویض شد' }, undefined);
   });
 
   it('hands a stated total to the service as it was sent, zero included', async () => {
@@ -58,10 +62,11 @@ describe('POST /v1/repair-orders/:id/complete', () => {
       const response = await post({ workPerformed: 'انجام شد', expectedTotalCostMinor: total });
 
       expect(response.status).toBe(200);
-      expect(complete).toHaveBeenCalledWith('RPR-1', {
-        workPerformed: 'انجام شد',
-        expectedTotalCostMinor: total,
-      });
+      expect(complete).toHaveBeenCalledWith(
+        'RPR-1',
+        { workPerformed: 'انجام شد', expectedTotalCostMinor: total },
+        undefined,
+      );
     }
   });
 

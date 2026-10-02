@@ -15,6 +15,7 @@ import {
   CANCEL_REPAIR_FIELDS,
   COMPLETE_REPAIR_FIELDS,
   DIRECT_COST_CATEGORIES,
+  MAX_AMOUNT_MINOR,
   PART_SOURCES,
   RECORD_COST_FIELDS,
   RECORD_LABOUR_FIELDS,
@@ -106,7 +107,7 @@ function positiveQuantity(label: string, maxDecimals: number, maxIntegerDigits: 
 
 /**
  * An amount in rials, typed in any digits with any grouping, as the minor-unit
- * string the service reads (`amountMinorSchema`: 1 to 30 Latin digits).
+ * string the service reads (Latin digits, no larger than the ledger's bound).
  * `parseMoneyInput` is the portal's one reader of a typed amount.
  */
 function rialAmount(label: string, options: { readonly allowZero: boolean }) {
@@ -135,12 +136,13 @@ function rialAmount(label: string, options: { readonly allowZero: boolean }) {
       });
       return z.NEVER;
     }
-    const digits = minor.toString();
-    if (digits.length > 30) {
+    // The ledger's own bound (BIGINT), not the platform's 30 digits: an amount
+    // past it passes the schema and then fails in the database.
+    if (minor > BigInt(MAX_AMOUNT_MINOR)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} بیش از حد بزرگ است` });
       return z.NEVER;
     }
-    return digits;
+    return minor.toString();
   });
 }
 
@@ -391,6 +393,14 @@ const REPAIR_MESSAGES: Readonly<Record<string, string>> = {
     'با این ساعت نمی‌توان بها را حساب کرد؛ ساعت یا نرخ را کوچک‌تر کنید.',
   'A cost must be in the same currency as the repair order.':
     'واحد پول هزینه باید با واحد پول ارجاع یکی باشد.',
+  'That amount is larger than the maximum this system can hold.':
+    'این مبلغ از بیشینهٔ مبلغی که سامانه نگه می‌دارد بزرگ‌تر است.',
+  'That line is larger than the maximum this system can hold; reduce the quantity or the price.':
+    'جمع این ردیف از بیشینهٔ مبلغ سامانه بزرگ‌تر می‌شود؛ تعداد یا بها را کمتر کنید.',
+  'The total would be larger than the maximum this system can hold; nothing was recorded.':
+    'با این ردیف، جمع هزینه از بیشینهٔ مبلغ سامانه بزرگ‌تر می‌شود؛ چیزی ثبت نشد.',
+  'Amount is larger than the maximum this system can hold (9223372036854775807)':
+    'این مبلغ از بیشینهٔ مبلغ سامانه بزرگ‌تر است.',
   'Quantity must be greater than zero': 'تعداد باید بیشتر از صفر باشد',
   'Labour hours must be greater than zero': 'ساعت کار باید بیشتر از صفر باشد',
   'A cost of zero records nothing; omit the line instead': 'مبلغ باید بیشتر از صفر باشد',

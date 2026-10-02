@@ -296,12 +296,9 @@ export class RequestService {
     if (dto.expectedTotalCostMinor !== request.totalCostMinor.toString()) {
       throw RastaError.businessRule(
         'The cost has changed since it was shown to you; review it again before approving.',
-        {
-          rule: 'APPROVAL_TOTAL_MISMATCH',
-          requestId: id,
-          expected: dto.expectedTotalCostMinor,
-          actual: request.totalCostMinor.toString(),
-        },
+        // The rule and the request only: the figures are the person's own money
+        // and the portal reads the new one from the service (S-09).
+        { rule: 'APPROVAL_TOTAL_MISMATCH', requestId: id },
       );
     }
 

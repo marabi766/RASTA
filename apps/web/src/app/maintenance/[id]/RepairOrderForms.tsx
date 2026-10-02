@@ -46,9 +46,15 @@ import {
  * None of them names its order in a field. Each carries `baseline`, a token the
  * page signed for this command under this request (`sealRepairOrderBaseline`),
  * and the action reads the order from it; the form's own fields are only what a
- * person types. As for the request's forms, none of them says what the service
- * will do with a repeated post: the honest answer to a write that may or may not
- * have landed is `UnconfirmedWriteAlert`.
+ * person types.
+ *
+ * Every one of them carries the submission id minted for it, which the portal
+ * sends as the `Idempotency-Key` and which maintenance-service enforces on all
+ * six writes: the same form posted again is the original answer, not a second
+ * cost line. The form keeps that one id across an attempt that came back
+ * unknown, so pressing the button again is exactly that retry — and the honest
+ * thing to say about a write that may or may not have landed is still
+ * `UnconfirmedWriteAlert`, never "nothing happened".
  */
 
 export type RepairIdentity = Identity & {
