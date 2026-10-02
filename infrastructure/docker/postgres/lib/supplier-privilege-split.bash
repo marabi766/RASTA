@@ -47,4 +47,5 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   resolve_role_passwords rasta_supplier rasta_supplier_migrator || exit 1
   echo "==> supplier-service privilege split"
   split_supplier_privileges "${1:-rasta_supplier}"
+  rotate_and_verify_split_logins supplier "${1:-rasta_supplier}"
 fi

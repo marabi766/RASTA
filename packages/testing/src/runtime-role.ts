@@ -23,7 +23,11 @@ export interface RawSqlClient {
 /** How Prisma reports SQLSTATE 42501 — insufficient privilege. */
 export const INSUFFICIENT_PRIVILEGE = /Code: `42501`/;
 
-/** Who the client is connected as, and whether that role can act as an owner. */
+/**
+ * Who the client is connected as, and whether that role can act as an owner —
+ * through membership of any kind ('MEMBER'): a grant WITH INHERIT FALSE still
+ * allows SET ROLE to the owner (Codex round 3 on #176).
+ */
 export interface RuntimeRoleFacts {
   role: string;
   databaseOwner: boolean;
@@ -36,9 +40,9 @@ export interface RuntimeRoleFacts {
 export async function runtimeRoleFacts(client: RawSqlClient): Promise<RuntimeRoleFacts> {
   const [row] = await client.$queryRawUnsafe<RuntimeRoleFacts[]>(`
     SELECT current_user::text AS role,
-           pg_has_role(current_user, d.datdba, 'USAGE') AS "databaseOwner",
+           pg_has_role(current_user, d.datdba, 'MEMBER') AS "databaseOwner",
            EXISTS (SELECT 1 FROM pg_namespace n
-                    WHERE pg_has_role(current_user, n.nspowner, 'USAGE')
+                    WHERE pg_has_role(current_user, n.nspowner, 'MEMBER')
                       AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema')
              AS "ownsASchema",
            r.rolcreatedb AS "createDb",
