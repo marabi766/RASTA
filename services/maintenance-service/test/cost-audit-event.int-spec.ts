@@ -390,9 +390,11 @@ describe('cost-line audit events (L7-14)', () => {
             repairOrders.complete(orderId, { workPerformed: 'انجام شد' }),
           );
           if (approve) {
-            await asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
-              requests.approve(requestId, {}),
-            );
+            await asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, async () => {
+              // The approver states the total they are looking at.
+              const { totalCostMinor } = await requests.get(requestId);
+              return requests.approve(requestId, { expectedTotalCostMinor: totalCostMinor });
+            });
           }
           return seen;
         });
@@ -457,6 +459,9 @@ describe('cost-line audit events (L7-14)', () => {
         cancelling = asActor({ organizationId: org.a, userId: 'USR-ITEST-OWNER' }, () =>
           requests.cancel(requestId, { reason: 'منصرف شدیم' }),
         );
+        // Refused before the assertion below attaches; observe it now so it
+        // is never an unhandled rejection.
+        cancelling.catch(() => undefined);
         await someoneWaitsOnALock();
         return sum(...args);
       });

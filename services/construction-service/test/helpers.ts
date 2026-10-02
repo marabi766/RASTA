@@ -1,6 +1,13 @@
-import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  runWithContext,
+  runUnscoped,
+  type RequestContext,
+} from '@rasta/nest-common';
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
+import { eventEnvelopeSchema } from '@rasta/contracts';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -30,6 +37,12 @@ import { SupplierStandingConsumer } from '../src/events/supplier-standing.consum
 import { BidRepository } from '../src/tender/bid.repository';
 import { BidService } from '../src/tender/bid.service';
 import { TenderClock } from '../src/tender/tender-clock';
+import { TenderOpenRepository } from '../src/tender/tender-open.repository';
+import { TenderOpenService } from '../src/tender/tender-open.service';
+import { BidAccessAudit } from '../src/tender/bid-access-audit';
+import type { LiveAnswer, LiveMembership, MembershipSource } from '../src/tender/membership.client';
+import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
+import { genesisReceipt } from '../src/tender/sealing/sealing';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
 import { TenderCloseService } from '../src/tender/tender-close.service';
 import {
@@ -174,6 +187,12 @@ export interface Wiring {
   tenderClose: TenderCloseService;
   tenderCloseSweeper: TenderCloseSweeper;
   tenderCloseSweeperWith(overrides?: Partial<TenderCloseSweeperOptions>): TenderCloseSweeper;
+  /** CON-002 PR 8: opening the bids, over an evidence source a test controls (what audit-service holds). */
+  evidence: FakeTenderEvidence;
+  /** identity-service as the approval of an opening sees it: who belongs to which organization now. */
+  memberships: FakeMemberships;
+  tenderOpens: TenderOpenRepository;
+  tenderOpen: TenderOpenService;
   close(): Promise<void>;
 }
 
@@ -257,6 +276,10 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       { ...TEST_SWEEPER, ...overrides },
     );
   const tenderCloses = new TenderCloseRepository(prisma);
+  const bidAudit = new BidAccessAudit(bidRepository, events);
+  const evidence = new FakeTenderEvidence(prisma);
+  const memberships = new FakeMemberships();
+  const tenderOpens = new TenderOpenRepository(prisma);
   const tenderClose = new TenderCloseService(prisma, tenderCloses, events, clock);
   const tenderCloseSweeperWith = (overrides: Partial<TenderCloseSweeperOptions> = {}) =>
     new TenderCloseSweeper(tenderCloses, tenderClose, {
@@ -272,6 +295,21 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     env,
     repository,
     projects,
+    evidence,
+    memberships,
+    tenderOpens,
+    tenderOpen: new TenderOpenService(
+      prisma,
+      tenderOpens,
+      bidAudit,
+      events,
+      access,
+      env,
+      clock,
+      evidence,
+      keys,
+      memberships,
+    ),
     tenderCloses,
     tenderClose,
     tenderCloseSweeper: tenderCloseSweeperWith(),
@@ -355,6 +393,181 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     progress: new ProgressService(prisma, repository, events, access, env, idempotency),
     close: () => prisma.onModuleDestroy(),
   };
+}
+
+/** The announced receipt of one bid revision, as BID_SUBMITTED / BID_REVISED carry it. */
+interface AnnouncedLink {
+  tenderId: string;
+  bidId: string;
+  revision: number;
+  receivedAt: string;
+  ciphertextSha256: string;
+  contentCommitment: string;
+  previousReceipt: string;
+  receipt: string;
+}
+
+/**
+ * What audit-service holds, built the way it builds it: from the receipts the events
+ * announced, linked from the genesis by `previousReceipt` (not "the last one written"),
+ * under the organization that owns the tender. Never from this service's `bid_receipt`.
+ */
+export async function chainFromEvents(
+  prisma: PrismaService,
+  organizationId: string,
+  tenderId: string,
+): Promise<TenderChain> {
+  const announced = (await outboxFor(prisma, organizationId))
+    .filter((row) => ['BID_SUBMITTED', 'BID_REVISED'].includes(row.eventName))
+    .map((row) => eventEnvelopeSchema.parse(row.payload).payload as AnnouncedLink)
+    .filter((payload) => payload.tenderId === tenderId);
+  const genesis = genesisReceipt(tenderId);
+  const links: TenderChain['links'] = [];
+  let previous = genesis;
+  for (let found = announced.find((p) => p.previousReceipt === previous); found;) {
+    links.push({
+      seq: links.length + 1,
+      bidId: found.bidId,
+      revision: found.revision,
+      receivedAt: found.receivedAt,
+      ciphertextSha256: found.ciphertextSha256,
+      contentCommitment: found.contentCommitment,
+      previousReceipt: found.previousReceipt,
+      receipt: found.receipt,
+    });
+    previous = found.receipt;
+    found = announced.find((p) => p.previousReceipt === previous);
+  }
+  return { tenderId, genesis, head: previous, links };
+}
+
+/**
+ * audit-service as the opening of bids sees it: by default the chain the events
+ * announced under the asked organization; a test can make it fail, or serve another
+ * chain, per tender.
+ */
+export class FakeTenderEvidence implements TenderEvidenceSource {
+  /** Makes every read fail, as an unreachable audit-service would. */
+  failure: Error | undefined;
+  /** A chain to serve for a tender instead of the announced one (a lag, a forgery). */
+  readonly served = new Map<string, TenderChain>();
+  readonly asked: { organizationId: string; tenderId: string }[] = [];
+  /** Runs once, right after the next read answered: what happens between the read and the lock. */
+  afterRead: (() => Promise<void>) | undefined;
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  async fetchChain(organizationId: string, tenderId: string): Promise<TenderChain> {
+    this.asked.push({ organizationId, tenderId });
+    if (this.failure) throw this.failure;
+    const chain =
+      this.served.get(tenderId) ?? (await chainFromEvents(this.prisma, organizationId, tenderId));
+    const hook = this.afterRead;
+    this.afterRead = undefined;
+    if (hook) await hook();
+    return chain;
+  }
+}
+
+/**
+ * identity-service as the approval of an opening sees it: by default nobody belongs to
+ * anything (the token's own organizations are checked besides); a test sets who belongs
+ * where now, or makes the read fail.
+ */
+export class FakeMemberships implements MembershipSource {
+  failure: Error | undefined;
+  /** Extra organizations a user belongs to now (each with the owner role set), besides the one they act for. */
+  readonly of = new Map<string, readonly string[]>();
+  readonly asked: string[] = [];
+  /**
+   * By default identity-service agrees with the request: the caller belongs to the
+   * organization they act for, with the roles of their token. These say otherwise.
+   */
+  readonly revoked = new Set<string>();
+  readonly rolesOf = new Map<string, readonly string[]>();
+  /** Who held a membership where over the interval after an opening; absent = as `of`. */
+  readonly since = new Map<string, readonly string[]>();
+  readonly askedSince: { userId: string; from: Date }[] = [];
+  /** identity-service's clock as it answers the interval query; absent = now. */
+  intervalAsOf: Date | undefined;
+
+  /** Runs once, before identity-service answers for that user: something happens in the race. */
+  readonly beforeAnswer = new Map<string, () => Promise<void>>();
+
+  /** identity-service's clock as it answers a live read; absent = now. */
+  liveAsOf: Date | undefined;
+  /**
+   * Memberships by the instants they held, answered over the interval after an opening
+   * honestly: one that ended before `from` is not in the answer.
+   */
+  readonly history = new Map<string, { organizationId: string; start: Date; end: Date | null }[]>();
+
+  async fetchMemberships(userId: string): Promise<LiveAnswer> {
+    this.asked.push(userId);
+    if (this.failure) throw this.failure;
+    const hook = this.beforeAnswer.get(userId);
+    if (hook) {
+      this.beforeAnswer.delete(userId);
+      await hook();
+    }
+    const byOrganization = new Map<string, LiveMembership>();
+    for (const organizationId of this.of.get(userId) ?? []) {
+      byOrganization.set(organizationId, { organizationId, roles: ['ORGANIZATION_ADMIN'] });
+    }
+    const request = currentRequest();
+    if (request?.userId === userId && request.organizationId && !this.revoked.has(userId)) {
+      byOrganization.set(request.organizationId, {
+        organizationId: request.organizationId,
+        roles: this.rolesOf.get(userId) ?? request.roles,
+      });
+    }
+    return { memberships: [...byOrganization.values()], asOf: this.liveAsOf ?? new Date() };
+  }
+
+  /** Back to the default: nobody belongs to anything, nothing fails, nothing asked. */
+  reset(): void {
+    this.failure = undefined;
+    this.sinceFailure = undefined;
+    this.intervalAsOf = undefined;
+    this.liveAsOf = undefined;
+    this.history.clear();
+    this.of.clear();
+    this.revoked.clear();
+    this.rolesOf.clear();
+    this.beforeAnswer.clear();
+    this.since.clear();
+    this.asked.length = 0;
+    this.askedSince.length = 0;
+  }
+
+  /** Fails only the interval read (the check after an opening), leaving the live reads working. */
+  sinceFailure: Error | undefined;
+
+  async fetchOrganizationIdsSince(
+    userId: string,
+    from: Date,
+  ): Promise<{ organizationIds: readonly string[]; asOf: Date }> {
+    this.askedSince.push({ userId, from });
+    if (this.failure ?? this.sinceFailure) throw (this.failure ?? this.sinceFailure)!;
+    const asOf = this.intervalAsOf ?? new Date();
+    const held = (this.history.get(userId) ?? [])
+      .filter((m) => m.start <= asOf && (m.end === null || m.end >= from))
+      .map((m) => m.organizationId);
+    return {
+      organizationIds: [
+        ...new Set([...(this.since.get(userId) ?? this.of.get(userId) ?? []), ...held]),
+      ],
+      asOf,
+    };
+  }
+}
+
+function currentRequest(): RequestContext | undefined {
+  try {
+    return getContext();
+  } catch {
+    return undefined;
+  }
 }
 
 /** A fresh organization id per test, so suites never collide or share rows. */

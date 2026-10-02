@@ -129,8 +129,9 @@ export class RequestController {
     summary: 'Approve the work and its cost',
     description:
       'The control the product document makes mandatory before settlement. Only a COMPLETED ' +
-      'request can be approved, and approval is terminal. Send `expectedTotalCostMinor` to be ' +
-      'refused with 422 if the cost changed between the screen and the button. Publishes ' +
+      'request can be approved, and approval is terminal. `expectedTotalCostMinor` is required, ' +
+      'and the approval is refused with 400 without it and with 422 if the cost changed between ' +
+      'the screen and the button. Publishes ' +
       'MAINTENANCE_APPROVED with a per-category cost breakdown, which is the only event that ' +
       'authorises settlement.',
   })

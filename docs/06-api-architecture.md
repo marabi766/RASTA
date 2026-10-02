@@ -456,6 +456,8 @@ POST   /v1/maintenance-requests/{id}/assign   ارجاع به تعمیرگاه
 POST   /v1/repair-orders/{id}/parts      ثبت قطعات
 POST   /v1/repair-orders/{id}/complete   اتمام تعمیر
 POST   /v1/maintenance-requests/{id}/approve  تأیید کاربر (پیش‌نیاز تسویه)
+                                          expectedTotalCostMinor الزامی (۴۰۰ بدون آن)؛
+                                          مبلغ نمایش‌داده‌شده باید با مجموع فعلی بخواند (۴۲۲ در غیر این صورت)
 GET    /v1/maintenance-schedules/due     سررسیدهای پیش رو
 ```
 

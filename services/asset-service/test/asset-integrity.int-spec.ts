@@ -210,10 +210,14 @@ describe('asset integrity', () => {
       const idle = asActor(manager(org.a), () =>
         assets.changeStatus(assetId, { status: 'IDLE', reason: 'فصل غیرکاری' }),
       );
+      // Settle-tracking starts before the release: the loser can be refused
+      // while release() still awaits the holder's commit, and an expected
+      // rejection with no handler yet fails the test as unhandled.
+      const settled = Promise.allSettled([decommission, idle]);
       await waitForBlocked(2);
       await release();
 
-      const [won, lost] = await Promise.allSettled([decommission, idle]);
+      const [won, lost] = await settled;
       expect(won.status).toBe('fulfilled');
       expect(lost).toMatchObject({
         status: 'rejected',
@@ -265,10 +269,11 @@ describe('asset integrity', () => {
       const edit = asActor(manager(org.a), () =>
         assets.update(assetId, { name: 'نام تازه', expectedVersion: version }),
       );
+      const settled = Promise.allSettled([decommission, edit]); // before release(), as above
       await waitForBlocked(2);
       await release();
 
-      const [, edited] = await Promise.allSettled([decommission, edit]);
+      const [, edited] = await settled;
       expect(edited).toMatchObject({
         status: 'rejected',
         reason: { code: 'OPTIMISTIC_LOCK_FAILED' },
@@ -793,10 +798,11 @@ describe('asset integrity', () => {
       const first = transfer(assetId);
       await waitForBlocked(1);
       const second = transfer(assetId);
+      const settled = Promise.allSettled([first, second]); // before release(), as above
       await waitForBlocked(2);
       await release();
 
-      const [won, lost] = await Promise.allSettled([first, second]);
+      const [won, lost] = await settled;
       expect(won.status).toBe('fulfilled');
       expect(lost).toMatchObject({
         status: 'rejected',
