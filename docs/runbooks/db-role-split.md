@@ -61,6 +61,14 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 هر Relationی باشد، روی پایگاه داده یا Schemaی `CREATE` داشته باشد، یا `CREATEDB`/`CREATEROLE`/`BYPASSRLS` داشته باشد.
 آزمون زنده: `test/startup-role.int-spec.ts` هر سرویس (URL مهاجر در جای `DATABASE_URL` → رد).
 
+**پیش از Nest.** Nest هوک `onModuleInit` هر Provider را پیش از `AppModule` اجرا می‌کند و Consumer یا Timer در هوک خودش
+شروع می‌شود؛ پس بررسی در `AppModule` به‌تنهایی دیر است — Consumer می‌توانست با اتصال مالک به گروهش بپیوندد و کار Commit
+کند (Codex روی #178). از این رو `main.ts` هر سرویس تقسیم‌شده نخستین کارِ `bootstrap()` را، پیش از `NestFactory.create`،
+`preflightRuntimeRole` (`@rasta/nest-common`) می‌کند: اتصالی کوتاه‌عمر با URL اجرای سرویس، همان بررسی‌ها، و در رد شدن خروج
+با کد ناصفر. بررسی `AppModule` هم می‌ماند. آزمون زنده در کار E2E CI: `scripts/runtime-preflight.e2e.mjs` — audit با URL
+مهاجر و رویدادی در صف: فرایند می‌میرد، رویداد مصرف و Commit نمی‌شود و گروه هرگز شکل نمی‌گیرد؛ identity با URL مهاجر: Consumer
+بازتاب Keycloak (که در هوک خودش شروع می‌شود) هرگز به گروهش نمی‌پیوندد؛ و کنترل مثبت پس از راه‌اندازی درست.
+
 **عضویت هم مالکیت است.** نقش اجرایی که عضو مهاجر باشد — حتی `WITH INHERIT FALSE`، که چیزی به ارث نمی‌برد — با
 `SET ROLE` مهاجر می‌شود و هر نگهبان را برمی‌دارد. پس هر دو بررسی (`assertRuntimeRole` و `check:db-runtime-privileges`)
 مالکیت را با `pg_has_role … 'MEMBER'` می‌سنجند و هر عضویتی در نقشی که اینجا مالک چیزی است، نامش `*_migrator` است یا
