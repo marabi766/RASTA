@@ -67,7 +67,9 @@ test('the query asks about every right the PM ruled out, through role membership
     "'owns type '",
     "'TRUNCATE', 'REFERENCES', 'TRIGGER'",
     '_prisma_migrations',
-    "pg_has_role(me.oid, t.relowner, 'USAGE')",
+    "pg_has_role(me.oid, t.relowner, 'MEMBER')",
+    "pg_has_role(me.oid, m.oid, 'MEMBER')",
+    "'member of '",
   ]) {
     assert.ok(FINDINGS_SQL.includes(fragment), fragment);
   }

@@ -105,6 +105,81 @@ own_migration_ledger() {
     COMMIT;"
 }
 
+# revoke_owner_memberships <database> <runtime>
+#
+# The runtime role is a member of nothing that could act as an owner here
+# (Codex round 3 on #176). On an existing cluster it may have been granted the
+# migrator — or any owner, or a superuser-capable role — WITH INHERIT FALSE:
+# it then inherits nothing and owns nothing, yet `SET ROLE` makes it that role,
+# and every guard is liftable again. Every direct membership of the runtime
+# role in a role that can reach (through further membership) a role that owns
+# something in this database, is named `*_migrator`, or holds SUPERUSER,
+# CREATEDB, CREATEROLE or BYPASSRLS is revoked — whoever granted it.
+revoke_owner_memberships() {
+  local db="$1" runtime="$2"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE grant_row record;
+    BEGIN
+      FOR grant_row IN
+        WITH dangerous AS (
+          SELECT r.oid FROM pg_roles r
+           WHERE r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolbypassrls
+              OR r.rolname LIKE '%\\_migrator'
+              OR EXISTS (SELECT 1 FROM pg_database d
+                          WHERE d.datname = current_database() AND d.datdba = r.oid)
+              OR EXISTS (SELECT 1 FROM pg_namespace n
+                          WHERE n.nspowner = r.oid
+                            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                            AND n.nspname NOT LIKE 'pg\\_%')
+              OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                          WHERE c.relowner = r.oid
+                            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                            AND n.nspname NOT LIKE 'pg\\_%')
+        )
+        SELECT granted.rolname AS granted, grantor.rolname AS grantor
+          FROM pg_auth_members am
+          JOIN pg_roles granted ON granted.oid = am.roleid
+          JOIN pg_roles grantor ON grantor.oid = am.grantor
+         WHERE am.member = '${runtime}'::regrole
+           AND EXISTS (SELECT 1 FROM dangerous d WHERE pg_has_role(am.roleid, d.oid, 'MEMBER'))
+      LOOP
+        EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE',
+                       grant_row.granted, '${runtime}', grant_row.grantor);
+      END LOOP;
+    END \$\$;"
+}
+
+# rotate_and_verify_split_logins <service> <database>
+#
+# For a standalone run (an upgrade of a cluster this repository did not just
+# bootstrap): the exported runtime password might be stale — not the one the
+# runtime role really has — so the comparison with the migrator's proved
+# nothing about the live credential (Codex round 3 on #176). The runtime role's
+# password is therefore set to the supplied value in this same run, so no older
+# credential survives, and both supplied credentials are then proven by
+# logging in over TCP — PGHOST when it names a host, else 127.0.0.1 — where the
+# server checks the password (a Unix socket may be trusted without one). The
+# two were already refused if equal (resolve_role_passwords).
+rotate_and_verify_split_logins() {
+  local svc="$1" db="$2"
+  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator"
+  local host="${PGHOST:-127.0.0.1}" port="${PGPORT:-5432}" role failed=0
+  [[ "${host}" == /* ]] && host=127.0.0.1
+  _svc_split_psql postgres "ALTER ROLE ${runtime} WITH LOGIN PASSWORD '${ROLE_PASSWORDS[$runtime]}'"
+  for role in "${runtime}" "${migrator}"; do
+    if ! PGPASSWORD="${ROLE_PASSWORDS[$role]}" psql -X -q -tA -h "${host}" -p "${port}" \
+      --username "${role}" --dbname "${db}" -c 'SELECT 1' >/dev/null 2>&1; then
+      echo "${role} cannot log in to ${db} at ${host}:${port} with the password just set" >&2
+      failed=1
+    fi
+  done
+  if ((failed)); then
+    echo "Login verification failed: fix pg_hba or the supplied value and run the split again." >&2
+    return 1
+  fi
+  echo "    - ${runtime} and ${migrator} each log in with the password just set; no older one remains for ${runtime}"
+}
+
 # split_service_privileges <service> [database] [default|migration]
 split_service_privileges() {
   local svc="${1:?a service name is required}"
@@ -134,6 +209,9 @@ split_service_privileges() {
   # Tables, sequences, types, functions, the ledger, and `public` itself if a
   # pre-15 cluster made the runtime role its owner.
   _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
+
+  # No back door: no membership in the migrator or any other owner.
+  revoke_owner_memberships "${db}" "${runtime}"
 
   # Database level: CONNECT, nothing more. TEMP and CREATE are withdrawn.
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
@@ -204,6 +282,7 @@ split_audit_database_privileges() {
   _svc_split_psql postgres "ALTER ROLE ${runtime} NOCREATEDB NOCREATEROLE NOBYPASSRLS"
   _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
   _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
+  revoke_owner_memberships "${db}" "${runtime}"
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM ${runtime}"
   _svc_split_psql postgres "GRANT CONNECT ON DATABASE ${db} TO ${runtime}"
@@ -217,8 +296,9 @@ split_audit_database_privileges() {
 }
 
 # Run directly (not sourced): split the named service's database with the
-# grants mode the bootstrap gives it. The runtime role's and the migrator's
-# passwords are resolved — POSTGRES_PASSWORD_<SVC> and
+# grants mode the bootstrap gives it, then set the runtime role's password and
+# prove both logins (rotate_and_verify_split_logins). The runtime role's and the
+# migrator's passwords are resolved — POSTGRES_PASSWORD_<SVC> and
 # POSTGRES_PASSWORD_<SVC>_MIGRATOR, both exported: outside the compose container
 # (RASTA_DB_BOOTSTRAP=compose) there is no development fallback — and refused
 # if they are equal, or equal to any other role password in the environment
@@ -241,4 +321,5 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   resolve_role_passwords "rasta_${svc}" "rasta_${svc}_migrator" || exit 1
   echo "==> ${svc}-service privilege split"
   split_service_privileges "${svc}" "${2:-rasta_${svc}}" "$(privilege_split_grants_mode "${svc}")"
+  rotate_and_verify_split_logins "${svc}" "${2:-rasta_${svc}}"
 fi

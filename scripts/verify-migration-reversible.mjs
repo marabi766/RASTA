@@ -46,6 +46,8 @@ import { resolve, join } from 'node:path';
 import {
   EXPECTED,
   verifierConnection,
+  verifierRoleProblem,
+  CONNECTED_ROLE_PROBE,
   assertionScript,
   assertSnapshotScript,
   createScratchDatabase,
@@ -97,6 +99,21 @@ if (connection.error) {
   process.exit(1);
 }
 const baseUrl = connection.url;
+
+// …and that variable really names the migrator, not a superuser or any other
+// role (verifierRoleProblem in the lib).
+{
+  const probe = psqlRunner(baseUrl)(CONNECTED_ROLE_PROBE);
+  const problem = probe.ok
+    ? verifierRoleProblem(service, probe.stdout)
+    : EXPECTED[service]?.connectAs === 'migrator'
+      ? `could not ask who ${connection.key} connects as:\n${probe.output}`
+      : null;
+  if (problem) {
+    console.error(`${connection.key}: ${problem}. Refusing to verify.`);
+    process.exit(1);
+  }
+}
 
 /**
  * The reference schema, where each migration.sql is applied on its own so the
