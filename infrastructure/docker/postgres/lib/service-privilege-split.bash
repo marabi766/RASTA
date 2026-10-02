@@ -27,12 +27,14 @@
 #   * `rasta_<svc>_migrator` exists and logs in. It holds CREATEDB only for the
 #     shadow database `prisma migrate dev` provisions locally; production runs
 #     `migrate deploy`, which needs none.
-#   * `rasta_<svc>` — the runtime role — loses CREATEDB, CREATEROLE and
-#     BYPASSRLS.
-#   * The database and **every object in it** (schema `public` if it names the
-#     runtime role, tables, sequences, types, functions, the Prisma ledger) are
-#     reassigned to the migrator. Nothing moves, so an existing database keeps
-#     every row and its migration history.
+#   * `rasta_<svc>` — the runtime role — loses SUPERUSER, CREATEDB,
+#     CREATEROLE and BYPASSRLS.
+#   * The database and **every object in it** (tables, sequences, types,
+#     functions, the Prisma ledger) are reassigned to the migrator, and so is
+#     schema `public` whoever owns it — the runtime role, `pg_database_owner`,
+#     or the superuser on a cluster upgraded from PostgreSQL 14 or older, which
+#     REASSIGN OWNED does not reach (Codex round 4 on #176). Nothing moves, so
+#     an existing database keeps every row and its migration history.
 #   * The runtime role keeps CONNECT on the database and USAGE on `public`:
 #     no CREATE (it cannot add objects it would own), no TEMP.
 #   * PUBLIC loses EXECUTE on functions the migrator creates, and on those it
@@ -202,13 +204,20 @@ split_service_privileges() {
   _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'"
 
   # The runtime role can no longer create — or, owning none, drop — a database.
-  _svc_split_psql postgres "ALTER ROLE ${runtime} NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
 
   _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
 
   # Tables, sequences, types, functions, the ledger, and `public` itself if a
   # pre-15 cluster made the runtime role its owner.
   _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
+
+  # `public` whoever owns it — REASSIGN moves only what the runtime role owned.
+  # On a cluster upgraded from PostgreSQL 14 or older the superuser owns it,
+  # and once the grants below are revoked the migrator would hold no CREATE
+  # there: it could neither create the ledger nor run a migration (Codex round
+  # 4 on #176). Before the revokes and the ledger.
+  _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}"
 
   # No back door: no membership in the migrator or any other owner.
   revoke_owner_memberships "${db}" "${runtime}"
@@ -263,46 +272,86 @@ split_service_privileges() {
   echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights"
 }
 
-# split_audit_database_privileges [database]
+# split_audit_database_privileges [database] [service]
 #
 # audit-service keeps its tables in schema `audit`, owned by
 # `rasta_audit_migrator` (ADR-053 § 6, 00-init-databases.sh), so its tables were
 # never the runtime role's. Its *database* still was: `rasta_audit` owned
 # database `rasta_audit`, and with it schema `public` (through
 # pg_database_owner), CREATE on the database and DROP DATABASE. This hands the
-# database to the migrator and leaves the runtime role CONNECT on it and USAGE
-# on `audit` (granted by the bootstrap) — no CREATE, no TEMP, nothing in
-# `public`, no CREATEDB. The table grants stay where they are, in audit's
-# migrations.
+# database, `public` and `audit` to the migrator — creating the migrator, and
+# `audit`, if an older cluster lacks them — and leaves the runtime role CONNECT
+# on the database and USAGE on `audit`: no CREATE, no TEMP, nothing in
+# `public`, no CREATEDB, no membership in an owner. The table grants stay where
+# they are, in audit's migrations. `service` (default `audit`) names the roles
+# — `rasta_<service>` and `rasta_<service>_migrator` — so a throwaway pair can
+# be split the same way in a test.
 split_audit_database_privileges() {
   local db="${1:-rasta_audit}"
-  local runtime=rasta_audit
-  local migrator=rasta_audit_migrator
+  local svc="${2:-audit}"
+  local runtime="rasta_${svc}"
+  local migrator="rasta_${svc}_migrator"
+  local password="${ROLE_PASSWORDS[$migrator]:?the ${migrator} password was not resolved}"
 
-  _svc_split_psql postgres "ALTER ROLE ${runtime} NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+  _svc_split_psql postgres "DO \$\$ BEGIN
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${migrator}') THEN
+        CREATE ROLE ${migrator} LOGIN CREATEDB;
+      END IF;
+    END \$\$;"
+  _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'"
+  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
   _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
   _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
+  # Both schemas whoever owns them (see split_service_privileges).
+  _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}"
+  _svc_split_psql "${db}" "CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION ${migrator}"
+  _svc_split_psql "${db}" "ALTER SCHEMA audit OWNER TO ${migrator}"
   revoke_owner_memberships "${db}" "${runtime}"
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM ${runtime}"
   _svc_split_psql postgres "GRANT CONNECT ON DATABASE ${db} TO ${runtime}"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM PUBLIC"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
+  # USAGE on `audit` and nothing more, as the bootstrap grants it: no CREATE.
+  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM PUBLIC"
+  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM ${runtime}"
+  _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA audit TO ${runtime}"
   # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
 
-  echo "    - ${db}: database owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created"
+  echo "    - ${db}: database, public and audit owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created"
 }
 
-# Run directly (not sourced): split the named service's database with the
-# grants mode the bootstrap gives it, then set the runtime role's password and
-# prove both logins (rotate_and_verify_split_logins). The runtime role's and the
-# migrator's passwords are resolved — POSTGRES_PASSWORD_<SVC> and
-# POSTGRES_PASSWORD_<SVC>_MIGRATOR, both exported: outside the compose container
-# (RASTA_DB_BOOTSTRAP=compose) there is no development fallback — and refused
-# if they are equal, or equal to any other role password in the environment
-# (lib/role-passwords.bash). audit's split sets no password at all.
+# upgrade_service_split <service> <database> <default|migration|audit>
+#
+# The standalone upgrade of an existing cluster, one service: resolve the
+# runtime role's and the migrator's passwords — both supplied, distinct, and
+# distinct from every other role password the run knows — split the database
+# (`audit` mode: split_audit_database_privileges), then set the runtime role's
+# password and prove both logins (rotate_and_verify_split_logins). audit goes
+# through the same credential step as every other service (Codex round 4 on
+# #176): an audit cluster whose two roles shared a password is otherwise left
+# with it. Needs role-passwords.bash sourced.
+upgrade_service_split() {
+  local svc="$1" db="$2" mode="$3"
+  resolve_role_passwords "rasta_${svc}" "rasta_${svc}_migrator" || return 1
+  echo "==> ${svc}-service privilege split"
+  if [[ "${mode}" == audit ]]; then
+    split_audit_database_privileges "${db}" "${svc}"
+  else
+    split_service_privileges "${svc}" "${db}" "${mode}"
+  fi
+  rotate_and_verify_split_logins "${svc}" "${db}"
+}
+
+# Run directly (not sourced): upgrade_service_split for the named service, with
+# the grants mode the bootstrap gives it (audit: its own split). The runtime
+# role's and the migrator's passwords — POSTGRES_PASSWORD_<SVC> and
+# POSTGRES_PASSWORD_<SVC>_MIGRATOR — are both exported: outside the compose
+# container (RASTA_DB_BOOTSTRAP=compose) there is no development fallback, and
+# they are refused if equal, or equal to any other role password in the
+# environment (lib/role-passwords.bash).
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   set -euo pipefail
   : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
@@ -310,16 +359,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # shellcheck source=role-passwords.bash
   source "$(dirname "${BASH_SOURCE[0]}")/role-passwords.bash"
   if [[ "${svc}" == audit ]]; then
-    echo "==> audit-service database ownership"
-    split_audit_database_privileges "${2:-rasta_audit}"
-    exit 0
-  fi
-  if [[ " ${PRIVILEGE_SPLIT_SERVICES[*]} " != *" ${svc} "* ]]; then
+    mode=audit
+  elif [[ " ${PRIVILEGE_SPLIT_SERVICES[*]} " == *" ${svc} "* ]]; then
+    mode="$(privilege_split_grants_mode "${svc}")"
+  else
     echo "${svc} is not in PRIVILEGE_SPLIT_SERVICES (lib/role-passwords.bash)" >&2
     exit 1
   fi
-  resolve_role_passwords "rasta_${svc}" "rasta_${svc}_migrator" || exit 1
-  echo "==> ${svc}-service privilege split"
-  split_service_privileges "${svc}" "${2:-rasta_${svc}}" "$(privilege_split_grants_mode "${svc}")"
-  rotate_and_verify_split_logins "${svc}" "${2:-rasta_${svc}}"
+  upgrade_service_split "${svc}" "${2:-rasta_${svc}}" "${mode}" || exit 1
 fi
