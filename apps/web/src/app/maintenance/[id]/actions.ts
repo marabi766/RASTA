@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 
-import { FLASH_PARAM } from '@/lib/form-fields';
+import { BASELINE_FIELD, FLASH_PARAM } from '@/lib/form-fields';
 import type {
   ApproveRequestField,
   ApproveRequestFormValues,
@@ -24,6 +24,7 @@ import {
   cancelRequest,
   cancelRequestFormValues,
   commandRequestId,
+  openApprovalBaseline,
   parseApproveRequestForm,
   parseAssignWorkshopForm,
   parseCancelRequestForm,
@@ -51,6 +52,13 @@ type Parsed<B, F extends string> =
 
 interface Command<V, B, F extends string> {
   readonly notice: RequestCommandNotice;
+  /**
+   * For a command that confirms something the person was shown: the form to
+   * read, with what was shown put back from what this server signed — or null
+   * when the form carries no proof of it. Runs after the request id is known
+   * and before anything is parsed, and a null refuses the post.
+   */
+  readonly confirmed?: (session: WebSession, form: FormData, requestId: string) => FormData | null;
   readonly valuesOf: (form: FormData) => V;
   readonly parse: (values: V) => Parsed<B, F>;
   readonly send: (
@@ -85,7 +93,10 @@ async function run<V, B, F extends string>(
   // person can see; the read side answers it as a missing one.
   if (requestId === null) return { kind: 'NOT_FOUND', correlationId: null };
 
-  const values = command.valuesOf(form);
+  const source = command.confirmed ? command.confirmed(session, form, requestId) : form;
+  if (source === null) return { kind: 'REFUSED', reason: 'BASELINE' };
+
+  const values = command.valuesOf(source);
   const parsed = command.parse(values);
   if (!parsed.ok) {
     return {
@@ -161,6 +172,18 @@ export async function submitApproveRequest(
   return run(
     {
       notice: 'approved',
+      // The request and the total are what the page signed, not what the form
+      // says: the hidden fields are not read for either.
+      confirmed: (session, posted, requestId) => {
+        const baseline = openApprovalBaseline(session, posted.get(BASELINE_FIELD), requestId);
+        if (!baseline) return null;
+        const shown = new FormData();
+        shown.set('requestId', baseline.requestId);
+        shown.set('expectedTotalCostMinor', baseline.totalCostMinor);
+        const notes = posted.get('notes');
+        if (typeof notes === 'string') shown.set('notes', notes);
+        return shown;
+      },
       valuesOf: approveRequestFormValues,
       parse: parseApproveRequestForm,
       send: approveRequest,

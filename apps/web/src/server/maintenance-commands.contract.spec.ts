@@ -144,6 +144,14 @@ describe('the request bodies', () => {
     ]);
   });
 
+  it('approve still REQUIRES the expected total: the form no longer sends it from a field, so the service must hold the line for every other client', () => {
+    // Not `.optional()`: an approval that never states the amount is not the
+    // control docs/17 makes mandatory (the pin above is the exact initializer).
+    expect(schemaProperties('approveRequestSchema').get('expectedTotalCostMinor')).not.toContain(
+      'optional',
+    );
+  });
+
   it('cancel still takes exactly a reason', () => {
     expect([...schemaProperties('cancelRequestSchema').keys()]).toEqual(['reason']);
   });
@@ -154,7 +162,7 @@ describe('the request bodies', () => {
     ['assignWorkshopSchema', 'workSummary', 'displayText(2, 1000).optional()'],
     ['approveRequestSchema', 'notes', 'displayText(1, 1000).optional()'],
     ['cancelRequestSchema', 'reason', 'displayText(3, 500)'],
-    ['approveRequestSchema', 'expectedTotalCostMinor', 'amountMinorSchema.optional()'],
+    ['approveRequestSchema', 'expectedTotalCostMinor', 'amountMinorSchema'],
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
     expect(schemaProperties(schema).get(key)?.replace(/\s+/g, ' ')).toBe(expected);
   });
@@ -266,7 +274,64 @@ describe('the sentences the portal translates', () => {
     expect(all.size).toBeGreaterThanOrEqual(8);
   });
 
-  it.each([...all.keys()])('still says %j', (sentence) => {
-    expect(haystack).toContain(normalise(sentence));
+  /**
+   * Sentences the service builds from a status (`already ${from}`): the
+   * template must still be there, and each status the portal names must still
+   * be one the service has.
+   */
+  const TEMPLATED: ReadonlyMap<string, { template: string; status: string }> = new Map([
+    [
+      'This maintenance request is already APPROVED',
+      { template: 'This maintenance request is already ${from}', status: 'APPROVED' },
+    ],
+    [
+      'This maintenance request is already CANCELLED',
+      { template: 'This maintenance request is already ${from}', status: 'CANCELLED' },
+    ],
+  ]);
+  const lifecycle = read('lifecycle.ts');
+
+  it.each([...all.keys()].filter((sentence) => !TEMPLATED.has(sentence)))(
+    'still says %j',
+    (sentence) => {
+      expect(haystack).toContain(normalise(sentence));
+    },
+  );
+
+  it.each([...TEMPLATED.entries()])(
+    'still builds %j from a status',
+    (sentence, { template, status }) => {
+      expect(all.has(sentence)).toBe(true);
+      expect(haystack).toContain(normalise(template));
+      expect(lifecycle).toContain(`'${status}'`);
+    },
+  );
+});
+
+describe('the fallback for a sentence the portal does not know', () => {
+  const platformErrors = readFileSync(
+    join(ROOT, 'packages', 'contracts', 'src', 'common', 'errors.ts'),
+    'utf8',
+  );
+  const nestErrors = readFileSync(
+    join(ROOT, 'packages', 'nest-common', 'src', 'errors', 'rasta-error.ts'),
+    'utf8',
+  );
+
+  const MAPPINGS = [
+    ['assign', ASSIGN_WORKSHOP_FIELD_MAPPING],
+    ['approve', APPROVE_REQUEST_FIELD_MAPPING],
+    ['cancel', CANCEL_REQUEST_FIELD_MAPPING],
+  ] as const;
+
+  it.each(MAPPINGS)('is keyed by codes the platform defines, for %s', (_name, mapping) => {
+    const codes = Object.keys(mapping.byCode ?? {});
+    expect(codes.sort()).toEqual(['BUSINESS_RULE_VIOLATION', 'INVALID_STATE_TRANSITION']);
+    for (const code of codes) expect(platformErrors).toContain(`${code}: '${code}'`);
+  });
+
+  it('covers the two ways the service refuses a state: a transition and a business rule', () => {
+    expect(nestErrors).toContain('ERROR_CODES.INVALID_STATE_TRANSITION');
+    expect(nestErrors).toContain('ERROR_CODES.BUSINESS_RULE_VIOLATION');
   });
 });

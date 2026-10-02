@@ -4,7 +4,7 @@ import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatMoney } from '@/lib/format';
 import {
   EMPTY_ASSIGN_WORKSHOP_FORM,
@@ -134,10 +134,17 @@ export function AssignWorkshopForm(identity: Identity) {
 
 export function ApproveRequestForm({
   totalCostMinor,
+  baseline,
   ...identity
 }: Identity & {
-  /** The total the screen above shows, echoed back so a moved figure is refused. */
+  /** The total the screen above shows. */
   totalCostMinor: string;
+  /**
+   * That total and this request, signed by the server for this person
+   * (`sealApprovalBaseline`). What the approval confirms is read from here, so
+   * the form does not carry the amount in a field a person could change.
+   */
+  baseline: string;
 }) {
   const [state, action, pending] = useActionState<
     RequestCommandFormState<ApproveRequestFormValues, ApproveRequestField>,
@@ -150,8 +157,7 @@ export function ApproveRequestForm({
   return (
     <form action={action} className="flex flex-col gap-4">
       <Hidden {...identity} submissionId={submissionOf(state, identity.submissionId)} />
-      {/* What the person was shown, not something they type. */}
-      <input type="hidden" name="expectedTotalCostMinor" value={totalCostMinor} />
+      <input type="hidden" name={BASELINE_FIELD} value={baseline} />
 
       <CommandBanner state={state} forbidden="اجازهٔ تأیید هزینه به شما داده نشده است." />
       {errors.expectedTotalCostMinor ? (
@@ -257,7 +263,9 @@ function CommandBanner({
         <Alert tone="danger">
           {state.reason === 'NO_SESSION'
             ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
-            : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
+            : state.reason === 'BASELINE'
+              ? 'این فرم منقضی شده است یا با مبلغ نمایش‌داده‌شده نمی‌خواند. صفحه را تازه کنید و دوباره تأیید کنید.'
+              : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
         </Alert>
       );
     case 'FORBIDDEN':

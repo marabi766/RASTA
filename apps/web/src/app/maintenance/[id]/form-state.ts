@@ -26,7 +26,7 @@ export type RequestCommandFormState<V, F extends string> =
    */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string | null }
   /** The post could not be trusted as this person's own. */
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
+  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' | 'BASELINE' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
   | UnconfirmedWriteState;

@@ -92,8 +92,17 @@ const MACHINE = 'AST-SEED-E2E-0001';
 
 /** What every request this suite files starts with, so its own can be told from anyone else's. */
 const TITLE_PREFIX = 'آزمون مرورگر';
-/** This worker's own marker: a retry, being a new worker, files under a different one. */
-const RUN = Date.now().toString(36);
+/**
+ * This run's own marker, the same in every worker and retry of one Playwright
+ * invocation (`playwright.config.ts`) and different in any other run — so two
+ * runs against one stack never see each other's requests as their own. The
+ * fallback is for a spec started some other way.
+ */
+const RUN = process.env.WEB_E2E_RUN_ID ?? `${Date.now().toString(36)}${process.pid}`;
+/** Where a run's id begins its title: the time it started, in base 36, eight characters. */
+const RUN_TIME_CHARS = 8;
+/** An open request this old, under the suite's prefix, belongs to a run that is long gone. */
+const STALE_AFTER_MS = 30 * 60 * 1000;
 const titled = (what: string): string => `${TITLE_PREFIX} ${RUN} - ${what}`;
 
 const BREAKDOWN_TITLE = titled('نشتی روغن هیدرولیک');
@@ -158,6 +167,26 @@ async function cancelOwn(
   created.clear();
 }
 
+/**
+ * Requests filed by a run that started more than `STALE_AFTER_MS` ago and never
+ * cleaned up (a killed job, a local run interrupted). Told apart by the start
+ * time every title carries, so a run in progress somewhere else is not mistaken
+ * for one that is long gone; a title that does not parse is left alone.
+ */
+async function cancelStale(request: APIRequestContext, accessToken: string): Promise<void> {
+  const open = await openCorrective(request, accessToken);
+  for (const record of open) {
+    if (!record.title.startsWith(`${TITLE_PREFIX} `)) continue;
+    const startedAt = parseInt(
+      record.title.slice(TITLE_PREFIX.length + 1, TITLE_PREFIX.length + 1 + RUN_TIME_CHARS),
+      36,
+    );
+    if (Number.isFinite(startedAt) && Date.now() - startedAt > STALE_AFTER_MS) {
+      await cancel(request, accessToken, record.id);
+    }
+  }
+}
+
 test.describe('reporting maintenance through the live stack', () => {
   test.skip(
     process.env.WEB_LIVE_STACK_E2E !== 'true',
@@ -173,9 +202,12 @@ test.describe('reporting maintenance through the live stack', () => {
   test.beforeEach(async ({ context, request }) => {
     const session = await installLiveSession(context, 'orgAdmin');
     accessToken = session.accessToken;
-    // What an earlier attempt of this suite left (a crashed worker, a failed
-    // teardown): anything on this machine filed under the suite's prefix.
-    await cancelOwn(request, accessToken, TITLE_PREFIX);
+    // What an earlier attempt of *this run* left (a crashed worker, a failed
+    // teardown) — and only that — plus what a run long gone left. Another run's
+    // live requests are never touched: they carry its id, and a run that started
+    // minutes ago is not long gone.
+    await cancelOwn(request, accessToken, `${TITLE_PREFIX} ${RUN}`);
+    await cancelStale(request, accessToken);
   });
 
   test.afterEach(async ({ request }) => {

@@ -18,6 +18,7 @@ import {
 } from '@/lib/maintenance-fields';
 
 import { localDateToIso } from './drivers';
+import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 
@@ -338,6 +339,10 @@ export function parseAssignWorkshopForm(
  * not know is shown as it arrived (`mapProblemToFields`).
  */
 const REQUEST_STATE_MESSAGES: Readonly<Record<string, string>> = {
+  'This maintenance request is already APPROVED':
+    'این درخواست همین حالا تأیید شده و نهایی است؛ دیگر تغییر نمی‌کند.',
+  'This maintenance request is already CANCELLED':
+    'این درخواست همین حالا لغو شده و نهایی است؛ درخواست تازه‌ای ثبت کنید.',
   'An approved maintenance request is final; it authorises settlement and cannot be reopened':
     'این درخواست تأیید شده و نهایی است؛ دیگر تغییر نمی‌کند.',
   'A cancelled maintenance request is final; raise a new one':
@@ -348,6 +353,20 @@ const REQUEST_STATE_MESSAGES: Readonly<Record<string, string>> = {
     'این ماشین به سازمان دیگری منتقل شده است و کار نمی‌تواند پیش برود.',
   'This machine is being transferred to another organization; raise the work after the transfer.':
     'این ماشین در حال انتقال به سازمان دیگری است؛ کار را پس از انتقال انجام دهید.',
+};
+
+/**
+ * What is said for a refusal whose sentence the portal does not know — a state
+ * the service words one more way, or a rule added after this was written —
+ * keyed by the platform error code, which is the part of the body a client may
+ * rely on. The sentence itself is not shown: the service's English is the truth
+ * but not a thing this screen's reader can act on, and the correlation id on the
+ * failure banner is how it is found.
+ */
+const REQUEST_STATE_FALLBACKS: Readonly<Record<string, string>> = {
+  INVALID_STATE_TRANSITION:
+    'وضعیت فعلی درخواست اجازهٔ این کار را نمی‌دهد. صفحه را تازه کنید و وضعیت را ببینید.',
+  BUSINESS_RULE_VIOLATION: 'این کار با قواعد این درخواست سازگار نیست. صفحه را تازه کنید.',
 };
 
 export const ASSIGN_WORKSHOP_FIELD_MAPPING: FieldMapping<AssignWorkshopField> = {
@@ -363,6 +382,7 @@ export const ASSIGN_WORKSHOP_FIELD_MAPPING: FieldMapping<AssignWorkshopField> = 
       'این درخواست همین حالا نزد یک تعمیرگاه است. برای ارجاع به جای دیگر، نخست آن ارجاع را لغو کنید.',
     'That workshop may not take on this work.': 'این تعمیرگاه نمی‌تواند این کار را بپذیرد.',
   },
+  byCode: REQUEST_STATE_FALLBACKS,
 };
 
 /** What a caller needs of the created referral: only that it exists. */
@@ -393,9 +413,10 @@ export function approveRequestFormValues(form: FormData): ApproveRequestFormValu
 
 export const approveRequestFormSchema = z
   .object({
-    // Required here although the service treats it as optional: this form
-    // always echoes what it showed, because an approval that does not say what
-    // it approves is not the control docs/17 makes mandatory.
+    // Required here and, since this change, by the service too: an approval
+    // that does not say what it approves is not the control docs/17 makes
+    // mandatory. The action fills it from the signed approval baseline, never
+    // from the browser (`openApprovalBaseline`).
     expectedTotalCostMinor: z
       .string()
       .trim()
@@ -437,6 +458,7 @@ export const APPROVE_REQUEST_FIELD_MAPPING: FieldMapping<ApproveRequestField> = 
     'The cost has changed since it was shown to you; review it again before approving.':
       APPROVAL_TOTAL_CHANGED_MESSAGE,
   },
+  byCode: REQUEST_STATE_FALLBACKS,
 };
 
 export function approveRequest(
@@ -454,6 +476,69 @@ export function approveRequest(
     mapping: APPROVE_REQUEST_FIELD_MAPPING,
     fetchImpl,
   });
+}
+
+// ---- What the approval was drawn from --------------------------------------
+
+const APPROVAL_BASELINE_PURPOSE = 'maintenance-approval-baseline';
+
+/**
+ * A page left open while a decision is made is still a page; one left open
+ * overnight is not. The service compares the total again on every approval, so
+ * this bounds how stale a *confirmation* can be, not how stale a figure can be.
+ */
+const APPROVAL_BASELINE_TTL_SECONDS = 4 * 60 * 60;
+
+const approvalBaselineSchema = z.object({
+  requestId: z.string().min(1).max(200),
+  totalCostMinor: z.string().regex(/^\d{1,30}$/),
+});
+
+export interface ApprovalBaseline {
+  readonly requestId: string;
+  readonly totalCostMinor: string;
+}
+
+/**
+ * The request and the total the approval button was drawn beside, signed for
+ * this session and carried in a hidden field.
+ *
+ * The approval confirms **this** request at **this** amount, so both are taken
+ * from here and neither from the form: a hidden `requestId` and a hidden total
+ * are fields a script can rewrite, and a form that could name request B with
+ * B's own total would confirm an amount its manager never saw. Signed, the only
+ * thing the browser controls is whether to press the button (and the note).
+ *
+ * maintenance-service exposes no version for a request, so there is none to
+ * bind; the status guard and the total comparison it applies on every approval
+ * are what cover a request that changed after this page was drawn.
+ */
+export function sealApprovalBaseline(
+  session: WebSession,
+  requestId: string,
+  totalCostMinor: string,
+): string {
+  return signPayload(
+    session,
+    APPROVAL_BASELINE_PURPOSE,
+    { requestId, totalCostMinor },
+    APPROVAL_BASELINE_TTL_SECONDS,
+  );
+}
+
+/**
+ * The baseline, if `token` is one this session was given for `requestId`;
+ * otherwise `null` — one answer for forged, somebody else's, expired, and for
+ * another request.
+ */
+export function openApprovalBaseline(
+  session: WebSession,
+  token: unknown,
+  requestId: string,
+): ApprovalBaseline | null {
+  const payload = verifyPayload(session, APPROVAL_BASELINE_PURPOSE, token, approvalBaselineSchema);
+  if (!payload || payload.requestId !== requestId) return null;
+  return { requestId: payload.requestId, totalCostMinor: payload.totalCostMinor };
 }
 
 // ---- Cancel ----------------------------------------------------------------
@@ -496,6 +581,7 @@ export const CANCEL_REQUEST_FIELD_MAPPING: FieldMapping<CancelRequestField> = {
     ...REQUEST_STATE_MESSAGES,
     'Contains unsupported characters': DISPLAY_TEXT_MESSAGE,
   },
+  byCode: REQUEST_STATE_FALLBACKS,
 };
 
 export function cancelRequest(

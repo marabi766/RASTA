@@ -3,7 +3,7 @@ import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchCurrentUser } from '@/server/identity';
 import { fetchMaintenanceRequest } from '@/server/maintenance';
-import { canManageMaintenance } from '@/server/maintenance-commands';
+import { canManageMaintenance, sealApprovalBaseline } from '@/server/maintenance-commands';
 import { mintSubmissionId } from '@/server/submission';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { REQUEST_COMMAND_NOTICES } from '@/lib/maintenance-fields';
@@ -83,7 +83,11 @@ export default async function MaintenanceRequestPage({
             ? {
                 assign: <AssignWorkshopForm {...identity()} />,
                 approve: (
-                  <ApproveRequestForm {...identity()} totalCostMinor={result.data.totalCostMinor} />
+                  <ApproveRequestForm
+                    {...identity()}
+                    totalCostMinor={result.data.totalCostMinor}
+                    baseline={sealApprovalBaseline(session, id, result.data.totalCostMinor)}
+                  />
                 ),
                 cancel: <CancelRequestForm {...identity()} />,
               }

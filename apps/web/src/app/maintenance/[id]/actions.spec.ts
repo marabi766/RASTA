@@ -1,9 +1,13 @@
 /**
  * @jest-environment node
  */
+import { BASELINE_FIELD } from '@/lib/form-fields';
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
-import { APPROVAL_TOTAL_CHANGED_MESSAGE } from '@/server/maintenance-commands';
+import {
+  APPROVAL_TOTAL_CHANGED_MESSAGE,
+  sealApprovalBaseline,
+} from '@/server/maintenance-commands';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
@@ -65,8 +69,14 @@ interface Command {
   readonly submit: (form: FormData) => Promise<unknown>;
   readonly service: jest.Mock;
   readonly valid: Record<string, string>;
+  /** Correctly authorised, but a form its own schema refuses. */
+  readonly refusedByItsSchema: Record<string, string>;
   readonly notice: string;
 }
+
+/** The approval baseline the page signs: this request, at this total. */
+const baselineFor = (total: string, requestId = REQUEST_ID, session: WebSession = SESSION) =>
+  sealApprovalBaseline(session, requestId, total);
 
 const COMMANDS: readonly Command[] = [
   {
@@ -74,13 +84,15 @@ const COMMANDS: readonly Command[] = [
     submit: (form) => actions.submitAssignWorkshop(IDLE_COMMAND_FORM, form),
     service: assignWorkshop,
     valid: { workshopOrganizationId: WORKSHOP, workshopName: 'تعمیرگاه کوثر' },
+    refusedByItsSchema: {},
     notice: 'assigned',
   },
   {
     name: 'approve',
     submit: (form) => actions.submitApproveRequest(IDLE_COMMAND_FORM, form),
     service: approveRequest,
-    valid: { expectedTotalCostMinor: '12500000', notes: 'تأیید' },
+    valid: { [BASELINE_FIELD]: baselineFor('12500000'), notes: 'تأیید' },
+    refusedByItsSchema: { [BASELINE_FIELD]: baselineFor('12500000'), notes: 'x'.repeat(1001) },
     notice: 'approved',
   },
   {
@@ -88,6 +100,7 @@ const COMMANDS: readonly Command[] = [
     submit: (form) => actions.submitCancelRequest(IDLE_COMMAND_FORM, form),
     service: cancelRequest,
     valid: { reason: 'ماشین فروخته شد' },
+    refusedByItsSchema: {},
     notice: 'cancelled',
   },
 ];
@@ -204,7 +217,7 @@ describe.each(COMMANDS)('$name — what reaches the service', (command) => {
   });
 
   it('does not send a form the form schema refuses', async () => {
-    const state = await command.submit(formData({}));
+    const state = await command.submit(formData(command.refusedByItsSchema));
     expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: expect.any(Object) });
     expect(command.service).not.toHaveBeenCalled();
   });
@@ -308,19 +321,86 @@ describe('approve — a total that moved', () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
-  it('sends the echoed total as posted: it is what the person was shown, validated as digits', async () => {
-    await expect(
-      approve.submit(formData({ expectedTotalCostMinor: '99', notes: '' })),
-    ).rejects.toThrow();
-    expect(approve.service.mock.calls[0][2]).toEqual({ expectedTotalCostMinor: '99' });
+  it('sends the total the page signed, and no amount the form says', async () => {
+    const form = formData({ [BASELINE_FIELD]: baselineFor('99'), notes: '' });
+    // A field the form never carries any more: if one arrives it is not read.
+    form.set('expectedTotalCostMinor', '1');
+    await expect(approve.submit(form)).rejects.toThrow(/NEXT_REDIRECT/);
 
-    approve.service.mockClear();
-    expect(
-      await approve.submit(formData({ expectedTotalCostMinor: '1e3', notes: '' })),
-    ).toMatchObject({
-      kind: 'INVALID',
-      fieldErrors: { expectedTotalCostMinor: expect.any(String) },
+    expect(approve.service).toHaveBeenCalledTimes(1);
+    expect(approve.service.mock.calls[0][2]).toEqual({ expectedTotalCostMinor: '99' });
+  });
+});
+
+describe('approve — a confirmation that is not the one the page showed', () => {
+  const approve = COMMANDS[1];
+  const OTHER_REQUEST = 'MNT_01J00000000000000000000099';
+  const BASELINE_REFUSED = { kind: 'REFUSED', reason: 'BASELINE' };
+
+  it('refuses a form that names another request than the baseline was signed for, and sends nothing', async () => {
+    // A manager edits the hidden request id to B but keeps A's signed baseline.
+    const form = formData(approve.valid, { requestId: OTHER_REQUEST });
+    expect(await approve.submit(form)).toEqual(BASELINE_REFUSED);
+    noneCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('does not let B be approved at B’s own total by pairing it with a posted amount', async () => {
+    // Request id B, B's real total typed into the old hidden field, no baseline.
+    const form = formData(
+      { expectedTotalCostMinor: '4800000', notes: '' },
+      { requestId: OTHER_REQUEST },
+    );
+    expect(await approve.submit(form)).toEqual(BASELINE_REFUSED);
+    noneCalled();
+  });
+
+  it('refuses a form with no baseline at all', async () => {
+    expect(await approve.submit(formData({ notes: 'تأیید' }))).toEqual(BASELINE_REFUSED);
+    noneCalled();
+  });
+
+  it('refuses a baseline signed for somebody else, one from an earlier login, and one that was altered', async () => {
+    const theirs = baselineFor('12500000', REQUEST_ID, { ...SESSION, subject: 'someone-else' });
+    const earlier = baselineFor('12500000', REQUEST_ID, {
+      ...SESSION,
+      csrfToken: 'the-token-before-re-login',
     });
-    expect(approve.service).not.toHaveBeenCalled();
+    const [body, mac] = baselineFor('12500000').split('.');
+    const altered = `${Buffer.from(
+      JSON.stringify({ requestId: REQUEST_ID, totalCostMinor: '1', exp: 4_102_444_800 }),
+    ).toString('base64url')}.${mac}`;
+    expect(body).not.toBe(altered.split('.')[0]);
+
+    for (const baseline of [theirs, earlier, altered, 'not-a-token', '']) {
+      expect(await approve.submit(formData({ [BASELINE_FIELD]: baseline, notes: '' }))).toEqual(
+        BASELINE_REFUSED,
+      );
+    }
+    noneCalled();
+  });
+
+  it('refuses a baseline that has expired', async () => {
+    jest.useFakeTimers({ now: Date.now() + 5 * 60 * 60 * 1000 });
+    try {
+      expect(await approve.submit(formData(approve.valid))).toEqual(BASELINE_REFUSED);
+    } finally {
+      jest.useRealTimers();
+    }
+    noneCalled();
+  });
+
+  it('does not accept an edit-form baseline in its place: the purpose is part of the key', async () => {
+    const { signPayload } = await import('@/server/signed-payload');
+    const wrongPurpose = signPayload(
+      SESSION,
+      'asset-edit-baseline',
+      { requestId: REQUEST_ID, totalCostMinor: '12500000' },
+      600,
+    );
+    expect(await approve.submit(formData({ [BASELINE_FIELD]: wrongPurpose, notes: '' }))).toEqual(
+      BASELINE_REFUSED,
+    );
+    noneCalled();
   });
 });

@@ -392,23 +392,112 @@ describe('writing', () => {
     expect(result).toMatchObject({ kind: 'INVALID', message: APPROVAL_TOTAL_CHANGED_MESSAGE });
   });
 
-  it('shows a sentence it does not know as it arrived, never hidden', async () => {
-    const { impl } = recording(409, {
-      code: 'INVALID_STATE_TRANSITION',
-      message: 'A completed request cannot be referred to a workshop',
+  describe.each([
+    [
+      'approving a request that is already approved',
+      409,
+      'INVALID_STATE_TRANSITION',
+      'This maintenance request is already APPROVED',
+      'این درخواست همین حالا تأیید شده و نهایی است؛ دیگر تغییر نمی‌کند.',
+    ],
+    [
+      'cancelling a request that is already cancelled',
+      409,
+      'INVALID_STATE_TRANSITION',
+      'This maintenance request is already CANCELLED',
+      'این درخواست همین حالا لغو شده و نهایی است؛ درخواست تازه‌ای ثبت کنید.',
+    ],
+    [
+      'cancelling an approved request',
+      409,
+      'INVALID_STATE_TRANSITION',
+      'An approved maintenance request is final; it authorises settlement and cannot be reopened',
+      'این درخواست تأیید شده و نهایی است؛ دیگر تغییر نمی‌کند.',
+    ],
+    [
+      'approving a cancelled request',
+      409,
+      'INVALID_STATE_TRANSITION',
+      'A cancelled maintenance request is final; raise a new one',
+      'این درخواست لغو شده و نهایی است؛ درخواست تازه‌ای ثبت کنید.',
+    ],
+  ])('%s', (_name, status, code, sentence, persian) => {
+    it.each([
+      [
+        'approve',
+        (impl: typeof fetch) =>
+          approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 's', impl),
+      ],
+      [
+        'cancel',
+        (impl: typeof fetch) => cancelRequest(SESSION, REQUEST, { reason: 'فروخته شد' }, 's', impl),
+      ],
+    ])('is said in Persian by %s, not in the service’s English', async (_verb, call) => {
+      const result = await call(recording(status, { code, message: sentence }).impl);
+
+      expect(result).toMatchObject({ kind: 'INVALID', message: persian });
+      expect(result.kind === 'INVALID' && result.message).not.toMatch(/[A-Za-z]{4,}/);
+    });
+  });
+
+  describe('a sentence the portal does not know', () => {
+    const STATE_FALLBACK =
+      'وضعیت فعلی درخواست اجازهٔ این کار را نمی‌دهد. صفحه را تازه کنید و وضعیت را ببینید.';
+    const RULE_FALLBACK = 'این کار با قواعد این درخواست سازگار نیست. صفحه را تازه کنید.';
+
+    it.each([
+      ['a transition', 409, 'INVALID_STATE_TRANSITION', STATE_FALLBACK],
+      ['a business rule', 422, 'BUSINESS_RULE_VIOLATION', RULE_FALLBACK],
+    ])('is said in Persian from its code, for %s', async (_n, status, code, persian) => {
+      const sentence = 'A maintenance request cannot move from OPEN to APPROVED';
+      for (const call of [
+        (impl: typeof fetch) =>
+          approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 's', impl),
+        (impl: typeof fetch) => cancelRequest(SESSION, REQUEST, { reason: 'فروخته شد' }, 's', impl),
+        (impl: typeof fetch) =>
+          assignWorkshop(SESSION, REQUEST, { workshopOrganizationId: WORKSHOP }, 's', impl),
+      ]) {
+        const result = await call(recording(status, { code, message: sentence }).impl);
+        expect(result).toMatchObject({ kind: 'INVALID', message: persian });
+        expect(JSON.stringify(result)).not.toContain(sentence);
+      }
     });
 
-    const result = await assignWorkshop(
-      SESSION,
-      REQUEST,
-      { workshopOrganizationId: WORKSHOP },
-      'sub_abc',
-      impl,
-    );
+    it('still prefers a sentence it knows over the fallback for its code', async () => {
+      const { impl } = recording(409, {
+        code: 'INVALID_STATE_TRANSITION',
+        message:
+          'This request is already with a workshop. Cancel that referral before making another.',
+      });
+      const result = await assignWorkshop(
+        SESSION,
+        REQUEST,
+        { workshopOrganizationId: WORKSHOP },
+        's',
+        impl,
+      );
+      expect(result).toMatchObject({
+        kind: 'INVALID',
+        message: expect.stringContaining('نزد یک تعمیرگاه'),
+      });
+    });
 
-    expect(result).toMatchObject({
-      kind: 'INVALID',
-      message: 'A completed request cannot be referred to a workshop',
+    it('shows a sentence under a code with no fallback as it arrived, never hidden', async () => {
+      const { impl } = recording(409, {
+        code: 'SOME_NEW_CODE',
+        message: 'A completed request cannot be referred to a workshop',
+      });
+      const result = await assignWorkshop(
+        SESSION,
+        REQUEST,
+        { workshopOrganizationId: WORKSHOP },
+        's',
+        impl,
+      );
+      expect(result).toMatchObject({
+        kind: 'INVALID',
+        message: 'A completed request cannot be referred to a workshop',
+      });
     });
   });
 

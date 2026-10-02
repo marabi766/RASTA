@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { APPROVAL_TOTAL_CHANGED_MESSAGE } from '@/server/maintenance-commands';
 
 import { ApproveRequestForm, AssignWorkshopForm, CancelRequestForm } from './RequestCommandForms';
@@ -27,6 +27,7 @@ jest.mock('react', () => {
 const CSRF = 'csrf-token-for-this-session';
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const REQUEST = 'MNT_01J00000000000000000000000';
+const BASELINE = 'signed-baseline-token';
 const IDENTITY = { csrfToken: CSRF, submissionId: SUBMISSION, requestId: REQUEST };
 
 /** Physical-direction utilities that would break the right-to-left layout. */
@@ -51,7 +52,8 @@ const FORMS = [
   },
   {
     name: 'the approve form',
-    render: () => render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" />),
+    render: () =>
+      render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />),
     button: 'تأیید هزینه',
     busy: 'در حال تأیید…',
   },
@@ -157,16 +159,28 @@ describe('the assign form', () => {
 
 describe('the approve form', () => {
   it('states the sum being approved, in Persian digits, and that it is final', () => {
-    render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" />);
+    render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />);
     expect(screen.getByText(/برای تسویه مجاز می‌شود/)).toHaveTextContent('۱۲');
     expect(screen.getByText(/نهایی است/)).toBeInTheDocument();
   });
 
-  it('echoes the Latin-digit total it showed in a hidden field the person does not edit', () => {
-    const { container } = render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" />);
-    const echo = container.querySelector('input[name="expectedTotalCostMinor"]');
-    expect(echo).toHaveValue('12500000');
-    expect(echo).toHaveAttribute('type', 'hidden');
+  it('carries the signed baseline, and no field the person could use to name another amount or request', () => {
+    const { container } = render(
+      <ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />,
+    );
+    const baseline = container.querySelector(`input[name="${BASELINE_FIELD}"]`);
+    expect(baseline).toHaveValue(BASELINE);
+    expect(baseline).toHaveAttribute('type', 'hidden');
+    // The amount rides in the baseline only: a plain hidden copy would be one
+    // more field a script could rewrite.
+    expect(container.querySelector('input[name="expectedTotalCostMinor"]')).toBeNull();
+  });
+
+  it('says so when the baseline was refused, and offers a way forward', () => {
+    setState({ kind: 'REFUSED', reason: 'BASELINE' });
+    render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('صفحه را تازه کنید');
+    expect(screen.getByRole('alert')).toHaveTextContent('مبلغ نمایش‌داده‌شده');
   });
 
   it('shows a problem with the echoed total as a warning, since there is no field to put it on', () => {
@@ -177,7 +191,7 @@ describe('the approve form', () => {
       fieldErrors: { expectedTotalCostMinor: 'مبلغ نمایش‌داده‌شده معتبر نیست؛ صفحه را تازه کنید' },
       message: null,
     });
-    render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" />);
+    render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />);
     expect(screen.getByRole('alert')).toHaveTextContent('صفحه را تازه کنید');
   });
 
@@ -189,7 +203,9 @@ describe('the approve form', () => {
       fieldErrors: { notes: 'یادداشت را کامل کنید' },
       message: APPROVAL_TOTAL_CHANGED_MESSAGE,
     });
-    const { container } = render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" />);
+    const { container } = render(
+      <ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />,
+    );
     expect(container.querySelector('textarea[name="notes"]')).toHaveValue('یادداشت من');
   });
 });
