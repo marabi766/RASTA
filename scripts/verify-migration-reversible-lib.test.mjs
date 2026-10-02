@@ -1065,10 +1065,115 @@ function runnableSources() {
  */
 const URL_FLAG_REFUSAL_TESTS = new Set(['scripts/outbox-b2-vacuum.pg.test.mjs']);
 
-test('no database url reaches a command line (D-045 follow-up)', () => {
+/** Every shell script the repository runs, outside node_modules. */
+function shellScripts() {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(?:sh|bash)$/.test(entry.name)) files.push(path);
+    }
+  };
+  ['infrastructure', 'scripts'].forEach((root) => walk(join(ROOT, root)));
+  return files;
+}
+
+const PG_CLIENT =
+  /(?<![\w./-])(psql|pg_dump|pg_dumpall|pg_restore|createdb|createuser|dropdb|dropuser)\b/g;
+
+/**
+ * Each PostgreSQL client command in a shell script, as written: from the
+ * program name to the end of the command — an unquoted newline that is not a
+ * line continuation, or an unquoted `|`, `;` or `&`. Quoted text may span
+ * lines. Comment lines are skipped.
+ */
+function pgClientCommands(source) {
+  const commands = [];
+  for (const match of source.matchAll(PG_CLIENT)) {
+    const lineStart = source.lastIndexOf('\n', match.index) + 1;
+    if (source.slice(lineStart, match.index).trimStart().startsWith('#')) continue;
+    let quote = null;
+    let end = match.index;
+    for (; end < source.length; end += 1) {
+      const char = source[end];
+      if (quote) {
+        if (char === '\\' && quote === '"') end += 1;
+        else if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === '\\') end += 1;
+      else if (char === '\n' || char === '|' || char === ';' || char === '&') break;
+    }
+    commands.push({
+      text: source.slice(match.index, end),
+      line: source.slice(0, match.index).split('\n').length,
+    });
+  }
+  return commands;
+}
+
+/**
+ * Why a PostgreSQL client command's argv could carry a credential, or null.
+ * Its `-c` text must be literal SQL with no password in it — a bare
+ * expansion (`-c "$2"`, `-c "${sql}"`) can carry anything a caller passes,
+ * an ALTER ROLE … PASSWORD included, so such SQL goes on stdin (`-f -`).
+ */
+function pgClientArgvProblem(command) {
+  if (/postgres(?:ql)?:\/\/[^\s"'/@:]+:[^\s"'@$]+@/.test(command)) return 'a credentialed URI';
+  for (const [, quoted] of command.matchAll(
+    /\s(?:-[A-Za-z]*c|--command)(?:\s+|=)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g,
+  )) {
+    if (/PASSWORD/i.test(quoted)) return 'a PASSWORD in its -c text';
+    if (/^["']?\$(?:\{?\w+\}?|\d)["']?$/.test(quoted)) {
+      return `-c ${quoted}, which could carry any SQL, a password included (use -f - and stdin)`;
+    }
+  }
+  return null;
+}
+
+test('no PostgreSQL client in a shell script gets a credential in its argv (D-045 follow-up)', () => {
+  const offenders = [];
+  let seen = 0;
+  for (const file of shellScripts()) {
+    for (const command of pgClientCommands(readFileSync(file, 'utf8'))) {
+      seen += 1;
+      const problem = pgClientArgvProblem(command.text);
+      if (problem) offenders.push(`${file.slice(ROOT.length)}:${command.line}: ${problem}`);
+    }
+  }
+  assert.ok(seen > 5, `only ${seen} psql invocations found — the scan is not reading the scripts`);
+  assert.deepEqual(offenders, []);
+});
+
+test('the shell argv rule catches what it must and passes what it may', () => {
+  for (const bad of [
+    'psql -v ON_ERROR_STOP=1 --dbname "$1" -c "$2"',
+    'psql -X -q -c "${sql}"',
+    'psql -X -tAc "$1"',
+    'psql --command="$2"',
+    `psql -c "ALTER ROLE r WITH PASSWORD '\${pw}'"`,
+    'psql "postgresql://u:secret@db/x" -c "SELECT 1"',
+  ]) {
+    assert.notEqual(pgClientArgvProblem(bad), null, bad);
+  }
+  for (const good of [
+    'psql -v ON_ERROR_STOP=1 --dbname "$1" -f -',
+    `psql -tAc "SELECT 1 FROM pg_database WHERE datname='\${db}'" --username "$POSTGRES_USER" postgres`,
+    'psql -X -q -tA -h 127.0.0.1 --username "$role" -c \'SELECT 1\'',
+    'psql "postgresql://rasta_economic@localhost:5432/rasta_economic" -c "SELECT 1"',
+  ]) {
+    assert.equal(pgClientArgvProblem(good), null, good);
+  }
+});
+
+test('our code puts no database url on a command line (D-045 follow-up; Prisma itself: D-047)', () => {
   // A process's argv is readable by every local user while it runs (`ps`,
   // /proc/<pid>/cmdline). Prisma takes the url from the environment through
   // `--schema`; psql takes the password from PGPASSWORD (libpqInvocation).
+  // This holds for the commands *we* start. Prisma's own schema-engine child
+  // still receives the url as `--datasource` during migrate commands — a
+  // third-party residual recorded as D-047 in docs/23, not covered here.
   const urlFlag = new RegExp(`['"]--${'url'}['"]`);
   const spawnsPsql = /spawn(?:Sync)?\(\s*'psql'/;
   const offenders = [];

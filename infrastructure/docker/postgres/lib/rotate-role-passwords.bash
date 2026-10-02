@@ -30,8 +30,12 @@ resolve_role_passwords || exit 1
 
 : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
 
+# SQL goes to psql on stdin (`-f -`), never as `-c` text: some of it carries
+# a role's password (ALTER ROLE … PASSWORD), and a process's argv is readable
+# by every local user while it runs (D-045 follow-up, Codex on #191). `printf`
+# is a shell builtin, so the text is never an argument of any process either.
 superuser_sql() {
-  psql -v ON_ERROR_STOP=1 -X -q -tA --username "$POSTGRES_USER" --dbname postgres -c "$1"
+  printf '%s\n' "$1" | psql -v ON_ERROR_STOP=1 -X -q -tA --username "$POSTGRES_USER" --dbname postgres -f -
 }
 
 # The database each role logs into for the check: a service's runtime role is

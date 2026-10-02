@@ -41,8 +41,12 @@ SERVICES=("${RASTA_SERVICES[@]}")
 # Infrastructure databases that are not owned by a Rasta service.
 INFRA_DATABASES=(keycloak temporal temporal_visibility)
 
+# SQL goes to psql on stdin (`-f -`), never as `-c` text: some of it carries
+# a role's password (ALTER ROLE … PASSWORD), and a process's argv is readable
+# by every local user while it runs (D-045 follow-up, Codex on #191). `printf`
+# is a shell builtin, so the text is never an argument of any process either.
 psql_exec() {
-  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$1" -c "$2"
+  printf '%s\n' "$2" | psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$1" -f -
 }
 
 echo "==> Creating per-service roles and databases"
