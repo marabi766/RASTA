@@ -51,6 +51,21 @@ export const CONTRACTOR_ROLE = 'CONTRACTOR';
 const OVERSIGHT_ROLE = 'AUDITOR';
 
 /**
+ * Roles that never open or read a bid, refused whenever present whatever else the user holds.
+ * ONE list, for the token's roles and for the live roles identity-service reports alike, so
+ * the two checks cannot drift apart.
+ */
+const BID_EXCLUDED_ROLES: readonly string[] = [SUPER_ROLE, CONTRACTOR_ROLE, OVERSIGHT_ROLE];
+
+function assertNoBidExcludedRole(roles: readonly string[]): void {
+  for (const refused of BID_EXCLUDED_ROLES) {
+    if (roles.includes(refused)) {
+      throw RastaError.forbidden(`The ${refused} role does not open or read bids`);
+    }
+  }
+}
+
+/**
  * Q-70 (7), decided 2026-09-26: the union administrator writes approval
  * policies for the organizations under its union; the platform administrator
  * may write one for any organization and is the only one who puts a policy in
@@ -94,7 +109,7 @@ export class ProjectAccess {
       env.CONSTRUCTION_TENDER_OPEN_ROLES.length > 0
         ? env.CONSTRUCTION_TENDER_OPEN_ROLES
         : env.CONSTRUCTION_PROJECT_ROLES
-    ).filter((role) => role !== SUPER_ROLE && role !== CONTRACTOR_ROLE);
+    ).filter((role) => !BID_EXCLUDED_ROLES.includes(role));
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
     this.policyReaders = [...new Set([...this.readers, UNION_ROLE])];
   }
@@ -324,16 +339,11 @@ export class ProjectAccess {
     actor: string;
     organizationIds: readonly string[];
   } {
-    assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
     // Refused whenever present, whatever else the user holds: a role that must never see
     // a bid is not made harmless by a second, granted one.
-    for (const refused of [SUPER_ROLE, CONTRACTOR_ROLE]) {
-      if (context.roles.includes(refused)) {
-        throw RastaError.forbidden(`The ${refused} role does not open or read bids`);
-      }
-    }
+    assertNoBidExcludedRole(context.roles);
     if (!this.bidOpeners.some((role) => context.roles.includes(role))) {
       throw RastaError.insufficientRole(this.bidOpeners, context.roles);
     }
@@ -356,11 +366,7 @@ export class ProjectAccess {
    * or a demotion, and a bid's content is not read on a stale claim. The token may only narrow.
    */
   assertLiveRolesMayOpenBids(liveRoles: readonly string[]): void {
-    for (const refused of [SUPER_ROLE, CONTRACTOR_ROLE]) {
-      if (liveRoles.includes(refused)) {
-        throw RastaError.forbidden(`The ${refused} role does not open or read bids`);
-      }
-    }
+    assertNoBidExcludedRole(liveRoles);
     if (!this.bidOpeners.some((role) => liveRoles.includes(role))) {
       throw RastaError.forbidden(
         'The caller no longer holds a role that opens or reads bids in this organization',

@@ -95,10 +95,14 @@ describe('MembershipClient against the identity-service contract', () => {
     );
 
   it('reads a user’s live memberships and roles with a tenant-less construction-service token', async () => {
-    expect(await client().fetchMemberships('USR_ONE')).toEqual([
-      { organizationId: 'ORG_A', roles: ['ORGANIZATION_ADMIN'] },
-      { organizationId: 'ORG_B', roles: ['OPERATOR', 'ORGANIZATION_ADMIN'] },
-    ]);
+    expect(await client().fetchMemberships('USR_ONE')).toEqual({
+      memberships: [
+        { organizationId: 'ORG_A', roles: ['ORGANIZATION_ADMIN'] },
+        { organizationId: 'ORG_B', roles: ['OPERATOR', 'ORGANIZATION_ADMIN'] },
+      ],
+      // identity-service's own clock as it answered: the start of the conflict window.
+      asOf: new Date('2026-10-02T10:00:00.000Z'),
+    });
     expect(seen).toEqual([
       {
         url: '/v1/users/USR_ONE/organizations',

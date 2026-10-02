@@ -39,10 +39,16 @@ export interface LiveMembership {
   roles: readonly string[];
 }
 
+/** The live memberships of a user and the instant (identity-service's clock) they were read at. */
+export interface LiveAnswer {
+  memberships: readonly LiveMembership[];
+  asOf: Date;
+}
+
 /** The seam the conflict check and the owner-side authorisation read through; tests put an answer in directly. */
 export interface MembershipSource {
-  /** The live memberships of `userId` **now**, with their roles. Throws when it cannot say. */
-  fetchMemberships(userId: string): Promise<readonly LiveMembership[]>;
+  /** The live memberships of `userId` **now**, with their roles, and when. Throws when it cannot say. */
+  fetchMemberships(userId: string): Promise<LiveAnswer>;
   /**
    * The organizations `userId` held a membership in at any time between `from` and the
    * moment identity-service answered (the detective control), and that moment (`asOf`).
@@ -74,8 +80,9 @@ export class MembershipClient implements MembershipSource {
     private readonly tokens: InternalTokenService,
   ) {}
 
-  async fetchMemberships(userId: string): Promise<readonly LiveMembership[]> {
-    return (await this.read(userId, '', liveSchema)).memberships;
+  async fetchMemberships(userId: string): Promise<LiveAnswer> {
+    const answer = await this.read(userId, '', liveSchema);
+    return { memberships: answer.memberships, asOf: new Date(answer.asOf) };
   }
 
   async fetchOrganizationIdsSince(

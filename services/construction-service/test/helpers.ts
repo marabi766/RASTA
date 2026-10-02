@@ -40,7 +40,7 @@ import { TenderClock } from '../src/tender/tender-clock';
 import { TenderOpenRepository } from '../src/tender/tender-open.repository';
 import { TenderOpenService } from '../src/tender/tender-open.service';
 import { BidAccessAudit } from '../src/tender/bid-access-audit';
-import type { LiveMembership, MembershipSource } from '../src/tender/membership.client';
+import type { LiveAnswer, LiveMembership, MembershipSource } from '../src/tender/membership.client';
 import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
 import { genesisReceipt } from '../src/tender/sealing/sealing';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
@@ -495,7 +495,15 @@ export class FakeMemberships implements MembershipSource {
   /** Runs once, before identity-service answers for that user: something happens in the race. */
   readonly beforeAnswer = new Map<string, () => Promise<void>>();
 
-  async fetchMemberships(userId: string): Promise<readonly LiveMembership[]> {
+  /** identity-service's clock as it answers a live read; absent = now. */
+  liveAsOf: Date | undefined;
+  /**
+   * Memberships by the instants they held, answered over the interval after an opening
+   * honestly: one that ended before `from` is not in the answer.
+   */
+  readonly history = new Map<string, { organizationId: string; start: Date; end: Date | null }[]>();
+
+  async fetchMemberships(userId: string): Promise<LiveAnswer> {
     this.asked.push(userId);
     if (this.failure) throw this.failure;
     const hook = this.beforeAnswer.get(userId);
@@ -514,7 +522,7 @@ export class FakeMemberships implements MembershipSource {
         roles: this.rolesOf.get(userId) ?? request.roles,
       });
     }
-    return [...byOrganization.values()];
+    return { memberships: [...byOrganization.values()], asOf: this.liveAsOf ?? new Date() };
   }
 
   /** Back to the default: nobody belongs to anything, nothing fails, nothing asked. */
@@ -522,6 +530,8 @@ export class FakeMemberships implements MembershipSource {
     this.failure = undefined;
     this.sinceFailure = undefined;
     this.intervalAsOf = undefined;
+    this.liveAsOf = undefined;
+    this.history.clear();
     this.of.clear();
     this.revoked.clear();
     this.rolesOf.clear();
@@ -540,9 +550,15 @@ export class FakeMemberships implements MembershipSource {
   ): Promise<{ organizationIds: readonly string[]; asOf: Date }> {
     this.askedSince.push({ userId, from });
     if (this.failure ?? this.sinceFailure) throw (this.failure ?? this.sinceFailure)!;
+    const asOf = this.intervalAsOf ?? new Date();
+    const held = (this.history.get(userId) ?? [])
+      .filter((m) => m.start <= asOf && (m.end === null || m.end >= from))
+      .map((m) => m.organizationId);
     return {
-      organizationIds: this.since.get(userId) ?? this.of.get(userId) ?? [],
-      asOf: this.intervalAsOf ?? new Date(),
+      organizationIds: [
+        ...new Set([...(this.since.get(userId) ?? this.of.get(userId) ?? []), ...held]),
+      ],
+      asOf,
     };
   }
 }

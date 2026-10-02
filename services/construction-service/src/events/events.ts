@@ -649,10 +649,11 @@ export const bidOpeningProposalWithdrawnPayload = z
   .strict();
 
 /**
- * After an opening committed, identity-service said that the proposer or the approver was a
- * member of a bidding organization at that very instant — the race the conflict check at the
- * approval cannot close (ADR-066 § 4, residual). The detective control: ids only, who and
- * which of the bidding organizations (at most 100 each; `organizationCount` is the whole).
+ * After an opening committed, identity-service said that the proposer or the approver held a
+ * membership of a bidding organization at some time in the window `windowStart`..`checkedAt`
+ * — the race the conflict check at the approval cannot close (ADR-066 § 4, residual). The
+ * detective control: ids only, who and which of the bidding organizations (at most 100 each;
+ * `organizationCount` is the whole).
  */
 export const bidOpeningConflictDetectedPayload = z
   .object({
@@ -661,7 +662,9 @@ export const bidOpeningConflictDetectedPayload = z
     openedAt: isoTimestamp,
     openedBy: identifier,
     proposedBy: identifier.nullable(),
-    /** The instant identity-service was asked about: the opening's commit. */
+    /** The start of the window: the earliest of the identity reads at the approval and the decision instant. */
+    windowStart: isoTimestamp,
+    /** The end of the window: identity-service's clock as it answered, after the commit. */
     checkedAt: isoTimestamp,
     conflicts: z
       .array(

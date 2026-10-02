@@ -175,7 +175,7 @@ describe('opening and reading bids (ADR-066 § 4)', () => {
         },
       );
 
-      it.each(['SYSTEM_ADMIN', 'CONTRACTOR'])(
+      it.each(['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR'])(
         'refuses %s even alongside an authorised role',
         (role) => {
           expect(() => access.assertLiveRolesMayOpenBids([role, 'ORGANIZATION_ADMIN'])).toThrow(

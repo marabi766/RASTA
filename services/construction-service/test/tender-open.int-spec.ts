@@ -1208,6 +1208,27 @@ describe('opening the bids of a tender', () => {
       });
     });
 
+    it('refuses an administrator who has since been given AUDITOR, though the token still says only ORGANIZATION_ADMIN: every role the token side refuses, refused live', async () => {
+      const { owner, tenderId } = await closedTender();
+      await open(owner, tenderId);
+      const [bid] = await bidRows(tenderId);
+      const calls: Array<() => Promise<unknown>> = [
+        () => w.tenderOpen.listBids(tenderId),
+        () => w.tenderOpen.getBid(tenderId, bid!.id),
+        () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
+        () => w.tenderOpen.open(tenderId),
+      ];
+      for (const role of ['AUDITOR', 'SYSTEM_ADMIN', 'CONTRACTOR']) {
+        w.memberships.rolesOf.set(carol, ['ORGANIZATION_ADMIN', role]);
+        for (const call of calls) {
+          expect(await codeOf(asCarol(owner, call))).toMatchObject({ code: 'FORBIDDEN' });
+        }
+      }
+      // Without it she reads again.
+      w.memberships.rolesOf.set(carol, ['ORGANIZATION_ADMIN']);
+      expect((await asCarol(owner, () => w.tenderOpen.listBids(tenderId))).opened).toBe(true);
+    });
+
     it('fails closed on every owner read when identity-service cannot say: nothing shown, counted as identity_unavailable', async () => {
       const { owner, tenderId } = await closedTender();
       await open(owner, tenderId);
@@ -1544,6 +1565,9 @@ describe('opening the bids of a tender', () => {
         w4.memberships.since.set(alice, [bidders[0]!, bidders[1]!]);
         const asOf = new Date(Date.now() + 5_000);
         w4.memberships.intervalAsOf = asOf;
+        // Both identity reads at the approval were made a minute before the decision instant.
+        const read = new Date(Date.now() - 60_000);
+        w4.memberships.liveAsOf = read;
         const before = await checks('conflict');
 
         const view = await approve(owner, tenderId, bob);
@@ -1555,9 +1579,11 @@ describe('opening the bids of a tender', () => {
           [alice, bob].sort(),
         );
         for (const ask of w4.memberships.askedSince) {
-          // The interval opens at the decision instant itself — not at some later "commit" instant,
-          // from which a membership that began in between would be missed.
-          expect(ask.from.getTime()).toBe(row.openedAt!.getTime());
+          // The interval opens at the earliest of the identity reads and the decision instant —
+          // not at the decision (a membership that came and went in between would be missed),
+          // and not at a later "commit" instant.
+          expect(ask.from.getTime()).toBe(read.getTime());
+          expect(ask.from.getTime()).toBeLessThan(row.openedAt!.getTime());
         }
         const [event] = await eventsOf(owner, 'BID_OPENING_CONFLICT_DETECTED', tenderId);
         const payload = payloadOf(event!) as { conflicts: unknown[] };
@@ -1566,8 +1592,9 @@ describe('opening the bids of a tender', () => {
           organizationId: owner,
           openedBy: bob,
           proposedBy: alice,
-          // The window: opened at the decision, checked as identity-service answered.
+          // The window: from the earliest identity read, to identity-service's answer.
           openedAt: row.openedAt!.toISOString(),
+          windowStart: read.toISOString(),
           checkedAt: asOf.toISOString(),
         });
         expect(payload.conflicts).toEqual(
@@ -1588,6 +1615,36 @@ describe('opening the bids of a tender', () => {
         );
         // Ids only: nothing of any bid.
         expect(JSON.stringify(payload)).not.toContain('priceMinor');
+      });
+
+      it('detects a membership created AFTER the approver’s identity read and revoked BEFORE the decision instant', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        const read = new Date(Date.now() - 10_000);
+        w4.memberships.liveAsOf = read;
+        // Joined a bidder 8s ago, left it 6s ago: after the read, and over before the decision (now).
+        w4.memberships.history.set(bob, [
+          {
+            organizationId: bidders[0]!,
+            start: new Date(read.getTime() + 2_000),
+            end: new Date(read.getTime() + 4_000),
+          },
+        ]);
+        const before = await checks('conflict');
+
+        expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
+
+        const row = await rowOf(tenderId);
+        // Its end is before the decision instant: a window starting there would have missed it.
+        expect(read.getTime() + 4_000).toBeLessThan(row.openedAt!.getTime());
+        expect(await checks('conflict')).toBe(before + 1);
+        const [event] = await eventsOf(owner, 'BID_OPENING_CONFLICT_DETECTED', tenderId);
+        expect(payloadOf(event!)).toMatchObject({
+          windowStart: read.toISOString(),
+          conflicts: [
+            { userId: bob, role: 'APPROVER', organizationIds: [bidders[0]!], organizationCount: 1 },
+          ],
+        });
       });
 
       it('says nothing when neither held a bidder’s membership in the window', async () => {

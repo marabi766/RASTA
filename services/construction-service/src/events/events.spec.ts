@@ -250,6 +250,7 @@ Object.assign(VALID, {
     openedAt: AT,
     openedBy: 'USR_1',
     proposedBy: 'USR_2',
+    windowStart: AT,
     checkedAt: AT,
     conflicts: [
       { userId: 'USR_2', role: 'PROPOSER', organizationIds: ['ORG_B'], organizationCount: 1 },

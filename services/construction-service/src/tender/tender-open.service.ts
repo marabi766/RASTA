@@ -21,7 +21,7 @@ import { BidAccessAudit } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
 import { TenderOpenRepository, type TenderForOpening } from './tender-open.repository';
 import { compareChains } from './chain-agreement';
-import type { LiveMembership, MembershipSource } from './membership.client';
+import type { LiveAnswer, MembershipSource } from './membership.client';
 import { SealingError } from './sealing/errors';
 import type { TenderKeyProvider } from './sealing/key-provider';
 import {
@@ -74,15 +74,23 @@ interface ApprovalPeople {
   proposedBy: string;
   proposedAt: Date;
   proposerOrganizationIds: readonly string[];
+  /** identity-service's clock when it said so: the proposer's membership is known from here on. */
+  proposerReadAt: Date;
   organizationIds: readonly string[];
 }
 
-/** What a committed opening leaves for the check after it: who, with whom, and the decision instant that opens the window to watch. */
+/** What a committed opening leaves for the check after it: who, with whom, and the window to watch. */
 interface OpeningFacts {
   tenderId: string;
   owner: string;
-  /** The decision instant (database clock, inside the transaction, before the commit): the window to watch starts here. */
+  /** The decision instant (database clock, inside the transaction, before the commit). */
   openedAt: Date;
+  /**
+   * Where the window to watch starts: the earliest of the decision instant and the identity
+   * reads at the approval. A membership created after a read and ended before the decision
+   * would otherwise end before the window began.
+   */
+  windowFrom: Date;
   openedBy: string;
   proposedBy: string | null;
   bidderOrganizationIds: readonly string[];
@@ -98,6 +106,11 @@ interface Principal {
   organizationId: string;
   actor: string;
   organizationIds: readonly string[];
+}
+
+/** A caller identity-service has been asked about: and when (its clock) it answered. */
+interface LivePrincipal extends Principal {
+  identityReadAt: Date;
 }
 
 /** The evidence, read and checked: the chain as audit-service holds it, and the receipts made from it. */
@@ -189,7 +202,8 @@ interface Evidence {
  * No lock spans identity-service and this one: a membership created after the identity read
  * at the approval and before the opening commits is not stopped (ADR-066 § 4). After each
  * commit identity-service is asked which organizations the proposer and the approver held a
- * membership in at any time from the decision instant to its answer
+ * membership in at any time from the earliest of their identity reads at the approval and the
+ * decision instant to its answer
  * (`checkOpeningForConflicts`); a bidding organization among them raises an alert and
  * `BID_OPENING_CONFLICT_DETECTED`. The opening stands; a person decides.
  *
@@ -254,7 +268,7 @@ export class TenderOpenService {
 
   private async openIn(
     tx: ExtendedPrismaClient,
-    principal: Principal,
+    principal: LivePrincipal,
     tenderId: string,
     evidence: Evidence | undefined,
     people: ApprovalPeople | undefined,
@@ -376,6 +390,15 @@ export class TenderOpenService {
         tenderId,
         owner: principal.organizationId,
         openedAt: at,
+        // The membership of each is known from its identity read; before that, nothing is
+        // claimed. The earliest of them and the decision: nothing after a read is left out.
+        windowFrom: new Date(
+          Math.min(
+            at.getTime(),
+            principal.identityReadAt.getTime(),
+            people?.proposerReadAt.getTime() ?? Infinity,
+          ),
+        ),
         openedBy: principal.actor,
         proposedBy: locked.openingProposedBy,
         bidderOrganizationIds: [...new Set(bids.map((bid) => bid.bidderOrganizationId))],
@@ -772,19 +795,19 @@ export class TenderOpenService {
       return undefined;
     }
     // The approver is already read: `principal` is live (identity-service and the token together).
-    const proposer = (await this.fetchMemberships(proposedBy)).map(
-      (membership) => membership.organizationId,
-    );
+    const read = await this.fetchMemberships(proposedBy);
+    const proposer = read.memberships.map((membership) => membership.organizationId);
     return {
       proposedBy,
       proposedAt,
       proposerOrganizationIds: proposer,
+      proposerReadAt: read.asOf,
       organizationIds: [...new Set([...proposer, ...principal.organizationIds])],
     };
   }
 
   /** Identity-service's word on whom a user belongs to now; anything less is a refusal, counted (a warning alert). */
-  private async fetchMemberships(userId: string): Promise<readonly LiveMembership[]> {
+  private async fetchMemberships(userId: string): Promise<LiveAnswer> {
     try {
       return await this.memberships.fetchMemberships(userId);
     } catch (error) {
@@ -805,8 +828,8 @@ export class TenderOpenService {
    * here, and an organization the token claims still counts. Every owner-side read of a bid's
    * content or metadata, and every opening, repeat ones included, goes through this.
    */
-  private async livePrincipal(principal: Principal): Promise<Principal> {
-    const live = await this.fetchMemberships(principal.actor);
+  private async livePrincipal(principal: Principal): Promise<LivePrincipal> {
+    const { memberships: live, asOf } = await this.fetchMemberships(principal.actor);
     const owner = live.find((membership) => membership.organizationId === principal.organizationId);
     if (!owner) {
       throw RastaError.forbidden(
@@ -816,6 +839,7 @@ export class TenderOpenService {
     this.access.assertLiveRolesMayOpenBids(owner.roles);
     return {
       ...principal,
+      identityReadAt: asOf,
       organizationIds: [
         ...new Set([
           ...live.map((membership) => membership.organizationId),
@@ -918,11 +942,13 @@ export class TenderOpenService {
    * read and the commit of the opening is not stopped. The application cannot read the commit
    * instant, so it watches an **interval**: after the commit, identity-service is asked
    * whether the proposer or the approver held a membership of any bidding organization at any
-   * time from the decision instant (read inside the transaction, before the commit) to the
-   * moment it answers, which is after the commit. Conservative on purpose: a membership that
-   * began and ended inside the window, or began after the commit, is a false positive, and a
-   * false positive is an alert. On a hit: the alert (a counter that pages) and
-   * `BID_OPENING_CONFLICT_DETECTED` (ids only; window = `openedAt` to `checkedAt`) say it.
+   * time from `windowFrom` — the earliest of the identity reads at the approval and the
+   * decision instant, so that a membership created after a read and ended before the decision
+   * is inside it — to the moment it answers, which is after the commit. Conservative on
+   * purpose: a membership that began and ended inside the window, or began after the commit,
+   * is a false positive, and a false positive is an alert. On a hit: the alert (a counter
+   * that pages) and `BID_OPENING_CONFLICT_DETECTED` (ids only; window = `windowStart` to
+   * `checkedAt`) say it.
    * Never in the way of the answer: the opening stands, and a check that could not be made is
    * counted and logged, not retried.
    */
@@ -941,12 +967,12 @@ export class TenderOpenService {
       organizationCount: number;
     }[] = [];
     // The end of the window: identity-service's clock as it answered, the latest of the answers.
-    let checkedAt = opening.openedAt;
+    let checkedAt = opening.windowFrom;
     try {
       for (const person of people) {
         const held = await this.memberships.fetchOrganizationIdsSince(
           person.userId,
-          opening.openedAt,
+          opening.windowFrom,
         );
         if (held.asOf.getTime() > checkedAt.getTime()) checkedAt = held.asOf;
         const shared = [
@@ -990,6 +1016,7 @@ export class TenderOpenService {
             openedAt: opening.openedAt.toISOString(),
             openedBy: opening.openedBy,
             proposedBy: opening.proposedBy,
+            windowStart: opening.windowFrom.toISOString(),
             checkedAt: checkedAt.toISOString(),
             conflicts,
           },
