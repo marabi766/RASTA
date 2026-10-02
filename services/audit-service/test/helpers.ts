@@ -175,6 +175,10 @@ export const PROTECTIVE_TRIGGERS = [
   'audit_event_append_only_truncate',
   'audit_chain_head_forward_only',
   'audit_chain_head_no_truncate',
+  'tg_tender_receipt_link_append_only',
+  'tg_tender_receipt_link_no_truncate',
+  'tg_bid_access_evidence_append_only',
+  'tg_bid_access_evidence_no_truncate',
 ] as const;
 
 /** One `(chain_scope, organization_id, chain_month)` a run wrote into. */
@@ -373,6 +377,20 @@ export async function cleanupRun(
       'ALTER TABLE audit_chain_head ENABLE TRIGGER audit_chain_head_forward_only',
     );
     await tx.$executeRawUnsafe('ALTER TABLE audit_event ENABLE TRIGGER audit_event_append_only');
+
+    // Receipts a run left held (a work queue: no trigger to lift).
+    await tx.$executeRawUnsafe(`DELETE FROM tender_receipt_pending WHERE tender_id LIKE $1`, like);
+
+    // The tender-evidence rows the run wrote (append-only for everybody, so the owner
+    // lifts the row triggers for the length of this transaction, like the two above).
+    for (const [table, trigger] of [
+      ['tender_receipt_link', 'tg_tender_receipt_link_append_only'],
+      ['bid_access_evidence', 'tg_bid_access_evidence_append_only'],
+    ] as const) {
+      await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+      await tx.$executeRawUnsafe(`DELETE FROM ${table} WHERE tender_id LIKE $1`, like);
+      await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+    }
 
     await tx.$executeRawUnsafe(`DELETE FROM processed_event WHERE event_id LIKE $1`, like);
     await tx.$executeRawUnsafe(`DELETE FROM organization_ref WHERE organization_id LIKE $1`, like);

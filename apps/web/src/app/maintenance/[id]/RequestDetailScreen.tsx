@@ -45,10 +45,10 @@ export interface RequestDetailScreenProps {
   readonly result: ReadResult<MaintenanceRequestDetail>;
   readonly requestId: string;
   /**
-   * Set by the write that sent the person here (`?created=1`). Display only:
-   * the query is attacker-controllable, so it can at worst put a harmless
-   * confirmation on a page the viewer is already allowed to read — and it is
-   * not rendered at all when the read failed.
+   * What the write that sent the person here did — decided by the page, which
+   * accepts it only from a flash the server signed for this session and this
+   * request (`server/flash.ts`), never from a bare query value. Not rendered at
+   * all when the read failed.
    */
   readonly notice?: 'created';
 }

@@ -176,6 +176,51 @@ Object.assign(VALID, {
     invitedBy: 'USR_1',
     invitedAt: AT,
   },
+  BID_SUBMITTED: {
+    bidId: 'BID_1',
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    bidderOrganizationId: 'ORG_B',
+    revision: 1,
+    receivedAt: AT,
+    contentCommitment: 'a'.repeat(64),
+    ciphertextSha256: 'b'.repeat(64),
+    previousReceipt: 'c'.repeat(64),
+    receipt: 'd'.repeat(64),
+    submittedBy: 'USR_9',
+  },
+  BID_REVISED: {
+    bidId: 'BID_1',
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    bidderOrganizationId: 'ORG_B',
+    revision: 2,
+    receivedAt: AT,
+    contentCommitment: 'a'.repeat(64),
+    ciphertextSha256: 'b'.repeat(64),
+    previousReceipt: 'c'.repeat(64),
+    receipt: 'd'.repeat(64),
+    submittedBy: 'USR_9',
+  },
+  BID_WITHDRAWN: {
+    bidId: 'BID_1',
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    bidderOrganizationId: 'ORG_B',
+    revision: 2,
+    withdrawnAt: AT,
+    withdrawnBy: 'USR_9',
+  },
+  BID_ACCESSED: {
+    bidId: 'BID_1',
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    accessorOrganizationId: 'ORG_B',
+    accessedBy: 'USR_9',
+    purpose: 'OWN_BID_RECEIPT',
+    outcome: 'GRANTED',
+    accessedAt: AT,
+  },
   CRITERIA_TEMPLATE_CREATED: {
     templateId: 'CTP_1',
     organizationId: 'ORG_A',
@@ -195,6 +240,10 @@ const TENDER_EVENTS = [
   'TENDER_CRITERIA_SET',
   'TENDER_PUBLISHED',
   'TENDER_BIDDER_INVITED',
+  'BID_SUBMITTED',
+  'BID_REVISED',
+  'BID_WITHDRAWN',
+  'BID_ACCESSED',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -224,6 +273,10 @@ describe('the construction event catalogue', () => {
       'APPROVAL_POLICY_SUSPENDED',
       'APPROVAL_REJECTED',
       'APPROVAL_REQUESTED',
+      'BID_ACCESSED',
+      'BID_REVISED',
+      'BID_SUBMITTED',
+      'BID_WITHDRAWN',
       'CRITERIA_TEMPLATE_CREATED',
       'PROJECT_COMPLETED',
       'PROJECT_CREATED',
@@ -264,12 +317,40 @@ describe('the construction event catalogue', () => {
     expect(() => validateConstructionPayload(name, withoutOrganization)).toThrow();
   });
 
-  it.each(TENDER_EVENTS as typeof NAMES)(
+  it.each(TENDER_EVENTS.filter((name) => !name.startsWith('BID_')) as typeof NAMES)(
     '%s requires the tender, project and organization',
     (name) => {
       for (const field of ['tenderId', 'projectId', 'organizationId']) {
         const { [field]: _omitted, ...without } = VALID[name]!;
         expect(() => validateConstructionPayload(name, without)).toThrow();
+      }
+    },
+  );
+
+  // A bid event is keyed by its tender and names the owner and the bidder: no project.
+  it.each(TENDER_EVENTS.filter((name) => name.startsWith('BID_')) as typeof NAMES)(
+    '%s requires the tender and the owner, and carries no project',
+    (name) => {
+      for (const field of ['tenderId', 'organizationId']) {
+        const { [field]: _omitted, ...without } = VALID[name]!;
+        expect(() => validateConstructionPayload(name, without)).toThrow();
+      }
+      expect(Object.keys(VALID[name]!)).not.toContain('projectId');
+    },
+  );
+
+  it.each(['BID_SUBMITTED', 'BID_REVISED', 'BID_WITHDRAWN', 'BID_ACCESSED'] as typeof NAMES)(
+    '%s carries no content, price or ciphertext, however it is dressed',
+    (name) => {
+      for (const extra of [
+        { priceMinor: '1250000000' },
+        { content: { note: 'x' } },
+        { ciphertext: 'AAAA' },
+        { answers: [] },
+      ]) {
+        expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...extra })).toThrow(
+          /does not match its published contract/,
+        );
       }
     },
   );

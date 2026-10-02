@@ -197,8 +197,7 @@ export class SupplierService {
   async standingOf(organizationId: string): Promise<StandingOf> {
     assertCallerIsConstructionService();
 
-    const asOf = await this.repository.databaseInstant();
-    const row = await this.repository.findStandingOf(organizationId);
+    const { asOf, row } = await this.repository.findStandingOf(organizationId);
     return {
       organizationId,
       contractingApprovedAt: row?.qualifications[0]?.decidedAt?.toISOString() ?? null,

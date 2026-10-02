@@ -37,6 +37,12 @@ const assetSchema = z.object({
   model: z.string().nullable().default(null),
   manufactureYear: z.number().int().nullable().default(null),
   commissionedAt: z.string().nullable().default(null),
+  /**
+   * What an edit is made against (`expectedVersion`). Absent from a service
+   * that predates it, and then the edit form is not offered: an edit with no
+   * version is the lost update this exists to prevent.
+   */
+  version: z.number().int().min(1).optional(),
 });
 
 export type AssetSummary = z.infer<typeof assetSchema>;
