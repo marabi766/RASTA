@@ -147,6 +147,10 @@ ALTER TABLE "bid_evaluation_score" ADD CONSTRAINT "ck_bid_score_shape"
 -- Append-only, and only while the tender is EVALUATING
 -- =============================================================================
 
+-- Each guard takes the tender row FOR SHARE before it tests the status: it conflicts with the FOR UPDATE
+-- that `evaluate` (and every owner command) holds, so an insert cannot pass the EVALUATING check while the
+-- evaluation is being completed and then land after EVALUATED commits and change the frozen matrix.
+--
 -- Each trigger below reads the tender itself rather than calling a shared helper: a function a
 -- trigger calls needs EXECUTE for the runtime role, which the role split (D-045) does not give.
 -- A decision on a bid: the tender is EVALUATING, the bid is one of its own and still OPENED.
@@ -156,7 +160,8 @@ DECLARE
   bid_status text;
 BEGIN
   SELECT "status"::text INTO tender_status
-    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id"
+    FOR SHARE;
   IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
     RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
       USING ERRCODE = 'check_violation';
@@ -208,7 +213,8 @@ DECLARE
   bid_status text;
 BEGIN
   SELECT "status"::text INTO tender_status
-    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id"
+    FOR SHARE;
   IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
     RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
       USING ERRCODE = 'check_violation';
@@ -241,7 +247,8 @@ DECLARE
   bid_status text;
 BEGIN
   SELECT "status"::text INTO tender_status
-    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id"
+    FOR SHARE;
   IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
     RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
       USING ERRCODE = 'check_violation';
@@ -275,7 +282,8 @@ DECLARE
   previous integer;
 BEGIN
   SELECT "status"::text INTO tender_status
-    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id"
+    FOR SHARE;
   IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
     RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
       USING ERRCODE = 'check_violation';

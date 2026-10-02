@@ -299,6 +299,24 @@ describe('evaluating the opened bids of a tender', () => {
       expect((await qualify(owner, tenderId, down.bidId)).decision).toBe('QUALIFIED');
     });
 
+    it('answers an identical repeat from the record: no question to supplier-service, so a standing that is down or has changed does not fail it', async () => {
+      const { owner, tenderId, bids } = await evaluating(1);
+      const bid = bids[0]!;
+      const first = await qualify(owner, tenderId, bid.bidId);
+      const asked = SUPPLIER.asked.length;
+
+      SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
+      expect(await qualify(owner, tenderId, bid.bidId)).toEqual({ ...first, alreadyDecided: true });
+      SUPPLIER.failure = undefined;
+      SUPPLIER.suspend(bid.bidder, `SUS_${bid.bidder}`);
+      expect(await qualify(owner, tenderId, bid.bidId)).toEqual({ ...first, alreadyDecided: true });
+      expect(SUPPLIER.asked.length).toBe(asked);
+      // A NEW decision still asks, and a different one is still refused.
+      expect(await refusalOf(disqualify(owner, tenderId, bid.bidId))).toContain(
+        'BID_ALREADY_DECIDED',
+      );
+    });
+
     it('is refused for a bid that does not exist, for a withdrawn bid (never opened), and for a tender that is not EVALUATING', async () => {
       const owner = newOrganizationId();
       organizations.push(owner);
@@ -748,6 +766,62 @@ describe('evaluating the opened bids of a tender', () => {
         );
         expect((await codeOf(call)).code).toBe('FORBIDDEN');
       }
+      // Each of those acted for the tender's own organization: the refusal is audited, with its code.
+      const own = (await logOf(tenderId)).filter(
+        (row) => row.outcome === 'REFUSED' && row.accessorOrganizationId === owner,
+      );
+      expect(own).toHaveLength(4);
+      for (const row of own) {
+        expect(row).toMatchObject({
+          organizationId: owner,
+          purpose: 'QUALIFY_BID',
+          refusalCode: 'FORBIDDEN',
+        });
+      }
+      // The role refusals of every route are logged the same way.
+      const roleless = newUserId();
+      const routes: [string, () => Promise<unknown>][] = [
+        ['SCORE_BID', () => w.evaluation.score(tenderId, bids[0]!.bidId, { scores: FULL })],
+        ['RECUSE', () => w.evaluation.recuse(tenderId, bids[0]!.bidId, { reasonCode: 'OTHER' })],
+        ['EVALUATE_BIDS', () => w.evaluation.evaluate(tenderId)],
+        ['READ_EVALUATION', () => w.evaluation.getMatrix(tenderId)],
+      ];
+      for (const [, route] of routes) {
+        const call = runWithContext(
+          context({
+            organizationId: owner,
+            organizationIds: [owner],
+            userId: roleless,
+            roles: ['FLEET_MANAGER'],
+          }),
+          route,
+        );
+        expect((await codeOf(call)).code).toBe('INSUFFICIENT_ROLE');
+      }
+      const byRoleless = (await logOf(tenderId)).filter((row) => row.accessorUserId === roleless);
+      expect(byRoleless.map((row) => [row.purpose, row.refusalCode]).sort()).toEqual(
+        [
+          ['EVALUATE_BIDS', 'INSUFFICIENT_ROLE'],
+          ['READ_EVALUATION', 'INSUFFICIENT_ROLE'],
+          ['RECUSE', 'INSUFFICIENT_ROLE'],
+          ['SCORE_BID', 'INSUFFICIENT_ROLE'],
+        ].sort(),
+      );
+
+      // A tender that is not the caller's own stays an unaudited 404 for a caller without the role too.
+      const before = (await logOf(tenderId)).length;
+      const strangerWithoutRole = runWithContext(
+        context({
+          organizationId: 'ORG_STRANGER_EVAL',
+          organizationIds: ['ORG_STRANGER_EVAL'],
+          userId: newUserId(),
+          roles: ['FLEET_MANAGER'],
+        }),
+        () => w.evaluation.getMatrix(tenderId),
+      );
+      expect((await codeOf(strangerWithoutRole)).code).toBe('INSUFFICIENT_ROLE');
+      expect((await logOf(tenderId)).length).toBe(before);
+
       const stranger = asAdmin('ORG_STRANGER_EVAL', () =>
         w.evaluation.qualify(tenderId, bids[0]!.bidId, { decision: 'QUALIFIED' }),
       );
@@ -1163,6 +1237,129 @@ describe('evaluating the opened bids of a tender', () => {
   });
 
   // ---------------------------------------------------------------------------------------------
+
+  describe('the guards lock the tender before they judge its status (as the runtime role)', () => {
+    /**
+     * Holds the tender row `FOR UPDATE` in a transaction of its own, starts `insert` as the runtime
+     * role, waits until a session is blocked on a lock, then runs `change` in the held transaction
+     * and commits: the insert must have waited for it and then be refused. Without the guard's own
+     * lock it would have read EVALUATING, passed, and landed after the change.
+     */
+    const heldWhileInserting = async (tenderId: string, insert: string, change: string) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const isLocked = new Promise<void>((resolve) => (locked = resolve));
+      const holder = runUnscoped('the suite holds the tender lock', () =>
+        w.prisma.client.$transaction(async (tx) => {
+          await tx.$queryRawUnsafe(`SELECT 1 FROM "tender" WHERE "id" = '${tenderId}' FOR UPDATE`);
+          locked();
+          await gate;
+          await tx.$executeRawUnsafe(change);
+        }),
+      );
+      await isLocked;
+      const attempt = sql('the suite inserts as the runtime role', insert).then(
+        () => 'INSERTED',
+        (error: unknown) => String(error),
+      );
+      await untilASessionWaitsOnALock(w.prisma);
+      release();
+      await holder;
+      return attempt;
+    };
+
+    const cancel = (tenderId: string) =>
+      `UPDATE "tender" SET "status" = 'CANCELLED', "status_reason" = 'the suite', "status_reason_code" = 'OWNER_REQUEST'
+        WHERE "id" = '${tenderId}'`;
+
+    it('a score waits for the completion of the evaluation and is then refused: the matrix and its digest do not move', async () => {
+      const { owner, tenderId, bids } = await evaluating(1);
+      const bid = bids[0]!;
+      await qualify(owner, tenderId, bid.bidId);
+      const user = newUserId();
+      await score(owner, tenderId, bid.bidId, FULL, user);
+      const claim = await runUnscoped('the suite reads the claim', () =>
+        w.prisma.client.bidEvaluation.findFirstOrThrow({ where: { tenderId } }),
+      );
+
+      // evaluate takes the lock and stops at its decision instant; the insert queues behind it.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const atDecision = new Promise<void>((resolve) => (reached = resolve));
+      w.clock.onDecision = async () => {
+        reached();
+        await gate;
+      };
+      const completing = evaluate(owner, tenderId);
+      await atDecision;
+      const attempt = sql(
+        'the suite inserts a cell as the runtime role',
+        `INSERT INTO "bid_evaluation_score" ("id", "organization_id", "tender_id", "bid_id", "evaluation_id",
+           "evaluator_id", "criterion_code", "revision", "score_scaled", "scored_at")
+         VALUES ('BSC_RACE', '${owner}', '${tenderId}', '${bid.bidId}', '${claim.id}', '${user}', 'PRICE', 2, 1, now())`,
+      ).then(
+        () => 'INSERTED',
+        (error: unknown) => String(error),
+      );
+      await untilASessionWaitsOnALock(w.prisma);
+      release();
+      const view = await completing;
+      expect(await attempt).toMatch(/ck_evaluation_open/);
+      const cells = await runUnscoped('the suite reads the cells', () =>
+        w.prisma.client.bidEvaluationScore.findMany({ where: { tenderId } }),
+      );
+      expect(cells).toHaveLength(2);
+      expect(
+        matrixDigest({
+          qualifications: await runUnscoped('the suite reads the decisions', () =>
+            w.prisma.client.bidQualification.findMany({ where: { tenderId } }),
+          ),
+          evaluations: await runUnscoped('the suite reads the claims', () =>
+            w.prisma.client.bidEvaluation.findMany({ where: { tenderId } }),
+          ),
+          recusals: [],
+          scores: cells,
+        }),
+      ).toBe(view.matrixDigest);
+    });
+
+    it('a recusal, an evaluator’s claim and a decision wait for a change of the tender’s state and are then refused', async () => {
+      type Tender = { owner: string; tenderId: string; bids: { bidId: string }[] };
+      const cases: [string, (t: Tender) => string][] = [
+        [
+          'recusal',
+          (
+            t,
+          ) => `INSERT INTO "bid_evaluation_recusal" ("id", "organization_id", "tender_id", "bid_id", "evaluator_id", "reason_code", "recused_at")
+           VALUES ('BRC_RACE', '${t.owner}', '${t.tenderId}', '${t.bids[0]!.bidId}', 'USR_RACE', 'OTHER', now())`,
+        ],
+        [
+          'claim',
+          (
+            t,
+          ) => `INSERT INTO "bid_evaluation" ("id", "organization_id", "tender_id", "bid_id", "evaluator_id", "created_at")
+           VALUES ('BEV_RACE', '${t.owner}', '${t.tenderId}', '${t.bids[0]!.bidId}', 'USR_RACE', now())`,
+        ],
+        [
+          'decision',
+          (
+            t,
+          ) => `INSERT INTO "bid_qualification" ("id", "organization_id", "tender_id", "bid_id", "decision", "reason_code", "reason_text", "decided_at", "decided_by")
+           VALUES ('BQL_RACE', '${t.owner}', '${t.tenderId}', '${t.bids[1]!.bidId}', 'DISQUALIFIED', 'OTHER', 'the suite', now(), 'USR_RACE')`,
+        ],
+      ];
+      // Each on a tender of its own, with its first bid QUALIFIED and its second still OPENED.
+      for (const [, insert] of cases) {
+        const t = await evaluating(2);
+        await qualify(t.owner, t.tenderId, t.bids[0]!.bidId);
+        const outcome = await heldWhileInserting(t.tenderId, insert(t), cancel(t.tenderId));
+        expect(outcome).toMatch(/ck_evaluation_open/);
+        expect(await counts(t.tenderId)).toMatchObject({ recusals: 0, evaluations: 0, scores: 0 });
+      }
+    });
+  });
 
   describe('the migration’s rollback', () => {
     it('refuses once any evaluation data exists, and touches nothing', async () => {

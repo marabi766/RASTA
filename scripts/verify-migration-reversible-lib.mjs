@@ -488,6 +488,7 @@ export const EXPECTED = {
       'audit_chain_head_hash_is_sha256',
       'ck_tender_receipt_link_shape',
       'ck_bid_access_evidence_shape',
+      'ck_bid_access_evidence_refusal_code',
       'ck_tender_receipt_pending_shape',
     ],
   },

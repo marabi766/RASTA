@@ -225,6 +225,45 @@ describe('opening and reading bids (ADR-066 § 4)', () => {
   });
 });
 
+describe('who may act for a bidder (ADR-066 § 4): the CONTRACTOR role, and never SYSTEM_ADMIN or AUDITOR', () => {
+  const access = new ProjectAccess(env());
+  const outcome = (overrides: Partial<RequestContext>) =>
+    runWithContext(context(overrides), () => {
+      try {
+        return access.assertCanBid();
+      } catch (error) {
+        return isRastaError(error) ? error.code : `NOT_A_PLATFORM_ERROR: ${String(error)}`;
+      }
+    });
+
+  it('lets a contractor act for the organization it acts for', () => {
+    expect(outcome({ roles: ['CONTRACTOR'] })).toEqual({ organizationId: ORG, actor: 'USR_1' });
+  });
+
+  it.each(['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'SUPPLIER'])(
+    'refuses %s alone: the owner’s staff do not bid',
+    (role) => {
+      expect(outcome({ roles: [role] })).toBe('INSUFFICIENT_ROLE');
+    },
+  );
+
+  it.each(['SYSTEM_ADMIN', 'AUDITOR'])(
+    'refuses %s whenever present — alone, and alongside CONTRACTOR in either order',
+    (role) => {
+      expect(outcome({ roles: [role] })).toBe('FORBIDDEN');
+      expect(outcome({ roles: [role, 'CONTRACTOR'] })).toBe('FORBIDDEN');
+      expect(outcome({ roles: ['CONTRACTOR', role] })).toBe('FORBIDDEN');
+      expect(outcome({ roles: ['CONTRACTOR', 'ORGANIZATION_ADMIN', role] })).toBe('FORBIDDEN');
+    },
+  );
+
+  it('refuses a service token, a missing organization and a missing actor', () => {
+    expect(outcome({ authType: 'SERVICE', roles: ['CONTRACTOR'] })).toBe('FORBIDDEN');
+    expect(outcome({ roles: ['CONTRACTOR'], organizationId: undefined })).toBe('FORBIDDEN');
+    expect(outcome({ roles: ['CONTRACTOR'], userId: undefined })).toBe('FORBIDDEN');
+  });
+});
+
 describe('who may evaluate a tender’s opened bids (ADR-067 § 4)', () => {
   const outcome = (
     access: ProjectAccess,

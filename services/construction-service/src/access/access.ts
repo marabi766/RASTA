@@ -57,6 +57,23 @@ const OVERSIGHT_ROLE = 'AUDITOR';
  */
 const BID_EXCLUDED_ROLES: readonly string[] = [SUPER_ROLE, CONTRACTOR_ROLE, OVERSIGHT_ROLE];
 
+/**
+ * Roles that never act on the **bidder's** side, refused whenever present, whatever else the
+ * user holds (a token with `SYSTEM_ADMIN` and `CONTRACTOR` is not a contractor): the platform
+ * administrator has no access to a bid through the API (ADR-066 § 4), and the oversight role has
+ * aggregate access only. The one list next to the owner-side one; `CONTRACTOR` is the role the
+ * bidder side *requires*, so it is not here. Every bidder route goes through `assertCanBid`.
+ */
+const BIDDER_EXCLUDED_ROLES: readonly string[] = [SUPER_ROLE, OVERSIGHT_ROLE];
+
+function assertNoBidderExcludedRole(roles: readonly string[]): void {
+  for (const refused of BIDDER_EXCLUDED_ROLES) {
+    if (roles.includes(refused)) {
+      throw RastaError.forbidden(`The ${refused} role does not act for a bidder`);
+    }
+  }
+}
+
 function assertNoBidExcludedRole(roles: readonly string[]): void {
   for (const refused of BID_EXCLUDED_ROLES) {
     if (roles.includes(refused)) {
@@ -313,9 +330,11 @@ export class ProjectAccess {
    * one, and the database refuses a bid on one's own tender).
    */
   assertCanBid(): { organizationId: string; actor: string } {
-    assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
+    // Refused whenever present, alongside CONTRACTOR as well: the platform administrator and the
+    // oversight role do not read or write a bidder's bid by also holding the bidder's role.
+    assertNoBidderExcludedRole(context.roles);
     if (!context.roles.includes(CONTRACTOR_ROLE)) {
       throw RastaError.insufficientRole([CONTRACTOR_ROLE], context.roles);
     }

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, getContext } from '@rasta/nest-common';
 import { ERROR_CODES } from '@rasta/contracts';
 import { withFinancialSpan } from '@rasta/observability';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -140,14 +140,19 @@ export class EvaluationService {
   // -- decide on a bid -------------------------------------------------------------------
 
   async qualify(tenderId: string, bidId: string, dto: QualifyBidDto): Promise<QualificationView> {
-    const caller = this.access.assertCanEvaluate();
+    const caller = await this.authorize(tenderId, 'QUALIFY_BID');
     return this.guarded(caller, tenderId, 'QUALIFY_BID', async () => {
       const principal = await this.identity.live(caller, 'EVALUATE_BIDS');
       await this.assertNotConflicted(principal, tenderId);
       // Eligibility is a decision for supplier-service (Q-85): asked outside any lock, fail closed,
-      // and only for a qualification — a bid may always be disqualified.
+      // only for a qualification (a bid may always be disqualified) and only before a NEW decision:
+      // a decision already on record is answered as it stands (below, under the lock), so an
+      // idempotent repeat never fails on a supplier-service that is down or has since suspended.
+      const recorded = await this.prisma.transaction((tx) =>
+        this.repo.findQualification(tx, tenderId, bidId),
+      );
       const standingAsOf =
-        dto.decision === 'QUALIFIED' ? await this.standingOf(tenderId, bidId) : null;
+        dto.decision === 'QUALIFIED' && !recorded ? await this.standingOf(tenderId, bidId) : null;
       return withFinancialSpan(
         'construction.bid.qualify',
         () =>
@@ -236,7 +241,7 @@ export class EvaluationService {
   // -- standing down ---------------------------------------------------------------------
 
   async recuse(tenderId: string, bidId: string, dto: RecuseDto): Promise<RecusalView> {
-    const caller = this.access.assertCanEvaluate();
+    const caller = await this.authorize(tenderId, 'RECUSE');
     return this.guarded(caller, tenderId, 'RECUSE', async () => {
       const principal = await this.identity.live(caller, 'EVALUATE_BIDS');
       await this.assertNotConflicted(principal, tenderId);
@@ -297,7 +302,7 @@ export class EvaluationService {
   // -- score a bid -----------------------------------------------------------------------
 
   async score(tenderId: string, bidId: string, dto: ScoreBidDto): Promise<ScoreRecordedView> {
-    const caller = this.access.assertCanEvaluate();
+    const caller = await this.authorize(tenderId, 'SCORE_BID');
     return this.guarded(caller, tenderId, 'SCORE_BID', async () => {
       const principal = await this.identity.live(caller, 'EVALUATE_BIDS');
       await this.assertNotConflicted(principal, tenderId);
@@ -428,7 +433,7 @@ export class EvaluationService {
   // -- complete the evaluation -----------------------------------------------------------
 
   async evaluate(tenderId: string): Promise<EvaluatedView> {
-    const caller = this.access.assertCanEvaluate();
+    const caller = await this.authorize(tenderId, 'EVALUATE_BIDS');
     const { view, completed } = await this.guarded(caller, tenderId, 'EVALUATE_BIDS', async () => {
       const principal = await this.identity.live(caller, 'EVALUATE_BIDS');
       await this.assertNotConflicted(principal, tenderId);
@@ -522,7 +527,7 @@ export class EvaluationService {
    * read of the bids it names (a row and `BID_ACCESSED` per bid, `READ_EVALUATION`).
    */
   async getMatrix(tenderId: string): Promise<MatrixView> {
-    const caller = this.access.assertCanEvaluate();
+    const caller = await this.authorize(tenderId, 'READ_EVALUATION');
     return this.guarded(caller, tenderId, 'READ_EVALUATION', async () => {
       const principal = await this.identity.live(caller, 'EVALUATE_BIDS');
       await this.assertNotConflicted(principal, tenderId);
@@ -543,6 +548,49 @@ export class EvaluationService {
   }
 
   // -- the envelope and its checks --------------------------------------------------------
+
+  /**
+   * The roles check of an evaluation route. A refusal of a caller who acts for the tender's **own**
+   * organization is audited (a REFUSED row with the closed code, before the answer); a tender the
+   * caller cannot see answers what a missing one does and is **not** logged: nothing is disclosed
+   * about it and nobody's log learns of a stranger's probing by role (ADR-066 § 5, ADR-067 § 4).
+   */
+  private async authorize(tenderId: string, purpose: BidAccessPurpose): Promise<Principal> {
+    try {
+      return this.access.assertCanEvaluate();
+    } catch (error) {
+      if (error instanceof RastaError) await this.recordOwnRefusal(tenderId, purpose, error);
+      throw error;
+    }
+  }
+
+  private async recordOwnRefusal(
+    tenderId: string,
+    purpose: BidAccessPurpose,
+    error: RastaError,
+  ): Promise<void> {
+    const context = getContext();
+    // Nobody to attribute it to: no log row can name an actor that is not there.
+    if (context.authType === 'SERVICE' || !context.organizationId || !context.userId) return;
+    let found;
+    try {
+      found = await this.opens.findOwnership(tenderId);
+    } catch {
+      return;
+    }
+    if (!found || found.organizationId !== context.organizationId) return;
+    await this.recordRefusal(
+      found.organizationId,
+      tenderId,
+      {
+        organizationId: context.organizationId,
+        actor: context.userId,
+        organizationIds: context.organizationIds ?? [],
+      },
+      purpose,
+      error,
+    );
+  }
 
   /**
    * Finds the tender, tells another organization's from a missing one without telling the

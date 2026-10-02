@@ -315,6 +315,31 @@ describe('evaluation API', () => {
       ).status,
     ).toBe(403);
 
+    // SYSTEM_ADMIN and AUDITOR are refused whenever present, even alongside CONTRACTOR in the
+    // bidder's own organization — on this route and on every other bidder route.
+    for (const excluded of ['SYSTEM_ADMIN', 'AUDITOR']) {
+      const mixed = as(actor(first.bidder, ['CONTRACTOR', excluded]));
+      expect((await http().get(path).set(mixed)).status).toBe(403);
+      expect((await http().get(`/v1/tenders/${tenderId}/bids/mine`).set(mixed)).status).toBe(403);
+      expect((await http().get('/v1/open-tenders').set(mixed)).status).toBe(403);
+      const submit = await http()
+        .post(`/v1/tenders/${tenderId}/bids`)
+        .set(mixed)
+        .send({ content: bidContent() });
+      expect(submit.status).toBe(403);
+      const withdraw = await http()
+        .post(`/v1/tenders/${tenderId}/bids/${first.bidId}/withdraw`)
+        .set(mixed)
+        .send({ expectedRevision: 1 });
+      expect(withdraw.status).toBe(403);
+    }
+    // Nothing was read for them: no OWN_BID_CONTENT row yet.
+    expect(
+      await runUnscoped('the suite reads the log', () =>
+        w.prisma.client.bidAccessLog.count({ where: { tenderId, purpose: 'OWN_BID_CONTENT' } }),
+      ),
+    ).toBe(0);
+
     const res = await http()
       .get(path)
       .set(as(actor(first.bidder, ['CONTRACTOR'])));

@@ -101,8 +101,8 @@ export const CONSTRUCTION_EVENTS = {
   BID_OPENING_CONFLICT_DETECTED: 'BID_OPENING_CONFLICT_DETECTED',
   // CON-002 PR 9 (ADR-067 § 2). `BID_QUALIFIED`, `BID_DISQUALIFIED` and `BIDS_EVALUATED` were
   // accepted by the project manager (2026-09-30); `BID_SCORED` and `BID_EVALUATOR_RECUSED` are
-  // added for S-06 (a score and a stand-down are state changes audit must hear about) and await
-  // acceptance. Ids, closed codes, counts and digests only: never a note or a reason in words.
+  // added for S-06 (a score and a stand-down are state changes audit must hear about) and were
+  // accepted by the project manager (2026-10-02). Ids, closed codes, counts and digests only: never a note or a reason in words.
   BID_QUALIFIED: 'BID_QUALIFIED',
   BID_DISQUALIFIED: 'BID_DISQUALIFIED',
   BID_SCORED: 'BID_SCORED',
