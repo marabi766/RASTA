@@ -264,10 +264,40 @@ describe('the tender-evidence projection', () => {
         600,
       );
 
+      // The counter announced the gap once; the overdue gauge stays up on every sample.
+      expect(await gauge('rasta_audit_tender_overdue_links')).toBeGreaterThanOrEqual(1);
+
       await consumer.handle(first.event, DELIVERY);
       await monitor.sample();
       expect(await heldFor(tenderId)).toBe(0);
       expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
+    });
+
+    it('counts overdue gaps over every held row, not a bounded sample', async () => {
+      const repository = new TenderEvidenceRepository(prisma);
+      const baseline = await repository.pendingSummary(60);
+      const tenderId = id('TND');
+      await consumer.handle(receipt('BID_SUBMITTED', tenderId, hash()).event, DELIVERY);
+      await migrator.client.$executeRawUnsafe(
+        `INSERT INTO tender_receipt_pending (source_event_id, tender_id, organization_id,
+           bidder_organization_id, bid_id, revision, received_at, ciphertext_sha256,
+           content_commitment, previous_receipt, receipt, held_at)
+         SELECT 'EVT_BULK_' || g || '_' || $1, $1, $2, $3, 'BID_BULK', 1, now(), $4, $4,
+                md5(g::text || $1) || md5($1 || g::text), md5(g::text || $1 || 'r') || md5($1 || 'r' || g::text),
+                now() - interval '1 hour'
+           FROM generate_series(1, 1100) g`,
+        tenderId,
+        OWNER,
+        BIDDER,
+        hash(),
+      );
+
+      const summary = await repository.pendingSummary(60);
+
+      expect(summary.overdueCount - baseline.overdueCount).toBe(1100);
+      expect(summary.held - baseline.held).toBe(1101);
+      expect(summary.oldestAgeSeconds).toBeGreaterThanOrEqual(3600);
+      expect(summary.newlyOverdue.length).toBeLessThanOrEqual(1000);
     });
 
     it('refuses two held successors of one missing predecessor: a fork, even while it is unseen', async () => {
@@ -332,6 +362,65 @@ describe('the tender-evidence projection', () => {
 
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
       expect((await chainOf(tenderId)).links).toHaveLength(2);
+    });
+
+    it('treats concurrent redeliveries of the same event as duplicates, never a fork: in order and held', async () => {
+      const tenderId = id('TND');
+      const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
+      const second = receipt('BID_SUBMITTED', tenderId, first.receipt);
+      const stray = receipt('BID_SUBMITTED', tenderId, hash());
+
+      // The same in-order event, and the same held one, each delivered three times at once.
+      const fresh = await Promise.allSettled(
+        [1, 2, 3].map(() => consumer.handle(first.event, DELIVERY)),
+      );
+      const held = await Promise.allSettled(
+        [1, 2, 3].map(() => consumer.handle(stray.event, DELIVERY)),
+      );
+      expect([...fresh, ...held].filter((r) => r.status === 'rejected')).toEqual([]);
+      expect((await chainOf(tenderId)).links.map((l) => l.receipt)).toEqual([first.receipt]);
+      expect(await heldFor(tenderId)).toBe(1);
+
+      // A successor and its predecessor, each duplicated, launched in either order.
+      const orders = [
+        [second.event, second.event, first.event, first.event],
+        [first.event, first.event, second.event, second.event],
+      ];
+      for (const [index, events] of orders.entries()) {
+        const tender = id('TND');
+        const a = receipt('BID_SUBMITTED', tender, genesisReceipt(tender));
+        const b = receipt('BID_SUBMITTED', tender, a.receipt);
+        const pick = (e: EventEnvelope): EventEnvelope => (e === first.event ? a.event : b.event);
+        const results = await Promise.allSettled(
+          events.map((e) => consumer.handle(pick(e), DELIVERY)),
+        );
+        expect({ order: index, rejected: results.filter((r) => r.status === 'rejected') }).toEqual({
+          order: index,
+          rejected: [],
+        });
+        expect((await chainOf(tender)).links.map((l) => l.receipt)).toEqual([a.receipt, b.receipt]);
+        expect(await heldFor(tender)).toBe(0);
+      }
+    });
+
+    it('treats concurrent redeliveries of one access event as one record', async () => {
+      const tenderId = id('TND');
+      const event = envelope('BID_ACCESSED', tenderId, {
+        bidId: id('BID'),
+        tenderId,
+        organizationId: OWNER,
+        accessorOrganizationId: BIDDER,
+        accessedBy: 'USR_9',
+        purpose: 'OWN_BID_RECEIPT',
+        outcome: 'GRANTED',
+        accessedAt: new Date().toISOString(),
+      });
+
+      const results = await Promise.allSettled(
+        [1, 2, 3].map(() => consumer.handle(event, DELIVERY)),
+      );
+
+      expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
     });
 
     it('refuses a payload that is not the contract, and a receipt that is not a digest', async () => {

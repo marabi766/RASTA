@@ -222,6 +222,13 @@ export const auditTenderPendingLinks = new Gauge({
   registers: [registry],
 });
 
+/** Receipts held longer than AUDIT_TENDER_GAP_ALERT_SECONDS: an open gap; 0 when none. */
+export const auditTenderOverdueLinks = new Gauge({
+  name: 'rasta_audit_tender_overdue_links',
+  help: 'Bid receipts held past the gap alert time for a predecessor that has not arrived',
+  registers: [registry],
+});
+
 /** Age of the oldest held receipt; 0 when none is held. */
 export const auditTenderPendingOldestAgeSeconds = new Gauge({
   name: 'rasta_audit_tender_pending_oldest_age_seconds',

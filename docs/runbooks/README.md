@@ -36,7 +36,7 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
 
 ## قواعد هشدار موجود در مخزن
 
-نام‌های `Rasta…` بالا سیزده هشدار
+نام‌های `Rasta…` بالا چهارده هشدار
 [`infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml`](../../infrastructure/docker/prometheus/rules/rasta-audit-alerts.yml)
 هستند — **تنها قواعد هشدار مخزن** — و همان فایل یک Recording Rule هم دارد (`topic:kafka_topic_retained_records:sum`). باقی ستون
 «هشدار محرک» شرط مستند است، نه قاعدهٔ نوشته‌شده. رفتار این چهارده قاعده با

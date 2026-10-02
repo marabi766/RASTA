@@ -13,6 +13,9 @@ import { defineConfig, devices } from '@playwright/test';
  * a browser job that ran against no screens would have asserted nothing, and
  * `/login` is the first real surface.
  */
+/** The specs that also run at a phone's viewport: read-only, see the project. */
+const MOBILE_SPECS = /(accessibility|tenant-isolation)\.spec\.ts$/;
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -27,7 +30,26 @@ export default defineConfig({
     locale: 'fa-IR',
     timezoneId: 'Asia/Tehran',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      // The same Chromium at a phone's size and with touch: Pixel 5, 393×851.
+      // docs/16 § 16.3 makes this portal mobile-first (a dehyari operator at a
+      // machine is on a phone), and EXP-002's second acceptance criterion names
+      // "supported mobile viewports". Nothing in the docs fixes a device list,
+      // so the one profile is a stated choice, not a discovered requirement.
+      //
+      // **Read-only scenarios only** (`MOBILE_SPECS`). The suite shares one
+      // live stack, and the write scenarios would run against it twice, at
+      // once; what a second viewport adds to a write is nothing the first did
+      // not prove. Accessibility and tenant isolation are exactly what a
+      // second viewport can change — layout, reflow, what is reachable — so
+      // those run on both.
+      name: 'mobile',
+      use: { ...devices['Pixel 5'] },
+      testMatch: MOBILE_SPECS,
+    },
+  ],
   webServer: {
     // A production build in CI, the dev server locally. They are different
     // programs: the dev server compiles on demand and tolerates things the

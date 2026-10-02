@@ -3,6 +3,7 @@ import { ENV } from '../tokens';
 import type { AuditEnv } from '../config/env';
 import {
   auditIngestionFailuresTotal,
+  auditTenderOverdueLinks,
   auditTenderPendingLinks,
   auditTenderPendingOldestAgeSeconds,
   INGESTION_FAILURE_REASONS,
@@ -14,10 +15,11 @@ import { TenderEvidenceRepository } from './tender-evidence.repository';
  *
  * A receipt that arrives before its predecessor is held, not dead-lettered; that is
  * only safe if a hole which never closes cannot stay unnoticed. Sampled from the table
- * (the gauges are never maintained by inc/dec): every held receipt older than
- * `AUDIT_TENDER_GAP_ALERT_SECONDS` is counted **once** under
- * `tender_chain_gap_overdue`, which fires the ingestion-failure alert, and the held count
- * and the age of the oldest are exported. Identifiers of held events are never labels.
+ * (the gauges are never maintained by inc/dec, and are computed over every held row):
+ * the held count, the count older than `AUDIT_TENDER_GAP_ALERT_SECONDS` and the age of the
+ * oldest are exported, and `RastaAuditTenderChainGapOpen` fires for as long as any overdue
+ * gap exists. Each such receipt is also counted **once** under `tender_chain_gap_overdue`
+ * (a new gap, for the ingestion-failure alert). Identifiers of held events are never labels.
  */
 @Injectable()
 export class TenderGapMonitor implements OnModuleInit, OnModuleDestroy {
@@ -49,8 +51,9 @@ export class TenderGapMonitor implements OnModuleInit, OnModuleDestroy {
     const summary = await this.repository.pendingSummary(this.env.AUDIT_TENDER_GAP_ALERT_SECONDS);
     auditTenderPendingLinks.set(summary.held);
     auditTenderPendingOldestAgeSeconds.set(summary.oldestAgeSeconds);
+    auditTenderOverdueLinks.set(summary.overdueCount);
 
-    const overdue = new Set(summary.overdue);
+    const overdue = new Set(summary.newlyOverdue);
     for (const id of this.alerted) if (!overdue.has(id)) this.alerted.delete(id);
     for (const id of overdue) {
       if (this.alerted.has(id)) continue;

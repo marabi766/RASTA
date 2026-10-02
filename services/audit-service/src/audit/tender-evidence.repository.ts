@@ -55,14 +55,17 @@ export class TenderEvidenceRepository {
    */
   async appendLink(eventId: string, link: ReceiptPayload): Promise<EvidenceOutcome> {
     return this.prisma.client.$transaction(async (tx) => {
+      // One writer per tender chain at a time; the head is read after the lock is held.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tender_evidence:${link.tenderId}`}, 0))`;
+
+      // Checked under the lock, not before it: a concurrent delivery of this same event
+      // that committed while this one waited must read as a duplicate, never as a fork.
       const already = await tx.processedEvent.findUnique({
         where: { eventId_consumerName: { eventId, consumerName: TENDER_EVIDENCE_CONSUMER } },
         select: { eventId: true },
       });
       if (already) return 'DUPLICATE';
 
-      // One writer per tender chain at a time; the head is read after the lock is held.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tender_evidence:${link.tenderId}`}, 0))`;
       const head = await tx.tenderReceiptLink.findFirst({
         where: { tenderId: link.tenderId },
         orderBy: { seq: 'desc' },
@@ -220,27 +223,39 @@ export class TenderEvidenceRepository {
   }
 
   /**
-   * Receipts held longer than `olderThanSeconds` for a predecessor that has not come,
-   * and the figures the gauges report. Identifiers of held events only.
+   * What the gauges report, counted over **all** held rows: how many are held, how many
+   * for longer than `olderThanSeconds`, and the age of the oldest. `newlyOverdue` lists
+   * (at most 1000, oldest first) the overdue receipts' event ids, only for the monitor
+   * to count each new gap once; it is never what the gauges are computed from.
    */
   async pendingSummary(olderThanSeconds: number): Promise<{
     held: number;
+    overdueCount: number;
     oldestAgeSeconds: number;
-    overdue: string[];
+    newlyOverdue: string[];
   }> {
-    const rows = await this.prisma.client.$queryRaw<
-      { source_event_id: string; age: number }[]
-    >`SELECT source_event_id, EXTRACT(EPOCH FROM (clock_timestamp() - held_at))::float8 AS age
-        FROM tender_receipt_pending ORDER BY held_at ASC LIMIT 1000`;
+    const [totals] = await this.prisma.client.$queryRaw<
+      { held: bigint; overdue: bigint; oldest: number | null }[]
+    >`SELECT count(*) AS held,
+             count(*) FILTER (WHERE clock_timestamp() - held_at >= make_interval(secs => ${olderThanSeconds})) AS overdue,
+             EXTRACT(EPOCH FROM (clock_timestamp() - min(held_at)))::float8 AS oldest
+        FROM tender_receipt_pending`;
+    const rows = await this.prisma.client.$queryRaw<{ source_event_id: string }[]>`
+      SELECT source_event_id FROM tender_receipt_pending
+       WHERE clock_timestamp() - held_at >= make_interval(secs => ${olderThanSeconds})
+       ORDER BY held_at ASC LIMIT 1000`;
     return {
-      held: rows.length,
-      oldestAgeSeconds: rows[0] ? Math.max(0, Math.floor(rows[0].age)) : 0,
-      overdue: rows.filter((row) => row.age >= olderThanSeconds).map((row) => row.source_event_id),
+      held: Number(totals?.held ?? 0n),
+      overdueCount: Number(totals?.overdue ?? 0n),
+      oldestAgeSeconds: totals?.oldest == null ? 0 : Math.max(0, Math.floor(totals.oldest)),
+      newlyOverdue: rows.map((row) => row.source_event_id),
     };
   }
 
   async recordAccess(eventId: string, access: AccessPayload): Promise<EvidenceOutcome> {
     return this.prisma.client.$transaction(async (tx) => {
+      // Serialised per event, so a concurrent redelivery waits and then reads a duplicate.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tender_access:${eventId}`}, 0))`;
       const already = await tx.processedEvent.findUnique({
         where: { eventId_consumerName: { eventId, consumerName: TENDER_EVIDENCE_CONSUMER } },
         select: { eventId: true },

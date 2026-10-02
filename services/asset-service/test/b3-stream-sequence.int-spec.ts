@@ -97,7 +97,7 @@ describe('asset stream sequencing', () => {
     const first = (await outboxFor(created.id)).length;
 
     await asActor({ organizationId: org.a, userId: `USR-B3-${id('X')}` }, () =>
-      assets.update(created.id, { name: 'لودر B3 — به‌روزشده' } as never),
+      assets.update(created.id, { name: 'لودر B3 — به‌روزشده', expectedVersion: created.version }),
     );
 
     const rows = await outboxFor(created.id);
