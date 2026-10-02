@@ -3,7 +3,12 @@
  */
 import type { z } from 'zod';
 
-import { mapProblemToFields, writeThroughGateway, type FieldMapping } from './write';
+import {
+  MAX_IN_PROGRESS_WAIT_SECONDS,
+  mapProblemToFields,
+  writeThroughGateway,
+  type FieldMapping,
+} from './write';
 import type { WebSession } from './session';
 
 /**
@@ -259,6 +264,54 @@ describe('mapProblemToFields', () => {
     );
     expect(mapped.fieldErrors).toEqual({});
     expect(mapped.message).toBe('required');
+  });
+});
+
+/**
+ * Round 1 on PR 171: a 409 CONFLICT that says when to look again is a submission
+ * still in flight, not a form to correct. Only `Retry-After` tells the two
+ * apart: a conflict waiting will not change carries none.
+ */
+describe('a submission still in flight', () => {
+  const conflict = (code: string, retryAfter?: string) => async () =>
+    new Response(JSON.stringify({ code, message: 'This request is already being processed' }), {
+      status: 409,
+      headers: {
+        'content-type': 'application/json',
+        ...(retryAfter === undefined ? {} : { 'retry-after': retryAfter }),
+      },
+    });
+
+  it('is IN_PROGRESS with the wait the service asked for', async () => {
+    const result = await call(conflict('CONFLICT', '1') as unknown as typeof fetch);
+    expect(result).toEqual({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+      correlationId: expect.any(String),
+    });
+  });
+
+  it('never holds a form longer than the cap, nor for less than a second', async () => {
+    expect(await call(conflict('CONFLICT', '86400') as unknown as typeof fetch)).toMatchObject({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: MAX_IN_PROGRESS_WAIT_SECONDS,
+    });
+    expect(await call(conflict('CONFLICT', '0') as unknown as typeof fetch)).toMatchObject({
+      kind: 'IN_PROGRESS',
+      retryAfterSeconds: 1,
+    });
+  });
+
+  it('stays INVALID without Retry-After, or for any other 409', async () => {
+    expect(await call(conflict('CONFLICT') as unknown as typeof fetch)).toMatchObject({
+      kind: 'INVALID',
+    });
+    expect(
+      await call(conflict('IDEMPOTENCY_KEY_REUSED', '1') as unknown as typeof fetch),
+    ).toMatchObject({ kind: 'INVALID' });
+    expect(
+      await call(conflict('CONFLICT', 'Wed, 21 Oct 2026 07:28:00 GMT') as unknown as typeof fetch),
+    ).toMatchObject({ kind: 'INVALID' });
   });
 });
 

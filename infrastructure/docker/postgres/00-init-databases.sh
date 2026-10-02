@@ -129,18 +129,26 @@ psql_exec rasta_audit "GRANT USAGE ON SCHEMA audit TO rasta_audit"
 echo "    - schema audit (owner rasta_audit_migrator, rasta_audit has USAGE only)"
 
 # -----------------------------------------------------------------------------
-# supplier-service: the database and everything in it belong to
-# rasta_supplier_migrator; the runtime role rasta_supplier gets CONNECT and
-# USAGE on `public`, loses CREATEDB, and gets its table grants from the
-# migrations. Unlike audit, the tables stay in `public`: supplier-service was
-# already migrated there on main, and a schema move would strand that data.
-# The whole reasoning, and the upgrade for an existing cluster, is in
-# lib/supplier-privilege-split.bash.
+# The runtime role owns nothing (D-045). For every PRIVILEGE_SPLIT_SERVICES
+# entry (lib/role-passwords.bash), the database and everything in it belong to
+# rasta_<svc>_migrator, which runs the migrations; rasta_<svc>, the role the
+# service connects as, gets CONNECT, USAGE on `public` and its table rights —
+# DML by default privileges, or (supplier-service) per-table grants from its own
+# migrations — loses CREATEDB, and cannot DISABLE a trigger, ALTER, DROP or
+# TRUNCATE anything. The reasoning, and the upgrade for an existing cluster, is
+# in lib/service-privilege-split.bash and docs/runbooks/db-role-split.md;
+# scripts/check-db-runtime-privileges.mjs fails CI if it does not hold.
+#
+# audit-service's tables already sit in a schema the runtime role does not own
+# (above); its database is handed to its migrator here as well.
 # -----------------------------------------------------------------------------
-echo "==> Splitting supplier-service ownership from its runtime role"
-# shellcheck source=lib/supplier-privilege-split.bash
-source "$(dirname "${BASH_SOURCE[0]}")/lib/supplier-privilege-split.bash"
-split_supplier_privileges rasta_supplier
+echo "==> Splitting each service's owner from its runtime role"
+# shellcheck source=lib/service-privilege-split.bash
+source "$(dirname "${BASH_SOURCE[0]}")/lib/service-privilege-split.bash"
+for svc in "${PRIVILEGE_SPLIT_SERVICES[@]}"; do
+  split_service_privileges "${svc}" "rasta_${svc}" "$(privilege_split_grants_mode "${svc}")"
+done
+split_audit_database_privileges rasta_audit
 
 # -----------------------------------------------------------------------------
 # Extensions go into template1, so every database created afterwards inherits

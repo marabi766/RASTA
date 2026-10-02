@@ -142,6 +142,15 @@ export const ID_PREFIX = {
   project: ID_PREFIXES.project,
   need: 'PND',
   tender: ID_PREFIXES.tender,
+  /** No platform prefix names these two, so they are this service's (CON-002 PR 4a). */
+  criteriaTemplate: 'CTP',
+  criterion: 'CRT',
+  /** CON-002 PR 4b: a tender's key pair, and an invitation to a restricted tender. */
+  tenderKey: 'TKY',
+  invitation: 'TIV',
+  /** CON-002 PR 6: a bid (the platform prefix) and a row of the bid access log. */
+  bid: ID_PREFIXES.bid,
+  bidAccess: 'BAL',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

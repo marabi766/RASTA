@@ -1,4 +1,5 @@
 import { AUDIT_TRAIL_TOPIC, DLQ_REASONS, PRODUCER_NAME_PATTERN } from './envelope';
+import { OPS_REPLAY_TOPIC } from './ops-replay';
 import {
   TOPIC_PRODUCERS,
   isAllowedProducer,
@@ -30,6 +31,7 @@ describe('TOPIC_PRODUCERS', () => {
       'rasta.notification.v1': ['notification-service'],
       'rasta.construction.v1': ['construction-service'],
       [AUDIT_TRAIL_TOPIC]: ['identity-service'],
+      [OPS_REPLAY_TOPIC]: ['ops-replay'],
     });
   });
 

@@ -4,14 +4,16 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { mintFlash } from '@/server/flash';
+import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
   parseReportRequestForm,
   reportMaintenanceRequest,
   reportRequestFormValues,
 } from '@/server/maintenance-commands';
 
-import type { ReportRequestFormState } from './form-state';
+import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } from './form-state';
 
 /**
  * The `/maintenance` report form's server action.
@@ -41,6 +43,15 @@ export async function submitReportRequest(
   }
 
   const values = reportRequestFormValues(form);
+
+  // "Edit and send as new" while the first submission is in flight (round 2
+  // on PR 171): nothing is sent. The values come back editable under a new
+  // bound id, so the edited form is a new request; the first keeps its own id
+  // and its own outcome.
+  if (form.get(REPORT_INTENT_FIELD) === EDIT_AS_NEW_INTENT) {
+    return { kind: 'EDITING', submissionId: mintSubmissionId(session), values };
+  }
+
   const parsed = parseReportRequestForm(values);
   if (!parsed.ok) {
     return {
@@ -57,7 +68,9 @@ export async function submitReportRequest(
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
-    redirect(`/maintenance/${encodeURIComponent(result.data.id)}?created=1`);
+    redirect(
+      `/maintenance/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+    );
   }
 
   switch (result.kind) {
@@ -78,5 +91,17 @@ export async function submitReportRequest(
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved".
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
+    case 'IN_PROGRESS':
+      // The first submission of this form is still being processed — a
+      // double press, or a create slower than the service waits for. Same
+      // values, same submission id: sent again after the wait, it is answered
+      // with that first request's result, never a second request.
+      return {
+        kind: 'IN_PROGRESS',
+        submissionId,
+        values,
+        retryAfterSeconds: result.retryAfterSeconds,
+        correlationId: result.correlationId,
+      };
   }
 }

@@ -2142,6 +2142,18 @@ HTTP (Gateway، توکن واقعی Keycloak)
 
 > نوشته‌شده در پایان دروازه انتشار فاز نگهداری (2026-08-28). هر ادعا شاهد دارد.
 
+> **به‌روز 2026-09-30 (#157، `fix/maintenance-request-idempotency`):** `POST /v1/maintenance-requests` اکنون
+> `Idempotency-Key` اختیاری را رعایت می‌کند — جدول مستأجری `idempotency_key` (Migration برگشت‌پذیر)، الگوی marketplace پس از
+> #147 (Claim/Complete/Release با Token هر Claim): همان کلید و بدنه از همان کاربر `201` اصلی را بازپخش می‌کند، حتی پس از
+> بسته شدن درخواست؛ بدنه یا کاربر دیگر `409 IDEMPOTENCY_KEY_REUSED`؛ درخواست هم‌زمان منتظر همان `201`؛ بی کلید، رفتار پیشین؛
+> `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` (۲۴). آزمون Integration: هم‌زمانی، بازپخش، بسته‌شده، استفادهٔ دوباره، مستأجرها، Fencing.
+> **دور ۱ بازبینی #171:** بررسی Claim (`SELECT … FOR UPDATE` با Token)، درخواست، Outbox و ذخیرهٔ پاسخ در **یک تراکنش**؛
+> ایجاد با Claim ازدست‌رفته Abort می‌شود؛ پاسخ طول عمر کلید را از نو آغاز می‌کند. «هر دو `201` می‌گیرند» فقط تا ۵ ثانیه؛ پس از
+> آن تکراری `409 CONFLICT` + `Retry-After` می‌گیرد که پورتال (`IN_PROGRESS` در `write.ts`) «در حال پردازش» نشان می‌دهد و
+> دکمه را برای همان مدت نگه می‌دارد؛ فرم‌های دیگر آن را «تأییدنشده» نشان می‌دهند. **دور ۲:** در این حالت فیلدها قفل‌اند و تکرار
+> دقیقاً همان مقادیر فرستاده‌شده را می‌فرستد (بدنهٔ دیگر با همان شناسه `IDEMPOTENCY_KEY_REUSED` می‌گرفت)؛ «ویرایش و ارسال جدید»
+> شناسهٔ ارسال تازهٔ مقید به نشست می‌گیرد و درخواست تازه‌ای است.
+
 | بُعد            | مقدار                                                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Service         | `maintenance-service` (`@rasta/maintenance-service`)                                                                     |
@@ -2530,9 +2542,9 @@ ScanWorker → Claim (FOR UPDATE SKIP LOCKED + Lease) → Stream از MinIO → 
 
 | موضوع         | واقعیت                                                                                  |
 | ------------- | --------------------------------------------------------------------------------------- |
-| Image         | `clamav/clamav@sha256:f0954d679017eb6d48221e2b2be3ac5457bf278a844f39b672376f55a085f591` |
-| نسخه          | ClamAV 1.5.4، Alpine 3.24.1، amd64، ~۴۰۰MB                                              |
-| امضا در Image | `main.cvd` v63 · `daily.cvd` v28108 · `bytecode.cvd` v339                               |
+| Image         | `clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0` |
+| نسخه          | ClamAV 1.5.4، Alpine 3.24.2، amd64، ~۴۰۰MB                                              |
+| امضا در Image | `main.cvd` v63 · `daily.cvd` v28136 · `bytecode.cvd` v339                               |
 | Production    | Unix Socket؛ `DOCUMENT_CLAMAV_HOST` در Production **رد می‌شود و فرآیند خارج** (S-08)    |
 | Local/CI      | TCP فقط روی `127.0.0.1`؛ CI روی لینوکس از Socket استفاده می‌کند                         |
 | freshclam     | Container جداگانه، غیر-root، Volume ماندگار — **محلی تأیید شد: 28108 → 28109**          |
@@ -2722,6 +2734,12 @@ FROM PUBLIC` روی هر پایگاه داده. Extension ها (`postgis`, `ltre
 `pgcrypto`) در `template1` نصب شده‌اند تا Shadow DB های Prisma هم آن‌ها را
 داشته باشند.
 
+> **به‌روز 2026-10-01 (D-045، `fix/d045-db-role-split`):** نقش اجرای سرویس‌های `PRIVILEGE_SPLIT_SERVICES`
+> (`lib/role-passwords.bash` — اکنون supplier و construction) مالک هیچ چیز نیست: `rasta_<svc>_migrator` مالک پایگاه داده و
+> همهٔ اشیا است و Migrationها را اجرا می‌کند (`DATABASE_URL_<SVC>_MIGRATOR`)؛ نقش اجرا فقط DML دارد
+> (`lib/service-privilege-split.bash`). پایگاه دادهٔ `rasta_audit` هم به مهاجرش رسید. `pnpm check:db-runtime-privileges`
+> در CI هر یافته را رد می‌کند؛ سرویس‌های باقی‌مانده در `PENDING_SPLIT` هستند. Runbook: `docs/runbooks/db-role-split.md`.
+
 Migration State: هر سه سرویس پیاده‌شده دقیقاً **یک** Migration دارند
 (`..._init_<service>`) — یعنی Schema هرکدام یک‌باره کامل طراحی و اعمال شده،
 هنوز هیچ Migration تکاملی (`add_*`) روی هیچ‌کدام اجرا نشده.
@@ -2810,9 +2828,9 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   **به‌روزرسانی 2026-09-28 (RUN-006، PR A #128 + PR B `chore/kafka-sasl-acl-broker`):** Broker توسعه و CI **احراز و
   مجوزدهی می‌کند** — SASL_SSL با SCRAM-SHA-512، یک Principal برای هر سرویس، `allow.everyone.if.no.acl.found=false`، و
   ACLهای تولیدشده از `TOPIC_PRODUCERS` و `TOPIC_CONSUMERS` در دو پروفایل: `broker-acls.development.json` (Compose و CI؛
-  ۱۶ Principal، ۱۸۶ Binding از 2026-09-30 با Consumer construction — ۱۶۷ پیش از READ کهنگی `ops-replay`، بی READ `rasta.economic.v1` و WRITE `.retry` آن) و `broker-acls.deployment.json` (۱۳ Principal، ۱۲۳ Binding، پیش‌تر ۱۰۷ — بی `itest-observer`، Kafka UI
+  ۱۶ Principal، ۲۰۷ Binding از 2026-10-01 — ۱۹۴ پیش از READ `ops-replay` روی هر `.retry` که می‌نویسد برای `--check-marker`، دور ۳ #166 — با Consumer construction و رکورد بازپخش `rasta.ops.replay.v1` — ۱۶۷ پیش از READ کهنگی `ops-replay`، بی READ `rasta.economic.v1` و WRITE `.retry` آن) و `broker-acls.deployment.json` (۱۳ Principal، ۱۴۲ Binding — ۱۲۹ پیش از READ `.retry` برای `ops-replay`، پیش‌تر ۱۰۷ — بی `itest-observer`، Kafka UI
   و Exporter). اعمال‌کننده (`pnpm kafka:acl:apply:dev` ← `kafka-acl.mjs apply --profile …`) و Broker بی پروفایل صریح اجرا
-  نمی‌شوند. فهرست Topicهای Bootstrap (`topics.txt`، ۳۵ Topic، شامل `rasta.audit.trail.v1.retry` و `rasta.construction.v1.dlq`) هم تولیدی است و آزمون
+  نمی‌شوند. فهرست Topicهای Bootstrap (`topics.txt`، ۳۷ Topic، شامل `rasta.audit.trail.v1.retry`، `rasta.construction.v1.dlq` و `rasta.ops.replay.v1` + `.retry`) هم تولیدی است و آزمون
   قرارداد-به-Bootstrap برابری‌اش را با قراردادها و ACLها نگه می‌دارد. فقط مالک روی Topicش می‌نویسد؛ Consumer فقط
   اشتراکش را زیر گروه‌های `<service>.` می‌خواند؛ فقط `ops-replay` روی `.retry` می‌نویسد و DLQها را می‌خواند؛
   `itest-observer` فقط READ دارد و فقط در پروفایل development. اعتبار admin، ops-replay و observer در
@@ -2829,7 +2847,10 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
   Topicهای مشترک را جز economic برای کهنگی می‌خواند (فقط گروه‌های `ops-replay.`). `EventConsumer` از #145 `.retry` را می‌خواند (D-039) و DLQ کلید را نگه
   می‌دارد (D-040). آزمون‌های Broker (ACL و بازپخش) در Job جدای CI «Broker authorisation» روی Broker تازه اجرا می‌شوند؛ آزمون
   Retention رکورد پاک می‌کند و فقط با `REPLAY_TEST_DISPOSABLE_BROKER=1` و رکوردهای همان اجرا کار می‌کند (محلی: Skip).
-  **شکاف باز:** رکورد ممیزی `rasta.ops.replay.v1` (یک `REPLAY_EXECUTED` برای هر رویداد) PR بعدی است.
+  **رکورد ممیزی بازپخش** (`feat/ops-replay-audit`، روی #144): هر بازپخش و `REPLAY_EXECUTED` آن در یک تراکنش Kafka روی
+  `rasta.ops.replay.v1` (ناشر فقط `ops-replay`)، که audit-service با گروه `audit-service.ops-replay` فقط‌الحاقی در `audit_event`
+  نگه می‌دارد (مستأجر = مستأجر رویداد بازپخش‌شده؛ بی آن پلتفرمی)؛ هر دو یا هیچ (مصرف‌کننده‌ها Commit‌شده می‌خوانند).
+  **شکاف باز:** تشخیص «قبلاً بازپخش شده» پیش از ارسال.
 - کاتالوگ کامل رویدادها: [`docs/events/README.md`](docs/events/README.md) —
   این جلسه با کد Sync شد (۵ رویداد گم‌شده اضافه، نام فیلدهای غلط اصلاح).
 

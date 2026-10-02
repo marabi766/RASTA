@@ -450,6 +450,101 @@ export class SupplierRepository {
   }
 
   /**
+   * One organization's standing as it is right now: the same selection as one
+   * snapshot item. `null` when the organization has no supplier profile.
+   */
+  async findStandingOf(organizationId: string) {
+    return runUnscoped(
+      'construction-service asks for one contractors current standing at the moment a bid ' +
+        'is decided (ADR-061 § 4); identifiers and instants only, caller checked in access.ts',
+      () =>
+        // One REPEATABLE READ snapshot for both: `asOf` is the transaction's start
+        // (`now()`), taken no later than the snapshot, so the standing returned is at
+        // least as new as the instant it claims. Two separate reads could report an
+        // instant that no state ever had (a suspension committed between them).
+        this.prisma.client.$transaction(
+          async (tx) => {
+            const instant = await tx.$queryRaw<{ now: Date }[]>`SELECT now() AS now`;
+            const asOf = instant[0]?.now;
+            if (!(asOf instanceof Date)) throw new Error('now() returned no timestamp');
+            const row = await tx.supplier.findUnique({
+              where: { organizationId },
+              select: {
+                organizationId: true,
+                qualifications: {
+                  where: { capability: 'CONTRACTING', state: 'APPROVED' },
+                  select: { decidedAt: true },
+                  orderBy: { decidedAt: 'desc' },
+                  take: 1,
+                },
+                suspensions: {
+                  select: { id: true, suspendedAt: true, reinstatedAt: true },
+                  orderBy: [{ suspendedAt: 'asc' }, { id: 'asc' }],
+                },
+              },
+            });
+            return { asOf, row };
+          },
+          { isolationLevel: 'RepeatableRead' },
+        ),
+    );
+  }
+
+  /** The database's own instant (never the application's clock). */
+  async databaseInstant(): Promise<Date> {
+    const rows = await this.prisma.client.$queryRaw<
+      { now: Date }[]
+    >`SELECT clock_timestamp() AS now`;
+    const now = rows[0]?.now;
+    if (!(now instanceof Date)) throw new Error('clock_timestamp() returned no timestamp');
+    return now;
+  }
+
+  /**
+   * One page of every supplier that has anything to say about standing: an
+   * approved CONTRACTING qualification, or any suspension episode (closed ones
+   * included, so a stale `SUPPLIER_SUSPENDED` replayed later converges with its
+   * `SUPPLIER_REINSTATED`). Keyset on the supplier id.
+   *
+   * Cross-tenant by nature — a snapshot of the whole directory's standing for the
+   * one service allowed to ask (`assertCallerIsConstructionService`). Selects
+   * identifiers and instants only: nothing a decision or a suspension wrote in
+   * words, no evidence, no name.
+   */
+  async listStandingSnapshot(filter: { cursor?: string; limit: number }) {
+    return runUnscoped(
+      'construction-service bootstraps the contractor-standing read model from the whole ' +
+        'directory (ADR-061 § 4); identifiers and instants only, caller checked in access.ts',
+      () =>
+        this.prisma.client.supplier.findMany({
+          where: {
+            OR: [
+              { qualifications: { some: { capability: 'CONTRACTING', state: 'APPROVED' } } },
+              { suspensions: { some: {} } },
+            ],
+            ...(filter.cursor ? { id: { gt: filter.cursor } } : {}),
+          },
+          select: {
+            id: true,
+            organizationId: true,
+            qualifications: {
+              where: { capability: 'CONTRACTING', state: 'APPROVED' },
+              select: { decidedAt: true },
+              orderBy: { decidedAt: 'desc' },
+              take: 1,
+            },
+            suspensions: {
+              select: { id: true, suspendedAt: true, reinstatedAt: true },
+              orderBy: [{ suspendedAt: 'asc' }, { id: 'asc' }],
+            },
+          },
+          orderBy: { id: 'asc' },
+          take: filter.limit + 1,
+        }),
+    );
+  }
+
+  /**
    * The platform review queue. Cross-tenant, and platform-only by `access.ts`.
    *
    * It returns the private qualification view, evidence identifiers included,

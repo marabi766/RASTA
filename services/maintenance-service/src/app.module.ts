@@ -37,6 +37,7 @@ import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { MaintenanceRepository } from './maintenance/maintenance.repository';
 import { ScheduleService } from './maintenance/schedule.service';
 import { RequestService } from './maintenance/request.service';
+import { IdempotencyStore } from './maintenance/idempotency';
 import { RepairOrderService } from './maintenance/repair-order.service';
 import { DueAnnouncerService } from './maintenance/due-announcer.service';
 import { DueScanner } from './maintenance/due-scanner';
@@ -150,6 +151,7 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
     MaintenanceRepository,
     ScheduleService,
     RequestService,
+    IdempotencyStore,
     MaintenanceFactService,
     AssetWorkStateService,
     TransferClearanceService,
@@ -319,6 +321,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly repository: MaintenanceRepository,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -354,6 +357,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         );
       } catch {
         // Metrics must never take the service down.
+      }
+      try {
+        // Expired Idempotency-Key records (#157), removed by age alone:
+        // unscoped by necessity, safe because they are already unusable.
+        await this.idempotency.purgeExpired();
+      } catch {
+        // Upkeep must never take the service down either.
       }
     };
 

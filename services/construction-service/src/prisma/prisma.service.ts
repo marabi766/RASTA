@@ -1,5 +1,9 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { createTenantGuardExtension } from '@rasta/nest-common';
+import { SERVICE_NAME } from '../config/env';
+import {
+  createTenantGuardExtension,
+  assertRuntimeRole as assertConnectedRuntimeRole,
+} from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 
 /**
@@ -22,6 +26,15 @@ export const TENANT_SCOPED_MODELS = [
   'Approval',
   'ProgressReport',
   'Tender',
+  'CriteriaTemplate',
+  'TenderCriterion',
+  'TenderInvitation',
+  'TenderKey',
+  'Bid',
+  'BidReceipt',
+  'BidAccessLog',
+  'ContractorStanding',
+  'ContractorSuspension',
 ] as const;
 
 /**
@@ -31,7 +44,15 @@ export const TENANT_SCOPED_MODELS = [
  * drained by a relay that has no request context, and it carries its own tenant
  * column for filtering. The same exception every other service makes.
  */
-export const TENANT_SCOPE_EXEMPT_MODELS = ['OutboxMessage'] as const;
+export const TENANT_SCOPE_EXEMPTIONS = {
+  OutboxMessage:
+    'The outbox relay drains this table across every tenant with no request context, and each row names its own organization_id: platform plumbing, filtered by that column rather than by the guard.',
+} as const satisfies Readonly<Record<string, string>>;
+
+/** The names, for callers that only need to know what is exempt. */
+export const TENANT_SCOPE_EXEMPT_MODELS = Object.keys(TENANT_SCOPE_EXEMPTIONS) as ReadonlyArray<
+  keyof typeof TENANT_SCOPE_EXEMPTIONS
+>;
 
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
@@ -72,6 +93,26 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Database connection established');
   }
 
+  /**
+   * Refuses to run as anything but this service's runtime role (D-045): not a
+   * superuser, not a migrator, owning nothing and holding no CREATE — what the
+   * catalogue says about the role actually connected, so a DATABASE_URL that
+   * names an owner is caught even though no *_MIGRATOR variable is set
+   * (@rasta/nest-common runtime-role.ts; Codex review of #176).
+   *
+   * Called first in `AppModule.onModuleInit`. Not in `onModuleInit` here: the
+   * integration suites open owner connections through this class on purpose.
+   */
+  async assertRuntimeRole(): Promise<void> {
+    const facts = await assertConnectedRuntimeRole(this.base, {
+      service: SERVICE_NAME,
+      runtimeVariable: 'DATABASE_URL_CONSTRUCTION',
+    });
+    this.logger.log(
+      `Connected as ${facts.role}: not a superuser or a migrator, owns nothing, no CREATE`,
+    );
+  }
+
   async onModuleDestroy(): Promise<void> {
     await this.base.$disconnect();
   }
@@ -92,7 +133,19 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * The outbox pattern requires the state change and the outbox insert to
    * share one transaction (AGENTS.md A-08, ADR-021).
    */
-  transaction<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient));
+  transaction<T>(
+    fn: (tx: ExtendedPrismaClient) => Promise<T>,
+    options?: { isolationLevel: 'RepeatableRead' },
+  ): Promise<T> {
+    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+  }
+
+  /**
+   * Runs `fn` against one snapshot (REPEATABLE READ): every read in it sees the
+   * database as it was at the first query, so two reads of one aggregate (the
+   * tender and its criteria) cannot straddle a commit between them.
+   */
+  snapshot<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.transaction(fn, { isolationLevel: 'RepeatableRead' });
   }
 }

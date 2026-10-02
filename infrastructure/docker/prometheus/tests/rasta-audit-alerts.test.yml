@@ -313,6 +313,44 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
+  # RastaAuditTenderChainGapOpen — a gauge: it keeps firing well past the 5m
+  # window of the one-off counter, for as long as a gap is overdue, and resolves
+  # when the gap closes. Two replicas sample the same table.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_tender_overdue_links{job="audit-service",instance="a:3115",environment="local"}'
+        values: '0 0 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 0 0'
+      - series: 'rasta_audit_tender_overdue_links{job="audit-service",instance="b:3115",environment="local"}'
+        values: '0 0 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditTenderChainGapOpen
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditTenderChainGapOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'A bid receipt chain has an unresolved gap'
+              description: '3 bid receipts have waited past the gap alert time for a predecessor that has not arrived; rasta_audit_tender_pending_oldest_age_seconds is the age of the oldest. The tender cannot open its bids until the gap is closed.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      # Fifteen minutes on, long after any 5m increase window: still firing.
+      - eval_time: 18m
+        alertname: RastaAuditTenderChainGapOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'A bid receipt chain has an unresolved gap'
+              description: '3 bid receipts have waited past the gap alert time for a predecessor that has not arrived; rasta_audit_tender_pending_oldest_age_seconds is the age of the oldest. The tender cannot open its bids until the gap is closed.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 22m
+        alertname: RastaAuditTenderChainGapOpen
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
   # RastaAuditIngestionLagHigh — ADR-053 § 13: p95 > 60 s per source_topic.
   #
   # Inputs are cumulative `rasta_audit_ingestion_lag_seconds_bucket` series with

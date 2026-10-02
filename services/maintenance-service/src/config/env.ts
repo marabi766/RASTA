@@ -69,6 +69,13 @@ export const maintenanceEnvSchema = baseEnvSchema
 
     /** How many schedules one scan pass evaluates. Bounds the query. */
     MAINTENANCE_DUE_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+
+    /**
+     * How long an `Idempotency-Key` on `POST /v1/maintenance-requests` is
+     * honoured, in hours (#157, docs/06 § 6.8: 24 by default, configurable).
+     * Within it a retry replays the original 201; after it the key is free.
+     */
+    MAINTENANCE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
   });
 
 export type MaintenanceEnv = z.infer<typeof maintenanceEnvSchema>;

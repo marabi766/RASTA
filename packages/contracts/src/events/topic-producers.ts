@@ -1,4 +1,5 @@
 import { AUDIT_TRAIL_TOPIC } from './envelope';
+import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
 
 /**
  * Which services may publish on which topic (ADR-061 § 1).
@@ -28,7 +29,9 @@ import { AUDIT_TRAIL_TOPIC } from './envelope';
  * means declaring its producer here first.
  *
  * The values are the producers' `SERVICE_NAME` — what `buildOutboxRow` writes
- * into `envelope.producer`. `asset-service` owns two topics.
+ * into `envelope.producer`. `asset-service` owns two topics. One producer is
+ * not a service: `ops-replay`, the operator's replay tool, alone writes
+ * `rasta.ops.replay.v1`, its record of every executed replay (`ops-replay.ts`).
  */
 export const TOPIC_PRODUCERS = Object.freeze({
   'rasta.identity.v1': Object.freeze(['identity-service'] as const),
@@ -44,6 +47,7 @@ export const TOPIC_PRODUCERS = Object.freeze({
   'rasta.notification.v1': Object.freeze(['notification-service'] as const),
   'rasta.construction.v1': Object.freeze(['construction-service'] as const),
   [AUDIT_TRAIL_TOPIC]: Object.freeze(['identity-service'] as const),
+  [OPS_REPLAY_TOPIC]: Object.freeze([OPS_REPLAY_PRODUCER] as const),
 });
 
 /**

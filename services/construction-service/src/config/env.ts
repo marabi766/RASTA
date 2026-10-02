@@ -87,6 +87,9 @@ function roleList(name: string, options: { min: number }) {
  *                                       a policy is not configurable: the owner
  *                                       decided that (Q-70 (7)).
  *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed.
+ *   SUPPLIER_SERVICE_URL                Where the contractor-standing snapshot is read
+ *                                       (and CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS,
+ *                                       CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS).
  *   CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS
  *                                       How long that confirmation may take;
  *                                       no answer in time refuses (504).
@@ -94,6 +97,10 @@ function roleList(name: string, options: { min: number }) {
  *   _BACKOFF_SECONDS / _BACKOFF_MAX_SECONDS
  *                                       The sweeper that suspends policies a
  *                                       moved organization stranded (Q-83).
+ *   CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS /
+ *   _BACKOFF_BASE_SECONDS / _BACKOFF_MAX_SECONDS
+ *                                       The sweeper that closes tenders past
+ *                                       their deadline (ADR-065 § 3).
  *   CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS
  *                                       Q-68. Submitted needs a project must
  *                                       have before it may request approval.
@@ -179,6 +186,41 @@ export const constructionEnvSchema = baseEnvSchema
      * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
      */
     ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    /**
+     * Where the contractor-standing snapshot is read (CON-002 PR 5, ADR-061 § 4):
+     * `GET {SUPPLIER_SERVICE_URL}/v1/suppliers/standing-snapshot`, a platform-wide
+     * service call with a token signed for no tenant. Until it has been loaded
+     * once, no contractor is eligible.
+     */
+    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    /**
+     * Where the externally held receipt chain is read (CON-002 PR 6, ADR-066 § 2):
+     * `GET {AUDIT_SERVICE_URL}/v1/internal/tender-evidence/{tenderId}/chain`, a
+     * platform-wide service call with a token signed for no tenant. Opening bids
+     * takes the chain head from there and nowhere else: if it cannot be read, bids
+     * are not opened.
+     */
+    AUDIT_SERVICE_URL: z.string().url().default('http://localhost:3115'),
+    CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
+    /** One page of the snapshot, headers to parse; an answer too slow is a failed attempt, retried. */
+    CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
+    /** Wait between failed attempts to load the snapshot. */
+    CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(600_000)
+      .default(15_000),
     CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -199,6 +241,42 @@ export const constructionEnvSchema = baseEnvSchema
     CONSTRUCTION_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
     CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(30),
     CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
+
+    /**
+     * The sweeper that closes tenders past `bid_closing_at` (ADR-065 § 3). A sweep
+     * every `INTERVAL_MS` claims at most `BATCH_SIZE` overdue tenders and closes each
+     * in one short transaction (no network call), so a tender is closed at most one
+     * interval late — which only delays the state: a bid after the deadline is refused
+     * by the database's clock whether or not the sweeper has run. `LEASE_SECONDS` must
+     * exceed one sweep (`BATCH_SIZE` × a close, milliseconds each); a tender whose
+     * close failed is claimed again when its lease runs out.
+     */
+    CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .default(5000),
+    CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+    /**
+     * A tender whose close failed is not claimed again for
+     * `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^failures)` — so a tender that
+     * cannot be closed neither takes every sweep's first slot nor starves the later
+     * overdue ones. `RastaConstructionTenderCloseRetriesHigh` fires past 5 failures.
+     */
+    CONSTRUCTION_TENDER_CLOSE_BACKOFF_BASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(10),
+    CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
@@ -242,6 +320,18 @@ export const constructionEnvSchema = baseEnvSchema
       .refine((value) => value === undefined || value === '' || isKekId(value), {
         message: 'CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)',
       }),
+
+    /**
+     * Q-84 (3): the shortest bidding window a tender may be published with.
+     * Default 0 — the platform invents no minimum; the window must only be a
+     * window that has not already closed.
+     */
+    CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(31_536_000)
+      .default(0),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),

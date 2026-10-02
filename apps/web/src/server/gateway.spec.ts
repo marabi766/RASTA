@@ -13,6 +13,7 @@ import {
   callGateway,
   gatewayUrl,
   neverSent,
+  parseRetryAfter,
 } from './gateway';
 
 /**
@@ -309,5 +310,20 @@ describe('a success with no body', () => {
     });
 
     expect(response.data).toEqual({ id: 'MBR_1' });
+  });
+});
+
+describe('Retry-After (round 1 on PR 171)', () => {
+  it('reads delay-seconds, the only form the platform sends', () => {
+    expect(parseRetryAfter('1')).toBe(1);
+    expect(parseRetryAfter(' 30 ')).toBe(30);
+  });
+
+  it('is null when absent, a date, or anything else', () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter('Wed, 21 Oct 2026 07:28:00 GMT')).toBeNull();
+    expect(parseRetryAfter('-1')).toBeNull();
+    expect(parseRetryAfter('1.5')).toBeNull();
+    expect(parseRetryAfter('')).toBeNull();
   });
 });

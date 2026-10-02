@@ -177,9 +177,11 @@ pnpm install --frozen-lockfile
 
 # PowerShell
 Copy-Item .env.example .env
+Copy-Item .env.migrator.example .env.migrator
 
 # Bash, macOS, or Linux
 cp .env.example .env
+cp .env.migrator.example .env.migrator   # database owner credentials, migrations only (D-045)
 
 pnpm infra:up
 pnpm db:generate

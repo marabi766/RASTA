@@ -115,6 +115,37 @@ describe('the machinery list', () => {
     const { container } = render(<AssetsScreen result={page()} query={{}} />);
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  describe('the registration form slot', () => {
+    const form = <p>فرم نمونهٔ ثبت ماشین</p>;
+
+    it('puts the form under its own heading, before the filters, when it is handed one', () => {
+      const { getByRole, getByText } = render(
+        <AssetsScreen result={page()} query={{}} registerForm={form} />,
+      );
+      const heading = getByRole('heading', { name: 'ثبت ماشین' });
+      expect(getByText('فرم نمونهٔ ثبت ماشین')).toBeInTheDocument();
+      const filters = getByRole('heading', { name: 'پالایش' });
+      expect(heading.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+
+    it('shows nothing where it was not handed one — no empty section, no dead heading', () => {
+      const { queryByRole } = render(<AssetsScreen result={page()} query={{}} />);
+      expect(queryByRole('heading', { name: 'ثبت ماشین' })).toBeNull();
+    });
+
+    it('still lists the machines when the person cannot register one', () => {
+      const { getByRole } = render(<AssetsScreen result={page()} query={{}} />);
+      expect(getByRole('link', { name: 'لودر کوماتسو' })).toBeInTheDocument();
+    });
+
+    it('has no accessibility violations with the slot filled', async () => {
+      const { container } = render(<AssetsScreen result={page()} query={{}} registerForm={form} />);
+      expect(await axe(container)).toHaveNoViolations();
+    });
+  });
 });
 
 const DOSSIER: AssetDossier = {
@@ -158,6 +189,70 @@ const DOSSIER: AssetDossier = {
 };
 
 describe('the electronic dossier', () => {
+  describe('the edit form slot', () => {
+    const form = <p>فرم نمونهٔ ویرایش</p>;
+
+    it('puts the form under its own heading when it is handed one', () => {
+      const { getByRole, getByText } = render(
+        <DossierScreen result={ok()} assetId="AST_1" editForm={form} />,
+      );
+      expect(getByRole('heading', { name: 'ویرایش مشخصات' })).toBeInTheDocument();
+      expect(getByText('فرم نمونهٔ ویرایش')).toBeInTheDocument();
+    });
+
+    it('shows nothing where it was not handed one', () => {
+      const { queryByRole } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+      expect(queryByRole('heading', { name: 'ویرایش مشخصات' })).toBeNull();
+    });
+
+    it('has no accessibility violations with the slot filled', async () => {
+      const { container } = render(<DossierScreen result={ok()} assetId="AST_1" editForm={form} />);
+      expect(await axe(container)).toHaveNoViolations();
+    });
+  });
+
+  describe('the confirmation after a write', () => {
+    it.each([
+      ['created', 'ماشین ثبت شد.'],
+      ['updated', 'مشخصات ماشین ذخیره شد.'],
+    ] as const)('confirms %s', (notice, words) => {
+      const { getByText } = render(<DossierScreen result={ok()} assetId="AST_1" notice={notice} />);
+      // A confirmation is `status`, which waits for a pause in the screen
+      // reader; found by its words because the page carries other status
+      // regions (the badges).
+      expect(getByText(words).closest('[role="status"]')).not.toBeNull();
+    });
+
+    it('says that an edit was not saved because the machine changed, as a warning', () => {
+      const { getByText } = render(
+        <DossierScreen result={ok()} assetId="AST_1" notice="conflict" />,
+      );
+      const words = getByText(/ویرایش شما ذخیره نشد/);
+      expect(words).toBeInTheDocument();
+      // A warning is not a success: it must not read as one to a screen reader.
+      expect(words.closest('[role="status"]')).toBeNull();
+      expect(words.closest('[role="alert"]')).not.toBeNull();
+    });
+
+    it('says nothing when the page was opened without one', () => {
+      const { queryByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+      expect(queryByText(/ماشین ثبت شد|مشخصات ماشین ذخیره شد/)).toBeNull();
+    });
+
+    it.each([
+      [{ kind: 'NOT_FOUND' }],
+      [{ kind: 'FORBIDDEN' }],
+      [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }],
+    ] as const)('never confirms anything on a page whose read failed (%j)', (failed) => {
+      // Even a genuine flash must not put a confirmation in front of a machine
+      // the viewer cannot read.
+      const { queryByText } = render(
+        <DossierScreen result={failed} assetId="AST_X" notice="created" />,
+      );
+      expect(queryByText(/ماشین ثبت شد/)).toBeNull();
+    });
+  });
+
   it('links to the report form with this machine already filled in', () => {
     const { getByRole } = render(<DossierScreen result={ok()} assetId="AST_1" />);
     expect(getByRole('link', { name: 'ثبت درخواست نگهداری' })).toHaveAttribute(

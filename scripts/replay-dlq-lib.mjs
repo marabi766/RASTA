@@ -34,7 +34,9 @@
  *
  * What is replayed: the original body, byte for byte, under that key, with
  * only the platform headers (`EVENT_HEADERS`) — each as the original publisher
- * set it — and `x-replay-id: <reportId>/<operator>`, never an `x-dlq-*` header.
+ * set it — and `x-replay-id: <reportId>/<operator>/<seq>/<eventId>` (one per
+ * replayed event: `seq` is its 1-based place in the run, see `replayIdFor`),
+ * never an `x-dlq-*` header.
  * `x-producer` is the one platform header a dead letter does not keep: the
  * dead-lettering consumer overwrites it with its own client id. It is neither
  * compared nor copied; it is restored from the envelope's `producer`, exactly
@@ -321,6 +323,13 @@ export function assess(record, { dlq, topology, topics, contracts }) {
   // says which partition key the publisher used.
   if (!key) return refuse('UNSEQUENCED_NO_KEY');
 
+  // Its REPLAY_EXECUTED record must be writable before anything is sent
+  // (round 1 on #166): the same schema, with this run's values stood in, so
+  // an event id past 128 characters — which the envelope allows and the
+  // record does not — is refused here by name, never discovered mid-run.
+  const unrecordable = recordProblem(summary, contracts);
+  if (unrecordable) return refuse(`UNRECORDABLE:${unrecordable}`);
+
   const restored = {};
   for (const [field, name] of Object.entries(EVENT_HEADERS)) {
     if (field === 'producer') continue;
@@ -333,6 +342,36 @@ export function assess(record, { dlq, topology, topics, contracts }) {
     refusal: null,
     message: { key, value: record.value, headers: restored },
   };
+}
+
+/** A report id and operator of the right shape, standing in for the run's own. */
+const RECORD_PROBE = Object.freeze({
+  reportId: 'rpl-00000000-0000-4000-8000-000000000000',
+  operator: 'probe',
+});
+
+/**
+ * The first field of this dead letter the `REPLAY_EXECUTED` v1 payload would
+ * refuse, as its schema path (`replayedEvent.eventId`), or `null` when a
+ * record can be written for it. The target position is not known yet and is
+ * stood in by `0`; the run's report id and operator are checked on their own.
+ */
+export function recordProblem(summary, contracts) {
+  const probe = contracts.replayExecutedPayloadSchemaV1.safeParse({
+    ...RECORD_PROBE,
+    replayedEvent: {
+      eventId: summary.eventId,
+      eventName: summary.eventName,
+      ...(summary.tenantId === null || summary.tenantId === undefined
+        ? {}
+        : { tenantId: summary.tenantId }),
+    },
+    dlq: { topic: summary.dlq, partition: summary.dlqPartition, offset: summary.dlqOffset },
+    target: { topic: summary.target, partition: 0, offset: '0' },
+    stale: false,
+  });
+  if (probe.success) return null;
+  return probe.error.issues[0].path.join('.') || '(root)';
 }
 
 /**
@@ -412,6 +451,140 @@ export function executionProblems(decisions, expectCount) {
   return problems;
 }
 
+/**
+ * The replay stamp of one replayed event: `<reportId>/<operator>/<seq>/<eventId>`,
+ * `seq` its 1-based place among the run's replays. Per event, not per run
+ * (round 2 on #166): after an unknown commit, the search for this exact value
+ * can only find this event's replay — never an earlier one of the same run.
+ * The operator pattern has no `/`, so the last segment is the whole event id.
+ */
+export function replayIdFor(reportId, operator, seq, eventId) {
+  return `${reportId}/${operator}/${seq}/${eventId}`;
+}
+
+/**
+ * The transaction timeout of every replay's producer (`replay-dlq.mjs`): the
+ * longest a transaction may stay open before its coordinator aborts it.
+ * `--check-marker` answers `ABORTED` only once at least this long has passed
+ * since the replay (round 3 on #166).
+ */
+export const REPLAY_TRANSACTION_TIMEOUT_MS = 30_000;
+
+/** A stamp {@link replayIdFor} writes: report, operator, place in the run, event id. */
+export const REPLAY_MARKER_PATTERN =
+  /^rpl-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9._@-]{1,64}\/[1-9]\d*\/.+$/;
+
+/**
+ * `--check-marker <x-replay-id> --topic <.retry> --partition P --offset O
+ * --replayed-at <ISO>`: the one recovery step after `COMMIT OUTCOME UNKNOWN`
+ * (round 3 on #166). Every value comes from the warning, which prints the
+ * whole command.
+ */
+export function parseCheckArgs(argv) {
+  const options = {};
+  const flags = {
+    '--check-marker': 'marker',
+    '--topic': 'topic',
+    '--partition': 'partition',
+    '--offset': 'offset',
+    '--replayed-at': 'replayedAt',
+  };
+  for (let i = 0; i < argv.length; i += 2) {
+    const name = flags[argv[i]];
+    if (!name) throw new UsageError(`unknown argument ${argv[i]} with --check-marker`);
+    const next = argv[i + 1];
+    if (next === undefined || next.startsWith('--'))
+      throw new UsageError(`${argv[i]} needs a value`);
+    options[name] = next;
+  }
+  for (const [flag, name] of Object.entries(flags)) {
+    if (options[name] === undefined)
+      throw new UsageError(`${flag} is required with --check-marker`);
+  }
+  if (!REPLAY_MARKER_PATTERN.test(options.marker)) {
+    throw new UsageError('--check-marker must be an x-replay-id as the warning printed it');
+  }
+  if (!options.topic.endsWith('.retry')) throw new UsageError('--topic must be a .retry topic');
+  if (!OFFSET.test(options.partition) || !OFFSET.test(options.offset)) {
+    throw new UsageError('--partition and --offset must be numbers');
+  }
+  const replayedAtMs = Date.parse(options.replayedAt);
+  if (!Number.isFinite(replayedAtMs)) throw new UsageError('--replayed-at must be an ISO instant');
+  return {
+    marker: options.marker,
+    topic: options.topic,
+    partition: Number(options.partition),
+    offset: BigInt(options.offset),
+    replayedAtMs,
+  };
+}
+
+/** The command that answers an unknown commit, as the warning prints it. */
+export function checkMarkerCommand({ marker, topic, partition, offset, replayedAt }) {
+  return (
+    `node scripts/replay-dlq.mjs --check-marker '${marker}' --topic ${topic} ` +
+    `--partition ${partition} --offset ${offset} --replayed-at ${replayedAt}`
+  );
+}
+
+/**
+ * Whether the replay stamped `marker` at `offset` committed (round 3 on #166).
+ *
+ * - `COMMITTED` — a read-committed read finds the record at `offset`, with
+ *   exactly this stamp.
+ * - `ABORTED` — only when both hold: the partition's last stable offset is
+ *   past `offset` (every transaction that wrote there is decided, and a
+ *   read-committed read does not return it), **and** at least the producer's
+ *   transaction timeout has passed since the replay.
+ * - `STILL_UNKNOWN` — anything else. Never "absent" early: a transaction still
+ *   being resolved is not yet readable, and reading that as an abort would
+ *   replay it twice.
+ * - `MISMATCH` — the position holds another committed record: the arguments
+ *   are not this replay's.
+ *
+ * `record` is the read-committed record at `offset`, or null when that read
+ * returned none; `stableOffset` is the partition's last stable offset and
+ * `lowOffset` its first (a position retention removed answers nothing).
+ */
+export function markerVerdict({
+  marker,
+  offset,
+  lowOffset = 0n,
+  stableOffset,
+  record,
+  replayedAtMs,
+  nowMs,
+  transactionTimeoutMs = REPLAY_TRANSACTION_TIMEOUT_MS,
+}) {
+  if (record) {
+    if (record.replayId === marker) return { answer: 'COMMITTED' };
+    return {
+      answer: 'MISMATCH',
+      reason: `offset ${offset} holds another record (x-replay-id ${record.replayId ?? 'none'})`,
+    };
+  }
+  if (lowOffset > offset) {
+    return {
+      answer: 'STILL_UNKNOWN',
+      reason: `retention has removed offset ${offset} (the partition now starts at ${lowOffset}): it cannot be read either way`,
+    };
+  }
+  if (stableOffset <= offset) {
+    return {
+      answer: 'STILL_UNKNOWN',
+      reason: `the last stable offset is ${stableOffset}: a transaction at ${offset} may still be open`,
+    };
+  }
+  const waited = nowMs - replayedAtMs;
+  if (waited < transactionTimeoutMs) {
+    return {
+      answer: 'STILL_UNKNOWN',
+      reason: `only ${Math.max(0, Math.floor(waited / 1000))} s since the replay; ask again after ${transactionTimeoutMs / 1000} s`,
+    };
+  }
+  return { answer: 'ABORTED' };
+}
+
 /** The record published to `.retry`: body unchanged, keyed, platform headers and the replay stamp. */
 export function replayMessage(decision, replayId, REPLAY_HEADERS) {
   return {
@@ -419,6 +592,168 @@ export function replayMessage(decision, replayId, REPLAY_HEADERS) {
     value: decision.message.value,
     headers: { ...decision.message.headers, [REPLAY_HEADERS.replayId]: replayId },
   };
+}
+
+/** `producerVersion` of every replay record: the version of these rules. */
+export const REPLAY_TOOL_VERSION = '1.0.0';
+
+/**
+ * The platform's record of one executed replay: a `REPLAY_EXECUTED` on
+ * `rasta.ops.replay.v1` (contracts `ops-replay.ts`), published after the
+ * replay landed on `.retry` at `landed` (`{ partition, offset }`). Ids and
+ * positions only — never the replayed payload. Keyed by the report id, so one
+ * run's records sit on one partition, in order.
+ *
+ * The envelope and payload are checked against the contracts before anything
+ * is sent: a record audit-service would refuse is a failure here, not later.
+ */
+export function replayExecutedRecord(
+  decision,
+  { reportId, operator, landed, eventId, occurredAt },
+  contracts,
+) {
+  const { summary } = decision;
+  const tenantId = summary.tenantId ?? undefined;
+  const payload = {
+    reportId,
+    operator,
+    replayedEvent: {
+      eventId: summary.eventId,
+      eventName: summary.eventName,
+      ...(tenantId === undefined ? {} : { tenantId }),
+    },
+    dlq: { topic: summary.dlq, partition: summary.dlqPartition, offset: summary.dlqOffset },
+    target: { topic: summary.target, partition: landed.partition, offset: String(landed.offset) },
+    stale: summary.stale,
+  };
+  const envelope = {
+    eventId,
+    eventName: contracts.REPLAY_EXECUTED,
+    eventVersion: contracts.REPLAY_EXECUTED_VERSION,
+    occurredAt,
+    producer: contracts.OPS_REPLAY_PRODUCER,
+    producerVersion: REPLAY_TOOL_VERSION,
+    aggregateType: contracts.REPLAY_RUN_AGGREGATE,
+    aggregateId: reportId,
+    ...(tenantId === undefined ? {} : { tenantId }),
+    correlationId: reportId,
+    causationId: summary.eventId,
+    actor: { type: 'USER', id: operator },
+    payload,
+  };
+  const checkedPayload = contracts.replayExecutedPayloadSchemaV1.safeParse(payload);
+  const checkedEnvelope = contracts.eventEnvelopeSchema.safeParse(envelope);
+  if (!checkedPayload.success || !checkedEnvelope.success) {
+    const issues = [
+      ...(checkedPayload.success ? [] : checkedPayload.error.issues),
+      ...(checkedEnvelope.success ? [] : checkedEnvelope.error.issues),
+    ].map((issue) => `${issue.path.join('.') || '(root)'} ${issue.code}`);
+    throw new Error(`the replay record breaks its contract: ${issues.join(', ')}`);
+  }
+  const { EVENT_HEADERS } = contracts;
+  const headers = {
+    [EVENT_HEADERS.eventId]: envelope.eventId,
+    [EVENT_HEADERS.eventName]: envelope.eventName,
+    [EVENT_HEADERS.eventVersion]: String(envelope.eventVersion),
+    [EVENT_HEADERS.correlationId]: envelope.correlationId,
+    [EVENT_HEADERS.causationId]: envelope.causationId,
+    [EVENT_HEADERS.producer]: envelope.producer,
+    ...(tenantId === undefined ? {} : { [EVENT_HEADERS.tenantId]: tenantId }),
+  };
+  return { key: reportId, value: JSON.stringify(envelope), headers };
+}
+
+/**
+ * `--execute` once every check has passed: for each decision, in order, one
+ * Kafka transaction holding the replay to its `.retry` **and** its
+ * `REPLAY_EXECUTED` record on `rasta.ops.replay.v1` (round 1 on #166).
+ *
+ * `beginTransaction()` opens one (a transactional producer, id
+ * `ops-replay.<reportId>`); its `send(topic, message)` resolves
+ * `{ partition, offset }`, and `commit()` / `abort()` end it. Consumers read
+ * committed only (kafkajs' default, and `EventConsumer`'s), so the pair is
+ * seen together or not at all: a failure before the commit — of either send,
+ * of building the record, or the process being killed — leaves neither
+ * record visible (an open transaction is aborted by its coordinator, or
+ * fenced by the next producer with the same id).
+ *
+ * Stops at the first failure and fails the run. A commit whose answer was
+ * lost is the one outcome the tool cannot know: the pair is either committed
+ * or not — never one without the other — and the warning names how to tell:
+ * this event's own replay stamp at the position the replay was written to.
+ */
+export async function executeReplays(
+  decisions,
+  { reportId, operator, beginTransaction, newEventId, now, report, warn, contracts },
+) {
+  let written = 0;
+  for (const [index, decision] of decisions.entries()) {
+    const replayId = replayIdFor(reportId, operator, index + 1, decision.summary.eventId);
+    let transaction;
+    let line = { replayId };
+    try {
+      transaction = await beginTransaction();
+      const landed = await transaction.send(
+        decision.summary.target,
+        replayMessage(decision, replayId, contracts.REPLAY_HEADERS),
+      );
+      const replayedAt = now();
+      const auditEventId = newEventId();
+      line = {
+        replayId,
+        replayPartition: landed.partition,
+        replayOffset: String(landed.offset),
+        replayedAt,
+        auditEventId,
+      };
+      const record = replayExecutedRecord(
+        decision,
+        { reportId, operator, landed, eventId: auditEventId, occurredAt: replayedAt },
+        contracts,
+      );
+      const audited = await transaction.send(contracts.OPS_REPLAY_TOPIC, record);
+      line = { ...line, auditPartition: audited.partition, auditOffset: String(audited.offset) };
+    } catch (error) {
+      await transaction?.abort().catch(() => undefined);
+      report(
+        reportLine(reportId, 'execute', decision, {
+          ...line,
+          error: error.message,
+          committed: false,
+        }),
+      );
+      return { written, recorded: written, failed: true };
+    }
+    try {
+      await transaction.commit();
+    } catch (error) {
+      report(
+        reportLine(reportId, 'execute', decision, {
+          ...line,
+          error: error.message,
+          committed: 'UNKNOWN',
+        }),
+      );
+      warn(
+        `COMMIT OUTCOME UNKNOWN for ${decision.summary.eventId} (${error.message}): its replay and ` +
+          `its ${contracts.REPLAY_EXECUTED} record are both committed or both not. Before running ` +
+          'again, ask — and only this answers it (runbook: docs/runbooks/replay-dlq.md, step 3): ' +
+          checkMarkerCommand({
+            marker: replayId,
+            topic: decision.summary.target,
+            partition: line.replayPartition,
+            offset: line.replayOffset,
+            replayedAt: line.replayedAt,
+          }) +
+          ' — COMMITTED: done, do not replay it again; ABORTED: replay it again; STILL_UNKNOWN: ' +
+          'ask again later. Stopped here.',
+      );
+      return { written, recorded: written, failed: true };
+    }
+    written += 1;
+    report(reportLine(reportId, 'execute', decision, { ...line, committed: true }));
+  }
+  return { written, recorded: written, failed: false };
 }
 
 /** One report line: ids, names, reasons and offsets — never a payload. */

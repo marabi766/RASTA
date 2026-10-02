@@ -116,7 +116,7 @@ describe('outbox defaults (ADR-050)', () => {
     expect(env.OUTBOX_CLAIM_LEASE_SECONDS).toBe(60);
     expect(env.OUTBOX_CLAIM_BACKOFF_SECONDS).toBe(5);
     expect(env.OUTBOX_CLAIM_BACKOFF_MAX_SECONDS).toBe(3600);
-    expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(30);
+    expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(20);
   });
 
   it('refuses a lease below the floor renewal timing depends on', () => {

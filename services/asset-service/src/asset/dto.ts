@@ -131,9 +131,20 @@ export const updateAssetSchema = z
     model: z.string().trim().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
     specifications: z.record(z.unknown()).optional(),
+    /**
+     * The version of the asset the caller's edit was made against — the
+     * `version` a read returned. **Required**: the update applies only to that
+     * version (`UPDATE … WHERE version = ?`) and is otherwise refused with
+     * `409 OPTIMISTIC_LOCK_FAILED`, and a request that does not say which
+     * version it was made against is refused with `400`. Optional, it left a
+     * direct API client free to overwrite whatever is current, which is the lost
+     * update this field exists to prevent (PR #158 review, twice): a caller that
+     * does not know the version cannot know what it is about to overwrite.
+     */
+    expectedVersion: z.number().int().min(1),
   })
   .strict()
-  .refine((value) => Object.keys(value).length > 0, {
+  .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {
     message: 'At least one field must be provided',
   });
 
@@ -294,6 +305,8 @@ export interface AssetView {
   commissionedAt: string | null;
   decommissionedAt: string | null;
   specifications: Record<string, unknown>;
+  /** Send it back as `expectedVersion` on an update made from this read. */
+  version: number;
   createdAt: string;
   updatedAt: string;
 }

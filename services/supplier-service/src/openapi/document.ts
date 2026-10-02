@@ -10,6 +10,9 @@ import {
   rejectQualificationSchema,
   reviewQueueQuerySchema,
   searchSuppliersQuerySchema,
+  standingOfSchema,
+  standingSnapshotPageSchema,
+  standingSnapshotQuerySchema,
   submitQualificationSchema,
   supplierDetailViewSchema,
   supplierDirectoryViewSchema,
@@ -82,6 +85,12 @@ const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.ZodType
     status: '200',
     schema: cursorPageOf(reviewQueueEntrySchema),
   },
+  // Service-to-service (construction-service only): identifiers and instants, no words.
+  'GET /v1/suppliers/standing-snapshot': { status: '200', schema: standingSnapshotPageSchema },
+  'GET /v1/suppliers/standing-snapshot/{organizationId}': {
+    status: '200',
+    schema: standingOfSchema,
+  },
   'POST /v1/suppliers/{id}/qualifications': { status: '201', schema: qualificationViewSchema },
   'POST /v1/suppliers/{id}/qualifications/{qualificationId}/approve': {
     status: '200',
@@ -106,6 +115,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/suppliers': searchSuppliersQuerySchema,
   'GET /v1/suppliers/qualified': listQualifiedForQuerySchema,
   'GET /v1/suppliers/qualifications': reviewQueueQuerySchema,
+  'GET /v1/suppliers/standing-snapshot': standingSnapshotQuerySchema,
 };
 
 const ERROR_DESCRIPTIONS: Record<number, string> = {
@@ -122,6 +132,19 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  // The standing routes are not bearer-authenticated: construction-service reaches them
+  // with a signed internal service token (ADR-020/035), signed for no tenant. Publishing
+  // them under the bearer scheme would describe a door that does not exist and hide the
+  // one that does.
+  document.components.securitySchemes ??= {};
+  document.components.securitySchemes.internalToken = {
+    type: 'apiKey',
+    in: 'header',
+    name: 'x-internal-token',
+    description:
+      'A signed internal service token minted by construction-service for supplier-service ' +
+      'and for no tenant. The standing snapshot routes accept it and nothing else.',
+  } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -139,7 +162,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       // as much as of the code that enforces it. A generated client would omit
       // the header and a reviewer would have no way to see the endpoint was
       // ever meant to be protected.
-      operation.security ??= [{ bearer: [] }];
+      operation.security ??= path.startsWith('/v1/suppliers/standing-snapshot')
+        ? [{ internalToken: [] }]
+        : [{ bearer: [] }];
 
       const body = REQUEST_BODIES[key];
       if (body) {

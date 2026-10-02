@@ -8,6 +8,7 @@ import {
   cleanup,
   newOrganizationId,
   outboxFor,
+  untilASessionWaitsOnALock,
   wire,
   type Wiring,
 } from './helpers';
@@ -272,6 +273,8 @@ describe('tender lifecycle', () => {
         const editB = asAdmin(a, () =>
           w.tenders.update(tender.id, { expectedVersion: 2, title: 'Edit B' }),
         );
+        // Not assumed: edit B is shown to be waiting on the row lock edit A holds.
+        await untilASessionWaitsOnALock(w.prisma);
         release();
         const [first, second] = await Promise.all([editA, editB]);
 

@@ -489,6 +489,11 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > همین سرویس می‌مانند و مصرف‌کننده از API (با مجوز خودش) می‌خواندشان (بازبینی Codex روی #119، یافتهٔ ۴). `PROJECT_CREATED`
 > به‌جای `location` فقط `hasArea` دارد. `estimate` با نام `estimatedCostMinor` (رشتهٔ ریالی، یا `null`) می‌آید.
 > تحویل مرتب میان Replicaهای Relay تضمین **نمی‌شود** (D-027، ADR-051 B4).
+>
+> **مصرف (CON-002 PR 5).** `construction-service` از `rasta.supplier.v1` فقط `SUPPLIER_QUALIFIED` (وقتی `qualifiedFor`
+> شامل `CONTRACTING` باشد)، `SUPPLIER_SUSPENDED` و `SUPPLIER_REINSTATED` را می‌خواند (گروه
+> `construction-service.supplier-standing`، صف مرده `rasta.construction.v1.dlq`) و از `rasta.organization.v1` فقط
+> `ORGANIZATION_MOVED` را. پیاده‌سازی مدل خواندنی: جابه‌جاپذیر و تکرارپذیر؛ سازمانِ ناشناخته واجد شرایط نیست.
 
 | رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                                                                            |
 | -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -532,10 +537,44 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `TENDER_CANCELLED` — را مدیر پروژه با همین نام‌ها پذیرفت (2026-09-30).** `BID_ACCESSED` هرگز محتوای پیشنهاد حمل نمی‌کند: فقط
 شناسه‌ها، بازیگر، زمان و هدف بسته (`.strict()` هر فیلد دیگر را رد می‌کند).
 
+**پیاده‌شده در CON-002 PR 6 (پیشنهاد):** `BID_SUBMITTED` و `BID_REVISED` علاوه بر ستون بالا `ciphertextSha256`، `previousReceipt`،
+`receipt` و `submittedBy` دارند: `receipt` **سرِ تازهٔ زنجیرهٔ رسید** همان مناقصه است و `audit-service` آن را بیرون از
+پایگاه دادهٔ این سرویس نگه می‌دارد؛ بازگشایی (گام ۸) سر را از آنجا می‌گیرد، نه از جدول `bid_receipt` (ADR-066 § ۲). Digestها
+امن‌اند؛ محتوا، قیمت و رمزنوشته هرگز نمی‌آیند. `BID_WITHDRAWN` شامل `revision` و `withdrawnBy` است. `BID_ACCESSED` برای هر خواندن
+پیشنهاد (رد شده هم) در همان تراکنش نوشته می‌شود: `bidId` (یا `null` اگر پیشنهادی برای خواننده نبود)، `accessorOrganizationId`،
+`accessedBy`، `purpose` (بسته: `OWN_BID_RECEIPT`؛ هدف‌های سمت کارفرما با گام ۸)، `outcome` (`GRANTED | REFUSED`)، `accessedAt`.
+هیچ‌کدام `projectId` ندارند؛ کلید پارتیشن `tenderId` است.
+
+**پیاده‌شده در CON-002 PR 7 (بستن مهلت):** `TENDER_CLOSED` (`aggregateType = Tender`، کلید `tenderId`؛ `projectId`، `organizationId`،
+`bidCount` — شمار پیشنهادهای ایستاده، نه انصراف‌یافته‌ها — `closedAt` و `closedBy`؛ برای جاروکننده `system:construction-service`).
+هیچ شناسهٔ پیمانکار، قیمت یا محتوایی نمی‌آید (`.strict()`). هر مناقصه **یک** `TENDER_CLOSED` دارد: بستن در پایگاه داده Idempotent است
+(مناقصه‌ای که دیگر `PUBLISHED` نیست بی‌اثر و بی‌رویداد برمی‌گردد). `closedAt` ساعت پایگاه داده است که پس از قفل مناقصه خوانده می‌شود و
+هرگز پیش از `bidClosingAt` نیست. رویداد با گذار در یک تراکنش نوشته می‌شود؛ تأخیر بسته‌شدن به فاصلهٔ جاروکننده
+(`CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS`) کران می‌خورد و درستی پذیرش پیشنهاد به آن وابسته نیست (ADR-065 § ۲-۳).
+
+**مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
+`tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
+(`tender_receipt_pending`) و در تراکنشِ الحاق پیشینش به ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_TENDER_GAP_ALERT_SECONDS` هشدار
+می‌دهد. دوشاخه‌شدن و ناسازگاری `tenantId` پاکت با `payload.organizationId` (یا `aggregateId` با `payload.tenderId`) پذیرفته
+نمی‌شود (DLQ و هشدار). `BID_ACCESSED` با فیلدهای شناسه‌ای و `outcome` واقعی (`GRANTED | REFUSED`) در `bid_access_evidence` می‌ماند.
+سرِ زنجیره را فقط `GET /v1/internal/tender-evidence/{tenderId}/chain` (`@AllowService('construction-service')`، با توکن امضاشده برای
+سازمان مالکِ Tender؛ جستجو با سازمان و Tender) می‌دهد.
+
 **پیاده‌شده در CON-002 PR 2:** `TENDER_CREATED` و `TENDER_CANCELLED` (`from` وضعیت پیشین، `reasonCode` از مجموعهٔ بستهٔ
 `OWNER_REQUEST | NO_QUALIFIED_BID`؛ دلیل نوشتاری فقط در پایگاه داده) و **`TENDER_UPDATED`** (`changedFields[]`، فقط نام فیلدها؛ مثل
 `PROJECT_UPDATED`، برای پوشش S-06 از ویرایش پیش‌نویس) — **`TENDER_UPDATED` در فهرست هشت‌تایی نبود؛ مدیر پروژه آن را پذیرفت (2026-09-30) — فقط نام فیلدها، هرگز مقدارشان.**
 همه با `aggregateType = Tender` و کلید پارتیشن `tenderId`. بقیه هنوز تولید نمی‌شوند.
+
+**پیاده‌شده در CON-002 PR 4a (دو رویداد افزوده، منتظر پذیرش مدیر پروژه — برای پوشش S-06 از تغییر معیارها):**
+`TENDER_CRITERIA_SET` (`aggregateType = Tender`، کلید `tenderId`؛ `criteriaCount`، `totalWeightBp`، `templateId` یا `null`، `setBy`،
+`setAt`) و `CRITERIA_TEMPLATE_CREATED` (`aggregateType = CriteriaTemplate`، کلید `{organizationId}/{templateId}`؛ `version`،
+`criteriaCount`، `totalWeightBp`، `createdBy`، `createdAt`). هیچ‌کدام کد، برچسب یا متن معیار را حمل نمی‌کنند (`.strict()`).
+این دو را مدیر پروژه پذیرفت (2026-09-30).
+
+**پیاده‌شده در CON-002 PR 4b:** `TENDER_PUBLISHED` (رویداد کاتالوگ؛ `aggregateType = Tender`، کلید `tenderId`؛ `visibility`،
+`bidOpeningAt`، `bidClosingAt`، `criteriaCount`، `keyId` — شناسهٔ کدر جفت‌کلید، `publishedBy`، `publishedAt`؛ **نه** عنوان، متن،
+معیار یا کلید عمومی) و **`TENDER_BIDDER_INVITED`** (`invitedOrganizationId`، `invitedBy`، `invitedAt`) — دومی برای پوشش S-06 از دعوت
+افزوده شد و **مدیر پروژه پذیرفت (2026-09-30؛ فقط شناسه‌ها)**.
 
 **`assetsUsed` روی Kafka نمی‌آید** (بازبینی Codex روی #122). شناسه‌های دارایی گزارش پیشرفت فقط در قالب شناسهٔ
 دارایی پلتفرم (`AST_<ULID>`، `assetIdSchema` در `@rasta/contracts`) پذیرفته می‌شوند — هر چیز دیگر `400` — و همراه
@@ -855,6 +894,32 @@ DLQ اختصاصی `rasta.notification.v1.dlq`. **فقط دو Topic و سه رو
 `resourceId`، `reason`، `correctionOf`). هرکدام **رد** می‌شود، نه کوتاه یا اصلاح: این جدول تنها جایی است که مقدارِ نشت‌کرده
 هرگز از آن حذف نمی‌شود، و پیوند اصلاحِ کوتاه‌شده به رکوردی اشاره می‌کند که هیچ‌کس نام نبرده. **آنچه Consumer بررسی
 نمی‌کند:** اینکه رکوردِ `correctionOf` واقعاً وجود دارد یا در همان مستأجر است — این بر عهدهٔ Producer فرمان اصلاح است.
+
+---
+
+## بازپخش DLQ — `rasta.ops.replay.v1`
+
+رکورد پلتفرم از هر بازپخش اجراشده (D-039، [`docs/runbooks/replay-dlq.md`](../runbooks/replay-dlq.md) گام ۳). **تنها
+ناشر** ابزار بازپخش اپراتور است، Principal `ops-replay` (`TOPIC_PRODUCERS`؛ ACL Broker هیچ سرویسی را اجازهٔ نوشتن
+نمی‌دهد)؛ **تنها مصرف‌کننده** audit-service با گروه ثابت `audit-service.ops-replay` که هر رکورد را فقط‌الحاقی در
+`audit_event` نگه می‌دارد. قرارداد: `packages/contracts/src/events/ops-replay.ts`.
+
+**یک رکورد برای هر رویداد بازپخش‌شده، در همان تراکنش Kafka که بازپخش را روی `.retry` می‌نویسد** (شناسهٔ تراکنشی
+`ops-replay.<reportId>`؛ مصرف‌کننده‌ها فقط Commit‌شده می‌خوانند): هر دو با هم Commit می‌شوند یا هیچ‌کدام دیده نمی‌شود — و بی
+رکورد جداگانهٔ «شروع». کلید
+پیام شناسهٔ گزارش اجرا است (یک اجرا روی یک پارتیشن، به ترتیب)؛ `correlationId` همان شناسه است تا یک اجرا با یک جست‌وجو
+بازسازی شود. `tenantId` مستأجرِ رویداد بازپخش‌شده است و باید با `replayedEvent.tenantId` یکی باشد — رویداد بی مستأجر
+رکورد پلتفرمی می‌سازد (فقط `SYSTEM_ADMIN`، ADR-053 § ۱۰). `actor` کاربری است به نام اپراتور (`REPLAY_OPERATOR`،
+ادعای دارندهٔ اعتبار `ops-replay`). **هرگز Payload رویداد بازپخش‌شده.**
+
+| رویداد            | نسخه | Payload (v1)                                                                                                                                                                           |
+| ----------------- | :--: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REPLAY_EXECUTED` |  ۱   | `reportId`، `operator`، `replayedEvent {eventId, eventName, tenantId?}`، `dlq {topic, partition, offset}`، `target {topic, partition, offset}`، `stale` (`false`\|`true`\|`'UNKNOWN'`) |
+
+Consumer هر رکوردی را که با خودش نخواند **رد** می‌کند (بازپخش و سپس DLQ `rasta.audit.v1.dlq`): نام یا نسخهٔ دیگر،
+ناشری جز `ops-replay`، Topic دیگر، Payload ناسازگار با Schema، `correlationId` ≠ `reportId`، `actor` ≠ اپراتور، و
+مستأجرِ ناهمخوان. ردیف: `action = REPLAY_EXECUTED`، `resourceType = Event` / `resourceId` = شناسهٔ رویداد بازپخش‌شده،
+و در `changes` جابه‌جایی رویداد (Topic، Partition، Offset از DLQ به `.retry`) و نام رویداد و حکم کهنگی.
 
 ---
 

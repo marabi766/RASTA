@@ -71,12 +71,14 @@ describe('the OpenAPI document describes the application that is running', () =>
     await api.close();
   });
 
-  it('documents exactly the ten supplier routes the controller serves', () => {
+  it('documents exactly the twelve supplier routes the controller serves', () => {
     const documented = documentedRoutes().filter((route) => route.includes('/suppliers'));
     expect(documented).toEqual([
       'GET /v1/suppliers',
       'GET /v1/suppliers/qualifications',
       'GET /v1/suppliers/qualified',
+      'GET /v1/suppliers/standing-snapshot',
+      'GET /v1/suppliers/standing-snapshot/{organizationId}',
       'GET /v1/suppliers/{id}',
       'POST /v1/suppliers',
       'POST /v1/suppliers/{id}/qualifications',
@@ -151,6 +153,24 @@ describe('the OpenAPI document describes the application that is running', () =>
     walkNames(document.components ?? {}, 'components');
 
     expect(offenders).toEqual([]);
+  });
+
+  it('publishes the standing routes under the internal service token, and every other route under the bearer', () => {
+    const schemes = (document.components as { securitySchemes?: Record<string, unknown> })
+      .securitySchemes;
+    expect(schemes?.internalToken).toMatchObject({ type: 'apiKey', in: 'header' });
+    expect((schemes?.internalToken as { name: string }).name).toBe('x-internal-token');
+
+    for (const [path, item] of Object.entries(document.paths ?? {})) {
+      const internal = path.startsWith('/v1/suppliers/standing-snapshot');
+      for (const [method, operation] of Object.entries(item ?? {})) {
+        const security = (operation as { security?: Record<string, unknown>[] }).security ?? [];
+        expect({ route: `${method} ${path}`, schemes: security.flatMap(Object.keys) }).toEqual({
+          route: `${method} ${path}`,
+          schemes: [internal ? 'internalToken' : 'bearer'],
+        });
+      }
+    }
   });
 
   it('marks every operation as requiring a bearer token', () => {

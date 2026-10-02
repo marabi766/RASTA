@@ -895,8 +895,19 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   در بازتاب Keycloak ساختن دوبارهٔ وضعیت فعلی). **دور ۲:** آزمون Retention رکورد پاک می‌کند، پس فقط روی Broker دورانداختنی
   (`REPLAY_TEST_DISPOSABLE_BROKER=1`) و فقط وقتی هر رکورد بازه مال همان اجرا باشد اجرا می‌شود؛ در CI Job جدای «Broker
   authorisation» با Broker تازه (آزمون بازپخش اول، سپس ACL). حضور Header با بدنهٔ خام پیش از پیش‌فرض‌های Schema سنجیده می‌شود.
-  **آنچه باز می‌ماند:** رکورد ممیزی پلتفرم برای هر بازپخش (Topic `rasta.ops.replay.v1`، یک رکورد `REPLAY_EXECUTED` برای هر
-  رویداد پس از نشستن روی `.retry`، با شناسهٔ گزارش؛ مصرف‌کننده audit-service) PR بعدی است — و تشخیص «قبلاً بازپخش شده» همان‌جا.
+  **به‌روز 2026-09-30 — رکورد ممیزی پلتفرم ساخته شد (`feat/ops-replay-audit`):** Topic `rasta.ops.replay.v1` (+ `.retry`)،
+  ناشر فقط `ops-replay` (WRITE تازه فقط همان‌جا)، مصرف‌کننده audit-service با گروه `audit-service.ops-replay`؛ یک
+  `REPLAY_EXECUTED` برای هر رویداد **پس از** نشستن روی `.retry` (شناسهٔ گزارش، اپراتور، DLQ/Partition/Offset، `.retry`/
+  Partition/Offset، شناسه و نام رویداد، حکم کهنگی — هرگز Payload)، فقط‌الحاقی در `audit_event` زیر مستأجرِ رویداد یا پلتفرمی.
+  **دور ۱ بازبینی #166:** بازپخش و رکوردش در **یک تراکنش Kafka** (`ops-replay.<reportId>`، ACL `TRANSACTIONAL_ID` فقط برای
+  `ops-replay` زیر `ops-replay.`)؛ مصرف‌کننده‌ها فقط Commit‌شده می‌خوانند، پس کشته شدن میان دو ارسال هیچ‌کدام را نمی‌گذارد؛
+  میدانی که رکورد نمی‌پذیرد (`eventId` > ۱۲۸) پیش از ارسال `UNRECORDABLE:<مسیر>` رد می‌شود.
+  **دور ۲:** مهر `x-replay-id` برای هر رویداد جداست (`<reportId>/<operator>/<seq>/<eventId>`)، پس پس از Commit نامعلومِ
+  رویداد دوم، جست‌وجوی مهرش بازپخش Commit‌شدهٔ رویداد اول را نمی‌یابد؛ هشدار مهر دقیق و موقعیت را نام می‌برد.
+  **دور ۳:** تنها گام بازیابی `--check-marker` است (Read-Committed، گروه `ops-replay.check.*`، با READ تازهٔ `ops-replay` روی
+  هر `.retry` که می‌نویسد): `COMMITTED` با یافتن مهر، `ABORTED` فقط پس از گذشتن LSO از Offset **و** Timeout تراکنش از زمان
+  بازپخش، وگرنه `STILL_UNKNOWN` — «ندیدم» هرگز زود «نشده» شمرده نمی‌شود.
+  **آنچه باز می‌ماند:** تشخیص «قبلاً بازپخش شده» پیش از ارسال (پایه‌اش همین رکوردها).
 - **اولویت:** متوسط
 - **وضعیت:** بخش (۱) رفع‌شده (2026-09-29، `fix/event-consumer-retry-and-dlq-key`): `EventConsumer` هر Topic را با `.retry` آن
   Subscribe می‌کند؛ رکورد `.retry` همان بررسی‌های Topic اصلی را می‌گذراند و به همان DLQ می‌رود؛ `audit-service` بازپخش را
@@ -1020,6 +1031,43 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   لفافه هم پنهان شود (Topic جدا یا شناسهٔ مستعار).
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-09-30
+
+### D-045 · نقش زمان اجرای برخی سرویس‌ها مالک جدول‌هایش است، پس می‌تواند Triggerهای تمامیت را غیرفعال کند
+
+- **چه چیزی:** `rasta_construction` (نقش اجرای `construction-service`) مالک جدول‌های `rasta_construction` است و ابرکاربر نیست؛ بررسی
+  شد (2026-10-01): `ALTER TABLE tender_criterion DISABLE TRIGGER tg_tender_criterion_freeze` با همین نقش موفق می‌شود. هر SQLی که از
+  نقش اجرا بگذرد (آسیب‌پذیری تزریق، یک مسیر نوشتن آینده) همهٔ Triggerهای تمامیت این سرویس را می‌تواند خاموش یا حذف کند:
+  انجماد معیارها (C3)، فقط‌افزودنیِ قالب معیار، نگهبان `tender_key` و محافظ‌های چرخهٔ حالت. `supplier-service` و `audit-service`
+  نقش مالک (`*_migrator`) را جدا کرده‌اند؛ ساخت و ساخته‌شده در این سرویس هنوز یکی است.
+- **چرا:** نقش جدا برای هر سرویس در RUN-002 هنوز برای `construction-service` انجام نشده است؛ این PRها آن را رفع نمی‌کنند. پاک‌سازی
+  آزمون‌ها اکنون از اتصال جداگانهٔ مالک می‌گذرد، نه از `PrismaService` در حال آزمون، و `DATABASE_URL_CONSTRUCTION_MIGRATOR` را
+  **صریحاً** می‌خواهد (بی بازگشت به URL زمان اجرا؛ نبودنش بلند خطا می‌دهد؛ CI آن را می‌گذارد). امروز مقدارش همان نقش است.
+- **ریسک:** Triggerهایی که در این PRها «در پایگاه داده» نگه داشته می‌شوند در برابر مهاجم دارای SQL با نقش اجرا، دفاع نیستند؛ فقط در
+  برابر خطای کد و مسیرهای نوشتن فراموش‌شده‌اند.
+- **رفع:** جداسازی نقش اجرا از نقش مالک برای `construction-service` (الگوی `supplier-privilege-split`)؛ نقش اجرا فقط
+  `SELECT/INSERT/UPDATE` لازم؛ آزمونی که نبودنِ `ALTER TABLE` را با نقش اجرا ثابت کند (مثل `runtime-privileges.int-spec.ts`).
+- **اولویت:** بالا (RUN-002)
+- **ثبت‌شده:** 2026-10-01
+- **وضعیت:** در حال رفع (2026-10-01، `fix/d045-db-role-split`). سازوکار مشترک ساخته شد: `lib/service-privilege-split.bash`
+  برای هر سرویس در `PRIVILEGE_SPLIT_SERVICES` پایگاه داده و همهٔ اشیای آن را به `rasta_<svc>_migrator` می‌دهد و به نقش
+  اجرا فقط DML (با `ALTER DEFAULT PRIVILEGES`)؛ `scripts/prisma.mjs` حق نقش اجرا روی `_prisma_migrations` را پس از هر
+  Migration می‌گیرد؛ `scripts/check-db-runtime-privileges.mjs` در CI شکست می‌خورد اگر نقش اجرای یک سرویس تقسیم‌شده مالک
+  چیزی باشد یا `TRIGGER`/`TRUNCATE`/`REFERENCES`/`CREATE` داشته باشد. **construction-service** تقسیم شد (آزمون زندهٔ
+  `runtime-privileges.int-spec.ts`: `DISABLE TRIGGER`، `ALTER`، `DROP`، `TRUNCATE` → `42501`)؛ supplier به همان سازوکار
+  منتقل شد؛ پایگاه دادهٔ `rasta_audit` هم از نقش اجرا به مهاجرش رسید. بازبینی Codex روی #176: (۱) دفتر
+  `_prisma_migrations` را خود تقسیم پیش از هر Migration با DDL دقیق Prisma و بی هیچ حقی برای نقش اجرا می‌سازد، پس
+  Migration ناموفق هم دفتر را نوشتنی نمی‌گذارد (آزمون زنده با `prisma migrate deploy` ناموفق)؛ (۲) گذرواژهٔ پیش‌فرض
+  توسعه فقط با `RASTA_DB_BOOTSTRAP=compose` (Compose و CI) پذیرفته می‌شود و هر اجرای دیگر بی گذرواژهٔ صریح رد می‌کند؛ (۳)
+  اعتبار مهاجر از `.env` به `.env.migrator` رفت که هیچ سرویسی بار نمی‌کند، و هر سرویس با متغیر `*_MIGRATOR` در محیطش بالا
+  نمی‌آید (`assertNoMigratorCredentials`، `pnpm test:boot-guard`). دور دوم Codex روی #176: گذرواژهٔ مهاجر
+  برابر با گذرواژهٔ نقش اجرا یا هر نقش شناخته‌شدهٔ دیگر رد می‌شود (تقسیم مستقل هر دو گذرواژه را می‌خواهد)؛ و هر سرویس
+  تقسیم‌شده پیش از کار، نقشِ واقعاً وصل‌شده را از Catalogue می‌پرسد (`assertRuntimeRole` مشترک در `@rasta/nest-common`) و
+  با Superuser، مهاجر، مالک یا دارندهٔ `CREATE` بالا نمی‌آید — پس `DATABASE_URL`ی که به مهاجر اشاره کند هم گرفته می‌شود. دور سوم: عضویت در مهاجر (حتی `INHERIT FALSE`، که
+  `SET ROLE` را باز می‌گذارد) در هر دو بررسی مالکیت حساب می‌شود و تقسیم آن را لغو می‌کند؛ اجرای مستقل گذرواژهٔ نقش اجرا را
+  به مقدار داده‌شده می‌چرخاند و ورود هر دو اعتبار را ثابت می‌کند؛ و Verifier پیش از کار بررسی می‌کند که دقیقاً با مهاجر همان
+  سرویس وصل است، نه Superuser. دور چهارم (مسیر ارتقای خوشهٔ موجود): تقسیم مستقل audit هم از همان گام اعتبار می‌گذرد (هر دو گذرواژه، متمایز، گذاشته و ورودشان ثابت)؛ `rotate-role-passwords.bash` هر `rasta_<svc>_migrator` را با پایگاه دادهٔ سرویسش می‌آزماید؛ و Schema `public`، هر که مالکش باشد (مثلاً Superuser پس از ارتقا از PostgreSQL 14)، پیش از Revokeها و ساخت دفتر به مهاجر داده می‌شود. آزمون زندهٔ «خوشهٔ قدیمی» بدترین حالت واقع‌بینانه را — `public` مال Superuser، نقش اجرا مالک همه‌چیز و عضو مهاجر با `SET`، یک گذرواژهٔ مشترک، audit هم — از ارتقای مستقل می‌گذراند و همهٔ ناورداها را می‌آزماید. **باقی‌مانده** (`PENDING_SPLIT`): identity،
+  notification، organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
+  هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
 
 ## ۲۳٫۶ ثبت بدهی معماری
 

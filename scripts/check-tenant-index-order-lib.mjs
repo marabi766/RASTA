@@ -95,8 +95,10 @@ export const EXEMPTIONS = {
   },
   // construction: every child references its parent by (organization_id,
   // parent_id), so per-parent indexes lead with the tenant column without
-  // weakening anything. One exemption:
+  // weakening anything. Two exemptions:
   construction: {
+    ix_tender_close_due:
+      'the close sweeper claims overdue PUBLISHED tenders for every tenant at once, oldest deadline first (TenderCloseRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, so it is small, and each tender is then closed under its own organization_id',
     ix_approval_authority_inbox:
       "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
   },
@@ -113,6 +115,18 @@ export const EXEMPTIONS = {
     audit_chain_head_pkey:
       'chain_scope separates the platform chain (organization_id = empty string) from tenant chains; lookups name all three columns',
     audit_chain_head_month_idx: 'which chains a month holds — asked across tenants by verification',
+    tender_receipt_link_pkey:
+      "one link per (tender, seq) — an invariant of one tender's chain; the chain is read by tender id alone through the tenant-less service token (ADR-066 § 2), and leading with organization_id would let two organizations each hold a chain for one tender",
+    ux_tender_receipt_link_receipt:
+      'a receipt is one link of its tender, whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    ux_tender_receipt_link_previous:
+      'a link has one successor per tender (no fork), whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    ux_tender_receipt_pending_previous:
+      'one held successor per predecessor within a tender: the fork check must not be weakened by a differing organization_id',
+    ux_tender_receipt_pending_receipt:
+      'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
+    ix_bid_access_evidence_tender:
+      "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
   },
 };
 

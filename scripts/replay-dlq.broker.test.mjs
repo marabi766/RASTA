@@ -38,6 +38,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import kafkajs from 'kafkajs';
 import { connectionFor, passwordVariable } from './kafka-acl-lib.mjs';
+import { REPLAY_TRANSACTION_TIMEOUT_MS } from './replay-dlq-lib.mjs';
 
 const { Kafka, logLevel } = kafkajs;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,6 +51,8 @@ const { EventConsumer, UnprocessableEventError, kafkaConnectionFor } = nestCommo
 
 const ORIGINAL = 'rasta.fleet.v1';
 const RETRY = 'rasta.fleet.v1.retry';
+/** The replay record: one REPLAY_EXECUTED per executed replay, written by the tool. */
+const OPS_REPLAY = 'rasta.ops.replay.v1';
 const DLQ = 'rasta.maintenance.v1.dlq';
 const OPERATOR = 'replay-itest';
 /** Records may be deleted only on a broker declared throwaway (CI's fresh one). */
@@ -172,7 +175,11 @@ function replay(
   if (operator) childEnv.REPLAY_OPERATOR = operator;
   const result = spawnSync(
     'node',
-    [resolve(ROOT, 'scripts/replay-dlq.mjs'), '--dlq', DLQ, ...args],
+    [
+      resolve(ROOT, 'scripts/replay-dlq.mjs'),
+      ...(args.includes('--check-marker') ? [] : ['--dlq', DLQ]),
+      ...args,
+    ],
     { env: childEnv, encoding: 'utf8', timeout: 180_000 },
   );
   const lines = result.stdout
@@ -263,9 +270,22 @@ async function deadLetters(since) {
     .filter((d) => Object.values(ids).includes(d.eventId));
 }
 let dlqStart;
+let opsReplayStart;
+
+/** This run's replay records, by report id. */
+async function replayRecords(reportId) {
+  return (await readSince('itest-observer', OPS_REPLAY, opsReplayStart))
+    .filter((m) => m.key?.toString() === reportId)
+    .map((m) => ({
+      key: m.key.toString(),
+      headers: m.headers,
+      body: JSON.parse(m.value.toString()),
+    }));
+}
 
 before(async () => {
   dlqStart = await endOffsets(DLQ);
+  opsReplayStart = await endOffsets(OPS_REPLAY);
 
   consumer = new EventConsumer(
     {
@@ -488,7 +508,10 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
       deliveredFrom(ids.replayable, RETRY),
     );
 
-    const replayId = `${result.summary.reportId}/${OPERATOR}`;
+    // The stamp is this event's own (round 2 on #166), and the report line names it.
+    const replayId = `${result.summary.reportId}/${OPERATOR}/1/${ids.replayable}`;
+    assert.equal(result.summary.replayIdPrefix, `${result.summary.reportId}/${OPERATOR}/`);
+    assert.equal(result.records[0].replayId, replayId);
     const landed = (await readSince('itest-observer', RETRY, retryBefore)).filter(
       (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
     );
@@ -504,6 +527,30 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     }
     // The publisher, as the relay set it — not the consumer that dead-lettered it.
     assert.equal(message.headers[EVENT_HEADERS.producer].toString(), 'fleet-service');
+
+    // And, after it landed, its one record on rasta.ops.replay.v1 — keyed by
+    // the run, stating where it moved and under what verdict, no payload.
+    assert.equal(result.summary.recorded, 1);
+    const [line] = result.records;
+    const records = await replayRecords(result.summary.reportId);
+    assert.equal(records.length, 1);
+    const [{ body, headers }] = records;
+    assert.equal(body.eventName, 'REPLAY_EXECUTED');
+    assert.equal(body.producer, 'ops-replay');
+    assert.equal(body.eventId, line.auditEventId);
+    assert.equal(body.tenantId, TENANT);
+    assert.equal(body.correlationId, result.summary.reportId);
+    assert.deepEqual(body.actor, { type: 'USER', id: OPERATOR });
+    assert.deepEqual(body.payload, {
+      reportId: result.summary.reportId,
+      operator: OPERATOR,
+      replayedEvent: { eventId: ids.replayable, eventName: 'USAGE_RECORDED', tenantId: TENANT },
+      dlq: { topic: DLQ, partition: line.dlqPartition, offset: line.dlqOffset },
+      target: { topic: RETRY, partition: line.replayPartition, offset: line.replayOffset },
+      stale: false,
+    });
+    assert.ok(!JSON.stringify(body).includes(`replay-itest-${run}`), 'no replayed payload');
+    assert.equal(headers[EVENT_HEADERS.producer].toString(), 'ops-replay');
   });
 
   test('an unsequenced event replays under the key its dead letter kept', async () => {
@@ -513,7 +560,7 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     await eventually('the consumer to take it from .retry', async () =>
       deliveredFrom(ids.unsequenced, RETRY),
     );
-    const replayId = `${result.summary.reportId}/${OPERATOR}`;
+    const replayId = `${result.summary.reportId}/${OPERATOR}/1/${ids.unsequenced}`;
     const [message] = (await readSince('itest-observer', RETRY, retryBefore)).filter(
       (m) => m.headers?.[REPLAY_HEADERS.replayId]?.toString() === replayId,
     );
@@ -590,12 +637,223 @@ describe('--execute writes only what a dry-run approved, exactly as many as expe
     );
   });
 
+  test('a refused or dry-run selection records nothing on rasta.ops.replay.v1', async () => {
+    const dry = replay(['--event-id', ids.replayable]);
+    const refused = replay(['--event-id', ids.financial, '--execute', '--expect-count', '1']);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.equal(refused.status, 1);
+    for (const result of [dry, refused]) {
+      assert.deepEqual(await replayRecords(result.summary.reportId), []);
+    }
+  });
+
   test('nothing the tool wrote reached the original topic', async () => {
     const since = await readSince('itest-observer', ORIGINAL, originalEnds);
     assert.deepEqual(
       since.filter((m) => m.headers?.[REPLAY_HEADERS.replayId] !== undefined),
       [],
     );
+  });
+});
+
+describe('one Kafka transaction per replay and its record (round 1 on #166)', () => {
+  /** The kinds of this run's markers on `topic` since `since`, as a read-committed consumer sees them. */
+  async function markerKinds(topic, since) {
+    return (await readSince('itest-observer', topic, since)).flatMap((m) => {
+      try {
+        const body = JSON.parse(m.value?.toString() ?? '');
+        return body.payload?.marker === `txn-${run}` ? [body.payload.kind] : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  /** A transactional producer as ops-replay, under its own namespace. */
+  async function transactional(transactionalId) {
+    return connected(
+      new Kafka({
+        ...connectionFor('ops-replay', env, read),
+        clientId: `replay-itest-txn-${run}`,
+        logLevel: logLevel.NOTHING,
+        retry: { retries: 5, initialRetryTime: 300 },
+      }).producer({ transactionalId, idempotent: true, maxInFlightRequests: 1 }),
+    );
+  }
+
+  // A valid envelope for a tenant the test's consumer skips, so a committed
+  // one on .retry is neither applied nor dead-lettered.
+  const marker = (kind) => ({
+    key: `txn-${run}`,
+    value: JSON.stringify(
+      envelope(`EVT_TXN_${kind}_${run}`, null, {
+        tenantId: `ORG_TXN_${run}`,
+        payload: { marker: `txn-${run}`, kind },
+      }),
+    ),
+  });
+
+  /**
+   * A committed transaction after the one under test, on the same partitions:
+   * a read-committed reader that reaches it has read past the aborted offsets,
+   * which a tail of aborted records alone would never let it do.
+   */
+  async function sentinel(kind) {
+    const producer = await transactional(`ops-replay.itest-sentinel-${kind}-${run}`);
+    const transaction = await producer.transaction();
+    await transaction.send({ topic: RETRY, acks: -1, messages: [marker(`${kind}-sentinel`)] });
+    await transaction.send({ topic: OPS_REPLAY, acks: -1, messages: [marker(`${kind}-sentinel`)] });
+    await transaction.commit();
+  }
+
+  test('an aborted transaction leaves neither the replay nor its record visible', async () => {
+    const retryBefore = await endOffsets(RETRY);
+    const recordsBefore = await endOffsets(OPS_REPLAY);
+    const producer = await transactional(`ops-replay.itest-abort-${run}`);
+    const transaction = await producer.transaction();
+    await transaction.send({ topic: RETRY, acks: -1, messages: [marker('aborted')] });
+    await transaction.send({ topic: OPS_REPLAY, acks: -1, messages: [marker('aborted')] });
+    await transaction.abort();
+    await sentinel('aborted');
+
+    assert.deepEqual(await markerKinds(RETRY, retryBefore), ['aborted-sentinel']);
+    assert.deepEqual(await markerKinds(OPS_REPLAY, recordsBefore), ['aborted-sentinel']);
+  });
+
+  test('a process killed between the replay and its record leaves nothing committed', async () => {
+    const retryBefore = await endOffsets(RETRY);
+    const recordsBefore = await endOffsets(OPS_REPLAY);
+    const transactionalId = `ops-replay.itest-kill-${run}`;
+    // A separate process, as ops-replay: the .retry send lands inside the
+    // transaction, then the process is killed before its record is sent.
+    const child = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `
+          import kafkajs from 'kafkajs';
+          import { readFileSync } from 'node:fs';
+          import { connectionFor } from ${JSON.stringify(resolve(ROOT, 'scripts/kafka-acl-lib.mjs'))};
+          const kafka = new kafkajs.Kafka({
+            ...connectionFor('ops-replay', process.env, (path) => readFileSync(path, 'utf8')),
+            logLevel: kafkajs.logLevel.NOTHING,
+            retry: { retries: 5, initialRetryTime: 300 },
+          });
+          const producer = kafka.producer({
+            transactionalId: ${JSON.stringify(transactionalId)},
+            idempotent: true,
+            maxInFlightRequests: 1,
+          });
+          await producer.connect();
+          const transaction = await producer.transaction();
+          await transaction.send({
+            topic: ${JSON.stringify(RETRY)},
+            acks: -1,
+            messages: [${JSON.stringify(marker('killed'))}],
+          });
+          process.stdout.write('SENT\\n');
+          process.kill(process.pid, 'SIGKILL');
+        `,
+      ],
+      {
+        cwd: ROOT,
+        env: {
+          PATH: process.env.PATH,
+          KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
+          KAFKA_SSL_CA_FILE: CA,
+          KAFKA_SASL_PASSWORD_OPS_REPLAY: process.env.KAFKA_SASL_PASSWORD_OPS_REPLAY,
+        },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    assert.equal(child.signal, 'SIGKILL', child.stderr);
+    assert.match(child.stdout, /SENT/, 'the replay was sent before the kill');
+
+    // The next producer with the id fences the dead one and its open
+    // transaction is aborted — as the tool's next run under a new id, or the
+    // coordinator's timeout, would leave it: never committed.
+    const successor = await transactional(transactionalId);
+    const transaction = await successor.transaction();
+    await transaction.abort();
+    await sentinel('killed');
+
+    assert.deepEqual(await markerKinds(RETRY, retryBefore), ['killed-sentinel']);
+    assert.deepEqual(await markerKinds(OPS_REPLAY, recordsBefore), ['killed-sentinel']);
+  });
+
+  // ---- --check-marker: the one recovery step after an unknown commit, run
+  // as an operator would, with ops-replay's credential (round 3 on #166).
+
+  /** A replay stamp as `replayIdFor` writes one, unique to this test. */
+  const stampFor = (seq) => `rpl-${randomUUID()}/${OPERATOR}/${seq}/EVT_CHECK_${seq}_${run}`;
+
+  /** One transaction holding a stamped replay on RETRY; returns it open, with its position. */
+  async function stampedReplay(kind, stamp) {
+    const producer = await transactional(`ops-replay.itest-check-${kind}-${run}`);
+    const transaction = await producer.transaction();
+    const message = { ...marker(`check-${kind}`), headers: { [REPLAY_HEADERS.replayId]: stamp } };
+    const [landed] = await transaction.send({ topic: RETRY, acks: -1, messages: [message] });
+    return { transaction, partition: landed.partition, offset: landed.baseOffset };
+  }
+
+  const ask = (stamp, { partition, offset }, replayedAt) =>
+    replay([
+      '--check-marker',
+      stamp,
+      '--topic',
+      RETRY,
+      '--partition',
+      String(partition),
+      '--offset',
+      String(offset),
+      '--replayed-at',
+      replayedAt,
+    ]);
+
+  const longAgo = () => new Date(Date.now() - REPLAY_TRANSACTION_TIMEOUT_MS - 5_000).toISOString();
+
+  test('--check-marker answers COMMITTED for a replay whose transaction committed', async () => {
+    const stamp = stampFor(1);
+    const replayed = await stampedReplay('committed', stamp);
+    await replayed.transaction.commit();
+
+    const result = ask(stamp, replayed, new Date().toISOString());
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      [result.records[0].answer, result.records[0].marker, result.records[0].offset],
+      ['COMMITTED', stamp, String(replayed.offset)],
+    );
+    // Another stamp at that position is not this replay.
+    const other = ask(stampFor(2), replayed, longAgo());
+    assert.equal(other.status, 2, other.stderr);
+    assert.equal(other.records[0].answer, 'MISMATCH');
+  });
+
+  test('--check-marker never answers early: STILL_UNKNOWN while open, and until the timeout has passed; ABORTED only then', async () => {
+    const stamp = stampFor(3);
+    const replayed = await stampedReplay('aborted', stamp);
+
+    // Still open: the last stable offset has not passed it.
+    const open = ask(stamp, replayed, longAgo());
+    assert.equal(open.status, 3, open.stderr);
+    assert.equal(open.records[0].answer, 'STILL_UNKNOWN');
+    assert.ok(BigInt(open.records[0].stableOffset) <= BigInt(replayed.offset));
+
+    await replayed.transaction.abort();
+    await sentinel('check');
+
+    // Decided and stable — but too soon after the replay to call it aborted.
+    const soon = ask(stamp, replayed, new Date().toISOString());
+    assert.equal(soon.status, 3, soon.stderr);
+    assert.equal(soon.records[0].answer, 'STILL_UNKNOWN');
+    assert.ok(BigInt(soon.records[0].stableOffset) > BigInt(replayed.offset));
+
+    // Stable past it, and the transaction timeout has passed since the replay.
+    const settled = ask(stamp, replayed, longAgo());
+    assert.equal(settled.status, 0, settled.stderr);
+    assert.equal(settled.records[0].answer, 'ABORTED');
   });
 });
 

@@ -34,11 +34,13 @@ superuser_sql() {
   psql -v ON_ERROR_STOP=1 -X -q -tA --username "$POSTGRES_USER" --dbname postgres -c "$1"
 }
 
-# The database each role logs into for the check.
+# The database each role logs into for the check: a service's runtime role is
+# named after its database, and every migrator — audit's and each split
+# service's — logs into its service's (Codex round 4 on #176: there is no
+# database named after a migrator).
 role_database() {
   case "$1" in
-    rasta_audit_migrator) printf 'rasta_audit' ;;
-    rasta_supplier_migrator) printf 'rasta_supplier' ;;
+    rasta_*_migrator) printf '%s' "${1%_migrator}" ;;
     *) printf '%s' "$1" ;;
   esac
 }
