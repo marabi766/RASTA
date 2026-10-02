@@ -6,17 +6,17 @@ import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { mintFlash } from '@/server/flash';
-import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import {
-  parseReportRequestForm,
-  reportMaintenanceRequest,
-  reportRequestFormValues,
-} from '@/server/maintenance-commands';
+  parseRegisterAssetForm,
+  registerAsset,
+  registerAssetFormValues,
+} from '@/server/asset-commands';
 
-import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } from './form-state';
+import type { RegisterAssetFormState } from './form-state';
 
 /**
- * The `/maintenance` report form's server action.
+ * The `/assets` registration form's server action.
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, then
  * CSRF, then the submission id, then the form, then the gateway. Each refusal
@@ -24,10 +24,10 @@ import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } 
  * gateway — which is what the spec beside this file asserts.
  */
 
-export async function submitReportRequest(
-  _previous: ReportRequestFormState,
+export async function submitRegisterAsset(
+  _previous: RegisterAssetFormState,
   form: FormData,
-): Promise<ReportRequestFormState> {
+): Promise<RegisterAssetFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
 
@@ -42,17 +42,8 @@ export async function submitReportRequest(
     return { kind: 'REFUSED', reason: 'SUBMISSION' };
   }
 
-  const values = reportRequestFormValues(form);
-
-  // "Edit and send as new" while the first submission is in flight (round 2
-  // on PR 171): nothing is sent. The values come back editable under a new
-  // bound id, so the edited form is a new request; the first keeps its own id
-  // and its own outcome.
-  if (form.get(REPORT_INTENT_FIELD) === EDIT_AS_NEW_INTENT) {
-    return { kind: 'EDITING', submissionId: mintSubmissionId(session), values };
-  }
-
-  const parsed = parseReportRequestForm(values);
+  const values = registerAssetFormValues(form);
+  const parsed = parseRegisterAssetForm(values);
   if (!parsed.ok) {
     return {
       kind: 'INVALID',
@@ -63,13 +54,13 @@ export async function submitReportRequest(
     };
   }
 
-  const result = await reportMaintenanceRequest(session, parsed.request, submissionId);
+  const result = await registerAsset(session, parsed.request, submissionId);
 
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
     redirect(
-      `/maintenance/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      `/assets/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
     );
   }
 
@@ -85,23 +76,17 @@ export async function submitReportRequest(
     case 'FORBIDDEN':
       return { kind: 'FORBIDDEN', correlationId: result.correlationId };
     case 'NOT_FOUND':
-      return { kind: 'NOT_FOUND', submissionId, values, correlationId: result.correlationId };
+      // asset-service never answers 404 for this endpoint — there is no
+      // referenced resource to be absent — but the type is shared across
+      // every write, so it is handled rather than assumed away.
+      return { kind: 'FAILED', status: 404, correlationId: result.correlationId };
     case 'UNAVAILABLE':
       return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
-    case 'UNKNOWN_OUTCOME':
-      // Sent, maybe committed, not confirmed: never "nothing was saved".
-      return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
     case 'IN_PROGRESS':
-      // The first submission of this form is still being processed — a
-      // double press, or a create slower than the service waits for. Same
-      // values, same submission id: sent again after the wait, it is answered
-      // with that first request's result, never a second request.
-      return {
-        kind: 'IN_PROGRESS',
-        submissionId,
-        values,
-        retryAfterSeconds: result.retryAfterSeconds,
-        correlationId: result.correlationId,
-      };
+    case 'UNKNOWN_OUTCOME':
+      // Sent, maybe committed, not confirmed: never "nothing was saved". In
+      // progress is the same unknown (asset-service stores no submission id, so
+      // it never says this; the gateway's answer is handled all the same).
+      return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

@@ -2,6 +2,8 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchMaintenanceRequest } from '@/server/maintenance';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { readFlash } from '@/server/flash';
 import { PORTAL_NAV } from '@/app/nav';
 import { RequestDetailScreen } from './RequestDetailScreen';
 
@@ -49,7 +51,12 @@ export default async function MaintenanceRequestPage({
       <RequestDetailScreen
         result={result}
         requestId={id}
-        notice={query.created === '1' ? 'created' : undefined}
+        notice={readFlash(
+          session,
+          typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,
+          id,
+          ['created'],
+        )}
       />
     </AppShell>
   );

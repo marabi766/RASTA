@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
@@ -333,6 +335,8 @@ export class AssetService {
   }
 
   async update(id: string, dto: UpdateAssetDto): Promise<AssetView> {
+    const { expectedVersion, ...fields } = dto;
+
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
@@ -345,29 +349,50 @@ export class AssetService {
       );
     }
 
-    if (dto.assetTag) {
-      const clash = await this.repository.findByAssetTag(asset.organizationId, dto.assetTag);
+    // The edit was made against a version that is no longer current: somebody
+    // else's edit landed first, and applying this one would put back what they
+    // changed. Decided before anything else so the answer does not depend on
+    // what the fields happen to hold.
+    if (asset.version !== expectedVersion) {
+      throw RastaError.optimisticLockFailed('Asset', id);
+    }
+
+    // What this request really changes, not what it names: a field sent with
+    // the value it already has is not a change, and `ASSET_UPDATED` must not say
+    // it was (consumers read `changedFields` to decide what to refresh).
+    const changes = changedAssetFields(asset, fields);
+    const changedFields = Object.keys(changes);
+    if (changedFields.length === 0) return toView(asset);
+
+    if (changes.assetTag) {
+      const clash = await this.repository.findByAssetTag(asset.organizationId, changes.assetTag);
       if (clash && clash.id !== id) throw RastaError.alreadyExists('Asset');
     }
 
-    const changedFields = Object.keys(dto);
     const actor = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
       // Guarded on the row, not only on the read above: a decommission that
-      // commits in between must not be followed by an edit (audit L3-07).
+      // commits in between must not be followed by an edit (audit L3-07), and
+      // an edit that commits in between must not be overwritten by one made
+      // against the version before it.
       let count: number;
       try {
         ({ count } = await tx.asset.updateMany({
-          where: { id, deletedAt: null, status: { not: 'DECOMMISSIONED' } },
+          where: {
+            id,
+            deletedAt: null,
+            status: { not: 'DECOMMISSIONED' },
+            version: expectedVersion,
+          },
           data: {
-            ...(dto.name !== undefined ? { name: dto.name } : {}),
-            ...(dto.assetTag !== undefined ? { assetTag: dto.assetTag } : {}),
-            ...(dto.manufacturer !== undefined ? { manufacturer: dto.manufacturer } : {}),
-            ...(dto.model !== undefined ? { model: dto.model } : {}),
-            ...(dto.manufactureYear !== undefined ? { manufactureYear: dto.manufactureYear } : {}),
-            ...(dto.specifications !== undefined
-              ? { specifications: dto.specifications as object }
+            ...(changes.name !== undefined ? { name: changes.name } : {}),
+            ...('assetTag' in changes ? { assetTag: changes.assetTag } : {}),
+            ...('manufacturer' in changes ? { manufacturer: changes.manufacturer } : {}),
+            ...('model' in changes ? { model: changes.model } : {}),
+            ...('manufactureYear' in changes ? { manufactureYear: changes.manufactureYear } : {}),
+            ...(changes.specifications !== undefined
+              ? { specifications: changes.specifications as object }
               : {}),
             updatedBy: actor,
             version: { increment: 1 },
@@ -1239,8 +1264,46 @@ interface AssetRow {
   commissionedAt: Date | null;
   decommissionedAt: Date | null;
   specifications: unknown;
+  version: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+type AssetFieldChanges = Partial<
+  Pick<
+    UpdateAssetDto,
+    'name' | 'assetTag' | 'manufacturer' | 'model' | 'manufactureYear' | 'specifications'
+  >
+>;
+
+/**
+ * The fields of an edit whose value differs from the row's. `null` is a value
+ * (it clears the field) and `undefined` is absence, so a key is present in the
+ * result exactly when the edit would change it.
+ */
+function changedAssetFields(
+  current: AssetRow,
+  edit: Omit<UpdateAssetDto, 'expectedVersion'>,
+): AssetFieldChanges {
+  const changes: AssetFieldChanges = {};
+  if (edit.name !== undefined && edit.name !== current.name) changes.name = edit.name;
+  if (edit.assetTag !== undefined && edit.assetTag !== current.assetTag) {
+    changes.assetTag = edit.assetTag;
+  }
+  if (edit.manufacturer !== undefined && edit.manufacturer !== current.manufacturer) {
+    changes.manufacturer = edit.manufacturer;
+  }
+  if (edit.model !== undefined && edit.model !== current.model) changes.model = edit.model;
+  if (edit.manufactureYear !== undefined && edit.manufactureYear !== current.manufactureYear) {
+    changes.manufactureYear = edit.manufactureYear;
+  }
+  if (
+    edit.specifications !== undefined &&
+    !isDeepStrictEqual(edit.specifications, current.specifications ?? {})
+  ) {
+    changes.specifications = edit.specifications;
+  }
+  return changes;
 }
 
 function toView(asset: AssetRow): AssetView {
@@ -1258,6 +1321,7 @@ function toView(asset: AssetRow): AssetView {
     commissionedAt: asset.commissionedAt?.toISOString() ?? null,
     decommissionedAt: asset.decommissionedAt?.toISOString() ?? null,
     specifications: (asset.specifications ?? {}) as Record<string, unknown>,
+    version: asset.version,
     createdAt: asset.createdAt.toISOString(),
     updatedAt: asset.updatedAt.toISOString(),
   };

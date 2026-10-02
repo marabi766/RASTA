@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import {
   Button,
   ButtonLink,
@@ -8,6 +9,7 @@ import {
   PageHeader,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import {
   assetStatusLabel,
@@ -43,6 +45,12 @@ import type { AssetListQuery, AssetPage, ReadResult } from '@/server/assets';
 export interface AssetsScreenProps {
   readonly result: ReadResult<AssetPage>;
   readonly query: AssetListQuery;
+  /**
+   * The registration form, when this person may use it. The screen stays a
+   * pure function of what the server read: whether to offer the form is
+   * decided by the page (a role check, fail-closed) and arrives already built.
+   */
+  readonly registerForm?: ReactNode;
 }
 
 /** Rebuilds this screen's URL with one value changed. */
@@ -138,52 +146,54 @@ function Filters({ query }: { query: AssetListQuery }) {
 function AssetRows({ page, query }: { page: AssetPage; query: AssetListQuery }) {
   return (
     <>
-      <table className="w-full border-collapse text-sm">
-        <caption className="sr-only">فهرست ماشین‌آلات این سازمان</caption>
-        <thead>
-          <tr className="border-b border-border text-start text-content-muted">
-            <th scope="col" className="p-3 text-start font-medium">
-              نام
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              شماره
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              نوع
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وضعیت
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              بهره‌برداری
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {page.items.map((asset) => (
-            <tr key={asset.id} className="border-b border-border">
-              <td className="p-3">
-                <a
-                  href={`/assets/${encodeURIComponent(asset.id)}`}
-                  className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                >
-                  {asset.name}
-                </a>
-              </td>
-              <td className="p-3">
-                {asset.assetTag ? <Identifier>{asset.assetTag}</Identifier> : '—'}
-              </td>
-              <td className="p-3 text-content-muted">{assetTypeLabel(asset.type)}</td>
-              <td className="p-3">
-                <StatusBadge status={asset.status} label={assetStatusLabel(asset.status)} />
-              </td>
-              <td className="p-3 text-content-muted">
-                {asset.commissionedAt ? formatJalaliDateLong(asset.commissionedAt) : '—'}
-              </td>
+      <TableScroll label="فهرست ماشین‌آلات این سازمان">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">فهرست ماشین‌آلات این سازمان</caption>
+          <thead>
+            <tr className="border-b border-border text-start text-content-muted">
+              <th scope="col" className="p-3 text-start font-medium">
+                نام
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                شماره
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                نوع
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وضعیت
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                بهره‌برداری
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {page.items.map((asset) => (
+              <tr key={asset.id} className="border-b border-border">
+                <td className="p-3">
+                  <a
+                    href={`/assets/${encodeURIComponent(asset.id)}`}
+                    className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                  >
+                    {asset.name}
+                  </a>
+                </td>
+                <td className="p-3">
+                  {asset.assetTag ? <Identifier>{asset.assetTag}</Identifier> : '—'}
+                </td>
+                <td className="p-3 text-content-muted">{assetTypeLabel(asset.type)}</td>
+                <td className="p-3">
+                  <StatusBadge status={asset.status} label={assetStatusLabel(asset.status)} />
+                </td>
+                <td className="p-3 text-content-muted">
+                  {asset.commissionedAt ? formatJalaliDateLong(asset.commissionedAt) : '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
 
       {page.hasMore && page.nextCursor ? (
         <div className="mt-4 flex justify-start">
@@ -196,7 +206,7 @@ function AssetRows({ page, query }: { page: AssetPage; query: AssetListQuery }) 
   );
 }
 
-export function AssetsScreen({ result, query }: AssetsScreenProps) {
+export function AssetsScreen({ result, query, registerForm }: AssetsScreenProps) {
   const filtered = Boolean(query.status || query.type || query.q);
 
   return (
@@ -205,6 +215,12 @@ export function AssetsScreen({ result, query }: AssetsScreenProps) {
         title="ماشین‌آلات"
         description="دارایی‌های ثبت‌شدهٔ سازمان فعال شما، با وضعیت بهره‌برداری هر کدام."
       />
+
+      {registerForm ? (
+        <Section headingId="register-asset" title="ثبت ماشین">
+          {registerForm}
+        </Section>
+      ) : null}
 
       <Section headingId="filters" title="پالایش">
         <Filters query={query} />
