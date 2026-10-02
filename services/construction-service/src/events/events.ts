@@ -92,6 +92,13 @@ export const CONSTRUCTION_EVENTS = {
   BID_ACCESSED: 'BID_ACCESSED',
   // CON-002 PR 7 (ADR-065 § 3). Accepted by the project manager (2026-09-30).
   TENDER_CLOSED: 'TENDER_CLOSED',
+  // CON-002 PR 8 (ADR-066). Accepted by the project manager (2026-09-30). Ids and counts only.
+  BIDS_OPENED: 'BIDS_OPENED',
+  // CON-002 PR 8, Codex #184 R4. `BID_OPENING_CONFLICT_DETECTED` is named by the project
+  // manager (2026-10-02); `BID_OPENING_PROPOSAL_WITHDRAWN` is added for S-06 (a proposal
+  // taken back, or cleared, is a state change audit must hear about) and awaits acceptance.
+  BID_OPENING_PROPOSAL_WITHDRAWN: 'BID_OPENING_PROPOSAL_WITHDRAWN',
+  BID_OPENING_CONFLICT_DETECTED: 'BID_OPENING_CONFLICT_DETECTED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -569,8 +576,21 @@ export const bidWithdrawnPayload = z
   })
   .strict();
 
-/** Closed codes for why a bid was read; owner-side purposes arrive with the opening (PR 8). */
-export const BID_ACCESS_PURPOSES = ['OWN_BID_RECEIPT'] as const;
+/**
+ * Closed codes for why a bid was read (ADR-066 § 5): the bidder's own receipt; the owner
+ * opening the bids, or proposing to (four eyes, Q-91; no bid is read); the owner counting the bids before the opening (no identity, no
+ * content); the owner reading them afterwards, listed or one by one.
+ */
+export const BID_ACCESS_PURPOSES = [
+  'OWN_BID_RECEIPT',
+  'OPEN_BIDS',
+  'PROPOSE_OPENING',
+  'WITHDRAW_PROPOSAL',
+  'COUNT_BIDS',
+  'LIST_BIDS',
+  'READ_BID',
+] as const;
+export type BidAccessPurpose = (typeof BID_ACCESS_PURPOSES)[number];
 
 /** A read of a bid, granted or refused (ADR-066 § 5): who, which bid, why, the outcome — no content. */
 export const bidAccessedPayload = z
@@ -584,6 +604,81 @@ export const bidAccessedPayload = z
     purpose: z.enum(BID_ACCESS_PURPOSES),
     outcome: z.enum(['GRANTED', 'REFUSED']),
     accessedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * The bids of a tender were opened (CLOSED → EVALUATING). A count, a digest of the bids'
+ * identifiers and the head of the receipt chain they were verified against — never a
+ * price, an answer, a note, a ciphertext or a key. Bounded by design: the event does not
+ * grow with the number of bids (a list of them could exceed any cap, and a tender with
+ * more bids than the cap could then never be opened); the identifiers themselves are read
+ * through the owner's API (`GET /v1/tenders/:id/bids`). `bidIdsDigest` is SHA-256, in
+ * hex, of the opened bids' identifiers sorted ascending and joined with `\n`, so a
+ * consumer holding the list can check it against the event. `receiptHead` is a digest
+ * and already public (it is the head audit-service holds). `proposedBy` is the first of
+ * the two people when four-eyes applies (Q-91), null when it is switched off.
+ */
+export const bidsOpenedPayload = z
+  .object({
+    ...tenderIdentity,
+    bidCount: z.number().int().nonnegative(),
+    bidIdsDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    receiptHead: z.string().regex(/^[0-9a-f]{64}$/),
+    openedAt: isoTimestamp,
+    openedBy: identifier,
+    proposedBy: identifier.nullable(),
+  })
+  .strict();
+
+/**
+ * The proposal to open a tender's bids (four-eyes, Q-91) was taken back by its proposer, or
+ * cleared by the approval that found the proposer a member of a bidding organization — so
+ * another eligible user can propose afresh. Ids only.
+ */
+export const bidOpeningProposalWithdrawnPayload = z
+  .object({
+    tenderId: identifier,
+    organizationId: identifier,
+    proposedBy: identifier,
+    /** Who took it back (the proposer) or whose approval found the proposer conflicted. */
+    withdrawnBy: identifier,
+    reason: z.enum(['WITHDRAWN_BY_PROPOSER', 'PROPOSER_CONFLICTED']),
+    withdrawnAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * After an opening committed, identity-service said that the proposer or the approver held a
+ * membership of a bidding organization at some time in the window `windowStart`..`checkedAt`
+ * — the race the conflict check at the approval cannot close (ADR-066 § 4, residual). The
+ * detective control: ids only, who and which of the bidding organizations (at most 100 each;
+ * `organizationCount` is the whole).
+ */
+export const bidOpeningConflictDetectedPayload = z
+  .object({
+    tenderId: identifier,
+    organizationId: identifier,
+    openedAt: isoTimestamp,
+    openedBy: identifier,
+    proposedBy: identifier.nullable(),
+    /** The start of the window: the earliest of the identity reads at the approval and the decision instant. */
+    windowStart: isoTimestamp,
+    /** The end of the window: identity-service's clock as it answered, after the commit. */
+    checkedAt: isoTimestamp,
+    conflicts: z
+      .array(
+        z
+          .object({
+            userId: identifier,
+            role: z.enum(['PROPOSER', 'APPROVER']),
+            organizationIds: z.array(identifier).min(1).max(100),
+            organizationCount: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(2),
   })
   .strict();
 
@@ -621,6 +716,9 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BID_WITHDRAWN: bidWithdrawnPayload,
   BID_ACCESSED: bidAccessedPayload,
   TENDER_CLOSED: tenderClosedPayload,
+  BIDS_OPENED: bidsOpenedPayload,
+  BID_OPENING_PROPOSAL_WITHDRAWN: bidOpeningProposalWithdrawnPayload,
+  BID_OPENING_CONFLICT_DETECTED: bidOpeningConflictDetectedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<
