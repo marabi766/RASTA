@@ -1,0 +1,45 @@
+# Behaviour tests for rules/rasta-construction-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-construction-alerts.test.yml
+#
+# Inputs carry the scrape's job/instance/environment labels so the expected alert also
+# proves which labels the rule keeps (none) and which it drops.
+
+rule_files:
+  - ../rules/rasta-construction-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaConstructionTenderCloseRetriesHigh
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Climbs past 5 and stays there.
+      - series: 'rasta_construction_tender_close_max_attempts{service="construction-service",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0 1 3 5 6 7 7 7 0 0 0'
+    alert_rule_test:
+      # Exactly 5 is not enough.
+      - eval_time: 3m
+        alertname: RastaConstructionTenderCloseRetriesHigh
+        exp_alerts: []
+      # Above 5, but not yet for 2 minutes.
+      - eval_time: 5m
+        alertname: RastaConstructionTenderCloseRetriesHigh
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: RastaConstructionTenderCloseRetriesHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'An overdue tender cannot be closed (7 failed attempts)'
+              description: 'At least one PUBLISHED tender past its deadline has failed more than 5 close attempts. Bids on it are already refused, but it stays PUBLISHED, so it cannot be opened, evaluated or awarded. The sweeper keeps retrying with a growing backoff; the construction-service log names the tender and the closed error code. This alert deliberately carries neither.'
+              runbook: docs/runbooks/tender-close-stuck.md
+      # Closed (or cancelled): the gauge is back to 0.
+      - eval_time: 9m
+        alertname: RastaConstructionTenderCloseRetriesHigh
+        exp_alerts: []

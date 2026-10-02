@@ -21,6 +21,19 @@ import { PrismaClient } from '../generated/prisma';
  */
 export const TENANT_SCOPED_MODELS = ['Membership', 'IdempotencyKey'] as const;
 
+/**
+ * Models that carry an `organization_id` column and are deliberately **not** guarded, each
+ * with the reason. Named rather than left out, so `tenant-scope.spec.ts` can hold the
+ * guarded list against the Prisma schema exactly: an exemption has to be written down
+ * to exist, and one without a reason fails that spec.
+ */
+export const TENANT_SCOPE_EXEMPTIONS = {
+  OutboxMessage:
+    'The outbox relay drains this table across every tenant with no request context, and each row names its own organization_id: platform plumbing, filtered by that column rather than by the guard.',
+  SecurityEventOutbox:
+    'Refusals awaiting delivery to the audit trail (ADR-053 § 4): written by the exception filter in its own short transaction and drained across tenants by a second relay; every row names its own organization_id explicitly.',
+} as const satisfies Readonly<Record<string, string>>;
+
 export type ExtendedPrismaClient = ReturnType<PrismaService['buildClient']>;
 
 @Injectable()
