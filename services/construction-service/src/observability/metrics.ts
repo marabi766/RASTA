@@ -81,3 +81,38 @@ export const policyReconciliationOldestDueAgeSeconds = new Gauge({
   labelNames: ['service'] as const,
   registers: [registry],
 });
+
+/**
+ * What each close sweep did with a tender (ADR-065 § 3), by result: `closed`, `noop`
+ * (already closed or cancelled by someone else), `not_due` (the deadline was moved
+ * after the claim), `lost` (the lease was taken back) and `failed`. `failed` that
+ * keeps rising means a tender cannot be closed and is retried every lease.
+ */
+export const tenderCloseTotal = new Counter({
+  name: 'rasta_construction_tender_close_total',
+  help: 'Tenders handled by the close sweeper, by result (closed, noop, not_due, lost, failed)',
+  labelNames: ['service', 'result'] as const,
+  registers: [registry],
+});
+
+/** Sampled from the database, never maintained by inc/dec (ADR-050). */
+export const tenderCloseBacklog = new Gauge({
+  name: 'rasta_construction_tender_close_backlog',
+  help: 'PUBLISHED tenders whose bid_closing_at has passed and that are not yet CLOSED',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+export const tenderCloseMaxAttempts = new Gauge({
+  name: 'rasta_construction_tender_close_max_attempts',
+  help: 'The most failed close attempts of any overdue PUBLISHED tender; 0 when none failed',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+export const tenderCloseOldestOverdueAgeSeconds = new Gauge({
+  name: 'rasta_construction_tender_close_oldest_overdue_age_seconds',
+  help: 'Seconds the oldest overdue PUBLISHED tender has waited past its deadline; 0 when none',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});

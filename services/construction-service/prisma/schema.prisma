@@ -502,7 +502,22 @@ model Tender {
   publishedAt DateTime? @map("published_at")
   publishedBy String?   @map("published_by")
 
-  criteria    TenderCriterion[]
+  /// When and by whom it was closed (ADR-065 § 3); both or neither, present from CLOSED on.
+  closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
+  closedBy String?   @map("closed_by")
+
+  /// The close sweeper's claim: a lease and a fencing token, set and cleared together.
+  /// Housekeeping, not state: claiming changes neither `version` nor `updated_at`.
+  closeLeaseUntil DateTime? @map("close_lease_until") @db.Timestamptz(3)
+  closeFence      String?   @map("close_fence")
+
+  /// Failed close attempts, and when the sweeper may try again (bounded exponential
+  /// backoff). Housekeeping like the lease; the database zeroes both when the tender
+  /// leaves PUBLISHED.
+  closeAttempts      Int       @default(0) @map("close_attempts")
+  closeNextAttemptAt DateTime? @map("close_next_attempt_at") @db.Timestamptz(3)
+
+  criteria   TenderCriterion[]
   invitations TenderInvitation[]
   /// At most one (`tender_key.tender_id` is its primary key); a list because the
   /// relation is keyed by the (organization, tender) pair, which Prisma cannot
@@ -515,6 +530,7 @@ model Tender {
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
   @@index([organizationId, projectId, status], map: "ix_tender_org_project_status")
+  // SQL-only: `ix_tender_close_due` — PUBLISHED tenders by deadline, the close sweeper's scan.
   @@map("tender")
 }
 

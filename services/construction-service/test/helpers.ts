@@ -30,6 +30,12 @@ import { SupplierStandingConsumer } from '../src/events/supplier-standing.consum
 import { BidRepository } from '../src/tender/bid.repository';
 import { BidService } from '../src/tender/bid.service';
 import { TenderClock } from '../src/tender/tender-clock';
+import { TenderCloseRepository } from '../src/tender/tender-close.repository';
+import { TenderCloseService } from '../src/tender/tender-close.service';
+import {
+  TenderCloseSweeper,
+  type TenderCloseSweeperOptions,
+} from '../src/tender/tender-close.sweeper';
 import { decisionInstant } from '../src/shared/clock';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { ContractorStandingRepository } from '../src/tender/contractor-standing.repository';
@@ -164,15 +170,32 @@ export interface Wiring {
   bidRepository: BidRepository;
   bids: BidService;
   clock: TestTenderClock;
+  /** CON-002 PR 7: closing a tender past its deadline, and the sweeper that does it (driven by `runOnce()`). */
+  tenderCloses: TenderCloseRepository;
+  tenderClose: TenderCloseService;
+  tenderCloseSweeper: TenderCloseSweeper;
+  tenderCloseSweeperWith(overrides?: Partial<TenderCloseSweeperOptions>): TenderCloseSweeper;
   close(): Promise<void>;
 }
 
 /** The tender clock with an optional pinned instant; the module's provider seam (ADR-065 § 2). */
 export class TestTenderClock extends TenderClock {
   fixed: Date | undefined;
+  /**
+   * A one-shot barrier: the next command to reach its decision — which is after it
+   * took the tender lock — reads its instant, then runs this and waits for it before
+   * going on. That is the deadline crossing between the decision and the write. The
+   * first to arrive consumes it, so a command queued behind the lock is not held by
+   * it. Deterministic ordering for the races, with no `sleep`.
+   */
+  onDecision: (() => Promise<void>) | undefined;
 
-  decisionInstant(tx: ExtendedPrismaClient): Promise<Date> {
-    return this.fixed ? Promise.resolve(this.fixed) : decisionInstant(tx);
+  async decisionInstant(tx: ExtendedPrismaClient): Promise<Date> {
+    const at = this.fixed ?? (await decisionInstant(tx));
+    const hook = this.onDecision;
+    this.onDecision = undefined;
+    if (hook) await hook();
+    return at;
   }
 }
 
@@ -234,11 +257,26 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       hierarchy as unknown as OrganizationDirectory,
       { ...TEST_SWEEPER, ...overrides },
     );
+  const tenderCloses = new TenderCloseRepository(prisma);
+  const tenderClose = new TenderCloseService(prisma, tenderCloses, events, clock);
+  const tenderCloseSweeperWith = (overrides: Partial<TenderCloseSweeperOptions> = {}) =>
+    new TenderCloseSweeper(tenderCloses, tenderClose, {
+      intervalMs: 60_000,
+      batchSize: 500,
+      leaseSeconds: 60,
+      retryBackoffBaseSeconds: 10,
+      retryBackoffMaxSeconds: 900,
+      ...overrides,
+    });
   return {
     prisma,
     env,
     repository,
     projects,
+    tenderCloses,
+    tenderClose,
+    tenderCloseSweeper: tenderCloseSweeperWith(),
+    tenderCloseSweeperWith,
     suspension,
     reconciliations,
     sweeper: sweeperWith(),

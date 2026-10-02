@@ -12,6 +12,7 @@ rule_files:
   - rules/rasta-audit-alerts.yml
   - rules/rasta-notification-alerts.yml
   - rules/rasta-economic-alerts.yml
+  - rules/rasta-construction-alerts.yml
 
 scrape_configs:
   - job_name: prometheus

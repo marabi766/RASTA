@@ -545,6 +545,13 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 `accessedBy`، `purpose` (بسته: `OWN_BID_RECEIPT`؛ هدف‌های سمت کارفرما با گام ۸)، `outcome` (`GRANTED | REFUSED`)، `accessedAt`.
 هیچ‌کدام `projectId` ندارند؛ کلید پارتیشن `tenderId` است.
 
+**پیاده‌شده در CON-002 PR 7 (بستن مهلت):** `TENDER_CLOSED` (`aggregateType = Tender`، کلید `tenderId`؛ `projectId`، `organizationId`،
+`bidCount` — شمار پیشنهادهای ایستاده، نه انصراف‌یافته‌ها — `closedAt` و `closedBy`؛ برای جاروکننده `system:construction-service`).
+هیچ شناسهٔ پیمانکار، قیمت یا محتوایی نمی‌آید (`.strict()`). هر مناقصه **یک** `TENDER_CLOSED` دارد: بستن در پایگاه داده Idempotent است
+(مناقصه‌ای که دیگر `PUBLISHED` نیست بی‌اثر و بی‌رویداد برمی‌گردد). `closedAt` ساعت پایگاه داده است که پس از قفل مناقصه خوانده می‌شود و
+هرگز پیش از `bidClosingAt` نیست. رویداد با گذار در یک تراکنش نوشته می‌شود؛ تأخیر بسته‌شدن به فاصلهٔ جاروکننده
+(`CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS`) کران می‌خورد و درستی پذیرش پیشنهاد به آن وابسته نیست (ADR-065 § ۲-۳).
+
 **مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
 `tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
 (`tender_receipt_pending`) و در تراکنشِ الحاق پیشینش به ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_TENDER_GAP_ALERT_SECONDS` هشدار
