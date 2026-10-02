@@ -1054,6 +1054,12 @@ function runnableSources() {
   return files;
 }
 
+/**
+ * Tests that hand `--url` to a CLI only to prove it is refused, with a
+ * credential-free placeholder. Nothing else may name the flag.
+ */
+const URL_FLAG_REFUSAL_TESTS = new Set(['scripts/outbox-b2-vacuum.pg.test.mjs']);
+
 test('no database url reaches a command line (D-045 follow-up)', () => {
   // A process's argv is readable by every local user while it runs (`ps`,
   // /proc/<pid>/cmdline). Prisma takes the url from the environment through
@@ -1064,7 +1070,9 @@ test('no database url reaches a command line (D-045 follow-up)', () => {
   for (const file of runnableSources()) {
     const source = readFileSync(file, 'utf8');
     const name = file.slice(ROOT.length);
-    if (urlFlag.test(source)) offenders.push(`${name}: passes a url to Prisma as an argument`);
+    if (urlFlag.test(source) && !URL_FLAG_REFUSAL_TESTS.has(name)) {
+      offenders.push(`${name}: passes a url to Prisma as an argument`);
+    }
     if (
       spawnsPsql.test(source) &&
       source.includes('new URL(') &&
