@@ -153,8 +153,32 @@ const kafkaAs = (principal) =>
     logLevel: logLevel.NOTHING,
   });
 
+/**
+ * Coordinator errors a fresh broker answers with while it is still loading
+ * __consumer_offsets (or moving a group to another broker): retried, bounded.
+ * kafkajs's admin does not retry them inside fetchOffsets.
+ */
+const COORDINATOR_NOT_READY = new Set([
+  'NOT_COORDINATOR_FOR_GROUP',
+  'GROUP_COORDINATOR_NOT_AVAILABLE',
+  'GROUP_LOAD_IN_PROGRESS',
+]);
+const COORDINATOR_WAIT_MS = 60_000;
+
 /** The group's committed offset per partition of its topic ('-1' = none), and its state. */
 async function groupView(service, group, topic) {
+  const deadline = Date.now() + COORDINATOR_WAIT_MS;
+  for (;;) {
+    try {
+      return await readGroup(service, group, topic);
+    } catch (error) {
+      if (!COORDINATOR_NOT_READY.has(error?.type) || Date.now() > deadline) throw error;
+      await new Promise((wake) => setTimeout(wake, 1_000));
+    }
+  }
+}
+
+async function readGroup(service, group, topic) {
   const admin = kafkaAs(service).admin();
   await admin.connect();
   try {
