@@ -181,7 +181,9 @@ describe('transactional outbox', () => {
     await asActor({ organizationId: org.a }, () =>
       repairOrders.complete(order.id, { workPerformed: 'انجام شد' }),
     );
-    await asActor({ organizationId: org.a }, () => requests.approve(request.id, {}));
+    await asActor({ organizationId: org.a }, () =>
+      requests.approve(request.id, { expectedTotalCostMinor: '2300000' }),
+    );
 
     const rows = await outboxFor(request.id);
     const approved = rows.find((row) => row.eventName === 'MAINTENANCE_APPROVED');

@@ -46,6 +46,14 @@ describe('zod to JSON Schema', () => {
       expect(total.pattern).toContain('\\d');
     });
 
+    it('publishes the total an approval must state as required', () => {
+      // The control the product document makes mandatory (docs/17): a client
+      // reading the contract must learn that an approval without the amount is
+      // refused, not that it is merely allowed to omit it.
+      const s = toJsonSchema(approveRequestSchema);
+      expect(s.required).toEqual(['expectedTotalCostMinor']);
+    });
+
     it('marks a datetime as a date-time format', () => {
       const s = toJsonSchema(createRequestSchema);
       const reportedAt = (s.properties as Record<string, Record<string, unknown>>).reportedAt;
