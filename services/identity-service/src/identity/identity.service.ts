@@ -136,19 +136,23 @@ export class IdentityService {
   }
 
   /**
-   * The organizations a user belongs to **now**, for construction-service's conflict-of-
-   * interest check at the approval of a bid opening (CON-002 PR 8, Q-91). Service-only:
-   * `construction-service` with a token signed for no tenant; anyone else is refused.
-   * Ids only, live memberships only (`isMembershipLive`'s predicate), judged on the
-   * **database's** clock, which is the one that stamps `validFrom`.
+   * The organizations a user belongs to **now**, with the roles held in each, for
+   * construction-service's conflict-of-interest check and its owner-side authorisation
+   * (CON-002 PR 8, Q-91). Service-only: `construction-service` with a token signed for no
+   * tenant; anyone else is refused. Live memberships only (`isMembershipLive`'s predicate),
+   * judged on the **database's** clock, which is the one that stamps `validFrom`.
    *
-   * With `at`: the organizations the user was a member of at that instant instead — the
-   * history the detective control after an opening asks for (ADR-066 § 3).
+   * With `from`: the organizations the user held a membership in at any time between `from`
+   * and the database's clock as the query ran (`asOf`) — the interval the detective control
+   * after an opening asks for (ADR-066 § 3). Ids only.
    */
-  async getLiveOrganizationIds(
+  async getMemberships(
     userId: string,
-    at?: Date,
-  ): Promise<{ userId: string; organizationIds: string[]; asOf: string }> {
+    from?: Date,
+  ): Promise<
+    | { userId: string; memberships: { organizationId: string; roles: string[] }[]; asOf: string }
+    | { userId: string; organizationIds: string[]; asOf: string }
+  > {
     const context = getContext();
     if (
       context.authType !== 'SERVICE' ||
@@ -159,15 +163,12 @@ export class IdentityService {
         'Only construction-service may read which organizations a user belongs to',
       );
     }
-    if (at) {
-      return {
-        userId,
-        organizationIds: await this.repository.findOrganizationIdsAt(userId, at),
-        asOf: at.toISOString(),
-      };
+    if (from) {
+      const since = await this.repository.findOrganizationIdsSince(userId, from);
+      return { userId, organizationIds: since.organizationIds, asOf: since.asOf.toISOString() };
     }
-    const live = await this.repository.findLiveOrganizationIds(userId);
-    return { userId, organizationIds: live.organizationIds, asOf: live.asOf.toISOString() };
+    const live = await this.repository.findLiveMemberships(userId);
+    return { userId, memberships: live.memberships, asOf: live.asOf.toISOString() };
   }
 
   async getUser(id: string): Promise<UserView> {
@@ -539,15 +540,9 @@ export class IdentityService {
       // commits first and is then moved off below, or waits and is refused.
       await this.repository.lockUserMemberships(tx, membership.userId);
 
-      await tx.membership.update({
-        where: { id: membershipId },
-        data: {
-          status: 'REVOKED',
-          deletedAt: new Date(),
-          updatedBy: actor,
-          version: { increment: 1 },
-        },
-      });
+      // `deletedAt` is the end of the membership in every history read: the database's clock,
+      // like `validFrom`, not this process's.
+      await this.repository.revokeMembership(tx, membershipId, actor);
 
       await this.moveActiveOrganizationOff(tx, membership.userId, membership.organizationId, actor);
 

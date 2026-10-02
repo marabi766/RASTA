@@ -3,6 +3,7 @@ import {
   allocateStreamSeqSql,
   buildOutboxRow,
   getContext,
+  RastaError,
   runUnscoped,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
@@ -229,29 +230,67 @@ export class IdentityRepository {
   }
 
   /**
-   * The organizations a user holds a live membership in **now**, ids only, and the instant
-   * that was. "Now" is the **database's** clock, in the one statement that selects: a
-   * membership's `validFrom` defaults to the database's `now()`, so judging it by an
-   * application clock that lags would miss a membership created a moment ago.
+   * The organizations a user holds a live membership in **now**, with the roles held in
+   * each, and the instant that was. "Now" is the **database's** clock, read once for the
+   * whole statement: a membership's `validFrom` defaults to the database's `now()`, so
+   * judging it by an application clock that lags would miss a membership created a moment ago.
    */
-  async findLiveOrganizationIds(
+  async findLiveMemberships(
     userId: string,
-  ): Promise<{ organizationIds: string[]; asOf: Date }> {
+  ): Promise<{ memberships: { organizationId: string; roles: string[] }[]; asOf: Date }> {
     const rows = await runUnscoped(
       'a service asks which organizations a user belongs to; a membership spans tenants',
       () =>
+        this.client.$queryRaw<
+          Array<{ as_of: Date; memberships: { organizationId: string; roles: string[] }[] }>
+        >`
+          WITH t AS MATERIALIZED (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now)
+          SELECT t.now AS as_of,
+                 COALESCE((
+                   SELECT json_agg(json_build_object('organizationId', m.organization_id,
+                                                     'roles', m.roles)
+                                   ORDER BY m.organization_id ASC)
+                     FROM membership m
+                    WHERE m.user_id = ${userId}
+                      AND m.status = 'ACTIVE'
+                      AND m.deleted_at IS NULL
+                      AND m.valid_from <= t.now
+                      AND (m.valid_until IS NULL OR m.valid_until > t.now)
+                 ), '[]'::json) AS memberships
+            FROM t`,
+    );
+    const row = rows[0];
+    if (!row) throw new Error('the database did not answer its own clock');
+    return { memberships: row.memberships, asOf: row.as_of };
+  }
+
+  /**
+   * The organizations a user held a membership in at any time between `from` and the
+   * database's clock as this statement ran (`asOf`), ids only: history, for the detective
+   * control after a bid opening. Wider than "live": a suspended membership counts, since
+   * when it was suspended is not recorded; only a revocation ends one, at its `deletedAt`.
+   * An end at exactly `from` counts too — timestamps are millisecond-rounded, and a false
+   * positive here is an alert, a false negative a missed conflict.
+   */
+  async findOrganizationIdsSince(
+    userId: string,
+    from: Date,
+  ): Promise<{ organizationIds: string[]; asOf: Date }> {
+    const rows = await runUnscoped(
+      'a service asks which organizations a user belonged to over an interval; a membership spans tenants',
+      () =>
         this.client.$queryRaw<Array<{ organization_ids: string[]; as_of: Date }>>`
-          SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS as_of,
+          WITH t AS MATERIALIZED (SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now)
+          SELECT t.now AS as_of,
                  ARRAY(
-                   SELECT organization_id FROM membership
-                    WHERE user_id = ${userId}
-                      AND status = 'ACTIVE'
-                      AND deleted_at IS NULL
-                      AND valid_from <= (clock_timestamp() AT TIME ZONE 'UTC')
-                      AND (valid_until IS NULL
-                           OR valid_until > (clock_timestamp() AT TIME ZONE 'UTC'))
-                    ORDER BY organization_id ASC
-                 ) AS organization_ids`,
+                   SELECT DISTINCT m.organization_id FROM membership m
+                    WHERE m.user_id = ${userId}
+                      AND m.valid_from <= t.now
+                      AND (m.valid_until IS NULL OR m.valid_until >= ${from})
+                      AND (m.deleted_at IS NULL OR m.deleted_at >= ${from})
+                    ORDER BY m.organization_id ASC
+                 ) AS organization_ids
+            FROM t`,
     );
     const row = rows[0];
     if (!row) throw new Error('the database did not answer its own clock');
@@ -259,23 +298,20 @@ export class IdentityRepository {
   }
 
   /**
-   * The organizations a user was a member of at `at`, ids only (history, for the detective
-   * control after a bid opening). Wider than "live": a suspended membership counts, since
-   * when it was suspended is not recorded; only a revocation ends one, at its `deletedAt`.
+   * Revokes a membership, in the caller's transaction (which holds the user's lock). The
+   * end of the membership, `deletedAt`, is the **database's** clock — the one that stamps
+   * `validFrom` and that every history read compares against — read here, after the lock.
    */
-  async findOrganizationIdsAt(userId: string, at: Date): Promise<string[]> {
-    const rows = await runUnscoped(
-      'a service asks which organizations a user belonged to at an instant; a membership spans tenants',
-      () =>
-        this.client.$queryRaw<Array<{ organization_id: string }>>`
-          SELECT DISTINCT organization_id FROM membership
-           WHERE user_id = ${userId}
-             AND valid_from <= ${at}
-             AND (valid_until IS NULL OR valid_until > ${at})
-             AND (deleted_at IS NULL OR deleted_at > ${at})
-           ORDER BY organization_id ASC`,
-    );
-    return rows.map((row) => row.organization_id);
+  async revokeMembership(tx: ExtendedPrismaClient, membershipId: string, actor: string) {
+    const count = await tx.$executeRaw`
+      UPDATE membership
+         SET status = 'REVOKED',
+             deleted_at = (clock_timestamp() AT TIME ZONE 'UTC'),
+             updated_at = (clock_timestamp() AT TIME ZONE 'UTC'),
+             updated_by = ${actor},
+             version = version + 1
+       WHERE id = ${membershipId} AND deleted_at IS NULL`;
+    if (count !== 1) throw RastaError.notFound('Membership', membershipId);
   }
 
   async findMembership(userId: string, organizationId: string, tx?: ExtendedPrismaClient) {

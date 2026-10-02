@@ -15,13 +15,13 @@ import {
   tenderTransitionsTotal,
   versionConflictsTotal,
 } from '../observability/metrics';
-import { decisionInstant, transactionNow } from '../shared/clock';
+import { transactionNow } from '../shared/clock';
 import { ENV, MEMBERSHIP_SOURCE, TENDER_EVIDENCE_SOURCE, TENDER_KEY_PROVIDER } from '../tokens';
 import { BidAccessAudit } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
 import { TenderOpenRepository, type TenderForOpening } from './tender-open.repository';
 import { compareChains } from './chain-agreement';
-import type { MembershipSource } from './membership.client';
+import type { LiveMembership, MembershipSource } from './membership.client';
 import { SealingError } from './sealing/errors';
 import type { TenderKeyProvider } from './sealing/key-provider';
 import {
@@ -66,23 +66,26 @@ export type OpeningRefusal = (typeof OPENING_REFUSALS)[number];
 const NOT_OPENED_STATES: readonly string[] = ['SUBMITTED', 'WITHDRAWN'];
 const isOpened = (bid: Bid): boolean => !NOT_OPENED_STATES.includes(bid.status);
 
-/** Who proposed, where the proposer belongs now, and every organization the proposer and the approver belong to now. */
+/**
+ * The proposal the approver evaluated (who and when: the proposal's identity), where its
+ * proposer belongs now, and every organization the proposer and the approver belong to now.
+ */
 interface ApprovalPeople {
   proposedBy: string;
+  proposedAt: Date;
   proposerOrganizationIds: readonly string[];
   organizationIds: readonly string[];
 }
 
-/** What a committed opening leaves for the check after it: who, with whom, and the instant it committed. */
+/** What a committed opening leaves for the check after it: who, with whom, and the decision instant that opens the window to watch. */
 interface OpeningFacts {
   tenderId: string;
   owner: string;
+  /** The decision instant (database clock, inside the transaction, before the commit): the window to watch starts here. */
   openedAt: Date;
   openedBy: string;
   proposedBy: string | null;
   bidderOrganizationIds: readonly string[];
-  /** The database's clock as the last statement of the opening's transaction ran: the commit, to a few microseconds. */
-  committedAt: Date;
 }
 
 interface Opened {
@@ -155,10 +158,12 @@ interface Evidence {
  * role set); never `SYSTEM_ADMIN`, `AUDITOR` or `CONTRACTOR`, each refused whenever
  * present. A member of **any bidder's** organization is refused on **every** owner route
  * and before any answer that says anything about the bids — the opened view, the counts,
- * the access log (ADR-067 § 4): it limits and grants nothing. "Member" is judged on the
- * token **and** on identity-service as of now (`livePrincipal`, fail closed — a reader who
- * joined a bidding organization after the token was issued is refused), on every route
- * and on a repeat opening too.
+ * the access log (ADR-067 § 4): it limits and grants nothing. "Member" is judged on
+ * identity-service as of now (`livePrincipal`, fail closed), on every route and on a repeat
+ * opening too, and its answer is authoritative: the token may only narrow it. A reader who
+ * joined a bidding organization after the token was issued is refused; one whose membership
+ * of the owner was revoked, or who no longer holds a role that opens bids in it, is refused
+ * too although the token is still valid.
  *
  * ## Four eyes (Q-91, provisional)
  *
@@ -170,7 +175,9 @@ interface Evidence {
  * The conflict is judged at the **approval**, on both people as they are *now*: their
  * organizations are read from identity-service (`MembershipSource`, fail closed), not taken
  * from the proposal or only from the approver's token — a proposer who has since joined a
- * bidding organization no longer stands. The proposal itself leaves an access row and
+ * bidding organization no longer stands. The proposal is identified by who and when
+ * (`openingProposedBy`, `openingProposedAt`): the approver's evidence is about that proposal
+ * only, and a fresh proposal by the same user is not cleared by a stale approval. The proposal itself leaves an access row and
  * `BID_ACCESSED` (`PROPOSE_OPENING`, ids only) in its transaction. A conflicted user is
  * refused **before** anything is said of the tender's state (not closed, not opened). A proposer
  * found conflicted at the approval is refused **and the proposal cleared** (audited, with
@@ -181,7 +188,8 @@ interface Evidence {
  *
  * No lock spans identity-service and this one: a membership created after the identity read
  * at the approval and before the opening commits is not stopped (ADR-066 § 4). After each
- * commit identity-service is asked who the proposer and the approver were at that instant
+ * commit identity-service is asked which organizations the proposer and the approver held a
+ * membership in at any time from the decision instant to its answer
  * (`checkOpeningForConflicts`); a bidding organization among them raises an alert and
  * `BID_OPENING_CONFLICT_DETECTED`. The opening stands; a person decides.
  *
@@ -222,7 +230,7 @@ export class TenderOpenService {
       let evidence: Evidence | undefined;
       let people: ApprovalPeople | undefined;
       if (found.status === 'CLOSED') {
-        people = await this.readApprovalPeople(principal, found.openingProposedBy);
+        people = await this.readApprovalPeople(principal, found);
         // A proposer who now belongs to a bidder neither stands nor blocks: the proposal is cleared.
         if (people) await this.clearProposalOfConflictedProposer(principal, tenderId, people);
         evidence = await this.readEvidence(principal.organizationId, tenderId);
@@ -284,9 +292,14 @@ export class TenderOpenService {
       if (locked.openingProposedBy === principal.actor)
         throw this.refused('SECOND_PERSON_REQUIRED');
       // Both people as they are NOW, not as they were at the proposal: someone who has since
-      // joined a bidding organization neither proposes nor approves. Read before the lock
-      // (the proposal never changes once made); no read, or one of another proposer, fails closed.
-      if (!people || people.proposedBy !== locked.openingProposedBy) {
+      // joined a bidding organization neither proposes nor approves. Read before the lock; it
+      // is evidence about THE proposal read with it (who and when), so no read, or one of
+      // another proposal — a fresh one by the same user included — fails closed.
+      if (
+        !people ||
+        people.proposedBy !== locked.openingProposedBy ||
+        people.proposedAt.getTime() !== locked.openingProposedAt?.getTime()
+      ) {
         throw RastaError.optimisticLockFailed('Tender', tenderId);
       }
       this.assertNoConflict(
@@ -366,8 +379,6 @@ export class TenderOpenService {
         openedBy: principal.actor,
         proposedBy: locked.openingProposedBy,
         bidderOrganizationIds: [...new Set(bids.map((bid) => bid.bidderOrganizationId))],
-        // The last statement of the transaction: the nearest the application can come to its commit.
-        committedAt: await decisionInstant(tx),
       },
     };
   }
@@ -429,13 +440,22 @@ export class TenderOpenService {
         if (!locked) throw RastaError.notFound('Tender', tenderId);
         if (locked.status !== 'CLOSED' || locked.openedAt !== null)
           throw this.refused('NOT_CLOSED');
-        if (locked.openingProposedBy === null) throw this.refused('NO_PROPOSAL');
+        // Both are set or neither (a CHECK); both are tested so that the proposal is one value.
+        if (locked.openingProposedBy === null || locked.openingProposedAt === null) {
+          throw this.refused('NO_PROPOSAL');
+        }
         if (locked.openingProposedBy !== principal.actor) {
           throw RastaError.forbidden(
             'Only the proposer may withdraw the proposal to open these bids',
           );
         }
-        await this.clearProposal(tx, principal, locked, principal.actor, 'WITHDRAWN_BY_PROPOSER');
+        await this.clearProposal(
+          tx,
+          principal,
+          locked,
+          { by: principal.actor, at: locked.openingProposedAt },
+          'WITHDRAWN_BY_PROPOSER',
+        );
         return { tenderId, withdrawnProposal: principal.actor };
       });
     });
@@ -630,6 +650,7 @@ export class TenderOpenService {
       status: string;
       openedAt: Date | null;
       openingProposedBy: string | null;
+      openingProposedAt: Date | null;
     }) => Promise<T>,
   ): Promise<T> {
     const found = await this.opens.findOwnership(tenderId);
@@ -734,27 +755,38 @@ export class TenderOpenService {
 
   /**
    * The proposer's and the approver's organizations as identity-service holds them now,
-   * read once, outside the transaction. Only when four-eyes applies and a proposal stands.
+   * read once, outside the transaction, together with the identity of the proposal they were
+   * read for. Only when four-eyes applies and a proposal stands.
    * Fails closed: unreachable or malformed refuses the opening (502/504).
    */
   private async readApprovalPeople(
     principal: Principal,
-    proposedBy: string | null,
+    found: { openingProposedBy: string | null; openingProposedAt: Date | null },
   ): Promise<ApprovalPeople | undefined> {
-    if (!this.env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES || proposedBy === null) return undefined;
+    const { openingProposedBy: proposedBy, openingProposedAt: proposedAt } = found;
+    if (
+      !this.env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES ||
+      proposedBy === null ||
+      proposedAt === null
+    ) {
+      return undefined;
+    }
     // The approver is already read: `principal` is live (identity-service and the token together).
-    const proposer = await this.fetchMemberships(proposedBy);
+    const proposer = (await this.fetchMemberships(proposedBy)).map(
+      (membership) => membership.organizationId,
+    );
     return {
       proposedBy,
+      proposedAt,
       proposerOrganizationIds: proposer,
       organizationIds: [...new Set([...proposer, ...principal.organizationIds])],
     };
   }
 
   /** Identity-service's word on whom a user belongs to now; anything less is a refusal, counted (a warning alert). */
-  private async fetchMemberships(userId: string): Promise<readonly string[]> {
+  private async fetchMemberships(userId: string): Promise<readonly LiveMembership[]> {
     try {
-      return await this.memberships.fetchOrganizationIds(userId);
+      return await this.memberships.fetchMemberships(userId);
     } catch (error) {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'identity_unavailable' });
       throw error instanceof RastaError
@@ -764,16 +796,32 @@ export class TenderOpenService {
   }
 
   /**
-   * The caller with the organizations they belong to **now**, as identity-service says, added
-   * to what the token says (the stricter of the two): a reader who joined a bidding
-   * organization after the token was issued is a member of it here. Every owner-side read of
-   * a bid's content or metadata, and every opening, repeat ones included, goes through this.
+   * The caller as identity-service says they are **now**. Its answer is authoritative for
+   * what the caller may do, and the token may only narrow it, never widen it: the caller must
+   * hold a live membership of the organization they act for with a role that opens bids, or
+   * they are refused — a revoked or demoted administrator with a still-valid token reads
+   * nothing. For the conflict of interest the two are added (the stricter, a narrowing): a
+   * reader who joined a bidding organization after the token was issued is a member of it
+   * here, and an organization the token claims still counts. Every owner-side read of a bid's
+   * content or metadata, and every opening, repeat ones included, goes through this.
    */
   private async livePrincipal(principal: Principal): Promise<Principal> {
     const live = await this.fetchMemberships(principal.actor);
+    const owner = live.find((membership) => membership.organizationId === principal.organizationId);
+    if (!owner) {
+      throw RastaError.forbidden(
+        'The caller is not a member of the organization they act for, as of now',
+      );
+    }
+    this.access.assertLiveRolesMayOpenBids(owner.roles);
     return {
       ...principal,
-      organizationIds: [...new Set([...live, ...principal.organizationIds])],
+      organizationIds: [
+        ...new Set([
+          ...live.map((membership) => membership.organizationId),
+          ...principal.organizationIds,
+        ]),
+      ],
     };
   }
 
@@ -792,12 +840,30 @@ export class TenderOpenService {
       await this.prisma.transaction((tx) => this.opens.listBidderOrganizationIds(tx, tenderId)),
     );
     if (!people.proposerOrganizationIds.some((organization) => bidders.has(organization))) return;
-    await this.prisma.transaction(async (tx) => {
+    const replaced = await this.prisma.transaction(async (tx) => {
       const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
-      // Another call may have cleared or replaced it already: only this proposer's is cleared.
-      if (!locked || locked.openingProposedBy !== people.proposedBy) return;
-      await this.clearProposal(tx, principal, locked, people.proposedBy, 'PROPOSER_CONFLICTED');
+      if (!locked) return false;
+      // Another call may have cleared it already: nothing to clear, and the refusal below is true.
+      if (locked.openingProposedBy === null) return false;
+      // Another proposal stands — a fresh one by the same user included: the evidence is about
+      // the proposal the approver evaluated, not this one. Only that exact proposal is cleared.
+      if (
+        locked.openingProposedBy !== people.proposedBy ||
+        locked.openingProposedAt?.getTime() !== people.proposedAt.getTime()
+      ) {
+        return true;
+      }
+      await this.clearProposal(
+        tx,
+        principal,
+        locked,
+        { by: people.proposedBy, at: people.proposedAt },
+        'PROPOSER_CONFLICTED',
+      );
+      return false;
     });
+    // Not conflicted evidence about what stands now: the approver asks again.
+    if (replaced) throw RastaError.optimisticLockFailed('Tender', tenderId);
     bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
     throw RastaError.forbidden(
       'The proposal to open these bids was cleared: its proposer is a member of an organization that bid. Another user may propose.',
@@ -809,10 +875,15 @@ export class TenderOpenService {
     tx: ExtendedPrismaClient,
     principal: Principal,
     locked: TenderForOpening,
-    proposedBy: string,
+    proposal: { by: string; at: Date },
     reason: 'WITHDRAWN_BY_PROPOSER' | 'PROPOSER_CONFLICTED',
   ): Promise<void> {
-    const cleared = await this.opens.clearProposal(tx, { tenderId: locked.id, proposedBy });
+    const proposedBy = proposal.by;
+    const cleared = await this.opens.clearProposal(tx, {
+      tenderId: locked.id,
+      proposedBy,
+      proposedAt: proposal.at,
+    });
     if (cleared === 0) throw RastaError.optimisticLockFailed('Tender', locked.id);
     const at = await transactionNow(tx);
     await this.audit.record(tx, {
@@ -844,11 +915,16 @@ export class TenderOpenService {
   /**
    * The detective control (ADR-066 § 4, the residual of the conflict check). The decision
    * point of the check is the identity read at the approval; a membership created between that
-   * read and the commit of the opening is not stopped. So, after the commit, identity-service
-   * is asked whether the proposer or the approver was a member of any bidding organization at
-   * the instant it committed; if so, an alert (a counter that pages) and
-   * `BID_OPENING_CONFLICT_DETECTED` (ids only) say it. Never in the way of the answer: the
-   * opening stands, and a check that could not be made is counted and logged, not retried.
+   * read and the commit of the opening is not stopped. The application cannot read the commit
+   * instant, so it watches an **interval**: after the commit, identity-service is asked
+   * whether the proposer or the approver held a membership of any bidding organization at any
+   * time from the decision instant (read inside the transaction, before the commit) to the
+   * moment it answers, which is after the commit. Conservative on purpose: a membership that
+   * began and ended inside the window, or began after the commit, is a false positive, and a
+   * false positive is an alert. On a hit: the alert (a counter that pages) and
+   * `BID_OPENING_CONFLICT_DETECTED` (ids only; window = `openedAt` to `checkedAt`) say it.
+   * Never in the way of the answer: the opening stands, and a check that could not be made is
+   * counted and logged, not retried.
    */
   private async checkOpeningForConflicts(opening: OpeningFacts): Promise<void> {
     const people: { userId: string; role: 'PROPOSER' | 'APPROVER' }[] = [
@@ -864,13 +940,18 @@ export class TenderOpenService {
       organizationIds: string[];
       organizationCount: number;
     }[] = [];
+    // The end of the window: identity-service's clock as it answered, the latest of the answers.
+    let checkedAt = opening.openedAt;
     try {
       for (const person of people) {
-        const belonged = await this.memberships.fetchOrganizationIdsAt(
+        const held = await this.memberships.fetchOrganizationIdsSince(
           person.userId,
-          opening.committedAt,
+          opening.openedAt,
         );
-        const shared = [...new Set(belonged.filter((organization) => bidders.has(organization)))];
+        if (held.asOf.getTime() > checkedAt.getTime()) checkedAt = held.asOf;
+        const shared = [
+          ...new Set(held.organizationIds.filter((organization) => bidders.has(organization))),
+        ];
         if (shared.length > 0) {
           conflicts.push({
             userId: person.userId,
@@ -894,7 +975,7 @@ export class TenderOpenService {
     // The alert first: it must fire whatever happens to the event below.
     bidOpeningConflictChecksTotal.inc({ service: SERVICE_NAME, outcome: 'conflict' });
     this.logger.error(
-      'a bid opening was made by a member of a bidding organization (detected after the commit)',
+      'a bid opening was made by someone who held a membership of a bidding organization in the window around it (detected after the commit)',
     );
     try {
       await this.prisma.transaction(async (tx) => {
@@ -909,7 +990,7 @@ export class TenderOpenService {
             openedAt: opening.openedAt.toISOString(),
             openedBy: opening.openedBy,
             proposedBy: opening.proposedBy,
-            checkedAt: opening.committedAt.toISOString(),
+            checkedAt: checkedAt.toISOString(),
             conflicts,
           },
           occurredAt: at,

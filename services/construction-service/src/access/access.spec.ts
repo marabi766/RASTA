@@ -159,6 +159,32 @@ describe('opening and reading bids (ADR-066 § 4)', () => {
       },
     );
 
+    describe('the roles identity-service says the caller holds now (assertLiveRolesMayOpenBids)', () => {
+      it('accepts a live owner role set that includes an authorised role', () => {
+        expect(() =>
+          access.assertLiveRolesMayOpenBids(['OPERATOR', 'ORGANIZATION_ADMIN']),
+        ).not.toThrow();
+      });
+
+      it.each([[[]], [['OPERATOR']], [['FLEET_MANAGER', 'SUPPLIER']]])(
+        'refuses %j: no live role that opens bids',
+        (roles) => {
+          expect(() => access.assertLiveRolesMayOpenBids(roles)).toThrow(
+            expect.objectContaining({ code: 'FORBIDDEN' }),
+          );
+        },
+      );
+
+      it.each(['SYSTEM_ADMIN', 'CONTRACTOR'])(
+        'refuses %s even alongside an authorised role',
+        (role) => {
+          expect(() => access.assertLiveRolesMayOpenBids([role, 'ORGANIZATION_ADMIN'])).toThrow(
+            expect.objectContaining({ code: 'FORBIDDEN' }),
+          );
+        },
+      );
+    });
+
     it('refuses SYSTEM_ADMIN and CONTRACTOR whenever present, even alongside the owner role and with an organization selected', () => {
       expect(outcome(access, { roles: ['SYSTEM_ADMIN'] })).toBe('FORBIDDEN');
       expect(outcome(access, { roles: ['CONTRACTOR'] })).toBe('FORBIDDEN');

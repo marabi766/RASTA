@@ -7,7 +7,7 @@ import {
   createMembershipSchema,
   createUserSchema,
   listUsersQuerySchema,
-  membershipInstantQuerySchema,
+  membershipWindowQuerySchema,
   rejectRegistrationSchema,
   revokeMembershipSchema,
   submitRegistrationSchema,
@@ -18,7 +18,7 @@ import {
   type CreateMembershipDto,
   type CreateUserDto,
   type ListUsersQuery,
-  type MembershipInstantQuery,
+  type MembershipWindowQuery,
   type RejectRegistrationDto,
   type RevokeMembershipDto,
   type SubmitRegistrationDto,
@@ -76,18 +76,19 @@ export class UserController {
   @Get(':id/organizations')
   @AllowService('construction-service')
   @ApiOperation({
-    summary: 'The organizations a user belongs to now (ids only)',
+    summary: 'The organizations a user belongs to now, with the roles held in each',
     description:
       'Service-to-service only: `construction-service` with a token signed for no tenant; a ' +
       'person, any other service, or a token signed for a tenant is refused 403. Live ' +
-      'memberships only, judged on the database clock. With `at`, the organizations the user ' +
-      'was a member of at that instant. Used to check a conflict of interest around a bid opening.',
+      'memberships only, judged on the database clock. With `from`, the organizations the user ' +
+      'held a membership in at any time between `from` and the database clock as the query ran ' +
+      '(ids only). Used to check a conflict of interest around a bid opening.',
   })
   liveOrganizations(
     @Param('id') id: string,
-    @Query(zodPipe(membershipInstantQuerySchema)) query: MembershipInstantQuery,
+    @Query(zodPipe(membershipWindowQuerySchema)) query: MembershipWindowQuery,
   ) {
-    return this.identity.getLiveOrganizationIds(id, query.at ? new Date(query.at) : undefined);
+    return this.identity.getMemberships(id, query.from ? new Date(query.from) : undefined);
   }
 
   @Get(':id')

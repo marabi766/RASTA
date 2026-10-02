@@ -26,6 +26,8 @@ export interface TenderForOpening {
   openedAt: Date | null;
   openedBy: string | null;
   openingProposedBy: string | null;
+  /** With `openingProposedBy`, the identity of the proposal: who and when (both set, or neither). */
+  openingProposedAt: Date | null;
 }
 
 /** Who owns a tender and how far it has got, found by id alone. */
@@ -35,6 +37,7 @@ export interface TenderOwnership {
   status: TenderStateName;
   openedAt: Date | null;
   openingProposedBy: string | null;
+  openingProposedAt: Date | null;
 }
 
 interface LockRow {
@@ -48,6 +51,7 @@ interface LockRow {
   opened_at: Date | null;
   opened_by: string | null;
   opening_proposed_by: string | null;
+  opening_proposed_at: Date | null;
 }
 
 const toLocked = (row: LockRow): TenderForOpening => ({
@@ -61,6 +65,7 @@ const toLocked = (row: LockRow): TenderForOpening => ({
   openedAt: row.opened_at,
   openedBy: row.opened_by,
   openingProposedBy: row.opening_proposed_by,
+  openingProposedAt: row.opening_proposed_at,
 });
 
 @Injectable()
@@ -85,6 +90,7 @@ export class TenderOpenRepository {
             status: true,
             openedAt: true,
             openingProposedBy: true,
+            openingProposedAt: true,
           },
         });
         return row ? { ...row, status: row.status as TenderStateName } : null;
@@ -104,7 +110,8 @@ export class TenderOpenRepository {
   ): Promise<TenderForOpening | null> {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
-             "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by"
+             "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by",
+             "opening_proposed_at"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR UPDATE`;
@@ -122,7 +129,8 @@ export class TenderOpenRepository {
   ): Promise<TenderForOpening | null> {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
-             "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by"
+             "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by",
+             "opening_proposed_at"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR SHARE`;
@@ -145,12 +153,13 @@ export class TenderOpenRepository {
   }
 
   /**
-   * Clears the proposal of `proposedBy` on a CLOSED, unopened tender, in the lock the caller
-   * holds, so another eligible user can propose afresh. Returns the rows matched: 0 or 1.
+   * Clears exactly the proposal `(proposedBy, proposedAt)` on a CLOSED, unopened tender, in
+   * the lock the caller holds, so another eligible user can propose afresh. A later proposal
+   * by the same user is another proposal and is not matched. Returns the rows matched: 0 or 1.
    */
   async clearProposal(
     tx: ExtendedPrismaClient,
-    input: { tenderId: string; proposedBy: string },
+    input: { tenderId: string; proposedBy: string; proposedAt: Date },
   ): Promise<number> {
     const result = await tx.tender.updateMany({
       where: {
@@ -158,6 +167,7 @@ export class TenderOpenRepository {
         status: 'CLOSED',
         openedAt: null,
         openingProposedBy: input.proposedBy,
+        openingProposedAt: input.proposedAt,
       },
       data: { openingProposedAt: null, openingProposedBy: null },
     });

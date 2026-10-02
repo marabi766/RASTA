@@ -1161,6 +1161,53 @@ describe('opening the bids of a tender', () => {
       expect((await asCarol(owner, () => w.tenderOpen.listBids(tenderId))).bids).toHaveLength(2);
     });
 
+    it('refuses an administrator whose membership of the owner was revoked, though their token is still valid: every route, nothing shown', async () => {
+      const { owner, tenderId } = await closedTender();
+      await open(owner, tenderId);
+      const [bid] = await bidRows(tenderId);
+      const logged = (await logOf(tenderId)).length;
+      // The token still says ORGANIZATION_ADMIN of the owner; identity-service has no such membership.
+      w.memberships.revoked.add(carol);
+
+      const calls: Array<() => Promise<unknown>> = [
+        () => w.tenderOpen.listBids(tenderId),
+        () => w.tenderOpen.getBid(tenderId, bid!.id),
+        () => w.tenderOpen.listAccessLog(tenderId, { limit: 10 }),
+        () => w.tenderOpen.open(tenderId),
+        () => w.tenderOpen.proposeOpening(tenderId),
+        () => w.tenderOpen.withdrawProposal(tenderId),
+      ];
+      for (const call of calls) {
+        expect(await codeOf(asCarol(owner, call))).toMatchObject({ code: 'FORBIDDEN' });
+      }
+
+      // Nothing was shown: only refusals under their name (the access log is refused before any row).
+      for (const row of (await logOf(tenderId)).slice(logged)) {
+        expect(row).toMatchObject({ accessorUserId: carol, outcome: 'REFUSED' });
+      }
+      // And a member who is still one reads.
+      w.memberships.revoked.clear();
+      expect((await asCarol(owner, () => w.tenderOpen.listBids(tenderId))).opened).toBe(true);
+    });
+
+    it('refuses an administrator who no longer holds a role that opens bids in the owner, though the token still says so', async () => {
+      const { owner, tenderId } = await closedTender();
+      await open(owner, tenderId);
+      w.memberships.rolesOf.set(carol, ['OPERATOR']);
+
+      expect(await codeOf(asCarol(owner, () => w.tenderOpen.listBids(tenderId)))).toMatchObject({
+        code: 'FORBIDDEN',
+      });
+
+      // The roles that open bids are enough, and one that must never read them is not made harmless by another.
+      w.memberships.rolesOf.set(carol, ['OPERATOR', 'ORGANIZATION_ADMIN']);
+      expect((await asCarol(owner, () => w.tenderOpen.listBids(tenderId))).opened).toBe(true);
+      w.memberships.rolesOf.set(carol, ['CONTRACTOR', 'ORGANIZATION_ADMIN']);
+      expect(await codeOf(asCarol(owner, () => w.tenderOpen.listBids(tenderId)))).toMatchObject({
+        code: 'FORBIDDEN',
+      });
+    });
+
     it('fails closed on every owner read when identity-service cannot say: nothing shown, counted as identity_unavailable', async () => {
       const { owner, tenderId } = await closedTender();
       await open(owner, tenderId);
@@ -1376,6 +1423,36 @@ describe('opening the bids of a tender', () => {
         expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
       });
 
+      it('does not clear a FRESH proposal by the same user when the approval that found the old one conflicted is stale', async () => {
+        const { owner, bidders, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        const stale = await rowOf(tenderId);
+        // Between bob reading alice's proposal and the clearing, alice withdraws and proposes afresh.
+        w4.memberships.beforeAnswer.set(alice, async () => {
+          await asAdmin(owner, () => w4.tenderOpen.withdrawProposal(tenderId), alice);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          await propose(owner, tenderId, alice);
+          w4.memberships.of.set(alice, [bidders[0]!]);
+        });
+
+        // The old proposal's proposer is conflicted per identity-service; bob's approval is stale: 409, retry.
+        expect(await codeOf(approve(owner, tenderId, bob))).toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+
+        const row = await rowOf(tenderId);
+        expect(row.openingProposedBy).toBe(alice);
+        expect(row.openingProposedAt!.getTime()).toBeGreaterThan(
+          stale.openingProposedAt!.getTime(),
+        );
+        // Only alice's own withdrawal is on record; the stale approval cleared nothing.
+        expect(
+          (await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId)).map(
+            (event) => (payloadOf(event) as { reason: string }).reason,
+          ),
+        ).toEqual(['WITHDRAWN_BY_PROPOSER']);
+      });
+
       it('fails closed when identity-service cannot say: 502, nothing opened', async () => {
         const { owner, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
@@ -1458,13 +1535,15 @@ describe('opening the bids of a tender', () => {
           .reduce((sum, value) => sum + value.value, 0);
       afterEach(() => w4.memberships.reset());
 
-      it('raises the alert and BID_OPENING_CONFLICT_DETECTED, ids only, when the approver or the proposer belonged to a bidder at the commit; the opening stands', async () => {
+      it('raises the alert and BID_OPENING_CONFLICT_DETECTED, ids only, when the approver or the proposer held a bidder’s membership in the window from the decision to the check; the opening stands', async () => {
         const { owner, bidders, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
         // At the approval identity-service said nobody belongs to a bidder (the default answer);
-        // by the commit instant, as its history now has it, both did.
-        w4.memberships.at.set(bob, [owner, bidders[1]!]);
-        w4.memberships.at.set(alice, [bidders[0]!, bidders[1]!]);
+        // over the window after the decision, as its history now has it, both did.
+        w4.memberships.since.set(bob, [owner, bidders[1]!]);
+        w4.memberships.since.set(alice, [bidders[0]!, bidders[1]!]);
+        const asOf = new Date(Date.now() + 5_000);
+        w4.memberships.intervalAsOf = asOf;
         const before = await checks('conflict');
 
         const view = await approve(owner, tenderId, bob);
@@ -1472,10 +1551,13 @@ describe('opening the bids of a tender', () => {
         expect(view).toMatchObject({ status: 'EVALUATING', openedBy: bob });
         expect(await checks('conflict')).toBe(before + 1);
         const row = await rowOf(tenderId);
-        expect(w4.memberships.askedAt.map((ask) => ask.userId).sort()).toEqual([alice, bob].sort());
-        for (const ask of w4.memberships.askedAt) {
-          // The instant it committed: not before the decision.
-          expect(ask.at.getTime()).toBeGreaterThanOrEqual(row.openedAt!.getTime());
+        expect(w4.memberships.askedSince.map((ask) => ask.userId).sort()).toEqual(
+          [alice, bob].sort(),
+        );
+        for (const ask of w4.memberships.askedSince) {
+          // The interval opens at the decision instant itself — not at some later "commit" instant,
+          // from which a membership that began in between would be missed.
+          expect(ask.from.getTime()).toBe(row.openedAt!.getTime());
         }
         const [event] = await eventsOf(owner, 'BID_OPENING_CONFLICT_DETECTED', tenderId);
         const payload = payloadOf(event!) as { conflicts: unknown[] };
@@ -1484,7 +1566,9 @@ describe('opening the bids of a tender', () => {
           organizationId: owner,
           openedBy: bob,
           proposedBy: alice,
+          // The window: opened at the decision, checked as identity-service answered.
           openedAt: row.openedAt!.toISOString(),
+          checkedAt: asOf.toISOString(),
         });
         expect(payload.conflicts).toEqual(
           expect.arrayContaining([
@@ -1506,10 +1590,10 @@ describe('opening the bids of a tender', () => {
         expect(JSON.stringify(payload)).not.toContain('priceMinor');
       });
 
-      it('says nothing when neither belonged to a bidder at the commit', async () => {
+      it('says nothing when neither held a bidder’s membership in the window', async () => {
         const { owner, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
-        w4.memberships.at.set(alice, [owner]);
+        w4.memberships.since.set(alice, [owner]);
         const [clear, conflict] = [await checks('clear'), await checks('conflict')];
 
         await approve(owner, tenderId, bob);
@@ -1522,7 +1606,7 @@ describe('opening the bids of a tender', () => {
       it('does not undo or fail the opening when the check cannot be made: counted and logged', async () => {
         const { owner, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
-        w4.memberships.atFailure = RastaError.upstreamUnavailable('identity-service');
+        w4.memberships.sinceFailure = RastaError.upstreamUnavailable('identity-service');
         const before = await checks('unavailable');
 
         expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
@@ -1535,11 +1619,11 @@ describe('opening the bids of a tender', () => {
         const { owner, tenderId } = await closedTender();
         await propose(owner, tenderId, alice);
         await approve(owner, tenderId, bob);
-        w4.memberships.askedAt.length = 0;
+        w4.memberships.askedSince.length = 0;
 
         expect((await approve(owner, tenderId, bob)).alreadyOpened).toBe(true);
 
-        expect(w4.memberships.askedAt).toEqual([]);
+        expect(w4.memberships.askedSince).toEqual([]);
       });
     });
 

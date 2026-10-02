@@ -350,6 +350,24 @@ export class ProjectAccess {
     };
   }
 
+  /**
+   * The same rule as `assertCanOpenBids`, on the roles identity-service says the caller holds
+   * **now** in the organization they act for, not the token's: a token outlives a revocation
+   * or a demotion, and a bid's content is not read on a stale claim. The token may only narrow.
+   */
+  assertLiveRolesMayOpenBids(liveRoles: readonly string[]): void {
+    for (const refused of [SUPER_ROLE, CONTRACTOR_ROLE]) {
+      if (liveRoles.includes(refused)) {
+        throw RastaError.forbidden(`The ${refused} role does not open or read bids`);
+      }
+    }
+    if (!this.bidOpeners.some((role) => liveRoles.includes(role))) {
+      throw RastaError.forbidden(
+        'The caller no longer holds a role that opens or reads bids in this organization',
+      );
+    }
+  }
+
   /** May the caller read projects and needs in the organization they act for? */
   assertCanRead(): { organizationId: string } {
     const { organizationId } = this.assert(this.readers, 'read construction projects');

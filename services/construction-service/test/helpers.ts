@@ -1,4 +1,10 @@
-import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  runWithContext,
+  runUnscoped,
+  type RequestContext,
+} from '@rasta/nest-common';
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema } from '@rasta/contracts';
@@ -34,7 +40,7 @@ import { TenderClock } from '../src/tender/tender-clock';
 import { TenderOpenRepository } from '../src/tender/tender-open.repository';
 import { TenderOpenService } from '../src/tender/tender-open.service';
 import { BidAccessAudit } from '../src/tender/bid-access-audit';
-import type { MembershipSource } from '../src/tender/membership.client';
+import type { LiveMembership, MembershipSource } from '../src/tender/membership.client';
 import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
 import { genesisReceipt } from '../src/tender/sealing/sealing';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
@@ -471,35 +477,81 @@ export class FakeTenderEvidence implements TenderEvidenceSource {
  */
 export class FakeMemberships implements MembershipSource {
   failure: Error | undefined;
+  /** Extra organizations a user belongs to now (each with the owner role set), besides the one they act for. */
   readonly of = new Map<string, readonly string[]>();
   readonly asked: string[] = [];
-  /** Who belonged where at an instant, for the check after an opening; absent = as `of`. */
-  readonly at = new Map<string, readonly string[]>();
-  readonly askedAt: { userId: string; at: Date }[] = [];
+  /**
+   * By default identity-service agrees with the request: the caller belongs to the
+   * organization they act for, with the roles of their token. These say otherwise.
+   */
+  readonly revoked = new Set<string>();
+  readonly rolesOf = new Map<string, readonly string[]>();
+  /** Who held a membership where over the interval after an opening; absent = as `of`. */
+  readonly since = new Map<string, readonly string[]>();
+  readonly askedSince: { userId: string; from: Date }[] = [];
+  /** identity-service's clock as it answers the interval query; absent = now. */
+  intervalAsOf: Date | undefined;
 
-  async fetchOrganizationIds(userId: string): Promise<readonly string[]> {
+  /** Runs once, before identity-service answers for that user: something happens in the race. */
+  readonly beforeAnswer = new Map<string, () => Promise<void>>();
+
+  async fetchMemberships(userId: string): Promise<readonly LiveMembership[]> {
     this.asked.push(userId);
     if (this.failure) throw this.failure;
-    return this.of.get(userId) ?? [];
+    const hook = this.beforeAnswer.get(userId);
+    if (hook) {
+      this.beforeAnswer.delete(userId);
+      await hook();
+    }
+    const byOrganization = new Map<string, LiveMembership>();
+    for (const organizationId of this.of.get(userId) ?? []) {
+      byOrganization.set(organizationId, { organizationId, roles: ['ORGANIZATION_ADMIN'] });
+    }
+    const request = currentRequest();
+    if (request?.userId === userId && request.organizationId && !this.revoked.has(userId)) {
+      byOrganization.set(request.organizationId, {
+        organizationId: request.organizationId,
+        roles: this.rolesOf.get(userId) ?? request.roles,
+      });
+    }
+    return [...byOrganization.values()];
   }
 
   /** Back to the default: nobody belongs to anything, nothing fails, nothing asked. */
   reset(): void {
     this.failure = undefined;
-    this.atFailure = undefined;
+    this.sinceFailure = undefined;
+    this.intervalAsOf = undefined;
     this.of.clear();
-    this.at.clear();
+    this.revoked.clear();
+    this.rolesOf.clear();
+    this.beforeAnswer.clear();
+    this.since.clear();
     this.asked.length = 0;
-    this.askedAt.length = 0;
+    this.askedSince.length = 0;
   }
 
-  /** Fails only the history read (the check after an opening), leaving the live reads working. */
-  atFailure: Error | undefined;
+  /** Fails only the interval read (the check after an opening), leaving the live reads working. */
+  sinceFailure: Error | undefined;
 
-  async fetchOrganizationIdsAt(userId: string, at: Date): Promise<readonly string[]> {
-    this.askedAt.push({ userId, at });
-    if (this.failure ?? this.atFailure) throw (this.failure ?? this.atFailure)!;
-    return this.at.get(userId) ?? this.of.get(userId) ?? [];
+  async fetchOrganizationIdsSince(
+    userId: string,
+    from: Date,
+  ): Promise<{ organizationIds: readonly string[]; asOf: Date }> {
+    this.askedSince.push({ userId, from });
+    if (this.failure ?? this.sinceFailure) throw (this.failure ?? this.sinceFailure)!;
+    return {
+      organizationIds: this.since.get(userId) ?? this.of.get(userId) ?? [],
+      asOf: this.intervalAsOf ?? new Date(),
+    };
+  }
+}
+
+function currentRequest(): RequestContext | undefined {
+  try {
+    return getContext();
+  } catch {
+    return undefined;
   }
 }
 

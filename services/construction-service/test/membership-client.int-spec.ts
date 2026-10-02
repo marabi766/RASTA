@@ -9,14 +9,15 @@ import { testEnv } from './helpers';
  * The consumer side of identity-service's `GET /v1/users/{id}/organizations`: the real
  * `MembershipClient` against a server that answers as identity-service does (a
  * `construction-service` token for identity-service, signed for no tenant; 200
- * `{ userId, organizationIds, asOf }`). Every way the answer can go wrong refuses:
+ * `{ userId, memberships: [{ organizationId, roles }], asOf }`; with `?from=`, `{ userId,
+ * organizationIds, asOf }`). Every way the answer can go wrong refuses:
  * "could not confirm" is never "no conflict".
  */
 
 const SECRET = randomBytes(24).toString('hex');
 const tokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
 
-type Behaviour = 'contract' | 'error' | 'extra-field' | 'other-user' | 'slow' | 'text';
+type Behaviour = 'contract' | 'error' | 'extra-field' | 'ids-only' | 'other-user' | 'slow' | 'text';
 
 describe('MembershipClient against the identity-service contract', () => {
   let server: Server;
@@ -42,12 +43,24 @@ describe('MembershipClient against the identity-service contract', () => {
         if (!claims || claims.callerService !== 'construction-service' || claims.organizationId) {
           return send(403, { error: 'forbidden' });
         }
-        const ok = { userId, organizationIds: ['ORG_A', 'ORG_B'], asOf: new Date().toISOString() };
+        const asOf = '2026-10-02T10:00:00.000Z';
+        const ok = (req.url ?? '').includes('?from=')
+          ? { userId, organizationIds: ['ORG_A', 'ORG_B'], asOf }
+          : {
+              userId,
+              memberships: [
+                { organizationId: 'ORG_A', roles: ['ORGANIZATION_ADMIN'] },
+                { organizationId: 'ORG_B', roles: ['OPERATOR', 'ORGANIZATION_ADMIN'] },
+              ],
+              asOf,
+            };
         switch (behaviour) {
           case 'error':
             return send(500, { error: 'boom' });
           case 'extra-field':
             return send(200, { ...ok, email: 'someone@example.test' });
+          case 'ids-only':
+            return send(200, { userId, organizationIds: ['ORG_A'], asOf });
           case 'other-user':
             return send(200, { ...ok, userId: 'USR_SOMEONE_ELSE' });
           case 'text':
@@ -81,8 +94,11 @@ describe('MembershipClient against the identity-service contract', () => {
       tokens,
     );
 
-  it('reads a user’s organizations with a tenant-less construction-service token', async () => {
-    expect(await client().fetchOrganizationIds('USR_ONE')).toEqual(['ORG_A', 'ORG_B']);
+  it('reads a user’s live memberships and roles with a tenant-less construction-service token', async () => {
+    expect(await client().fetchMemberships('USR_ONE')).toEqual([
+      { organizationId: 'ORG_A', roles: ['ORGANIZATION_ADMIN'] },
+      { organizationId: 'ORG_B', roles: ['OPERATOR', 'ORGANIZATION_ADMIN'] },
+    ]);
     expect(seen).toEqual([
       {
         url: '/v1/users/USR_ONE/organizations',
@@ -92,10 +108,13 @@ describe('MembershipClient against the identity-service contract', () => {
     expect(seen[0]!.claims!.organizationId).toBeUndefined();
   });
 
-  it('asks for the memberships held at an instant with `at`', async () => {
-    const at = new Date('2026-10-01T12:00:00.000Z');
-    expect(await client().fetchOrganizationIdsAt('USR_ONE', at)).toEqual(['ORG_A', 'ORG_B']);
-    expect(seen[0]!.url).toBe('/v1/users/USR_ONE/organizations?at=2026-10-01T12%3A00%3A00.000Z');
+  it('asks for the organizations held from an instant to identity-service’s own, with `from`', async () => {
+    const from = new Date('2026-10-01T12:00:00.000Z');
+    expect(await client().fetchOrganizationIdsSince('USR_ONE', from)).toEqual({
+      organizationIds: ['ORG_A', 'ORG_B'],
+      asOf: new Date('2026-10-02T10:00:00.000Z'),
+    });
+    expect(seen[0]!.url).toBe('/v1/users/USR_ONE/organizations?from=2026-10-01T12%3A00%3A00.000Z');
   });
 
   it.each<[Behaviour, string]>([
@@ -105,14 +124,24 @@ describe('MembershipClient against the identity-service contract', () => {
     ['text', 'a body that is not JSON'],
   ])('refuses %s (%s): UPSTREAM_UNAVAILABLE', async (kind) => {
     behaviour = kind;
-    await expect(client().fetchOrganizationIds('USR_ONE')).rejects.toMatchObject({
+    await expect(client().fetchMemberships('USR_ONE')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    await expect(client().fetchOrganizationIdsSince('USR_ONE', new Date())).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  it('refuses the old shape of the live answer (ids only, no roles): the owner’s role cannot be confirmed', async () => {
+    behaviour = 'ids-only';
+    await expect(client().fetchMemberships('USR_ONE')).rejects.toMatchObject({
       code: 'UPSTREAM_UNAVAILABLE',
     });
   });
 
   it('refuses an answer that is too slow: UPSTREAM_TIMEOUT', async () => {
     behaviour = 'slow';
-    await expect(client(200).fetchOrganizationIds('USR_ONE')).rejects.toMatchObject({
+    await expect(client(200).fetchMemberships('USR_ONE')).rejects.toMatchObject({
       code: 'UPSTREAM_TIMEOUT',
     });
   });

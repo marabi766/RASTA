@@ -90,7 +90,7 @@ tests:
               severity: critical
             exp_annotations:
               summary: 'A bid opening was made by a member of a bidding organization (1 detected)'
-              description: 'After an opening committed, identity-service said its proposer or approver belonged to an organization that bid on the tender at that instant: a membership was created between the check at the approval and the commit. The opening was not undone. BID_OPENING_CONFLICT_DETECTED names the tender, the person and the organizations (ids only); this alert deliberately carries none of them.'
+              description: 'After an opening committed, identity-service said its proposer or approver held a membership of an organization that bid on the tender at some time between the decision and this check after the commit: one was probably created between the check at the approval and the commit (the window is deliberately wide, so a membership that came and went inside it is a false positive). The opening was not undone. BID_OPENING_CONFLICT_DETECTED names the tender, the person and the organizations (ids only); this alert deliberately carries none of them.'
               runbook: docs/runbooks/bid-opening-conflict.md
 
   # ---------------------------------------------------------------------------

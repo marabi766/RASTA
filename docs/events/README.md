@@ -565,8 +565,9 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 دو رویداد (`aggregateType = Tender`، کلید `tenderId`؛ هیچ‌کدام `projectId` ندارند؛ فقط شناسه، `.strict()`):
 
 - `BID_OPENING_CONFLICT_DETECTED` — **نام را مدیر پروژه داد (2026-10-02).** پس از Commit بازگشایی، identity گفت پیشنهاددهنده یا
-  تأییدکننده در همان لحظه عضو سازمانی پیشنهاددهنده بوده است (باقیماندهٔ ADR-066 § ۴): `tenderId`، `organizationId`، `openedAt`، `openedBy`،
-  `proposedBy` (یا `null`)، `checkedAt` (لحظهٔ Commit) و `conflicts` (۱ تا ۲ مورد: `userId`، `role` = `PROPOSER | APPROVER`، `organizationIds`
+  تأییدکننده در بازهٔ `openedAt` تا `checkedAt` عضو سازمانی پیشنهاددهنده بوده است (باقیماندهٔ ADR-066 § ۴): `tenderId`، `organizationId`، `openedAt`
+  (لحظهٔ تصمیم؛ آغاز بازه)، `openedBy`،
+  `proposedBy` (یا `null`)، `checkedAt` (ساعت identity هنگام پاسخ، پس از Commit؛ پایان بازه) و `conflicts` (۱ تا ۲ مورد: `userId`، `role` = `PROPOSER | APPROVER`، `organizationIds`
   حداکثر ۱۰۰ و `organizationCount`). بازگشایی پس گرفته نمی‌شود.
 - `BID_OPENING_PROPOSAL_WITHDRAWN` — **افزودهٔ CON-002 برای S-06؛ در انتظار پذیرش.** پیشنهادِ بازگشایی را پیشنهاددهنده پس گرفت یا تأییدی که او را
   عضو پیشنهاددهنده یافت پاکش کرد: `tenderId`، `organizationId`، `proposedBy`، `withdrawnBy`، `reason`
