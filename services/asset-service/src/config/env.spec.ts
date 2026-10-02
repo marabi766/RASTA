@@ -39,3 +39,26 @@ describe('claim authority configuration', () => {
     expect(() => ceiling.parse('1e9')).toThrow();
   });
 });
+
+/** The two Idempotency-Key lifetimes on POST /v1/assets (#169), validated at boot. */
+describe('idempotency configuration', () => {
+  const ttl = assetEnvSchema.shape.ASSET_IDEMPOTENCY_TTL_HOURS;
+  const lease = assetEnvSchema.shape.ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS;
+
+  it('keeps a completed response for a day and an in-flight claim for two minutes by default', () => {
+    expect(ttl.parse(undefined)).toBe(24);
+    expect(lease.parse(undefined)).toBe(120);
+  });
+
+  it('refuses a lease below the floor that keeps a slow request its claim, or above an hour', () => {
+    expect(lease.parse('30')).toBe(30);
+    expect(() => lease.parse('29')).toThrow();
+    expect(() => lease.parse('3601')).toThrow();
+    expect(() => lease.parse('90.5')).toThrow();
+  });
+
+  it('refuses a response lifetime outside one hour to a week', () => {
+    expect(() => ttl.parse('0')).toThrow();
+    expect(() => ttl.parse('169')).toThrow();
+  });
+});
