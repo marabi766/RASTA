@@ -55,7 +55,6 @@ DROP FUNCTION IF EXISTS "bid_score_guard"();
 DROP FUNCTION IF EXISTS "bid_recusal_guard"();
 DROP FUNCTION IF EXISTS "bid_evaluation_guard"();
 DROP FUNCTION IF EXISTS "bid_qualification_guard"();
-DROP FUNCTION IF EXISTS "evaluation_assert_open"(text, text);
 
 DROP TYPE IF EXISTS "QualificationDecision";
 

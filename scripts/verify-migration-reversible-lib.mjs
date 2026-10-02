@@ -1013,7 +1013,6 @@ export const EXPECTED = {
       'standing_bootstrap_guard',
       'bid_guard',
       'bid_append_only',
-      'evaluation_assert_open',
       'bid_qualification_guard',
       'bid_decision_recorded',
       'bid_evaluation_guard',

@@ -147,25 +147,20 @@ ALTER TABLE "bid_evaluation_score" ADD CONSTRAINT "ck_bid_score_shape"
 -- Append-only, and only while the tender is EVALUATING
 -- =============================================================================
 
-CREATE FUNCTION "evaluation_assert_open"(p_org text, p_tender text) RETURNS void AS $$
+-- Each trigger below reads the tender itself rather than calling a shared helper: a function a
+-- trigger calls needs EXECUTE for the runtime role, which the role split (D-045) does not give.
+-- A decision on a bid: the tender is EVALUATING, the bid is one of its own and still OPENED.
+CREATE FUNCTION "bid_qualification_guard"() RETURNS trigger AS $$
 DECLARE
   tender_status text;
+  bid_status text;
 BEGIN
   SELECT "status"::text INTO tender_status
-    FROM "tender" WHERE "organization_id" = p_org AND "id" = p_tender;
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
   IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
     RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
       USING ERRCODE = 'check_violation';
   END IF;
-END;
-$$ LANGUAGE plpgsql;
-
--- A decision on a bid: the tender is EVALUATING, the bid is one of its own and still OPENED.
-CREATE FUNCTION "bid_qualification_guard"() RETURNS trigger AS $$
-DECLARE
-  bid_status text;
-BEGIN
-  PERFORM "evaluation_assert_open"(NEW."organization_id", NEW."tender_id");
   SELECT "status"::text INTO bid_status FROM "bid"
    WHERE "id" = NEW."bid_id" AND "organization_id" = NEW."organization_id"
      AND "tender_id" = NEW."tender_id";
@@ -209,9 +204,15 @@ CREATE TRIGGER "tg_bid_status_requires_decision"
 -- An evaluator's claim on a bid: the tender is EVALUATING, the bid is QUALIFIED, they have not stood down.
 CREATE FUNCTION "bid_evaluation_guard"() RETURNS trigger AS $$
 DECLARE
+  tender_status text;
   bid_status text;
 BEGIN
-  PERFORM "evaluation_assert_open"(NEW."organization_id", NEW."tender_id");
+  SELECT "status"::text INTO tender_status
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+  IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
+    RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
+      USING ERRCODE = 'check_violation';
+  END IF;
   SELECT "status"::text INTO bid_status FROM "bid"
    WHERE "id" = NEW."bid_id" AND "organization_id" = NEW."organization_id"
      AND "tender_id" = NEW."tender_id";
@@ -236,9 +237,15 @@ CREATE TRIGGER "tg_bid_evaluation_guard"
 -- Standing down: while the tender is EVALUATING, from a bid still being decided on or evaluated.
 CREATE FUNCTION "bid_recusal_guard"() RETURNS trigger AS $$
 DECLARE
+  tender_status text;
   bid_status text;
 BEGIN
-  PERFORM "evaluation_assert_open"(NEW."organization_id", NEW."tender_id");
+  SELECT "status"::text INTO tender_status
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+  IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
+    RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
+      USING ERRCODE = 'check_violation';
+  END IF;
   SELECT "status"::text INTO bid_status FROM "bid"
    WHERE "id" = NEW."bid_id" AND "organization_id" = NEW."organization_id"
      AND "tender_id" = NEW."tender_id";
@@ -259,6 +266,7 @@ CREATE TRIGGER "tg_bid_recusal_guard"
 -- criterion is 0 or full marks), and the revision is the next one of that cell.
 CREATE FUNCTION "bid_score_guard"() RETURNS trigger AS $$
 DECLARE
+  tender_status text;
   claim_bid text;
   claim_tender text;
   claim_evaluator text;
@@ -266,7 +274,12 @@ DECLARE
   top integer;
   previous integer;
 BEGIN
-  PERFORM "evaluation_assert_open"(NEW."organization_id", NEW."tender_id");
+  SELECT "status"::text INTO tender_status
+    FROM "tender" WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."tender_id";
+  IF tender_status IS DISTINCT FROM 'EVALUATING' THEN
+    RAISE EXCEPTION 'ck_evaluation_open: evaluation is recorded only while the tender is EVALUATING'
+      USING ERRCODE = 'check_violation';
+  END IF;
 
   SELECT "bid_id", "tender_id", "evaluator_id" INTO claim_bid, claim_tender, claim_evaluator
     FROM "bid_evaluation"
