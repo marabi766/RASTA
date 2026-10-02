@@ -468,7 +468,25 @@ Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ
 میان‌سرویسی؛ ADR-066 § ۴): پس از Commit بازگشایی، عضویت دو نفر در بازهٔ زودترین خواندن identity در تأیید/لحظهٔ تصمیم تا پاسخ (`GET …/organizations?from=`) دوباره پرسیده می‌شود؛ تضاد ⇒ هشدار
 بحرانی و `BID_OPENING_CONFLICT_DETECTED`.
 
-**هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد، ارزیابی و انتخاب — CON-002؛ قرارداد — CON-003؛
+**CON-002 PR 9 (ارزیابی).** ارزیابانِ کارفرما (نقش‌های `CONSTRUCTION_TENDER_EVALUATE_ROLES`، پیش‌فرض همان مجموعهٔ نقش‌های مالک؛ **همان** فهرست ممنوع‌های بازگشایی:
+`SYSTEM_ADMIN`، `AUDITOR`، `CONTRACTOR`، توکن سرویس): `POST /v1/tenders/{id}/bids/{bidId}/qualification` (`OPENED → QUALIFIED | DISQUALIFIED`، یک‌بار و نهایی؛
+رد با دلیل بستهٔ `reasonCode` و متن که فقط در پایگاه داده می‌ماند)، `POST …/recusal` (کناره‌گیری از یک پیشنهاد، نهایی)، `POST …/scores` (امتیاز عددصحیح = نمره × ۱۰۰ به‌ازای معیار)، `POST /v1/tenders/{id}/evaluate`
+(`EVALUATING → EVALUATED`)، `GET /v1/tenders/{id}/evaluation` (ماتریس و رتبه‌بندی). **وزن‌ها و بیشینهٔ نمره از معیارهای منجمدشدهٔ همان مناقصه می‌آید؛ هیچ وزن یا معیاری در کد نیست.**
+جمع هر ارزیاب `Σ weightBp × scoreScaled` به‌صورت `bigint` است (رشته در API)، بی تقسیم و بی گرد کردن؛ رتبه = ۱ + شمار پیشنهادهای **اکیداً** بهتر و تساوی رتبهٔ مشترک می‌گیرد؛ **رتبهٔ نخست انتخاب نیست**
+(`award` گام ۱۰ است). ثبت **الحاقی** است (بازبینی = ردیف تازه با `revision`، ماتریس آخرین بازبینی هر خانه)؛ هر چهار جدول (`bid_qualification`، `bid_evaluation`، `bid_evaluation_recusal`،
+`bid_evaluation_score`) با Trigger الحاقی‌اند و **فقط وقتی مناقصه `EVALUATING` است** پذیرفته می‌شوند، پس ماتریس پس از `evaluate` برای هیچ نویسنده‌ای تغییر نمی‌کند؛ Trigger همچنین بازهٔ نمره، توالی بازبینی،
+معیارِ همان مناقصه و کناره‌گیری را در پایگاه داده نگه می‌دارد و `bid.status` را فقط با تصمیم ثبت‌شده به `QUALIFIED/DISQUALIFIED` می‌برد. هر فرمان قفل `FOR UPDATE` ردیف مناقصه را می‌گیرد و لحظه را **پس از قفل** از ساعت پایگاه داده می‌خواند؛
+یک امتیاز که پشت `evaluate` منتظر مانده مناقصه را `EVALUATED` می‌یابد و `422 NOT_EVALUATING` می‌گیرد. هر تغییر، رویداد خود را در همان تراکنش دارد (`BID_QUALIFIED`/`BID_DISQUALIFIED`، `BID_SCORED`، `BID_EVALUATOR_RECUSED`، `BIDS_EVALUATED`) و یک ردیف
+`bid_access_log` با `BID_ACCESSED`. **تعارض منافع (ADR-067 § ۴):** هویت فعلی ارزیاب از identity (Fail Closed) و عضو **هر** سازمان پیشنهاددهنده (حتی پس‌گرفته‌شده) در **هر** مسیر ارزیابی `403 CONFLICT_OF_INTEREST` می‌گیرد، پیش از هر پاسخی دربارهٔ
+مناقصه؛ `CONSTRUCTION_COI_RULES` (پیش‌فرض خالی) `EVALUATOR_NOT_TENDER_AUTHOR` (سازندهٔ یا منتشرکنندهٔ مناقصه) را روشن می‌کند و `AWARDER_NOT_EVALUATOR` را برای `award` ثبت می‌کند. **هر رد ممیزی می‌شود:** ردیف `REFUSED` با ستون تازهٔ
+`refusal_code` (کد بسته) و `BID_ACCESSED.refusalCode`. `qualification` با `QUALIFIED` وضعیت جاری پیمانکار را از `supplier-service` می‌پرسد (Q-85؛ بیرون از قفل، Fail Closed؛ ناواجد ⇒ `422 BIDDER_NOT_ELIGIBLE`، و می‌توان رد کرد).
+تعداد ارزیاب (`CONSTRUCTION_EVALUATION_MIN_EVALUATORS`/`_MAX_EVALUATORS`، پیش‌فرض ۱ و ۱ — MVP ADR-067)، تجمیع چند ارزیاب (میانگین دقیق با ضرب متقاطع) و فهرست دلیل‌های بسته **پاسخ موقت‌اند، Q-92**. `evaluate` وقتی مجاز است که دست‌کم یک پیشنهاد `QUALIFIED`
+باشد، هر `QUALIFIED` به‌اندازهٔ حداقل ارزیاب امتیاز کامل داشته باشد و پیشنهاد `OPENED` تصمیم‌نگرفته نمانده باشد؛ صفر `QUALIFIED` ⇒ `422 NO_QUALIFIED_BID` (فقط ابطال؛ دروازهٔ ابطال گام ۱۱ است).
+**پیمانکار پیشنهاد خودش را پس از بازگشایی می‌خواند:** `GET /v1/tenders/{id}/bids/mine/opened` (نقش `CONTRACTOR`؛ مسیر هیچ شناسهٔ پیشنهادی نمی‌گیرد، پس پیشنهاد پیمانکار دیگر در دسترس نیست): محتوایی که مهر کرده، با
+رسیدهای `audit-service` سنجیده (`BidContentReader`، همان بررسی خواندن مالک: در دسترس‌نبودن ⇒ `503/504`، ناهماهنگی ⇒ `422 INTEGRITY`)، وضعیت، تصمیم (فقط کد دلیلِ رد) و — فقط پس از `EVALUATED` — جمع خودش و بیشینهٔ ممکن، بی رتبه و بی پیشنهاددهندهٔ
+دیگر (Q-89). هر خواندن، granted یا refused، `BID_ACCESSED` (`OWN_BID_CONTENT`) با نتیجه دارد. `down.sql` مهاجرت تا وقتی هر دادهٔ ارزیابی هست رد می‌کند.
+
+**هنوز نیست:** پیوست مدارک و تصویر پیشرفت (Q-72)؛ مناقصه، پیشنهاد و انتخاب — CON-002 (ارزیابی بالا آمد؛ `award` گام ۱۰)؛ قرارداد — CON-003؛
 تحلیل ناوگان؛ هیچ Consumer رویدادی.
 
 **رابطه با `organization_policy`.** منبع حقیقت موافقت‌های پروژه جدول `approval_policy` همین سرویس است (ADR-063).

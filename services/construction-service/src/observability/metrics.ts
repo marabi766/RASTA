@@ -134,6 +134,18 @@ export const bidOpeningRefusalsTotal = new Counter({
 });
 
 /**
+ * Evaluation commands and reads refused (ADR-067 § 4), by closed reason: a conflict of interest
+ * (`conflict_of_interest`, `tender_author`, `recused`), a state the command does not apply in, an
+ * incomplete evaluation. Never labelled by tender, tenant or person.
+ */
+export const evaluationRefusalsTotal = new Counter({
+  name: 'rasta_construction_evaluation_refusals_total',
+  help: 'Evaluation commands and reads of opened bids refused, by reason',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});
+
+/**
  * The detective control after an opening committed (ADR-066 § 4): identity-service was asked
  * whether the proposer or the approver was a member of a bidding organization at the commit
  * instant. `clear` is the usual answer; `conflict` is the race the approval cannot close and

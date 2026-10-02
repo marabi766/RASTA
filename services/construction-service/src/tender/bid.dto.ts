@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { cursorPaginationSchema } from '@rasta/contracts';
+import { ownEvaluationViewSchema } from './evaluation.dto';
 
 /**
  * A bid, as the bidder writes it and as it is answered (ADR-066, ADR-065 § 1).
@@ -80,6 +81,25 @@ export const bidReceiptViewSchema = z
   })
   .strict();
 export type BidReceiptView = z.infer<typeof bidReceiptViewSchema>;
+
+/**
+ * A bidder's own bid after the opening (ADR-066 § 4): what it sealed, read back against the
+ * receipts audit-service holds, its status, and what the evaluation says of **it** — never of
+ * another bidder's bid, the winner or the amount (Q-89).
+ */
+export const ownOpenedBidViewSchema = z
+  .object({
+    bidId: z.string(),
+    tenderId: z.string(),
+    status: z.string(),
+    revision: z.number().int(),
+    receivedAt: z.string(),
+    contentCommitment: z.string(),
+    content: bidContentSchema,
+    evaluation: ownEvaluationViewSchema,
+  })
+  .strict();
+export type OwnOpenedBidView = z.infer<typeof ownOpenedBidViewSchema>;
 
 /** A tender as a bidder sees it: frozen criteria, the window, nothing of the owner's drafting. */
 export const openTenderViewSchema = z

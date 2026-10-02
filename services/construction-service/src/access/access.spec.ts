@@ -225,6 +225,98 @@ describe('opening and reading bids (ADR-066 § 4)', () => {
   });
 });
 
+describe('who may evaluate a tender’s opened bids (ADR-067 § 4)', () => {
+  const outcome = (
+    access: ProjectAccess,
+    overrides: Partial<RequestContext>,
+  ): string | { organizationId: string; actor: string; organizationIds: readonly string[] } =>
+    runWithContext(context(overrides), () => {
+      try {
+        return access.assertCanEvaluate();
+      } catch (error) {
+        return isRastaError(error) ? error.code : `NOT_A_PLATFORM_ERROR: ${String(error)}`;
+      }
+    });
+
+  describe('by default, the owner role set — with the same refusals as opening', () => {
+    const access = new ProjectAccess(env());
+
+    it('lets ORGANIZATION_ADMIN evaluate, as the organization it acts for, and says whom it belongs to', () => {
+      expect(
+        outcome(access, { roles: ['ORGANIZATION_ADMIN'], organizationIds: [ORG, 'ORG-B'] }),
+      ).toEqual({ organizationId: ORG, actor: 'USR_1', organizationIds: [ORG, 'ORG-B'] });
+    });
+
+    it.each(['FLEET_MANAGER', 'PROCUREMENT_USER', 'UNION_ADMIN', 'SUPPLIER'])(
+      'refuses %s',
+      (role) => {
+        expect(outcome(access, { roles: [role] })).toBe('INSUFFICIENT_ROLE');
+      },
+    );
+
+    it.each(['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR'])(
+      'refuses %s whenever present, alongside the owner role as well',
+      (role) => {
+        expect(outcome(access, { roles: [role] })).toBe('FORBIDDEN');
+        expect(outcome(access, { roles: ['ORGANIZATION_ADMIN', role] })).toBe('FORBIDDEN');
+      },
+    );
+
+    it('refuses a service token, a missing organization and a missing actor', () => {
+      expect(outcome(access, { authType: 'SERVICE', roles: ['ORGANIZATION_ADMIN'] })).toBe(
+        'FORBIDDEN',
+      );
+      expect(outcome(access, { roles: ['ORGANIZATION_ADMIN'], organizationId: undefined })).toBe(
+        'FORBIDDEN',
+      );
+      expect(outcome(access, { roles: ['ORGANIZATION_ADMIN'], userId: undefined })).toBe(
+        'FORBIDDEN',
+      );
+    });
+
+    describe('the roles identity-service says the caller holds now (assertLiveRolesMayEvaluate)', () => {
+      it('accepts a live owner role set that includes an authorised role', () => {
+        expect(() =>
+          access.assertLiveRolesMayEvaluate(['OPERATOR', 'ORGANIZATION_ADMIN']),
+        ).not.toThrow();
+      });
+
+      it.each([[[]], [['OPERATOR']], [['FLEET_MANAGER', 'SUPPLIER']]])(
+        'refuses %j: no live role that evaluates bids',
+        (roles) => {
+          expect(() => access.assertLiveRolesMayEvaluate(roles)).toThrow(
+            expect.objectContaining({ code: 'FORBIDDEN' }),
+          );
+        },
+      );
+
+      it.each(['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR'])(
+        'refuses %s even alongside an authorised role',
+        (role) => {
+          expect(() => access.assertLiveRolesMayEvaluate([role, 'ORGANIZATION_ADMIN'])).toThrow(
+            expect.objectContaining({ code: 'FORBIDDEN' }),
+          );
+        },
+      );
+    });
+  });
+
+  describe('with a configured list', () => {
+    it('replaces the owner role set, and is independent of who opens', () => {
+      const access = new ProjectAccess(
+        env({
+          CONSTRUCTION_TENDER_EVALUATE_ROLES: 'PROCUREMENT_USER',
+          CONSTRUCTION_TENDER_OPEN_ROLES: 'ORGANIZATION_ADMIN',
+        }),
+      );
+      expect(outcome(access, { roles: ['PROCUREMENT_USER'] })).toMatchObject({
+        organizationId: ORG,
+      });
+      expect(outcome(access, { roles: ['ORGANIZATION_ADMIN'] })).toBe('INSUFFICIENT_ROLE');
+    });
+  });
+});
+
 describe('the row-level check', () => {
   it('answers 404 for a project of another organization, never 403', () => {
     try {
