@@ -25,6 +25,16 @@ import {
   listInvitationsQuerySchema,
   publishTenderSchema,
 } from '../tender/publication.dto';
+import { BidController } from '../tender/bid.controller';
+import { BidService } from '../tender/bid.service';
+import {
+  bidReceiptViewSchema,
+  listOpenTendersQuerySchema,
+  openTenderViewSchema,
+  reviseBidSchema,
+  submitBidSchema,
+  withdrawBidSchema,
+} from '../tender/bid.dto';
 import { CriteriaController } from '../tender/criteria.controller';
 import { CriteriaService } from '../tender/criteria.service';
 import {
@@ -174,6 +184,12 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/tenders/{id}/publish': { status: '200', schema: tenderViewSchema },
   'POST /v1/tenders/{id}/invitations': { status: '201', schema: invitationViewSchema },
   'GET /v1/tenders/{id}/invitations': { status: '200', schema: cursorPageOf(invitationViewSchema) },
+  'GET /v1/open-tenders': { status: '200', schema: cursorPageOf(openTenderViewSchema) },
+  'GET /v1/open-tenders/{id}': { status: '200', schema: openTenderViewSchema },
+  'POST /v1/tenders/{id}/bids': { status: '201', schema: bidReceiptViewSchema },
+  'GET /v1/tenders/{id}/bids/mine': { status: '200', schema: bidReceiptViewSchema },
+  'PUT /v1/tenders/{id}/bids/{bidId}': { status: '200', schema: bidReceiptViewSchema },
+  'POST /v1/tenders/{id}/bids/{bidId}/withdraw': { status: '200', schema: bidReceiptViewSchema },
 };
 
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
@@ -203,6 +219,9 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'PUT /v1/tenders/{id}/criteria': setCriteriaSchema,
   'POST /v1/tenders/{id}/publish': publishTenderSchema,
   'POST /v1/tenders/{id}/invitations': inviteBidderSchema,
+  'POST /v1/tenders/{id}/bids': submitBidSchema,
+  'PUT /v1/tenders/{id}/bids/{bidId}': reviseBidSchema,
+  'POST /v1/tenders/{id}/bids/{bidId}/withdraw': withdrawBidSchema,
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -216,6 +235,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/tenders': listTendersQuerySchema,
   'GET /v1/criteria-templates': listCriteriaTemplatesQuerySchema,
   'GET /v1/tenders/{id}/invitations': listInvitationsQuerySchema,
+  'GET /v1/open-tenders': listOpenTendersQuerySchema,
 };
 
 /** The create endpoints that accept an optional `Idempotency-Key`. */
@@ -249,6 +269,9 @@ const VERSIONED = new Set([
   'POST /v1/tenders/{id}/cancel',
   'PUT /v1/tenders/{id}/criteria',
   'POST /v1/tenders/{id}/publish',
+  // Against the bid's `expectedRevision` rather than a version (409 OPTIMISTIC_LOCK_FAILED).
+  'PUT /v1/tenders/{id}/bids/{bidId}',
+  'POST /v1/tenders/{id}/bids/{bidId}/withdraw',
 ]);
 
 /** Commands with no version that can still be refused by the lifecycle (422). */
@@ -257,6 +280,8 @@ const LIFECYCLE_CREATES = new Set([
   'POST /v1/projects/{id}/progress',
   'POST /v1/projects/{id}/tenders',
   'POST /v1/tenders/{id}/invitations',
+  // The window, eligibility, the owner's own tender, an unknown criterion, size.
+  'POST /v1/tenders/{id}/bids',
 ]);
 
 /**
@@ -278,6 +303,8 @@ const RACING_CREATES = new Set([
   'POST /v1/approval-policies',
   // The same organization invited twice: 409 ALREADY_EXISTS.
   'POST /v1/tenders/{id}/invitations',
+  // A second bid by one organization: 409 ALREADY_EXISTS.
+  'POST /v1/tenders/{id}/bids',
 ]);
 
 /** Publishing needs the tender key provider; without a key-encryption key it answers 503. */
@@ -352,9 +379,11 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     TenderController,
     CriteriaController,
     PublicationController,
+    BidController,
   ],
   providers: [
     { provide: PublicationService, useValue: {} },
+    { provide: BidService, useValue: {} },
     { provide: ProjectService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },

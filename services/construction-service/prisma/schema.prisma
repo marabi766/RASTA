@@ -508,6 +508,9 @@ model Tender {
   /// relation is keyed by the (organization, tender) pair, which Prisma cannot
   /// see is unique.
   keys        TenderKey[]
+  bids        Bid[]
+  bidReceipts BidReceipt[]
+  bidAccesses BidAccessLog[]
 
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
@@ -777,4 +780,110 @@ model ContractorSuspension {
 
   @@index([organizationId, suspensionId], map: "ix_contractor_suspension_org")
   @@map("contractor_suspension")
+}
+
+// ---------------------------------------------------------------------------
+// Bids — sealed at submission, opened by the owner after the deadline
+// (CON-002 PR 6, ADR-065, ADR-066)
+// ---------------------------------------------------------------------------
+
+enum BidStatus {
+  SUBMITTED
+  WITHDRAWN
+  OPENED
+  QUALIFIED
+  DISQUALIFIED
+  AWARDED
+  NOT_AWARDED
+}
+
+/// One organization's one bid on a tender. `organizationId` is the **owner** of the
+/// tender (the tenant the guard scopes by, ADR-065 § 4); `bidderOrganizationId` is
+/// the contractor. The bidder is another tenant, so every bidder-side access is a
+/// reasoned `runUnscoped` with the bidder in the predicate. The content exists only
+/// sealed (ADR-066 § 2): no price, no answer, no note is a column.
+model Bid {
+  id String @id
+
+  organizationId       String    @map("organization_id")
+  tenderId             String    @map("tender_id")
+  bidderOrganizationId String    @map("bidder_organization_id")
+  status               BidStatus @default(SUBMITTED)
+  /// 1, 2, 3 … one per replacement before the deadline; bound into the seal.
+  revision             Int
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  sealVersion       Int   @map("seal_version")
+  keyId             String @map("key_id")
+  nonce             Bytes
+  ciphertext        Bytes
+  tag               Bytes
+  wrappedContentKey Bytes @map("wrapped_content_key")
+  /// Safe to publish: reveals neither the price nor the salt.
+  contentCommitment String @map("content_commitment")
+  ciphertextSha256  String @map("ciphertext_sha256")
+
+  submittedAt DateTime  @map("submitted_at")
+  /// The decision instant of the latest revision (the receipt's `receivedAt`).
+  receivedAt  DateTime  @map("received_at")
+  withdrawnAt DateTime? @map("withdrawn_at")
+  submittedBy String    @map("submitted_by")
+  updatedAt   DateTime  @map("updated_at")
+  updatedBy   String    @map("updated_by")
+
+  @@unique([organizationId, tenderId, bidderOrganizationId], map: "ux_bid_tender_bidder")
+  @@index([organizationId, tenderId, status], map: "ix_bid_org_tender_status")
+  @@map("bid")
+}
+
+/// The tender's receipt chain (ADR-066 § 3), append-only: one link per submission or
+/// revision, in `seq` order. The head is published on `BID_SUBMITTED` / `BID_REVISED`
+/// and kept by audit-service; **opening takes the head from there, never from this
+/// table** (ADR-066 § 2), because whoever can rewrite a bid can rewrite these rows.
+model BidReceipt {
+  tenderId String @map("tender_id")
+  seq      Int
+
+  organizationId   String   @map("organization_id")
+  bidId            String   @map("bid_id")
+  revision         Int
+  receivedAt       DateTime @map("received_at")
+  ciphertextSha256 String   @map("ciphertext_sha256")
+  contentCommitment String  @map("content_commitment")
+  previousReceipt  String   @map("previous_receipt")
+  receipt          String
+  /// The instant supplier-service read the contractor's standing at, for this revision:
+  /// the eligibility decision's effective time. Award re-checks current standing (ADR-067).
+  eligibleAsOf     DateTime @map("eligible_as_of")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([organizationId, tenderId, seq])
+  @@unique([receipt], map: "ux_bid_receipt_receipt")
+  @@index([organizationId, tenderId], map: "ix_bid_receipt_org_tender")
+  @@map("bid_receipt")
+}
+
+/// Every read of a bid, granted or refused (ADR-066 § 5), append-only. Identifiers,
+/// the reader, a closed purpose and the outcome — never content.
+model BidAccessLog {
+  id String @id
+
+  organizationId         String   @map("organization_id")
+  tenderId               String   @map("tender_id")
+  /// Null when the read named no bid that exists for the reader.
+  bidId                  String?  @map("bid_id")
+  accessorOrganizationId String   @map("accessor_organization_id")
+  accessorUserId         String   @map("accessor_user_id")
+  /// A closed code (`OWN_BID_RECEIPT`); owner-side purposes arrive with PR 8.
+  purpose                String
+  /// `GRANTED` or `REFUSED`.
+  outcome                String
+  accessedAt             DateTime @map("accessed_at")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([organizationId, tenderId, accessedAt], map: "ix_bid_access_org_tender_time")
+  @@map("bid_access_log")
 }

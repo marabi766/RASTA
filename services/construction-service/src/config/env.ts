@@ -189,6 +189,20 @@ export const constructionEnvSchema = baseEnvSchema
      * once, no contractor is eligible.
      */
     SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    /**
+     * Where the externally held receipt chain is read (CON-002 PR 6, ADR-066 § 2):
+     * `GET {AUDIT_SERVICE_URL}/v1/internal/tender-evidence/{tenderId}/chain`, a
+     * platform-wide service call with a token signed for no tenant. Opening bids
+     * takes the chain head from there and nowhere else: if it cannot be read, bids
+     * are not opened.
+     */
+    AUDIT_SERVICE_URL: z.string().url().default('http://localhost:3115'),
+    CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(5000),
     /** One page of the snapshot, headers to parse; an answer too slow is a failed attempt, retried. */
     CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
       .number()
