@@ -42,6 +42,8 @@
  *      integration suites open owner connections through that class on purpose.
  */
 
+import { DemoSeedRefusedError } from '@rasta/config';
+
 /** The one raw-SQL method every generated Prisma client has. */
 export interface RuntimeRoleQueryClient {
   $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): PromiseLike<T>;
@@ -199,5 +201,32 @@ export async function preflightRuntimeRole(
     return await assertRuntimeRole(client, options);
   } finally {
     await client.$disconnect();
+  }
+}
+
+/**
+ * {@link preflightRuntimeRole} for a demo seed (Codex round 2 on #177): the
+ * first time a seed touches its database — before the seed guard's
+ * disposable-marker probe (`assertDemoSeedDatabase`, @rasta/config) and long
+ * before it writes. A refusal is the seed guard's refusal,
+ * `DemoSeedRefusedError` ("Refusing to seed <service>: …"), so every way a seed
+ * stops reads the same and scripts/verify-seed-guard.mjs can tell a refusal
+ * from a crash: an owner is named with what it could do (roles and objects,
+ * never the URL); a database that cannot be asked at all is refused without
+ * echoing the driver's error.
+ */
+export async function assertDemoSeedRuntimeRole(
+  open: () => RuntimeRolePreflightClient,
+  options: AssertRuntimeRoleOptions,
+): Promise<void> {
+  try {
+    await preflightRuntimeRole(open, options);
+  } catch (error) {
+    throw new DemoSeedRefusedError(options.service, [
+      error instanceof RuntimeRoleRefusedError
+        ? `it is connected as ${error.facts.role}, which ${error.problems.join(', ')}; ` +
+          `a seed writes only as the runtime role (${options.runtimeVariable})`
+        : 'the role the target database connects as could not be checked',
+    ]);
   }
 }

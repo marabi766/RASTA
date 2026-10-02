@@ -190,6 +190,7 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
   preflightRuntimeRole,
