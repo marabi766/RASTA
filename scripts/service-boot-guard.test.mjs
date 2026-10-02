@@ -256,3 +256,24 @@ for (const service of ROLE_CHECKED) {
     });
   }
 }
+
+test('the outbox B2 backfill — an operator command that writes to service databases — refuses owners like every entry point (Codex on #178)', () => {
+  const source = readFileSync(join(ROOT, 'scripts', 'outbox-b2-backfill.mjs'), 'utf8');
+  const main = /\nasync function main\(\) \{\n([\s\S]*?)\n\}\n/.exec(source);
+  assert.ok(main, 'no main()');
+  const body = main[1];
+  const firstStatement = body
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith('//'));
+  assert.equal(firstStatement, 'assertNoMigratorCredentials(process.env);');
+  const preflight = body.indexOf('await db.preflight(databaseUrlKey(service))');
+  assert.ok(preflight > 0, 'no per-service runtime-role preflight');
+  assert.ok(
+    preflight < body.indexOf('runServiceBackfill('),
+    'the preflight comes after the first query',
+  );
+  // The port's preflight is the services' own check.
+  const port = readFileSync(join(ROOT, 'scripts', 'outbox-b2-prisma-port.mjs'), 'utf8');
+  assert.match(port, /preflight: \(runtimeVariable\) =>\s+preflightRuntimeRole\(/);
+});

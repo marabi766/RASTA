@@ -463,15 +463,10 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
-          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
-          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
-          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
 
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
@@ -556,6 +551,7 @@ jobs:
             eval "${maintenance_credentials}" && eval "${fleet_credentials}" && \
             PORT=3105 PREFLIGHT_STATE_DIR=/tmp/rasta-web-e2e-logs \
             PREFLIGHT_OWNER_URL=postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public \
+            DATABASE_URL_MAINTENANCE=postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused maintenance-service )
 
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
@@ -637,12 +633,16 @@ jobs:
       - name: What the owner-URL starts left alone is consumed through the runtime role
         # The positive controls for the refusals in the start step (D-045,
         # Codex on #178): now asset-service and maintenance-service run as their
-        # runtime roles, each group's offset must move past the queued event.
+        # runtime roles, each group's offset must move past the queued event,
+        # and maintenance-service must have folded it — the event marked
+        # processed and the asset's usage meter written.
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           PREFLIGHT_STATE_DIR: /tmp/rasta-web-e2e-logs
+          # Read back, as the runtime role, for maintenance's real outcome.
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
         run: |
           set -euo pipefail
           asset_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh service asset-service)"
@@ -1827,7 +1827,6 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
-          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
 
       - name: Seed organization-service
         # Q-70 (7): construction-service asks organization-service whether an
@@ -1839,7 +1838,6 @@ jobs:
           NODE_ENV: test
           RASTA_ALLOW_DEMO_SEED: 'true'
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
-          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
 
       - name: Build
         run: pnpm run build

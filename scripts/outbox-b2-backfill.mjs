@@ -47,7 +47,8 @@
 // Target selection, option parsing or the environment check fails, before any
 // service is iterated: no target, an unknown or repeated service, `--dry-run`
 // with `--apply`, a bad or out-of-range numeric option, an unknown option,
-// `NODE_ENV=production`, or an unrecognised `NODE_ENV`.
+// `NODE_ENV=production`, an unrecognised `NODE_ENV`, or a database owner's
+// credential (`*_MIGRATOR`) anywhere in the environment (D-045).
 //
 //   Output:  exactly one `refused` event, and nothing else.
 //   Scope:   **unscoped** — it carries no `service` field, because no valid
@@ -88,7 +89,10 @@
 //                  remain. Everything already assigned is committed and a
 //                  re-run resumes from it. Counted in `summary.incomplete`.
 //   `refused`      emitted *instead of* `done` when the attempt failed:
-//                  `DATABASE_URL_<SERVICE>` unset, a B1 precondition failed,
+//                  `DATABASE_URL_<SERVICE>` unset, it connects as anything but
+//                  the service's runtime role (D-045: a split service's URL is
+//                  proven before the first query, so a migrator, owner or
+//                  superuser URL never writes), a B1 precondition failed,
 //                  the ordering guard tripped, or VACUUM failed. Scoped to
 //                  that one service — every later selected service is still
 //                  attempted and the summary is still emitted. Counted in
@@ -105,11 +109,20 @@
 // -----------------------------------------------------------------------------
 import {
   B2RefusalError,
+  databaseUrlKey,
   parseOptions,
   resolveDatabaseUrl,
   runServiceBackfill,
 } from './outbox-b2-lib.mjs';
 import { prismaPort } from './outbox-b2-prisma-port.mjs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
+
+// The same owner-credential rule every service entry point runs (D-045).
+const { assertNoMigratorCredentials } = createRequire(import.meta.url)(
+  join(import.meta.dirname, '..', 'packages', 'config', 'dist', 'index.js'),
+);
 
 const emit = (event) => {
   process.stdout.write(`${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
@@ -132,7 +145,15 @@ function converged(result) {
 }
 
 async function main() {
+  // D-045 (Codex on #178): this command writes to a service's database, so it
+  // is held to the rule every entry point is held to. No owner's credential in
+  // its environment at all — a global refusal, before any service — and, below,
+  // each split service's URL proven to be its runtime role before the first
+  // query: `--apply` with a migrator URL in DATABASE_URL_<SERVICE> would
+  // otherwise write as the database owner.
+  assertNoMigratorCredentials(process.env);
   const options = parseOptions(process.argv.slice(2), process.env);
+  const split = new Set(splitServicesFromLibrary());
   let ok = 0;
   let incomplete = 0;
   let refused = 0;
@@ -148,6 +169,8 @@ async function main() {
       // service's refusal, not the whole run's.
       const url = resolveDatabaseUrl(service, process.env);
       db = prismaPort(service, url);
+      // Before the first query; a refusal is this service's `refused` event.
+      if (split.has(service)) await db.preflight(databaseUrlKey(service));
       const result = await runServiceBackfill({ service, db, options, emit });
       if (converged(result)) {
         ok += 1;
