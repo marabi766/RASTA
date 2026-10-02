@@ -34,7 +34,15 @@
 // application's own wiring — skips both of those gates, so it must run the
 // preflight itself, as the first thing its entry function awaits. The scan
 // below finds them; services/identity-service/test/projection-cli.int-spec.ts
-// is the live refusal for the Keycloak backfill/reconcile CLI.
+// is the live refusal for the Keycloak backfill/reconcile CLI. No exemption: a
+// seed's first await is its gate too (assertDemoSeedRuntimeRole, the
+// preflight speaking the seed guard's refusal), before the marker probe.
+//
+// Its limit: a Nest app or context counts as opening the database only when
+// the file imports AppModule statically (`from './app.module'` or
+// `'../app.module'`). A dynamic `import()`, a re-export under another name or
+// a module that wraps AppModule would not be seen — a Prisma client
+// constructed in the file always is.
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -228,8 +236,8 @@ for (const service of ROLE_CHECKED) {
       const source = readFileSync(join(ROOT, 'services', service, entry), 'utf8');
       assert.match(
         source,
-        /^import \{[^}]*\bpreflightRuntimeRole\b[^}]*\} from '@rasta\/nest-common';$/m,
-        'does not import preflightRuntimeRole from @rasta/nest-common',
+        /^import \{[^}]*\b(preflightRuntimeRole|assertDemoSeedRuntimeRole)\b[^}]*\} from '@rasta\/nest-common';$/m,
+        'imports neither preflightRuntimeRole nor assertDemoSeedRuntimeRole from @rasta/nest-common',
       );
       const body = /\nasync function (?:main|bootstrap)\([^)]*\)[^{]*\{\n([\s\S]*?)\n\}\n/.exec(
         source,
@@ -238,16 +246,9 @@ for (const service of ROLE_CHECKED) {
       const firstAwait = body[1]
         .split('\n')
         .map((line) => line.trim())
-        .find(
-          (line) =>
-            !line.startsWith('//') &&
-            /\bawait\b/.test(line) &&
-            // A seed's guard reads its database's disposable marker first,
-            // read-only, so a refused seed refuses as the guard.
-            !line.startsWith('await assertDemoSeedDatabase('),
-        );
+        .find((line) => !line.startsWith('//') && /\bawait\b/.test(line));
       assert.ok(
-        firstAwait?.startsWith('await preflightRuntimeRole('),
+        /^await (preflightRuntimeRole|assertDemoSeedRuntimeRole)\(/.test(firstAwait ?? ''),
         `the first await is ${firstAwait}`,
       );
       const variable = `DATABASE_URL_${service.replace(/-service$/, '').toUpperCase()}`;

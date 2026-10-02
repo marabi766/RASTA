@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
-import { preflightRuntimeRole } from '@rasta/nest-common';
+import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
 
 /**
  * Demo seed for marketplace-service.
@@ -508,17 +508,17 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient({ datasources: { db: { url } } });
 
   try {
-    // …and only into a database the development bootstrap marked disposable:
-    // the shell's settings cannot tell a production URL from a local one.
-    await assertDemoSeedDatabase('marketplace-service', prisma);
-    // D-045: the demo data is written as the runtime role, never an owner — the
-    // gate every entry point of this service runs (Codex on #177). After the
-    // guard's read-only marker check, so a refused seed still refuses as the
-    // guard (scripts/verify-seed-guard.mjs), and before anything is written.
-    await preflightRuntimeRole(() => new PrismaClient({ datasources: { db: { url } } }), {
+    // D-045: the first time this seed touches its database is to confirm it is
+    // connected as the runtime role, never an owner (Codex on #177) — before the
+    // disposable-marker probe and before any write. A refusal is the seed
+    // guard's refusal (DemoSeedRefusedError).
+    await assertDemoSeedRuntimeRole(() => new PrismaClient({ datasources: { db: { url } } }), {
       service: 'marketplace-service',
       runtimeVariable: 'DATABASE_URL_MARKETPLACE',
     });
+    // …and only into a database the development bootstrap marked disposable:
+    // the shell's settings cannot tell a production URL from a local one.
+    await assertDemoSeedDatabase('marketplace-service', prisma);
 
     console.warn('Seeding marketplace-service…');
     console.warn(`  target: ${describeTarget(url)}`);
