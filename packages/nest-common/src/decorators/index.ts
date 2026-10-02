@@ -7,6 +7,7 @@ export const ALLOW_SERVICE_KEY = 'rasta:allowService';
 export const IDEMPOTENT_KEY = 'rasta:idempotent';
 export const SKIP_TENANT_SCOPE_KEY = 'rasta:skipTenantScope';
 export const AUDITOR_SELF_SERVICE_KEY = 'rasta:auditorSelfService';
+export const REQUIRE_PLATFORM_USER_ID_KEY = 'rasta:requirePlatformUserId';
 
 /**
  * Marks an endpoint as reachable without authentication.
@@ -47,6 +48,19 @@ export const AuditorSelfService = (reason: string) =>
   SetMetadata(AUDITOR_SELF_SERVICE_KEY, { allowed: true, reason });
 
 export const AllowService = (...services: string[]) => SetMetadata(ALLOW_SERVICE_KEY, services);
+
+/**
+ * Refuses a user token that does not carry the platform user id (`rasta_uid`)
+ * — `403 FORBIDDEN`, in the auth guard, before the handler runs.
+ *
+ * For every route where who the caller is decides a separation of duties: the
+ * proposer and the approver of a four-eyes decision, the author of something a
+ * different person must approve. Without `rasta_uid` the guard falls back to
+ * the IdP subject for `userId`, and one person with two tokens could be two
+ * actors (#188). A service caller and an anonymous request are not affected:
+ * `@AllowService` and `@Public` decide those.
+ */
+export const RequirePlatformUserId = () => SetMetadata(REQUIRE_PLATFORM_USER_ID_KEY, true);
 
 /**
  * Requires an `Idempotency-Key` header.

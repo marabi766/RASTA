@@ -48,6 +48,14 @@ export const ERROR_CODES = {
   OPTIMISTIC_LOCK_FAILED: 'OPTIMISTIC_LOCK_FAILED',
 
   // 422 — the request is well-formed but the domain refuses it
+  /**
+   * Separation of duties cannot be proven: one of the two actors a rule keeps
+   * apart has no recorded stable identity (issuer and subject), so nobody can
+   * be shown not to be them. Refused, never assumed (ADR-060, stable actor
+   * identity addendum, #188).
+   */
+  ACTOR_IDENTITY_UNKNOWN: 'ACTOR_IDENTITY_UNKNOWN',
+
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   LEDGER_UNBALANCED: 'LEDGER_UNBALANCED',
@@ -107,6 +115,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   IDEMPOTENCY_KEY_REUSED: 409,
   INVALID_STATE_TRANSITION: 409,
   OPTIMISTIC_LOCK_FAILED: 409,
+  ACTOR_IDENTITY_UNKNOWN: 422,
+
   BUSINESS_RULE_VIOLATION: 422,
   INSUFFICIENT_BALANCE: 422,
   LEDGER_UNBALANCED: 422,
