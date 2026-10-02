@@ -76,6 +76,30 @@ export const maintenanceEnvSchema = baseEnvSchema
      * Within it a retry replays the original 201; after it the key is free.
      */
     MAINTENANCE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+
+    /**
+     * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
+     * the lease a request holds while it works, separate from the hours a
+     * *completed* response is kept (above).
+     *
+     * A process that dies after its claim committed and before its write did
+     * leaves the claim behind. Without a lease of its own that claim lasted as
+     * long as a stored response — a day — and every retry was a retryable 409
+     * until then. Past the lease, a retry takes the claim over under a new
+     * fencing token; the first holder's late work is refused by the token, never
+     * committed beside the retry's.
+     *
+     * Floor 30 s: well above a gateway's upstream timeout (3 s by default), so a
+     * request that is merely slow keeps its claim. Ceiling one hour. The default
+     * is two minutes — long enough for any write here, short enough that a
+     * crashed one is retried at once.
+     */
+    MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(30)
+      .max(3_600)
+      .default(120),
   });
 
 export type MaintenanceEnv = z.infer<typeof maintenanceEnvSchema>;

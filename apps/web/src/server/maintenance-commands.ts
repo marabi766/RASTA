@@ -242,7 +242,7 @@ export function canManageMaintenance(effectiveRoles: readonly string[]): boolean
 export const MAINTENANCE_DISPLAY_TEXT =
   /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+]+$/u;
 
-const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
+export const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
 
 const organizationId = seedIdSchema(ID_PREFIXES.organization);
 const requestId = seedIdSchema(ID_PREFIXES.maintenanceRequest);
@@ -254,7 +254,7 @@ export function commandRequestId(form: FormData): string | null {
 }
 
 /** Text that may be left empty, which then says nothing at all. */
-function optionalText(label: string, max: number) {
+export function optionalText(label: string, max: number) {
   return z
     .string()
     .transform((raw) => normalizePersianText(raw))
@@ -270,7 +270,10 @@ function optionalText(label: string, max: number) {
     .transform((value) => (value === '' ? undefined : value));
 }
 
-function readFields<F extends string>(form: FormData, fields: readonly F[]): Record<F, string> {
+export function readFields<F extends string>(
+  form: FormData,
+  fields: readonly F[],
+): Record<F, string> {
   const values = {} as Record<F, string>;
   for (const field of fields) {
     const raw = form.get(field);
@@ -279,7 +282,7 @@ function readFields<F extends string>(form: FormData, fields: readonly F[]): Rec
   return values;
 }
 
-function firstIssues<F extends string>(
+export function firstIssues<F extends string>(
   error: z.ZodError,
   fields: readonly F[],
 ): Partial<Record<F, string>> {
@@ -338,7 +341,7 @@ export function parseAssignWorkshopForm(
  * else's change, and a machine that changed hands. A sentence the portal does
  * not know is shown as it arrived (`mapProblemToFields`).
  */
-const REQUEST_STATE_MESSAGES: Readonly<Record<string, string>> = {
+export const REQUEST_STATE_MESSAGES: Readonly<Record<string, string>> = {
   'This maintenance request is already APPROVED':
     'این درخواست همین حالا تأیید شده و نهایی است؛ دیگر تغییر نمی‌کند.',
   'This maintenance request is already CANCELLED':
@@ -386,7 +389,7 @@ export const ASSIGN_WORKSHOP_FIELD_MAPPING: FieldMapping<AssignWorkshopField> = 
 };
 
 /** What a caller needs of the created referral: only that it exists. */
-const commandAnswerSchema = z.object({ id: z.string().min(1) });
+export const commandAnswerSchema = z.object({ id: z.string().min(1) });
 
 export function assignWorkshop(
   session: WebSession,

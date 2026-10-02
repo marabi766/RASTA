@@ -37,6 +37,14 @@ In particular the live maintenance scenarios:
   it files, and `afterEach` cancels exactly those ids (skipping one the test
   already cancelled through the page).
 
+The repair-order scenario takes one request all the way to a **completed** repair
+(refer, start, record a part, labour and a charge, complete). That is final for
+the order, and a completed request is not open, so it does not trip the check
+above on a later run on the same stack: it stays as the record it is. The suite
+never approves it — approval authorises settlement, and no browser test may start
+money moving. Cleanup still cancels only the ids the run recorded and only while
+they are open.
+
 If a run is killed or crashes between filing a request and recording its id, the
 next run stops at the check above. Reset the stack (CI never needs this), or
 cancel the named requests yourself, and run again.

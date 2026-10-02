@@ -14,6 +14,8 @@ import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
  * service and store, so every claim is about what the database holds: how
  * many requests exist, and what each caller was answered.
  */
+const LEASE_SECONDS = 120;
+
 describe('maintenance request creation under an Idempotency-Key', () => {
   let prisma: PrismaService;
   let requests: RequestService;
@@ -27,7 +29,10 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     prisma = newPrisma();
     const repository = new MaintenanceRepository(prisma);
     requests = new RequestService(repository);
-    store = new IdempotencyStore(prisma, { MAINTENANCE_IDEMPOTENCY_TTL_HOURS: 24 });
+    store = new IdempotencyStore(prisma, {
+      MAINTENANCE_IDEMPOTENCY_TTL_HOURS: 24,
+      MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: LEASE_SECONDS,
+    });
     controller = new RequestController(
       requests,
       new RepairOrderService(repository, new UnverifiedWorkshopDirectory()),
@@ -321,5 +326,77 @@ describe('maintenance request creation under an Idempotency-Key', () => {
       code: 'VALIDATION_FAILED',
     });
     expect(await requestsFor(assetId)).toHaveLength(0);
+  });
+  // ---- Round 3 on #187: the store is shared, so a request creation whose
+  // process died after its claim committed is retried after the claim's lease.
+
+  describe('a claim left behind by a process that died', () => {
+    const row = async (key: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ claim_token: string; state: string; secs: number }[]>(
+          `SELECT claim_token, state, extract(epoch FROM (expires_at - now()))::float AS secs
+           FROM idempotency_key WHERE organization_id = $1 AND endpoint = $2 AND key = $3`,
+          org.a,
+          CREATE_REQUEST_ENDPOINT,
+          key,
+        )
+      )[0];
+    const lapse = (key: string) =>
+      prisma.client.$executeRawUnsafe(
+        `UPDATE idempotency_key SET expires_at = now() - interval '1 second'
+         WHERE organization_id = $1 AND endpoint = $2 AND key = $3`,
+        org.a,
+        CREATE_REQUEST_ENDPOINT,
+        key,
+      );
+
+    it('is held for the lease while in flight and for the configured hours once completed', async () => {
+      const assetId = await machine();
+      const key = id('KEY');
+      const dto = breakdown(assetId);
+
+      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+      const claimed = await row(key);
+      expect(claimed?.state).toBe('IN_PROGRESS');
+      expect(claimed?.secs).toBeGreaterThan(LEASE_SECONDS - 30);
+      expect(claimed?.secs).toBeLessThanOrEqual(LEASE_SECONDS);
+
+      const done = id('KEY');
+      await create(breakdown(await machine()), done);
+      const completed = await row(done);
+      expect(completed?.state).toBe('COMPLETED');
+      expect(completed?.secs).toBeGreaterThan(23 * 3_600);
+    });
+
+    it('answers a retry inside the lease with a retryable 409 and creates nothing', async () => {
+      const assetId = await machine();
+      const key = id('KEY');
+      const dto = breakdown(assetId);
+      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+
+      await expect(create(dto, key)).rejects.toMatchObject({
+        code: 'CONFLICT',
+        retryAfterSeconds: 1,
+      });
+      expect(await requestsFor(assetId)).toEqual([]);
+    }, 20_000);
+
+    it('is taken over by a retry once the lease has lapsed, under a new fencing token: one request', async () => {
+      const assetId = await machine();
+      const key = id('KEY');
+      const dto = breakdown(assetId);
+      await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+      const dead = (await row(key))?.claim_token;
+      await lapse(key);
+
+      const created = (await create(dto, key)) as { id: string };
+
+      expect((await requestsFor(assetId)).map((r) => r.id)).toEqual([created.id]);
+      const after = await row(key);
+      expect(after?.state).toBe('COMPLETED');
+      expect(after?.claim_token).not.toBe(dead);
+      expect(await create(dto, key)).toEqual(created);
+      expect(await requestsFor(assetId)).toHaveLength(1);
+    });
   });
 });
