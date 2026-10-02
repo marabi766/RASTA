@@ -20,6 +20,13 @@ export const LOGGER = Symbol('CONSTRUCTION_LOGGER');
 export const TENDER_KEY_PROVIDER = Symbol('CONSTRUCTION_TENDER_KEY_PROVIDER');
 
 /**
+ * Where a tender's receipt chain and head are read from when its bids are opened
+ * (`TenderEvidenceSource`, ADR-066 § 2): audit-service in production, a stand-in chain
+ * in tests. **Never this service's own tables.**
+ */
+export const TENDER_EVIDENCE_SOURCE = Symbol('CONSTRUCTION_TENDER_EVIDENCE_SOURCE');
+
+/**
  * Where the contractor-standing snapshot is read from (`StandingSnapshotSource`):
  * supplier-service in production, a page list in tests.
  */

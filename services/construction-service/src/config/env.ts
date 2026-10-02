@@ -141,6 +141,22 @@ export const constructionEnvSchema = baseEnvSchema
       .default('')
       .pipe(roleList('CONSTRUCTION_PROJECT_READER_ROLES', { min: 0 })),
 
+    /**
+     * ADR-066 § 4: who may open a tender's bids and read them afterwards. Empty (the
+     * default) means the tender owner's own role set, `CONSTRUCTION_PROJECT_ROLES`.
+     * `SYSTEM_ADMIN` and `CONTRACTOR` are refused at startup: the platform
+     * administrator has no access to a bid through the API (ADR-066 § 4), and the
+     * bidder's role is the other side of the table.
+     */
+    CONSTRUCTION_TENDER_OPEN_ROLES: z
+      .string()
+      .default('')
+      .pipe(roleList('CONSTRUCTION_TENDER_OPEN_ROLES', { min: 0 }))
+      .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
+        message:
+          'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
+      }),
+
     CONSTRUCTION_CANCELLABLE_STATES: z
       .string()
       .default(CANCELLABLE_BY_LIFECYCLE.join(','))

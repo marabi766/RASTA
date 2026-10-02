@@ -86,9 +86,15 @@ export class ProjectAccess {
   private readonly writers: readonly string[];
   private readonly readers: readonly string[];
   private readonly policyReaders: readonly string[];
+  private readonly bidOpeners: readonly string[];
 
   constructor(@Inject(ENV) env: ConstructionEnv) {
     this.writers = [SUPER_ROLE, ...env.CONSTRUCTION_PROJECT_ROLES];
+    this.bidOpeners = (
+      env.CONSTRUCTION_TENDER_OPEN_ROLES.length > 0
+        ? env.CONSTRUCTION_TENDER_OPEN_ROLES
+        : env.CONSTRUCTION_PROJECT_ROLES
+    ).filter((role) => role !== SUPER_ROLE && role !== CONTRACTOR_ROLE);
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
     this.policyReaders = [...new Set([...this.readers, UNION_ROLE])];
   }
@@ -301,6 +307,39 @@ export class ProjectAccess {
       throw RastaError.forbidden('This operation records an actor and the request names none');
     }
     return { organizationId: context.organizationId, actor: context.userId };
+  }
+
+  /**
+   * May the caller open a tender's bids and read them afterwards, and as whom? The
+   * owner's side (ADR-066 § 4): the configured roles (`CONSTRUCTION_TENDER_OPEN_ROLES`,
+   * by default the tender owner's own role set) in the organization the request acts
+   * for. **`SYSTEM_ADMIN` is not accepted** — not even as the super-role: it has no
+   * access to a bid through the API — and neither is `AUDITOR` or a service token.
+   * `organizationIds` is every organization the user is a member of, for the conflict
+   * of interest the caller checks against the bidders (ADR-067 § 4).
+   */
+  assertCanOpenBids(): {
+    organizationId: string;
+    actor: string;
+    organizationIds: readonly string[];
+  } {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (!this.bidOpeners.some((role) => context.roles.includes(role))) {
+      throw RastaError.insufficientRole(this.bidOpeners, context.roles);
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('Select an organization with X-Organization-Id to open its bids');
+    }
+    if (!context.userId) {
+      throw RastaError.forbidden('This operation records an actor and the request names none');
+    }
+    return {
+      organizationId: context.organizationId,
+      actor: context.userId,
+      organizationIds: context.organizationIds,
+    };
   }
 
   /** May the caller read projects and needs in the organization they act for? */

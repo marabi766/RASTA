@@ -96,6 +96,34 @@ describe('project roles (Q-69)', () => {
     );
   });
 
+  describe('who opens bids (ADR-066 § 4)', () => {
+    it('is empty by default, which means the owner role set', () => {
+      expect(load().CONSTRUCTION_TENDER_OPEN_ROLES).toEqual([]);
+    });
+
+    it('accepts a configured list, trimmed', () => {
+      expect(
+        load({ CONSTRUCTION_TENDER_OPEN_ROLES: 'ORGANIZATION_ADMIN, PROCUREMENT_USER' })
+          .CONSTRUCTION_TENDER_OPEN_ROLES,
+      ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+    });
+
+    it.each(['AUDITOR', 'SYSTEM_ADMIN', 'CONTRACTOR'])(
+      'refuses to start when it names %s',
+      (role) => {
+        expect(() =>
+          load({ CONSTRUCTION_TENDER_OPEN_ROLES: `ORGANIZATION_ADMIN,${role}` }),
+        ).toThrow(/CONSTRUCTION_TENDER_OPEN_ROLES/);
+      },
+    );
+
+    it('refuses an unknown role rather than ignoring it', () => {
+      expect(() => load({ CONSTRUCTION_TENDER_OPEN_ROLES: 'COMMITTEE_CHAIR' })).toThrow(
+        /Unknown role in CONSTRUCTION_TENDER_OPEN_ROLES/,
+      );
+    });
+  });
+
   it('refuses an empty writer list: nobody could create a project', () => {
     expect(() => load({ CONSTRUCTION_PROJECT_ROLES: ' , ' })).toThrow(/at least 1 role/);
   });

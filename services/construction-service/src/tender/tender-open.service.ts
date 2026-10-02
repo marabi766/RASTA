@@ -1,0 +1,640 @@
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { KeyObject } from 'node:crypto';
+import { RastaError } from '@rasta/nest-common';
+import { withFinancialSpan } from '@rasta/observability';
+import type { CursorPage } from '@rasta/contracts';
+import type { Bid } from '../generated/prisma';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { EventPublisher } from '../events/publisher';
+import type { BidAccessPurpose } from '../events/events';
+import { ProjectAccess } from '../access/access';
+import { SERVICE_NAME } from '../config/env';
+import {
+  bidOpeningRefusalsTotal,
+  tenderTransitionsTotal,
+  versionConflictsTotal,
+} from '../observability/metrics';
+import { transactionNow } from '../shared/clock';
+import { TENDER_EVIDENCE_SOURCE, TENDER_KEY_PROVIDER } from '../tokens';
+import { BidAccessAudit } from './bid-access-audit';
+import { TenderClock } from './tender-clock';
+import { TenderOpenRepository, type TenderForOpening } from './tender-open.repository';
+import { compareChains } from './chain-agreement';
+import { SealingError } from './sealing/errors';
+import type { TenderKeyProvider } from './sealing/key-provider';
+import {
+  openBid,
+  privateKeyFromDer,
+  type SealedBid,
+  type TrustedReceipts,
+} from './sealing/sealing';
+import {
+  trustedReceiptsOf,
+  type TenderChain,
+  type TenderEvidenceSource,
+} from './tender-evidence.client';
+import { assertTenderTransition } from './tender.state-machine';
+import { bidContentSchema, type BidContent } from './bid.dto';
+import type {
+  BidAccessLogEntry,
+  BidsOpenedView,
+  ListBidAccessLogQuery,
+  OpenedBidView,
+  TenderBidsView,
+} from './bid-opening.dto';
+
+/** The closed reasons an opening or an owner read is refused for; the metric's label and the 422's code. */
+export const OPENING_REFUSALS = [
+  'NOT_CLOSED',
+  'NOT_OPENED',
+  'EVIDENCE_UNAVAILABLE',
+  'EVIDENCE_BEHIND',
+  'INTEGRITY',
+  'CONFLICT_OF_INTEREST',
+  'KEY_UNAVAILABLE',
+] as const;
+export type OpeningRefusal = (typeof OPENING_REFUSALS)[number];
+
+/** Bids that have been opened: everything past SUBMITTED, except the ones taken back. */
+const NOT_OPENED_STATES: readonly string[] = ['SUBMITTED', 'WITHDRAWN'];
+const isOpened = (bid: Bid): boolean => !NOT_OPENED_STATES.includes(bid.status);
+
+interface Principal {
+  organizationId: string;
+  actor: string;
+  organizationIds: readonly string[];
+}
+
+/** The evidence, read and checked: the chain as audit-service holds it, and the receipts made from it. */
+interface Evidence {
+  chain: TenderChain;
+  receipts: TrustedReceipts;
+}
+
+/**
+ * Opening a tender's bids and the owner's reads of them (ADR-065 § 1, ADR-066 § 2-5).
+ *
+ * ## When, and on whose word
+ *
+ * `open-bids` moves a **CLOSED** tender to EVALUATING, and only then. The tender row is
+ * locked `FOR UPDATE` (bids share it `FOR SHARE`, the close sweeper takes it `FOR
+ * UPDATE`), the decision instant is read from the tender clock **after** the lock, and a
+ * tender that is still PUBLISHED — even past its deadline, with the sweeper not yet
+ * come — is refused rather than closed here: closing is `TenderCloseService`'s. Once
+ * CLOSED no bid can be written (`bid_guard`), so the chain cannot move under the opening.
+ *
+ * ## The head is not ours to say
+ *
+ * Whoever can rewrite a bid can rewrite `bid_receipt` with it. So the chain and its head
+ * are read from **audit-service** (`TenderEvidenceSource`, a tenant-signed request for
+ * the owner's organization and the tender), checked to be a sound chain
+ * (`trustedReceiptsOf`), compared link by link with this service's own copy
+ * (`compareChains`) and handed to `openBid`, which checks every stored bid against **those**
+ * receipts, digest and commitment in constant time. Any failure refuses the whole opening
+ * and writes nothing: unreachable (503/504), behind (the newest receipts have not reached
+ * audit-service yet — retry), differing, forged. There is no fallback to the local head.
+ * The read happens **outside** the transaction and before it takes the lock: it must not
+ * hold the tender row while it waits on a network, and CLOSED is stable.
+ *
+ * ## The key
+ *
+ * The tender's private key is unwrapped only inside the call that needs it, held as a
+ * `KeyObject` for that call, and its DER bytes are zeroised in a `finally`. It is never
+ * logged, never in an error, never kept. A read after the opening unwraps it again
+ * (ADR-066 § 2): the content is not stored in the clear anywhere.
+ *
+ * ## Every read is audited
+ *
+ * Opening writes one granted row (purpose `OPEN_BIDS`) and one `BID_ACCESSED` per bid,
+ * in the opening's own transaction; so does every list and every single read. A **refused**
+ * request — another tenant's tender, not closed, evidence down, forged — commits a REFUSED
+ * row in a transaction of its own before the error is answered. A failed write of a log
+ * row fails the read.
+ *
+ * ## Idempotent
+ *
+ * Opening a tender whose bids are already open answers the same view with
+ * `alreadyOpened`, reads nothing, writes nothing and publishes nothing: two callers, or
+ * one retrying, end with one opening and one `BIDS_OPENED`.
+ *
+ * ## Who
+ *
+ * The configured roles (`CONSTRUCTION_TENDER_OPEN_ROLES`, by default the owner's own
+ * role set); never `SYSTEM_ADMIN`. A member of **any bidder's** organization is refused
+ * (ADR-067 § 4): it limits and grants nothing. Whether opening needs two people
+ * (four-eyes) is not decided by ADR-066/067 and is not built.
+ */
+@Injectable()
+export class TenderOpenService {
+  private readonly logger = new Logger(TenderOpenService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly opens: TenderOpenRepository,
+    private readonly audit: BidAccessAudit,
+    private readonly events: EventPublisher,
+    private readonly access: ProjectAccess,
+    private readonly clock: TenderClock,
+    @Inject(TENDER_EVIDENCE_SOURCE) private readonly evidence: TenderEvidenceSource,
+    @Inject(TENDER_KEY_PROVIDER) private readonly keys: TenderKeyProvider,
+  ) {}
+
+  // -- open ---------------------------------------------------------------------
+
+  async open(tenderId: string): Promise<BidsOpenedView> {
+    const principal = this.access.assertCanOpenBids();
+    const view = await this.guarded(principal, tenderId, 'OPEN_BIDS', async (found) => {
+      // Outside any transaction and before any lock (see the class header). A tender
+      // already open needs no evidence; one that is not closed has none to ask for.
+      let evidence: Evidence | undefined;
+      if (found.status === 'CLOSED') {
+        evidence = await this.readEvidence(principal.organizationId, tenderId);
+      } else if (found.openedAt === null) {
+        throw this.refused('NOT_CLOSED');
+      }
+      return withFinancialSpan(
+        'construction.bid.open',
+        () => this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence)),
+        { 'rasta.tender.command': 'open-bids' },
+      );
+    });
+    if (!view.alreadyOpened) {
+      tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'open-bids' });
+    }
+    return view;
+  }
+
+  private async openIn(
+    tx: ExtendedPrismaClient,
+    principal: Principal,
+    tenderId: string,
+    evidence: Evidence | undefined,
+  ): Promise<BidsOpenedView> {
+    const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
+    if (!locked) throw RastaError.notFound('Tender', tenderId);
+
+    const bids = await this.opens.listBids(tx, tenderId);
+    if (locked.openedAt !== null && locked.openedBy !== null) {
+      return openedView(
+        locked,
+        { at: locked.openedAt, by: locked.openedBy },
+        bids.filter(isOpened).length,
+        true,
+      );
+    }
+    if (locked.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
+    assertTenderTransition(tenderId, locked.status, 'EVALUATING');
+
+    // After the lock: a long wait for it cannot leave the decision before the close.
+    const at = await this.clock.decisionInstant(tx);
+    if (!locked.closedAt || !locked.bidClosingAt || at.getTime() < locked.bidClosingAt.getTime()) {
+      throw this.refused('NOT_CLOSED');
+    }
+    // It was PUBLISHED when the evidence was to be read, and has been closed since: ask again.
+    if (!evidence) throw RastaError.optimisticLockFailed('Tender', tenderId);
+
+    this.assertNoConflict(principal, bids);
+    await this.assertAgrees(tx, tenderId, evidence.chain, bids);
+
+    const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
+    // The point of the whole exercise: every standing bid is opened against the evidence
+    // and what it says is checked against its commitment. Nothing is kept of the content.
+    await this.withPrivateKey(tx, tenderId, standing.length > 0, (privateKey, keyId) => {
+      for (const bid of standing) this.openOne(privateKey, keyId, tenderId, bid, evidence.receipts);
+    });
+
+    const opened = await this.opens.markBidsOpened(tx, { tenderId, actor: principal.actor, at });
+    if (opened !== standing.length) {
+      versionConflictsTotal.inc({ service: SERVICE_NAME, aggregate: 'Bid' });
+      throw RastaError.optimisticLockFailed('Tender', tenderId);
+    }
+    const matched = await this.opens.openTender(tx, {
+      tenderId,
+      expectedVersion: locked.version,
+      actor: principal.actor,
+      at,
+    });
+    if (matched === 0) {
+      versionConflictsTotal.inc({ service: SERVICE_NAME, aggregate: 'Tender' });
+      throw RastaError.optimisticLockFailed('Tender', tenderId);
+    }
+
+    await this.events.enqueue(tx, {
+      eventName: 'BIDS_OPENED',
+      aggregateId: tenderId,
+      organizationId: principal.organizationId,
+      payload: {
+        tenderId,
+        projectId: locked.projectId,
+        organizationId: principal.organizationId,
+        bidCount: standing.length,
+        bidIds: standing.map((bid) => bid.id),
+        receiptHead: evidence.chain.head,
+        openedAt: at.toISOString(),
+        openedBy: principal.actor,
+      },
+      occurredAt: at,
+    });
+    for (const bid of standing) {
+      await this.audit.record(tx, {
+        owner: principal.organizationId,
+        tenderId,
+        bidId: bid.id,
+        accessorOrganizationId: principal.organizationId,
+        accessorUserId: principal.actor,
+        purpose: 'OPEN_BIDS',
+        outcome: 'GRANTED',
+        at,
+      });
+    }
+    return openedView(
+      { id: tenderId, status: 'EVALUATING' },
+      { at, by: principal.actor },
+      standing.length,
+      false,
+    );
+  }
+
+  // -- the owner's reads ----------------------------------------------------------
+
+  /**
+   * The tender's bids as the owner may see them. **Before** the opening: how many and
+   * when each was received — not who, not what (ADR-066 § 4), and the key is not
+   * touched. **After**: every opened bid with its content, each read audited.
+   */
+  async listBids(tenderId: string): Promise<TenderBidsView> {
+    const principal = this.access.assertCanOpenBids();
+    return this.guarded(principal, tenderId, 'LIST_BIDS', async (found) => {
+      const evidence =
+        found.openedAt !== null
+          ? await this.readEvidence(principal.organizationId, tenderId)
+          : undefined;
+      return this.prisma.transaction((tx) =>
+        this.readIn(tx, principal, tenderId, evidence, { purpose: 'LIST_BIDS' }).then(
+          (result) => result.view,
+        ),
+      );
+    });
+  }
+
+  /** One opened bid, with its content. Before the opening there is nothing to read: 422. */
+  async getBid(tenderId: string, bidId: string): Promise<OpenedBidView> {
+    const principal = this.access.assertCanOpenBids();
+    return this.guarded(principal, tenderId, 'READ_BID', async (found) => {
+      if (found.openedAt === null) throw this.refused('NOT_OPENED');
+      const evidence = await this.readEvidence(principal.organizationId, tenderId);
+      return this.prisma.transaction(async (tx) => {
+        const { view } = await this.readIn(tx, principal, tenderId, evidence, {
+          purpose: 'READ_BID',
+          bidId,
+        });
+        const bid = view.bids[0];
+        if (!bid) throw RastaError.notFound('Bid', bidId);
+        return bid;
+      });
+    });
+  }
+
+  /** The tender's access log, newest first. Reading the log is not a read of a bid and is not itself logged. */
+  async listAccessLog(
+    tenderId: string,
+    query: ListBidAccessLogQuery,
+  ): Promise<CursorPage<BidAccessLogEntry>> {
+    this.access.assertCanOpenBids();
+    const rows = await this.prisma.transaction(async (tx) => {
+      if (!(await this.opens.ownsTender(tx, tenderId)))
+        throw RastaError.notFound('Tender', tenderId);
+      return this.opens.listAccessLog(tx, tenderId, query);
+    });
+    const hasMore = rows.length > query.limit;
+    const visible = hasMore ? rows.slice(0, query.limit) : rows;
+    return {
+      items: visible.map((row) => ({
+        id: row.id,
+        tenderId: row.tenderId,
+        bidId: row.bidId,
+        accessorOrganizationId: row.accessorOrganizationId,
+        accessorUserId: row.accessorUserId,
+        purpose: row.purpose as BidAccessLogEntry['purpose'],
+        outcome: row.outcome as BidAccessLogEntry['outcome'],
+        accessedAt: row.accessedAt.toISOString(),
+      })),
+      nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
+      hasMore,
+    };
+  }
+
+  private async readIn(
+    tx: ExtendedPrismaClient,
+    principal: Principal,
+    tenderId: string,
+    evidence: Evidence | undefined,
+    read: { purpose: 'LIST_BIDS' | 'READ_BID'; bidId?: string },
+  ): Promise<{ view: TenderBidsView }> {
+    const locked = await this.opens.lockSharedForRead(tx, principal.organizationId, tenderId);
+    if (!locked) throw RastaError.notFound('Tender', tenderId);
+    const at = await transactionNow(tx);
+    const bids = await this.opens.listBids(tx, tenderId);
+    const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
+
+    if (locked.openedAt === null) {
+      // Before the opening: a count and the times of receipt. No identity, no content, no key.
+      if (read.purpose === 'READ_BID') throw this.refused('NOT_OPENED');
+      await this.audit.record(tx, {
+        owner: principal.organizationId,
+        tenderId,
+        bidId: null,
+        accessorOrganizationId: principal.organizationId,
+        accessorUserId: principal.actor,
+        purpose: 'COUNT_BIDS',
+        outcome: 'GRANTED',
+        at,
+      });
+      return {
+        view: {
+          tenderId,
+          opened: false,
+          bidCount: standing.length,
+          receivedAt: standing.map((bid) => bid.receivedAt.toISOString()).sort(),
+          bids: [],
+        },
+      };
+    }
+    // Opened between the evidence being asked for (none was, the tender was not open) and now.
+    if (!evidence) throw RastaError.optimisticLockFailed('Tender', tenderId);
+
+    this.assertNoConflict(principal, bids);
+    await this.assertAgrees(tx, tenderId, evidence.chain, bids);
+
+    const readable = bids
+      .filter(isOpened)
+      .filter((bid) => read.bidId === undefined || bid.id === read.bidId);
+    const contents = new Map<string, BidContent>();
+    await this.withPrivateKey(tx, tenderId, readable.length > 0, (privateKey, keyId) => {
+      for (const bid of readable) {
+        contents.set(bid.id, this.openOne(privateKey, keyId, tenderId, bid, evidence.receipts));
+      }
+    });
+    for (const bid of readable) {
+      await this.audit.record(tx, {
+        owner: principal.organizationId,
+        tenderId,
+        bidId: bid.id,
+        accessorOrganizationId: principal.organizationId,
+        accessorUserId: principal.actor,
+        purpose: read.purpose,
+        outcome: 'GRANTED',
+        at,
+      });
+    }
+    return {
+      view: {
+        tenderId,
+        opened: true,
+        bidCount: readable.length,
+        receivedAt: [],
+        bids: readable.map((bid) => ({
+          bidId: bid.id,
+          tenderId,
+          bidderOrganizationId: bid.bidderOrganizationId,
+          status: bid.status,
+          revision: bid.revision,
+          receivedAt: bid.receivedAt.toISOString(),
+          contentCommitment: bid.contentCommitment,
+          content: contentOf(contents, bid.id),
+        })),
+      },
+    };
+  }
+
+  // -- the audited envelope -----------------------------------------------------------
+
+  /**
+   * Finds the tender, tells another organization's from a missing one without telling the
+   * caller, runs `work`, and — when it refuses — commits a REFUSED row for the attempt
+   * before the error is answered (ADR-066 § 5).
+   */
+  private async guarded<T>(
+    principal: Principal,
+    tenderId: string,
+    purpose: BidAccessPurpose,
+    work: (found: { status: string; openedAt: Date | null }) => Promise<T>,
+  ): Promise<T> {
+    const found = await this.opens.findOwnership(tenderId);
+    if (!found) throw RastaError.notFound('Tender', tenderId);
+    if (found.organizationId !== principal.organizationId) {
+      // Not theirs: they are told what a missing tender is told, and the owner is told who asked.
+      await this.recordRefusal(found.organizationId, tenderId, null, principal, purpose);
+      throw RastaError.notFound('Tender', tenderId);
+    }
+    try {
+      return await work(found);
+    } catch (error) {
+      // No bid id: what the caller named is not stored unless it is a bid (it is not looked up here).
+      if (error instanceof RastaError) {
+        await this.recordRefusal(found.organizationId, tenderId, null, principal, purpose);
+      }
+      throw error;
+    }
+  }
+
+  /** The refusal, in a transaction of its own (the one that refused has rolled back). Best effort: it never replaces the answer. */
+  private async recordRefusal(
+    owner: string,
+    tenderId: string,
+    bidId: string | null,
+    principal: Principal,
+    purpose: BidAccessPurpose,
+  ): Promise<void> {
+    try {
+      await this.prisma.transaction(async (tx) => {
+        await this.audit.record(tx, {
+          owner,
+          tenderId,
+          bidId,
+          accessorOrganizationId: principal.organizationId,
+          accessorUserId: principal.actor,
+          purpose,
+          outcome: 'REFUSED',
+          at: await transactionNow(tx),
+        });
+      });
+    } catch (cause) {
+      // The log of a refusal is evidence, not the answer: the caller is refused either way.
+      this.logger.error(
+        `could not record a refused bid read: ${cause instanceof Error ? cause.name : 'unknown'}`,
+      );
+    }
+  }
+
+  // -- the evidence ------------------------------------------------------------------
+
+  /** The chain and head from audit-service, checked to be sound. Fails closed, always. */
+  private async readEvidence(ownerOrganizationId: string, tenderId: string): Promise<Evidence> {
+    let chain: TenderChain;
+    try {
+      chain = await this.evidence.fetchChain(ownerOrganizationId, tenderId);
+    } catch (error) {
+      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'evidence_unavailable' });
+      if (error instanceof RastaError) throw error;
+      throw RastaError.upstreamUnavailable('audit-service', error);
+    }
+    try {
+      return { chain, receipts: trustedReceiptsOf(chain) };
+    } catch (error) {
+      throw this.refusalOf(error);
+    }
+  }
+
+  /** This service's own copy must be the evidence, or nothing is opened. */
+  private async assertAgrees(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    chain: TenderChain,
+    bids: readonly Bid[],
+  ): Promise<void> {
+    const local = await this.opens.listReceipts(tx, tenderId);
+    const verdict = compareChains(
+      local,
+      chain,
+      bids.map((bid) => bid.id),
+    );
+    if (verdict === 'AGREES') return;
+    if (verdict === 'EVIDENCE_BEHIND') {
+      // audit-service has not yet heard of the newest receipts: not a forgery, and not ready.
+      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'evidence_behind' });
+      throw RastaError.upstreamUnavailable('audit-service');
+    }
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'integrity' });
+    this.logger.error(
+      'the stored receipts of a tender differ from the evidence; nothing was opened',
+    );
+    throw this.refused('INTEGRITY');
+  }
+
+  private assertNoConflict(principal: Principal, bids: readonly Bid[]): void {
+    const bidders = new Set(bids.map((bid) => bid.bidderOrganizationId));
+    if (principal.organizationIds.some((organization) => bidders.has(organization))) {
+      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
+      throw RastaError.forbidden(
+        'A member of an organization that bid on this tender does not open or read its bids',
+      );
+    }
+  }
+
+  // -- the key -----------------------------------------------------------------------
+
+  /**
+   * Unwraps the tender's private key for the duration of `use` and no longer: the DER
+   * bytes are zeroised in the `finally`, whatever `use` did. `needed` false (no bid to
+   * open) never touches the key.
+   */
+  private async withPrivateKey(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    needed: boolean,
+    use: (privateKey: KeyObject, keyId: string) => void,
+  ): Promise<void> {
+    if (!needed) return;
+    const key = await this.opens.findKey(tx, tenderId);
+    if (!key) throw RastaError.internal('A published tender has no key; its bids cannot be opened');
+
+    let der: Buffer | undefined;
+    try {
+      der = this.keys.unwrap(
+        {
+          kekId: key.kekId,
+          nonce: Buffer.from(key.wrapNonce),
+          ciphertext: Buffer.from(key.wrappedPrivateKey),
+          tag: Buffer.from(key.wrapTag),
+        },
+        { tenderId, keyId: key.keyId },
+      );
+      use(privateKeyFromDer(der), key.keyId);
+    } catch (error) {
+      throw this.refusalOf(error);
+    } finally {
+      der?.fill(0);
+    }
+  }
+
+  /** One bid, opened against the evidence's receipts and read as the content the bidder sealed. */
+  private openOne(
+    privateKey: KeyObject,
+    keyId: string,
+    tenderId: string,
+    bid: Bid,
+    receipts: TrustedReceipts,
+  ): BidContent {
+    const sealed: SealedBid = {
+      version: bid.sealVersion,
+      keyId: bid.keyId,
+      nonce: Buffer.from(bid.nonce),
+      ciphertext: Buffer.from(bid.ciphertext),
+      tag: Buffer.from(bid.tag),
+      wrappedContentKey: Buffer.from(bid.wrappedContentKey),
+      contentCommitment: bid.contentCommitment,
+      ciphertextSha256: bid.ciphertextSha256,
+    };
+    const opened = openBid({
+      privateKey,
+      binding: {
+        tenderId,
+        bidId: bid.id,
+        bidderOrganizationId: bid.bidderOrganizationId,
+        revision: bid.revision,
+        keyId,
+      },
+      sealed,
+      receipts,
+    });
+    const content = bidContentSchema.safeParse(opened);
+    // The commitment held, so this is what was sealed; a shape this service no longer reads is not a bid it can show.
+    if (!content.success) throw new SealingError('TAMPERED');
+    return content.data;
+  }
+
+  // -- errors -------------------------------------------------------------------------
+
+  /** A sealing failure is an integrity refusal (or a missing key); nothing about which part failed is said. */
+  private refusalOf(error: unknown): unknown {
+    if (!(error instanceof SealingError)) return error;
+    if (error.code === 'KEY_UNAVAILABLE') {
+      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'key_unavailable' });
+      return RastaError.upstreamUnavailable('tender-key-provider');
+    }
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'integrity' });
+    this.logger.error(`a bid did not verify against its receipt: ${error.code}`);
+    return this.refused('INTEGRITY');
+  }
+
+  private refused(reason: OpeningRefusal): RastaError {
+    if (reason === 'NOT_CLOSED' || reason === 'NOT_OPENED') {
+      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
+    }
+    return RastaError.businessRule(`Bids are not opened: ${reason}`, { refusals: [reason] });
+  }
+}
+
+/** What `openOne` read for a bid; every readable bid was opened before its view is made. */
+function contentOf(contents: ReadonlyMap<string, BidContent>, bidId: string): BidContent {
+  const content = contents.get(bidId);
+  if (!content) throw RastaError.internal('A bid was listed that was not opened');
+  return content;
+}
+
+function openedView(
+  tender: Pick<TenderForOpening, 'id' | 'status'>,
+  opening: { at: Date; by: string },
+  bidCount: number,
+  alreadyOpened: boolean,
+): BidsOpenedView {
+  return {
+    tenderId: tender.id,
+    status: tender.status,
+    openedAt: opening.at.toISOString(),
+    openedBy: opening.by,
+    bidCount,
+    alreadyOpened,
+  };
+}

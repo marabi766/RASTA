@@ -75,6 +75,10 @@ import { BidRepository } from './tender/bid.repository';
 import { TenderEvidenceClient } from './tender/tender-evidence.client';
 import { BidService } from './tender/bid.service';
 import { BidController } from './tender/bid.controller';
+import { BidAccessAudit } from './tender/bid-access-audit';
+import { BidOpeningController } from './tender/bid-opening.controller';
+import { TenderOpenRepository } from './tender/tender-open.repository';
+import { TenderOpenService } from './tender/tender-open.service';
 import { DatabaseTenderClock, TenderClock } from './tender/tender-clock';
 import { TenderCloseRepository } from './tender/tender-close.repository';
 import { TenderCloseService } from './tender/tender-close.service';
@@ -94,6 +98,7 @@ import {
   LOGGER,
   STANDING_OF_SOURCE,
   STANDING_SNAPSHOT_SOURCE,
+  TENDER_EVIDENCE_SOURCE,
   TENDER_KEY_PROVIDER,
 } from './tokens';
 import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './config/env';
@@ -128,6 +133,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     CriteriaController,
     PublicationController,
     BidController,
+    BidOpeningController,
     HealthController,
     MetricsController,
   ],
@@ -180,9 +186,14 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     // ADR-066 § 2: the receipt chain and its head are read from audit-service, which
     // holds them where this service cannot rewrite them; opening bids (PR 8) uses it.
     TenderEvidenceClient,
+    { provide: TENDER_EVIDENCE_SOURCE, useExisting: TenderEvidenceClient },
     // ADR-065 § 2: the deadline is judged on the database's clock, read after the lock.
     { provide: TenderClock, useClass: DatabaseTenderClock },
     BidService,
+    // ADR-066: opening the bids and the owner's audited reads of them (CON-002 PR 8).
+    TenderOpenRepository,
+    BidAccessAudit,
+    TenderOpenService,
     // ADR-065 § 3: a bounded, leased, fenced sweep closes tenders past their deadline.
     // The bids are refused by the clock whether or not it runs.
     TenderCloseRepository,

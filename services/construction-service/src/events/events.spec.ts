@@ -227,6 +227,14 @@ Object.assign(VALID, {
     outcome: 'GRANTED',
     accessedAt: AT,
   },
+  BIDS_OPENED: {
+    ...TENDER,
+    bidCount: 2,
+    bidIds: ['BID_1', 'BID_2'],
+    receiptHead: 'a'.repeat(64),
+    openedAt: AT,
+    openedBy: 'USR_1',
+  },
   CRITERIA_TEMPLATE_CREATED: {
     templateId: 'CTP_1',
     organizationId: 'ORG_A',
@@ -251,6 +259,7 @@ const TENDER_EVENTS = [
   'BID_REVISED',
   'BID_WITHDRAWN',
   'BID_ACCESSED',
+  'BIDS_OPENED',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -280,6 +289,7 @@ describe('the construction event catalogue', () => {
       'APPROVAL_POLICY_SUSPENDED',
       'APPROVAL_REJECTED',
       'APPROVAL_REQUESTED',
+      'BIDS_OPENED',
       'BID_ACCESSED',
       'BID_REVISED',
       'BID_SUBMITTED',
@@ -347,7 +357,13 @@ describe('the construction event catalogue', () => {
     },
   );
 
-  it.each(['BID_SUBMITTED', 'BID_REVISED', 'BID_WITHDRAWN', 'BID_ACCESSED'] as typeof NAMES)(
+  it.each([
+    'BID_SUBMITTED',
+    'BID_REVISED',
+    'BID_WITHDRAWN',
+    'BID_ACCESSED',
+    'BIDS_OPENED',
+  ] as typeof NAMES)(
     '%s carries no content, price or ciphertext, however it is dressed',
     (name) => {
       for (const extra of [
@@ -471,6 +487,9 @@ describe('payload rules', () => {
     // A closure counts bids and says nothing about them.
     ['TENDER_CLOSED', { bids: [{ bidderOrganizationId: 'ORG_B' }] }],
     ['TENDER_CLOSED', { priceMinor: '1250000000' }],
+    // An opening names the bids and counts them; what they say is read, audited, from the API.
+    ['BIDS_OPENED', { bids: [{ priceMinor: '1250000000' }] }],
+    ['BIDS_OPENED', { receiptHead: 'the head, in words' }],
   ])('refuses free text on %s (%j)', (name, prose) => {
     expect(() => validateConstructionPayload(name, { ...VALID[name]!, ...prose })).toThrow();
   });

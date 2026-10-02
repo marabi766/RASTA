@@ -116,3 +116,16 @@ export const tenderCloseOldestOverdueAgeSeconds = new Gauge({
   labelNames: ['service'] as const,
   registers: [registry],
 });
+
+/**
+ * Opening or reading a tender's bids that was refused, by a closed reason
+ * (not_closed, evidence_unavailable, evidence_behind, integrity, conflict_of_interest,
+ * key_unavailable). `integrity` is the one to look at: a stored bid, or the whole chain,
+ * did not match what audit-service holds (ADR-066 § 3). Never labelled by tender or tenant.
+ */
+export const bidOpeningRefusalsTotal = new Counter({
+  name: 'rasta_construction_bid_opening_refusals_total',
+  help: 'Openings and owner reads of bids refused, by reason',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});

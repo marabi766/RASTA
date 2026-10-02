@@ -92,6 +92,8 @@ export const CONSTRUCTION_EVENTS = {
   BID_ACCESSED: 'BID_ACCESSED',
   // CON-002 PR 7 (ADR-065 § 3). Accepted by the project manager (2026-09-30).
   TENDER_CLOSED: 'TENDER_CLOSED',
+  // CON-002 PR 8 (ADR-066). Accepted by the project manager (2026-09-30). Ids and counts only.
+  BIDS_OPENED: 'BIDS_OPENED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -569,8 +571,19 @@ export const bidWithdrawnPayload = z
   })
   .strict();
 
-/** Closed codes for why a bid was read; owner-side purposes arrive with the opening (PR 8). */
-export const BID_ACCESS_PURPOSES = ['OWN_BID_RECEIPT'] as const;
+/**
+ * Closed codes for why a bid was read (ADR-066 § 5): the bidder's own receipt; the owner
+ * opening the bids; the owner counting the bids before the opening (no identity, no
+ * content); the owner reading them afterwards, listed or one by one.
+ */
+export const BID_ACCESS_PURPOSES = [
+  'OWN_BID_RECEIPT',
+  'OPEN_BIDS',
+  'COUNT_BIDS',
+  'LIST_BIDS',
+  'READ_BID',
+] as const;
+export type BidAccessPurpose = (typeof BID_ACCESS_PURPOSES)[number];
 
 /** A read of a bid, granted or refused (ADR-066 § 5): who, which bid, why, the outcome — no content. */
 export const bidAccessedPayload = z
@@ -584,6 +597,23 @@ export const bidAccessedPayload = z
     purpose: z.enum(BID_ACCESS_PURPOSES),
     outcome: z.enum(['GRANTED', 'REFUSED']),
     accessedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * The bids of a tender were opened (CLOSED → EVALUATING). Identifiers, a count and the
+ * head of the receipt chain they were verified against — never a price, an answer, a
+ * note, a ciphertext or a key. `receiptHead` is a digest and already public (it is the
+ * head audit-service holds).
+ */
+export const bidsOpenedPayload = z
+  .object({
+    ...tenderIdentity,
+    bidCount: z.number().int().nonnegative(),
+    bidIds: z.array(identifier).max(1000),
+    receiptHead: z.string().regex(/^[0-9a-f]{64}$/),
+    openedAt: isoTimestamp,
+    openedBy: identifier,
   })
   .strict();
 
@@ -621,6 +651,7 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BID_WITHDRAWN: bidWithdrawnPayload,
   BID_ACCESSED: bidAccessedPayload,
   TENDER_CLOSED: tenderClosedPayload,
+  BIDS_OPENED: bidsOpenedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<
