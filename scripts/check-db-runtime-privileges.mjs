@@ -13,9 +13,9 @@
 // CREATEDB, CREATEROLE or BYPASSRLS. Owning a table is what lets SQL running as
 // the service ALTER TABLE … DISABLE TRIGGER and lift an integrity guard.
 //
-// A split service must hold none of it. A service on PENDING_SPLIT is expected
-// to, and fails the check when it no longer does (move it to
-// PRIVILEGE_SPLIT_SERVICES). The rules: check-db-runtime-privileges-lib.mjs.
+// Every service must hold none of it, and every service must be in
+// PRIVILEGE_SPLIT_SERVICES (audit has its own split). The rules:
+// check-db-runtime-privileges-lib.mjs.
 // -----------------------------------------------------------------------------
 import { spawnSync } from 'node:child_process';
 import { FINDINGS_SQL, classifyServices, verdict } from './check-db-runtime-privileges-lib.mjs';

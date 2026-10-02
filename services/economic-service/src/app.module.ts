@@ -333,6 +333,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   private gaugeTimer?: NodeJS.Timeout;
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly ledger: LedgerService,
@@ -348,6 +349,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onModuleInit(): Promise<void> {
+    // First of all (D-045): nothing is served, relayed or consumed as a role
+    // that could lift this service's database guards.
+    await this.prisma.assertRuntimeRole();
+
     // The platform's own accounts, before the first request needs one.
     // Creating them lazily inside a money-moving transaction would put an
     // account insert — and a possible unique-constraint race — on the

@@ -282,7 +282,11 @@ test('a stream larger than one batch is numbered with no duplicate, gap or reord
 
     const { events, result } = await backfill(db, ['--apply']);
     assert.ok(result.batches.length >= 2, 'the fixture did not span a batch boundary');
-    assert.equal(events.filter((e) => e.type === 'vacuum').length, result.batches.length);
+    // No vacuum between batches (D-045): one `required`, after the last.
+    assert.deepEqual(
+      events.filter((e) => e.type === 'vacuum').map((e) => [e.status, e.table]),
+      [['required', 'outbox_message']],
+    );
 
     const hot = await rows(
       db,
@@ -697,60 +701,42 @@ test('rows written during the backfill trip the ordering guard and nothing is as
   });
 });
 
-test('a VACUUM failure stops the run and says so', async () => {
+test('the backfill issues no VACUUM through its port, and says one is required', async () => {
   await withOutbox('document', async ({ db }) => {
     await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 8 }));
 
-    // Fault injection on the port's maintenance call only. Everything else —
-    // the batch transaction, the SQL, the database — is real, so what is being
-    // tested is the tool's reaction to a maintenance failure and not a
-    // simulation of the backfill.
-    const failing = {
+    // Every statement the port is asked to execute outside a transaction is
+    // recorded. Since D-045 the backfill runs as the runtime role, whose
+    // VACUUM PostgreSQL skips while reporting success; it must not try.
+    const executed = [];
+    const recording = {
       ...db,
       execute: (sql) => {
-        if (sql === vacuumSql()) throw new Error('disk full');
+        executed.push(sql);
         return db.execute(sql);
       },
     };
+    const events = [];
+    const result = await runServiceBackfill({
+      service: 'document',
+      db: recording,
+      options: options(['--apply', '--batch-size', '3']),
+      emit: (event) => events.push(event),
+    });
 
-    await assert.rejects(
-      () =>
-        runServiceBackfill({
-          service: 'document',
-          db: failing,
-          options: options(['--apply', '--batch-size', '3']),
-          emit: () => {},
-        }),
-      (error) => {
-        assert.match(error.message, /VACUUM \(ANALYZE\) failed after batch 1: disk full/);
-        assert.match(error.message, /stopping rather than/);
-        return true;
-      },
+    assert.ok(result.batches.length >= 3, 'the fixture did not span several batches');
+    assert.deepEqual(
+      executed.filter((sql) => sql === vacuumSql() || /\bVACUUM\b/i.test(sql)),
+      [],
     );
-
-    // The first batch's assignment is committed — the run is resumable, which
-    // is the reason the failure is reported rather than swallowed.
-    assert.equal(
-      await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "stream_seq" IS NOT NULL`),
-      3,
+    const vacuum = events.filter((event) => event.type === 'vacuum');
+    assert.deepEqual(
+      vacuum.map((event) => [event.status, event.table, event.ok]),
+      [['required', 'outbox_message', undefined]],
     );
+    assert.equal(result.vacuum, 'required');
   });
 });
-
-// ---------------------------------------------------------------------------
-// `mutated` means the database changed, not that writing was authorised.
-//
-// The field used to be hard-coded `true` on every apply. The local-development
-// operational gate then reported `mutated: true` on all eight services while
-// provably changing nothing — zero batches, zero counter writes, zero head
-// changes, byte-identical fingerprints. The value said "apply mode was
-// authorised", which is what `mode` already says.
-//
-// It is now derived from the three write counts the run actually observes:
-// rows assigned across committed batches, `counters.written`, and
-// `heads.changed`. These tests pin every path, against real PostgreSQL and
-// real counts — nothing here mocks a write result.
-// ---------------------------------------------------------------------------
 
 test('mutated is false for a dry run and for an apply that writes nothing', async () => {
   await withOutbox('document', async ({ db }) => {
