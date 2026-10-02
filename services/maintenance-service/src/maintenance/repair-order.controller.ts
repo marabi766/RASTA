@@ -1,7 +1,8 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RepairOrderService } from './repair-order.service';
+import { IdempotencyStore, requiredIdempotencyKey, type ClaimFence } from './idempotency';
 import {
   cancelRepairSchema,
   completeRepairSchema,
@@ -12,12 +13,42 @@ import {
   startRepairSchema,
   type CancelRepairDto,
   type CompleteRepairDto,
+  type LabourEntryView,
   type ListRepairOrdersQuery,
+  type MaintenanceCostView,
+  type PartUsageView,
   type RecordCostDto,
   type RecordLabourDto,
   type RecordPartDto,
+  type RepairOrderView,
   type StartRepairDto,
 } from './dto';
+
+/**
+ * The route templates an Idempotency-Key is stored under, one per write: the
+ * same key on two different endpoints is two requests. The order id is part of
+ * the hashed request, so one key cannot be replayed onto another order.
+ */
+export const REPAIR_ORDER_ENDPOINTS = {
+  start: 'POST /v1/repair-orders/:id/start',
+  complete: 'POST /v1/repair-orders/:id/complete',
+  cancel: 'POST /v1/repair-orders/:id/cancel',
+  parts: 'POST /v1/repair-orders/:id/parts',
+  labour: 'POST /v1/repair-orders/:id/labour',
+  costs: 'POST /v1/repair-orders/:id/costs',
+} as const;
+
+const IDEMPOTENCY_KEY_HEADER = {
+  name: 'Idempotency-Key',
+  required: true,
+  description:
+    'Required, here and at the gateway: a missing or malformed key is 400 and nothing is ' +
+    'written. 8 to 255 characters, scoped to the organization ' +
+    'and the endpoint. The same key with the same body, order and user answers the original ' +
+    'response without doing the work again (24 hours by default); the same key with a different ' +
+    'body, order or user answers 409 IDEMPOTENCY_KEY_REUSED; a duplicate of a request still in ' +
+    'flight answers 409 CONFLICT with Retry-After.',
+} as const;
 
 /**
  * HTTP surface for repair orders — the work and what it cost.
@@ -38,7 +69,41 @@ import {
 @ApiTags('repair-orders')
 @Controller({ path: 'repair-orders', version: '1' })
 export class RepairOrderController {
-  constructor(private readonly repairOrders: RepairOrderService) {}
+  constructor(
+    private readonly repairOrders: RepairOrderService,
+    private readonly idempotency: IdempotencyStore,
+  ) {}
+
+  /**
+   * Runs a write under its `Idempotency-Key`, which it must have (docs/06 § 6.8).
+   *
+   * A missing or malformed key is refused before anything else, and nothing is
+   * written: unlike creating a request, these writes add money to a bill or
+   * close one, and a retried post that was not the same post is the failure the
+   * key exists to prevent. The caller's right to the order is established next,
+   * so a stored response is only ever replayed to somebody who could have caused
+   * it; the claim, the work, its outbox rows and the stored response then commit
+   * in one transaction (`idempotency.ts`).
+   */
+  private async idempotently<T extends { id: string }>(
+    endpoint: string,
+    orderId: string,
+    dto: object,
+    rawKey: string | undefined,
+    successStatus: number,
+    work: (fence: ClaimFence<T>) => Promise<T>,
+  ): Promise<T> {
+    const key = requiredIdempotencyKey(rawKey);
+    await this.repairOrders.assertAccessible(orderId);
+    const { result } = await this.idempotency.execute<T>(
+      endpoint,
+      key,
+      { repairOrderId: orderId, ...dto },
+      successStatus,
+      work,
+    );
+    return result;
+  }
 
   // ---- Reads --------------------------------------------------------------
 
@@ -76,8 +141,20 @@ export class RepairOrderController {
       'moves it to IN_MAINTENANCE and fleet-service stops it being assigned to a driver. ' +
       'Returns 409 if the repair has already started or been cancelled.',
   })
-  start(@Param('id') id: string, @Body(zodPipe(startRepairSchema)) dto: StartRepairDto) {
-    return this.repairOrders.start(id, dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  start(
+    @Param('id') id: string,
+    @Body(zodPipe(startRepairSchema)) dto: StartRepairDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.idempotently<RepairOrderView>(
+      REPAIR_ORDER_ENDPOINTS.start,
+      id,
+      dto,
+      idempotencyKey,
+      200,
+      (fence) => this.repairOrders.start(id, dto, fence),
+    );
   }
 
   @Post(':id/complete')
@@ -89,10 +166,24 @@ export class RepairOrderController {
       'Publishes REPAIR_COMPLETED with what this workshop charged, and MAINTENANCE_COMPLETED, ' +
       'which returns the machine to service. The request moves to COMPLETED, not APPROVED — ' +
       'nothing settles until an owner has looked at the bill. Set `returnedToServiceAt` when ' +
-      'the machine was collected later than it was repaired; downtime counts to that moment.',
+      'the machine was collected later than it was repaired; downtime counts to that moment. ' +
+      'Optionally send `expectedTotalCostMinor`, the order total you were shown: if a part or ' +
+      'a charge was recorded since, the completion is refused with 422 and nothing changes.',
   })
-  complete(@Param('id') id: string, @Body(zodPipe(completeRepairSchema)) dto: CompleteRepairDto) {
-    return this.repairOrders.complete(id, dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  complete(
+    @Param('id') id: string,
+    @Body(zodPipe(completeRepairSchema)) dto: CompleteRepairDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.idempotently<RepairOrderView>(
+      REPAIR_ORDER_ENDPOINTS.complete,
+      id,
+      dto,
+      idempotencyKey,
+      200,
+      (fence) => this.repairOrders.complete(id, dto, fence),
+    );
   }
 
   @Post(':id/cancel')
@@ -104,8 +195,20 @@ export class RepairOrderController {
       'The request stays open and can be referred elsewhere — a workshop turning a job down is ' +
       'not the job going away. Cost already recorded is kept.',
   })
-  cancel(@Param('id') id: string, @Body(zodPipe(cancelRepairSchema)) dto: CancelRepairDto) {
-    return this.repairOrders.cancel(id, dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  cancel(
+    @Param('id') id: string,
+    @Body(zodPipe(cancelRepairSchema)) dto: CancelRepairDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.idempotently<RepairOrderView>(
+      REPAIR_ORDER_ENDPOINTS.cancel,
+      id,
+      dto,
+      idempotencyKey,
+      200,
+      (fence) => this.repairOrders.cancel(id, dto, fence),
+    );
   }
 
   // ---- Cost ---------------------------------------------------------------
@@ -122,8 +225,20 @@ export class RepairOrderController {
       'or stock movement in the service that owns it. Publishes REPAIR_PART_RECORDED in the same ' +
       'transaction.',
   })
-  recordPart(@Param('id') id: string, @Body(zodPipe(recordPartSchema)) dto: RecordPartDto) {
-    return this.repairOrders.recordPart(id, dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  recordPart(
+    @Param('id') id: string,
+    @Body(zodPipe(recordPartSchema)) dto: RecordPartDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.idempotently<PartUsageView>(
+      REPAIR_ORDER_ENDPOINTS.parts,
+      id,
+      dto,
+      idempotencyKey,
+      201,
+      (fence) => this.repairOrders.recordPart(id, dto, fence),
+    );
   }
 
   @Post(':id/labour')
@@ -135,8 +250,20 @@ export class RepairOrderController {
       'has no account on this platform, and requiring one would block the entry. It stays in ' +
       'this service: REPAIR_LABOUR_RECORDED, published in the same transaction, does not carry it.',
   })
-  recordLabour(@Param('id') id: string, @Body(zodPipe(recordLabourSchema)) dto: RecordLabourDto) {
-    return this.repairOrders.recordLabour(id, dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  recordLabour(
+    @Param('id') id: string,
+    @Body(zodPipe(recordLabourSchema)) dto: RecordLabourDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.idempotently<LabourEntryView>(
+      REPAIR_ORDER_ENDPOINTS.labour,
+      id,
+      dto,
+      idempotencyKey,
+      201,
+      (fence) => this.repairOrders.recordLabour(id, dto, fence),
+    );
   }
 
   @Post(':id/costs')
@@ -149,7 +276,19 @@ export class RepairOrderController {
       'the provenance on a cost line meaningful. Publishes REPAIR_COST_RECORDED in the same ' +
       'transaction.',
   })
-  recordCost(@Param('id') id: string, @Body(zodPipe(recordCostSchema)) dto: RecordCostDto) {
-    return this.repairOrders.recordCost(id, dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  recordCost(
+    @Param('id') id: string,
+    @Body(zodPipe(recordCostSchema)) dto: RecordCostDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.idempotently<MaintenanceCostView>(
+      REPAIR_ORDER_ENDPOINTS.costs,
+      id,
+      dto,
+      idempotencyKey,
+      201,
+      (fence) => this.repairOrders.recordCost(id, dto, fence),
+    );
   }
 }

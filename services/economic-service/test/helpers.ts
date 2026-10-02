@@ -245,6 +245,8 @@ export interface ActorOptions {
   userId?: string;
   roles?: string[];
   authType?: 'USER' | 'SERVICE';
+  /** The token's IdP subject; the operator path compares it (ADR-064 B3). */
+  subject?: string;
 }
 
 /**
@@ -270,6 +272,7 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     roles: options.roles ?? ['ORGANIZATION_ADMIN'],
     organizationIds: [],
     authType: options.authType ?? 'USER',
+    ...(options.subject ? { subject: options.subject } : {}),
     startedAt: Date.now(),
   };
 
@@ -539,12 +542,37 @@ export async function cleanup(
       orgs,
     );
 
+    // The operator path's history is append-only at the database (ADR-064 B3).
+    // Lifted for this run's own organizations only, inside one transaction
+    // that restores the triggers on every exit path — and by the **owner**
+    // connection, never the runtime one, which cannot lift a trigger (D-045).
+    const historyOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await historyOwner.$transaction(async (tx) => {
+        for (const [table, trigger] of [
+          ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
+          ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
+        ]) {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+          await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+          await tx.$executeRawUnsafe(
+            `DELETE FROM ${table} WHERE organization_id LIKE ANY($1::text[])`,
+            orgs,
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+        }
+      });
+    } finally {
+      await historyOwner.$disconnect();
+    }
+
     for (const table of [
       'settlement',
       'commission',
       'reward',
       'reward_balance',
-      // Before its intent: the task's foreign key is ON DELETE RESTRICT.
+      // Children first: each foreign key here is ON DELETE RESTRICT.
       'payment_reconciliation_task',
       'payment_intent',
       'wallet_hold',

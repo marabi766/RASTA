@@ -21,7 +21,9 @@ import { databaseUrl } from './helpers';
  * (`trg_journal_has_entries`, `trg_ledger_entry_open_journal`), a wallet's
  * balances agree (`ck_wallet_balances`), and the reward evaluation cutover only
  * moves forward (`reward_evaluation_cutover_forward_only`,
- * `reward_evaluation_cutover_no_truncate`).
+ * `reward_evaluation_cutover_no_truncate`), and the payment reconciliation
+ * operator path's history is append-only (`trg_payment_resolution_append_only`,
+ * `trg_payment_requeue_append_only`; ADR-064 § 6, D-046).
  *
  * Until D-045 the service connected as the owner of these tables, which could
  * DISABLE, DROP or ALTER each guard away — and so could any SQL that reached
@@ -42,6 +44,9 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   ['journal', 'trg_journal_has_entries'],
   ['reward_evaluation_cutover', 'reward_evaluation_cutover_forward_only'],
   ['reward_evaluation_cutover', 'reward_evaluation_cutover_no_truncate'],
+  // The operator path's history (ADR-064 § 6): never deleted, decided once.
+  ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
+  ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {

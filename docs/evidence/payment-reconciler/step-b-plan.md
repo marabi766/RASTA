@@ -1,8 +1,8 @@
 # Durable payment reconciler, step B — STEP 0 plan
 
 > Branch `fix/economic-payment-reconciler-b`, cut from `fix/economic-refund-safety` @ `3a0a5d0` (#143, B0, queued). I will
-> merge `main` in once #143 lands and never rebase. ADR-064; D-035; Q-81; Q-82. **B1 (the task table) and B2 (the reconciler) are
-> implemented; B3 is not.** Only `MockPaymentProvider` exists; no bank connection is claimed (ADR-024).
+> merge `main` in once #143 lands and never rebase. ADR-064; D-035; Q-81; Q-82. **B1 (the task table), B2 (the reconciler) and B3
+> (the operator path with four-eyes) are implemented** — B3 as built is § 2.5's note. Only `MockPaymentProvider` exists; no bank connection is claimed (ADR-024).
 
 ## 0. Rulings (PM, on this plan)
 
@@ -301,6 +301,41 @@ The endpoint refuses `resolve` when:
 
 When this lands, `payment-refund-stuck.md` §4-2 (the manual `UPDATE` of the marker) is **deleted**. The runbook then
 points at this endpoint and the escalation alert.
+
+**As built (B3, branch `fix/economic-payment-reconciler-b3`).** Where it differs from the plan above, this wins.
+
+- **Routes, not one discriminated body:** `GET /v1/payment-intents/{id}/reconciliation` (the task and every resolution),
+  `POST …/reconciliation/requeue`, `POST …/reconciliation/resolutions` (propose),
+  `POST …/reconciliation/resolutions/{resolutionId}/approve` and `…/reject`. Every write takes an `Idempotency-Key`; the
+  `@Roles` ceiling is `SYSTEM_ADMIN`, `UNION_ADMIN`, narrowed by `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES`; a
+  service caller is refused.
+- **Four-eyes (Q-B3):** a proposal is a row in `payment_reconciliation_resolution` (`PENDING_APPROVAL`; at most one per
+  task — `ux_payment_resolution_pending`) and moves nothing. The approver must be neither the proposer nor the intent's
+  `created_by`; the proposer may not be the creator either. The table itself refuses `decided_by = proposed_by` under
+  four-eyes and free-text evidence (`ck_payment_resolution_four_eyes`, `ck_payment_resolution_evidence`). With four-eyes
+  configured off (development and test only), a proposal is approved at once by its proposer, recorded `fourEyes: false`.
+- **Only approval runs the apply function** — `PaymentReconciler.apply`, the sweeper's own, with the operator's outcome
+  as an authoritative answer (the evidence and the second person vouch for it). It takes no lease of its own: it locks the
+  open task and requires that no sweeper holds it (409 otherwise). A verdict that moves nothing (a frozen wallet → 422,
+  anything else → 409) rolls the approval back and leaves the resolution pending; an approval of "nothing to reconcile"
+  is refused, not recorded.
+- **Events:** the approval's `PAYMENT_RECONCILIATION_RESOLVED` names `resolvedBy` = the approver plus `proposedBy`,
+  `approvedBy`, `evidenceReference`, `resolutionId`, `fourEyes`. Requeue, proposal and rejection are a new
+  `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`NEVER_AUTO_REPLAY`). The evidence reference is on the resolution row, not
+  the task.
+- **Requeue** resets attempts and makes the task due now; refused while a sweeper holds it or a resolution is pending.
+  Its reason is kept in an append-only `payment_reconciliation_requeue` row; the event carries `requeueId`, never the text.
+- **Codex on #175 (round 1):** a resolver must carry `rasta_uid` (403 otherwise), and separation compares the token's
+  issuer and subject as well as the user id, stored on the proposal and the decision. Authorization runs before an
+  idempotent replay, and the key is bound to its sender. `down.sql` refuses while any resolution or requeue row exists,
+  and both tables are append-only at the database.
+- **Codex on #175 (round 2):** the payment intent records its creator's issuer and subject (`created_by_issuer`,
+  `created_by_subject`); a decider matching them is refused, and an intent without them is never approved
+  (`422 CREATOR_IDENTITY_UNKNOWN`, fail closed). Proposals are taken only for an `ESCALATED` task no sweeper holds.
+  audit-service keeps envelope fields only, so the full record — second actor, evidence — is economic's append-only
+  resolution history; a versioned audit projection is a follow-up (D-046).
+- **Not built:** "contradicts a provider answer already on record" — no definitive provider answer is stored (one would
+  have resolved the task), so there is nothing to contradict.
 
 ### 2.6 Configuration, metrics, alerts
 

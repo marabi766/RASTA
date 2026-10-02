@@ -15,14 +15,23 @@ import {
   costCategoryLabel,
   maintenanceRequestStatusLabel,
   maintenanceTypeLabel,
+  partSourceLabel,
   repairOrderStatusLabel,
   severityLabel,
 } from '@/lib/labels';
-import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
+import {
+  PERSIAN_DECIMAL_SEPARATOR,
+  formatJalaliDateLong,
+  formatMoney,
+  toPersianDigits,
+} from '@/lib/format';
 import type { RequestCommandNotice } from '@/lib/maintenance-fields';
+import type { RepairCommandName, RepairCommandNotice } from '@/lib/repair-order-fields';
+import { repairCommandsFor } from '@/lib/repair-order-fields';
 import type {
   MaintenanceRequestDetail,
   ReadResult,
+  RepairOrderDetail,
   RepairOrderSummary,
 } from '@/server/maintenance';
 
@@ -56,7 +65,7 @@ export interface RequestDetailScreenProps {
    * request (`server/flash.ts`), never from a bare query value. Not rendered at
    * all when the read failed.
    */
-  readonly notice?: 'created' | RequestCommandNotice;
+  readonly notice?: 'created' | RequestCommandNotice | RepairCommandNotice;
   /**
    * The three commands, present only for a person the page found allowed to
    * use them (`canManageMaintenance`) and only when the request read.
@@ -66,10 +75,24 @@ export interface RequestDetailScreenProps {
     readonly approve: ReactNode;
     readonly cancel: ReactNode;
   };
+  /**
+   * What each repair order has recorded under it, by order id: `null` for an
+   * order whose lines could not be read, which then shows the summary alone and
+   * says so — the page does not fail for the lines.
+   */
+  readonly orderDetails?: Readonly<Record<string, RepairOrderDetail | null>>;
+  /**
+   * The repair-order commands, by order id, built by the page for the orders it
+   * minted baselines for. Which of them an order's status leaves open is
+   * decided here (`repairCommandsFor`); the service decides again.
+   */
+  readonly orderForms?: Readonly<Record<string, OrderForms>>;
 }
 
+export type OrderForms = Partial<Record<RepairCommandName, ReactNode>>;
+
 const NOTICES: Record<
-  'created' | RequestCommandNotice,
+  'created' | RequestCommandNotice | RepairCommandNotice,
   { tone: 'success' | 'warning'; text: string }
 > = {
   created: { tone: 'success', text: 'درخواست ثبت شد. کار از همین صفحه دنبال می‌شود.' },
@@ -80,6 +103,22 @@ const NOTICES: Record<
     tone: 'warning',
     text: 'هزینه از زمان نمایش تغییر کرده بود، پس تأیید انجام نشد. مبلغ تازه را بررسی کنید و اگر درست بود دوباره تأیید کنید.',
   },
+  repairStarted: { tone: 'success', text: 'تعمیر آغاز شد. ماشین از سرویس خارج می‌شود.' },
+  repairCompleted: {
+    tone: 'success',
+    text: 'تعمیر تکمیل شد و ماشین به سرویس بازمی‌گردد. درخواست در انتظار تأیید هزینه است.',
+  },
+  repairCancelled: {
+    tone: 'success',
+    text: 'ارجاع پس گرفته شد. درخواست باز است و می‌توان آن را به تعمیرگاه دیگری ارجاع داد.',
+  },
+  repairCostChanged: {
+    tone: 'warning',
+    text: 'هزینهٔ ارجاع از زمان نمایش تغییر کرده بود، پس تعمیر تکمیل نشد. مبلغ تازه را بررسی کنید و اگر درست بود دوباره تکمیل کنید.',
+  },
+  partRecorded: { tone: 'success', text: 'قطعه ثبت شد.' },
+  labourRecorded: { tone: 'success', text: 'اجرت ثبت شد.' },
+  costRecorded: { tone: 'success', text: 'هزینه ثبت شد.' },
 };
 
 /** Work that can still be referred on: open, and not already with a workshop. */
@@ -122,7 +161,94 @@ function workflowHistory(request: MaintenanceRequestDetail): Milestone[] {
   return milestones;
 }
 
-function RepairOrderCard({ order }: { order: RepairOrderSummary }) {
+/** `12.5` as «۱۲٫۵»: the service's decimal, in the reader's digits and mark. */
+function formatQuantity(latin: string): string {
+  return toPersianDigits(latin).replace('.', PERSIAN_DECIMAL_SEPARATOR);
+}
+
+function RecordedLines({ detail }: { detail: RepairOrderDetail }) {
+  // A line written by recording a part or labour is listed with that work; what
+  // is left is what a person entered directly.
+  const direct = detail.costs.filter((cost) => !cost.partUsageId && !cost.laborEntryId);
+  if (detail.parts.length === 0 && detail.labour.length === 0 && direct.length === 0) {
+    return (
+      <p className="mt-4 text-sm text-content-muted">هنوز قطعه، اجرت یا هزینه‌ای ثبت نشده است.</p>
+    );
+  }
+
+  return (
+    <div className="mt-4 flex flex-col gap-4">
+      {detail.parts.length > 0 ? (
+        <div>
+          <h3 className="text-sm text-content-subtle">قطعه‌ها</h3>
+          <ul className="mt-2 flex flex-col gap-2 text-sm">
+            {detail.parts.map((part) => (
+              <li key={part.id} className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-content">
+                  {part.partName} — {formatQuantity(part.quantity)} {part.unit} ×{' '}
+                  {formatMoney(part.unitCostMinor)}
+                  <span className="text-content-muted"> ({partSourceLabel(part.source)})</span>
+                </span>
+                <span className="text-content">{formatMoney(part.totalCostMinor)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {detail.labour.length > 0 ? (
+        <div>
+          <h3 className="text-sm text-content-subtle">اجرت</h3>
+          <ul className="mt-2 flex flex-col gap-2 text-sm">
+            {detail.labour.map((entry) => (
+              <li key={entry.id} className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-content">
+                  {entry.description}
+                  {entry.technician ? ` — ${entry.technician}` : ''} — {formatQuantity(entry.hours)}{' '}
+                  ساعت × {formatMoney(entry.hourlyRateMinor)}
+                </span>
+                <span className="text-content">{formatMoney(entry.totalCostMinor)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {direct.length > 0 ? (
+        <div>
+          <h3 className="text-sm text-content-subtle">هزینه‌های دیگر</h3>
+          <ul className="mt-2 flex flex-col gap-2 text-sm">
+            {direct.map((cost) => (
+              <li key={cost.id} className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-content">
+                  {costCategoryLabel(cost.category)}
+                  {cost.description ? ` — ${cost.description}` : ''}
+                </span>
+                <span className="text-content">{formatMoney(cost.amountMinor)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RepairOrderCard({
+  order,
+  detail,
+  forms,
+}: {
+  order: RepairOrderSummary;
+  /** `undefined` when the page did not read it, `null` when it could not. */
+  detail?: RepairOrderDetail | null;
+  forms?: OrderForms;
+}) {
+  const open = repairCommandsFor(order.status);
+  const has = (command: RepairCommandName) => Boolean(forms?.[command]) && open.includes(command);
+  const work = (['start', 'complete'] as const).filter(has);
+  const cost = (['part', 'labour', 'cost'] as const).filter(has);
+
   return (
     <li className="rounded-md border border-border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -158,6 +284,26 @@ function RepairOrderCard({ order }: { order: RepairOrderSummary }) {
       {order.cancellationReason ? (
         <p className="mt-3 text-sm text-content-muted">دلیل لغو: {order.cancellationReason}</p>
       ) : null}
+
+      {detail ? (
+        <RecordedLines detail={detail} />
+      ) : detail === null ? (
+        <p className="mt-4 text-sm text-content-muted">
+          ریز قطعه‌ها و هزینه‌های این ارجاع الان خوانده نشد؛ صفحه را تازه کنید.
+        </p>
+      ) : null}
+
+      {work.length > 0 || cost.length > 0 || has('cancel') ? (
+        <div className="mt-6 flex flex-col gap-4 border-t border-border pt-4">
+          {work.map((command) => (
+            <div key={command}>{forms?.[command]}</div>
+          ))}
+          {cost.map((command) => (
+            <div key={command}>{forms?.[command]}</div>
+          ))}
+          {has('cancel') ? <div>{forms?.cancel}</div> : null}
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -167,6 +313,8 @@ export function RequestDetailScreen({
   requestId,
   notice,
   commandForms,
+  orderDetails,
+  orderForms,
 }: RequestDetailScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
@@ -323,7 +471,12 @@ export function RequestDetailScreen({
         ) : (
           <ul className="flex flex-col gap-4">
             {request.repairOrders.map((order) => (
-              <RepairOrderCard key={order.id} order={order} />
+              <RepairOrderCard
+                key={order.id}
+                order={order}
+                detail={orderDetails?.[order.id]}
+                forms={orderForms?.[order.id]}
+              />
             ))}
           </ul>
         )}

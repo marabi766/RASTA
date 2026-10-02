@@ -7,6 +7,7 @@ import type {
   MaintenanceRequestDetail,
   MaintenanceRequestPage,
   ReadResult,
+  RepairOrderDetail,
 } from '@/server/maintenance';
 
 /**
@@ -415,6 +416,221 @@ describe('the commands on a request', () => {
         requestId="MREQ_1"
         commandForms={forms}
         notice="costChanged"
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the repair orders on a request', () => {
+  const ok = (data: MaintenanceRequestDetail): ReadResult<MaintenanceRequestDetail> => ({
+    kind: 'OK',
+    data,
+  });
+
+  const order = (status: string, over: Partial<RepairOrderDetail> = {}) => ({
+    id: 'RPO_1',
+    status,
+    workshopName: 'تعمیرگاه مرکزی',
+    workSummary: null,
+    workPerformed: null,
+    assignedAt: '2026-02-02T08:00:00.000Z',
+    startedAt: null,
+    completedAt: null,
+    cancelledAt: null,
+    cancellationReason: null,
+    partsCostMinor: '700000',
+    labourCostMinor: '1200000',
+    otherCostMinor: '500000',
+    totalCostMinor: '2400000',
+    ...over,
+  });
+
+  const detail = (status: string): RepairOrderDetail => ({
+    ...order(status),
+    parts: [
+      {
+        id: 'PRT_1',
+        partName: 'فیلتر روغن',
+        partReference: 'F-12',
+        quantity: '2.5',
+        unit: 'عدد',
+        unitCostMinor: '280000',
+        totalCostMinor: '700000',
+        source: 'INVENTORY',
+        recordedAt: '2026-02-03T08:00:00.000Z',
+      },
+    ],
+    labour: [
+      {
+        id: 'LAB_1',
+        description: 'تعویض شیلنگ',
+        technician: 'استاد رضا',
+        hours: '1.5',
+        hourlyRateMinor: '800000',
+        totalCostMinor: '1200000',
+        performedAt: '2026-02-03T09:00:00.000Z',
+      },
+    ],
+    costs: [
+      {
+        id: 'CST_1',
+        category: 'PART',
+        amountMinor: '700000',
+        description: 'فیلتر روغن × 2.5 عدد',
+        partUsageId: 'PRT_1',
+        laborEntryId: null,
+        recordedAt: '2026-02-03T08:00:00.000Z',
+      },
+      {
+        id: 'CST_2',
+        category: 'LABOUR',
+        amountMinor: '1200000',
+        description: 'تعویض شیلنگ',
+        partUsageId: null,
+        laborEntryId: 'LAB_1',
+        recordedAt: '2026-02-03T09:00:00.000Z',
+      },
+      {
+        id: 'CST_3',
+        category: 'SERVICE',
+        amountMinor: '500000',
+        description: 'ایاب و ذهاب',
+        partUsageId: null,
+        laborEntryId: null,
+        recordedAt: '2026-02-03T10:00:00.000Z',
+      },
+    ],
+  });
+
+  const request = (status: string, orderStatus: string): MaintenanceRequestDetail => ({
+    ...DETAIL,
+    status,
+    repairOrders: [order(orderStatus)],
+  });
+
+  const COMMANDS = ['start', 'complete', 'cancel', 'part', 'labour', 'cost'] as const;
+  const forms = Object.fromEntries(
+    COMMANDS.map((command) => [command, <div key={command}>فرم {command} نمونه</div>]),
+  );
+
+  const offered = (orderStatus: string) => {
+    const { queryByText } = render(
+      <RequestDetailScreen
+        result={ok(request('IN_PROGRESS', orderStatus))}
+        requestId="MREQ_1"
+        orderForms={{ RPO_1: forms }}
+      />,
+    );
+    return COMMANDS.filter((command) => queryByText(`فرم ${command} نمونه`) !== null);
+  };
+
+  it.each([
+    ['OPEN', ['start', 'cancel', 'part', 'labour', 'cost']],
+    ['IN_PROGRESS', ['complete', 'cancel', 'part', 'labour', 'cost']],
+    ['COMPLETED', []],
+    ['CANCELLED', []],
+  ] as const)(
+    'offers, for an order that is %s, exactly what its status leaves open',
+    (status, expected) => {
+      expect(offered(status)).toEqual(
+        [...expected].sort((a, b) => COMMANDS.indexOf(a) - COMMANDS.indexOf(b)),
+      );
+    },
+  );
+
+  it('offers no order command to a person the page did not hand the forms to', () => {
+    const { queryByText } = render(
+      <RequestDetailScreen result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))} requestId="MREQ_1" />,
+    );
+    for (const command of COMMANDS) expect(queryByText(`فرم ${command} نمونه`)).toBeNull();
+  });
+
+  it('puts the forms on the order they were built for, and on no other', () => {
+    const { queryByText } = render(
+      <RequestDetailScreen
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+        orderForms={{ RPO_OTHER: forms }}
+      />,
+    );
+    expect(queryByText('فرم complete نمونه')).toBeNull();
+  });
+
+  it('lists the parts, the labour and the direct charges, once each, with every figure in rials', () => {
+    const { getByText, getAllByText, queryAllByText } = render(
+      <RequestDetailScreen
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+        orderDetails={{ RPO_1: detail('IN_PROGRESS') }}
+      />,
+    );
+    expect(getByText(/فیلتر روغن — ۲٫۵ عدد/)).toBeInTheDocument();
+    expect(getByText(/انبار/)).toBeInTheDocument();
+    expect(getByText(/تعویض شیلنگ — استاد رضا — ۱٫۵ ساعت/)).toBeInTheDocument();
+    expect(getByText(/ایاب و ذهاب/)).toBeInTheDocument();
+    // The part and labour cost lines are the lines above, not charges of their own.
+    expect(queryAllByText(/تعویض شیلنگ/)).toHaveLength(1);
+    expect(getAllByText('۵۰۰٬۰۰۰ ریال').length).toBeGreaterThan(0);
+  });
+
+  it('says so when nothing has been recorded yet', () => {
+    const empty: RepairOrderDetail = { ...detail('OPEN'), parts: [], labour: [], costs: [] };
+    const { getByText } = render(
+      <RequestDetailScreen
+        result={ok(request('OPEN', 'OPEN'))}
+        requestId="MREQ_1"
+        orderDetails={{ RPO_1: empty }}
+      />,
+    );
+    expect(getByText('هنوز قطعه، اجرت یا هزینه‌ای ثبت نشده است.')).toBeInTheDocument();
+  });
+
+  it('keeps the card, and says the lines could not be read, when they could not — the commands stay', () => {
+    const { getByText, queryByText } = render(
+      <RequestDetailScreen
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+        orderDetails={{ RPO_1: null }}
+        orderForms={{ RPO_1: forms }}
+      />,
+    );
+    expect(getByText(/خوانده نشد؛ صفحه را تازه کنید/)).toBeInTheDocument();
+    expect(getByText('تعمیرگاه مرکزی')).toBeInTheDocument();
+    expect(queryByText('فرم complete نمونه')).not.toBeNull();
+  });
+
+  it('does not claim lines it was not given: a page that read none shows no list and no apology', () => {
+    const { queryByText } = render(
+      <RequestDetailScreen result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))} requestId="MREQ_1" />,
+    );
+    expect(queryByText(/خوانده نشد/)).toBeNull();
+    expect(queryByText(/هنوز قطعه، اجرت یا هزینه‌ای ثبت نشده/)).toBeNull();
+  });
+
+  it.each([
+    ['repairStarted', 'تعمیر آغاز شد', 'status'],
+    ['repairCompleted', 'تعمیر تکمیل شد و ماشین به سرویس بازمی‌گردد', 'status'],
+    ['repairCancelled', 'ارجاع پس گرفته شد', 'status'],
+    ['repairCostChanged', 'هزینهٔ ارجاع از زمان نمایش تغییر کرده بود', 'alert'],
+    ['partRecorded', 'قطعه ثبت شد', 'status'],
+    ['labourRecorded', 'اجرت ثبت شد', 'status'],
+    ['costRecorded', 'هزینه ثبت شد', 'status'],
+  ] as const)('says what %s did, as a %s', (notice, words, role) => {
+    const { getByText } = render(
+      <RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" notice={notice} />,
+    );
+    expect(getByText(new RegExp(words)).closest(`[role="${role}"]`)).not.toBeNull();
+  });
+
+  it('has no accessibility violations with lines, commands and a notice', async () => {
+    const { container } = render(
+      <RequestDetailScreen
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+        orderDetails={{ RPO_1: detail('IN_PROGRESS') }}
+        orderForms={{ RPO_1: forms }}
+        notice="repairCostChanged"
       />,
     );
     expect(await axe(container)).toHaveNoViolations();

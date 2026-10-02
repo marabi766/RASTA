@@ -104,6 +104,27 @@ export const assetEnvSchema = baseEnvSchema
      * owners accept 30 to 3600.
      */
     ASSET_TRANSFER_FENCE_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(600),
+
+    /**
+     * How long a **completed** `POST /v1/assets` under an `Idempotency-Key` is
+     * remembered (#169, docs/06 § 6.8). Within it a retry by the same caller
+     * with the same body replays the original 201; after it the key is free.
+     */
+    ASSET_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+
+    /**
+     * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
+     * the lease a registration holds while it works, separate from the hours a
+     * completed response is kept (above). A process that dies after its claim
+     * committed and before its asset did leaves the claim behind; past the
+     * lease a retry takes it over under a new fencing token, and the first
+     * holder's late work is refused by that token.
+     *
+     * Floor 30 s: well above the gateway's upstream timeout (3 s by default),
+     * so a request that is merely slow keeps its claim. Ceiling one hour.
+     * Default two minutes, as maintenance-service's (#187).
+     */
+    ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
   });
 
 export type AssetEnv = z.infer<typeof assetEnvSchema>;

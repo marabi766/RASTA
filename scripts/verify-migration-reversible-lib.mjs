@@ -257,14 +257,27 @@ INSERT INTO "payment_intent" (
  * then would leave a held refund that nothing ever looks at again (ADR-064
  * step B1). The whole-chain reversal below runs on an empty table and sees
  * neither.
+ *
+ * Every later migration that hangs off the task table is rolled back first,
+ * newest first (a `runDownScript` list runs in order), and re-applied with it:
+ * B2's heal-window index and B3's resolution table. Rolling back the task
+ * table alone dropped B2's index with it and the re-deploy never put it back
+ * (the ledger still listed B2) — caught once B3's snapshot expected it. The
+ * probe also shows B3's down script refusing while ANY resolution exists — a
+ * decided one included, since those rows are the only record of the evidence
+ * (Codex on #175, HIGH 2) — and the table refusing to delete one.
  */
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label: 'intents B0 left marked, and the open tasks they get',
   steps: [
     {
-      label: 'down: the rollback succeeds while no task is open',
-      runDownScript: true,
+      label: 'down: the rollback succeeds while no task is open (the resolutions first)',
+      runDownScript: [
+        '20261001100000_payment_reconciliation_resolution',
+        '20260930210000_payment_intent_unfinished_refund_index',
+        '20260930200000_payment_reconciliation_task',
+      ],
     },
     {
       label: 'down: the schema before the queue holds marked intents',
@@ -316,8 +329,88 @@ export const ECONOMIC_DATA_ROLLBACK = {
       mustFail: 'Unique constraint failed on the fields: (`payment_intent_id`)',
     },
     {
+      label: 'up again: a DECIDED resolution on the backfilled task (history, not pending)',
+      sql: `INSERT INTO "payment_reconciliation_resolution"
+              ("id", "organization_id", "payment_intent_id", "task_id", "status", "provider_outcome",
+               "evidence_reference", "reason", "four_eyes", "proposed_by", "proposed_by_issuer",
+               "proposed_by_subject", "proposed_at", "decided_by", "decided_by_issuer",
+               "decided_by_subject", "decided_at", "decision_reason", "correlation_id",
+               "created_at", "updated_at")
+            VALUES ('PRR_MIGCHECK', 'ORG-MIGCHECK', 'PAY_MIGCHECK_REFUND', 'PRT_PAY_MIGCHECK_REFUND',
+                    'REJECTED', 'DECLINED', 'TICKET-MIGCHECK', 'a migration probe', true,
+                    'USR-MIGCHECK-A', 'https://idp.migcheck', 'sub-a', NOW(),
+                    'USR-MIGCHECK-B', 'https://idp.migcheck', 'sub-b', NOW(), 'checked',
+                    'COR-MIGCHECK', NOW(), NOW());`,
+    },
+    {
+      label: 'up again: the rollback refuses while any resolution exists, decided or not',
+      runDownScript: ['20261001100000_payment_reconciliation_resolution'],
+      mustFail: 'refusing to drop its history',
+    },
+    {
+      label: 'up again: a resolution is never deleted',
+      sql: `DELETE FROM "payment_reconciliation_resolution" WHERE id = 'PRR_MIGCHECK';`,
+      mustFail: 'append-only',
+    },
+    {
+      // Codex round 3 on #175: newest-first, the creator-identity rollbacks
+      // run before B3's. Each refuses first, so the sequence stops before
+      // changing anything — never a half-rolled-back schema.
+      label:
+        'up again: the newest-first rollback refuses at its first script while operator history exists',
+      runDownScript: [
+        '20261002100100_payment_intent_creator_identity_validate',
+        '20261002100000_payment_intent_creator_identity',
+        '20261001100000_payment_reconciliation_resolution',
+      ],
+      mustFail: 'refusing to roll back beneath it',
+    },
+    {
+      label: 'up again: the creator-identity rollback refuses on its own as well',
+      runDownScript: ['20261002100000_payment_intent_creator_identity'],
+      mustFail: 'refusing to roll back beneath it',
+    },
+    {
+      label:
+        'up again: the schema is intact — creator columns, validated CHECK, both migrations applied',
+      sql: `
+        DO $$
+        DECLARE found INT;
+        BEGIN
+          SELECT count(*) INTO found FROM information_schema.columns
+           WHERE table_schema = current_schema() AND table_name = 'payment_intent'
+             AND column_name IN ('created_by_issuer', 'created_by_subject');
+          IF found <> 2 THEN
+            RAISE EXCEPTION 'the creator columns were dropped (found %)', found;
+          END IF;
+          SELECT count(*) INTO found FROM pg_constraint
+           WHERE conname = 'ck_payment_intent_creator_identity' AND convalidated
+             AND conrelid = 'payment_intent'::regclass;
+          IF found <> 1 THEN
+            RAISE EXCEPTION 'the creator CHECK is no longer validated';
+          END IF;
+          SELECT count(*) INTO found FROM "_prisma_migrations"
+           WHERE migration_name IN ('20261002100000_payment_intent_creator_identity',
+                                    '20261002100100_payment_intent_creator_identity_validate')
+             AND finished_at IS NOT NULL AND rolled_back_at IS NULL;
+          IF found <> 2 THEN
+            RAISE EXCEPTION 'a creator-identity migration left the ledger (found %)', found;
+          END IF;
+          SELECT count(*) INTO found FROM "payment_reconciliation_resolution" WHERE id = 'PRR_MIGCHECK';
+          IF found <> 1 THEN
+            RAISE EXCEPTION 'the operator history is gone';
+          END IF;
+        END
+        $$;`,
+    },
+    {
       label: 'cleanup: the probe rows are removed before the chain reversal',
-      sql: `DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
+      // The append-only trigger is lifted for the probe's own row only, in this
+      // one script; the owner may do that, the service's runtime role may not.
+      sql: `ALTER TABLE "payment_reconciliation_resolution" DISABLE TRIGGER "trg_payment_resolution_append_only";
+            DELETE FROM "payment_reconciliation_resolution" WHERE organization_id = 'ORG-MIGCHECK';
+            ALTER TABLE "payment_reconciliation_resolution" ENABLE TRIGGER "trg_payment_resolution_append_only";
+            DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
             DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
     },
   ],
@@ -637,18 +730,35 @@ export const EXPECTED = {
       'transaction',
       'settlement',
       'payment_reconciliation_task',
+      'payment_reconciliation_resolution',
+      'payment_reconciliation_requeue',
     ],
-    triggers: ['trg_ledger_entry_immutable', 'trg_journal_immutable', 'trg_journal_balanced'],
+    triggers: [
+      'trg_ledger_entry_immutable',
+      'trg_journal_immutable',
+      'trg_journal_balanced',
+      // The operator path's history (ADR-064 § 6): never deleted, decided once.
+      'trg_payment_resolution_append_only',
+      'trg_payment_requeue_append_only',
+    ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
       'ck_wallet_balances',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
+      // Separation of duties on an operator resolution (ADR-064 § 6).
+      'ck_payment_resolution_four_eyes',
+      // The creator's stable identity: both or neither (ADR-064 § 6).
+      'ck_payment_intent_creator_identity',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the
     // double-settlement race it closes, silently.
-    indexes: ['ux_transaction_source_fact', 'ux_payment_reconciliation_open'],
+    indexes: [
+      'ux_transaction_source_fact',
+      'ux_payment_reconciliation_open',
+      'ux_payment_resolution_pending',
+    ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
   /**
@@ -1219,6 +1329,10 @@ export const EXPECTED = {
       'ck_claim_decided_iff_decision_recorded',
       'ck_claim_rejected_has_no_approved_amount',
       'ck_claim_settled_iff_settlement_recorded',
+      'ck_idempotency_claim_token_not_blank',
+      'ck_idempotency_completed_has_response',
+      'ck_idempotency_key_not_blank',
+      'ck_idempotency_state',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

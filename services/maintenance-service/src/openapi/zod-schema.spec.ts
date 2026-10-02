@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
 import {
   approveRequestSchema,
+  completeRepairSchema,
   createRequestSchema,
   createScheduleSchema,
   listRequestsQuerySchema,
@@ -52,6 +53,19 @@ describe('zod to JSON Schema', () => {
       // refused, not that it is merely allowed to omit it.
       const s = toJsonSchema(approveRequestSchema);
       expect(s.required).toEqual(['expectedTotalCostMinor']);
+    });
+
+    it('publishes the completion’s total as optional, and says the portal always sends it', () => {
+      // Optional for a direct API client, unlike the approval's: the contract
+      // must say so rather than leave a reader to guess which commands bind to
+      // a shown figure.
+      const s = toJsonSchema(completeRepairSchema);
+      const total = (s.properties as Record<string, Record<string, unknown>>)
+        .expectedTotalCostMinor;
+      expect(s.required).toEqual(['workPerformed']);
+      expect(total.type).toBe('string');
+      expect(total.description).toMatch(/Optional for API clients and always sent by the portal/);
+      expect(total.description).toMatch(/422/);
     });
 
     it('marks a datetime as a date-time format', () => {

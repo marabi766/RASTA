@@ -41,6 +41,7 @@ export const ECONOMIC_EVENTS = {
   PAYMENT_REFUND_UNRECONCILED: 'PAYMENT_REFUND_UNRECONCILED',
   PAYMENT_RECONCILIATION_ESCALATED: 'PAYMENT_RECONCILIATION_ESCALATED',
   PAYMENT_RECONCILIATION_RESOLVED: 'PAYMENT_RECONCILIATION_RESOLVED',
+  PAYMENT_RECONCILIATION_OPERATOR_ACTION: 'PAYMENT_RECONCILIATION_OPERATOR_ACTION',
   COMMISSION_APPLIED: 'COMMISSION_APPLIED',
   REWARD_GRANTED: 'REWARD_GRANTED',
   REWARD_LEVEL_CHANGED: 'REWARD_LEVEL_CHANGED',
@@ -257,6 +258,14 @@ const unfinishedRefundMarker = z.enum([
 const code = z.string().regex(/^[A-Z][A-Z_]{0,63}$/);
 
 /**
+ * A reference to an operator's evidence — a ticket or a document id — never
+ * free text (ADR-064 step B3, Q-82). The table's `ck_payment_resolution_evidence`
+ * is the same pattern; the request DTO validates with it too.
+ */
+export const EVIDENCE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/;
+const evidenceReference = z.string().regex(EVIDENCE_REFERENCE_PATTERN);
+
+/**
  * The reconciler gave up on its own and handed an unfinished refund to a
  * person (ADR-064 step B2).
  *
@@ -314,6 +323,43 @@ export const paymentReconciliationResolvedPayload = z.object({
   provider: z.string(),
   simulated: z.boolean(),
   resolvedAt: z.string(),
+  // An operator resolution (step B3) also names both actors and the evidence:
+  // `resolvedBy` is then the approver.
+  resolutionId: z.string().optional(),
+  proposedBy: z.string().min(1).optional(),
+  approvedBy: z.string().min(1).optional(),
+  evidenceReference: evidenceReference.optional(),
+  fourEyes: z.boolean().optional(),
+});
+
+/**
+ * An operator acted on a payment reconciliation without moving money
+ * (ADR-064 § 6, step B3): `REQUEUED` an escalated task, `PROPOSED` a
+ * resolution for a second resolver's approval, or `REJECTED` one. An approval
+ * is `PAYMENT_RECONCILIATION_RESOLVED`. audit-service keeps it as the record
+ * of who did what on which evidence. Codes, actors and the pattern-checked
+ * evidence reference only — the free-text reason stays in this service.
+ */
+export const paymentReconciliationOperatorActionPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  kind: reconciliationKind,
+  action: z.enum(['REQUEUED', 'PROPOSED', 'REJECTED']),
+  actor: z.string().min(1),
+  /** For `REQUEUED`: the requeue row that keeps the reason (never on the event). */
+  requeueId: z.string().nullable(),
+  resolutionId: z.string().nullable(),
+  providerOutcome: z.enum(['REFUNDED', 'DECLINED', 'NOT_REACHED']).nullable(),
+  evidenceReference: evidenceReference.nullable(),
+  /** For `REJECTED`: who proposed what was rejected. */
+  proposedBy: z.string().min(1).nullable(),
+  fourEyes: z.boolean(),
+  amountMinor,
+  currency,
+  provider: z.string(),
+  simulated: z.boolean(),
+  occurredAt: z.string(),
 });
 
 // ---------------------------------------------------------------------------
@@ -595,6 +641,8 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED]: paymentRefundUnreconciledPayload,
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_ESCALATED]: paymentReconciliationEscalatedPayload,
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_RESOLVED]: paymentReconciliationResolvedPayload,
+  [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_OPERATOR_ACTION]:
+    paymentReconciliationOperatorActionPayload,
   [ECONOMIC_EVENTS.COMMISSION_APPLIED]: commissionAppliedPayload,
   [ECONOMIC_EVENTS.REWARD_GRANTED]: rewardGrantedPayload,
   [ECONOMIC_EVENTS.REWARD_LEVEL_CHANGED]: rewardLevelChangedPayload,

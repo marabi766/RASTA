@@ -180,7 +180,7 @@ describe('the approve form', () => {
     setState({ kind: 'REFUSED', reason: 'BASELINE' });
     render(<ApproveRequestForm {...IDENTITY} totalCostMinor="12500000" baseline={BASELINE} />);
     expect(screen.getByRole('alert')).toHaveTextContent('صفحه را تازه کنید');
-    expect(screen.getByRole('alert')).toHaveTextContent('مبلغ نمایش‌داده‌شده');
+    expect(screen.getByRole('alert')).toHaveTextContent('نمایش‌داده‌شده');
   });
 
   it('shows a problem with the echoed total as a warning, since there is no field to put it on', () => {

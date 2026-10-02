@@ -176,6 +176,23 @@ describe('routing table integrity', () => {
   });
 });
 
+describe('repair orders', () => {
+  it('require an idempotency key on writes, and only on writes', () => {
+    // A cost form posted twice must be one cost line (docs/06 § 6.8). The
+    // requirement applies to unsafe methods only, so reading an order needs none.
+    expect(resolveRoute('/repair-orders/RPO_1/costs')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/repair-orders/RPO_1/complete')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/repair-orders/RPO_1')?.service).toBe('maintenance');
+  });
+
+  it('leave the request-level maintenance prefixes as they were', () => {
+    // Creating a request honours a key when one is sent (#171) but does not
+    // demand one; the portal sends it either way.
+    expect(resolveRoute('/maintenance-requests')?.requiresIdempotencyKey).toBeUndefined();
+    expect(resolveRoute('/maintenance-schedules')?.requiresIdempotencyKey).toBeUndefined();
+  });
+});
+
 describe('resolveRoute', () => {
   it.each([
     ['/users/me', 'identity'],

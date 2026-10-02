@@ -108,6 +108,33 @@ export function optionalIdempotencyKey(value: string | undefined): string | unde
 }
 
 /**
+ * A **required** `Idempotency-Key`, trimmed — for the writes that add money to a
+ * bill or close one, where a retried post must be the same post. Missing or
+ * empty is `400 VALIDATION_FAILED` with code `required`; present but out of
+ * bounds is the same refusal with code `invalid`, exactly as for an optional key.
+ *
+ * The gateway demands the header on these routes too; the service does not
+ * assume it was only reached through the gateway (ADR-020), because the
+ * protection against a double post must not depend on which door a request
+ * used.
+ */
+export function requiredIdempotencyKey(value: string | undefined): string {
+  if (value === undefined || value.trim() === '') {
+    throw RastaError.validation(
+      [
+        {
+          path: 'Idempotency-Key',
+          code: 'required',
+          message: 'This endpoint requires an Idempotency-Key header',
+        },
+      ],
+      'Idempotency-Key is required',
+    );
+  }
+  return optionalIdempotencyKey(value) as string;
+}
+
+/**
  * Idempotent creation of maintenance requests (docs/06 § 6.8, #157) — the
  * shape marketplace-service uses since #147, in this service's own copy
  * (services share no source, A-02).
@@ -150,6 +177,18 @@ export function optionalIdempotencyKey(value: string | undefined): string | unde
  *
  * Any failure of the work — its own, or the claim being lost — releases the
  * claim, but only this claim's own in-flight row, never a successor's.
+ *
+ * ## A claim is a lease, not a lock for a day
+ *
+ * A process can die after its claim committed and before the work did. So a
+ * claim in flight lives `MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS` (two
+ * minutes by default), and only a **completed** response lives
+ * `MAINTENANCE_IDEMPOTENCY_TTL_HOURS`. Past its lease an abandoned claim is
+ * removed by the next retry, which takes the key under a **new token**: the old
+ * holder, if it is merely slow rather than dead, can then neither pass `hold`
+ * nor store a response, because both match on the token it no longer has — and
+ * a claim whose work already holds the row's lock cannot be taken from under
+ * it, because the removal waits for that lock and then finds the response.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -157,7 +196,11 @@ export class IdempotencyStore {
 
   constructor(
     private readonly prisma: PrismaService,
-    @Inject(ENV) private readonly env: Pick<MaintenanceEnv, 'MAINTENANCE_IDEMPOTENCY_TTL_HOURS'>,
+    @Inject(ENV)
+    private readonly env: Pick<
+      MaintenanceEnv,
+      'MAINTENANCE_IDEMPOTENCY_TTL_HOURS' | 'MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'
+    >,
   ) {}
 
   /**
@@ -231,7 +274,8 @@ export class IdempotencyStore {
    * {@link ClaimFence.complete}: the response for replay, on the row `hold`
    * locked, in the work's own transaction. The key lives
    * `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` from now — from the response, not the
-   * claim — so a retry that waited on the lock finds it live and replays it.
+   * claim, which only ever held a lease — so a retry that waited on the lock
+   * finds it live and replays it.
    */
   async storeResponse(
     tx: ExtendedPrismaClient,
@@ -255,8 +299,18 @@ export class IdempotencyStore {
     if (count !== 1) throw claimLost(endpoint);
   }
 
+  /** When a **completed** response stops being replayed. */
   private expiry(from: Date): Date {
     return new Date(from.getTime() + this.env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000);
+  }
+
+  /**
+   * When a claim still **in flight** may be taken over: a short lease, not a
+   * response's lifetime. A request that died holding one is retried, under a
+   * new token, after this — not after a day.
+   */
+  private lease(from: Date): Date {
+    return new Date(from.getTime() + this.env.MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS * 1000);
   }
 
   /** SHA-256 over the canonical request and the caller who sent it. */
@@ -301,7 +355,8 @@ export class IdempotencyStore {
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
     const now = new Date();
-    const expiresAt = this.expiry(now);
+    // The lease, not the response's lifetime: `storeResponse` moves it to that.
+    const expiresAt = this.lease(now);
 
     const token = randomUUID();
     try {

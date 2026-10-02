@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  EnvValidationError,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
@@ -129,6 +130,31 @@ export const economicEnvSchema = baseEnvSchema
      * an unknown outcome, which the reconciler resolves by asking. Top-up
      * calls get none until step C can recover them (Codex on #164, HIGH 1).
      */
+    /**
+     * Who may requeue, propose, approve or reject the resolution of an
+     * escalated payment (ADR-064 § 6, Q-82). Comma-separated, within the
+     * platform roles only; `SYSTEM_ADMIN` by default. Governance, so it is
+     * configuration and not code (ADR-023).
+     */
+    ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES: z
+      .string()
+      .default('SYSTEM_ADMIN')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((role) => role.trim())
+          .filter((role) => role.length > 0),
+      )
+      .pipe(z.array(z.enum(['SYSTEM_ADMIN', 'UNION_ADMIN'])).min(1)),
+
+    /**
+     * Four-eyes on an operator resolution (ADR-064 § 6, PM ruling Q-B3): a
+     * proposal moves nothing until a second resolver — neither the proposer
+     * nor the intent's creator — approves it. On by default; turning it off is
+     * refused outside development and test (`loadEconomicEnv`).
+     */
+    ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES: booleanEnv(true),
+
     ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS: z.coerce
       .number()
       .int()
@@ -255,7 +281,7 @@ export const economicEnvSchema = baseEnvSchema
 export type EconomicEnv = z.infer<typeof economicEnvSchema>;
 
 export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): EconomicEnv {
-  return loadEnv(economicEnvSchema, {
+  const env = loadEnv(economicEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? 'economic-service',
     PORT: source.PORT ?? source.PORT_ECONOMIC ?? '3112',
@@ -264,6 +290,25 @@ export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): Econom
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'economic-service.main',
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  assertFourEyesOptOut(source, env);
+  return env;
+}
+
+/**
+ * Four-eyes may be off only where nobody's money is real: development and
+ * test (PM ruling Q-B3). Read from `NODE_ENV` as given, as the Kafka plaintext
+ * opt-out is: the schema would default an unset one to `development`, and an
+ * operator who forgot it must not lose the second pair of eyes by accident.
+ */
+function assertFourEyesOptOut(source: NodeJS.ProcessEnv, env: EconomicEnv): void {
+  if (env.ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES) return;
+  if (source.NODE_ENV === 'development' || source.NODE_ENV === 'test') return;
+  throw new EnvValidationError([
+    {
+      path: 'ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES',
+      message: 'may be false only when NODE_ENV is development or test',
+    },
+  ]);
 }
 
 export function corsOrigins(env: EconomicEnv): string[] {

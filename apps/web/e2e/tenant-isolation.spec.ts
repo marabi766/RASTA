@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
 import { installLiveSession, type LiveSession } from './live-session';
@@ -33,6 +35,31 @@ import { installLiveSession, type LiveSession } from './live-session';
  * therefore **equality**: the answer for another tenant's id is byte for byte
  * the answer for an id that does not exist, not merely "some error".
  */
+
+/**
+ * ORG-DEH-0001's completed repair order (maintenance seed), on its approved
+ * request `MNT-SEED-0001`. ORG-DEH-0002 has no repair order at all.
+ */
+const OWN_REPAIR_ORDER = 'RPO-SEED-0001';
+const MISSING_REPAIR_ORDER = 'RPO-SEED-9999';
+
+/**
+ * A well-formed body for every repair-order write. The service validates a body
+ * before it looks at the order, so a malformed one would answer 400 for *any*
+ * id and hide whether the tenant boundary held — the reason the asset write
+ * above sends a well-formed edit.
+ */
+const REPAIR_ORDER_WRITES: readonly { verb: string; body: Record<string, string> }[] = [
+  { verb: 'start', body: {} },
+  { verb: 'complete', body: { workPerformed: 'تلاش از مستأجر دیگر' } },
+  { verb: 'cancel', body: { reason: 'تلاش از مستأجر دیگر' } },
+  {
+    verb: 'parts',
+    body: { partName: 'فیلتر روغن', quantity: '1', unit: 'عدد', unitCostMinor: '1000' },
+  },
+  { verb: 'labour', body: { description: 'تعویض شیلنگ', hours: '1', hourlyRateMinor: '1000' } },
+  { verb: 'costs', body: { category: 'SERVICE', amountMinor: '1000', description: 'ایاب و ذهاب' } },
+];
 
 const OTHER_TENANT_ASSET = 'AST-SEED-0004';
 const OTHER_TENANT_ASSET_TAG = 'D2-GRD-001';
@@ -204,6 +231,80 @@ test.describe('tenant isolation through the live stack', () => {
       // the other describe below; here, asked with this one, it stays invisible.
       const read = await assetName(request, session.accessToken, OTHER_TENANT_ASSET);
       expect(read.status).toBe(404);
+    });
+  });
+
+  test.describe('repair orders', () => {
+    // Every repair-order write needs an Idempotency-Key at the gateway; each
+    // call here is its own request, so each gets its own.
+    const headers = (token: string) => ({
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      'idempotency-key': `e2e-${randomUUID()}`,
+    });
+
+    test('ORG-DEH-0001’s own completed order is refused by its state, so the 404s below are the tenant boundary', async ({
+      context,
+      request,
+    }) => {
+      const session = await installLiveSession(context, 'orgAdmin');
+
+      const cancel = await request.post(
+        gatewayUrl(`/v1/repair-orders/${OWN_REPAIR_ORDER}/cancel`),
+        {
+          headers: headers(session.accessToken),
+          data: { reason: 'تلاش برای لغو کار تمام‌شده' },
+        },
+      );
+      expect(cancel.status()).toBe(409);
+
+      const cost = await request.post(gatewayUrl(`/v1/repair-orders/${OWN_REPAIR_ORDER}/costs`), {
+        headers: headers(session.accessToken),
+        data: { category: 'SERVICE', amountMinor: '1000', description: 'ایاب و ذهاب' },
+      });
+      expect(cost.status()).toBe(422);
+
+      const read = await request.get(gatewayUrl(`/v1/repair-orders/${OWN_REPAIR_ORDER}`), {
+        headers: headers(session.accessToken),
+      });
+      expect(read.status()).toBe(200);
+      expect(((await read.json()) as { status: string }).status).toBe('COMPLETED');
+    });
+
+    test('ORG-DEH-0002 can neither read nor write it, and is answered as for an order that does not exist', async ({
+      context,
+      request,
+    }) => {
+      const session = await installLiveSession(context, 'orgAdminB');
+
+      const answered = async (id: string, verb: string | null, body: Record<string, string>) => {
+        const response =
+          verb === null
+            ? await request.get(gatewayUrl(`/v1/repair-orders/${id}`), {
+                headers: headers(session.accessToken),
+              })
+            : await request.post(gatewayUrl(`/v1/repair-orders/${id}/${verb}`), {
+                headers: headers(session.accessToken),
+                data: body,
+              });
+        const text = await response.json();
+        return { status: response.status(), code: (text as { code?: string }).code };
+      };
+
+      for (const { verb, body } of [{ verb: null, body: {} }, ...REPAIR_ORDER_WRITES]) {
+        const foreign = await answered(OWN_REPAIR_ORDER, verb, body);
+        const missing = await answered(MISSING_REPAIR_ORDER, verb, body);
+        expect(foreign).toEqual({ status: 404, code: 'NOT_FOUND' });
+        expect(foreign).toEqual(missing);
+      }
+
+      // And nothing moved: asked of the owning tenant's own token.
+      const owner = await installLiveSession(context, 'orgAdmin');
+      const read = await request.get(gatewayUrl(`/v1/repair-orders/${OWN_REPAIR_ORDER}`), {
+        headers: headers(owner.accessToken),
+      });
+      expect(read.status()).toBe(200);
+      expect(((await read.json()) as { status: string }).status).toBe('COMPLETED');
     });
   });
 
