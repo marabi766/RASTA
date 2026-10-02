@@ -975,9 +975,14 @@ test('psql gets libpq’s own URL parameters, and none of Prisma’s', () => {
 });
 
 test('psql gets the password in its environment, never in its argv', () => {
-  const inUserinfo = libpqInvocation(
-    'postgresql://rasta_x_migrator:p%40ss%3Aw0rd@db.example:5432/rasta_x?schema=public&sslmode=require',
+  // Built, not written: a fixture password, set through URL so it is encoded
+  // as a real one would be (and no credentialed URI sits in the source).
+  const withPassword = new URL(
+    'postgresql://rasta_x_migrator@db.example:5432/rasta_x?schema=public&sslmode=require',
   );
+  withPassword.password = 'p@ss:w0rd';
+  assert.match(withPassword.toString(), /:p%40ss%3Aw0rd@/);
+  const inUserinfo = libpqInvocation(withPassword.toString());
   assert.equal(
     inUserinfo.target,
     'postgresql://rasta_x_migrator@db.example:5432/rasta_x?sslmode=require',
