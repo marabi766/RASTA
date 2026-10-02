@@ -1069,6 +1069,24 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   notification، organization، asset، fleet، maintenance، marketplace، document، economic و چهار پایگاه دادهٔ بی‌جدول —
   هر کدام در PR بعدی؛ D-045 وقتی بسته می‌شود که این فهرست خالی شود. Runbook: `docs/runbooks/db-role-split.md`.
 
+### D-046 · سابقهٔ حسابرسی حل انسانی آشتی پرداخت کنشگر دوم و شاهد را ندارد
+
+- **چه چیزی:** رویدادهای مسیر اپراتور آشتی پرداخت (ADR-064 § ۶، گام B3) — `PAYMENT_RECONCILIATION_RESOLVED` و
+  `PAYMENT_RECONCILIATION_OPERATOR_ACTION` — در محموله `proposedBy`، `approvedBy`، `evidenceReference`، `resolutionId`،
+  `requeueId` و `fourEyes` دارند، اما `audit-service` امروز فقط فیلدهای پاکت را نگه می‌دارد (`audit.mapper.ts`: نام رویداد، یک
+  کنشگر پاکت، مستأجر، Aggregate). ردیف حسابرسی پس نشان نمی‌دهد که تأییدکننده که بود یا بر کدام شاهد تأیید کرد.
+- **چرا:** تغییر Mapper یا Schema در `audit-service` بیرون از دامنهٔ #175 است (تصمیم مدیر پروژه، بازبینی Codex دور ۲ روی #175).
+- **کاهش امروز:** سابقهٔ کامل — هر دو کنشگر و هویت پایدارشان (Issuer و Subject)، شاهد، نتیجه، `fourEyes` و دلیل‌ها — در جدول‌های
+  economic است که در خود پایگاه داده فقط‌افزودنی‌اند: `payment_reconciliation_resolution` (حذف هرگز، تصمیم یک بار) و
+  `payment_reconciliation_requeue` (بی UPDATE و DELETE)؛ `down.sql` مهاجرتشان تا ردیفی هست رد می‌کند؛ `GET
+/v1/payment-intents/{id}/reconciliation` آن را به حل‌کننده نشان می‌دهد.
+- **ریسک:** حسابرسی که فقط `audit-service` را می‌بیند جداسازی وظایف را از سابقهٔ خودش ثابت نمی‌تواند و باید به economic رجوع کند؛
+  و تا D-045 برای economic بسته نشود، نقش اجرای economic مالک این جدول‌هاست و می‌تواند Trigger فقط‌افزودنی را غیرفعال کند.
+- **رفع:** نمای حسابرسی نسخه‌دار برای این دو رویداد در `audit-service` (فیلدهای محمولهٔ مجاز با فهرست سفید، نسخهٔ Schema) و آزمون
+  اینکه ردیف حسابرسی تأییدکننده، پیشنهاددهنده و مرجع شاهد را نگه می‌دارد.
+- **اولویت:** متوسط
+- **ثبت‌شده:** 2026-10-02 (#175)
+
 ## ۲۳٫۶ ثبت بدهی معماری
 
 بدهی جدید در همین فایل، در همین قالب، با شناسه ثبت می‌شود:

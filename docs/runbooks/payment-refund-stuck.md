@@ -193,16 +193,32 @@ POST /v1/payment-intents/{id}/reconciliation/requeue                            
 | `409 INVALID_STATE_TRANSITION` | آشتی‌دهنده همین حالا تسک را در دست دارد (کمی بعد دوباره)، تسک بازی نیست، پیشنهاد قبلاً تصمیم گرفته شده، یا Intent دیگر در آن وضعیت نیست (پیشنهاد را رد کن) |
 | `422 BUSINESS_RULE_VIOLATION`  | علامت معلوم است (§ ۳؛ یا `requeue`)، یا `REFUNDED` از کیف پول غیرفعال (§ ۲) — پیشنهاد منتظر می‌ماند                                                        |
 | `403`                          | نقش مجاز نیست، یا جداسازی وظایف (پیشنهاددهنده/سازنده)                                                                                                      |
+| `422 CREATOR_IDENTITY_UNKNOWN` | Intent هویت پایدار سازنده‌اش را ثبت نکرده (پیش از این نسخه ساخته شده)؛ تأیید ممکن نیست — پایین را ببین                                                     |
 
 **جداسازی وظایف** (`ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES`) پیش‌فرض روشن است و سرویس خاموش‌بودنش را بیرون از
 `development` و `test` نمی‌پذیرد؛ وقتی خاموش است پیشنهاد بی‌درنگ با همان شخص تأیید و همین‌طور ثبت می‌شود (`fourEyes: false`).
 
-جداسازی هم با شناسهٔ کاربری پلتفرم و هم با Issuer و Subject Token سنجیده می‌شود: دو Token یک شخص یک شخص‌اند.
+جداسازی هم با شناسهٔ کاربری پلتفرم و هم با Issuer و Subject Token سنجیده می‌شود: دو Token یک شخص یک شخص‌اند. Intent از این
+نسخه به بعد Issuer و Subject سازنده‌اش را هم ثبت می‌کند (`created_by_issuer`، `created_by_subject`).
+
+**پیشنهاد فقط برای تسک `ESCALATED`** که آشتی‌دهنده در دست ندارد پذیرفته می‌شود (وگرنه `409`): تسک `PENDING` را آشتی‌دهنده هنوز
+ممکن است بردارد و حل کند. پس از `requeue` تا وقتی دوباره تشدید نشود، کار انسان نیست.
+
+**`CREATOR_IDENTITY_UNKNOWN`** — Intentی که پیش از ثبت هویت سازنده ساخته شده، از مسیر اپراتور **تأیید نمی‌شود**: هیچ‌کس را نمی‌توان
+ثابت کرد که سازنده نیست، و سامانه این را فرض نمی‌کند. Hold سر جایش می‌ماند (پول امن است). چه کنی:
+
+1. پیشنهاد منتظر را رد کن (`…/reject`؛ رد چیزی را جابه‌جا نمی‌کند) و شاهد Provider را پیوست تیکت نگه دار.
+2. تیکت را با شناسهٔ Intent، `resolutionId` و کد `CREATOR_IDENTITY_UNKNOWN` به مالک economic-service بسپار؛ حل این Intentها تصمیم
+   پلتفرم است، نه اپراتور.
+3. **هرگز** `created_by_issuer`/`created_by_subject` یا `created_by` را دستی پر یا عوض نکن — همان جعل هویت سازنده است.
 
 هر گام رویداد دارد: `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`REQUEUED` با `requeueId`، `PROPOSED`، `REJECTED`) و برای تأیید
 `PAYMENT_RECONCILIATION_RESOLVED` با `proposedBy`، `approvedBy`، `evidenceReference` و `fourEyes` — هر دو به `audit-service`
-می‌رسند. دلیل‌های متنی در رویداد و Log نیستند: پیشنهاد و تصمیم در `payment_reconciliation_resolution` و دلیل بازگرداندن در
-`payment_reconciliation_requeue` می‌مانند، هر دو فقط‌افزودنی در خود پایگاه داده، و `GET …/reconciliation` آن‌ها را نشان می‌دهد.
+می‌رسند — اما **`audit-service` امروز فقط فیلدهای پاکت را نگه می‌دارد** (نام رویداد، یک کنشگر پاکت، مستأجر، Aggregate)، نه
+`proposedBy`، `approvedBy`، شاهد یا `fourEyes` محموله را. پس **سابقهٔ کامل** — کنشگر دوم، شاهد، نتیجه و دلیل‌ها — در
+پایگاه دادهٔ economic است: پیشنهاد و تصمیم در `payment_reconciliation_resolution` و دلیل بازگرداندن در
+`payment_reconciliation_requeue`، هر دو فقط‌افزودنی در خود پایگاه داده، و `GET …/reconciliation` آن‌ها را نشان می‌دهد. نمای
+نسخه‌دار این سابقه در `audit-service` پیگیری جداگانه است (D-046). دلیل‌های متنی در رویداد و Log نیستند.
 تیکت را با شناسهٔ `resolutionId` (یا `requeueId`) ببند.
 
 ---

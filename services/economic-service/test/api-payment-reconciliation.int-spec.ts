@@ -155,14 +155,23 @@ describe('payment reconciliation operator routes (HTTP)', () => {
       lastOutcome: 'REQUEUED',
     });
 
-    const proposed = await request(http)
+    // Back with the reconciler, it is no person's to resolve until escalated again.
+    await request(http)
       .post(`${base(intentId)}/resolutions`)
+      .set('authorization', as(alice))
+      .set('idempotency-key', id('recon-op-p-requeued'))
+      .send(proposal)
+      .expect(409);
+
+    const other = await escalated();
+    const proposed = await request(http)
+      .post(`${base(other)}/resolutions`)
       .set('authorization', as(alice))
       .set('idempotency-key', id('recon-op-p2'))
       .send(proposal)
       .expect(200);
     const rejected = await request(http)
-      .post(`${base(intentId)}/resolutions/${proposed.body.id}/reject`)
+      .post(`${base(other)}/resolutions/${proposed.body.id}/reject`)
       .set('authorization', as(bob))
       .set('idempotency-key', id('recon-op-reject'))
       .send({ reason: 'The statement is for another payment' })

@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -276,6 +277,20 @@ export class PaymentReconciliationOperator {
           { paymentIntentId, marker: intent.failureReason },
         );
       }
+      // Only a task the reconciler gave up on, and that no sweeper holds:
+      // a PENDING task can still be claimed and settled by the sweeper,
+      // which would leave this proposal pending against a DONE task (Codex
+      // round 2 on #175). Checked under the task's row lock; the sweeper
+      // never claims an ESCALATED task, and requeue is refused while a
+      // proposal is pending.
+      if (task.status !== 'ESCALATED' || task.leased) {
+        throw RastaError.invalidStateTransition(
+          'PaymentReconciliationTask',
+          task.leased ? 'LEASED' : task.status,
+          'PROPOSED',
+          'Only a reconciliation the reconciler escalated to a person may be resolved by one',
+        );
+      }
       const hold = await this.walletRepository.findActiveHold(tx, wallet.id, intent.id);
       refuseUnlessEffect(
         decideReconciliation({
@@ -323,6 +338,7 @@ export class PaymentReconciliationOperator {
       if (fourEyes) return { resolution: proposed, verdict: null };
       // Separation of duties configured off (development and test only): the
       // proposer is the approver, and the record says so.
+      assertCreatorKnown(intent);
       return this.approveLocked(tx, task, proposed, actor, input.reason);
     });
     this.logAction(
@@ -463,6 +479,9 @@ export class PaymentReconciliationOperator {
       throw separation('a resolution is decided by someone other than its proposer');
     }
     if (isCreator(intent, actor)) throw separation('the payment’s creator may not resolve it');
+    // Approval moves money, so separation from the creator must be provable.
+    // A rejection moves nothing and stays possible (to clear a proposal).
+    if (to === 'APPROVED') assertCreatorKnown(intent);
     if (proposed.status !== 'PENDING_APPROVAL') {
       throw RastaError.invalidStateTransition(
         'PaymentReconciliationResolution',
@@ -664,12 +683,33 @@ function separation(why: string): RastaError {
 }
 
 /**
- * Whether `actor` created the intent. `created_by` holds the creator's user id
- * — the IdP subject when their token carried no `rasta_uid` — so both of the
- * actor's identifiers are compared.
+ * Whether `actor` created the intent: by the creator's recorded issuer and
+ * subject (the stable identity — Codex round 2 on #175), and by `created_by`,
+ * which holds their user id, or their IdP subject when their token carried no
+ * `rasta_uid`.
  */
 function isCreator(intent: PaymentIntent, actor: OperatorActor): boolean {
-  return intent.createdBy === actor.userId || intent.createdBy === actor.subject;
+  return (
+    (intent.createdByIssuer === actor.issuer && intent.createdBySubject === actor.subject) ||
+    intent.createdBy === actor.userId ||
+    intent.createdBy === actor.subject
+  );
+}
+
+/**
+ * Fails closed when the intent records no creator identity — one created
+ * before it was recorded, or by a caller with no subject. Without it nobody
+ * can be shown not to be its creator, so an approval is refused, never
+ * assumed (`CREATOR_IDENTITY_UNKNOWN`; runbook payment-refund-stuck § 4-2).
+ */
+function assertCreatorKnown(intent: PaymentIntent): void {
+  if (!intent.createdByIssuer || !intent.createdBySubject) {
+    throw new RastaError(
+      ERROR_CODES.CREATOR_IDENTITY_UNKNOWN,
+      'This payment records no stable identity for its creator, so separation of duties ' +
+        'cannot be proven; it cannot be approved on the operator path',
+    );
+  }
 }
 
 function toResolutionView(row: PaymentReconciliationResolution): ResolutionView {

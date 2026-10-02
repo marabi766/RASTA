@@ -51,6 +51,12 @@ export const ERROR_CODES = {
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   LEDGER_UNBALANCED: 'LEDGER_UNBALANCED',
+  /**
+   * Separation of duties cannot be proven: the record names no stable
+   * identity (issuer and subject) for the person who created it, so nobody
+   * can be shown not to be them. Refused, never assumed (ADR-064 § 6).
+   */
+  CREATOR_IDENTITY_UNKNOWN: 'CREATOR_IDENTITY_UNKNOWN',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -110,6 +116,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   BUSINESS_RULE_VIOLATION: 422,
   INSUFFICIENT_BALANCE: 422,
   LEDGER_UNBALANCED: 422,
+  CREATOR_IDENTITY_UNKNOWN: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,

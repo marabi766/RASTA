@@ -691,6 +691,8 @@ export const EXPECTED = {
       'ck_payment_reconciliation_lease_pair',
       // Separation of duties on an operator resolution (ADR-064 § 6).
       'ck_payment_resolution_four_eyes',
+      // The creator's stable identity: both or neither (ADR-064 § 6).
+      'ck_payment_intent_creator_identity',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the

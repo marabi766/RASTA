@@ -52,6 +52,7 @@ describe('the payment reconciliation operator path (real database)', () => {
       wiring.walletRepository,
       provider,
       wiring.paymentReconciliation,
+      testEnv(),
     );
   });
 
@@ -169,6 +170,17 @@ describe('the payment reconciliation operator path (real database)', () => {
     );
     return { walletId: wallet.id, intentId: topUp.paymentIntentId };
   }
+
+  /** The reconciler gives the task up to a person, as at its attempt or age limit. */
+  const escalate = (paymentIntentId: string) =>
+    runUnscoped('the suite escalates the task', () =>
+      prisma.client.$executeRawUnsafe(
+        `UPDATE payment_reconciliation_task
+            SET status = 'ESCALATED', escalated_at = now(), last_outcome = 'PROVIDER_OUTCOME_UNKNOWN'
+          WHERE payment_intent_id = $1 AND status = 'PENDING'`,
+        paymentIntentId,
+      ),
+    );
 
   const proposal = (providerOutcome: 'REFUNDED' | 'DECLINED' | 'NOT_REACHED') => ({
     providerOutcome,
@@ -463,6 +475,34 @@ describe('the payment reconciliation operator path (real database)', () => {
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     });
 
+    it('recognises the creator under another platform id by their recorded identity', async () => {
+      const organizationId = `${org.b}-CREATOR-PAIR`;
+      // Created as USR-ZOE with IdP subject sub-zoe; the intent records both.
+      const made = await escalatedUnknown(organizationId, 368n, 'USR-ZOE');
+      const intent = await intentOf(made.intentId);
+      expect(intent).toMatchObject({
+        createdBy: 'USR-ZOE',
+        createdByIssuer: env.OIDC_ISSUER_URL,
+        createdBySubject: 'sub-usr-zoe',
+      });
+      const operator = operatorWith();
+      const proposed = await as(organizationId, 'USR-ALICE', () =>
+        operator.propose(made.intentId, proposal('DECLINED')),
+      );
+
+      // A later token for the same subject carries another platform id.
+      const laterZoe = <T>(fn: () => Promise<T>) =>
+        as(organizationId, 'USR-ZOE-2', fn, ['SYSTEM_ADMIN'], 'sub-usr-zoe');
+      for (const attempt of [
+        () => operator.approve(made.intentId, proposed.id, 'Approving my own payment'),
+        () => operator.reject(made.intentId, proposed.id, 'Rejecting on my own payment'),
+        () => operator.propose(made.intentId, proposal('DECLINED')),
+      ]) {
+        await expect(laterZoe(attempt)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      }
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 368n });
+    });
+
     it('refuses anyone outside the configured resolver roles, and a service caller', async () => {
       const organizationId = `${org.b}-ROLES`;
       const made = await escalatedUnknown(organizationId, 370n);
@@ -656,6 +696,119 @@ describe('the payment reconciliation operator path (real database)', () => {
       ).resolves.toMatchObject({ status: 'REJECTED' });
     });
 
+    it('takes proposals only for an escalated task no sweeper holds (Codex round 2 on #175)', async () => {
+      const organizationId = `${org.b}-ESCALATED-ONLY`;
+      const made = await escalatedUnknown(organizationId, 411n);
+      const operator = operatorWith();
+      const setTask = (sql: string) =>
+        runUnscoped('the suite moves the task as the reconciler would', () =>
+          prisma.client.$executeRawUnsafe(
+            `UPDATE payment_reconciliation_task SET ${sql} WHERE payment_intent_id = $1`,
+            made.intentId,
+          ),
+        );
+
+      // PENDING and due: a sweeper may still claim and settle it.
+      await setTask(`status = 'PENDING', next_attempt_at = now()`);
+      await expect(
+        as(organizationId, 'USR-ALICE', () =>
+          operator.propose(made.intentId, proposal('DECLINED')),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+      // PENDING and claimed by a sweeper.
+      await setTask(`lease_until = now() + interval '1 minute', lease_token = 'SWEEPER'`);
+      await expect(
+        as(organizationId, 'USR-ALICE', () =>
+          operator.propose(made.intentId, proposal('DECLINED')),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+      // ESCALATED but still leased (a sweeper that has not yet let go).
+      await setTask(`status = 'ESCALATED', escalated_at = now()`);
+      await expect(
+        as(organizationId, 'USR-ALICE', () =>
+          operator.propose(made.intentId, proposal('DECLINED')),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+      expect(
+        await runUnscoped('the suite counts resolutions', () =>
+          prisma.client.paymentReconciliationResolution.count({
+            where: { paymentIntentId: made.intentId },
+          }),
+        ),
+      ).toBe(0);
+    });
+
+    it('keeps a pending proposal and the sweeper apart, in either order', async () => {
+      const organizationId = `${org.b}-INTERLEAVE`;
+      const made = await escalatedUnknown(organizationId, 412n);
+      const operator = operatorWith();
+      const proposed = await as(organizationId, 'USR-ALICE', () =>
+        operator.propose(made.intentId, proposal('DECLINED')),
+      );
+
+      // The sweeper's own claim never takes an ESCALATED task, so it cannot
+      // settle this one under the proposal. (A one-second lease on anything
+      // else it claims here lapses at once.)
+      const claimed = await wiring.paymentReconciliation.claimDue(500, 1, `TEST-${ulid()}`);
+      expect(claimed.map((task) => task.paymentIntentId)).not.toContain(made.intentId);
+      expect(await taskOf(made.intentId)).toMatchObject({
+        status: 'ESCALATED',
+        leaseToken: null,
+      });
+
+      // Nor can it be handed back to the sweeper while the proposal waits.
+      await expect(
+        as(organizationId, 'USR-BOB', () => operator.requeue(made.intentId, 'Ask again')),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+      // The second resolver decides it; only then is the task DONE.
+      await as(organizationId, 'USR-BOB', () =>
+        operator.approve(made.intentId, proposed.id, 'Checked against the provider'),
+      );
+      expect(await taskOf(made.intentId)).toMatchObject({
+        status: 'DONE',
+        resolution: 'REFUND_DECLINED',
+      });
+    });
+
+    it('fails closed when the intent records no creator identity (Codex round 2 on #175)', async () => {
+      const organizationId = `${org.b}-LEGACY`;
+      const made = await escalatedUnknown(organizationId, 413n);
+      // An intent created before the identity was recorded.
+      await runUnscoped('the suite makes the intent a legacy one', () =>
+        prisma.client.$executeRawUnsafe(
+          `UPDATE payment_intent SET created_by_issuer = NULL, created_by_subject = NULL WHERE id = $1`,
+          made.intentId,
+        ),
+      );
+      const operator = operatorWith();
+      const proposed = await as(organizationId, 'USR-ALICE', () =>
+        operator.propose(made.intentId, proposal('DECLINED')),
+      );
+      await expect(
+        as(organizationId, 'USR-BOB', () =>
+          operator.approve(made.intentId, proposed.id, 'Checked against the provider'),
+        ),
+      ).rejects.toMatchObject({ code: 'CREATOR_IDENTITY_UNKNOWN', status: 422 });
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 413n });
+
+      // Rejecting moves nothing and stays possible; nor does four-eyes-off bypass it.
+      await as(organizationId, 'USR-BOB', () =>
+        operator.reject(made.intentId, proposed.id, 'Cannot be approved here'),
+      );
+      await expect(
+        as(organizationId, 'USR-ALICE', () =>
+          operatorWith({ ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES: false }).propose(
+            made.intentId,
+            proposal('DECLINED'),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: 'CREATOR_IDENTITY_UNKNOWN' });
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 413n });
+    });
+
     it('resolves an uncreditable capture: REFUNDED fails it, NOT_REACHED makes it creditable', async () => {
       for (const [outcome, status, marker] of [
         ['REFUNDED', 'FAILED', 'CAPTURE_NOT_CREDITED'],
@@ -679,6 +832,7 @@ describe('the payment reconciliation operator path (real database)', () => {
           prisma.client.paymentIntent.findMany({ where: { organizationId } }),
         );
         expect(intent?.failureReason).toBe('CAPTURED_REFUND_UNKNOWN');
+        await escalate(intent!.id);
 
         const operator = operatorWith();
         const proposed = await as(organizationId, 'USR-ALICE', () =>

@@ -329,6 +329,11 @@ points at this endpoint and the escalation alert.
   issuer and subject as well as the user id, stored on the proposal and the decision. Authorization runs before an
   idempotent replay, and the key is bound to its sender. `down.sql` refuses while any resolution or requeue row exists,
   and both tables are append-only at the database.
+- **Codex on #175 (round 2):** the payment intent records its creator's issuer and subject (`created_by_issuer`,
+  `created_by_subject`); a decider matching them is refused, and an intent without them is never approved
+  (`422 CREATOR_IDENTITY_UNKNOWN`, fail closed). Proposals are taken only for an `ESCALATED` task no sweeper holds.
+  audit-service keeps envelope fields only, so the full record — second actor, evidence — is economic's append-only
+  resolution history; a versioned audit projection is a follow-up (D-046).
 - **Not built:** "contradicts a provider answer already on record" — no definitive provider answer is stored (one would
   have resolved the task), so there is nothing to contradict.
 

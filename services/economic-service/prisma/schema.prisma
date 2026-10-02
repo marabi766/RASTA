@@ -599,12 +599,17 @@ model PaymentIntent {
 
   correlationId String @map("correlation_id")
 
-  createdAt    DateTime  @default(now()) @map("created_at")
-  authorizedAt DateTime? @map("authorized_at")
-  capturedAt   DateTime? @map("captured_at")
-  failedAt     DateTime? @map("failed_at")
-  refundedAt   DateTime? @map("refunded_at")
-  createdBy    String    @map("created_by")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  authorizedAt     DateTime? @map("authorized_at")
+  capturedAt       DateTime? @map("captured_at")
+  failedAt         DateTime? @map("failed_at")
+  refundedAt       DateTime? @map("refunded_at")
+  createdBy        String    @map("created_by")
+  /// The creator's token issuer and IdP subject — a stable identity beside
+  /// `created_by` (ADR-064 § 6; Codex round 2 on #175). NULL for intents
+  /// created before it was recorded: the operator path fails closed on those.
+  createdByIssuer  String?   @map("created_by_issuer")
+  createdBySubject String?   @map("created_by_subject")
 
   /// The reconciliation tasks of its refunds (ADR-064 step B): at most one open.
   reconciliationTasks       PaymentReconciliationTask[]
