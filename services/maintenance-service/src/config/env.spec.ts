@@ -60,3 +60,36 @@ describe('MAINTENANCE_DUE_SCAN_ENABLED', () => {
     expect(() => load(value)).toThrow(EnvValidationError);
   });
 });
+
+/**
+ * `MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS` — how long a claim on an
+ * Idempotency-Key stays in flight before a retry may take it over. A bad value
+ * is a failed boot, not a claim that lasts a day or one that lapses under a
+ * request that is merely slow.
+ */
+describe('MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS', () => {
+  const load = (value?: string) =>
+    loadMaintenanceEnv({
+      ...BASE,
+      ...(value === undefined ? {} : { MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: value }),
+    });
+
+  it('defaults to two minutes, comfortably above a request timeout and far below a response’s lifetime', () => {
+    const env = load();
+    expect(env.MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
+    expect(env.MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBeLessThan(
+      env.MAINTENANCE_IDEMPOTENCY_TTL_HOURS * 3_600,
+    );
+  });
+
+  it.each(['30', '300', '3600'])('accepts %s seconds', (value) => {
+    expect(load(value).MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(Number(value));
+  });
+
+  it.each(['0', '29', '-1', '3601', '1.5', 'soon', ''])(
+    'refuses %p at boot rather than guessing',
+    (value) => {
+      expect(() => load(value)).toThrow(EnvValidationError);
+    },
+  );
+});

@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@n
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { RepairOrderService } from './repair-order.service';
-import { IdempotencyStore, optionalIdempotencyKey, type ClaimFence } from './idempotency';
+import { IdempotencyStore, requiredIdempotencyKey, type ClaimFence } from './idempotency';
 import {
   cancelRepairSchema,
   completeRepairSchema,
@@ -40,9 +40,10 @@ export const REPAIR_ORDER_ENDPOINTS = {
 
 const IDEMPOTENCY_KEY_HEADER = {
   name: 'Idempotency-Key',
-  required: false,
+  required: true,
   description:
-    'Optional here, required at the gateway. 8 to 255 characters, scoped to the organization ' +
+    'Required, here and at the gateway: a missing or malformed key is 400 and nothing is ' +
+    'written. 8 to 255 characters, scoped to the organization ' +
     'and the endpoint. The same key with the same body, order and user answers the original ' +
     'response without doing the work again (24 hours by default); the same key with a different ' +
     'body, order or user answers 409 IDEMPOTENCY_KEY_REUSED; a duplicate of a request still in ' +
@@ -74,12 +75,15 @@ export class RepairOrderController {
   ) {}
 
   /**
-   * Runs a write under its `Idempotency-Key`, if it has one (docs/06 § 6.8).
+   * Runs a write under its `Idempotency-Key`, which it must have (docs/06 § 6.8).
    *
-   * The caller's right to the order is established first, so a stored response
-   * is only ever replayed to somebody who could have caused it; the claim, the
-   * work, its outbox rows and the stored response then commit in one
-   * transaction (`idempotency.ts`). No key: the work runs as it always did.
+   * A missing or malformed key is refused before anything else, and nothing is
+   * written: unlike creating a request, these writes add money to a bill or
+   * close one, and a retried post that was not the same post is the failure the
+   * key exists to prevent. The caller's right to the order is established next,
+   * so a stored response is only ever replayed to somebody who could have caused
+   * it; the claim, the work, its outbox rows and the stored response then commit
+   * in one transaction (`idempotency.ts`).
    */
   private async idempotently<T extends { id: string }>(
     endpoint: string,
@@ -87,17 +91,16 @@ export class RepairOrderController {
     dto: object,
     rawKey: string | undefined,
     successStatus: number,
-    work: (fence?: ClaimFence<T>) => Promise<T>,
+    work: (fence: ClaimFence<T>) => Promise<T>,
   ): Promise<T> {
-    const key = optionalIdempotencyKey(rawKey);
-    if (key === undefined) return work();
+    const key = requiredIdempotencyKey(rawKey);
     await this.repairOrders.assertAccessible(orderId);
     const { result } = await this.idempotency.execute<T>(
       endpoint,
       key,
       { repairOrderId: orderId, ...dto },
       successStatus,
-      (fence) => work(fence),
+      work,
     );
     return result;
   }

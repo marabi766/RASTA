@@ -18,7 +18,19 @@ import { recordCostSchema, recordLabourSchema, recordPartSchema } from './dto';
  */
 describe('the ledger’s bound on an amount a caller states', () => {
   const QUIET_LOGGER = { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() };
-  const service = { recordPart: jest.fn(), recordLabour: jest.fn(), recordCost: jest.fn() };
+  const service = {
+    assertAccessible: jest.fn(),
+    recordPart: jest.fn(),
+    recordLabour: jest.fn(),
+    recordCost: jest.fn(),
+  };
+  // The store runs the work and hands back what it returned.
+  const store = {
+    execute: jest.fn(async (...args: unknown[]) => ({
+      result: await (args[4] as (fence: unknown) => Promise<unknown>)({}),
+      executed: true,
+    })),
+  };
   let app: INestApplication;
 
   beforeAll(async () => {
@@ -26,7 +38,7 @@ describe('the ledger’s bound on an amount a caller states', () => {
       controllers: [RepairOrderController],
       providers: [
         { provide: RepairOrderService, useValue: service },
-        { provide: IdempotencyStore, useValue: {} },
+        { provide: IdempotencyStore, useValue: store },
       ],
     }).compile();
     app = moduleRef.createNestApplication();
@@ -70,6 +82,7 @@ describe('the ledger’s bound on an amount a caller states', () => {
   const post = (verb: string, body: object) =>
     request(app.getHttpServer())
       .post(`/v1/repair-orders/RPO-1/${verb}`)
+      .set('Idempotency-Key', 'a-key-of-sufficient-length')
       .send(body as object);
 
   it('is the BIGINT maximum, 2^63 − 1', () => {

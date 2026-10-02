@@ -471,7 +471,8 @@ test.describe('reporting maintenance through the live stack', () => {
     // button is pressed: the completion is refused by the service, whole, and the
     // person is sent to a page that shows the new total.
     const late = await request.post(maintenanceUrl(`/v1/repair-orders/${orderId}/costs`), {
-      headers: authorised(),
+      // A repair-order write needs its Idempotency-Key at the service as well.
+      headers: { ...authorised(), 'idempotency-key': `e2e-late-${Date.now()}-${orderId}` },
       data: {
         category: 'SERVICE',
         amountMinor: '400000',

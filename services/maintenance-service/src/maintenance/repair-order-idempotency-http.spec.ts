@@ -9,7 +9,7 @@ import { IdempotencyStore } from './idempotency';
 /**
  * The six repair-order writes over HTTP, through the real controller, pipes and
  * exception filter, with the service and the store stubbed: what each does with
- * an `Idempotency-Key` header. What the store and the database then do with it
+ * an `Idempotency-Key` header: required, and refused when missing or malformed. What the store and the database then do with it
  * is proved against PostgreSQL in `test/repair-order-idempotency.int-spec.ts`.
  */
 describe('Idempotency-Key on the repair-order writes', () => {
@@ -123,14 +123,32 @@ describe('Idempotency-Key on the repair-order writes', () => {
   };
 
   describe.each(WRITES)('$verb', ({ verb, method, endpoint, status, body }) => {
-    it('runs the work directly, as it always did, when no key is sent', async () => {
+    it('refuses a post with no key, 400 with the code "required", before anything else, and writes nothing', async () => {
       const response = await post(verb, body);
 
-      expect(response.status).toBe(status);
-      expect(store.execute).not.toHaveBeenCalled();
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('VALIDATION_FAILED');
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: 'Idempotency-Key', code: 'required' }),
+        ]),
+      );
       expect(service.assertAccessible).not.toHaveBeenCalled();
-      expect(service[method]).toHaveBeenCalledTimes(1);
-      expect(service[method].mock.calls[0][2]).toBeUndefined();
+      expect(store.execute).not.toHaveBeenCalled();
+      expect(service[method]).not.toHaveBeenCalled();
+    });
+
+    it('refuses an empty key the same way: a header that says nothing is no key', async () => {
+      const response = await post(verb, body, '   ');
+
+      expect(response.status).toBe(400);
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: 'Idempotency-Key', code: 'required' }),
+        ]),
+      );
+      expect(store.execute).not.toHaveBeenCalled();
+      expect(service[method]).not.toHaveBeenCalled();
     });
 
     it('checks the caller’s right to the order first, then runs the work under the claim', async () => {
@@ -162,11 +180,16 @@ describe('Idempotency-Key on the repair-order writes', () => {
       expect(service[method]).not.toHaveBeenCalled();
     });
 
-    it('refuses a key that is present but too short, and does nothing', async () => {
+    it('refuses a key that is present but too short, with the code "invalid", and does nothing', async () => {
       const response = await post(verb, body, 'short');
 
       expect(response.status).toBe(400);
       expect(response.body.code).toBe('VALIDATION_FAILED');
+      expect(response.body.details).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: 'Idempotency-Key', code: 'invalid' }),
+        ]),
+      );
       expect(store.execute).not.toHaveBeenCalled();
       expect(service[method]).not.toHaveBeenCalled();
     });

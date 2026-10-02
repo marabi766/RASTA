@@ -146,6 +146,28 @@ describe('who may use the commands', () => {
   });
 });
 
+describe('the Idempotency-Key the portal sends', () => {
+  const source = read('repair-order.controller.ts');
+  const controller = parse(source);
+
+  it.each(['start', 'complete', 'cancel', 'recordPart', 'recordLabour', 'recordCost'])(
+    'is still read by the service on %s, which requires it',
+    (handler) => {
+      const declaration = collect(controller, ts.isMethodDeclaration).find(
+        (node) => node.name.getText() === handler,
+      );
+      expect(declaration).toBeDefined();
+      const parameters = declaration!.parameters.map((parameter) => parameter.getText());
+      expect(parameters.some((text) => text.includes("@Headers('idempotency-key')"))).toBe(true);
+    },
+  );
+
+  it('is demanded of every one of them, not only honoured when sent', () => {
+    expect(source).toContain('requiredIdempotencyKey(rawKey)');
+    expect(source).not.toContain('optionalIdempotencyKey');
+  });
+});
+
 describe('the request bodies', () => {
   it.each([
     ['startRepairSchema', ['startedAt', 'workSummary']],
