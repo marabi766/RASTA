@@ -70,6 +70,7 @@
     "test:grafana-live-isolation-lib": "node --test scripts/verify-grafana-dashboard-isolation.test.mjs",
     "verify:grafana-dashboard-live": "node scripts/verify-grafana-dashboard-live.mjs",
     "test:outbox-b2-pg": "node --env-file=.env --env-file-if-exists=.env.migrator --test scripts/outbox-b2-backfill.pg.test.mjs",
+    "test:outbox-b2-vacuum-pg": "node --env-file-if-exists=.env --env-file-if-exists=.env.migrator --test scripts/outbox-b2-vacuum.pg.test.mjs",
     "test:outbox-b3": "node --env-file-if-exists=.env --env-file-if-exists=.env.migrator --test scripts/outbox-b3-protocol.pg.test.mjs",
     "test:supplier-privilege-split": "node --env-file-if-exists=.env --env-file-if-exists=.env.migrator --test scripts/supplier-privilege-split.pg.test.mjs",
     "test:db-runtime-privileges": "node --env-file-if-exists=.env --test scripts/check-db-runtime-privileges.pg.test.mjs",

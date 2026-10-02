@@ -23,12 +23,15 @@ import {
   SERVICES,
   assertEnvironment,
   assignBatchSql,
+  b1PreconditionSql,
   counterUpsertSql,
   databaseUrlKey,
   headMaintenanceSql,
   parseOptions,
   planSql,
   resolveDatabaseUrl,
+  runServiceBackfill,
+  vacuumFactsSql,
   vacuumSql,
   verifySql,
 } from './outbox-b2-lib.mjs';
@@ -136,19 +139,19 @@ test('a batch size that is not a positive integer is refused', () => {
   }
 });
 
-test('--max-batches and --vacuum-every take the same positive integer rule', () => {
-  for (const flag of ['--max-batches', '--vacuum-every']) {
-    assert.match(
-      refusal(() => parseOptions(['--service', 'document', flag, '0'], {})),
-      /must be a positive integer/,
-    );
-  }
-  const options = parseOptions(
-    ['--service', 'document', '--max-batches', '3', '--vacuum-every', '2'],
-    {},
+test('--max-batches takes the positive integer rule', () => {
+  assert.match(
+    refusal(() => parseOptions(['--service', 'document', '--max-batches', '0'], {})),
+    /must be a positive integer/,
   );
-  assert.equal(options.maxBatches, 3);
-  assert.equal(options.vacuumEvery, 2);
+  assert.equal(parseOptions(['--service', 'document', '--max-batches', '3'], {}).maxBatches, 3);
+});
+
+test('--vacuum-every is refused by name, pointing at the maintenance command (D-045)', () => {
+  const reason = refusal(() => parseOptions(['--service', 'document', '--vacuum-every', '2'], {}));
+  assert.match(reason, /--vacuum-every was removed/);
+  assert.match(reason, /runtime role/);
+  assert.match(reason, /scripts\/outbox-b2-vacuum\.mjs/);
 });
 
 test('an unbounded run has no batch limit', () => {
@@ -288,6 +291,96 @@ test('the verification is only counts', () => {
 
 test('vacuum is ANALYZE on the outbox table and nothing else', () => {
   assert.equal(vacuumSql(), 'VACUUM (ANALYZE) "outbox_message"');
+  assert.equal(
+    vacuumSql('"public"."outbox_message"'),
+    'VACUUM (ANALYZE) "public"."outbox_message"',
+  );
+});
+
+test('the vacuum facts are read-only and name the outbox table only', () => {
+  assert.doesNotMatch(vacuumFactsSql(), /\b(UPDATE|INSERT|DELETE|TRUNCATE|ALTER|DROP|VACUUM)\b/i);
+  assert.match(vacuumFactsSql(), /to_regclass\('"outbox_message"'\)/);
+  // Ownership, directly or by inherited membership, and the manual counters.
+  assert.match(vacuumFactsSql(), /pg_has_role\(current_user, c\.relowner, 'USAGE'\)/);
+  assert.match(vacuumFactsSql(), /s\.vacuum_count/);
+  assert.match(vacuumFactsSql(), /s\.analyze_count/);
+});
+
+/**
+ * A port that answers the backfill's own SQL with canned counts and records
+ * every statement. One stream of two rows: one batch assigns both, the next
+ * selects none.
+ */
+function scriptedPort() {
+  const executed = [];
+  const queried = [];
+  const batches = [
+    { selected: 2, updated: 2, streams: 1, violations: 0 },
+    { selected: 0, updated: 0, streams: 0, violations: 0 },
+  ];
+  const answer = (sql) => {
+    queried.push(sql);
+    if (sql === b1PreconditionSql()) return [];
+    if (sql === planSql()) return [{ pending_unsequenced: 2 }];
+    if (sql === assignBatchSql()) return [batches.shift()];
+    if (sql === counterUpsertSql()) return [{ written: 1 }];
+    if (sql === headMaintenanceSql()) return [{ changed: 1 }];
+    if (sql === verifySql()) return [{ remaining: 0 }];
+    throw new Error(`unexpected query: ${sql.slice(0, 60)}`);
+  };
+  const port = {
+    query: async (sql) => answer(sql),
+    execute: async (sql) => {
+      executed.push(sql);
+      return 0;
+    },
+    transaction: async (fn) => fn({ query: async (sql) => answer(sql) }),
+  };
+  return { port, executed, queried };
+}
+
+test('an apply never vacuums and says the vacuum is required, naming the table (D-045)', async () => {
+  const { port, executed, queried } = scriptedPort();
+  const events = [];
+  const result = await runServiceBackfill({
+    service: 'document',
+    db: port,
+    options: parseOptions(['--service', 'document', '--apply'], {}),
+    emit: (event) => events.push(event),
+  });
+
+  assert.equal(result.mutated, true);
+  // No VACUUM through any path: the runtime role's would be skipped by
+  // PostgreSQL and reported as success.
+  assert.deepEqual(executed, []);
+  assert.equal(
+    queried.some((sql) => /\bVACUUM\b/i.test(sql)),
+    false,
+  );
+  const vacuum = events.filter((event) => event.type === 'vacuum');
+  assert.equal(vacuum.length, 1);
+  assert.equal(vacuum[0].status, 'required');
+  assert.equal(vacuum[0].table, 'outbox_message');
+  assert.equal(vacuum[0].ok, undefined, 'a vacuum that did not happen was reported as ok');
+  assert.match(vacuum[0].reason, /scripts\/outbox-b2-vacuum\.mjs --service document/);
+  assert.equal(events.find((event) => event.type === 'done').vacuum, 'required');
+  assert.equal(result.vacuum, 'required');
+});
+
+test('a plan owes no vacuum and reports none', async () => {
+  const { port, executed } = scriptedPort();
+  const events = [];
+  await runServiceBackfill({
+    service: 'document',
+    db: port,
+    options: parseOptions(['--service', 'document'], {}),
+    emit: (event) => events.push(event),
+  });
+  assert.deepEqual(executed, []);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'vacuum'),
+    [],
+  );
 });
 
 test('no B2 SQL names another service or a shared sequence table', () => {

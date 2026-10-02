@@ -33,7 +33,16 @@
 //   --batch-size <n>    rows per transaction, 1..5000 (default 5000)
 //   --max-batches <n>   stop after n batches — a bounded, resumable slice.
 //                       If work remains the run reports `incomplete` and exits 1.
-//   --vacuum-every <n>  VACUUM (ANALYZE) every n completed batches (default 1)
+//
+// No VACUUM (D-045, Codex on #180). The backfill connects as the service's
+// runtime role, which owns no table, and PostgreSQL skips such a role's VACUUM
+// with a warning while reporting success. So it never vacuums: an apply that
+// wrote anything emits `vacuum` with `status: "required"` and the table, and
+// `scripts/outbox-b2-vacuum.mjs --service <name>` — with the migrator's
+// credential in its environment, never in this process — runs
+// `VACUUM (ANALYZE)` and proves it from the table's counters. For a large
+// table, slice the apply with --max-batches and run it between the slices.
+// `--vacuum-every` is refused by name.
 //
 // Output is NDJSON on stdout: one object per event, counts only. No payload,
 // no credential and no connection string is ever printed — the events carry
@@ -63,14 +72,16 @@
 //
 //   `plan`         the counts a run would act on. First event for a service
 //                  that got as far as opening its database.
-//   `batch`,       one pair per batch of an apply: rows assigned, then the
-//   `vacuum`       maintenance between batches.
+//   `batch`        one per batch of an apply: rows assigned.
 //   `counters`,    written once, only when the run converged.
 //   `heads`
+//   `vacuum`       `status: "required"` with the table, once, after an apply
+//                  that wrote anything — the maintenance this run did not do.
 //   `verify`       the post-run counts, read back from the database.
 //   `done`         emitted by the service backfill for any attempt that ran to
-//                  the end — a dry run or an apply — carrying `converged` and
-//                  `mutated`.
+//                  the end — a dry run or an apply — carrying `converged`,
+//                  `mutated` and, for an apply, `vacuum` (`required` or
+//                  `not-required`).
 //
 // **`mode` and `mutated` are not the same thing, and the difference matters
 // for evidence.** `mode: "apply"` says writing was *authorised*. `mutated`
@@ -93,7 +104,7 @@
 //                  the service's runtime role (D-045: a split service's URL is
 //                  proven before the first query, so a migrator, owner or
 //                  superuser URL never writes), a B1 precondition failed,
-//                  the ordering guard tripped, or VACUUM failed. Scoped to
+//                  or the ordering guard tripped. Scoped to
 //                  that one service — every later selected service is still
 //                  attempted and the summary is still emitted. Counted in
 //                  `summary.refused`.
@@ -195,7 +206,7 @@ async function main() {
     } catch (error) {
       refused += 1;
       // Every way one service can fail lands here: an unresolvable connection,
-      // a B1 precondition, the ordering guard, a failed VACUUM. The message,
+      // a B1 precondition, the ordering guard. The message,
       // never the stack and never the URL — a stack from a Prisma client can
       // carry the datasource in it, and `resolveDatabaseUrl` deliberately
       // names the environment variable rather than its value.

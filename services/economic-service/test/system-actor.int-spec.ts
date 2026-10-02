@@ -2,8 +2,18 @@ import { ulid } from 'ulid';
 import { runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { LedgerBalanceAudit } from '../src/wallet/balance-audit';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
-import { cleanup, fundWallet, newPrisma, tenants, testEnv, wire, type Wiring } from './helpers';
+import {
+  cleanup,
+  fundWallet,
+  newPrisma,
+  ownerDatabaseUrl,
+  tenants,
+  testEnv,
+  wire,
+  type Wiring,
+} from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaClient } from '../src/generated/prisma';
 
 /**
  * What the platform records when the actor is not a person.
@@ -400,19 +410,22 @@ describe('a system actor', () => {
     // kill in the gap between them still leaves the constraint absent — that
     // gap closes only with a per-run schema, and until then
     // `isolation-controls.int-spec.ts` is what notices.
+    //
+    // Both halves run on the owner connection (D-045): the runtime role under
+    // test can neither drop the constraint nor put it back — which is the point
+    // of the split. The owner client has no tenant guard, so no `runUnscoped`.
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     try {
-      await runUnscoped('the suite writes a row the constraint would refuse', () =>
-        prisma.transaction(async (tx) => {
-          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE. The row it
-          // exists for is named on the next line, and the `finally` below
-          // restores the constraint on every path out of this test.
-          await tx.$executeRawUnsafe('ALTER TABLE wallet DROP CONSTRAINT ck_wallet_balances');
-          await tx.$executeRawUnsafe(
-            `UPDATE wallet SET available_balance_minor = available_balance_minor + 7 WHERE id = $1`,
-            walletId,
-          );
-        }),
-      );
+      await owner.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE. The row it
+        // exists for is named on the next line, and the `finally` below
+        // restores the constraint on every path out of this test.
+        await tx.$executeRawUnsafe('ALTER TABLE wallet DROP CONSTRAINT ck_wallet_balances');
+        await tx.$executeRawUnsafe(
+          `UPDATE wallet SET available_balance_minor = available_balance_minor + 7 WHERE id = $1`,
+          walletId,
+        );
+      });
 
       const audit = new LedgerBalanceAudit(wiring.walletRepository, wiring.ledger, testEnv());
       const deviations = await audit.run();
@@ -420,8 +433,8 @@ describe('a system actor', () => {
       const found = deviations.find((row) => row.walletId === walletId);
       expect(found?.kind).toBe('INTERNAL_INCONSISTENCY');
     } finally {
-      await runUnscoped('the suite restores the row and the constraint together', () =>
-        prisma.transaction(async (tx) => {
+      await owner
+        .$transaction(async (tx) => {
           await tx.$executeRawUnsafe(
             `UPDATE wallet SET available_balance_minor = available_balance_minor - 7 WHERE id = $1`,
             walletId,
@@ -437,8 +450,8 @@ describe('a system actor', () => {
                  "available_balance_minor" = "ledger_balance_minor" - "pending_balance_minor"
                )`,
           );
-        }),
-      );
+        })
+        .finally(() => owner.$disconnect());
     }
   });
   it('supplies the currency when a caller that bypasses the schema omits it', async () => {

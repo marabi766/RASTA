@@ -116,8 +116,8 @@ jobs:
         run: pnpm run test:infra-preflight
 
       - name: Database runtime-role rules (D-045)
-        # Every service is placed exactly once — split, audit or pending — and
-        # a pending one that passes fails; the migration ledger revoke
+        # Every service is placed exactly once — split or audit — and one in
+        # neither fails; the migration ledger revoke
         # scripts/prisma.mjs runs after each migration quotes and refuses
         # what it must.
         run: pnpm run test:db-runtime-privileges-lib
@@ -1011,6 +1011,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
@@ -1051,6 +1052,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
@@ -1106,6 +1108,7 @@ jobs:
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
 
       - name: Marketplace coverage gate
         # `docs/14` § 14.2 puts marketplace-service in the 75% band, and until
@@ -1355,6 +1358,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
@@ -1429,6 +1433,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
@@ -1462,6 +1467,19 @@ jobs:
           MIGRATION_LIB_TEST_FOREIGN_DATABASE_URL: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization
           MIGRATION_LIB_TEST_DATABASE_REQUIRED: 'true'
 
+      - name: Outbox B2 vacuum is the owner's, and verified (D-045)
+        # The B2 backfill runs as the runtime role, whose VACUUM PostgreSQL
+        # skips while reporting success, so it reports `vacuum: required`
+        # instead; scripts/outbox-b2-vacuum.mjs runs VACUUM (ANALYZE) with the
+        # migrator's credential from its environment and proves it from
+        # pg_stat_user_tables (Codex on #180). Both CLIs run as processes, in a
+        # throwaway schema on document's database.
+        run: pnpm run test:outbox-b2-vacuum-pg
+        env:
+          NODE_ENV: test
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+
       - name: Demo seeds refuse outside development and test
         # Every service's prisma/seed.ts upserts fixed ids with demo values; run
         # with production credentials it would overwrite real tenants. Each seed
@@ -1481,6 +1499,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
 
@@ -1508,6 +1527,7 @@ jobs:
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
@@ -1537,8 +1557,8 @@ jobs:
         # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
-        # service database this job bootstrapped and migrated; a service still
-        # on PENDING_SPLIT must still fail, so a split nobody recorded fails too.
+        # service database this job bootstrapped and migrated; every service
+        # must be split (audit its own way), so a new one that is not fails.
         run: pnpm run check:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1780,6 +1800,7 @@ jobs:
           DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public

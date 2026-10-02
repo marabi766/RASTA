@@ -158,7 +158,6 @@ export function parseOptions(argv, env = {}) {
     apply: false,
     batchSize: MAX_BATCH_SIZE,
     maxBatches: Infinity,
-    vacuumEvery: 1,
   };
   let all = false;
 
@@ -194,7 +193,14 @@ export function parseOptions(argv, env = {}) {
         options.maxBatches = parsePositiveInt(arg, value());
         break;
       case '--vacuum-every':
-        options.vacuumEvery = parsePositiveInt(arg, value());
+        // Removed, and refused by name rather than as an unknown option, so an
+        // operator's old command line learns where the maintenance went.
+        refuse(
+          '--vacuum-every was removed (D-045): the backfill runs as the runtime role, ' +
+            'which owns no table and whose VACUUM PostgreSQL skips. The backfill reports ' +
+            '`vacuum: required` instead; bound a large run with --max-batches and run ' +
+            'scripts/outbox-b2-vacuum.mjs between the slices.',
+        );
         break;
       default:
         refuse(`Unknown option "${arg}". Known: ${KNOWN_OPTIONS.join(', ')}.`);
@@ -241,7 +247,6 @@ const KNOWN_OPTIONS = [
   '--dry-run',
   '--batch-size',
   '--max-batches',
-  '--vacuum-every',
 ];
 
 function parsePositiveInt(flag, raw) {
@@ -553,19 +558,50 @@ SELECT
 }
 
 /**
- * `VACUUM (ANALYZE)` on the outbox table.
+ * `VACUUM (ANALYZE)` on the outbox table — run by `outbox-b2-vacuum.mjs`, never
+ * by the backfill.
  *
  * ADR-051 § R7 measured a single in-place `UPDATE` at roughly 2x table growth:
- * every updated row is a new tuple, and without the intervening vacuum the
- * dead ones accumulate for the whole run. ANALYZE comes with it because the
- * statistics on `stream_seq` change from "all NULL" to a real distribution,
- * and B3/B4 plan against them.
+ * every updated row is a new tuple, and the dead ones stay until a vacuum.
+ * ANALYZE comes with it because the statistics on `stream_seq` change from
+ * "all NULL" to a real distribution, and B3/B4 plan against them.
  *
- * Cannot run inside a transaction block, which is why the caller runs it
- * *between* batches and never inside one.
+ * Only the table's owner may run it, and since D-045 that is the service's
+ * migrator. The backfill connects as the runtime role, for which PostgreSQL
+ * *skips* the vacuum with a warning and reports success — so the backfill
+ * never issues it and says `vacuum: required` instead, and the maintenance
+ * command runs it with the migrator's credential and proves it ran
+ * (`vacuumFactsSql`). Cannot run inside a transaction block.
+ *
+ * `table` is the catalogue's own quoted, schema-qualified name
+ * (`vacuumFactsSql().qualified`); without it, the outbox table on the
+ * connection's search_path.
  */
-export function vacuumSql() {
-  return `VACUUM (ANALYZE) "${OUTBOX_TABLE}"`;
+export function vacuumSql(table = `"${OUTBOX_TABLE}"`) {
+  return `VACUUM (ANALYZE) ${table}`;
+}
+
+/**
+ * What the maintenance command needs to know about the outbox table on its
+ * connection, before and after the vacuum: whether the connected role may
+ * vacuum it at all (it owns the table, directly or by inherited membership —
+ * PostgreSQL 16 skips anyone else's VACUUM with only a warning), and the two
+ * counters that prove a manual `VACUUM (ANALYZE)` happened. `vacuum_count` and
+ * `analyze_count` count manual runs only; autovacuum has its own counters, so
+ * a concurrent autovacuum cannot pass for this one. One row, or none when the
+ * connection has no outbox table.
+ */
+export function vacuumFactsSql() {
+  return `
+SELECT current_user::text                                       AS role,
+       quote_ident(n.nspname) || '.' || quote_ident(c.relname)  AS qualified,
+       pg_has_role(current_user, c.relowner, 'USAGE')           AS may_vacuum,
+       s.vacuum_count::bigint                                   AS vacuum_count,
+       s.analyze_count::bigint                                  AS analyze_count
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_stat_user_tables s ON s.relid = c.oid
+ WHERE c.oid = to_regclass('"${OUTBOX_TABLE}"')`;
 }
 
 // ---------------------------------------------------------------------------
@@ -682,23 +718,6 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
       );
     }
     if (result.selected === 0) break;
-
-    // Between batches, never inside one: VACUUM cannot run in a transaction
-    // block. A failure here is an operational failure and stops the run — the
-    // table bloat this prevents is the reason batching exists at all.
-    if (batchNumber % options.vacuumEvery === 0) {
-      try {
-        await db.execute(vacuumSql());
-        event('vacuum', { batch: batchNumber, ok: true });
-      } catch (error) {
-        throw new B2RefusalError(
-          `${service}: VACUUM (ANALYZE) failed after batch ${batchNumber}: ${error.message}. ` +
-            'The maintenance ADR-051 § R7 requires did not happen; stopping rather than ' +
-            'continuing to bloat the table. Assigned sequences are already committed and ' +
-            'a re-run resumes from them.',
-        );
-      }
-    }
   }
 
   const truncated = remaining > 0;
@@ -722,16 +741,35 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
   // the previous head. Reading only `assigned` would report that as untouched.
   const mutated = assigned > 0 || counterWrites > 0 || headWrites > 0;
 
+  // D-045 (Codex on #180): this connection is the runtime role, which owns no
+  // table; PostgreSQL would skip its VACUUM with a warning and report success.
+  // So the backfill never vacuums and never claims to have: every write left
+  // dead tuples and moved the statistics, and the event says what is owed and
+  // by which command. `outbox-b2-vacuum.mjs` runs it as the table's owner and
+  // proves it from the table's counters.
+  const vacuum = mutated ? 'required' : 'not-required';
+  if (mutated) {
+    event('vacuum', {
+      status: 'required',
+      table: OUTBOX_TABLE,
+      reason:
+        'the runtime role cannot VACUUM a table it does not own, so this run did not; ' +
+        `run scripts/outbox-b2-vacuum.mjs --service ${service} with the service's ` +
+        'migrator credential in the environment',
+    });
+  }
+
   const [verified] = (await db.query(verifySql())).map(mapRow);
   event('verify', verified);
   event('done', {
     mode: 'apply',
     mutated,
+    vacuum,
     batches: batchNumber,
     truncated,
     converged: !truncated && verified.remaining === 0,
     elapsedMs: now() - startedAt,
   });
 
-  return { plan, batches, verified, applied: true, truncated, mutated };
+  return { plan, batches, verified, applied: true, truncated, mutated, vacuum };
 }

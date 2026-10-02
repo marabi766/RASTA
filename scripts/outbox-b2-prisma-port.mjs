@@ -28,9 +28,10 @@ const { preflightRuntimeRole } = createRequire(import.meta.url)(
  * rather than quietly open the wrong database.
  *
  * `$transaction` with a callback gives a real transaction, so a batch that
- * trips the ordering guard rolls back with nothing written. `VACUUM` goes
- * through `$executeRawUnsafe` outside any transaction, because PostgreSQL
- * refuses it inside a transaction block.
+ * trips the ordering guard rolls back with nothing written. `execute` runs a
+ * statement outside any transaction — `outbox-b2-vacuum.mjs`'s `VACUUM`, which
+ * PostgreSQL refuses inside a transaction block; the backfill itself never
+ * vacuums (D-045).
  */
 export function prismaPort(service, url) {
   const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);

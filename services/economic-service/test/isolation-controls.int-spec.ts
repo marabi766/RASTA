@@ -5,12 +5,14 @@ import {
   cleanup,
   fundWallet,
   newPrisma,
+  ownerDatabaseUrl,
   PLATFORM_ORGANIZATION_ID,
   tenants,
   wire,
   type Wiring,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { PrismaClient } from '../src/generated/prisma';
 
 /**
  * Negative controls for the economic integration suite itself.
@@ -132,8 +134,12 @@ describe('the economic suite mutates only what it owns', () => {
     // suspended inside one transaction, as `cleanup` suspends the ledger
     // triggers, so no exit path leaves it off.
     const emptyJournalId = `JRN_CONTROL_EMPTY_${ulid()}`;
-    await runUnscoped('the control seeds an entry-less journal on purpose', () =>
-      prisma.client.$transaction(async (tx) => {
+    //
+    // The guard is lifted by the owner connection, never the runtime one under
+    // test: since D-045 the runtime role cannot disable a trigger at all.
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await owner.$transaction(async (tx) => {
         // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; this
         // transaction bounds it and reverts it on every exit path.
         await tx.$executeRawUnsafe('ALTER TABLE journal DISABLE TRIGGER trg_journal_has_entries');
@@ -144,8 +150,10 @@ describe('the economic suite mutates only what it owns', () => {
           organizationId,
         );
         await tx.$executeRawUnsafe('ALTER TABLE journal ENABLE TRIGGER trg_journal_has_entries');
-      }),
-    );
+      });
+    } finally {
+      await owner.$disconnect();
+    }
 
     const author = `USR-ITEST-CONTROL-${ulid().slice(-8)}`;
     const commissionRule = await asActor({ organizationId, userId: author }, () =>
