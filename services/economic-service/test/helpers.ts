@@ -544,22 +544,28 @@ export async function cleanup(
 
     // The operator path's history is append-only at the database (ADR-064 B3).
     // Lifted for this run's own organizations only, inside one transaction
-    // that restores the triggers on every exit path.
-    await prisma.transaction(async (tx) => {
-      for (const [table, trigger] of [
-        ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
-        ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
-      ]) {
-        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
-        await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
-        await tx.$executeRawUnsafe(
-          `DELETE FROM ${table} WHERE organization_id LIKE ANY($1::text[])`,
-          orgs,
-        );
-        // ISOLATION-ALLOW-UNBOUNDED: as above.
-        await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
-      }
-    });
+    // that restores the triggers on every exit path — and by the **owner**
+    // connection, never the runtime one, which cannot lift a trigger (D-045).
+    const historyOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await historyOwner.$transaction(async (tx) => {
+        for (const [table, trigger] of [
+          ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
+          ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
+        ]) {
+          // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+          await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+          await tx.$executeRawUnsafe(
+            `DELETE FROM ${table} WHERE organization_id LIKE ANY($1::text[])`,
+            orgs,
+          );
+          // ISOLATION-ALLOW-UNBOUNDED: as above.
+          await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+        }
+      });
+    } finally {
+      await historyOwner.$disconnect();
+    }
 
     for (const table of [
       'settlement',
