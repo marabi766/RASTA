@@ -266,6 +266,10 @@ const repository = {
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
   lockUserMemberships: async () => ({ activeOrganizationId: ORG_A, now: new Date() }),
+  // The revocation's own write, stamped with the database's clock in SQL.
+  revokeMembership: async () => {
+    writes.push({ model: 'membership', status: 'REVOKED' });
+  },
   enqueueEvent: async () => 'evt-1',
   findUserById: async () => (lookups.user ? userRow() : null),
   findUserByUsernameOrEmail: async () => null,

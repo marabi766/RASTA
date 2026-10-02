@@ -524,7 +524,7 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `BID_SUBMITTED`                      | audit (مهر زمانی و رسید)                                   | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `revision`, `receivedAt`, `contentCommitment`, `receipt`                               |
 | `BID_REVISED`                        | audit                                                      | همان `BID_SUBMITTED` با `revision` بالاتر                                                                                                             |
 | `BID_WITHDRAWN`                      | audit                                                      | `bidId`, `tenderId`, `organizationId`, `bidderOrganizationId`, `withdrawnAt`                                                                          |
-| `BIDS_OPENED`                        | audit · notification                                       | `tenderId`, `organizationId`, `bidCount`, `openedBy`, `openedAt`                                                                                      |
+| `BIDS_OPENED`                        | audit · notification                                       | `tenderId`, `projectId`, `organizationId`, `bidCount`, `bidIdsDigest`, `receiptHead`, `openedBy`, `proposedBy`, `openedAt`                            |
 | `BID_ACCESSED`                       | audit                                                      | `bidId`, `tenderId`, `organizationId`, `accessorOrganizationId`, `purpose` (بسته), `outcome`, `accessedAt`                                            |
 | `BID_QUALIFIED` / `BID_DISQUALIFIED` | audit                                                      | `bidId`, `tenderId`, `organizationId`, `reasonCode` (بسته، فقط رد), `decidedBy`, `decidedAt`                                                          |
 | `BIDS_EVALUATED`                     | audit · analytics                                          | `tenderId`, `organizationId`, `evaluatedBidCount`, `evaluatedBy`, `evaluatedAt`                                                                       |
@@ -551,6 +551,27 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 (مناقصه‌ای که دیگر `PUBLISHED` نیست بی‌اثر و بی‌رویداد برمی‌گردد). `closedAt` ساعت پایگاه داده است که پس از قفل مناقصه خوانده می‌شود و
 هرگز پیش از `bidClosingAt` نیست. رویداد با گذار در یک تراکنش نوشته می‌شود؛ تأخیر بسته‌شدن به فاصلهٔ جاروکننده
 (`CONSTRUCTION_TENDER_CLOSE_INTERVAL_MS`) کران می‌خورد و درستی پذیرش پیشنهاد به آن وابسته نیست (ADR-065 § ۲-۳).
+
+**پیاده‌شده در CON-002 PR 8 (بازگشایی):** `BIDS_OPENED` (`aggregateType = Tender`، کلید `tenderId`؛ `projectId`، `organizationId`، `bidCount` —
+پیشنهادهای ایستاده که باز شدند، نه انصراف‌یافته‌ها — `bidIdsDigest` (SHA-256 به‌صورت hex از شناسهٔ پیشنهادهای بازشده، مرتب‌شدهٔ صعودی و
+پیوسته با `\n`؛ رویداد **کران‌دار** است و با شمار پیشنهادها بزرگ نمی‌شود، خود شناسه‌ها با `GET /v1/tenders/:id/bids` خوانده می‌شوند)،
+`receiptHead` (سرِ زنجیرهٔ رسید که پیشنهادها با آن سنجیده شدند؛ Digest و پیشتر عمومی)، `openedBy`، `proposedBy` (نفر نخستِ چهارچشمی، Q-91؛
+در غیاب آن `null`)، `openedAt`). هیچ قیمت، پاسخ، یادداشت، رمزنوشته یا کلیدی نمی‌آید (`.strict()`). هر مناقصه **یک** `BIDS_OPENED` دارد.
+هدف‌های `BID_ACCESSED` اکنون: `OWN_BID_RECEIPT` (پیمانکار)، و سمت کارفرما `OPEN_BIDS` (به‌ازای هر پیشنهاد بازشده)، `PROPOSE_OPENING` (پیشنهادِ بازگشایی، چهارچشمی؛ بی `bidId`، پیشنهادی خوانده نمی‌شود)، `COUNT_BIDS` (شمار پیش
+از بازگشایی؛ بی `bidId`)، `LIST_BIDS`، `READ_BID`؛ ردشده‌ها `outcome = REFUSED` و `bidId = null`. بازگشایی یا خواندنی که پیشنهادی برای
+نشان‌دادن ندارد (مناقصه‌ای بی پیشنهاد) هم یک ردیف سطح مناقصه (`bidId = null`، `outcome = GRANTED`) می‌گذارد.
+
+**افزوده در دور چهارم Codex #184 (تضاد منفعت):** هدف `BID_ACCESSED` تازه: `WITHDRAW_PROPOSAL` (پس‌گرفتن یا پاک‌شدن پیشنهادِ بازگشایی؛ بی `bidId`).
+دو رویداد (`aggregateType = Tender`، کلید `tenderId`؛ هیچ‌کدام `projectId` ندارند؛ فقط شناسه، `.strict()`):
+
+- `BID_OPENING_CONFLICT_DETECTED` — **نام را مدیر پروژه داد (2026-10-02).** پس از Commit بازگشایی، identity گفت پیشنهاددهنده یا
+  تأییدکننده در بازهٔ `windowStart` تا `checkedAt` عضو سازمانی پیشنهاددهنده بوده است (باقیماندهٔ ADR-066 § ۴): `tenderId`، `organizationId`، `openedAt`
+  (لحظهٔ تصمیم)، `openedBy`،
+  `proposedBy` (یا `null`)، `windowStart` (آغاز بازه: زودترین از خواندن‌های identity در تأیید و لحظهٔ تصمیم)، `checkedAt` (ساعت identity هنگام پاسخ، پس از Commit؛ پایان بازه) و `conflicts` (۱ تا ۲ مورد: `userId`، `role` = `PROPOSER | APPROVER`، `organizationIds`
+  حداکثر ۱۰۰ و `organizationCount`). بازگشایی پس گرفته نمی‌شود.
+- `BID_OPENING_PROPOSAL_WITHDRAWN` — **افزودهٔ CON-002 برای S-06؛ در انتظار پذیرش.** پیشنهادِ بازگشایی را پیشنهاددهنده پس گرفت یا تأییدی که او را
+  عضو پیشنهاددهنده یافت پاکش کرد: `tenderId`، `organizationId`، `proposedBy`، `withdrawnBy`، `reason`
+  (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED`)، `withdrawnAt`.
 
 **مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
 `tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**

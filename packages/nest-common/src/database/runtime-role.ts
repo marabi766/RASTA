@@ -27,10 +27,22 @@
  *     or is superuser-capable (SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS).
  *
  * Infrastructure, not business logic: it decides whether a process may start,
- * never what it does. Each service calls it first in `AppModule.onModuleInit`;
- * it is not in `PrismaService.onModuleInit`, because the integration suites
- * open owner connections through that class on purpose.
+ * never what it does. Each service runs it twice:
+ *
+ *   1. {@link preflightRuntimeRole}, first in `main.ts`'s `bootstrap()`, before
+ *      `NestFactory.create` — on a short-lived connection of its own, so the
+ *      refusal comes before Nest initialises a single provider. Nest runs every
+ *      provider's `onModuleInit` before the root module's, and a consumer or a
+ *      timer starts in its own: gated only in `AppModule`, it could take and
+ *      commit work under an owner connection before the refusal (Codex on
+ *      #178). A refused preflight rejects; `bootstrap().catch` exits 1.
+ *   2. {@link assertRuntimeRole}, first in `AppModule.onModuleInit`, on the
+ *      service's own connection — belt and braces, for an entry point that
+ *      skips `main.ts`. Not in `PrismaService.onModuleInit`, because the
+ *      integration suites open owner connections through that class on purpose.
  */
+
+import { DemoSeedRefusedError } from '@rasta/config';
 
 /** The one raw-SQL method every generated Prisma client has. */
 export interface RuntimeRoleQueryClient {
@@ -165,4 +177,56 @@ export async function assertRuntimeRole(
     throw new RuntimeRoleRefusedError(service, facts, problems, runtimeVariable);
   }
   return facts;
+}
+
+/** A client {@link preflightRuntimeRole} can open, ask, and close. */
+export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
+  $disconnect(): PromiseLike<void>;
+}
+
+/**
+ * The startup gate, before Nest builds anything: opens a client on the
+ * service's runtime URL (`open`, typically `new PrismaClient({ datasources })`),
+ * runs {@link assertRuntimeRole} on it and closes it whatever the outcome.
+ * Rejects with {@link RuntimeRoleRefusedError} when the connected role could act
+ * as an owner — and with the connection error when it cannot connect at all,
+ * so nothing starts on a database it cannot vouch for.
+ */
+export async function preflightRuntimeRole(
+  open: () => RuntimeRolePreflightClient,
+  options: AssertRuntimeRoleOptions,
+): Promise<ConnectedRoleFacts> {
+  const client = open();
+  try {
+    return await assertRuntimeRole(client, options);
+  } finally {
+    await client.$disconnect();
+  }
+}
+
+/**
+ * {@link preflightRuntimeRole} for a demo seed (Codex round 2 on #177): the
+ * first time a seed touches its database — before the seed guard's
+ * disposable-marker probe (`assertDemoSeedDatabase`, @rasta/config) and long
+ * before it writes. A refusal is the seed guard's refusal,
+ * `DemoSeedRefusedError` ("Refusing to seed <service>: …"), so every way a seed
+ * stops reads the same and scripts/verify-seed-guard.mjs can tell a refusal
+ * from a crash: an owner is named with what it could do (roles and objects,
+ * never the URL); a database that cannot be asked at all is refused without
+ * echoing the driver's error.
+ */
+export async function assertDemoSeedRuntimeRole(
+  open: () => RuntimeRolePreflightClient,
+  options: AssertRuntimeRoleOptions,
+): Promise<void> {
+  try {
+    await preflightRuntimeRole(open, options);
+  } catch (error) {
+    throw new DemoSeedRefusedError(options.service, [
+      error instanceof RuntimeRoleRefusedError
+        ? `it is connected as ${error.facts.role}, which ${error.problems.join(', ')}; ` +
+          `a seed writes only as the runtime role (${options.runtimeVariable})`
+        : 'the role the target database connects as could not be checked',
+    ]);
+  }
 }

@@ -50,7 +50,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const [command, flag, profile] = process.argv.slice(2);
 const PROFILES = ['development', 'deployment'];
 if (command !== 'apply' || flag !== '--profile' || !PROFILES.includes(profile)) {
-  process.stderr.write('usage: node scripts/kafka-acl.mjs apply --profile development|deployment\n');
+  process.stderr.write(
+    'usage: node scripts/kafka-acl.mjs apply --profile development|deployment\n',
+  );
   process.exit(2);
 }
 

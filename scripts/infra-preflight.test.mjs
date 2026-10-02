@@ -14,6 +14,7 @@ import {
   passwordVariable,
   ROLE_LIBRARY,
   rolesFromLibrary,
+  splitServicesFromLibrary,
 } from './infra-preflight-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,12 +34,13 @@ const noValues = (messages, ...values) => {
 
 test('reads all sixteen service roles and every migrator from the bash library', () => {
   const roles = rolesFromLibrary();
-  assert.equal(roles.length, 19);
+  const split = splitServicesFromLibrary();
+  assert.ok(split.includes('supplier') && split.includes('construction'));
+  assert.equal(roles.length, 16 + 1 + split.length);
   assert.ok(roles.includes('rasta_identity'));
-  assert.deepEqual(roles.slice(-3), [
+  assert.deepEqual(roles.slice(16), [
     'rasta_audit_migrator',
-    'rasta_supplier_migrator',
-    'rasta_construction_migrator',
+    ...split.map((service) => `rasta_${service}_migrator`),
   ]);
   assert.equal(
     passwordVariable('rasta_construction_migrator'),
