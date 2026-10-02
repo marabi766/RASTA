@@ -286,6 +286,10 @@ describe('dispatch blocks (L3-02)', () => {
         );
       });
       const attempt = assign(org.a, assetId, driverId);
+      // The refusal can settle before release() returns (it awaits the holder's
+      // commit), so observe it now; otherwise Node reports an unhandled
+      // rejection and Jest fails the test with the expected error.
+      attempt.catch(() => undefined);
       await waitForBlocked(1);
       await release();
 
