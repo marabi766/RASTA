@@ -199,3 +199,9 @@ export function validateLocalPostgresConfig(text) {
 
   return { errors, postgresUrls, ignoredUrls };
 }
+
+/**
+ * The committed local defaults, checked as one text: .env.example, and the
+ * database owners' URLs kept apart from it in .env.migrator.example (D-045).
+ */
+export const COMMITTED_CONFIG_FILES = Object.freeze(['.env.example', '.env.migrator.example']);

@@ -22,6 +22,7 @@ playwright-report/
 .env
 .env.*
 !.env.example
+!.env.migrator.example
 *.pem
 *.key
 !infrastructure/**/*.example.key

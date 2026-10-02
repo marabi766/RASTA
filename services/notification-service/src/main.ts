@@ -7,6 +7,12 @@
 // -----------------------------------------------------------------------------
 import { initTelemetry, shutdownTelemetry } from '@rasta/observability';
 import { loadNotificationEnv, corsOrigins, SERVICE_NAME } from './config/env';
+import { assertNoMigratorCredentials } from '@rasta/config';
+
+// D-045: a service never holds its database owner's credential. Refuse to start,
+// before anything is loaded or connected, if one reached this environment
+// (@rasta/config owner-credentials.ts).
+assertNoMigratorCredentials(process.env);
 
 const env = loadNotificationEnv();
 

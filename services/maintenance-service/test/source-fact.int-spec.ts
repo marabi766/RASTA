@@ -81,7 +81,9 @@ describe('maintenance source fact', () => {
     await asActor({ organizationId: org.a }, () =>
       repairOrders.complete(order.id, { workPerformed: 'کاسه‌نمد تعویض شد' }),
     );
-    await asActor({ organizationId: org.a }, () => requests.approve(request.id, {}));
+    await asActor({ organizationId: org.a }, () =>
+      requests.approve(request.id, { expectedTotalCostMinor: '2250000' }),
+    );
     approvedId = request.id;
   });
 

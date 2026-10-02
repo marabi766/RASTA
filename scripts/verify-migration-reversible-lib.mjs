@@ -376,6 +376,9 @@ export const EXPECTED = {
    * the second `up` to fail on a name that already exists.
    */
   audit: {
+    // D-045: rasta_audit_migrator owns database rasta_audit, and the runtime
+    // role lost CREATE on it — the scratch schema is the migrator's to create.
+    connectAs: 'migrator',
     tables: [
       'audit_event',
       'audit_event_2026_09',
@@ -933,6 +936,10 @@ export const EXPECTED = {
    * area is valid geometry.
    */
   construction: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch
+    // database is created — and migrated — as the migrator, which owns
+    // rasta_construction (lib/service-privilege-split.bash).
+    connectAs: 'migrator',
     scratchDatabase: true,
     tables: [
       'approval',
@@ -1282,6 +1289,64 @@ export const EXPECTED = {
  * whose verification either cannot run, runs by sequential scan, or cannot be
  * re-applied at all.
  */
+/**
+ * The connection a verification runs on, and the variable it came from.
+ *
+ * A service whose EXPECTED entry says `connectAs: 'migrator'` is verified as its
+ * migrator — the role that owns its database and runs its migrations (D-045) —
+ * and **only** as that: `DATABASE_URL_<SVC>_MIGRATOR` is required, and the
+ * generic `DATABASE_URL` is never used in its place (Codex review of #178).
+ * A shell's DATABASE_URL naming some other role would otherwise be taken
+ * silently, and the scratch schema made — or refused — by the wrong owner.
+ * Every other service keeps the old order: DATABASE_URL, then
+ * DATABASE_URL_<SVC>.
+ *
+ * Returns `{ key, url }`, or `{ key, error }` naming what to set.
+ */
+export function verifierConnection(service, env = process.env) {
+  const serviceKey = `DATABASE_URL_${service.replaceAll('-', '_').toUpperCase()}`;
+  if (EXPECTED[service]?.connectAs === 'migrator') {
+    const key = `${serviceKey}_MIGRATOR`;
+    if (env[key]) return { key, url: env[key] };
+    return {
+      key,
+      error:
+        `${key} is not set. ${service}-service is verified as its migrator only — DATABASE_URL ` +
+        'is not used in its place. Copy .env.migrator.example to .env.migrator, or export it.',
+    };
+  }
+  if (env.DATABASE_URL) return { key: 'DATABASE_URL', url: env.DATABASE_URL };
+  if (env[serviceKey]) return { key: serviceKey, url: env[serviceKey] };
+  return {
+    key: serviceKey,
+    error: `${serviceKey} is not set. Copy .env.example to .env, or set DATABASE_URL.`,
+  };
+}
+
+/** Who a verification is connected as; `psql -At` prints `current|session|superuser`. */
+export const CONNECTED_ROLE_PROBE =
+  'SELECT current_user, session_user, rolsuper FROM pg_roles WHERE rolname = current_user';
+
+/**
+ * For a `connectAs: 'migrator'` service, the reason the connection behind
+ * `probeOutput` (CONNECTED_ROLE_PROBE's) is not exactly that service's
+ * migrator, or null when it is (Codex round 3 on #176). A superuser — or any
+ * other role the URL happened to name — would make the scratch schemas and pass
+ * checks the migrator itself might fail, so the verification would prove
+ * nothing about the role migrations really run as. Other services: always null.
+ */
+export function verifierRoleProblem(service, probeOutput) {
+  if (EXPECTED[service]?.connectAs !== 'migrator') return null;
+  const expected = `rasta_${service.replaceAll('-', '_')}_migrator`;
+  const [current, session, superuser] = String(probeOutput).trim().split('|');
+  if (!current) return `could not tell which role the ${service} verification is connected as`;
+  if (superuser === 't') return `connected as ${current}, a superuser — not ${expected}`;
+  if (current !== expected || session !== expected) {
+    return `connected as ${session === current ? current : `${session} (SET ROLE ${current})`} — not ${expected}`;
+  }
+  return null;
+}
+
 export function assertionScript(expected, present, schema) {
   const {
     tables,

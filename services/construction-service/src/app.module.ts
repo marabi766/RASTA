@@ -361,6 +361,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   private gaugeTimer?: NodeJS.Timeout;
 
   constructor(
+    private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly moves: OrganizationMovedConsumer,
     private readonly standing: SupplierStandingConsumer,
@@ -381,6 +382,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onModuleInit(): Promise<void> {
+    // First of all (D-045): nothing is served, relayed or consumed as a role
+    // that could lift this service's database guards.
+    await this.prisma.assertRuntimeRole();
+
     // The consumer first: a topic it cannot subscribe to must stop the boot
     // (`EventConsumer` never auto-creates topics), not leave a service that
     // looks healthy and never hears a move.

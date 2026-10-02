@@ -237,6 +237,47 @@ describe('what comes back', () => {
   });
 });
 
+describe('mapProblemToFields — a fallback keyed by error code', () => {
+  const mapping = {
+    paths: {},
+    messages: { 'Known sentence': 'جملهٔ شناخته‌شده' },
+    byCode: { INVALID_STATE_TRANSITION: 'پیام جایگزین' },
+  };
+
+  it('uses a known sentence first', () => {
+    const mapped = mapProblemToFields(
+      { code: 'INVALID_STATE_TRANSITION', message: 'Known sentence' },
+      mapping,
+    );
+    expect(mapped.message).toBe('جملهٔ شناخته‌شده');
+  });
+
+  it('says the code’s fallback for an unknown sentence, and never the sentence', () => {
+    const mapped = mapProblemToFields(
+      { code: 'INVALID_STATE_TRANSITION', message: 'Something new' },
+      mapping,
+    );
+    expect(mapped.message).toBe('پیام جایگزین');
+  });
+
+  it('keeps the sentence as it arrived under a code with no fallback', () => {
+    const mapped = mapProblemToFields({ code: 'OTHER', message: 'Something new' }, mapping);
+    expect(mapped.message).toBe('Something new');
+  });
+
+  it('applies to a detail the mapping does not place on a field', () => {
+    const mapped = mapProblemToFields(
+      {
+        code: 'INVALID_STATE_TRANSITION',
+        message: 'Request failed',
+        details: [{ path: 'elsewhere', message: 'Something new' }],
+      },
+      mapping,
+    );
+    expect(mapped.message).toBe('پیام جایگزین');
+  });
+});
+
 describe('mapProblemToFields', () => {
   it('keeps the first problem per field', () => {
     const mapped = mapProblemToFields(

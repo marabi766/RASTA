@@ -17,6 +17,18 @@ import { installLiveSession } from './live-session';
  * the desktop project only: the phone project runs the read-only scenarios
  * (`playwright.config.ts`), and a write that creates a record belongs once,
  * not once per viewport.
+ *
+ * ## One run per stack
+ *
+ * **The live block assumes it is the only run using its stack.** CI gives every
+ * job a fresh stack; a local run uses a stack nobody else is writing to. It does
+ * not try to share the suite's machine (`AST-SEED-E2E-0001`) with another run:
+ * it does not tell its requests from a concurrent run's, and it does not guess
+ * whether an open request belongs to a run that is still going. Instead it
+ * states the assumption and checks it — before each test the machine must have
+ * no open corrective request, or the test stops with a message saying so — and
+ * it cancels only the requests this run created, by the ids it recorded.
+ * See `e2e/README.md`.
  */
 
 test.describe('the maintenance route', () => {
@@ -90,11 +102,9 @@ test.describe('the maintenance route', () => {
  */
 const MACHINE = 'AST-SEED-E2E-0001';
 
-/** What every request this suite files starts with, so its own can be told from anyone else's. */
+/** What every request this suite files starts with: readable in a failure, not a way to find them again. */
 const TITLE_PREFIX = 'آزمون مرورگر';
-/** This worker's own marker: a retry, being a new worker, files under a different one. */
-const RUN = Date.now().toString(36);
-const titled = (what: string): string => `${TITLE_PREFIX} ${RUN} - ${what}`;
+const titled = (what: string): string => `${TITLE_PREFIX} - ${what}`;
 
 const BREAKDOWN_TITLE = titled('نشتی روغن هیدرولیک');
 
@@ -141,21 +151,36 @@ async function cancel(request: APIRequestContext, accessToken: string, id: strin
 }
 
 /**
- * Cancels what this suite filed and nothing else: the ids it saw created, and
- * any open request on its own machine whose title carries `marker`. The marker
- * is how a request the form committed but the test never saw (the attempt failed
- * after the service answered) is still found — by what the test wrote into it,
- * not by "everything open".
+ * Cancels the requests this run created, by the ids it recorded, and nothing
+ * else: no title, prefix or age is used to decide what is "ours". A recorded id
+ * that is no longer open (a test that cancelled its own request through the
+ * page) is skipped, because cancelling it again would be a conflict, not a
+ * cleanup.
  */
-async function cancelOwn(
-  request: APIRequestContext,
-  accessToken: string,
-  marker: string,
-): Promise<void> {
-  const open = await openCorrective(request, accessToken);
-  const own = open.filter((record) => created.has(record.id) || record.title.startsWith(marker));
-  for (const record of own) await cancel(request, accessToken, record.id);
+async function cancelCreated(request: APIRequestContext, accessToken: string): Promise<void> {
+  if (created.size === 0) return;
+  const open = new Set((await openCorrective(request, accessToken)).map((record) => record.id));
+  for (const id of created) if (open.has(id)) await cancel(request, accessToken, id);
   created.clear();
+}
+
+/**
+ * The assumption this suite is built on, checked rather than hoped for: the
+ * machine has no open corrective request before a test starts. If it has one, a
+ * previous run on this stack left it (or another run is using the stack), and
+ * the duplicate rule would turn that into a confusing failure inside a test.
+ * Nothing is cancelled here — what is open is not this run's to remove.
+ */
+async function assertMachineIsOurs(request: APIRequestContext, accessToken: string): Promise<void> {
+  const open = await openCorrective(request, accessToken);
+  if (open.length > 0) {
+    throw new Error(
+      `${MACHINE} already has ${open.length} open corrective request(s) ` +
+        `(${open.map((record) => record.id).join(', ')}). The live browser suite assumes it is ` +
+        'the only run on its stack and starts from a machine with none; reset the stack ' +
+        '(or cancel those requests yourself) and run it again. See apps/web/e2e/README.md.',
+    );
+  }
 }
 
 test.describe('reporting maintenance through the live stack', () => {
@@ -173,14 +198,12 @@ test.describe('reporting maintenance through the live stack', () => {
   test.beforeEach(async ({ context, request }) => {
     const session = await installLiveSession(context, 'orgAdmin');
     accessToken = session.accessToken;
-    // What an earlier attempt of this suite left (a crashed worker, a failed
-    // teardown): anything on this machine filed under the suite's prefix.
-    await cancelOwn(request, accessToken, TITLE_PREFIX);
+    await assertMachineIsOurs(request, accessToken);
   });
 
   test.afterEach(async ({ request }) => {
-    // Only what this test filed.
-    if (accessToken) await cancelOwn(request, accessToken, `${TITLE_PREFIX} ${RUN}`);
+    // Only the ids this run recorded.
+    if (accessToken) await cancelCreated(request, accessToken);
   });
 
   test('a breakdown reported in the form is held by maintenance-service, and a second one is refused by it', async ({
@@ -239,6 +262,52 @@ test.describe('reporting maintenance through the live stack', () => {
     await expect(page.getByText(/همین حالا یک درخواست باز از همین نوع دارد/)).toBeVisible();
     await expect(page).not.toHaveURL(/created=1|flash=/);
     expect(await openCorrective(request, accessToken)).toHaveLength(1);
+  });
+
+  test('a request this suite filed is cancelled from its page, and maintenance-service holds the cancellation', async ({
+    page,
+    request,
+  }) => {
+    test.setTimeout(60_000);
+
+    // The request is filed straight at the owning service: this test is about
+    // the command on the detail page, and the report form has its own test.
+    const title = titled('درخواست برای لغو');
+    const filed = await request.post(maintenanceUrl('/v1/maintenance-requests'), {
+      headers: { authorization: `Bearer ${accessToken}` },
+      data: { assetId: MACHINE, type: 'CORRECTIVE', severity: 'LOW', title },
+    });
+    expect(filed.status()).toBe(201);
+    const { id } = (await filed.json()) as RequestRecord;
+    created.add(id);
+
+    await page.goto(`/maintenance/${encodeURIComponent(id)}`);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(title);
+
+    // An organization admin is offered the three commands; the one used here is
+    // closed until asked for.
+    await page.getByText('لغو این درخواست').click();
+    const form = page.locator('form').filter({
+      has: page.getByRole('button', { name: 'لغو درخواست' }),
+    });
+    await form.locator('textarea[name="reason"]').fill('لغو در آزمون مرورگر');
+    await form.getByRole('button', { name: 'لغو درخواست' }).click();
+
+    // A signed flash on the page the redirect lands on, which reads the request
+    // again; the query carries no notice a person could have typed.
+    await expect(page).toHaveURL(new RegExp(`/maintenance/${encodeURIComponent(id)}\\?flash=`));
+    await expect(page.getByText('درخواست لغو شد.')).toBeVisible();
+
+    // Asked of the owning service, with the same token: the portal is not the
+    // witness of its own write.
+    const read = await request.get(maintenanceUrl(`/v1/maintenance-requests/${id}`), {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    expect(read.status()).toBe(200);
+    expect((await read.json()) as RequestRecord).toEqual(
+      expect.objectContaining({ id, organizationId: 'ORG-DEH-0001', status: 'CANCELLED' }),
+    );
+    expect(await openCorrective(request, accessToken)).toHaveLength(0);
   });
 
   test('a breakdown without a severity is refused at the form and reaches no service', async ({
