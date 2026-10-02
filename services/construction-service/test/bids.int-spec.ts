@@ -1018,14 +1018,39 @@ describe('bids', () => {
       for (const sql of [
         `UPDATE "bid_access_log" SET "outcome" = 'GRANTED' WHERE "tender_id" = '${tenderId}'`,
         `DELETE FROM "bid_access_log" WHERE "tender_id" = '${tenderId}'`,
-        'TRUNCATE "bid_access_log"',
         `UPDATE "bid_receipt" SET "receipt" = '${'0'.repeat(64)}' WHERE "tender_id" = '${tenderId}'`,
         `DELETE FROM "bid_receipt" WHERE "tender_id" = '${tenderId}'`,
-        'TRUNCATE "bid_receipt"',
       ]) {
         await expect(
           runUnscoped('the suite attacks the table', () => w.prisma.client.$executeRawUnsafe(sql)),
         ).rejects.toThrow(/ck_bid_append_only/);
+      }
+      // TRUNCATE at both layers. The service's role may not truncate at all
+      // (D-045: it holds DML only)…
+      for (const table of ['bid_access_log', 'bid_receipt']) {
+        await expect(
+          runUnscoped('the suite attacks the table', () =>
+            w.prisma.client.$executeRawUnsafe(`TRUNCATE "${table}"`),
+          ),
+        ).rejects.toThrow(/permission denied/);
+      }
+      // …and the trigger still refuses the owner, whose TRUNCATE would be a
+      // migration's or an operator's — inside a transaction that is rolled back
+      // whatever happens, so a missing trigger fails the case without emptying
+      // the shared tables.
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const rollback = new Error('the suite rolls the attempt back');
+      try {
+        for (const table of ['bid_access_log', 'bid_receipt']) {
+          await expect(
+            owner.$transaction(async (tx) => {
+              await tx.$executeRawUnsafe(`TRUNCATE "${table}"`);
+              throw rollback;
+            }),
+          ).rejects.toThrow(/ck_bid_append_only/);
+        }
+      } finally {
+        await owner.$disconnect();
       }
       expect(await linksOf(tenderId)).toHaveLength(1);
     });
