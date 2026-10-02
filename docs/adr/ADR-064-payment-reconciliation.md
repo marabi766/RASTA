@@ -181,6 +181,24 @@ ADR-024 است.
   می‌کند مگر `NODE_ENV` برابر `development` یا `test` باشد.
 - `requeue` تک‌کنشگر می‌ماند: پولی جابه‌جا نمی‌کند و فقط تسک را به صف برمی‌گرداند.
 
+**چنان‌که ساخته شد (گام B3، #175).** جایی که با بالا فرق دارد، این معتبر است:
+
+- **Route جدا به جای یک بدنهٔ چندکنشی:** `GET /v1/payment-intents/{id}/reconciliation` (تسک و همهٔ پیشنهادها)،
+  `POST …/reconciliation/requeue`، `POST …/reconciliation/resolutions` (پیشنهاد)، و
+  `POST …/reconciliation/resolutions/{resolutionId}/approve` و `…/reject`؛ هر نوشتن Idempotency-Key می‌خواهد. سقف `@Roles`
+  `SYSTEM_ADMIN` و `UNION_ADMIN` است و پیکربندی آن را تنگ می‌کند؛ فراخوانندهٔ سرویسی رد می‌شود.
+- **نتیجه همان پاسخ Provider است، نه وضعیت Intent:** `providerOutcome: REFUNDED | DECLINED | NOT_REACHED`. تأیید آن را به‌عنوان
+  پاسخی معتبر به همان جدول تصمیم و همان `PaymentReconciler.apply` (قفل Intent، سپس کیف پول، سپس تسک) می‌دهد؛ شاهد و نفر دوم
+  پشتوانهٔ آن‌اند. حکمی که چیزی را جابه‌جا نمی‌کند تأیید را برمی‌گرداند و پیشنهاد منتظر می‌ماند: کیف پول غیرفعال → `422`،
+  بقیه → `409`. تأیید تسکی را که آشتی‌دهنده در دست دارد رد می‌کند (`409`) و Lease خودش را نمی‌گیرد.
+- **پیشنهاد ردیفی در `payment_reconciliation_resolution` است** (حداکثر یک `PENDING_APPROVAL` برای هر تسک). خود جدول شاهد آزاد
+  و `decided_by = proposed_by` زیر تأیید دونفره را رد می‌کند؛ `down.sql` آن با قفل جدول آغاز می‌شود و تا پیشنهادی منتظر است رد
+  می‌کند. پیشنهاددهنده هم نمی‌تواند سازندهٔ Intent باشد.
+- **رویدادها:** تأیید `PAYMENT_RECONCILIATION_RESOLVED` است با `resolvedBy` = تأییدکننده و `proposedBy`، `approvedBy`،
+  `evidenceReference`، `resolutionId`، `fourEyes`؛ بازگرداندن، پیشنهاد و رد رویداد تازهٔ `PAYMENT_RECONCILIATION_OPERATOR_ACTION`
+  (`NEVER_AUTO_REPLAY`). `requeue` تسک باز را با تلاش صفرشده بی‌درنگ سررسید می‌کند و تا آشتی‌دهنده آن را دارد یا پیشنهادی منتظر
+  است رد می‌شود.
+
 ### ۷. کجا اجرا می‌شود: Timer درون فرایند، نه Temporal
 
 `economic-service` هیچ Worker تمپورالی ندارد (فقط marketplace دارد)؛ ADR-031 جریان‌های اقتصادی را بیرون از Temporal نگه
@@ -243,8 +261,8 @@ promtool.
 | A      | طرح STEP 0 و همین ADR، Q-81، Q-82                                                                                     | #140 |
 | **B0** | R2: Hold بازپرداخت و چهار علامت آن (§ ۲)؛ U6: بازپرداخت بی‌پاسخ نامعلوم است، نه رد                                    | #143 |
 | B1     | جدول تسک، Migration با Backfill، تولد تسک با Hold یا علامت و مرگش با نتیجه در همان تراکنش، تست جداسازی مستأجر (§ ۸)   | #161 |
-| B2     | آشتی‌دهنده (`SKIP LOCKED`، Lease، Fence)، `getRefundStatus` در Port و Mock، Timeout، جدول تصمیم، تشدید، متریک و هشدار | —    |
-| B3     | مسیر اپراتور با تأیید دونفره (§ ۶)، حذف `UPDATE` دستی Runbook، OpenAPI، به‌روزرسانی حافظهٔ پروژه و D-035              | —    |
+| B2     | آشتی‌دهنده (`SKIP LOCKED`، Lease، Fence)، `getRefundStatus` در Port و Mock، Timeout، جدول تصمیم، تشدید، متریک و هشدار | #164 |
+| B3     | مسیر اپراتور با تأیید دونفره (§ ۶)، حذف `UPDATE` دستی Runbook، OpenAPI، به‌روزرسانی حافظهٔ پروژه و D-035              | #175 |
 | C      | Intentهای Top-up گیرکرده (U1–U5، U7، U8) روی همان جدول و آشتی‌دهنده؛ `getStatus` پرداخت و سیاست Capture (Q-81)        | —    |
 
 > **دامنهٔ گام B (تصمیم مدیر پروژه، بازبینی نهایی #143 و طرح #161):** اسکن پایدار `REFUND_REQUESTED` کهنه و علامت‌های دیگر،
