@@ -1,5 +1,11 @@
 import { z } from 'zod';
 import { queryBoolean } from '@rasta/config';
+import {
+  UNSUPPORTED_CHARACTERS,
+  WITHOUT_BIDI_CONTROL,
+  plainText,
+  referenceId,
+} from '@rasta/contracts';
 import { DOCUMENT_CLASSES } from '../content/policy';
 
 /**
@@ -14,7 +20,12 @@ import { DOCUMENT_CLASSES } from '../content/policy';
  * merely intended.
  */
 
-const identifier = z.string().min(1).max(64);
+/**
+ * An id: an upload intent, a cursor, and — stored as given, never resolved —
+ * the owning resource's id. No control or format character, bidi controls
+ * included (#209).
+ */
+const identifier = referenceId().min(1).max(64);
 
 export const requestUploadUrlSchema = z
   .object({
@@ -34,8 +45,11 @@ export const requestUploadUrlSchema = z
      * The client's filename, for display only.
      *
      * Sanitised on arrival and never used to build the object key (ADR-014).
+     * A bidi control is refused here rather than silently stripped: the caller
+     * learns the name it sent is not the name that would be shown (#209). The
+     * sanitising stays as the safeguard for everything else it removes.
      */
-    filename: z.string().min(1).max(255),
+    filename: z.string().min(1).max(255).regex(WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS),
   })
   .strict();
 
@@ -59,7 +73,7 @@ export const finalizeDocumentSchema = z
      * registration fail when an unrelated service is down, and the reference
      * is meaningful to the caller either way (AGENTS.md A-01).
      */
-    ownerResourceType: z.string().min(1).max(64).optional(),
+    ownerResourceType: plainText().min(1).max(64).optional(),
     ownerResourceId: identifier.optional(),
   })
   .strict()
@@ -79,7 +93,7 @@ export const deleteDocumentSchema = z
      * "who and when" but not "why", which is the question an auditor actually
      * asks. A minimum length stops "x" from satisfying it.
      */
-    reason: z.string().min(8).max(500),
+    reason: plainText().min(8).max(500),
   })
   .strict();
 
