@@ -504,6 +504,9 @@ export const EXPECTED = {
       'bid_access_evidence',
       // 20261001130000_tender_receipt_pending: receipts held until their predecessor arrives.
       'tender_receipt_pending',
+      // 20261003120000_payment_reconciliation_evidence (D-046): who proposed and
+      // approved a payment-reconciliation resolution, on which evidence.
+      'payment_reconciliation_evidence',
     ],
     triggers: [
       'tg_tender_receipt_link_append_only',
@@ -517,6 +520,8 @@ export const EXPECTED = {
       // sees a TRUNCATE. Both names or the head is forward-only in name only.
       'audit_chain_head_forward_only',
       'audit_chain_head_no_truncate',
+      'tg_payment_reconciliation_evidence_append_only',
+      'tg_payment_reconciliation_evidence_no_truncate',
     ],
     indexes: [
       // Verification walks one chain in `sequence_no` order within a partition.
@@ -539,6 +544,8 @@ export const EXPECTED = {
       'ux_tender_receipt_pending_previous',
       'ux_tender_receipt_pending_receipt',
       'ix_tender_receipt_pending_held',
+      'ux_payment_reconciliation_evidence_audit_event',
+      'ix_payment_reconciliation_evidence_intent',
     ],
     types: ['audit_chain_scope'],
     // The two trigger functions, named separately from the triggers that call
@@ -547,7 +554,12 @@ export const EXPECTED = {
     // `DROP FUNCTION` the forward migration forgets to restore leaves a trigger
     // definition pointing at nothing -- which PostgreSQL refuses to create, so
     // the rollback and the re-apply are the only place either shows up.
-    functions: ['refuse_mutation', 'refuse_chain_head_regression', 'tender_evidence_append_only'],
+    functions: [
+      'refuse_mutation',
+      'refuse_chain_head_regression',
+      'tender_evidence_append_only',
+      'payment_reconciliation_evidence_append_only',
+    ],
     constraints: [
       'audit_event_source_event_id_not_blank',
       'audit_event_source_topic_not_blank',
@@ -583,6 +595,10 @@ export const EXPECTED = {
       'ck_bid_access_evidence_shape',
       'ck_bid_access_evidence_refusal_code',
       'ck_tender_receipt_pending_shape',
+      // D-046: the version, the allow-listed values and which fields each event carries.
+      'ck_payment_reconciliation_evidence_version',
+      'ck_payment_reconciliation_evidence_values',
+      'ck_payment_reconciliation_evidence_shape',
     ],
   },
   /**
