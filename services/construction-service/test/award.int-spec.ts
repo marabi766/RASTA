@@ -26,6 +26,8 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  awardApproved,
+  approveAward,
 } from './helpers';
 
 /**
@@ -94,7 +96,35 @@ describe('awarding an evaluated tender', () => {
   ) =>
     as(
       owner,
-      () => on.award.awardApproved(tenderId, justification ? { bidId, justification } : { bidId }),
+      () => awardApproved(on, tenderId, justification ? { bidId, justification } : { bidId }),
+      userId,
+    );
+
+  /** The awarder asks and other people approve; nothing is awarded yet. */
+  const approve = (owner: string, tenderId: string, bidId: string, justification?: string) =>
+    as(owner, () =>
+      approveAward(w, tenderId, justification ? { bidId, justification } : { bidId }),
+    );
+
+  /** The command itself, on an approval already given: the answer is the award (or its refusal). */
+  const awardNow = (
+    owner: string,
+    tenderId: string,
+    bidId: string,
+    justification?: string,
+    userId?: string,
+    on: Wiring = w,
+  ) =>
+    as(
+      owner,
+      async () => {
+        const answer = await on.award.award(
+          tenderId,
+          justification ? { bidId, justification } : { bidId },
+        );
+        if (!answer.executed) throw new Error('the award was not approved yet');
+        return answer.result;
+      },
       userId,
     );
 
@@ -271,6 +301,7 @@ describe('awarding an evaluated tender', () => {
         winnerOrganizationId: bids[0]!.bidder,
         hasJustification: false,
         matrixDigest: digest,
+        approvalRequestId: expect.any(String),
         awardedBy: user,
         awardedAt: row!.awardedAt.toISOString(),
       });
@@ -345,7 +376,7 @@ describe('awarding an evaluated tender', () => {
         issuer: ISSUER,
       } as unknown as Partial<RequestContext>;
       await runWithContext(context(withIdentity), () =>
-        w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }),
+        awardApproved(w, tenderId, { bidId: bids[0]!.bidId }),
       );
       expect((await awardRows(tenderId))[0]).toMatchObject({
         awardedBy: user,
@@ -357,6 +388,10 @@ describe('awarding an evaluated tender', () => {
     it('records no half pair: a subject without its issuer is not kept', async () => {
       const { owner, tenderId, bids } = await evaluated({ count: 1 });
       const user = newUserId();
+      // Someone whose identity is known asks and is approved by others (a request whose maker cannot be
+      // told from its approver is refused, so an unknown identity cannot ask) ...
+      await approve(owner, tenderId, bids[0]!.bidId);
+      // ... and the person with half a pair executes: what is recorded is no half pair.
       await runWithContext(
         context({
           organizationId: owner,
@@ -367,7 +402,10 @@ describe('awarding an evaluated tender', () => {
           // No issuer in the token: half a pair proves nothing.
           issuer: undefined,
         } as unknown as Partial<RequestContext>),
-        () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }),
+        async () => {
+          const done = await w.award.award(tenderId, { bidId: bids[0]!.bidId });
+          if (!done.executed) throw new Error('the award was not approved');
+        },
       );
       expect((await awardRows(tenderId))[0]).toMatchObject({
         awardedBy: user,
@@ -542,16 +580,33 @@ describe('awarding an evaluated tender', () => {
       expect((await award(owner, tenderId, bids[0]!.bidId)).status).toBe('AWARDED');
     });
 
-    it('asks supplier-service about the winner only, and not at all for a repeat of an award already made', async () => {
+    it('asks supplier-service about the winner only: for the request, and again at the execution, which an approval never replaces; not at all for a repeat of an award already made', async () => {
       const { owner, tenderId, bids } = await evaluated({ count: 3 });
       const before = SUPPLIER.asked.length;
-      await award(owner, tenderId, bids[0]!.bidId);
-      // The winner alone, once: the pre-check. The check after the commit is the sweeper's, not the request's.
+      await approve(owner, tenderId, bids[0]!.bidId);
+      // The winner alone, once, for the request the authority decides on.
       expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder]);
+      await awardNow(owner, tenderId, bids[0]!.bidId);
+      // And once more now, at the execution: the approval did not stand in for it. The check after the
+      // commit is the sweeper's, not the request's.
+      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder, bids[0]!.bidder]);
       SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
-      const again = await award(owner, tenderId, bids[0]!.bidId);
+      const again = await awardNow(owner, tenderId, bids[0]!.bidId);
       expect(again.alreadyAwarded).toBe(true);
-      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder]);
+      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder, bids[0]!.bidder]);
+    });
+
+    it('does not award on an approval when the winner is no longer eligible at the execution: 422, the approval stays unused', async () => {
+      const { owner, tenderId, bids } = await evaluated({ count: 2 });
+      await approve(owner, tenderId, bids[0]!.bidId);
+      SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+      expect(await refusalOf(awardNow(owner, tenderId, bids[0]!.bidId))).toContain(
+        'WINNER_NOT_ELIGIBLE',
+      );
+      expect(await awardRows(tenderId)).toHaveLength(0);
+      // Reinstated, the same approval still stands (nothing used it) and awards.
+      SUPPLIER.reinstate(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+      expect((await awardNow(owner, tenderId, bids[0]!.bidId)).status).toBe('AWARDED');
     });
 
     it('fails closed when supplier-service cannot be reached: 503, nothing is awarded, the attempt is audited', async () => {
@@ -632,10 +687,13 @@ describe('awarding an evaluated tender', () => {
           await checks('unavailable'),
         ];
         const user = newUserId();
-        const view = await award(owner, tenderId, bids[0]!.bidId, undefined, user);
+        await approve(owner, tenderId, bids[0]!.bidId);
+        const askedAtExecution = SUPPLIER.asked.length;
+        const view = await awardNow(owner, tenderId, bids[0]!.bidId, undefined, user);
 
         // Only the pre-check was asked; the check after the commit is not the request's.
-        expect(SUPPLIER.asked.length - asked).toBe(1);
+        expect(asked).toBeLessThanOrEqual(askedAtExecution);
+        expect(SUPPLIER.asked.length - askedAtExecution).toBe(1);
         expect(await rowOf(tenderId)).toMatchObject({
           organizationId: owner,
           tenderId,
@@ -692,9 +750,10 @@ describe('awarding an evaluated tender', () => {
         const { owner, tenderId, bids } = await evaluated({ count: 1 });
         const bidder = bids[0]!.bidder;
         const before = await checks('conflict');
+        await approve(owner, tenderId, bids[0]!.bidId);
         SUPPLIER.afterAnswer = () => SUPPLIER.suspend(bidder, `SUS_RACE_${bidder}`);
         const user = newUserId();
-        const view = await award(owner, tenderId, bids[0]!.bidId, undefined, user);
+        const view = await awardNow(owner, tenderId, bids[0]!.bidId, undefined, user);
 
         // Not stopped, not undone, and nothing is said in the request.
         expect(view.status).toBe('AWARDED');
@@ -774,8 +833,9 @@ describe('awarding an evaluated tender', () => {
 
       it('keeps the check pending when the outcome cannot be written, and names the award in the log', async () => {
         const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await approve(owner, tenderId, bids[0]!.bidId);
         SUPPLIER.afterAnswer = () => SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
-        await award(owner, tenderId, bids[0]!.bidId);
+        await awardNow(owner, tenderId, bids[0]!.bidId);
         const lines: string[] = [];
         jest.spyOn(Logger.prototype, 'error').mockImplementation((m: unknown) => {
           lines.push(String(m));
@@ -1070,7 +1130,7 @@ describe('awarding an evaluated tender', () => {
           userId: token,
           roles: ['ORGANIZATION_ADMIN'],
         }),
-        () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }),
+        () => awardApproved(w, tenderId, { bidId: bids[0]!.bidId }),
       );
       expect(await refusalOf(byToken, 'FORBIDDEN')).toContain('CONFLICT_OF_INTEREST');
       // By identity-service: a membership created after the token was issued.
@@ -1098,7 +1158,7 @@ describe('awarding an evaluated tender', () => {
           userId: newUserId(),
           roles: ['ORGANIZATION_ADMIN'],
         }),
-        () => w.award.awardApproved(tenderId, { bidId: 'BID_ANY' }),
+        () => awardApproved(w, tenderId, { bidId: 'BID_ANY' }),
       );
       expect(await refusalOf(caller, 'FORBIDDEN')).toContain('CONFLICT_OF_INTEREST');
     });
@@ -1118,7 +1178,7 @@ describe('awarding an evaluated tender', () => {
         const call = asUser(
           owner,
           roles,
-          () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }),
+          () => awardApproved(w, tenderId, { bidId: bids[0]!.bidId }),
           user,
         );
         expect((await codeOf(call)).code).toBe('FORBIDDEN');
@@ -1131,7 +1191,7 @@ describe('awarding an evaluated tender', () => {
             asUser(
               owner,
               ['FLEET_MANAGER'],
-              () => w.award.awardApproved(tenderId, { bidId: 'x' }),
+              () => awardApproved(w, tenderId, { bidId: 'x' }),
               plain,
             ),
           )
@@ -1242,7 +1302,7 @@ describe('awarding an evaluated tender', () => {
             roles: ['ORGANIZATION_ADMIN'],
             subject: evaluator,
           }),
-          () => strict.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }),
+          () => awardApproved(strict, tenderId, { bidId: bids[0]!.bidId }),
         );
         expect(await refusalOf(alias, 'FORBIDDEN')).toContain('AWARDER_IS_EVALUATOR');
         expect(await awardRows(tenderId)).toHaveLength(0);
@@ -1283,7 +1343,7 @@ describe('awarding an evaluated tender', () => {
           issuer: string,
         ) =>
           runWithContext(identity(t.owner, userId, subject, issuer), () =>
-            strict.award.awardApproved(t.tenderId, { bidId: t.bids[0]!.bidId }),
+            awardApproved(strict, t.tenderId, { bidId: t.bids[0]!.bidId }),
           );
 
         const other = await evaluatedByIdentity();
@@ -1368,14 +1428,17 @@ describe('awarding an evaluated tender', () => {
       ]);
     });
 
-    it('refuses the route with a policy in force too, until the approval round is wired (PR 11)', async () => {
+    it('with a policy in force opens the request and awards nothing; the same command awards once it is approved', async () => {
       const { owner, tenderId, bids } = await evaluated({ count: 1 });
       await activateAwardPolicy(w, owner);
-      expect(
-        await refusalOf(as(owner, () => w.award.award(tenderId, { bidId: bids[0]!.bidId }))),
-      ).toContain('APPROVAL_REQUIRED');
+      const asked = await as(owner, () => w.award.award(tenderId, { bidId: bids[0]!.bidId }));
+      expect(asked.executed).toBe(false);
       expect(await awardRows(tenderId)).toHaveLength(0);
-      // The core is the same code with the gate satisfied.
+      expect(await stateOf(tenderId, bids)).toEqual({
+        tender: 'EVALUATED',
+        bids: ['QUALIFIED'],
+        awards: 0,
+      });
       expect((await award(owner, tenderId, bids[0]!.bidId)).status).toBe('AWARDED');
     });
 
@@ -1394,10 +1457,11 @@ describe('awarding an evaluated tender', () => {
   describe('races', () => {
     it('two different awards at once are one award and a 409', async () => {
       const { owner, tenderId, bids } = await evaluated({ count: 2 });
+      await approve(owner, tenderId, bids[0]!.bidId);
       const { release, atDecision } = holdAtDecision();
-      const first = award(owner, tenderId, bids[0]!.bidId);
+      const first = awardNow(owner, tenderId, bids[0]!.bidId);
       await atDecision;
-      const second = award(owner, tenderId, bids[1]!.bidId, 'The other one, for a reason');
+      const second = awardNow(owner, tenderId, bids[1]!.bidId, 'The other one, for a reason');
       await untilASessionWaitsOnALock(w.prisma);
       release();
       expect((await first).bidId).toBe(bids[0]!.bidId);
@@ -1410,10 +1474,11 @@ describe('awarding an evaluated tender', () => {
 
     it('the same award twice at once is one award, and the second answers it', async () => {
       const { owner, tenderId, bids } = await evaluated({ count: 2 });
+      await approve(owner, tenderId, bids[0]!.bidId);
       const { release, atDecision } = holdAtDecision();
-      const first = award(owner, tenderId, bids[0]!.bidId);
+      const first = awardNow(owner, tenderId, bids[0]!.bidId);
       await atDecision;
-      const second = award(owner, tenderId, bids[0]!.bidId);
+      const second = awardNow(owner, tenderId, bids[0]!.bidId);
       await untilASessionWaitsOnALock(w.prisma);
       release();
       const [a, b] = [await first, await second];
@@ -1428,8 +1493,9 @@ describe('awarding an evaluated tender', () => {
       const claim = await runUnscoped('the suite reads a claim', () =>
         w.prisma.client.bidEvaluation.findFirstOrThrow({ where: { tenderId } }),
       );
+      await approve(owner, tenderId, bids[0]!.bidId);
       const { release, atDecision } = holdAtDecision();
-      const awarding = award(owner, tenderId, bids[0]!.bidId);
+      const awarding = awardNow(owner, tenderId, bids[0]!.bidId);
       await atDecision;
 
       // As the runtime role, around the application: a cell, a decision and a recusal.
@@ -1820,6 +1886,14 @@ describe('awarding an evaluated tender', () => {
         await expect(
           attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_TWO'`)),
         ).rejects.toThrow(transition);
+        // A takeover of a lapsed lease is a new holder: it keeps no fence of the one it replaces.
+        await ownerSql([
+          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
+        ]);
+        await expect(
+          attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`)),
+        ).rejects.toThrow(/a claim sets a new fence/);
+        await attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_THREE'`));
         // From a live claim: a settlement dated in the future, or one that moves anything else.
         await expect(
           attack(

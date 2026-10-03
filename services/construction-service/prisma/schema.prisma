@@ -341,8 +341,13 @@ model Approval {
   organizationId String @map("organization_id")
   projectId      String @map("project_id")
 
+  /// Set exactly for a tender workflow (`tender.*`, `ck_approval_tender_scope`): the tender this step
+  /// is about. The project is then the tender's own.
+  tenderId       String? @map("tender_id")
+
   project Project        @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   policy  ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  tender  Tender?        @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
   workflowKey String @map("workflow_key")
   round       Int
@@ -376,8 +381,9 @@ model Approval {
 
   version Int @default(1)
 
-  // SQL-only: `ux_approval_one_pending` — one PENDING step per (project, workflow).
-  @@unique([organizationId, projectId, workflowKey, round, stepOrder], map: "ux_approval_round_step")
+  // SQL-only: `ux_approval_one_pending` — one PENDING step per (project, workflow, tender), and
+  // `ux_approval_round_step` — one step per (project, workflow, tender, round, step order): both
+  // keyed on COALESCE(tender_id, ''), which Prisma cannot express (PR 11).
   @@index([organizationId, projectId, round], map: "ix_approval_org_project_round")
   @@index([authorityOrganizationId, status, id], map: "ix_approval_authority_inbox")
   @@map("approval")
@@ -569,6 +575,10 @@ model Tender {
   /// (organization, tender) pair, which Prisma cannot see is unique.
   awards         TenderAward[]
   standingChecks TenderAwardStandingCheck[]
+  /// The gates of PR 11: the steps of its approval rounds, the requests they decide and the log.
+  approvals        Approval[]
+  approvalRequests TenderApprovalRequest[]
+  approvalLog      TenderApprovalLog[]
 
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
@@ -1146,4 +1156,101 @@ model TenderAwardStandingCheck {
   @@unique([organizationId, tenderId], map: "ux_award_standing_check_tender")
   // SQL-only: `ix_award_standing_check_due` — what is still PENDING, oldest first, the sweeper's scan.
   @@map("tender_award_standing_check")
+}
+
+// ---------------------------------------------------------------------------
+// Approval gates for a tender (CON-002 PR 11, docs/24 Q-84 item 5)
+//
+// One approval module: the policy, its steps and the round are the project's own
+// (`approval_policy`, `approval_policy_step`, `approval`); a step of a tender round
+// carries `approval.tender_id`. A request binds the round to the one command it may
+// authorise and is used up by that command's execution (the database keeps both).
+// ---------------------------------------------------------------------------
+
+/// The binding of one approval round to what it authorises. Alive (undecided, or approved and not
+/// yet used) at most once per (tender, workflow): `ux_tender_approval_request_live`; used at most
+/// once, ever: `ux_tender_approval_request_consumed` (both SQL-only partial indexes). Only `endedAt`
+/// (REJECTED by a step, STALE when what it was asked on changed) and the `consumed*` columns ever
+/// change; the database refuses anything else (`tg_tender_approval_request_guard`).
+model TenderApprovalRequest {
+  id String @id
+
+  organizationId String @map("organization_id")
+  tenderId       String @map("tender_id")
+  projectId      String @map("project_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// `tender.publication`, `tender.award` or `tender.cancellation`.
+  workflowKey   String @map("workflow_key")
+  /// The round of the steps that decide it (`approval.round`).
+  round         Int
+  /// The tender version the request was made on: the execution happens on this one or not at all.
+  tenderVersion Int    @map("tender_version")
+
+  /// An award: the bid, its bidder, its rank in the frozen matrix, whether the rank is shared, the
+  /// justification, the matrix digest and the standing read (always ELIGIBLE) it was decided on.
+  bidId                String?   @map("bid_id")
+  bidderOrganizationId String?   @map("bidder_organization_id")
+  rank                 Int?
+  tied                 Boolean?
+  justification        String?
+  matrixDigest         String?   @map("matrix_digest")
+  standingVerdict      String?   @map("standing_verdict")
+  standingAsOf         DateTime? @map("standing_as_of") @db.Timestamptz(3)
+  /// A cancellation: the reason in words and its closed code (`OWNER_REQUEST`, `NO_QUALIFIED_BID`).
+  reason               String?
+  reasonCode           String?   @map("reason_code")
+
+  requestedBy            String   @map("requested_by")
+  /// The requester's stable identity (#188), both or neither: what the approver is compared with.
+  requestedByIssuer      String?  @map("requested_by_issuer")
+  requestedBySubject     String?  @map("requested_by_subject")
+  requestedAt            DateTime @map("requested_at") @db.Timestamptz(3)
+  requestedCorrelationId String   @map("requested_correlation_id")
+
+  /// `REJECTED` or `STALE`, with when; never both with `consumedAt`.
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz(3)
+  endedReason String?   @map("ended_reason")
+
+  /// Used by its execution: when, by whom, and the transaction the database saw it in (set by the
+  /// database, never by the service).
+  consumedAt        DateTime? @map("consumed_at") @db.Timestamptz(3)
+  consumedBy        String?   @map("consumed_by")
+  consumedByIssuer  String?   @map("consumed_by_issuer")
+  consumedBySubject String?   @map("consumed_by_subject")
+  consumedTxid      BigInt?   @map("consumed_txid")
+
+  version Int @default(1)
+
+  @@unique([organizationId, tenderId, workflowKey, round], map: "ux_tender_approval_request_round")
+  @@map("tender_approval_request")
+}
+
+/// Every request, decision, execution and refusal on the owner's tender, granted or refused: the
+/// audit row of the approval gates, written in the same transaction as what it records (a refusal in
+/// its own, as the bid access log does). Append-only.
+model TenderApprovalLog {
+  id String @id
+
+  organizationId String  @map("organization_id")
+  tenderId       String  @map("tender_id")
+  requestId      String? @map("request_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  workflowKey         String   @map("workflow_key")
+  /// `REQUEST`, `GRANT`, `REJECT`, `EXECUTE` or `STALE` (the system ending a request it found stale).
+  action              String
+  /// `GRANTED` or `REFUSED`.
+  outcome             String
+  /// A closed code, only when refused.
+  refusalCode         String?  @map("refusal_code")
+  stepOrder           Int?     @map("step_order")
+  actorUserId         String   @map("actor_user_id")
+  actorOrganizationId String   @map("actor_organization_id")
+  occurredAt          DateTime @map("occurred_at") @db.Timestamptz(3)
+
+  @@index([organizationId, tenderId, occurredAt], map: "ix_tender_approval_log_tender")
+  @@map("tender_approval_log")
 }

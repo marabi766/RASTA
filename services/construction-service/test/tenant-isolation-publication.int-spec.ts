@@ -7,6 +7,7 @@ import {
   outboxFor,
   wire,
   type Wiring,
+  publishApproved,
 } from './helpers';
 
 /**
@@ -130,7 +131,7 @@ describe('tenant isolation — publication and invitations', () => {
     const own = await asAdmin(b, () => w.tenders.list({ limit: 10 }));
     const ownTender = own.items[0]!;
     const published = await asAdmin(b, () =>
-      w.publication.publishApproved(ownTender.id, { expectedVersion: 2 }),
+      publishApproved(w, ownTender.id, { expectedVersion: 2 }),
     );
     expect(published.status).toBe('PUBLISHED');
     expect(
@@ -139,7 +140,8 @@ describe('tenant isolation — publication and invitations', () => {
         async () => await w.prisma.client.tenderKey.count({ where: { tenderId: ownTender.id } }),
       ),
     ).toBe(1);
-    // The afterEach for this test counts B's event stream once more; account for it.
-    outboxBeforeB += 1;
+    // B's own gate wrote B's events (its policy, the request, the grant, the publication): the afterEach
+    // counts B's event stream from here.
+    outboxBeforeB = (await outboxFor(w.prisma, b)).length;
   });
 });

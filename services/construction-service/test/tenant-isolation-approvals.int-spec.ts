@@ -228,7 +228,7 @@ describe('tenant isolation — policies, approvals, execution and progress', () 
       const superseded = await w.prisma.transaction((tx) =>
         w.approvalRepository.supersedeOpen(
           tx,
-          { organizationId: b, projectId: pendingProjectId },
+          { organizationId: b, projectId: pendingProjectId, tenderId: null },
           new Date(),
         ),
       );

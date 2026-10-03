@@ -116,6 +116,8 @@ describe('the schema models nothing CON-001 has not decided', () => {
       'BidEvaluationScore',
       'TenderAward',
       'TenderAwardStandingCheck',
+      'TenderApprovalRequest',
+      'TenderApprovalLog',
     ]);
   });
 

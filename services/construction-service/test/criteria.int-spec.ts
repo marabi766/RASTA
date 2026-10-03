@@ -13,6 +13,9 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  cancelApproved,
+  liftApprovalGuard,
+  restoreApprovalGuard,
 } from './helpers';
 
 /**
@@ -66,10 +69,13 @@ describe('evaluation criteria', () => {
     return { a, tender };
   };
 
+  // This suite moves statuses by raw SQL to probe other guards; the approval guard has its own suite.
+  beforeAll(liftApprovalGuard);
   beforeAll(() => {
     w = wire();
   });
 
+  afterAll(restoreApprovalGuard);
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
     await w.close();
@@ -280,7 +286,7 @@ describe('evaluation criteria', () => {
     it('cannot be set on a cancelled tender', async () => {
       const { a, tender } = await withTender();
       await asAdmin(a, () =>
-        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
 
       await expect(
@@ -379,7 +385,7 @@ describe('evaluation criteria', () => {
           w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
         ),
         asAdmin(a, () =>
-          w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+          cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
         ),
       ]);
 
@@ -556,7 +562,7 @@ describe('evaluation criteria', () => {
       await expect(setStatus(tender.id, 'AWARDED')).rejects.toThrow(/ck_tender_status_transition/);
 
       await asAdmin(a, () =>
-        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
       await expect(setStatus(tender.id, 'DRAFT')).rejects.toThrow(/ck_tender_status_transition/);
       // Refused by whichever guard fires first: this tender also has no criteria.

@@ -113,19 +113,79 @@ describe('publication API', () => {
     expect(stale.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
   });
 
-  it('refuses with APPROVAL_REQUIRED while the approval round is not wired, even with a policy in force', async () => {
+  it('with a policy in force answers 202 with the request, publishes only once another person approved it, and only once', async () => {
     const a = org('publish-policy');
     const { id, version, token } = await tenderFor(a);
     await activatePublicationPolicy(w, a);
+    const publish = (as_: string) =>
+      http().post(`/v1/tenders/${id}/publish`).set(as(as_)).send({ expectedVersion: version });
 
-    const refused = await http()
+    const asked = await publish(token);
+    expect(asked.status).toBe(202);
+    expect(asked.body).toMatchObject({
+      workflowKey: 'tender.publication',
+      tenderId: id,
+      tenderVersion: version,
+      status: 'PENDING',
+    });
+    expect((await http().get(`/v1/tenders/${id}`).set(as(token))).body.status).toBe('DRAFT');
+    const listed = await http().get(`/v1/tenders/${id}/approvals`).set(as(token));
+    expect(listed.status).toBe(200);
+    expect(listed.body.items.map((r: { id: string }) => r.id)).toEqual([asked.body.id]);
+
+    // The same command again, still undecided: the same request.
+    expect((await publish(token)).body.id).toBe(asked.body.id);
+
+    // The person who asked does not approve (403); somebody else does (200) and the step is granted.
+    const stepId = asked.body.steps[0].approvalId as string;
+    const decision = (as_: string, expectedVersion: number) =>
+      http()
+        .post(`/v1/approvals/${stepId}/decision`)
+        .set(as(as_))
+        .send({ decision: 'GRANT', expectedVersion });
+    const step = await http().get(`/v1/approvals/${stepId}`).set(as(token));
+    expect(step.status).toBe(200);
+    expect(step.body).toMatchObject({ tenderId: id, workflowKey: 'tender.publication' });
+    const own = await decision(token, step.body.version);
+    expect(own.status).toBe(403);
+    expect(own.body.message).toContain('Separation of duties');
+    const granted = await decision(orgAdmin(a), step.body.version);
+    expect(granted.status).toBe(200);
+    expect(granted.body.status).toBe('GRANTED');
+
+    const published = await publish(token);
+    expect(published.status).toBe(200);
+    expect(published.body).toMatchObject({ status: 'PUBLISHED', version: version + 1 });
+    // Used once: the same command is now a stale one.
+    expect((await publish(token)).status).toBe(409);
+  });
+
+  it('answers 409 APPROVAL_STALE when the tender changed after the approval, and publishes nothing', async () => {
+    const a = org('publish-stale');
+    const { id, version, token } = await tenderFor(a);
+    await activatePublicationPolicy(w, a);
+    const asked = await http()
       .post(`/v1/tenders/${id}/publish`)
       .set(as(token))
       .send({ expectedVersion: version });
+    const stepId = asked.body.steps[0].approvalId as string;
+    const step = await http().get(`/v1/approvals/${stepId}`).set(as(token));
+    await http()
+      .post(`/v1/approvals/${stepId}/decision`)
+      .set(as(orgAdmin(a)))
+      .send({ decision: 'GRANT', expectedVersion: step.body.version });
+    const edited = await http()
+      .patch(`/v1/tenders/${id}`)
+      .set(as(token))
+      .send({ expectedVersion: version, title: 'Edited after approval' });
+    expect(edited.status).toBe(200);
 
-    expect(refused.status).toBe(422);
-    expect(refused.body.message).toContain('APPROVAL_REQUIRED');
-    expect(refused.body.message).not.toContain('APPROVAL_POLICY_REQUIRED');
+    const stale = await http()
+      .post(`/v1/tenders/${id}/publish`)
+      .set(as(token))
+      .send({ expectedVersion: edited.body.version });
+    expect(stale.status).toBe(409);
+    expect(stale.body.message).toContain('APPROVAL_STALE');
     expect((await http().get(`/v1/tenders/${id}`).set(as(token))).body.status).toBe('DRAFT');
   });
 
@@ -243,5 +303,6 @@ describe('publication API', () => {
       ).status,
     ).toBe(404);
     expect((await http().get(`/v1/tenders/${id}/invitations`).set(stranger)).status).toBe(404);
+    expect((await http().get(`/v1/tenders/${id}/approvals`).set(stranger)).status).toBe(404);
   });
 });

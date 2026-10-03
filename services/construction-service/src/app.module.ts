@@ -88,6 +88,11 @@ import { EvaluationController } from './tender/evaluation.controller';
 import { AwardRepository } from './tender/award.repository';
 import { AwardService } from './tender/award.service';
 import { AwardController } from './tender/award.controller';
+import { TenderApprovalRepository } from './tender/tender-approval.repository';
+import { TenderApprovalAudit } from './tender/tender-approval.audit';
+import { TenderApprovalService } from './tender/tender-approval.service';
+import { TenderApprovalGate } from './tender/tender-approval.gate';
+import { TenderApprovalController } from './tender/tender-approval.controller';
 import { AwardStandingCheckRepository } from './tender/award-standing-check.repository';
 import { AwardStandingCheckService } from './tender/award-standing-check.service';
 import { AwardStandingCheckSweeper } from './tender/award-standing-check.sweeper';
@@ -154,6 +159,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     BidOpeningController,
     EvaluationController,
     AwardController,
+    TenderApprovalController,
     HealthController,
     MetricsController,
   ],
@@ -228,6 +234,12 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     // ADR-067 § 3: awarding an evaluated tender to one of its qualified bids.
     AwardRepository,
     AwardService,
+    // CON-002 PR 11 (Q-84): the approval gates of a tender — the project module's own round, bound to the
+    // command it authorises and used up by its execution.
+    TenderApprovalRepository,
+    TenderApprovalAudit,
+    TenderApprovalService,
+    TenderApprovalGate,
     // ADR-067 § 3 (residual): the standing check after every award is a row written in the award's
     // transaction and made by a bounded, leased, fenced sweep; the award's answer waits for nothing.
     AwardStandingCheckRepository,

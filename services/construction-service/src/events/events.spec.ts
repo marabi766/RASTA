@@ -149,6 +149,7 @@ Object.assign(VALID, {
     ...TENDER,
     from: 'DRAFT',
     reasonCode: 'OWNER_REQUEST',
+    approvalRequestId: 'TAR_1',
     cancelledBy: 'USR_1',
     cancelledAt: AT,
   },
@@ -173,6 +174,7 @@ Object.assign(VALID, {
     bidClosingAt: '2026-11-30T20:30:00.000Z',
     criteriaCount: 3,
     keyId: 'TKY_1',
+    approvalRequestId: 'TAR_1',
     publishedBy: 'USR_1',
     publishedAt: AT,
   },
@@ -274,8 +276,21 @@ Object.assign(VALID, {
     winnerOrganizationId: 'ORG_B',
     hasJustification: false,
     matrixDigest: 'c'.repeat(64),
+    approvalRequestId: 'TAR_1',
     awardedBy: 'USR_1',
     awardedAt: AT,
+  },
+  TENDER_APPROVAL_ACTION: {
+    ...TENDER,
+    workflowKey: 'tender.award',
+    requestId: 'TAR_1',
+    action: 'GRANT',
+    outcome: 'GRANTED',
+    refusalCode: null,
+    stepOrder: 1,
+    actedBy: 'USR_2',
+    actorOrganizationId: 'ORG_A',
+    actedAt: AT,
   },
   TENDER_AWARD_STANDING_CONFLICT_DETECTED: {
     ...TENDER,
@@ -360,6 +375,7 @@ const TENDER_EVENTS = [
   'TENDER_AWARDED',
   'BID_NOT_AWARDED',
   'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
+  'TENDER_APPROVAL_ACTION',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -415,6 +431,7 @@ describe('the construction event catalogue', () => {
       'PROJECT_STARTED',
       'PROJECT_STATUS_CHANGED',
       'PROJECT_UPDATED',
+      'TENDER_APPROVAL_ACTION',
       'TENDER_AWARDED',
       'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
       'TENDER_BIDDER_INVITED',
@@ -512,6 +529,47 @@ describe('the construction event catalogue', () => {
     it('the shared topic never carries the winner’s price, whatever it is called', () => {
       const text = JSON.stringify(VALID.TENDER_AWARDED);
       expect(text).not.toMatch(/amount|price/i);
+    });
+
+    it('TENDER_APPROVAL_ACTION is ids, closed codes and times only: no reason, justification, bid or amount', () => {
+      for (const extra of [
+        { reason: 'Funding withdrawn' },
+        { justification: 'Best value' },
+        { winningBidId: 'BID_1' },
+        { bidId: 'BID_1' },
+        { amountMinor: '100' },
+        { conditions: 'on site' },
+      ]) {
+        expect(() =>
+          validateConstructionPayload('TENDER_APPROVAL_ACTION', {
+            ...VALID.TENDER_APPROVAL_ACTION!,
+            ...extra,
+          }),
+        ).toThrow(/does not match its published contract/);
+      }
+      // A refusal names its closed code; the workflow is one of the three tender gates.
+      expect(() =>
+        validateConstructionPayload('TENDER_APPROVAL_ACTION', {
+          ...VALID.TENDER_APPROVAL_ACTION!,
+          outcome: 'REFUSED',
+          refusalCode: 'ACTOR_IDENTITY_UNKNOWN',
+        }),
+      ).not.toThrow();
+      expect(() =>
+        validateConstructionPayload('TENDER_APPROVAL_ACTION', {
+          ...VALID.TENDER_APPROVAL_ACTION!,
+          workflowKey: 'project.execution',
+        }),
+      ).toThrow(/does not match its published contract/);
+    });
+
+    it('the three events a gate uses up name the approval request they used', () => {
+      for (const name of ['TENDER_PUBLISHED', 'TENDER_AWARDED', 'TENDER_CANCELLED'] as const) {
+        const { approvalRequestId: _omitted, ...without } = VALID[name] as Record<string, unknown>;
+        expect(() => validateConstructionPayload(name, without)).toThrow(
+          /does not match its published contract/,
+        );
+      }
     });
 
     it('TENDER_AWARD_STANDING_CONFLICT_DETECTED is ids, counts and times only', () => {

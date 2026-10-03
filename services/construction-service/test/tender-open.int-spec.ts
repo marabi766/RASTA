@@ -37,6 +37,8 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  liftApprovalGuard,
+  restoreApprovalGuard,
 } from './helpers';
 
 /**
@@ -208,6 +210,8 @@ describe('opening the bids of a tender', () => {
       },
     });
 
+  // This suite moves statuses by raw SQL to probe other guards; the approval guard has its own suite.
+  beforeAll(liftApprovalGuard);
   beforeAll(async () => {
     // One person opens: the four-eyes rule (Q-91) has its own describe, below.
     w = wire(testEnv({ CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' }));
@@ -228,6 +232,7 @@ describe('opening the bids of a tender', () => {
     w.evidence.asked.length = 0;
   });
 
+  afterAll(restoreApprovalGuard);
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
     await w.close();

@@ -1,7 +1,19 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+  Res,
+} from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { PublicationService } from './publication.service';
+import { GATED_NOTE, answerGated } from './gated-response';
 import {
   inviteBidderSchema,
   listInvitationsQuerySchema,
@@ -46,17 +58,16 @@ export class PublicationController {
       'a RESTRICTED tender has at least one invitation. The criteria are frozen from this moment. ' +
       "Makes the tender's key pair, wrapping its private half with the key-encryption key " +
       '(ADR-066); without one configured nothing is published and the answer is 503. Publishes ' +
-      'TENDER_PUBLISHED. **The approval gate fails closed (Q-84):** with no active ' +
-      '`tender.publication` approval policy the answer is 422 naming APPROVAL_POLICY_REQUIRED, and ' +
-      'while the approval round is not wired (CON-002 PR 11) even a policy in force is 422 naming ' +
-      'APPROVAL_REQUIRED — so until then this endpoint publishes nothing. ' +
+      `TENDER_PUBLISHED. ${GATED_NOTE} The request is bound to the tender and its version; a ` +
+      'publication that could not succeed (any reason above) is never asked for. ' +
       `${TENANT_NOTE} ${ROLES_NOTE}`,
   })
   async publish(
     @Param('id') id: string,
     @Body(zodPipe(publishTenderSchema)) dto: PublishTenderDto,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    return this.publication.publish(id, dto);
+    return answerGated(response, await this.publication.publish(id, dto));
   }
 
   @Post('tenders/:id/invitations')

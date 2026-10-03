@@ -272,7 +272,7 @@ export class ProjectService {
       // A cancelled project has no round left to decide: every undecided step
       // ends here, in the same transaction, so no authority can decide a step
       // of a project that no longer exists as a proposal.
-      await this.approvals.supersedeOpen(tx, { organizationId, projectId }, at);
+      await this.approvals.supersedeOpen(tx, { organizationId, projectId, tenderId: null }, at);
 
       await this.events.enqueue(tx, {
         eventName: 'PROJECT_STATUS_CHANGED',

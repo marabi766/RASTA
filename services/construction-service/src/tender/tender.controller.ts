@@ -9,11 +9,14 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { parseIdempotencyKey } from '../project/project.controller';
 import { TenderService } from './tender.service';
+import { GATED_NOTE, answerGated } from './gated-response';
 import {
   cancelTenderSchema,
   createTenderSchema,
@@ -100,15 +103,23 @@ export class TenderController {
   }
 
   @Post('tenders/:id/cancel')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Cancel a tender (terminal)',
     description:
-      `${VERSION_NOTE} Cancellable from every live state by the lifecycle; in this release only ` +
-      'a DRAFT exists to cancel. The reason is required and kept as statusReason; ' +
-      'TENDER_CANCELLED carries only the closed code OWNER_REQUEST (no free text on events).',
+      `${VERSION_NOTE} Cancellable from every live state (DRAFT, PUBLISHED, CLOSED, EVALUATING, ` +
+      'EVALUATED); a DRAFT too — every cancellation needs an approval policy (Q-84). The reason is ' +
+      'required and kept as statusReason; TENDER_CANCELLED carries only the closed code ' +
+      '(`reasonCode`: OWNER_REQUEST by default, or NO_QUALIFIED_BID for an EVALUATING tender in which ' +
+      'no bid was qualified — 422 REASON_CODE_NOT_APPLICABLE otherwise; no free text on events). ' +
+      `${GATED_NOTE} The request is bound to the tender, its version, the reason and its code.`,
   })
-  async cancel(@Param('id') id: string, @Body(zodPipe(cancelTenderSchema)) dto: CancelTenderDto) {
-    return this.tenders.cancel(id, dto);
+  async cancel(
+    @Param('id') id: string,
+    @Body(zodPipe(cancelTenderSchema)) dto: CancelTenderDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    return answerGated(response, await this.tenders.cancel(id, dto));
   }
 }

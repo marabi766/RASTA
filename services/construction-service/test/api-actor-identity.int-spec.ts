@@ -17,6 +17,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  publishApproved,
 } from './helpers';
 
 /**
@@ -134,7 +135,7 @@ describe('stable actor identity (#188) through the API', () => {
       }),
     );
     await asPerson(ownerOrg, authorSub, () =>
-      w.publication.publishApproved(tender.id, { expectedVersion: set.version }),
+      publishApproved(w, tender.id, { expectedVersion: set.version }),
     );
     const bidIds: string[] = [];
     for (const [i, price] of ['1250000000', '1300000000'].entries()) {

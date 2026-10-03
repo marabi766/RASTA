@@ -18,7 +18,7 @@ const READY: PublicationFacts = {
   criteriaCount: 3,
   totalWeightBp: 10_000,
   invitationCount: 0,
-  approval: 'GRANTED',
+  approval: 'POLICY_IN_FORCE',
 };
 
 const refusals = (overrides: Partial<PublicationFacts>) =>
@@ -29,10 +29,9 @@ describe('publicationRefusals', () => {
     expect(publicationRefusals(READY)).toEqual([]);
   });
 
-  it('fails closed on the approval gate: no policy, or a policy nobody has satisfied', () => {
+  it('fails closed on the approval gate: no policy in force refuses', () => {
     expect(refusals({ approval: 'NO_POLICY' })).toEqual(['APPROVAL_POLICY_REQUIRED']);
-    expect(refusals({ approval: 'NOT_GRANTED' })).toEqual(['APPROVAL_REQUIRED']);
-    expect(refusals({ approval: 'GRANTED' })).toEqual([]);
+    expect(refusals({ approval: 'POLICY_IN_FORCE' })).toEqual([]);
   });
 
   it('never defaults the nature or the visibility', () => {

@@ -17,6 +17,7 @@ import { NeedService } from '../src/project/need.service';
 import { ProjectAccess } from '../src/access/access';
 import { IdempotencyStore } from '../src/shared/idempotency';
 import { ApprovalRepository } from '../src/approval/approval.repository';
+import type { WorkflowKey } from '../src/approval/approval.state-machine';
 import { TenderRepository } from '../src/tender/tender.repository';
 import { TenderService } from '../src/tender/tender.service';
 import { CriteriaRepository } from '../src/tender/criteria.repository';
@@ -47,6 +48,13 @@ import { EvaluationRepository } from '../src/tender/evaluation.repository';
 import { EvaluationService } from '../src/tender/evaluation.service';
 import { AwardRepository } from '../src/tender/award.repository';
 import { AwardService } from '../src/tender/award.service';
+import { TenderApprovalRepository } from '../src/tender/tender-approval.repository';
+import { TenderApprovalAudit } from '../src/tender/tender-approval.audit';
+import { TenderApprovalService } from '../src/tender/tender-approval.service';
+import { TenderApprovalGate } from '../src/tender/tender-approval.gate';
+import type { TenderApprovalRequestView } from '../src/tender/tender-approval.dto';
+import type { TenderView } from '../src/tender/dto';
+import type { TenderAwardView } from '../src/tender/award.dto';
 import { AwardStandingCheckRepository } from '../src/tender/award-standing-check.repository';
 import { AwardStandingCheckService } from '../src/tender/award-standing-check.service';
 import {
@@ -212,8 +220,11 @@ export interface Wiring {
   /** CON-002 PR 9: evaluating the opened bids, and a contractor reading its own opened bid. */
   evaluation: EvaluationService;
   ownBids: OwnBidService;
-  /** CON-002 PR 10: awarding an evaluated tender; `awardApproved` is the core with the approval gate satisfied. */
+  /** CON-002 PR 10, gated by the approval round since PR 11: awarding an evaluated tender. */
   award: AwardService;
+  /** CON-002 PR 11: the requests and log of the tender approval gates, and the authority's side of them. */
+  tenderApprovalRepository: TenderApprovalRepository;
+  tenderApprovals: TenderApprovalService;
   /** The standing check after an award: its rows, and the sweeper that makes it (driven by `runOnce(tenderId)`; it never ticks here). */
   awardChecks: AwardStandingCheckRepository;
   awardCheckService: AwardStandingCheckService;
@@ -284,6 +295,20 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     events,
     reconciliations,
   );
+  const memberships = new FakeMemberships();
+  const identity = new OwnerIdentity(access, memberships);
+  const tenderApprovalRepository = new TenderApprovalRepository(prisma);
+  const tenderApprovalAudit = new TenderApprovalAudit(prisma, tenderApprovalRepository, events);
+  const tenderApprovals = new TenderApprovalService(
+    prisma,
+    approvalRepository,
+    tenderApprovalRepository,
+    tenderApprovalAudit,
+    tenderRepository,
+    access,
+    identity,
+    env,
+  );
   const approvals = new ApprovalService(
     prisma,
     approvalRepository,
@@ -294,6 +319,13 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     env,
     hierarchy as unknown as OrganizationDirectory,
     suspension,
+    tenderApprovals,
+  );
+  const gate = new TenderApprovalGate(
+    approvals,
+    tenderApprovalRepository,
+    tenderApprovalAudit,
+    tenderApprovals,
   );
   /** A sweeper over this wiring's hierarchy; `sweeperWith` for other options. */
   const sweeperWith = (overrides: Partial<SweeperOptions> = {}) =>
@@ -306,10 +338,8 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const tenderCloses = new TenderCloseRepository(prisma);
   const bidAudit = new BidAccessAudit(bidRepository, events);
   const evidence = new FakeTenderEvidence(prisma);
-  const memberships = new FakeMemberships();
   const tenderOpens = new TenderOpenRepository(prisma);
   const reader = new BidContentReader(evidence, keys);
-  const identity = new OwnerIdentity(access, memberships);
   const tenderClose = new TenderCloseService(prisma, tenderCloses, events, clock);
   const tenderCloseSweeperWith = (overrides: Partial<TenderCloseSweeperOptions> = {}) =>
     new TenderCloseSweeper(tenderCloses, tenderClose, {
@@ -387,7 +417,11 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       reader,
       clock,
       env,
+      gate,
+      tenderApprovalRepository,
     ),
+    tenderApprovalRepository,
+    tenderApprovals,
     tenderCloses,
     tenderClose,
     tenderCloseSweeper: tenderCloseSweeperWith(),
@@ -423,7 +457,16 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
     ),
     needs: new NeedService(prisma, repository, events, access, idempotency),
     tenderRepository,
-    tenders: new TenderService(prisma, tenderRepository, repository, events, access, idempotency),
+    tenders: new TenderService(
+      prisma,
+      tenderRepository,
+      repository,
+      events,
+      access,
+      idempotency,
+      gate,
+      tenderApprovalRepository,
+    ),
     publicationRepository,
     keys,
     publication: new PublicationService(
@@ -436,6 +479,8 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       env,
       keys,
       hierarchy as unknown as OrganizationDirectory,
+      gate,
+      tenderApprovalRepository,
     ),
     criteriaRepository,
     criteria: new CriteriaService(
@@ -776,10 +821,14 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
         ['bid_evaluation_score', 'tg_bid_score_append_only'],
         ['tender_award', 'tg_tender_award_append_only'],
         ['tender_award_standing_check', 'tg_award_standing_check_no_delete'],
+        ['tender_approval_log', 'tg_tender_approval_log_append_only'],
+        ['tender_approval_request', 'tg_tender_approval_request_guard'],
       ] as const;
       for (const [table, trigger] of APPEND_ONLY) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
       }
+      await tx.tenderApprovalLog.deleteMany({ where });
+      await tx.tenderApprovalRequest.deleteMany({ where });
       await tx.tenderAwardStandingCheck.deleteMany({ where });
       await tx.tenderAward.deleteMany({ where });
       await tx.bidEvaluationScore.deleteMany({ where });
@@ -794,8 +843,8 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
       }
     });
     await owner.tenderInvitation.deleteMany({ where });
-    await owner.tender.deleteMany({ where });
     await owner.approval.deleteMany({ where });
+    await owner.tender.deleteMany({ where });
     await owner.progressReport.deleteMany({ where });
     await owner.policyReconciliationTask.deleteMany({ where });
     await owner.approvalPolicyStep.deleteMany({ where });
@@ -985,8 +1034,8 @@ export async function qualify(_w: Wiring, organizationId: string): Promise<void>
 /**
  * A PUBLISHED tender of a fresh organization that bidders may bid on right now:
  * the window opened an hour ago and closes in two, criteria PRICE and LICENCE, and
- * — when RESTRICTED — `invited` invited. Published through the approved core
- * (`publishApproved`), since the route's approval gate is closed until PR 11.
+ * — when RESTRICTED — `invited` invited. Published through the real approval gate
+ * (`publishApproved`: a policy, a request, other people's approval, the command again).
  */
 export async function publishedForBids(
   w: Wiring,
@@ -1032,7 +1081,7 @@ export async function publishedForBids(
     );
   }
   const published = await asAdmin(organizationId, () =>
-    w.publication.publishApproved(tender.id, { expectedVersion: set.version }),
+    publishApproved(w, tender.id, { expectedVersion: set.version }),
   );
   const key = await asAdmin(
     organizationId,
@@ -1192,49 +1241,17 @@ export class FakeHierarchy {
 }
 
 /**
- * An ACTIVE `tender.publication` policy for `organizationId`, written straight to
- * the table: the approval module cannot write one until its round is wired (PR 11),
- * and the publication gate is proven against the row it will read.
+ * A `tender.publication` policy in force for `organizationId`, written the decided way (a union administrator
+ * writes it, a different platform administrator approves it; one step, decided by the organization's own
+ * `ORGANIZATION_ADMIN`). Since PR 11 the module writes them; nothing is put in the table by hand.
  */
 export function activatePublicationPolicy(w: Wiring, organizationId: string): Promise<string> {
-  return activateTenderPolicy(w, organizationId, 'tender.publication');
+  return ensureGatePolicy(w, organizationId, 'tender.publication');
 }
 
-/** The same for `tender.award` (CON-002 PR 10): the award gate is proven against the row it will read. */
+/** The same for `tender.award`. */
 export function activateAwardPolicy(w: Wiring, organizationId: string): Promise<string> {
-  return activateTenderPolicy(w, organizationId, 'tender.award');
-}
-
-async function activateTenderPolicy(
-  w: Wiring,
-  organizationId: string,
-  workflowKey: 'tender.publication' | 'tender.award',
-): Promise<string> {
-  const id = `APL_${ulid()}`;
-  await runUnscoped(`the suite puts a ${workflowKey} policy in force`, () =>
-    w.prisma.client.approvalPolicy.create({
-      data: {
-        id,
-        organizationId,
-        authorOrganizationId: organizationId,
-        authorRole: 'SYSTEM_ADMIN',
-        workflowKey,
-        policyVersion: 1,
-        status: 'ACTIVE',
-        label: workflowKey === 'tender.award' ? 'Tender award' : 'Tender publication',
-        rationale: 'Written by the tender gate suites',
-        isSample: true,
-        createdAt: new Date(),
-        createdBy: 'USR_suite',
-        createdCorrelationId: ulid(),
-        submittedAt: new Date(),
-        submittedBy: 'USR_suite',
-        activatedAt: new Date(),
-        activatedBy: 'USR_suite_2',
-      },
-    }),
-  );
-  return id;
+  return ensureGatePolicy(w, organizationId, 'tender.award');
 }
 
 export interface StepSpec {
@@ -1254,7 +1271,7 @@ export async function activePolicy(
   w: Wiring,
   organizationId: string,
   steps: StepSpec[],
-  workflowKey: 'project.execution' | 'project.completion' = 'project.execution',
+  workflowKey: WorkflowKey = 'project.execution',
 ): Promise<string> {
   const policy = await asSetter(organizationId, () =>
     w.policies.create({
@@ -1435,4 +1452,188 @@ export async function evaluatedTender(
   }
   await asAdmin(owner, () => w.evaluation.evaluate(tenderId), evaluator);
   return { owner, tenderId, evaluator, bids };
+}
+
+// ---------------------------------------------------------------------------
+// CON-002 PR 11: the approval gates, driven the real way
+// ---------------------------------------------------------------------------
+
+export type GateKey = 'tender.publication' | 'tender.award' | 'tender.cancellation';
+
+/** The organization the request being served acts for (the suites' own context). */
+function actingOrganization(): string {
+  const organizationId = currentRequest()?.organizationId;
+  if (!organizationId) throw new Error('a gated command is driven inside a request context');
+  return organizationId;
+}
+
+/**
+ * Puts a policy in force for the gate unless one is, the decided way (Q-70 (7): a union administrator writes
+ * and submits it, a different platform administrator approves it): one step, whose authority is the
+ * organization itself with `ORGANIZATION_ADMIN` — decided by a person other than the requester. Returns its id.
+ */
+export async function ensureGatePolicy(
+  w: Wiring,
+  organizationId: string,
+  key: GateKey,
+  steps: StepSpec[] = [{ authorityOrganizationId: organizationId }],
+): Promise<string> {
+  const current = await runUnscoped('the suite looks for the gate policy in force', async () =>
+    w.prisma.client.approvalPolicy.findFirst({
+      where: { organizationId, workflowKey: key, status: 'ACTIVE' },
+    }),
+  );
+  if (current) return current.id;
+  return activePolicy(w, organizationId, steps, key);
+}
+
+/** Runs `fn` as a person of the authority a policy step names: a different one each call unless `userId` is given. */
+export function asApprover<T>(
+  authorityOrganizationId: string,
+  fn: () => T,
+  userId = newUserId(),
+  role = 'ORGANIZATION_ADMIN',
+): T {
+  // Under the issuer of the request being served: a person of another issuer cannot be told from the
+  // requester (UNKNOWN, fail closed), so a suite that gives its requester an issuer gives its approvers it too.
+  const issuer = (currentRequest() as { issuer?: string } | undefined)?.issuer;
+  return runWithContext(
+    context({
+      organizationId: authorityOrganizationId,
+      organizationIds: [authorityOrganizationId],
+      userId,
+      roles: [role],
+      ...(issuer ? { issuer } : {}),
+    } as Partial<RequestContext>),
+    fn,
+  );
+}
+
+/** Grants every step of a request in order, each as a different person of the authority the step names. */
+export async function grantRequest(
+  w: Wiring,
+  request: TenderApprovalRequestView,
+  by: () => string = newUserId,
+): Promise<void> {
+  for (const step of request.steps) {
+    const fresh = await asApprover(step.authorityOrganizationId, () =>
+      w.approvals.get(step.approvalId),
+    );
+    await asApprover(
+      step.authorityOrganizationId,
+      () =>
+        w.approvals.decide(step.approvalId, { decision: 'GRANT', expectedVersion: fresh.version }),
+      by(),
+      step.authorityRole,
+    );
+  }
+}
+
+/**
+ * Asks for the publication and has every step granted by other people, in the context being served, and
+ * stops there: the request is APPROVED and unused. (A race is then between the commands, not the approval.)
+ */
+export async function approvePublication(
+  w: Wiring,
+  tenderId: string,
+  dto: { expectedVersion: number },
+): Promise<void> {
+  await ensureGatePolicy(w, actingOrganization(), 'tender.publication');
+  const first = await w.publication.publish(tenderId, dto);
+  if (!first.executed) await grantRequest(w, first.request);
+}
+
+/**
+ * Publishes through the real gate, in the context being served: a policy in force, a request, every step
+ * granted by other people, and the same command again. What the suites call where they used the unrouted
+ * core before PR 11.
+ */
+export async function publishApproved(
+  w: Wiring,
+  tenderId: string,
+  dto: { expectedVersion: number },
+): Promise<TenderView> {
+  await approvePublication(w, tenderId, dto);
+  const done = await w.publication.publish(tenderId, dto);
+  if (!done.executed) throw new Error('an approved publication was not executed');
+  return done.result;
+}
+
+/** The same for an award: the awarder asks, other people approve (and the award is not yet made). */
+export async function approveAward(
+  w: Wiring,
+  tenderId: string,
+  dto: { bidId: string; justification?: string },
+): Promise<void> {
+  await ensureGatePolicy(w, actingOrganization(), 'tender.award');
+  const first = await w.award.award(tenderId, dto);
+  if (!first.executed) await grantRequest(w, first.request);
+}
+
+/** The awarder asks, other people approve, the awarder awards. */
+export async function awardApproved(
+  w: Wiring,
+  tenderId: string,
+  dto: { bidId: string; justification?: string },
+): Promise<TenderAwardView> {
+  await approveAward(w, tenderId, dto);
+  const done = await w.award.award(tenderId, dto);
+  if (!done.executed) throw new Error('an approved award was not executed');
+  return done.result;
+}
+
+type CancelBody = {
+  expectedVersion: number;
+  reason: string;
+  reasonCode?: 'OWNER_REQUEST' | 'NO_QUALIFIED_BID';
+};
+
+/** The same for a cancellation. */
+export async function approveCancellation(
+  w: Wiring,
+  tenderId: string,
+  dto: CancelBody,
+): Promise<void> {
+  await ensureGatePolicy(w, actingOrganization(), 'tender.cancellation');
+  const first = await w.tenders.cancel(tenderId, { reasonCode: 'OWNER_REQUEST', ...dto });
+  if (!first.executed) await grantRequest(w, first.request);
+}
+
+export async function cancelApproved(
+  w: Wiring,
+  tenderId: string,
+  dto: CancelBody,
+): Promise<TenderView> {
+  await approveCancellation(w, tenderId, dto);
+  const done = await w.tenders.cancel(tenderId, { reasonCode: 'OWNER_REQUEST', ...dto });
+  if (!done.executed) throw new Error('an approved cancellation was not executed');
+  return done.result;
+}
+
+/**
+ * Lifts, for a suite that moves a tender's status by raw SQL to probe some other guard, the database's rule that a
+ * tender becomes PUBLISHED, AWARDED or CANCELLED only by an approved request used in the same transaction
+ * (`tg_tender_status_requires_approval`; proven by `tender-approval.int-spec`). On the **owner** connection, like
+ * `cleanup`: the service's own connection never switches a trigger off. Put back by `restoreApprovalGuard`.
+ */
+export async function liftApprovalGuard(): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$executeRawUnsafe(
+      'ALTER TABLE "tender" DISABLE TRIGGER "tg_tender_status_requires_approval"',
+    );
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+export async function restoreApprovalGuard(): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$executeRawUnsafe(
+      'ALTER TABLE "tender" ENABLE TRIGGER "tg_tender_status_requires_approval"',
+    );
+  } finally {
+    await owner.$disconnect();
+  }
 }
