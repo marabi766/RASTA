@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { AUDIT_CHANGES_MAX_ENTRIES, auditChangeSchema, type AuditChange } from '@rasta/contracts';
+import {
+  AUDIT_CHANGES_MAX_ENTRIES,
+  auditChangeSchema,
+  type AuditChange,
+  plainText,
+} from '@rasta/contracts';
 
 /**
  * The audit correction command (ADR-053 § 7, AUD-003 correction): what a platform
@@ -86,7 +91,7 @@ export const auditCorrectionCommandSchema = z
       .string()
       .datetime({ offset: true })
       .transform((value) => new Date(value).toISOString()),
-    reason: z.string().trim().min(1).max(CORRECTION_REASON_MAX_LENGTH),
+    reason: plainText().min(1).max(CORRECTION_REASON_MAX_LENGTH),
     changes: z.array(correctionChangeSchema).min(1).max(AUDIT_CHANGES_MAX_ENTRIES),
   })
   .strict()

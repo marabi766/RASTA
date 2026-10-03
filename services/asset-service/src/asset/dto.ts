@@ -5,6 +5,9 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   amountMinorSchema,
+  plainText,
+  referenceId,
+  withoutBidiControlDeep,
 } from '@rasta/contracts';
 import { canonicalIdentifier } from './identifier';
 
@@ -59,7 +62,13 @@ export const DOCUMENT_KINDS = [
 export const assetTypeSchema = z.enum(ASSET_TYPES);
 export const operationalStatusSchema = z.enum(OPERATIONAL_STATUSES);
 
-/** Persian display text, allowing ZWNJ and the usual punctuation. */
+/**
+ * Persian display text, allowing ZWNJ and the usual punctuation.
+ *
+ * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
+ * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
+ * One pattern, so the published OpenAPI `pattern` states both rules.
+ */
 const displayText = (min: number, max: number) =>
   z
     .string()
@@ -67,7 +76,7 @@ const displayText = (min: number, max: number) =>
     .min(min)
     .max(max)
     .regex(
-      /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
+      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
       'Contains unsupported characters',
     );
 
@@ -77,7 +86,19 @@ const displayText = (min: number, max: number) =>
  * lookups and the unique index see one spelling (audit L3-10).
  */
 const identifierText = (min: number, max: number) =>
-  z.string().trim().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
+  plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
+
+/**
+ * Type-specific attributes: any shape, but no bidi control in any key or string
+ * value at any depth (#209) — they are stored and shown like any other text.
+ */
+const freeFormSpecifications = withoutBidiControlDeep(z.record(z.unknown()));
+
+/**
+ * A document-service id, stored as given and never resolved here. No control
+ * or format character, bidi controls included (#209).
+ */
+const documentReference = referenceId().max(64);
 
 const coordinate = z
   .object({
@@ -108,12 +129,12 @@ export const createAssetSchema = z
     manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
 
     /** Type-specific attributes; free-form so a new type needs no migration. */
-    specifications: z.record(z.unknown()).default({}),
+    specifications: freeFormSpecifications.default({}),
 
     location: z
       .object({
         siteName: displayText(1, 200).optional(),
-        addressLine: z.string().trim().max(500).optional(),
+        addressLine: plainText().max(500).optional(),
         coordinate: coordinate.optional(),
       })
       .strict()
@@ -149,7 +170,7 @@ export const updateAssetSchema = z
     manufacturer: displayText(1, 120).nullable().optional(),
     model: z.string().trim().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
-    specifications: z.record(z.unknown()).optional(),
+    specifications: freeFormSpecifications.optional(),
     expectedVersion,
   })
   .strict()
@@ -211,9 +232,9 @@ export type DecommissionDto = z.infer<typeof decommissionSchema>;
 export const transferAssetSchema = z
   .object({
     toOrganizationId: organizationId,
-    reason: z.string().trim().min(10).max(1000),
+    reason: plainText().min(10).max(1000),
     /** Board resolution or handover document number, where one exists. */
-    referenceNo: z.string().trim().max(120).optional(),
+    referenceNo: plainText().max(120).optional(),
   })
   .strict();
 
@@ -223,7 +244,7 @@ export const recordLocationSchema = z
   .object({
     coordinate: coordinate.optional(),
     siteName: displayText(1, 200).optional(),
-    addressLine: z.string().trim().max(500).optional(),
+    addressLine: plainText().max(500).optional(),
     source: z.enum(['MANUAL', 'TELEMATICS', 'IMPORTED']).default('MANUAL'),
   })
   .strict()
@@ -236,7 +257,7 @@ export type RecordLocationDto = z.infer<typeof recordLocationSchema>;
 export const attachDocumentSchema = z
   .object({
     /** The id issued by document-service. The file never passes through here. */
-    documentId: z.string().trim().min(1).max(64),
+    documentId: documentReference.min(1),
     kind: z.enum(DOCUMENT_KINDS),
     title: displayText(2, 200),
     issuedAt: z.string().datetime().optional(),
@@ -422,7 +443,7 @@ export const createPolicySchema = z
     insuredValueMinor: amountMinorSchema.optional(),
     validFrom: z.string().datetime(),
     validTo: z.string().datetime(),
-    documentId: z.string().trim().max(64).optional(),
+    documentId: documentReference.optional(),
   })
   .strict()
   .refine((v) => new Date(v.validTo) > new Date(v.validFrom), {
@@ -439,7 +460,7 @@ export const createInspectionSchema = z
     validTo: z.string().datetime(),
     result: z.enum(['PASSED', 'CONDITIONAL', 'FAILED']),
     notes: z.string().trim().max(1000).optional(),
-    documentId: z.string().trim().max(64).optional(),
+    documentId: documentReference.optional(),
   })
   .strict()
   .refine((v) => new Date(v.validTo) > new Date(v.inspectedAt), {
@@ -469,8 +490,8 @@ export const submitClaimSchema = z
     /** The policy the incident is claimed under. It must belong to this asset. */
     policyId,
     /** The insurer's file number, where one has been issued already. */
-    claimNumber: z.string().trim().min(1).max(64).optional(),
-    description: z.string().trim().min(10).max(2000),
+    claimNumber: plainText().min(1).max(64).optional(),
+    description: plainText().min(10).max(2000),
     incidentAt: z.string().datetime(),
     claimedAmountMinor: amountMinorSchema.optional(),
   })
@@ -484,7 +505,7 @@ export type SubmitClaimDto = z.infer<typeof submitClaimSchema>;
 
 export const reviewClaimSchema = z
   .object({
-    notes: z.string().trim().min(1).max(1000).optional(),
+    notes: plainText().min(1).max(1000).optional(),
   })
   .strict();
 
@@ -502,7 +523,7 @@ export const decideClaimSchema = z
   .object({
     decision: z.enum(['APPROVED', 'REJECTED']),
     approvedAmountMinor: amountMinorSchema.optional(),
-    notes: z.string().trim().min(3).max(1000).optional(),
+    notes: plainText().min(3).max(1000).optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -529,8 +550,8 @@ export const recordClaimSettlementSchema = z
     settledAt: z.string().datetime().optional(),
     /** The reference under which settlement happened elsewhere — the insurer's
      *  payment reference or an economic-service transaction id. */
-    settlementReference: z.string().trim().min(1).max(120).optional(),
-    notes: z.string().trim().min(1).max(1000).optional(),
+    settlementReference: plainText().min(1).max(120).optional(),
+    notes: plainText().min(1).max(1000).optional(),
   })
   .strict()
   .refine((v) => !v.settledAt || new Date(v.settledAt) <= new Date(), {

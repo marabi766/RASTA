@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { amountMinorSchema, currencySchema } from '@rasta/contracts';
+import { amountMinorSchema, currencySchema, plainText } from '@rasta/contracts';
 
 /**
  * Catalogue request and response shapes.
@@ -12,13 +12,13 @@ import { amountMinorSchema, currencySchema } from '@rasta/contracts';
 
 export const createProductSchema = z
   .object({
-    sku: z.string().trim().min(1).max(64),
-    name: z.string().trim().min(1).max(200),
-    description: z.string().trim().max(2000).optional(),
-    category: z.string().trim().min(1).max(100),
+    sku: plainText().min(1).max(64),
+    name: plainText().min(1).max(200),
+    description: plainText().max(2000).optional(),
+    category: plainText().min(1).max(100),
     kind: z.enum(['GOOD', 'SERVICE']).default('GOOD'),
     /** Free text from the defining organization: "عدد", "لیتر", "ساعت". */
-    unit: z.string().trim().min(1).max(32),
+    unit: plainText().min(1).max(32),
   })
   .strict();
 

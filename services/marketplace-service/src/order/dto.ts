@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { plainText } from '@rasta/contracts';
 import { RESPONSIBILITY_ATTRIBUTION } from '../events/events';
 
 /**
@@ -41,7 +42,7 @@ export const createOrderSchema = z
       .min(1)
       .max(50),
     /** Free text from the buyer, carried through to the supplier. */
-    note: z.string().trim().max(1000).optional(),
+    note: plainText().max(1000).optional(),
   })
   .strict();
 
@@ -50,8 +51,8 @@ export type CreateOrderDto = z.infer<typeof createOrderSchema>;
 export const fulfillOrderSchema = z
   .object({
     /** A waybill or courier reference. Opaque to this service. */
-    trackingReference: z.string().trim().min(1).max(128).optional(),
-    note: z.string().trim().max(1000).optional(),
+    trackingReference: plainText().min(1).max(128).optional(),
+    note: plainText().max(1000).optional(),
   })
   .strict();
 
@@ -59,7 +60,7 @@ export type FulfillOrderDto = z.infer<typeof fulfillOrderSchema>;
 
 export const confirmReceiptSchema = z
   .object({
-    note: z.string().trim().max(1000).optional(),
+    note: plainText().max(1000).optional(),
   })
   .strict();
 
@@ -74,7 +75,7 @@ export const raiseDisputeSchema = z
      * resolve it needs to know what it is about, and a one-word reason is how
      * a dispute becomes permanent by neglect.
      */
-    reason: z.string().trim().min(10).max(1000),
+    reason: plainText().min(10).max(1000),
   })
   .strict();
 
@@ -90,7 +91,7 @@ export const resolveDisputeSchema = z
      * that is neither settled nor refunded leaves the money held forever.
      */
     outcome: z.enum(['SETTLE', 'REFUND']),
-    resolution: z.string().trim().min(10).max(1000),
+    resolution: plainText().min(10).max(1000),
     /**
      * Who the operator holds responsible (ADR-052 §§ 1-b, 4 rule 13).
      *
@@ -108,7 +109,7 @@ export type ResolveDisputeDto = z.infer<typeof resolveDisputeSchema>;
 
 export const cancelOrderSchema = z
   .object({
-    reason: z.string().trim().min(3).max(500),
+    reason: plainText().min(3).max(500),
   })
   .strict();
 
@@ -117,7 +118,7 @@ export type CancelOrderDto = z.infer<typeof cancelOrderSchema>;
 export const submitReviewSchema = z
   .object({
     rating: z.number().int().min(1).max(5),
-    comment: z.string().trim().max(2000).optional(),
+    comment: plainText().max(2000).optional(),
   })
   .strict();
 

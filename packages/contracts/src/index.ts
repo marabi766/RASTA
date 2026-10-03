@@ -19,6 +19,16 @@ export {
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
 export {
+  WITHOUT_BIDI_CONTROL,
+  WITHOUT_CONTROL_CHARACTER,
+  UNSUPPORTED_CHARACTERS,
+  containsBidiControl,
+  plainText,
+  referenceId,
+  withoutBidiControlDeep,
+} from './common/text';
+
+export {
   CURRENCIES,
   MAX_AMOUNT_MINOR,
   MIN_SIGNED_AMOUNT_MINOR,
