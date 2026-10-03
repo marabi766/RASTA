@@ -231,6 +231,9 @@ export function buildMatrix(input: MatrixInput): MatrixView {
     minEvaluators: input.minEvaluators,
     maxEvaluators: input.maxEvaluators,
     ready: qualifiedBids.length > 0 && blockers.length === 0 && undecidedBidCount === 0,
+    // The counted evaluators as people (#188) need their stable identities, which this pure
+    // function does not see: the service decides it (`EvaluationService.readinessOfPeople`).
+    readinessBlockedBy: null,
     undecidedBidCount,
     blockers,
     bids: bids.map((entry) => {

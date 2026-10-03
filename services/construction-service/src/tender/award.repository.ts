@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import type { ActorIdentity } from '@rasta/nest-common';
 import type { TenderAward } from '../generated/prisma';
+import { storedActor } from '../shared/stable-actor';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 
 /** The workflow whose active approval policy would gate an award (Q-84); none can be written yet (PR 11). */
@@ -18,6 +20,36 @@ export const AWARD_WORKFLOW_KEY = 'tender.award';
 export class AwardRepository {
   findAward(tx: ExtendedPrismaClient, tenderId: string): Promise<TenderAward | null> {
     return tx.tenderAward.findFirst({ where: { tenderId } });
+  }
+
+  /**
+   * Everyone on record as having taken part in the evaluation of the tender's bids — who decided on
+   * one, who claimed one, who stood down from one — each with the stable identity the row recorded
+   * (#188): the people `AWARDER_NOT_EVALUATOR` compares the awarder with.
+   */
+  async listParticipants(tx: ExtendedPrismaClient, tenderId: string): Promise<ActorIdentity[]> {
+    const [decisions, claims, recusals] = await Promise.all([
+      tx.bidQualification.findMany({
+        where: { tenderId },
+        select: { decidedBy: true, decidedByIssuer: true, decidedBySubject: true },
+      }),
+      tx.bidEvaluation.findMany({
+        where: { tenderId },
+        select: { evaluatorId: true, evaluatorIssuer: true, evaluatorSubject: true },
+      }),
+      tx.bidEvaluationRecusal.findMany({
+        where: { tenderId },
+        select: { evaluatorId: true, evaluatorIssuer: true, evaluatorSubject: true },
+      }),
+    ]);
+    return [
+      ...decisions.map((row) =>
+        storedActor(row.decidedBy, row.decidedByIssuer, row.decidedBySubject),
+      ),
+      ...[...claims, ...recusals].map((row) =>
+        storedActor(row.evaluatorId, row.evaluatorIssuer, row.evaluatorSubject),
+      ),
+    ];
   }
 
   /** Whether the organization in context has an ACTIVE `tender.award` approval policy (Q-84). Only ACTIVE counts. */

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma, Tender } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { StoredIdentity } from '../shared/stable-actor';
 import { TERMINAL_TENDER_STATES, type TenderStateName } from './tender.state-machine';
 
 /**
@@ -45,6 +46,8 @@ export interface TenderCreateInput {
   bidOpeningAt: Date | null;
   bidClosingAt: Date | null;
   actor: string;
+  /** The creator's stable identity (#188), both or neither: `EVALUATOR_NOT_TENDER_AUTHOR` compares it. */
+  actorIdentity: StoredIdentity;
   correlationId: string;
   at: Date;
 }
@@ -77,6 +80,8 @@ export class TenderRepository {
         statusChangedBy: input.actor,
         createdAt: input.at,
         createdBy: input.actor,
+        createdByIssuer: input.actorIdentity.issuer,
+        createdBySubject: input.actorIdentity.subject,
         createdCorrelationId: input.correlationId,
         updatedAt: input.at,
         updatedBy: input.actor,
@@ -170,7 +175,14 @@ export class TenderRepository {
    */
   async publishTender(
     tx: ExtendedPrismaClient,
-    input: { tenderId: string; expectedVersion: number; actor: string; at: Date },
+    input: {
+      tenderId: string;
+      expectedVersion: number;
+      actor: string;
+      /** The publisher's stable identity (#188), both or neither. */
+      actorIdentity: StoredIdentity;
+      at: Date;
+    },
   ): Promise<number> {
     const result = await tx.tender.updateMany({
       where: { id: input.tenderId, status: 'DRAFT', version: input.expectedVersion },
@@ -178,6 +190,8 @@ export class TenderRepository {
         status: 'PUBLISHED',
         publishedAt: input.at,
         publishedBy: input.actor,
+        publishedByIssuer: input.actorIdentity.issuer,
+        publishedBySubject: input.actorIdentity.subject,
         statusChangedAt: input.at,
         statusChangedBy: input.actor,
         updatedAt: input.at,

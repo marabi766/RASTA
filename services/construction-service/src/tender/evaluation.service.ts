@@ -1,6 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { RastaError, getContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  actorIdentityUnknown,
+  compareActors,
+  currentActor,
+  getContext,
+} from '@rasta/nest-common';
 import { ERROR_CODES } from '@rasta/contracts';
 import { withFinancialSpan } from '@rasta/observability';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -12,12 +18,14 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { evaluationRefusalsTotal, tenderTransitionsTotal } from '../observability/metrics';
 import { versionConflictsTotal } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
+import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import { ENV } from '../tokens';
 import { BidAccessAudit, refusalCodeOf } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
 import { TenderOpenRepository } from './tender-open.repository';
 import {
   EvaluationRepository,
+  type BidEvaluatorRow,
   type BidSummary,
   type TenderForEvaluation,
 } from './evaluation.repository';
@@ -26,6 +34,7 @@ import { StandingAuthority } from './standing-authority';
 import { assertTenderTransition } from './tender.state-machine';
 import { buildMatrix, matrixDigest, type MatrixInput } from './evaluation-matrix';
 import { readMatrixInput } from './matrix-input';
+import { evaluatorPeople } from './evaluator-people';
 import type {
   EvaluatedView,
   MatrixView,
@@ -45,6 +54,7 @@ export const EVALUATION_REFUSALS = [
   'CONFLICT_OF_INTEREST',
   'EVALUATOR_IS_TENDER_AUTHOR',
   'RECUSED',
+  'SAME_PERSON_AS_EVALUATOR',
   'NOT_OPENED',
   'NOT_EVALUATING',
   'BID_NOT_OPENED',
@@ -175,7 +185,7 @@ export class EvaluationService {
               };
             }
             if (bid.status !== 'OPENED') throw this.rule('BID_NOT_OPENED');
-            await this.assertNotRecused(tx, tenderId, bidId, principal.actor);
+            await this.assertOnePerson(tx, tenderId, bidId, 'DECIDE');
 
             const { at } = locked;
             const reasonCode = dto.decision === 'DISQUALIFIED' ? (dto.reasonCode ?? null) : null;
@@ -189,6 +199,7 @@ export class EvaluationService {
               reasonText: dto.decision === 'DISQUALIFIED' ? (dto.reasonText ?? null) : null,
               standingAsOf,
               actor: principal.actor,
+              identity: storedIdentityOf(currentActor()),
               at,
             });
             const matched = await this.repo.decideBid(tx, {
@@ -263,6 +274,7 @@ export class EvaluationService {
         if (bid.status !== 'OPENED' && bid.status !== 'QUALIFIED') {
           throw this.rule('BID_NOT_EVALUABLE');
         }
+        await this.assertOnePerson(tx, tenderId, bidId, 'RECUSE');
         const { at } = locked;
         await this.repo.insertRecusal(tx, {
           id: newId(ID_PREFIX.recusal),
@@ -270,6 +282,7 @@ export class EvaluationService {
           tenderId,
           bidId,
           evaluatorId: principal.actor,
+          identity: storedIdentityOf(currentActor()),
           reasonCode: dto.reasonCode,
           at,
         });
@@ -313,7 +326,7 @@ export class EvaluationService {
           this.prisma.transaction(async (tx) => {
             const locked = await this.enter(tx, principal, tenderId);
             const bid = this.bidOf(locked, bidId);
-            await this.assertNotRecused(tx, tenderId, bidId, principal.actor);
+            await this.assertOnePerson(tx, tenderId, bidId, 'SCORE');
             if (bid.status !== 'QUALIFIED') throw this.rule('BID_NOT_QUALIFIED');
 
             const criteria = await this.repo.listCriteria(tx, tenderId);
@@ -341,12 +354,14 @@ export class EvaluationService {
                 throw this.rule('EVALUATOR_LIMIT');
               }
               const id = newId(ID_PREFIX.evaluation);
+              const identity = storedIdentityOf(currentActor());
               await this.repo.insertEvaluation(tx, {
                 id,
                 organizationId: principal.organizationId,
                 tenderId,
                 bidId,
                 evaluatorId: principal.actor,
+                identity,
                 at,
               });
               evaluation = {
@@ -355,6 +370,8 @@ export class EvaluationService {
                 tenderId,
                 bidId,
                 evaluatorId: principal.actor,
+                evaluatorIssuer: identity.issuer,
+                evaluatorSubject: identity.subject,
                 createdAt: at,
               };
             }
@@ -475,10 +492,12 @@ export class EvaluationService {
                   undecidedBidCount: matrix.undecidedBidCount,
                 });
               }
+              await this.assertDistinctEvaluators(tx, tenderId, matrix);
               const matched = await this.repo.completeEvaluation(tx, {
                 tenderId,
                 expectedVersion: tender.version,
                 actor: principal.actor,
+                identity: storedIdentityOf(currentActor()),
                 at,
               });
               if (matched === 0) throw this.conflict('Tender', tenderId);
@@ -539,7 +558,14 @@ export class EvaluationService {
         this.assertEvaluatorMayAct(principal, tender, bids);
         if (tender.openedAt === null) throw this.rule('NOT_OPENED');
         const at = await transactionNow(tx);
-        const matrix = buildMatrix(await this.matrixInput(tx, tender, bids));
+        const counted = buildMatrix(await this.matrixInput(tx, tender, bids));
+        // `ready` is what `evaluate` would answer: the counted evaluators are people too (#188).
+        const blockedBy = await this.readinessOfPeople(tx, tenderId, counted);
+        const matrix: MatrixView = {
+          ...counted,
+          ready: counted.ready && blockedBy === null,
+          readinessBlockedBy: blockedBy,
+        };
         for (const bidId of bids.length > 0 ? bids.map((bid) => bid.id) : [null]) {
           await this.record(tx, principal, tenderId, bidId, 'READ_EVALUATION', at);
         }
@@ -699,13 +725,39 @@ export class EvaluationService {
       principal,
       bids.map((bid) => bid.bidderOrganizationId),
     );
-    if (
-      this.env.CONSTRUCTION_COI_RULES.includes('EVALUATOR_NOT_TENDER_AUTHOR') &&
-      (tender.createdBy === principal.actor || tender.publishedBy === principal.actor)
-    ) {
+    if (this.env.CONSTRUCTION_COI_RULES.includes('EVALUATOR_NOT_TENDER_AUTHOR')) {
+      this.assertNotTenderAuthor(tender);
+    }
+  }
+
+  /**
+   * `EVALUATOR_NOT_TENDER_AUTHOR`: the evaluator is provably neither the tender's creator nor its
+   * publisher, on the token's issuer and subject (`compareActors`, #188) — not on user ids, which
+   * one person can hold two of. The same person is 403 `EVALUATOR_IS_TENDER_AUTHOR`; an author
+   * whose identity was not recorded (a tender older than the record) cannot be told apart from
+   * the evaluator, and that is `422 ACTOR_IDENTITY_UNKNOWN`, never a pass.
+   */
+  private assertNotTenderAuthor(tender: TenderForEvaluation): void {
+    const evaluator = currentActor();
+    const authors = [
+      storedActor(tender.createdBy, tender.createdByIssuer, tender.createdBySubject),
+    ];
+    if (tender.publishedBy !== null) {
+      authors.push(
+        storedActor(tender.publishedBy, tender.publishedByIssuer, tender.publishedBySubject),
+      );
+    }
+    const comparisons = authors.map((author) => compareActors(author, evaluator));
+    if (comparisons.includes('SAME')) {
       throw this.forbid(
         'EVALUATOR_IS_TENDER_AUTHOR',
-        'The user who created or published a tender does not evaluate its bids',
+        'The person who created or published a tender does not evaluate its bids',
+      );
+    }
+    if (comparisons.includes('UNKNOWN')) {
+      evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+      throw actorIdentityUnknown(
+        'the evaluator of a tender is neither its creator nor its publisher',
       );
     }
   }
@@ -724,15 +776,124 @@ export class EvaluationService {
     }
   }
 
-  private async assertNotRecused(
+  /**
+   * One person is one evaluator of a bid, whatever user id they arrive with (#188, E1 and E2).
+   * Compared on the token's issuer and subject (`compareActors`) with everyone on record for the
+   * bid:
+   *
+   *  - a person who stood down from the bid — under this user id or another — does not decide on
+   *    it, score it or stand down again: 403 `RECUSED` (`recuse` answers its own repeat under the
+   *    same id before it asks);
+   *  - a person who already holds an evaluation of the bid under **another** user id (their own,
+   *    under this one, is the one they keep scoring) does not claim a second one, nor stand
+   *    down under another id while their scores stay under the first: 403
+   *    `SAME_PERSON_AS_EVALUATOR` — one person never counts as two evaluators (Q-92's minimum);
+   *  - a row that names no identity (older than the record) cannot be told from the caller:
+   *    `422 ACTOR_IDENTITY_UNKNOWN`, never a pass.
+   *
+   * Under the tender lock, so two claims of one person cannot pass together; the database says
+   * the same (`bid_*_guard`, `ux_bid_evaluation_person`).
+   */
+  private async assertOnePerson(
     tx: ExtendedPrismaClient,
     tenderId: string,
     bidId: string,
-    evaluatorId: string,
+    duty: 'DECIDE' | 'SCORE' | 'RECUSE',
   ): Promise<void> {
-    if (await this.repo.findRecusal(tx, tenderId, bidId, evaluatorId)) {
-      throw this.forbid('RECUSED', 'This evaluator stood down from this bid');
+    const caller = currentActor();
+    const { evaluations, recusals } = await this.repo.listBidEvaluators(tx, tenderId, bidId);
+    const compare = (rows: readonly BidEvaluatorRow[]) =>
+      rows.map((row) =>
+        compareActors(
+          storedActor(row.evaluatorId, row.evaluatorIssuer, row.evaluatorSubject),
+          caller,
+        ),
+      );
+    const stoodDown = compare(recusals);
+    if (stoodDown.includes('SAME')) {
+      throw this.forbid('RECUSED', 'This person stood down from this bid');
     }
+    const evaluating =
+      duty === 'DECIDE'
+        ? []
+        : compare(evaluations.filter((row) => row.evaluatorId !== caller.userId));
+    if (evaluating.includes('SAME')) {
+      throw this.forbid(
+        'SAME_PERSON_AS_EVALUATOR',
+        'This person already evaluates this bid under another user id',
+      );
+    }
+    if (stoodDown.includes('UNKNOWN') || evaluating.includes('UNKNOWN')) {
+      evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+      throw actorIdentityUnknown('one person is one evaluator of a bid');
+    }
+  }
+
+  /**
+   * Completion counts people, not user ids (#188; PM ruling on #200). The matrix counts its
+   * evaluators by user id, so rows written before the stable identity was recorded could let one
+   * person meet the minimum (Q-92) under two ids, or keep scores they stood down from under
+   * another. The contributing evaluations of each qualified bid — complete, and not stood down by
+   * the same user id — are compared pairwise and with the bid's recusals (`evaluatorPeople`):
+   *
+   *  - the same person: 403 `SAME_PERSON_AS_EVALUATOR`;
+   *  - a pair that cannot be told apart (an identity not on record, or another issuer):
+   *    `422 ACTOR_IDENTITY_UNKNOWN`.
+   *
+   * Both refusals are audited like every other. The rows are append-only, so the remedy is the
+   * owner's: cancel the tender and run the evaluation again (ADR-067 note, docs/09 § 9.3).
+   */
+  private async assertDistinctEvaluators(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    matrix: MatrixView,
+  ): Promise<void> {
+    const blockedBy = await this.readinessOfPeople(tx, tenderId, matrix);
+    if (blockedBy === 'SAME_PERSON_AS_EVALUATOR') {
+      throw this.forbid(
+        'SAME_PERSON_AS_EVALUATOR',
+        'One person is counted as more than one evaluator of a bid, or keeps scores of a bid they stood down from',
+      );
+    }
+    if (blockedBy === 'ACTOR_IDENTITY_UNKNOWN') {
+      evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+      throw actorIdentityUnknown(
+        'the evaluators a completed evaluation counts are distinct people',
+      );
+    }
+  }
+
+  /**
+   * The one judgement both completion and the matrix read use, so that `ready` never says yes
+   * where `evaluate` would refuse: null when the counted evaluators are provably distinct
+   * people, else the closed code of what stands in the way (`evaluatorPeople`).
+   */
+  private async readinessOfPeople(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    matrix: MatrixView,
+  ): Promise<MatrixView['readinessBlockedBy']> {
+    const [evaluations, recusals] = await Promise.all([
+      this.repo.listEvaluations(tx, tenderId),
+      this.repo.listRecusals(tx, tenderId),
+    ]);
+    const counts = new Set<string>();
+    for (const bid of matrix.bids) {
+      if (bid.qualification?.decision !== 'QUALIFIED') continue;
+      const stoodDown = new Set(bid.recusals.map((recusal) => recusal.evaluatorId));
+      for (const evaluation of bid.evaluations) {
+        if (evaluation.complete && !stoodDown.has(evaluation.evaluatorId)) {
+          counts.add(`${bid.bidId}|${evaluation.evaluatorId}`);
+        }
+      }
+    }
+    const { verdict } = evaluatorPeople(
+      evaluations.filter((row) => counts.has(`${row.bidId}|${row.evaluatorId}`)),
+      recusals,
+    );
+    if (verdict === 'SAME') return 'SAME_PERSON_AS_EVALUATOR';
+    if (verdict === 'UNKNOWN') return 'ACTOR_IDENTITY_UNKNOWN';
+    return null;
   }
 
   /** Supplier-service's word on the contractor's standing now, asked outside any lock (fail closed). */

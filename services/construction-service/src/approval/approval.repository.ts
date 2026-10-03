@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import type { Approval, ApprovalPolicy, ApprovalPolicyStep, Prisma } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { StoredIdentity } from '../shared/stable-actor';
 import type { ApprovalStateName, PolicyStateName, WorkflowKey } from './approval.state-machine';
 import type { ProjectStateName } from '../project/project.state-machine';
 
@@ -131,6 +132,8 @@ export class ApprovalRepository {
       rationale: string;
       isSample: boolean;
       actor: string;
+      /** The author's stable identity (#188), both or neither: what the four-eyes check compares. */
+      actorIdentity: StoredIdentity;
       correlationId: string;
       at: Date;
     },
@@ -151,6 +154,8 @@ export class ApprovalRepository {
           isSample: policy.isSample,
           createdAt: policy.at,
           createdBy: policy.actor,
+          createdByIssuer: policy.actorIdentity.issuer,
+          createdBySubject: policy.actorIdentity.subject,
           createdCorrelationId: policy.correlationId,
         },
       });

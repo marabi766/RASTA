@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { RastaError, getContext } from '@rasta/nest-common';
+import { RastaError, compareActors, currentActor, getContext } from '@rasta/nest-common';
 import { ERROR_CODES } from '@rasta/contracts';
 import { withFinancialSpan } from '@rasta/observability';
 import type { TenderAward } from '../generated/prisma';
@@ -29,9 +29,9 @@ import {
 import { OwnerIdentity, type LivePrincipal, type Principal } from './owner-identity';
 import { StandingAuthority } from './standing-authority';
 import { AwardRepository } from './award.repository';
-import { buildMatrix, matrixDigest, type MatrixInput } from './evaluation-matrix';
+import { buildMatrix, matrixDigest } from './evaluation-matrix';
 import { readMatrixInput } from './matrix-input';
-import { comparePeople, currentPerson, personByUserId, storedIdentity } from './person';
+import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import type { AwardTenderDto, TenderAwardView } from './award.dto';
 
 /**
@@ -118,7 +118,7 @@ type Judged =
  * the tender. With `CONSTRUCTION_COI_RULES` naming `AWARDER_NOT_EVALUATOR` the awarder is none of the
  * people who took part in the evaluation (decided on a bid, scored one, stood down from one, or
  * completed it): 403 `AWARDER_IS_EVALUATOR`, or 422 `ACTOR_IDENTITY_UNKNOWN` when the records cannot
- * show that they are two people — people are compared in `person.ts` only. Every refusal is audited.
+ * show that they are two people — people are compared on their stable identity (`compareActors`, #188). Every refusal is audited.
  *
  * ## The approval gate (Q-84) — fail closed
  *
@@ -226,7 +226,7 @@ export class AwardService {
               });
               if (amountMinor === undefined) throw RastaError.internal('A bid was not opened');
 
-              const identity = storedIdentity(currentPerson(principal.actor));
+              const identity = storedIdentityOf(currentActor());
               const id = newId(ID_PREFIX.award);
               await this.awards.insertAward(tx, {
                 id,
@@ -444,7 +444,7 @@ export class AwardService {
       maxEvaluators: this.env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS,
     });
     if (this.env.CONSTRUCTION_COI_RULES.includes('AWARDER_NOT_EVALUATOR')) {
-      this.assertAwarderIsNotEvaluator(principal, tender, input);
+      await this.assertAwarderIsNotEvaluator(tx, tender);
     }
 
     const recorded = await this.awards.findAward(tx, tender.id);
@@ -483,26 +483,28 @@ export class AwardService {
   }
 
   /**
-   * `AWARDER_NOT_EVALUATOR` (Q-90, Q-93): the awarder is none of the people who took part in the
-   * evaluation — who decided on a bid, scored one, stood down from one, or completed the evaluation.
-   * The same person is 403; a person who cannot be told from them is 422 (fail closed), because a
-   * record that holds a user id alone cannot show that two user ids are two people.
+   * `AWARDER_NOT_EVALUATOR` (Q-90, Q-93; on by default and strict): the awarder is none of the people
+   * who took part in the evaluation — who decided on a bid, scored one, stood down from one, or
+   * completed the evaluation. People are compared on the token's issuer and subject
+   * (`compareActors`, #188), not on user ids, with the identity each row recorded when it was written.
+   * The same person is 403; a person who cannot be told from them is 422 (fail closed): a row that
+   * names no stable identity (older than the record, or another issuer) cannot show that two user ids
+   * are two people.
    */
-  private assertAwarderIsNotEvaluator(
-    principal: Principal,
+  private async assertAwarderIsNotEvaluator(
+    tx: ExtendedPrismaClient,
     tender: TenderForEvaluation,
-    input: MatrixInput,
-  ): void {
-    const participants = new Set<string>([
-      ...input.qualifications.map((row) => row.decidedBy),
-      ...input.evaluations.map((row) => row.evaluatorId),
-      ...input.recusals.map((row) => row.evaluatorId),
-      ...(tender.evaluatedBy ? [tender.evaluatedBy] : []),
-    ]);
-    const awarder = currentPerson(principal.actor);
+  ): Promise<void> {
+    const participants = await this.awards.listParticipants(tx, tender.id);
+    if (tender.evaluatedBy) {
+      participants.push(
+        storedActor(tender.evaluatedBy, tender.evaluatedByIssuer, tender.evaluatedBySubject),
+      );
+    }
+    const awarder = currentActor();
     let unknown = false;
-    for (const userId of participants) {
-      const comparison = comparePeople(awarder, personByUserId(userId));
+    for (const person of participants) {
+      const comparison = compareActors(awarder, person);
       if (comparison === 'SAME') {
         throw this.forbid(
           'AWARDER_IS_EVALUATOR',

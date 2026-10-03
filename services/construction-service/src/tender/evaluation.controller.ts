@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AuditorSelfService, zodPipe } from '@rasta/nest-common';
+import { AuditorSelfService, RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { EvaluationService } from './evaluation.service';
 import {
   qualifyBidSchema,
@@ -18,7 +18,12 @@ const EVALUATOR_NOTE =
   'judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of ' +
   'any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is ' +
   'said about the tender; with CONSTRUCTION_COI_RULES naming EVALUATOR_NOT_TENDER_AUTHOR, so is the ' +
-  'user who created or published it (403 `EVALUATOR_IS_TENDER_AUTHOR`). The routes name no role at the ' +
+  'person who created or published it (403 `EVALUATOR_IS_TENDER_AUTHOR`; a tender whose author has no ' +
+  'stable identity on record is 422 `ACTOR_IDENTITY_UNKNOWN`). One person is one evaluator of a bid, ' +
+  'compared on issuer and subject (#188): a person who stood down from it under another user id is 403 ' +
+  '`RECUSED`, one who already evaluates it under another user id is 403 `SAME_PERSON_AS_EVALUATOR`, and ' +
+  'an evaluator on record without an identity makes it 422 `ACTOR_IDENTITY_UNKNOWN`. Every write needs ' +
+  'the platform user id: a token without `rasta_uid` is 403. The routes name no role at the ' +
   'guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s ' +
   'organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. ' +
   'On the caller’s own tender every refusal is audited, whatever role the caller holds (AUDITOR and ' +
@@ -45,6 +50,7 @@ export class EvaluationController {
 
   @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/bids/:bidId/qualification')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Qualify or disqualify an opened bid (OPENED → QUALIFIED | DISQUALIFIED)',
@@ -69,6 +75,7 @@ export class EvaluationController {
 
   @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/bids/:bidId/recusal')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Stand down from a bid (the caller, final)',
@@ -90,6 +97,7 @@ export class EvaluationController {
 
   @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/bids/:bidId/scores')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Score a qualified bid against the tender’s frozen criteria',
@@ -113,6 +121,7 @@ export class EvaluationController {
 
   @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
   @Post('tenders/:id/evaluate')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Complete the evaluation (EVALUATING → EVALUATED)',

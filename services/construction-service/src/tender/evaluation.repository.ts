@@ -7,6 +7,7 @@ import type {
   TenderCriterion,
 } from '../generated/prisma';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { StoredIdentity } from '../shared/stable-actor';
 import type { TenderStateName } from './tender.state-machine';
 
 /**
@@ -32,6 +33,16 @@ export interface TenderForEvaluation {
   evaluatedBy: string | null;
   createdBy: string;
   publishedBy: string | null;
+  /**
+   * The stable identities (#188) beside `evaluatedBy`, `createdBy` and `publishedBy`: both or
+   * neither of each pair; NULL on a tender written before they were recorded (unknown).
+   */
+  evaluatedByIssuer: string | null;
+  evaluatedBySubject: string | null;
+  createdByIssuer: string | null;
+  createdBySubject: string | null;
+  publishedByIssuer: string | null;
+  publishedBySubject: string | null;
 }
 
 interface LockRow {
@@ -45,6 +56,12 @@ interface LockRow {
   evaluated_by: string | null;
   created_by: string;
   published_by: string | null;
+  evaluated_by_issuer: string | null;
+  evaluated_by_subject: string | null;
+  created_by_issuer: string | null;
+  created_by_subject: string | null;
+  published_by_issuer: string | null;
+  published_by_subject: string | null;
 }
 
 const toLocked = (row: LockRow): TenderForEvaluation => ({
@@ -58,7 +75,20 @@ const toLocked = (row: LockRow): TenderForEvaluation => ({
   evaluatedBy: row.evaluated_by,
   createdBy: row.created_by,
   publishedBy: row.published_by,
+  evaluatedByIssuer: row.evaluated_by_issuer,
+  evaluatedBySubject: row.evaluated_by_subject,
+  createdByIssuer: row.created_by_issuer,
+  createdBySubject: row.created_by_subject,
+  publishedByIssuer: row.published_by_issuer,
+  publishedBySubject: row.published_by_subject,
 });
+
+/** An evaluator of a bid as a row names them: the user id and the stable identity (#188). */
+export interface BidEvaluatorRow {
+  evaluatorId: string;
+  evaluatorIssuer: string | null;
+  evaluatorSubject: string | null;
+}
 
 /** A bid as evaluation needs it: who bid and how far it has got — never the sealed bytes. */
 export interface BidSummary {
@@ -81,7 +111,9 @@ export class EvaluationRepository {
   ): Promise<TenderForEvaluation | null> {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
-             "opened_at", "evaluated_at", "evaluated_by", "created_by", "published_by"
+             "opened_at", "evaluated_at", "evaluated_by", "created_by", "published_by",
+             "evaluated_by_issuer", "evaluated_by_subject", "created_by_issuer",
+             "created_by_subject", "published_by_issuer", "published_by_subject"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR UPDATE`;
@@ -96,7 +128,9 @@ export class EvaluationRepository {
   ): Promise<TenderForEvaluation | null> {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
-             "opened_at", "evaluated_at", "evaluated_by", "created_by", "published_by"
+             "opened_at", "evaluated_at", "evaluated_by", "created_by", "published_by",
+             "evaluated_by_issuer", "evaluated_by_subject", "created_by_issuer",
+             "created_by_subject", "published_by_issuer", "published_by_subject"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR SHARE`;
@@ -154,6 +188,8 @@ export class EvaluationRepository {
       reasonText: string | null;
       standingAsOf: Date | null;
       actor: string;
+      /** The decider's stable identity (#188), both or neither. */
+      identity: StoredIdentity;
       at: Date;
     },
   ): Promise<void> {
@@ -169,6 +205,8 @@ export class EvaluationRepository {
         standingAsOf: input.standingAsOf,
         decidedAt: input.at,
         decidedBy: input.actor,
+        decidedByIssuer: input.identity.issuer,
+        decidedBySubject: input.identity.subject,
       },
     });
   }
@@ -211,6 +249,8 @@ export class EvaluationRepository {
       tenderId: string;
       bidId: string;
       evaluatorId: string;
+      /** The evaluator's stable identity (#188), both or neither. */
+      identity: StoredIdentity;
       reasonCode: string;
       at: Date;
     },
@@ -222,6 +262,8 @@ export class EvaluationRepository {
         tenderId: input.tenderId,
         bidId: input.bidId,
         evaluatorId: input.evaluatorId,
+        evaluatorIssuer: input.identity.issuer,
+        evaluatorSubject: input.identity.subject,
         reasonCode: input.reasonCode,
         recusedAt: input.at,
       },
@@ -241,6 +283,27 @@ export class EvaluationRepository {
     evaluatorId: string,
   ): Promise<BidEvaluation | null> {
     return tx.bidEvaluation.findFirst({ where: { tenderId, bidId, evaluatorId } });
+  }
+
+  /**
+   * Everyone on record as an evaluator of one bid — who claimed it and who stood down from it —
+   * with their stable identity (#188), so that one person under two user ids is found.
+   */
+  async listBidEvaluators(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    bidId: string,
+  ): Promise<{ evaluations: BidEvaluatorRow[]; recusals: BidEvaluatorRow[] }> {
+    const select = { evaluatorId: true, evaluatorIssuer: true, evaluatorSubject: true } as const;
+    const [evaluations, recusals] = await Promise.all([
+      tx.bidEvaluation.findMany({ where: { tenderId, bidId }, select, orderBy: { id: 'asc' } }),
+      tx.bidEvaluationRecusal.findMany({
+        where: { tenderId, bidId },
+        select,
+        orderBy: { id: 'asc' },
+      }),
+    ]);
+    return { evaluations, recusals };
   }
 
   /** The evaluators who hold a claim on the bid and have not stood down: how many may still be added. */
@@ -272,6 +335,8 @@ export class EvaluationRepository {
       tenderId: string;
       bidId: string;
       evaluatorId: string;
+      /** The evaluator's stable identity (#188), both or neither. */
+      identity: StoredIdentity;
       at: Date;
     },
   ): Promise<void> {
@@ -282,6 +347,8 @@ export class EvaluationRepository {
         tenderId: input.tenderId,
         bidId: input.bidId,
         evaluatorId: input.evaluatorId,
+        evaluatorIssuer: input.identity.issuer,
+        evaluatorSubject: input.identity.subject,
         createdAt: input.at,
       },
     });
@@ -342,7 +409,14 @@ export class EvaluationRepository {
    */
   async completeEvaluation(
     tx: ExtendedPrismaClient,
-    input: { tenderId: string; expectedVersion: number; actor: string; at: Date },
+    input: {
+      tenderId: string;
+      expectedVersion: number;
+      actor: string;
+      /** The completer's stable identity (#188), both or neither. */
+      identity: StoredIdentity;
+      at: Date;
+    },
   ): Promise<number> {
     const result = await tx.tender.updateMany({
       where: { id: input.tenderId, status: 'EVALUATING', version: input.expectedVersion },
@@ -350,6 +424,8 @@ export class EvaluationRepository {
         status: 'EVALUATED',
         evaluatedAt: input.at,
         evaluatedBy: input.actor,
+        evaluatedByIssuer: input.identity.issuer,
+        evaluatedBySubject: input.identity.subject,
         statusChangedAt: input.at,
         statusChangedBy: input.actor,
         updatedAt: input.at,

@@ -21,6 +21,7 @@ import {
   outboxFor,
   ownerDatabaseUrl,
   ownerSql,
+  TEST_ISSUER,
   testEnv,
   untilASessionWaitsOnALock,
   wire,
@@ -211,9 +212,9 @@ describe('awarding an evaluated tender', () => {
         tied: false,
         justification: null,
         awardedBy: user,
-        // The test context carries no issuer: nothing is invented.
-        awardedByIssuer: null,
-        awardedBySubject: null,
+        // The identity the token carried (the suites give each user id a subject of its own, #188).
+        awardedByIssuer: TEST_ISSUER,
+        awardedBySubject: `sub-${user}`,
       });
       // supplier-service was asked at the award, and its instant is on the record.
       expect(row!.standingAsOf.getTime()).toBeGreaterThan(Date.now() - 120_000);
@@ -363,7 +364,9 @@ describe('awarding an evaluated tender', () => {
           userId: user,
           roles: ['ORGANIZATION_ADMIN'],
           subject: 'idp-subject-8',
-        }),
+          // No issuer in the token: half a pair proves nothing.
+          issuer: undefined,
+        } as unknown as Partial<RequestContext>),
         () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }),
       );
       expect((await awardRows(tenderId))[0]).toMatchObject({
@@ -1245,8 +1248,95 @@ describe('awarding an evaluated tender', () => {
         expect(await awardRows(tenderId)).toHaveLength(0);
       });
 
+      it('compares people on the identity each row recorded (#188 part B): another subject passes, the same subject under another user id is refused, another issuer is unknown', async () => {
+        const identity = (owner: string, userId: string, subject: string, issuer: string) =>
+          context({
+            organizationId: owner,
+            organizationIds: [owner],
+            userId,
+            roles: ['ORGANIZATION_ADMIN'],
+            subject,
+            issuer,
+          } as unknown as Partial<RequestContext>);
+        // An evaluated tender whose every row names its person: the evaluator's issuer and subject.
+        const evaluatedByIdentity = async () => {
+          const t = await evaluatingTender(w, organizations, 1);
+          const evaluator = <T>(fn: () => T) =>
+            runWithContext(identity(t.owner, 'USR_EVAL', 'sub-evaluator', ISSUER), fn);
+          const bidId = t.bids[0]!.bidId;
+          await evaluator(() => w.evaluation.qualify(t.tenderId, bidId, { decision: 'QUALIFIED' }));
+          await evaluator(() =>
+            w.evaluation.score(t.tenderId, bidId, {
+              scores: [
+                { criterionCode: 'PRICE', scoreScaled: 8_000 },
+                { criterionCode: 'LICENCE', scoreScaled: 100 },
+              ],
+            }),
+          );
+          await evaluator(() => w.evaluation.evaluate(t.tenderId));
+          return t;
+        };
+        const awardAs = (
+          t: Awaited<ReturnType<typeof evaluatedByIdentity>>,
+          userId: string,
+          subject: string,
+          issuer: string,
+        ) =>
+          runWithContext(identity(t.owner, userId, subject, issuer), () =>
+            strict.award.awardApproved(t.tenderId, { bidId: t.bids[0]!.bidId }),
+          );
+
+        const other = await evaluatedByIdentity();
+        expect((await awardAs(other, 'USR_OTHER', 'sub-other', ISSUER)).status).toBe('AWARDED');
+        expect((await awardRows(other.tenderId))[0]).toMatchObject({
+          awardedBy: 'USR_OTHER',
+          awardedByIssuer: ISSUER,
+          awardedBySubject: 'sub-other',
+        });
+
+        // One person behind a second user id: the subject gives them away.
+        const same = await evaluatedByIdentity();
+        expect(
+          await refusalOf(awardAs(same, 'USR_SECOND_ID', 'sub-evaluator', ISSUER), 'FORBIDDEN'),
+        ).toContain('AWARDER_IS_EVALUATOR');
+
+        // Another issuer: a subject is unique only within its issuer, so nobody is taken for another person.
+        const elsewhere = await evaluatedByIdentity();
+        expect(
+          await refusalOf(
+            awardAs(elsewhere, 'USR_ELSEWHERE', 'sub-other', 'https://idp.other/realms/rasta'),
+          ),
+        ).toContain('ACTOR_IDENTITY_UNKNOWN');
+        expect(await awardRows(elsewhere.tenderId)).toHaveLength(0);
+      });
+
       it('fails closed for a user id the records cannot show to be another person: 422, not an award', async () => {
-        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        // Rows written before the identity was recorded (or by a token that carried none) name a user id only.
+        const { owner, tenderId, bids } = await evaluatingTender(w, organizations, 1);
+        const evaluator = newUserId();
+        const old = <T>(fn: () => T) =>
+          runWithContext(
+            context({
+              organizationId: owner,
+              organizationIds: [owner],
+              userId: evaluator,
+              roles: ['ORGANIZATION_ADMIN'],
+              issuer: undefined,
+              subject: undefined,
+            } as unknown as Partial<RequestContext>),
+            fn,
+          );
+        await old(() => w.evaluation.qualify(tenderId, bids[0]!.bidId, { decision: 'QUALIFIED' }));
+        await old(() =>
+          w.evaluation.score(tenderId, bids[0]!.bidId, {
+            scores: [
+              { criterionCode: 'PRICE', scoreScaled: 8_000 },
+              { criterionCode: 'LICENCE', scoreScaled: 100 },
+            ],
+          }),
+        );
+        await old(() => w.evaluation.evaluate(tenderId));
+
         const stranger = newUserId();
         expect(
           await refusalOf(award(owner, tenderId, bids[0]!.bidId, undefined, stranger, strict)),

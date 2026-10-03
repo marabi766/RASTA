@@ -1,6 +1,11 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllowService, AuditorSelfService, zodPipe } from '@rasta/nest-common';
+import {
+  AllowService,
+  AuditorSelfService,
+  RequirePlatformUserId,
+  zodPipe,
+} from '@rasta/nest-common';
 import { AwardService } from './award.service';
 import { awardTenderSchema, type AwardTenderDto } from './award.dto';
 
@@ -40,6 +45,9 @@ export class AwardController {
   constructor(private readonly awards: AwardService) {}
 
   @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
+  // The award records who awarded and is compared with the evaluators on their stable identity (#188):
+  // a user token without the platform user id is refused (403) before anything is done.
+  @RequirePlatformUserId()
   @Post('tenders/:id/award')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
