@@ -3,6 +3,7 @@ import { runUnscoped, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 import { apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
+import { eventEnvelopeSchema } from '@rasta/contracts';
 import {
   approvedProject,
   asBidder,
@@ -10,6 +11,7 @@ import {
   cleanup,
   context,
   loadStanding,
+  outboxFor,
   ownerDatabaseUrl,
   qualify,
   testEnv,
@@ -233,39 +235,62 @@ describe('stable actor identity (#188) through the API', () => {
       expect((await tenderRow(tenderId)).openedAt).toBeNull();
     });
 
-    it('refuses a proposal that names no identity (older than the record): 422 ACTOR_IDENTITY_UNKNOWN; withdrawn and proposed again, it opens', async () => {
+    /** The proposal events of a tender, payloads only, in order. */
+    const withdrawals = async (ownerOrg: string, tenderId: string) =>
+      (await outboxFor(w.prisma, ownerOrg))
+        .filter(
+          (row) =>
+            row.eventName === 'BID_OPENING_PROPOSAL_WITHDRAWN' && row.aggregateId === tenderId,
+        )
+        .map((row) => eventEnvelopeSchema.parse(row.payload).payload);
+
+    it('clears a proposal that names no identity (older than the record) when a second person approves: 422 ACTOR_IDENTITY_UNKNOWN, audited; proposed again, it opens', async () => {
       const { owner: o, tenderId } = await closed('a1-old');
       const alice = person();
       const aliceToken = alice.token(o, ['ORGANIZATION_ADMIN']);
-      expect((await propose(tenderId, aliceToken)).status).toBe(200);
+      const proposed = await propose(tenderId, aliceToken);
+      expect(proposed.status).toBe(200);
       await sql(
         `UPDATE "tender" SET "opening_proposed_by_issuer" = NULL, "opening_proposed_by_subject" = NULL
           WHERE "id" = '${tenderId}'`,
       );
 
       const bob = person();
-      const unknown = await open(tenderId, bob.token(o, ['ORGANIZATION_ADMIN']));
+      const bobToken = bob.token(o, ['ORGANIZATION_ADMIN']);
+      const unknown = await open(tenderId, bobToken);
       expect(unknown.status).toBe(422);
       expect(unknown.body.code).toBe('ACTOR_IDENTITY_UNKNOWN');
-      expect((await tenderRow(tenderId)).openedAt).toBeNull();
-      // The refusal is audited like every other one on this route.
-      const refused = await runUnscoped('the suite reads the log', () =>
-        w.prisma.client.bidAccessLog.findMany({
-          where: { tenderId, outcome: 'REFUSED', refusalCode: 'ACTOR_IDENTITY_UNKNOWN' },
-        }),
-      );
-      expect(refused).toHaveLength(1);
-
-      // The documented remedy: the proposer withdraws (an exact user-id match) and proposes again.
-      expect((await withdraw(tenderId, aliceToken)).status).toBe(200);
+      // Refused AND cleared: the proposal neither stands nor blocks the tender.
       const cleared = await tenderRow(tenderId);
-      expect(cleared.openingProposedByIssuer).toBeNull();
-      expect(cleared.openingProposedBySubject).toBeNull();
+      expect(cleared.openedAt).toBeNull();
+      expect(cleared.openingProposedBy).toBeNull();
+      expect(cleared.openingProposedAt).toBeNull();
+      expect(await withdrawals(o, tenderId)).toEqual([
+        expect.objectContaining({
+          proposedBy: proposed.body.proposedBy,
+          reason: 'PROPOSER_IDENTITY_UNKNOWN',
+        }),
+      ]);
+      // Both are audited: the clearing (granted) and the refusal of the opening.
+      const log = await runUnscoped('the suite reads the log', () =>
+        w.prisma.client.bidAccessLog.findMany({ where: { tenderId } }),
+      );
+      expect(
+        log.filter(
+          (row) => row.outcome === 'REFUSED' && row.refusalCode === 'ACTOR_IDENTITY_UNKNOWN',
+        ),
+      ).toHaveLength(1);
+      expect(
+        log.filter((row) => row.outcome === 'GRANTED' && row.purpose === 'WITHDRAW_PROPOSAL'),
+      ).toHaveLength(1);
+
+      // Anyone eligible proposes afresh; the new proposal records its identity and is approved.
       expect((await propose(tenderId, aliceToken)).status).toBe(200);
-      expect((await open(tenderId, bob.token(o, ['ORGANIZATION_ADMIN']))).status).toBe(200);
+      expect((await tenderRow(tenderId)).openingProposedBySubject).toBe(alice.sub);
+      expect((await open(tenderId, bobToken)).status).toBe(200);
     });
 
-    it('refuses a proposal recorded under another issuer: 422 ACTOR_IDENTITY_UNKNOWN', async () => {
+    it('clears a proposal recorded under another issuer the same way: 422 ACTOR_IDENTITY_UNKNOWN', async () => {
       const { owner: o, tenderId } = await closed('a1-issuer');
       expect((await propose(tenderId, person().token(o, ['ORGANIZATION_ADMIN']))).status).toBe(200);
       await sql(
@@ -274,6 +299,43 @@ describe('stable actor identity (#188) through the API', () => {
       const other = await open(tenderId, person().token(o, ['ORGANIZATION_ADMIN']));
       expect(other.status).toBe(422);
       expect(other.body.code).toBe('ACTOR_IDENTITY_UNKNOWN');
+      expect((await tenderRow(tenderId)).openingProposedBy).toBeNull();
+      expect((await withdrawals(o, tenderId)).map((p) => (p as { reason: string }).reason)).toEqual(
+        ['PROPOSER_IDENTITY_UNKNOWN'],
+      );
+    });
+
+    it('lets the proposer of a legacy proposal made without rasta_uid withdraw it with a platform id (same subject); nobody else', async () => {
+      const { owner: o, tenderId } = await closed('a1-legacy-withdraw');
+      const carol = person();
+      expect((await propose(tenderId, carol.token(o, ['ORGANIZATION_ADMIN']))).status).toBe(200);
+      // As a token without rasta_uid wrote it before the record: the user id IS the subject.
+      await sql(
+        `UPDATE "tender" SET "opening_proposed_by" = '${carol.sub}',
+           "opening_proposed_by_issuer" = NULL, "opening_proposed_by_subject" = NULL
+          WHERE "id" = '${tenderId}'`,
+      );
+      // Today that route needs a platform id, so the exact user id can never come back.
+      expect((await withdraw(tenderId, person().token(o, ['ORGANIZATION_ADMIN']))).status).toBe(
+        403,
+      );
+      const withdrawn = await withdraw(tenderId, carol.token(o, ['ORGANIZATION_ADMIN']));
+      expect(withdrawn.status).toBe(200);
+      expect(withdrawn.body).toEqual({ tenderId, withdrawnProposal: carol.sub });
+      expect((await tenderRow(tenderId)).openingProposedBy).toBeNull();
+      expect((await withdrawals(o, tenderId)).map((p) => (p as { reason: string }).reason)).toEqual(
+        ['WITHDRAWN_BY_PROPOSER'],
+      );
+    });
+
+    it('lets the proposer withdraw under a second platform id (same subject, identity on record)', async () => {
+      const { owner: o, tenderId } = await closed('a1-u2-withdraw');
+      const dan = person();
+      const proposed = await propose(tenderId, dan.token(o, ['ORGANIZATION_ADMIN']));
+      expect(proposed.status).toBe(200);
+      const withdrawn = await withdraw(tenderId, dan.token(o, ['ORGANIZATION_ADMIN']));
+      expect(withdrawn.status).toBe(200);
+      expect(withdrawn.body.withdrawnProposal).toBe(proposed.body.proposedBy);
     });
   });
 

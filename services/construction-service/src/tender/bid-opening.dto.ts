@@ -46,7 +46,11 @@ export type BidOpeningProposalView = z.infer<typeof bidOpeningProposalViewSchema
 export const bidOpeningProposalWithdrawnViewSchema = z
   .object({
     tenderId: z.string(),
-    withdrawnProposal: z.string().describe('The proposer, who is the caller.'),
+    withdrawnProposal: z
+      .string()
+      .describe(
+        'The user id the proposal was made under: the caller, or the same person under another user id (#188).',
+      ),
   })
   .strict();
 export type BidOpeningProposalWithdrawnView = z.infer<typeof bidOpeningProposalWithdrawnViewSchema>;

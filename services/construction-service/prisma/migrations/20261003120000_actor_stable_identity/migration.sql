@@ -22,6 +22,12 @@
 --
 -- Adding nullable columns rewrites no row and fires no row trigger, so the append-only tables
 -- (`bid_append_only`) accept this migration unchanged.
+--
+-- Limitation of `down.sql`: rolling back DISCARDS every recorded issuer and subject. It is not
+-- refused, because the user ids stay and every row merely becomes UNKNOWN again, which every check
+-- refuses (fail closed) — but the identities cannot be recovered by re-applying this migration:
+-- after a rollback, open proposals, pending policies and evaluations must follow the remedies above
+-- as if they had been written before it.
 -- =============================================================================
 
 -- AlterTable

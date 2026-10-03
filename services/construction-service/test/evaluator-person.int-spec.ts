@@ -190,6 +190,105 @@ describe('one person, one evaluator (#188 E1, E2)', () => {
     expect(claims).toHaveLength(1);
   });
 
+  describe('completion counts people, not user ids (rows written before the record)', () => {
+    /**
+     * An evaluation of `bidId`, complete (both criteria scored), as it was written before the
+     * stable identity was recorded — or, with `subject`, by a token of that subject. The owner's
+     * connection, past the service; the guard triggers still apply.
+     */
+    const legacyEvaluation = async (
+      o: string,
+      tenderId: string,
+      bidId: string,
+      userId: string,
+      subject: string | null = null,
+    ): Promise<void> => {
+      const evaluationId = `EVL_${ulid()}`;
+      const pair = subject === null ? 'NULL, NULL' : `'${TEST_ISSUER}', '${subject}'`;
+      await owner.$executeRawUnsafe(
+        `INSERT INTO "bid_evaluation" ("id", "organization_id", "tender_id", "bid_id", "evaluator_id",
+                                       "evaluator_issuer", "evaluator_subject", "created_at")
+         VALUES ('${evaluationId}', '${o}', '${tenderId}', '${bidId}', '${userId}', ${pair}, now())`,
+      );
+      for (const [criterion, score] of [
+        ['PRICE', 7_000],
+        ['LICENCE', 100],
+      ] as const) {
+        await owner.$executeRawUnsafe(
+          `INSERT INTO "bid_evaluation_score" ("id", "organization_id", "tender_id", "bid_id", "evaluation_id",
+                                               "evaluator_id", "criterion_code", "revision", "score_scaled", "scored_at")
+           VALUES ('SCR_${ulid()}', '${o}', '${tenderId}', '${bidId}', '${evaluationId}',
+                   '${userId}', '${criterion}', 1, ${score}, now())`,
+        );
+      }
+    };
+    /** A qualified one-bid tender, its owner, and the refusals its completion logged. */
+    const oneQualifiedBid = async () => {
+      const { owner: o, tenderId, bids } = await evaluatingTender(w, organizations, 1);
+      const bidId = bids[0]!.bidId;
+      await person().as(o)(() => w.evaluation.qualify(tenderId, bidId, { decision: 'QUALIFIED' }));
+      return { o, tenderId, bidId };
+    };
+    const completionRefusals = (tenderId: string) =>
+      runUnscoped('the suite reads the log', () =>
+        w.prisma.client.bidAccessLog.findMany({
+          where: { tenderId, purpose: 'EVALUATE_BIDS', outcome: 'REFUSED' },
+        }),
+      );
+    const statusOf = async (tenderId: string) =>
+      (
+        await runUnscoped('the suite reads the tender', () =>
+          w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
+        )
+      ).status;
+
+    it('refuses one person scoring under U1 and U2 before the record (UNKNOWN): the minimum of two is not met by them', async () => {
+      const { o, tenderId, bidId } = await oneQualifiedBid();
+      await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`);
+      await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`);
+      // The matrix, which counts user ids, would call this ready.
+      const matrix = await person().as(o)(() => w.evaluation.getMatrix(tenderId));
+      expect(matrix.ready).toBe(true);
+
+      const refused = await refusal(person().as(o)(() => w.evaluation.evaluate(tenderId)));
+      expect(refused.code).toBe('ACTOR_IDENTITY_UNKNOWN');
+      expect(await statusOf(tenderId)).toBe('EVALUATING');
+      expect((await completionRefusals(tenderId)).map((row) => row.refusalCode)).toEqual([
+        'ACTOR_IDENTITY_UNKNOWN',
+      ]);
+    });
+
+    it('refuses one person who scored under U1 and stood down under U2 before the record (UNKNOWN)', async () => {
+      const { o, tenderId, bidId } = await oneQualifiedBid();
+      await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`);
+      // A second evaluator, recorded, completes the minimum of two. (Through the service it would
+      // be refused already: the command compares a new claim with the legacy one.)
+      await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`, `sub-${ulid()}`);
+      await owner.$executeRawUnsafe(
+        `INSERT INTO "bid_evaluation_recusal" ("id", "organization_id", "tender_id", "bid_id", "evaluator_id",
+                                               "reason_code", "recused_at")
+         VALUES ('REC_${ulid()}', '${o}', '${tenderId}', '${bidId}', 'USR_${ulid()}', 'CONFLICT_OF_INTEREST', now())`,
+      );
+      const refused = await refusal(person().as(o)(() => w.evaluation.evaluate(tenderId)));
+      expect(refused.code).toBe('ACTOR_IDENTITY_UNKNOWN');
+      expect(await statusOf(tenderId)).toBe('EVALUATING');
+    });
+
+    it('refuses one person provably counted twice (SAME): a legacy row under their subject, a recorded one under a platform id', async () => {
+      const { o, tenderId, bidId } = await oneQualifiedBid();
+      const subject = `sub-${ulid()}`;
+      // Written from a token without rasta_uid: the user id is the subject.
+      await legacyEvaluation(o, tenderId, bidId, subject);
+      await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`, subject);
+      const refused = await refusal(person().as(o)(() => w.evaluation.evaluate(tenderId)));
+      expect(refused.code).toBe('FORBIDDEN');
+      expect(refused.message).toContain('SAME_PERSON_AS_EVALUATOR');
+      expect((await completionRefusals(tenderId)).map((row) => row.refusalCode)).toEqual([
+        'SAME_PERSON_AS_EVALUATOR',
+      ]);
+    });
+  });
+
   describe('the database, past the service', () => {
     const evaluation = (
       o: string,

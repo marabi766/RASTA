@@ -33,6 +33,7 @@ import { OwnerIdentity, type LivePrincipal, type Principal } from './owner-ident
 import { StandingAuthority } from './standing-authority';
 import { assertTenderTransition } from './tender.state-machine';
 import { buildMatrix, matrixDigest, type MatrixInput } from './evaluation-matrix';
+import { evaluatorPeople } from './evaluator-people';
 import type {
   EvaluatedView,
   MatrixView,
@@ -490,6 +491,7 @@ export class EvaluationService {
                   undecidedBidCount: matrix.undecidedBidCount,
                 });
               }
+              await this.assertDistinctEvaluators(tx, tenderId, matrix);
               const matched = await this.repo.completeEvaluation(tx, {
                 tenderId,
                 expectedVersion: tender.version,
@@ -816,6 +818,57 @@ export class EvaluationService {
     if (stoodDown.includes('UNKNOWN') || evaluating.includes('UNKNOWN')) {
       evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
       throw actorIdentityUnknown('one person is one evaluator of a bid');
+    }
+  }
+
+  /**
+   * Completion counts people, not user ids (#188; PM ruling on #200). The matrix counts its
+   * evaluators by user id, so rows written before the stable identity was recorded could let one
+   * person meet the minimum (Q-92) under two ids, or keep scores they stood down from under
+   * another. The contributing evaluations of each qualified bid — complete, and not stood down by
+   * the same user id — are compared pairwise and with the bid's recusals (`evaluatorPeople`):
+   *
+   *  - the same person: 403 `SAME_PERSON_AS_EVALUATOR`;
+   *  - a pair that cannot be told apart (an identity not on record, or another issuer):
+   *    `422 ACTOR_IDENTITY_UNKNOWN`.
+   *
+   * Both refusals are audited like every other. The rows are append-only, so the remedy is the
+   * owner's: cancel the tender and run the evaluation again (ADR-067 note, docs/09 § 9.3).
+   */
+  private async assertDistinctEvaluators(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    matrix: MatrixView,
+  ): Promise<void> {
+    const [evaluations, recusals] = await Promise.all([
+      this.repo.listEvaluations(tx, tenderId),
+      this.repo.listRecusals(tx, tenderId),
+    ]);
+    const counts = new Set<string>();
+    for (const bid of matrix.bids) {
+      if (bid.qualification?.decision !== 'QUALIFIED') continue;
+      const stoodDown = new Set(bid.recusals.map((recusal) => recusal.evaluatorId));
+      for (const evaluation of bid.evaluations) {
+        if (evaluation.complete && !stoodDown.has(evaluation.evaluatorId)) {
+          counts.add(`${bid.bidId}|${evaluation.evaluatorId}`);
+        }
+      }
+    }
+    const people = evaluatorPeople(
+      evaluations.filter((row) => counts.has(`${row.bidId}|${row.evaluatorId}`)),
+      recusals,
+    );
+    if (people.verdict === 'SAME') {
+      throw this.forbid(
+        'SAME_PERSON_AS_EVALUATOR',
+        'One person is counted as more than one evaluator of a bid, or keeps scores of a bid they stood down from',
+      );
+    }
+    if (people.verdict === 'UNKNOWN') {
+      evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+      throw actorIdentityUnknown(
+        'the evaluators a completed evaluation counts are distinct people',
+      );
     }
   }
 
