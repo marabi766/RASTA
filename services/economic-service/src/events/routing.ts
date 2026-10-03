@@ -40,6 +40,8 @@ export const AGGREGATE_OF = {
   PAYMENT_FAILED: 'PaymentIntent',
   PAYMENT_CAPTURE_UNRECONCILED: 'PaymentIntent',
   PAYMENT_REFUND_UNRECONCILED: 'PaymentIntent',
+  PAYMENT_REFUNDED: 'PaymentIntent',
+  PAYMENT_REFUND_FAILED: 'PaymentIntent',
   PAYMENT_RECONCILIATION_ESCALATED: 'PaymentIntent',
   PAYMENT_RECONCILIATION_RESOLVED: 'PaymentIntent',
   PAYMENT_RECONCILIATION_OPERATOR_ACTION: 'PaymentIntent',
@@ -146,6 +148,10 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
     scope: 'PAYMENT_INTENT',
     key: payload.paymentIntentId,
   }),
+  // The refund's outcome, ordered with the intent's other refund events
+  // (ADR-064 § 9): never ahead of the unreconciled alert it may follow.
+  PAYMENT_REFUNDED: (payload) => ({ scope: 'PAYMENT_INTENT', key: payload.paymentIntentId }),
+  PAYMENT_REFUND_FAILED: (payload) => ({ scope: 'PAYMENT_INTENT', key: payload.paymentIntentId }),
   // Ordered with the intent's own refund events: a resolution never overtakes
   // the unreconciled alert it closes.
   PAYMENT_RECONCILIATION_ESCALATED: (payload) => ({

@@ -274,6 +274,9 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // Its foreign key needs the intent's (organization_id, id) index,
+        // which 20260930200000's down script drops.
+        '20261003100000_payment_refund_decline',
         '20261001100000_payment_reconciliation_resolution',
         '20260930210000_payment_intent_unfinished_refund_index',
         '20260930200000_payment_reconciliation_task',
@@ -749,6 +752,7 @@ export const EXPECTED = {
       'payment_reconciliation_task',
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
+      'payment_refund_decline',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
