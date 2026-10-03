@@ -298,7 +298,7 @@ test.describe.serial('the marketplace critical path', () => {
       balanced: boolean;
       totalDebitMinor: string;
       totalCreditMinor: string;
-      lines: { accountId: string; debitMinor: string; creditMinor: string }[];
+      accounts: { accountId: string; debitMinor: string; creditMinor: string }[];
     };
     const trialBalance = async (): Promise<TrialBalance> => {
       const response = await platformAdmin.get('/v1/ledger/trial-balance?currency=IRR');
@@ -307,7 +307,7 @@ test.describe.serial('the marketplace critical path', () => {
     };
     /** The settlement's own accounts, as the trial balance totals them. */
     const legTotals = (balance: TrialBalance) =>
-      balance.lines
+      balance.accounts
         .filter((line) => legs.has(line.accountId))
         .map((line) => `${line.accountId}:${line.debitMinor}:${line.creditMinor}`)
         .sort();
