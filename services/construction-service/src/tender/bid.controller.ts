@@ -12,6 +12,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { zodPipe } from '@rasta/nest-common';
 import { BidService } from './bid.service';
+import { OwnBidService } from './own-bid.service';
 import {
   listOpenTendersQuerySchema,
   reviseBidSchema,
@@ -35,7 +36,10 @@ const BIDDER_NOTE =
 @ApiTags('bids')
 @Controller({ version: '1' })
 export class BidController {
-  constructor(private readonly bids: BidService) {}
+  constructor(
+    private readonly bids: BidService,
+    private readonly ownBids: OwnBidService,
+  ) {}
 
   @Get('open-tenders')
   @ApiOperation({
@@ -89,6 +93,25 @@ export class BidController {
   })
   async mine(@Param('id') id: string) {
     return this.bids.getMine(id);
+  }
+
+  @Get('tenders/:id/bids/mine/opened')
+  @ApiOperation({
+    summary: 'The caller’s own bid after the opening: its content, status and evaluation',
+    description:
+      'Only the caller’s organization’s own bid — the route names none, so there is no way to ask for ' +
+      'another contractor’s (ADR-066 § 4). The content is read back from the sealed bytes against the ' +
+      'receipts audit-service holds on every call (unreachable: 503/504; a chain or bid that differs: ' +
+      '422 INTEGRITY). The evaluation shows the decision once made (a disqualification’s closed reason ' +
+      'code, not the evaluator’s words) and, only once the evaluation is completed, the bid’s own total ' +
+      'and the most a bid can score — no rank, no other bidder, no winner (Q-89). Before the opening, ' +
+      'or for a withdrawn bid, there is nothing to read: 422 NOT_OPENED; no bid of the caller on the ' +
+      'tender is 404. Every call is audited in the same transaction — a bid_access_log row and ' +
+      'BID_ACCESSED (OWN_BID_CONTENT), granted or refused, a refused read with its closed code. ' +
+      BIDDER_NOTE,
+  })
+  async mineOpened(@Param('id') id: string) {
+    return this.ownBids.getMineOpened(id);
   }
 
   @Put('tenders/:id/bids/:bidId')

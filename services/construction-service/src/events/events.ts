@@ -99,6 +99,15 @@ export const CONSTRUCTION_EVENTS = {
   // taken back, or cleared, is a state change audit must hear about) and awaits acceptance.
   BID_OPENING_PROPOSAL_WITHDRAWN: 'BID_OPENING_PROPOSAL_WITHDRAWN',
   BID_OPENING_CONFLICT_DETECTED: 'BID_OPENING_CONFLICT_DETECTED',
+  // CON-002 PR 9 (ADR-067 § 2). `BID_QUALIFIED`, `BID_DISQUALIFIED` and `BIDS_EVALUATED` were
+  // accepted by the project manager (2026-09-30); `BID_SCORED` and `BID_EVALUATOR_RECUSED` are
+  // added for S-06 (a score and a stand-down are state changes audit must hear about) and were
+  // accepted by the project manager (2026-10-02). Ids, closed codes, counts and digests only: never a note or a reason in words.
+  BID_QUALIFIED: 'BID_QUALIFIED',
+  BID_DISQUALIFIED: 'BID_DISQUALIFIED',
+  BID_SCORED: 'BID_SCORED',
+  BID_EVALUATOR_RECUSED: 'BID_EVALUATOR_RECUSED',
+  BIDS_EVALUATED: 'BIDS_EVALUATED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -589,6 +598,14 @@ export const BID_ACCESS_PURPOSES = [
   'COUNT_BIDS',
   'LIST_BIDS',
   'READ_BID',
+  // CON-002 PR 9: a contractor reads its own bid after the opening; the owner's evaluators
+  // decide on a bid, score it, stand down from it, complete the evaluation and read the matrix.
+  'OWN_BID_CONTENT',
+  'QUALIFY_BID',
+  'SCORE_BID',
+  'RECUSE',
+  'EVALUATE_BIDS',
+  'READ_EVALUATION',
 ] as const;
 export type BidAccessPurpose = (typeof BID_ACCESS_PURPOSES)[number];
 
@@ -603,6 +620,8 @@ export const bidAccessedPayload = z
     accessedBy: identifier,
     purpose: z.enum(BID_ACCESS_PURPOSES),
     outcome: z.enum(['GRANTED', 'REFUSED']),
+    /** Why it was refused, as a closed code (a refusal reason, or the error code); null when granted. */
+    refusalCode: z.string().min(1).max(64).nullable(),
     accessedAt: isoTimestamp,
   })
   .strict();
@@ -682,6 +701,78 @@ export const bidOpeningConflictDetectedPayload = z
   })
   .strict();
 
+const disqualificationCode = z.enum([
+  'NOT_ELIGIBLE',
+  'NON_RESPONSIVE',
+  'INTEGRITY_VIOLATION',
+  'OTHER',
+]);
+
+const bidDecisionBase = {
+  bidId: identifier,
+  tenderId: identifier,
+  organizationId: identifier,
+  decidedBy: identifier,
+  decidedAt: isoTimestamp,
+};
+
+/** An opened bid was found to qualify (OPENED → QUALIFIED). Ids and times only. */
+export const bidQualifiedPayload = z.object({ ...bidDecisionBase }).strict();
+
+/**
+ * An opened bid was disqualified (OPENED → DISQUALIFIED): the closed reason code, never the
+ * reason in words (that stays in the database) and never anything the bid said.
+ */
+export const bidDisqualifiedPayload = z
+  .object({ ...bidDecisionBase, reasonCode: disqualificationCode })
+  .strict();
+
+/**
+ * An evaluator recorded scores for a bid: how many cells were written (each a new revision) and
+ * a digest of them — `SHA-256` of the lines `criterionCode|revision|scoreScaled`, sorted and joined
+ * with a newline — so a holder of the database rows can check them against the event. The scores
+ * themselves are not on the event.
+ */
+export const bidScoredPayload = z
+  .object({
+    bidId: identifier,
+    tenderId: identifier,
+    organizationId: identifier,
+    evaluationId: identifier,
+    evaluatorId: identifier,
+    recordedCount: z.number().int().positive().max(50),
+    scoresDigest: sha256Hex,
+    scoredAt: isoTimestamp,
+  })
+  .strict();
+
+/** An evaluator stood down from a bid: who, from which bid, and the closed reason. */
+export const bidEvaluatorRecusedPayload = z
+  .object({
+    bidId: identifier,
+    tenderId: identifier,
+    organizationId: identifier,
+    evaluatorId: identifier,
+    reasonCode: z.enum(['CONFLICT_OF_INTEREST', 'OTHER']),
+    recusedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * The evaluation was completed (EVALUATING → EVALUATED): how many qualified bids were evaluated
+ * and a digest of the matrix that is now frozen. No score, no rank and no winner: ranking is
+ * computed and shown, and a tie makes no winner (ADR-067 § 2-3).
+ */
+export const bidsEvaluatedPayload = z
+  .object({
+    ...tenderIdentity,
+    evaluatedBidCount: z.number().int().positive(),
+    matrixDigest: sha256Hex,
+    evaluatedBy: identifier,
+    evaluatedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -719,6 +810,11 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BIDS_OPENED: bidsOpenedPayload,
   BID_OPENING_PROPOSAL_WITHDRAWN: bidOpeningProposalWithdrawnPayload,
   BID_OPENING_CONFLICT_DETECTED: bidOpeningConflictDetectedPayload,
+  BID_QUALIFIED: bidQualifiedPayload,
+  BID_DISQUALIFIED: bidDisqualifiedPayload,
+  BID_SCORED: bidScoredPayload,
+  BID_EVALUATOR_RECUSED: bidEvaluatorRecusedPayload,
+  BIDS_EVALUATED: bidsEvaluatedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

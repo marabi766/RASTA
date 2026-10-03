@@ -1,6 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
-import type { Bid, Tender, TenderCriterion } from '../generated/prisma';
+import type {
+  Bid,
+  BidEvaluation,
+  BidEvaluationRecusal,
+  BidEvaluationScore,
+  BidQualification,
+  Tender,
+  TenderCriterion,
+  TenderKey,
+} from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { SealedBid } from './sealing/sealing';
 
@@ -128,6 +137,48 @@ export class BidRepository {
       }),
     );
     return key;
+  }
+
+  /**
+   * The tender's key row, wrapped (the private half is useless without the KEK): read when a
+   * bidder reads its own bid after the opening, which unwraps it for that call only (ADR-066 § 2, § 4).
+   */
+  findWrappedKey(tx: ExtendedPrismaClient, tenderId: string): Promise<TenderKey | null> {
+    return runUnscoped(
+      'a bidder reads its own opened bid, which needs the tenders key (ADR-066 § 4)',
+      () => tx.tenderKey.findFirst({ where: { tenderId } }),
+    );
+  }
+
+  /** The decision on the bidder's own bid, if one was made. The bid id is the bidder's own. */
+  findQualificationOf(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    ownBidId: string,
+  ): Promise<BidQualification | null> {
+    return runUnscoped('a bidder reads the decision on its own bid (ADR-066 § 4)', () =>
+      tx.bidQualification.findFirst({ where: { tenderId, bidId: ownBidId } }),
+    );
+  }
+
+  /**
+   * What the evaluation of the bidder's own bid is made of: the claims on it, those who stood
+   * down from it, and every revision of its cells. Only the bidder's own bid id is in any predicate.
+   */
+  async evaluationOf(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    ownBidId: string,
+  ): Promise<{
+    evaluations: BidEvaluation[];
+    recusals: BidEvaluationRecusal[];
+    scores: BidEvaluationScore[];
+  }> {
+    return runUnscoped('a bidder reads the evaluation of its own bid (ADR-066 § 4)', async () => ({
+      evaluations: await tx.bidEvaluation.findMany({ where: { tenderId, bidId: ownBidId } }),
+      recusals: await tx.bidEvaluationRecusal.findMany({ where: { tenderId, bidId: ownBidId } }),
+      scores: await tx.bidEvaluationScore.findMany({ where: { tenderId, bidId: ownBidId } }),
+    }));
   }
 
   listCriteria(tx: ExtendedPrismaClient, tenderId: string): Promise<TenderCriterion[]> {
@@ -353,6 +404,7 @@ export class BidRepository {
       accessorUserId: string;
       purpose: string;
       outcome: 'GRANTED' | 'REFUSED';
+      refusalCode: string | null;
       at: Date;
     },
   ): Promise<void> {
@@ -369,6 +421,7 @@ export class BidRepository {
             accessorUserId: input.accessorUserId,
             purpose: input.purpose,
             outcome: input.outcome,
+            refusalCode: input.refusalCode,
             accessedAt: input.at,
           },
         }),
