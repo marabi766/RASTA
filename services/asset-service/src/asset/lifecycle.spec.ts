@@ -5,7 +5,9 @@ import {
   openWorkRefusal,
   DISPATCHABLE_STATUSES,
   OPEN_ACTIVITY_STATUSES,
+  OPEN_WORK_MESSAGES,
   OPEN_WORK_REFUSALS,
+  WITHDRAWAL_TARGETS,
   TERMINAL_STATUSES,
   TRANSITIONS,
   type AssetStatus,
@@ -147,6 +149,28 @@ describe('asset lifecycle', () => {
         code: 'OPEN_MAINTENANCE',
         message: expect.stringContaining('maintenance-service'),
       });
+    });
+
+    it('says each closed code once, whichever way the work was found', () => {
+      // Found in the asset's own status, or in an owner's answer when asked
+      // (docs/24 Q-94): the same code, the same sentence.
+      expect(Object.keys(OPEN_WORK_MESSAGES).sort()).toEqual([
+        'OPEN_ASSIGNMENT',
+        'OPEN_MAINTENANCE',
+      ]);
+      for (const refusal of Object.values(OPEN_WORK_REFUSALS)) {
+        expect(refusal!.message).toBe(OPEN_WORK_MESSAGES[refusal!.code]);
+      }
+    });
+
+    it('asks the owners before a person reaches either status that leaves service, and no other', () => {
+      expect([...WITHDRAWAL_TARGETS].sort()).toEqual(['DECOMMISSIONED', 'OUT_OF_SERVICE']);
+      // Every other status a person can reach keeps the asset in service.
+      const reachable = new Set(TRANSITIONS.filter((t) => t.actor === 'USER').map((t) => t.to));
+      expect([...reachable].filter((s) => !WITHDRAWAL_TARGETS.includes(s)).sort()).toEqual([
+        'ACTIVE',
+        'IDLE',
+      ]);
     });
 
     it('is a refusal for a person only: an event is never told to end the work first', () => {

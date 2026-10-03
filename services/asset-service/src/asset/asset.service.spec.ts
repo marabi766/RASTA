@@ -1074,6 +1074,258 @@ describe('AssetService', () => {
     });
   });
 
+  describe('leaving service asks the owners of the work (docs/24 Q-94)', () => {
+    const OWNERS = ['fleet-service', 'maintenance-service'];
+
+    /** Both commands that take an asset out of service, from a status that shows no open work. */
+    const COMMANDS: Array<[string, string, (h: Harness) => Promise<unknown>]> = [
+      [
+        'taking it out of service',
+        'ACTIVE',
+        (h) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: 2,
+          }),
+      ],
+      [
+        'decommissioning it',
+        'OUT_OF_SERVICE',
+        (h) =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+      ],
+    ];
+
+    const at = (
+      status: string,
+      clearance: FakeClearance,
+      overrides: Record<string, unknown> = {},
+    ) =>
+      harness(
+        { findById: jest.fn(async () => assetRow({ version: 2, status })), ...overrides },
+        clearance,
+      );
+
+    const untouched = (h: Harness) => {
+      expect(h.repository.transaction).not.toHaveBeenCalled();
+      expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+      expect(h.timeline).toHaveLength(0);
+    };
+
+    describe.each(COMMANDS)('%s', (_name, status, command) => {
+      it('asks both owners first, writes, and lifts the fences afterwards', async () => {
+        const h = at(status, fakeClearance());
+
+        await run(() => command(h));
+
+        expect(h.clearance.asked.sort()).toEqual(OWNERS);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+        expect(h.repository.compareAndSetStatus).toHaveBeenCalledTimes(1);
+      });
+
+      it('is refused while maintenance holds a repair the asset’s own status never showed', async () => {
+        // A repair started on an asset that is already OUT_OF_SERVICE: the
+        // status stays as it was, so only the owner knows.
+        const h = at(
+          status,
+          fakeClearance({ 'maintenance-service': { clear: false, open: { openRepairOrders: 1 } } }),
+        );
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(error).toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          status: 409,
+          details: [{ path: 'status', code: 'OPEN_MAINTENANCE' }],
+        });
+        untouched(h);
+        // Every owner, not only the one that answered clear.
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('is refused while a just-committed assignment is not yet projected', async () => {
+        const h = at(
+          status,
+          fakeClearance({ 'fleet-service': { clear: false, open: { openAssignments: 1 } } }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          details: [{ path: 'status', code: 'OPEN_ASSIGNMENT' }],
+        });
+        untouched(h);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('names every kind of open work at once, assignment first', async () => {
+        const h = at(
+          status,
+          fakeClearance({
+            'fleet-service': { clear: false, open: { openAssignments: 2 } },
+            'maintenance-service': { clear: false, open: { openRequests: 1 } },
+          }),
+        );
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(error.details?.map((detail) => detail.code)).toEqual([
+          'OPEN_ASSIGNMENT',
+          'OPEN_MAINTENANCE',
+        ]);
+        untouched(h);
+      });
+
+      it.each([
+        [
+          'is unavailable',
+          () => RastaError.upstreamUnavailable('maintenance-service'),
+          'UPSTREAM_UNAVAILABLE',
+        ],
+        [
+          'times out',
+          () => RastaError.upstreamTimeout('maintenance-service', 3000),
+          'UPSTREAM_TIMEOUT',
+        ],
+      ])('fails closed when an owner %s: nothing is written', async (_how, failure, code) => {
+        const h = at(
+          status,
+          fakeClearance({
+            'maintenance-service': async () => {
+              throw failure();
+            },
+          }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({ code });
+        untouched(h);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('fails closed when an owner has a fence of another transfer in place', async () => {
+        const h = at(
+          status,
+          fakeClearance({
+            'fleet-service': async () => {
+              throw RastaError.invalidStateTransition('Asset', 'ACTIVE', 'TRANSFERRED', 'busy');
+            },
+          }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+        });
+        untouched(h);
+      });
+
+      it('never leaves service when no clearance was configured', async () => {
+        const h = at(status, fakeClearance());
+        const bare = new AssetService(h.repository);
+
+        await expect(
+          run(() =>
+            status === 'ACTIVE'
+              ? bare.changeStatus(ASSET_ID, {
+                  status: 'OUT_OF_SERVICE',
+                  reason: 'عیب فنی',
+                  expectedVersion: 2,
+                })
+              : bare.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+          ),
+        ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+        untouched(h);
+      });
+
+      it('asks nobody about a stale version: that is a 409 before anything else', async () => {
+        const h = at(status, fakeClearance(), {
+          findById: jest.fn(async () => assetRow({ version: 3, status })),
+        });
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.clearance.asked).toEqual([]);
+        untouched(h);
+      });
+
+      it('rolls back a write that finishes after half the fences’ life, and lifts them', async () => {
+        const clearance = fakeClearance();
+        const h = at(status, clearance, {
+          compareAndSetStatus: jest.fn(async () => {
+            clearance.clock = 300_000;
+            return 1;
+          }),
+        });
+
+        await expect(run(() => command(h))).rejects.toThrow(/took too long to confirm/);
+        expect(clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('lifts the fences when the write itself fails', async () => {
+        const h = at(status, fakeClearance(), { compareAndSetStatus: jest.fn(async () => 0) });
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('carries only the closed code and a fixed sentence: no input in the response or the log', async () => {
+        const h = at(
+          status,
+          fakeClearance({ 'maintenance-service': { clear: false, open: { openRepairOrders: 1 } } }),
+        );
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(JSON.stringify([error.message, error.details])).not.toMatch(/عیب فنی|فرسودگی/);
+        expect(error.internalContext).toEqual({
+          aggregate: 'Asset',
+          from: status,
+          to: expect.stringMatching(/OUT_OF_SERVICE|DECOMMISSIONED/),
+          reason: 'OPEN_MAINTENANCE',
+        });
+      });
+    });
+
+    it.each(['IDLE', 'ACTIVE'] as const)(
+      'asks nobody when the asset is only marked %s: that does not leave service',
+      async (target) => {
+        const from = target === 'IDLE' ? 'ACTIVE' : 'IDLE';
+        const h = at(from, fakeClearance());
+
+        await run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: target,
+            reason: 'تغییر عادی',
+            expectedVersion: 2,
+          }),
+        );
+
+        expect(h.clearance.asked).toEqual([]);
+        expect(h.clearance.released).toEqual([]);
+      },
+    );
+
+    it('asks nobody when the status already shows open work: the cheap check refuses first', async () => {
+      const h = at('ASSIGNED', fakeClearance());
+
+      await expect(
+        run(() =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+        ),
+      ).rejects.toMatchObject({ details: [{ code: 'OPEN_ASSIGNMENT' }] });
+      expect(h.clearance.asked).toEqual([]);
+    });
+
+    it('asks nobody about an event: the owners’ own events are what end their work', async () => {
+      const h = harness();
+      await run(() => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'));
+      expect(h.clearance.asked).toEqual([]);
+    });
+  });
+
   describe('transfer of ownership', () => {
     const dto: TransferAssetDto = {
       toOrganizationId: DEH2,

@@ -127,6 +127,7 @@ export default async function AssetDossierPage({
   const lifecycle =
     lifecycleSource && (Object.keys(tokens).length > 0 || holdsOpenWork) ? (
       <LifecycleControls
+        assetId={id}
         assetName={lifecycleSource.asset.name}
         status={lifecycleSource.asset.status}
         csrfToken={session.csrfToken}

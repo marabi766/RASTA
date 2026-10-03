@@ -370,7 +370,7 @@ describe('writing', () => {
 
     it.each([
       ['OPEN_ASSIGNMENT', 'تخصیص باز دارد', 'fleet-service'],
-      ['OPEN_MAINTENANCE', 'در تعمیر است', 'maintenance-service'],
+      ['OPEN_MAINTENANCE', 'کار باز تعمیر دارد', 'maintenance-service'],
     ] as const)(
       'says the closed open-work code %s in Persian, whatever sentence carries it (docs/24 Q-94)',
       async (code, words, owner) => {

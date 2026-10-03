@@ -86,6 +86,21 @@ async function timelineCounts(
 /** Ids this test registered, so cleanup touches those and nothing else. */
 const registered = new Set<string>();
 
+/** Maintenance requests this test filed, cancelled first so they never hold a machine open. */
+const filedRequests = new Set<string>();
+
+async function cancelFiledRequests(request: APIRequestContext, accessToken: string): Promise<void> {
+  for (const id of filedRequests) {
+    const cancelled = await request.post(gatewayUrl(`/v1/maintenance-requests/${id}/cancel`), {
+      headers: auth(accessToken),
+      data: { reason: 'پاک‌سازی آزمون مرورگر' },
+    });
+    // Already cancelled through the page or the API is a conflict, not a failure.
+    expect([200, 409]).toContain(cancelled.status());
+  }
+  filedRequests.clear();
+}
+
 /**
  * A machine of this test's own: registered, with the dossier activation asks for
  * (a policy in force and an ownership title) unless `complete` is false.
@@ -190,8 +205,10 @@ test.describe('a machine’s life, through the portal and the live stack', () =>
   });
 
   test.afterEach(async ({ request }) => {
-    // Retire what this test registered and left in the fleet; skip what it
-    // already retired through the page.
+    // Cancel the requests this test filed (an open one would keep a machine
+    // from being retired), then retire what it registered and left in the
+    // fleet; skip what it already retired through the page.
+    await cancelFiledRequests(request, token);
     for (const id of registered) {
       const asset = await read(request, token, id);
       if (asset.status !== 'DECOMMISSIONED') {
@@ -438,6 +455,83 @@ test.describe('a machine’s life, through the portal and the live stack', () =>
     expect(await timelineCounts(request, token, asset.id)).toMatchObject({
       ASSET_DECOMMISSIONED: 1,
     });
+  });
+
+  test('a machine with open maintenance work cannot be retired, even though its own status shows none', async ({
+    page,
+    request,
+    isMobile,
+  }) => {
+    test.skip(isMobile, 'a service-to-service rule, identical at the phone’s size');
+
+    // OUT_OF_SERVICE shows no open work at all: maintenance accepts a repair on
+    // such a machine and asset-service keeps it OUT_OF_SERVICE, so only the
+    // owner of the work knows (docs/24 Q-94).
+    const asset = await registerMachine(request, token, { complete: false });
+    const out = await command(request, token, asset.id, 'status', {
+      status: 'OUT_OF_SERVICE',
+      reason: 'عیب فنی، در انتظار تعمیر',
+      expectedVersion: asset.version,
+    });
+    expect(out.status).toBe('OUT_OF_SERVICE');
+
+    // maintenance-service learns of the new machine from its event; until it
+    // has, it cannot take a request about it, so wait for exactly that.
+    let requestId = '';
+    await expect
+      .poll(
+        async () => {
+          const filed = await request.post(gatewayUrl('/v1/maintenance-requests'), {
+            headers: auth(token),
+            data: {
+              assetId: asset.id,
+              type: 'CORRECTIVE',
+              severity: 'LOW',
+              title: `${NAME_PREFIX} - کار باز`,
+            },
+          });
+          if (filed.status() === 201) {
+            requestId = ((await filed.json()) as { id: string }).id;
+            filedRequests.add(requestId);
+          }
+          return filed.status();
+        },
+        { timeout: 60_000, intervals: [1_000, 2_000, 3_000] },
+      )
+      .toBe(201);
+
+    await page.goto(`/assets/${asset.id}`);
+    await expect(statusBadge(page)).toHaveText('خارج از سرویس');
+    await page.getByText('اسقاط این دارایی…').click();
+    await page.getByLabel(/دلیل اسقاط/).fill('فرسودگی کامل و هزینهٔ تعمیر بیش از ارزش');
+    await confirmationTick(page, asset.name).check();
+    await page.getByRole('button', { name: 'اسقاط قطعی دارایی' }).click();
+
+    // Refused with the reason, as a warning, and nothing written.
+    await expect(page.getByRole('alert').filter({ hasText: /کار باز تعمیر دارد/ })).toBeVisible();
+    await expect(page.getByText(NOTICES.decommissioned)).toHaveCount(0);
+    const refused = await read(request, token, asset.id);
+    expect(refused).toMatchObject({ status: 'OUT_OF_SERVICE', version: out.version });
+    expect(await timelineCounts(request, token, asset.id)).not.toHaveProperty(
+      'ASSET_DECOMMISSIONED',
+    );
+
+    // The owner closes its work; the same form, still at the same version, goes through.
+    const cancelled = await request.post(
+      gatewayUrl(`/v1/maintenance-requests/${requestId}/cancel`),
+      {
+        headers: auth(token),
+        data: { reason: 'پاک‌سازی آزمون مرورگر' },
+      },
+    );
+    expect(cancelled.status()).toBe(200);
+    filedRequests.delete(requestId);
+
+    await page.getByLabel(/دلیل اسقاط/).fill('فرسودگی کامل و هزینهٔ تعمیر بیش از ارزش');
+    await confirmationTick(page, asset.name).check();
+    await page.getByRole('button', { name: 'اسقاط قطعی دارایی' }).click();
+    await expect(page.getByText(NOTICES.decommissioned)).toBeVisible();
+    expect((await read(request, token, asset.id)).status).toBe('DECOMMISSIONED');
   });
 
   test('a person without the right to manage assets is offered no forms, and the service refuses them anyway', async ({

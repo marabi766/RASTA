@@ -81,7 +81,7 @@ interface Case {
 const CASES: readonly Case[] = [
   {
     command: 'activate',
-    submit: (form) => actions.submitActivateAsset(IDLE_LIFECYCLE_FORM, form),
+    submit: (form) => actions.submitActivateAsset(ASSET_ID, IDLE_LIFECYCLE_FORM, form),
     send: activateAsset,
     shownStatus: 'REGISTERED',
     valid: {},
@@ -89,7 +89,7 @@ const CASES: readonly Case[] = [
   },
   {
     command: 'status',
-    submit: (form) => actions.submitChangeStatus(IDLE_LIFECYCLE_FORM, form),
+    submit: (form) => actions.submitChangeStatus(ASSET_ID, IDLE_LIFECYCLE_FORM, form),
     send: changeAssetStatus,
     shownStatus: 'ACTIVE',
     valid: { status: 'IDLE', reason: 'فصل غیرکاری' },
@@ -97,7 +97,7 @@ const CASES: readonly Case[] = [
   },
   {
     command: 'decommission',
-    submit: (form) => actions.submitDecommission(IDLE_LIFECYCLE_FORM, form),
+    submit: (form) => actions.submitDecommission(ASSET_ID, IDLE_LIFECYCLE_FORM, form),
     send: decommissionAsset,
     shownStatus: 'ACTIVE',
     valid: { reason: 'فرسودگی کامل و هزینهٔ تعمیر بیش از ارزش', confirm: 'yes' },
@@ -153,6 +153,14 @@ const redirectedTo = async (promise: Promise<unknown>): Promise<URL> => {
   if (!match) throw error;
   return new URL(match[1]!, 'http://localhost:3200');
 };
+
+/** The form as the page of `assetId` binds it. */
+const submitOn = (testCase: Case, assetId: string, form: FormData): Promise<unknown> =>
+  testCase.command === 'activate'
+    ? actions.submitActivateAsset(assetId, IDLE_LIFECYCLE_FORM, form)
+    : testCase.command === 'status'
+      ? actions.submitChangeStatus(assetId, IDLE_LIFECYCLE_FORM, form)
+      : actions.submitDecommission(assetId, IDLE_LIFECYCLE_FORM, form);
 
 beforeEach(() => {
   currentSession.mockResolvedValue(SESSION);
@@ -249,6 +257,36 @@ describe.each(CASES)('$command', (testCase) => {
         ).toEqual({ kind: 'REFUSED', reason: 'BASELINE' });
       }
       expect(sent()).toHaveLength(0);
+    });
+
+    it('refuses a genuine baseline for ANOTHER asset of the same person, and sends nothing (the swap)', async () => {
+      // Both baselines are valid: same session, same command, signed by this
+      // server. The form belongs to asset A's page; the baseline names B. A
+      // person who confirmed A's name must never act on B.
+      const ofB = baselineFor(testCase, { assetId: OTHER_ASSET_ID, assetName: 'ماشین دیگر' });
+
+      expect(await testCase.submit(formData(testCase, undefined, { baseline: ofB }))).toEqual({
+        kind: 'REFUSED',
+        reason: 'BASELINE',
+      });
+      expect(sent()).toHaveLength(0);
+      expect(redirect).not.toHaveBeenCalled();
+    });
+
+    it('does the same from the other side: asset B’s page refuses asset A’s baseline', async () => {
+      const ofA = baselineFor(testCase);
+      const onB = (form: FormData) => submitOn(testCase, OTHER_ASSET_ID, form);
+      expect(await onB(formData(testCase, undefined, { baseline: ofA }))).toEqual({
+        kind: 'REFUSED',
+        reason: 'BASELINE',
+      });
+      expect(sent()).toHaveLength(0);
+    });
+
+    it('acts on a page’s own baseline for each of two assets of one session, each on its own', async () => {
+      const own = await redirectedTo(testCase.submit(formData(testCase)));
+      expect(own.pathname).toBe(`/assets/${ASSET_ID}`);
+      expect(testCase.send.mock.calls[0]![1]).toBe(ASSET_ID);
     });
 
     it('refuses an expired baseline', async () => {
@@ -384,15 +422,19 @@ describe.each(CASES)('$command', (testCase) => {
   });
 
   it('answers a 404 for another organization’s asset exactly as for a missing one', async () => {
+    // Each on the page of its own id, with a baseline signed for that id: the
+    // portal asks the service, which answers the same for both.
+    const MISSING_ID = 'AST_01J00000000000000000000123';
     testCase.send.mockResolvedValue({ kind: 'NOT_FOUND', correlationId: 'same-shape' });
-    const ofAnotherTenant = await testCase.submit(formData(testCase));
+    const ofAnotherTenant = await submitOn(testCase, ASSET_ID, formData(testCase));
     testCase.send.mockResolvedValue({ kind: 'NOT_FOUND', correlationId: 'same-shape' });
-    const ofNothing = await testCase.submit(
-      formData(testCase, undefined, {
-        baseline: baselineFor(testCase, { assetId: 'AST_01J00000000000000000000123' }),
-      }),
+    const ofNothing = await submitOn(
+      testCase,
+      MISSING_ID,
+      formData(testCase, undefined, { baseline: baselineFor(testCase, { assetId: MISSING_ID }) }),
     );
     expect(ofAnotherTenant).toEqual(ofNothing);
+    expect(ofNothing).toMatchObject({ kind: 'NOT_FOUND' });
   });
 });
 

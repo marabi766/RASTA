@@ -34,7 +34,8 @@ const CSRF = 'csrf-token-for-this-session';
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const BASELINE = 'signed-baseline-token';
 const NAME = 'لودر کوماتسو';
-const IDENTITY = { csrfToken: CSRF, submissionId: SUBMISSION, baseline: BASELINE };
+const ASSET = 'AST_01J00000000000000000000000';
+const IDENTITY = { assetId: ASSET, csrfToken: CSRF, submissionId: SUBMISSION, baseline: BASELINE };
 
 /** Physical-direction utilities that would break the right-to-left layout. */
 const PHYSICAL_DIRECTION = /\b(?:m[lr]|p[lr]|left|right|text-left|text-right)-/;
@@ -270,6 +271,7 @@ describe('LifecycleControls', () => {
   it('draws exactly the commands it was given a baseline for, each with its own', () => {
     const { container } = render(
       <LifecycleControls
+        assetId={ASSET}
         assetName={NAME}
         status="ACTIVE"
         csrfToken={CSRF}
@@ -287,7 +289,13 @@ describe('LifecycleControls', () => {
 
   it('draws nothing for a command without a baseline, however the status reads', () => {
     const { container } = render(
-      <LifecycleControls assetName={NAME} status="REGISTERED" csrfToken={CSRF} tokens={{}} />,
+      <LifecycleControls
+        assetId={ASSET}
+        assetName={NAME}
+        status="REGISTERED"
+        csrfToken={CSRF}
+        tokens={{}}
+      />,
     );
     expect(container.querySelector('form')).toBeNull();
   });
@@ -295,6 +303,7 @@ describe('LifecycleControls', () => {
   it('draws no status form when the status leaves no target', () => {
     const { container } = render(
       <LifecycleControls
+        assetId={ASSET}
         assetName={NAME}
         status="DECOMMISSIONED"
         csrfToken={CSRF}
@@ -310,7 +319,13 @@ describe('LifecycleControls', () => {
   ] as const)('an asset with open work (%s) — docs/24 Q-94', (status, title, href) => {
     it('says whose work it is and where to end it, and draws no form', () => {
       const { container } = render(
-        <LifecycleControls assetName={NAME} status={status} csrfToken={CSRF} tokens={{}} />,
+        <LifecycleControls
+          assetId={ASSET}
+          assetName={NAME}
+          status={status}
+          csrfToken={CSRF}
+          tokens={{}}
+        />,
       );
       expect(screen.getByText(title)).toBeInTheDocument();
       expect(screen.getByText(/وضعیت یا اسقاط آن از اینجا ممکن نیست/)).toBeInTheDocument();
@@ -322,6 +337,7 @@ describe('LifecycleControls', () => {
     it('draws no status form even if it was handed a baseline for one', () => {
       const { container } = render(
         <LifecycleControls
+          assetId={ASSET}
           assetName={NAME}
           status={status}
           csrfToken={CSRF}
@@ -333,7 +349,13 @@ describe('LifecycleControls', () => {
 
     it('has no accessibility violations', async () => {
       const { container } = render(
-        <LifecycleControls assetName={NAME} status={status} csrfToken={CSRF} tokens={{}} />,
+        <LifecycleControls
+          assetId={ASSET}
+          assetName={NAME}
+          status={status}
+          csrfToken={CSRF}
+          tokens={{}}
+        />,
       );
       expect(await axe(container)).toHaveNoViolations();
     });
@@ -342,6 +364,7 @@ describe('LifecycleControls', () => {
   it('says nothing about open work for an asset that has none', () => {
     render(
       <LifecycleControls
+        assetId={ASSET}
         assetName={NAME}
         status="ACTIVE"
         csrfToken={CSRF}
@@ -354,6 +377,7 @@ describe('LifecycleControls', () => {
   it('has no accessibility violations with every command drawn', async () => {
     const { container } = render(
       <LifecycleControls
+        assetId={ASSET}
         assetName={NAME}
         status="REGISTERED"
         csrfToken={CSRF}

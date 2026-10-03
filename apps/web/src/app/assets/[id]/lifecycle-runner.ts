@@ -29,6 +29,13 @@ import type { LifecycleFormState } from './lifecycle-form-state';
  * Not a `'use server'` module: that directive turns every export into a
  * network-callable action, and this is a helper the three actions share.
  *
+ * ## Which asset
+ *
+ * The asset is the page's own, bound by the form, and the signed baseline must
+ * name the same one. The baseline still carries the version, the status shown
+ * and the name; the binding is what stops a valid baseline for one asset from
+ * being posted in another asset's form.
+ *
  * ## Why a second press is not a second write
  *
  * Every command is sent with the version its page was drawn at. The first press
@@ -57,6 +64,11 @@ const assetPath = (assetId: string, flash: string): string =>
 
 export async function runLifecycle<V, B, F extends string>(
   command: LifecycleCommand<V, B, F>,
+  /**
+   * The asset of the page this form was drawn on — the route's id, bound to the
+   * action by the form (`action.bind(null, assetId)`), never a field of it.
+   */
+  assetId: string,
   form: FormData,
 ): Promise<LifecycleFormState<V, F>> {
   const session = await currentSession();
@@ -77,6 +89,13 @@ export async function runLifecycle<V, B, F extends string>(
   // what the person was shown, so nothing can be sent.
   const baseline = openAssetLifecycleBaseline(session, form.get(BASELINE_FIELD), command.command);
   if (!baseline) return { kind: 'REFUSED', reason: 'BASELINE' };
+
+  // A baseline is valid for **its** asset, and this form belongs to the page's.
+  // Another asset's genuine baseline for this same person and command (it
+  // opens above) must not act here: the person confirmed this page's name, and
+  // a swapped token would retire the other machine under it. Refused before
+  // anything is parsed or sent, with the same answer as any other bad baseline.
+  if (baseline.assetId !== assetId) return { kind: 'REFUSED', reason: 'BASELINE' };
 
   const values = command.valuesOf(form);
   const parsed = command.parse(values, baseline);

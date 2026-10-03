@@ -162,22 +162,39 @@ export interface OpenWorkRefusal {
 }
 
 /**
+ * What each closed code says. One sentence per code, whichever way the work was
+ * found — the asset's own status (below) or the owning service's answer when
+ * asked (`AssetService.clearForWithdrawal`) — so the portal's Persian wording,
+ * keyed by the code, is true in both.
+ */
+export const OPEN_WORK_MESSAGES: Readonly<Record<OpenWorkCode, string>> = {
+  OPEN_ASSIGNMENT:
+    'This asset has an open assignment. End it in fleet-service first, and then this change can be made.',
+  OPEN_MAINTENANCE:
+    'This asset has open maintenance work, a request or a repair order. Complete or withdraw it in maintenance-service first, and then this change can be made.',
+};
+
+/**
  * Statuses in which a person may change nothing about the asset's status
  * directly, and why. A subset of {@link OPEN_ACTIVITY_STATUSES}, keyed so the
  * refusal can name the one service that must act first.
+ *
+ * This is the cheap, readable check on what this service already knows. It is
+ * **not** the whole rule: a repair can be open on an OUT_OF_SERVICE asset, and
+ * an assignment can be committed in fleet-service before its event is
+ * projected here. Before any transition into OUT_OF_SERVICE or DECOMMISSIONED
+ * the owning services are asked as well (docs/24 Q-94).
  */
 export const OPEN_WORK_REFUSALS: Readonly<Partial<Record<AssetStatus, OpenWorkRefusal>>> = {
-  ASSIGNED: {
-    code: 'OPEN_ASSIGNMENT',
-    message:
-      'This asset has an open assignment. End it in fleet-service first; its release moves the asset back to ACTIVE, and then this change can be made.',
-  },
-  IN_MAINTENANCE: {
-    code: 'OPEN_MAINTENANCE',
-    message:
-      'This asset is in the workshop with an open repair. Complete or withdraw the repair in maintenance-service first; its release moves the asset back to ACTIVE, and then this change can be made.',
-  },
+  ASSIGNED: { code: 'OPEN_ASSIGNMENT', message: OPEN_WORK_MESSAGES.OPEN_ASSIGNMENT },
+  IN_MAINTENANCE: { code: 'OPEN_MAINTENANCE', message: OPEN_WORK_MESSAGES.OPEN_MAINTENANCE },
 };
+
+/**
+ * The statuses a person's command may only reach once the owning services have
+ * said nothing is open (docs/24 Q-94): leaving service, and leaving for good.
+ */
+export const WITHDRAWAL_TARGETS: readonly AssetStatus[] = ['OUT_OF_SERVICE', 'DECOMMISSIONED'];
 
 /**
  * The refusal a person's command gets because other work is open on the asset,

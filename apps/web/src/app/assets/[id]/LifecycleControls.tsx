@@ -28,6 +28,8 @@ export interface LifecycleToken {
 }
 
 export interface LifecycleControlsProps {
+  /** The page's asset, which every form binds its action to. */
+  readonly assetId: string;
   readonly assetName: string;
   /** The status the page shows, which the choices are drawn from. */
   readonly status: string;
@@ -55,6 +57,7 @@ function Block({
 }
 
 export function LifecycleControls({
+  assetId,
   assetName,
   status,
   csrfToken,
@@ -83,13 +86,14 @@ export function LifecycleControls({
 
       {tokens.activate ? (
         <Block headingId="lifecycle-activate" title="فعال‌سازی">
-          <ActivateAssetForm csrfToken={csrfToken} {...tokens.activate} />
+          <ActivateAssetForm assetId={assetId} csrfToken={csrfToken} {...tokens.activate} />
         </Block>
       ) : null}
 
       {tokens.status && targets.length > 0 ? (
         <Block headingId="lifecycle-status" title="تغییر وضعیت">
           <ChangeStatusForm
+            assetId={assetId}
             csrfToken={csrfToken}
             currentStatus={status}
             targets={targets}
@@ -101,6 +105,7 @@ export function LifecycleControls({
       {tokens.decommission ? (
         <Block headingId="lifecycle-decommission" title="اسقاط">
           <DecommissionAssetForm
+            assetId={assetId}
             csrfToken={csrfToken}
             assetName={assetName}
             {...tokens.decommission}

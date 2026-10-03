@@ -1,9 +1,13 @@
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
-import { runUnscoped } from '@rasta/nest-common';
+import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
-import { TransferClearanceClient } from '../src/asset/transfer-clearance';
+import {
+  TransferClearanceClient,
+  type ClearanceAnswer,
+  type WorkOwner,
+} from '../src/asset/transfer-clearance';
 import { ASSET_EVENTS, INSURANCE_EVENTS } from '../src/asset/events';
 import { createAssetSchema } from '../src/asset/dto';
 import { InsuranceService } from '../src/insurance/insurance.service';
@@ -1433,6 +1437,179 @@ describe('asset integrity', () => {
         expect((await statusOf(assetId)).status).toBe('OUT_OF_SERVICE');
       },
     );
+
+    describe('the owners of the work are asked before leaving service', () => {
+      const WITHDRAWALS = [
+        [
+          'taking it out of service',
+          'ACTIVE',
+          (service: AssetService, assetId: string, expectedVersion: number) =>
+            asActor(manager(org.a), () =>
+              service.changeStatus(assetId, {
+                status: 'OUT_OF_SERVICE',
+                reason: 'عیب فنی',
+                expectedVersion,
+              }),
+            ),
+        ],
+        [
+          'decommissioning it',
+          'OUT_OF_SERVICE',
+          (service: AssetService, assetId: string, expectedVersion: number) =>
+            asActor(admin(org.a), () =>
+              service.decommission(assetId, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+            ),
+        ],
+      ] as const;
+
+      /** Owners that answer from a script, and remember who was asked and released. */
+      const owners = (answers: Partial<Record<WorkOwner, () => Promise<ClearanceAnswer>>>) => {
+        const fake = clearingOwners();
+        fake.ask = async (owner) => {
+          fake.asked.push(owner);
+          return answers[owner] ? answers[owner]!() : { clear: true };
+        };
+        return fake;
+      };
+
+      it.each(WITHDRAWALS)(
+        '%s: a repair started on an asset that is already OUT_OF_SERVICE refuses it, and nothing is written',
+        async (_name, status, withdraw) => {
+          // The asset's own status shows no open work: maintenance accepts an
+          // OUT_OF_SERVICE asset, and a repair there leaves it OUT_OF_SERVICE.
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const eventsBefore = (await outboxFor(assetId)).length;
+          const fake = owners({
+            'maintenance-service': async () => ({ clear: false, open: { openRepairOrders: 1 } }),
+          });
+
+          await expect(
+            withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion),
+          ).rejects.toMatchObject({
+            code: 'INVALID_STATE_TRANSITION',
+            status: 409,
+            details: [{ path: 'status', code: 'OPEN_MAINTENANCE' }],
+          });
+
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+          expect(await outboxFor(assetId)).toHaveLength(eventsBefore);
+          expect(fake.asked.sort()).toEqual(['fleet-service', 'maintenance-service']);
+          expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: an assignment fleet-service committed and has not yet published refuses it',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const fake = owners({
+            'fleet-service': async () => ({ clear: false, open: { openAssignments: 1 } }),
+          });
+
+          await expect(
+            withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion),
+          ).rejects.toMatchObject({ details: [{ code: 'OPEN_ASSIGNMENT' }] });
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: an owner that cannot answer refuses it (fail closed), and nothing is written',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const fake = owners({
+            'fleet-service': async () => {
+              throw RastaError.upstreamUnavailable('fleet-service');
+            },
+          });
+
+          await expect(
+            withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion),
+          ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+          expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: with the real client and nothing listening, it is refused and nothing is written',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          // Port 9 (discard): nothing listens, so the connection is refused.
+          const unreachable = new TransferClearanceClient({
+            baseUrls: {
+              'fleet-service': 'http://127.0.0.1:9',
+              'maintenance-service': 'http://127.0.0.1:9',
+            },
+            timeoutMs: 500,
+            fenceTtlSeconds: 600,
+            tokens: { issue: async () => 'itest-token' },
+          });
+
+          await expect(
+            withdraw(
+              new AssetService(repository, undefined, unreachable),
+              assetId,
+              expectedVersion,
+            ),
+          ).rejects.toMatchObject({
+            code: expect.stringMatching(/^UPSTREAM_(UNAVAILABLE|TIMEOUT)$/),
+          });
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: when both owners say nothing is open it goes through, and the fences are lifted',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const fake = owners({});
+
+          await withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion);
+
+          expect(await versionOf(assetId)).toBe(expectedVersion + 1);
+          expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        },
+      );
+
+      it('rolls back a decommission that commits after half the fences’ life', async () => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        const expectedVersion = await versionOf(assetId);
+        const fake = owners({});
+        let reads = 0;
+        fake.now = () => (reads++ === 0 ? 0 : 400_000);
+        const eventsBefore = (await outboxFor(assetId)).length;
+
+        await expect(
+          asActor(admin(org.a), () =>
+            new AssetService(repository, undefined, fake).decommission(assetId, {
+              reason: 'فرسودگی کامل ماشین',
+              expectedVersion,
+            }),
+          ),
+        ).rejects.toThrow(/took too long to confirm/);
+
+        expect((await statusOf(assetId)).status).toBe('ACTIVE');
+        expect(await versionOf(assetId)).toBe(expectedVersion);
+        expect(await outboxFor(assetId)).toHaveLength(eventsBefore);
+        expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+    });
 
     it('still lets a person withdraw an idle or active asset directly', async () => {
       for (const status of ['ACTIVE', 'IDLE'] as const) {

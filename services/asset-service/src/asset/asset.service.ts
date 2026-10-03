@@ -13,6 +13,9 @@ import {
   explainRefusal,
   openWorkRefusal,
   DISPATCHABLE_STATUSES,
+  OPEN_WORK_MESSAGES,
+  WITHDRAWAL_TARGETS,
+  type OpenWorkCode,
   OPEN_ACTIVITY_STATUSES,
   type AssetStatus,
   type TransitionActor,
@@ -27,6 +30,7 @@ import {
   type TransferInsurancePolicy,
 } from '../insurance/ownership';
 import {
+  FLEET_SERVICE,
   TRANSFER_CLEARANCE,
   UNCONFIGURED_TRANSFER_CLEARANCE,
   WORK_OWNERS,
@@ -546,9 +550,25 @@ export class AssetService {
 
     this.assertTransition(asset.status as AssetStatus, dto.status as AssetStatus, 'USER');
 
-    const updated = await this.repository.transaction((tx) =>
-      this.writeStatusChange(tx, id, asset, dto.status, dto.reason, dto.expectedVersion),
-    );
+    const write = (assertWithinDeadline: () => void = () => undefined) =>
+      this.repository.transaction(async (tx) => {
+        const row = await this.writeStatusChange(
+          tx,
+          id,
+          asset,
+          dto.status,
+          dto.reason,
+          dto.expectedVersion,
+        );
+        // Still inside the transaction: too late rolls it back.
+        assertWithinDeadline();
+        return row;
+      });
+
+    // Leaving service: the owners of the machine's work are asked first (Q-94).
+    const updated = WITHDRAWAL_TARGETS.includes(dto.status as AssetStatus)
+      ? await this.withWithdrawalClearance(id, asset, dto.status as AssetStatus, write)
+      : await write();
     return toView(updated);
   }
 
@@ -562,47 +582,56 @@ export class AssetService {
     const decommissionedAt = dto.decommissionedAt ? new Date(dto.decommissionedAt) : new Date();
     const actor = getContext().userId ?? 'SYSTEM';
 
-    const updated = await this.repository.transaction(async (tx) => {
-      const row = await this.compareAndSet(
-        tx,
-        id,
-        asset.status,
-        {
-          status: 'DECOMMISSIONED',
-          decommissionedAt,
-          decommissionedReason: dto.reason,
-          updatedBy: actor,
-        },
-        { version: dto.expectedVersion },
-      );
+    // Leaving for good: the owners of the machine's work are asked first (Q-94).
+    const updated = await this.withWithdrawalClearance(
+      id,
+      asset,
+      'DECOMMISSIONED',
+      (assertWithinDeadline) =>
+        this.repository.transaction(async (tx) => {
+          const row = await this.compareAndSet(
+            tx,
+            id,
+            asset.status,
+            {
+              status: 'DECOMMISSIONED',
+              decommissionedAt,
+              decommissionedReason: dto.reason,
+              updatedBy: actor,
+            },
+            { version: dto.expectedVersion },
+          );
 
-      await this.repository.enqueueEvent(tx, {
-        aggregateType: 'Asset',
-        aggregateId: id,
-        eventName: ASSET_EVENTS.ASSET_DECOMMISSIONED,
-        topic: ASSET_TOPIC,
-        organizationId: asset.organizationId,
-        payload: validateAssetPayload(ASSET_EVENTS.ASSET_DECOMMISSIONED, {
-          assetId: id,
-          organizationId: asset.organizationId,
-          reason: dto.reason,
-          decommissionedAt: decommissionedAt.toISOString(),
+          await this.repository.enqueueEvent(tx, {
+            aggregateType: 'Asset',
+            aggregateId: id,
+            eventName: ASSET_EVENTS.ASSET_DECOMMISSIONED,
+            topic: ASSET_TOPIC,
+            organizationId: asset.organizationId,
+            payload: validateAssetPayload(ASSET_EVENTS.ASSET_DECOMMISSIONED, {
+              assetId: id,
+              organizationId: asset.organizationId,
+              reason: dto.reason,
+              decommissionedAt: decommissionedAt.toISOString(),
+            }),
+          });
+
+          await this.appendTimeline(tx, {
+            assetId: id,
+            organizationId: asset.organizationId,
+            eventName: ASSET_EVENTS.ASSET_DECOMMISSIONED,
+            sourceEventId: `local-${id}-decommissioned-${decommissionedAt.getTime()}`,
+            category: 'LIFECYCLE',
+            title: 'اسقاط',
+            description: dto.reason,
+            occurredAt: decommissionedAt,
+          });
+
+          // Still inside the transaction: too late rolls it back.
+          assertWithinDeadline();
+          return row;
         }),
-      });
-
-      await this.appendTimeline(tx, {
-        assetId: id,
-        organizationId: asset.organizationId,
-        eventName: ASSET_EVENTS.ASSET_DECOMMISSIONED,
-        sourceEventId: `local-${id}-decommissioned-${decommissionedAt.getTime()}`,
-        category: 'LIFECYCLE',
-        title: 'اسقاط',
-        description: dto.reason,
-        occurredAt: decommissionedAt,
-      });
-
-      return row;
-    });
+    );
 
     return toView(updated);
   }
@@ -764,6 +793,101 @@ export class AssetService {
         this.clearance.release(owner, organizationId, assetId, transferId),
       ),
     );
+  }
+
+  /**
+   * Runs a write that takes the asset out of service, or retires it, only after
+   * the owners of its work have said nothing is open (docs/24 Q-94).
+   *
+   * The asset's own status is not enough: a repair can be started on an
+   * OUT_OF_SERVICE asset, which maintenance accepts and this service keeps as
+   * OUT_OF_SERVICE, and an assignment committed in fleet-service shows here only
+   * once its event is consumed. So fleet-service and maintenance-service are
+   * asked, exactly as a transfer asks them (ADR-062): each counts, and when
+   * nothing is open fences the machine, so no work starts there while the
+   * write commits. Every owner must say clear. Anything else — open work, a
+   * conflict, an owner that is down or slow — refuses the command with nothing
+   * written, open work as the closed reason (`OPEN_ASSIGNMENT`,
+   * `OPEN_MAINTENANCE`) and an unavailable owner as 503 or 504; unavailable
+   * never means clear.
+   *
+   * The write must finish inside half the fence's life — it checks
+   * `assertWithinDeadline` as its last step in the transaction, so too late
+   * rolls it back — and the fences are lifted afterwards whatever happened. What
+   * remains is the lag between the commit and the owners consuming
+   * `ASSET_STATUS_CHANGED` / `ASSET_DECOMMISSIONED` (a residual, recorded in
+   * docs/24 Q-94).
+   */
+  private async withWithdrawalClearance<T>(
+    id: string,
+    asset: { organizationId: string; status: string },
+    to: AssetStatus,
+    write: (assertWithinDeadline: () => void) => Promise<T>,
+  ): Promise<T> {
+    // The id's shape is what the owners' fence endpoints accept (`TRF_` + a
+    // ULID); this fence is lifted by the release below or by its expiry.
+    const fenceId = `TRF_${ulid()}`;
+    const from = asset.organizationId;
+
+    const askedAt = this.clearance.now();
+    await this.clearForWithdrawal(id, from, fenceId, asset.status as AssetStatus, to);
+    const deadlineMs = (this.clearance.fenceTtlSeconds * 1000) / 2;
+
+    try {
+      return await write(() => {
+        if (this.clearance.now() - askedAt >= deadlineMs) {
+          throw RastaError.invalidStateTransition(
+            'Asset',
+            asset.status,
+            to,
+            'The change took too long to confirm and was not recorded. Try again.',
+          );
+        }
+      });
+    } finally {
+      await this.releaseFences(id, from, fenceId);
+    }
+  }
+
+  /** Asks every owner at once; on anything but all-clear, lifts every fence and refuses. */
+  private async clearForWithdrawal(
+    assetId: string,
+    organizationId: string,
+    fenceId: string,
+    from: AssetStatus,
+    to: AssetStatus,
+  ): Promise<void> {
+    const outcomes = await Promise.allSettled(
+      WORK_OWNERS.map((owner) => this.clearance.ask(owner, organizationId, assetId, fenceId)),
+    );
+
+    for (const [index, outcome] of outcomes.entries()) {
+      transferClearanceTotal.inc({
+        service: SERVICE_NAME,
+        owner: WORK_OWNERS[index],
+        outcome: clearanceOutcome(outcome),
+      });
+    }
+
+    if (outcomes.every((outcome) => outcome.status === 'fulfilled' && outcome.value.clear)) {
+      return;
+    }
+
+    // Every owner is sent the release, not only those that answered clear: one
+    // whose answer was lost may have committed its fence all the same.
+    await this.releaseFences(assetId, organizationId, fenceId);
+
+    // Open work first: it is the refusal a person can act on.
+    const open: OpenWorkCode[] = [];
+    for (const [index, outcome] of outcomes.entries()) {
+      if (outcome.status === 'fulfilled' && !outcome.value.clear) {
+        open.push(WORK_OWNERS[index] === FLEET_SERVICE ? 'OPEN_ASSIGNMENT' : 'OPEN_MAINTENANCE');
+      }
+    }
+    if (open.length > 0) throw openWorkError(from, to, open);
+
+    const failure = outcomes.find((outcome) => outcome.status === 'rejected');
+    throw failure?.reason ?? RastaError.internal('Withdrawal clearance returned no answer');
   }
 
   /** The ownership change itself, once every owner of the machine's work has cleared it. */
@@ -1085,10 +1209,7 @@ export class AssetService {
 
     // Other work is open on the asset (docs/24 Q-94): the refusal carries a
     // closed reason code a client can act on without reading the sentence.
-    throw new RastaError('INVALID_STATE_TRANSITION', message, {
-      details: [{ path: 'status', message, code: openWork.code }],
-      internalContext: { aggregate: 'Asset', from, to, reason: openWork.code },
-    });
+    throw openWorkError(from, to, [openWork.code]);
   }
 
   /**
@@ -1302,6 +1423,20 @@ export class AssetService {
  * create or rename they both pass, and the index is what refuses.
  */
 /** The metric label for one owner's answer (ADR-062). */
+/**
+ * The refusal for a command that open work stops (docs/24 Q-94): 409
+ * INVALID_STATE_TRANSITION whose `details` carry one closed code per kind of
+ * work, on the `status` path. Nothing a client typed goes in it, in the
+ * response or in the logged context (S-09).
+ */
+function openWorkError(from: string, to: string, codes: readonly OpenWorkCode[]): RastaError {
+  const message = codes.map((code) => OPEN_WORK_MESSAGES[code]).join(' ');
+  return new RastaError('INVALID_STATE_TRANSITION', message, {
+    details: codes.map((code) => ({ path: 'status', message: OPEN_WORK_MESSAGES[code], code })),
+    internalContext: { aggregate: 'Asset', from, to, reason: codes.join(',') },
+  });
+}
+
 function clearanceOutcome(
   outcome: PromiseSettledResult<ClearanceAnswer>,
 ): 'clear' | 'open_work' | 'conflict' | 'unavailable' {

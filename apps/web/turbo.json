@@ -14,7 +14,9 @@
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.controller.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.repository.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/lifecycle.ts",
-        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts"
+        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
+        "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts"
       ]
     },
     "test:unit": {
@@ -25,7 +27,9 @@
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.controller.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.repository.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/lifecycle.ts",
-        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts"
+        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
+        "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts"
       ]
     }
   }

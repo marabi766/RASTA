@@ -37,6 +37,8 @@ import { submitActivateAsset, submitChangeStatus, submitDecommission } from './l
  */
 
 export interface LifecycleIdentity {
+  /** The page's asset: bound to the action, and the baseline must name the same one. */
+  readonly assetId: string;
   readonly csrfToken: string;
   /** Minted for this render and bound to this session. */
   readonly submissionId: string;
@@ -113,7 +115,7 @@ export function ActivateAssetForm(identity: LifecycleIdentity) {
   const [state, action, pending] = useActionState<
     LifecycleFormState<ActivateAssetFormValues, never>,
     FormData
-  >(submitActivateAsset, IDLE_LIFECYCLE_FORM);
+  >(submitActivateAsset.bind(null, identity.assetId), IDLE_LIFECYCLE_FORM);
 
   return (
     <form action={action} className="flex flex-col gap-4">
@@ -151,7 +153,7 @@ export function ChangeStatusForm({
   const [state, action, pending] = useActionState<
     LifecycleFormState<ChangeStatusFormValues, ChangeStatusField>,
     FormData
-  >(submitChangeStatus, IDLE_LIFECYCLE_FORM);
+  >(submitChangeStatus.bind(null, identity.assetId), IDLE_LIFECYCLE_FORM);
 
   const values = state.kind === 'INVALID' ? state.values : EMPTY_CHANGE_STATUS_FORM;
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
@@ -296,7 +298,7 @@ export function DecommissionAssetForm({
   const [state, action, pending] = useActionState<
     LifecycleFormState<DecommissionFormValues, DecommissionField>,
     FormData
-  >(submitDecommission, IDLE_LIFECYCLE_FORM);
+  >(submitDecommission.bind(null, identity.assetId), IDLE_LIFECYCLE_FORM);
 
   const values = state.kind === 'INVALID' ? state.values : EMPTY_DECOMMISSION_FORM;
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};

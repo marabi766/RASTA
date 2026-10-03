@@ -299,7 +299,70 @@ describe('open work in another service (docs/24 Q-94)', () => {
   it('travels in the 409’s `details[].code` on the `status` path, for the portal to read', () => {
     const service = squash(serviceSource);
     expect(service).toContain("newRastaError('INVALID_STATE_TRANSITION',message,{");
-    expect(service).toContain("details:[{path:'status',message,code:openWork.code}]");
+    expect(service).toContain(
+      "details:codes.map((code)=>({path:'status',message:OPEN_WORK_MESSAGES[code],code}))",
+    );
+  });
+
+  it('has one sentence per code in the service, and the portal says the same codes', () => {
+    const messages = topLevelConst(lifecycle, 'OPEN_WORK_MESSAGES');
+    const keys = collect(messages, ts.isPropertyAssignment).map((node) => node.name.getText());
+    expect(keys.sort()).toEqual(Object.keys(OPEN_WORK_CODES).sort());
+  });
+
+  describe('asked of the owners, not only read from the asset’s own status', () => {
+    const method = (name: string): string => {
+      const declaration = collect(parse(serviceSource), ts.isMethodDeclaration).find(
+        (node) => node.name.getText() === name,
+      );
+      return declaration?.body?.getText() ?? '';
+    };
+
+    it('leaves service only through the owners’ answer: the targets are OUT_OF_SERVICE and DECOMMISSIONED', () => {
+      const targets = collect(
+        topLevelConst(lifecycle, 'WITHDRAWAL_TARGETS'),
+        ts.isStringLiteral,
+      ).map((node) => node.text);
+      expect(targets.sort()).toEqual(['DECOMMISSIONED', 'OUT_OF_SERVICE']);
+    });
+
+    it('changeStatus and decommission both go through the owners’ clearance', () => {
+      expect(squash(method('changeStatus'))).toContain('WITHDRAWAL_TARGETS.includes(dto.status');
+      expect(squash(method('changeStatus'))).toContain('this.withWithdrawalClearance(');
+      expect(squash(method('decommission'))).toContain('this.withWithdrawalClearance(');
+    });
+
+    it('asks both owners, and fails closed on anything but all-clear', () => {
+      const clear = squash(method('clearForWithdrawal'));
+      expect(clear).toContain('WORK_OWNERS.map((owner)=>this.clearance.ask(');
+      expect(clear).toContain("outcome.status==='fulfilled'&&outcome.value.clear");
+      // An owner that cannot answer is its own error, never a clear.
+      expect(clear).toContain('failure?.reason');
+    });
+
+    it('checks the deadline inside the write and lifts the fences whatever happened', () => {
+      const guarded = squash(method('withWithdrawalClearance'));
+      expect(guarded).toContain('finally{awaitthis.releaseFences(');
+      expect(squash(method('decommission'))).toContain('assertWithinDeadline()');
+    });
+
+    it('uses the fence id shape the owners’ endpoints accept', () => {
+      expect(squash(method('withWithdrawalClearance'))).toContain('`TRF_${ulid()}`');
+      for (const owner of ['fleet-service', 'maintenance-service']) {
+        const file = readFileSync(
+          join(
+            ROOT,
+            'services',
+            owner,
+            'src',
+            owner === 'fleet-service' ? 'fleet' : 'maintenance',
+            'transfer-clearance.ts',
+          ),
+          'utf8',
+        );
+        expect(file).toContain('TRF_[0-9A-HJKMNP-TV-Z]{26}');
+      }
+    });
   });
 
   it('is told apart from a stale version: the version is still judged first', () => {
