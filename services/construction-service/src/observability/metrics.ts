@@ -158,11 +158,39 @@ export const awardRefusalsTotal = new Counter({
 });
 
 /**
+ * The durable standing check after an award (ADR-067 § 3, residual): how many are still pending, how
+ * old the oldest is, and how many are past the configured alert age. Never labelled by tender,
+ * tenant or contractor — the rows are in the database under authorization.
+ */
+export const awardStandingCheckPending = new Gauge({
+  name: 'rasta_construction_award_standing_check_pending',
+  help: 'Standing checks after an award that are still pending',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+export const awardStandingCheckOldestPendingAgeSeconds = new Gauge({
+  name: 'rasta_construction_award_standing_check_oldest_pending_age_seconds',
+  help: 'Age in seconds of the oldest standing check after an award that is still pending; 0 when none',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/** Pending past `CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS`: what the warning alert fires on. */
+export const awardStandingCheckOverdue = new Gauge({
+  name: 'rasta_construction_award_standing_check_overdue',
+  help: 'Standing checks after an award that are pending past the configured alert age',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
  * The detective control after an award committed (ADR-067 § 3): supplier-service was asked again
  * whether the winner was suspended, or lost its qualification, in the window since the pre-check.
  * `clear` is the usual answer; `conflict` is the race the pre-check cannot close and pages;
- * `unavailable` says the check could not be made (it is not retried). Never labelled by tender,
- * tenant or contractor.
+ * `unavailable` counts an attempt that could not be made (it is retried with a backoff; the
+ * overdue gauge is what alerts). Counted once the check is settled in the database (or the attempt
+ * failed). Never labelled by tender, tenant or contractor.
  */
 export const awardStandingChecksTotal = new Counter({
   name: 'rasta_construction_award_standing_checks_total',

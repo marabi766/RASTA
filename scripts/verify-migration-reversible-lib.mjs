@@ -1095,6 +1095,7 @@ export const EXPECTED = {
       'bid_evaluation_score',
       // 20261003100000_tender_award (CON-002 PR 10).
       'tender_award',
+      'tender_award_standing_check',
     ],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
     // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
@@ -1136,6 +1137,10 @@ export const EXPECTED = {
       'tg_tender_award_consistent',
       'tg_tender_award_append_only',
       'tg_tender_award_no_truncate',
+      // The standing check of an award: its guard, and never deleted.
+      'tg_award_standing_check_guard',
+      'tg_award_standing_check_no_delete',
+      'tg_award_standing_check_no_truncate',
     ],
     functions: [
       'tender_criterion_freeze',
@@ -1155,6 +1160,7 @@ export const EXPECTED = {
       'tender_award_recorded',
       'bid_award_recorded',
       'tender_award_consistent',
+      'award_standing_check_guard',
     ],
     constraints: [
       'ck_project_text_not_blank',
@@ -1278,6 +1284,8 @@ export const EXPECTED = {
       'ck_tender_award_actor_pair',
       'tender_award_organization_id_tender_id_fkey',
       'tender_award_bid_id_fkey',
+      'ck_award_standing_check_shape',
+      'tender_award_standing_check_organization_id_tender_id_fkey',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

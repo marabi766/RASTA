@@ -70,6 +70,42 @@ export class AwardRepository {
   }
 
   /**
+   * The standing check that follows the award, PENDING and untried, in the award's own transaction
+   * (ADR-067 § 3, residual). `windowStart` is the instant of the standing read the award was made on.
+   * The database accepts it only as the check of the award the tender holds.
+   */
+  async insertStandingCheck(
+    tx: ExtendedPrismaClient,
+    input: {
+      id: string;
+      organizationId: string;
+      tenderId: string;
+      projectId: string;
+      bidId: string;
+      winnerOrganizationId: string;
+      awardedBy: string;
+      awardedAt: Date;
+      windowStart: Date;
+      at: Date;
+    },
+  ): Promise<void> {
+    await tx.tenderAwardStandingCheck.create({
+      data: {
+        id: input.id,
+        organizationId: input.organizationId,
+        tenderId: input.tenderId,
+        projectId: input.projectId,
+        bidId: input.bidId,
+        winnerOrganizationId: input.winnerOrganizationId,
+        awardedBy: input.awardedBy,
+        awardedAt: input.awardedAt,
+        windowStart: input.windowStart,
+        createdAt: input.at,
+      },
+    });
+  }
+
+  /**
    * EVALUATED → AWARDED: compare-and-set on status and version, who and when. Returns the rows
    * matched: 0 or 1. The database lets it through only with the award recorded.
    */

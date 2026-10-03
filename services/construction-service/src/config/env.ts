@@ -406,6 +406,43 @@ export const constructionEnvSchema = baseEnvSchema
       .max(86_400)
       .default(900),
 
+    /**
+     * The sweeper that makes the standing check after an award (ADR-067 § 3, residual), the close
+     * sweeper's shape: a sweep every `INTERVAL_MS` claims at most `BATCH_SIZE` pending checks under a
+     * lease of `LEASE_SECONDS` and a fencing token, asks supplier-service about each winner (a network
+     * call, outside any transaction) and settles each in one short transaction. `LEASE_SECONDS` must
+     * exceed one sweep (`BATCH_SIZE` × the supplier request timeout). A check whose answer could not be
+     * had is not claimed again for `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^attempts)`.
+     * `ALERT_AGE_SECONDS`: a check still PENDING past this age is counted by the overdue gauge, which
+     * `RastaConstructionAwardStandingCheckOverdue` alerts on.
+     */
+    CONSTRUCTION_AWARD_CHECK_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .default(10_000),
+    CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+    CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
+    CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(10),
+    CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
+    CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(604_800)
+      .default(600),
+
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),

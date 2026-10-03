@@ -47,6 +47,12 @@ import { EvaluationRepository } from '../src/tender/evaluation.repository';
 import { EvaluationService } from '../src/tender/evaluation.service';
 import { AwardRepository } from '../src/tender/award.repository';
 import { AwardService } from '../src/tender/award.service';
+import { AwardStandingCheckRepository } from '../src/tender/award-standing-check.repository';
+import { AwardStandingCheckService } from '../src/tender/award-standing-check.service';
+import {
+  AwardStandingCheckSweeper,
+  type AwardStandingCheckSweeperOptions,
+} from '../src/tender/award-standing-check.sweeper';
 import type { LiveAnswer, LiveMembership, MembershipSource } from '../src/tender/membership.client';
 import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
 import { genesisReceipt } from '../src/tender/sealing/sealing';
@@ -208,6 +214,13 @@ export interface Wiring {
   ownBids: OwnBidService;
   /** CON-002 PR 10: awarding an evaluated tender; `awardApproved` is the core with the approval gate satisfied. */
   award: AwardService;
+  /** The standing check after an award: its rows, and the sweeper that makes it (driven by `runOnce(tenderId)`; it never ticks here). */
+  awardChecks: AwardStandingCheckRepository;
+  awardCheckService: AwardStandingCheckService;
+  awardCheckSweeper: AwardStandingCheckSweeper;
+  awardCheckSweeperWith(
+    overrides?: Partial<AwardStandingCheckSweeperOptions>,
+  ): AwardStandingCheckSweeper;
   close(): Promise<void>;
 }
 
@@ -307,11 +320,31 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       retryBackoffMaxSeconds: 900,
       ...overrides,
     });
+  const awardChecks = new AwardStandingCheckRepository(prisma);
+  const awardCheckService = new AwardStandingCheckService(
+    prisma,
+    awardChecks,
+    events,
+    new StandingAuthority(SUPPLIER),
+  );
+  const awardCheckSweeperWith = (overrides: Partial<AwardStandingCheckSweeperOptions> = {}) =>
+    new AwardStandingCheckSweeper(awardChecks, awardCheckService, {
+      intervalMs: 60_000,
+      batchSize: 50,
+      leaseSeconds: 60,
+      retryBackoffBaseSeconds: 30,
+      retryBackoffMaxSeconds: 900,
+      ...overrides,
+    });
   return {
     prisma,
     env,
     repository,
     projects,
+    awardChecks,
+    awardCheckService,
+    awardCheckSweeper: awardCheckSweeperWith(),
+    awardCheckSweeperWith,
     evidence,
     memberships,
     tenderOpens,
@@ -730,10 +763,12 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
         ['bid_evaluation_recusal', 'tg_bid_recusal_append_only'],
         ['bid_evaluation_score', 'tg_bid_score_append_only'],
         ['tender_award', 'tg_tender_award_append_only'],
+        ['tender_award_standing_check', 'tg_award_standing_check_no_delete'],
       ] as const;
       for (const [table, trigger] of APPEND_ONLY) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
       }
+      await tx.tenderAwardStandingCheck.deleteMany({ where });
       await tx.tenderAward.deleteMany({ where });
       await tx.bidEvaluationScore.deleteMany({ where });
       await tx.bidEvaluation.deleteMany({ where });

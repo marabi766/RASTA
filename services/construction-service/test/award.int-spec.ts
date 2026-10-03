@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
+import { Logger } from '@nestjs/common';
 import { awardStandingChecksTotal } from '../src/observability/metrics';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
 import {
@@ -541,12 +542,12 @@ describe('awarding an evaluated tender', () => {
       const { owner, tenderId, bids } = await evaluated({ count: 3 });
       const before = SUPPLIER.asked.length;
       await award(owner, tenderId, bids[0]!.bidId);
-      // The winner alone, twice: the pre-check, and the check after the commit.
-      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder, bids[0]!.bidder]);
+      // The winner alone, once: the pre-check. The check after the commit is the sweeper's, not the request's.
+      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder]);
       SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
       const again = await award(owner, tenderId, bids[0]!.bidId);
       expect(again.alreadyAwarded).toBe(true);
-      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder, bids[0]!.bidder]);
+      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder]);
     });
 
     it('fails closed when supplier-service cannot be reached: 503, nothing is awarded, the attempt is audited', async () => {
@@ -598,13 +599,92 @@ describe('awarding an evaluated tender', () => {
       }
     });
 
-    describe('the detective control after the commit (ADR-067 § 3, residual)', () => {
+    describe('the standing check after the award: durable, and out of the request (ADR-067 § 3, residual)', () => {
       const checks = async (outcome: string) =>
         (await awardStandingChecksTotal.get()).values.find(
           (v) => v.labels.outcome === outcome && v.labels.service === 'construction-service',
         )?.value ?? 0;
 
-      it('detects a suspension that lands between the answer and the commit: the award stands, a person is told', async () => {
+      const rowOf = (tenderId: string) =>
+        runUnscoped('the suite reads the standing check', () =>
+          w.prisma.client.tenderAwardStandingCheck.findFirstOrThrow({ where: { tenderId } }),
+        );
+      const rowCount = (tenderId: string) =>
+        runUnscoped('the suite counts the standing checks', () =>
+          w.prisma.client.tenderAwardStandingCheck.count({ where: { tenderId } }),
+        );
+      const conflicts = (owner: string, tenderId: string) =>
+        eventsOf(owner, 'TENDER_AWARD_STANDING_CONFLICT_DETECTED', tenderId);
+      const backoff = { baseSeconds: 30, maxSeconds: 900 };
+
+      afterEach(() => jest.restoreAllMocks());
+
+      it('is written in the award’s own transaction, pending, and the response waits for nothing', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        const asked = SUPPLIER.asked.length;
+        const [clear, conflict, unavailable] = [
+          await checks('clear'),
+          await checks('conflict'),
+          await checks('unavailable'),
+        ];
+        const user = newUserId();
+        const view = await award(owner, tenderId, bids[0]!.bidId, undefined, user);
+
+        // Only the pre-check was asked; the check after the commit is not the request's.
+        expect(SUPPLIER.asked.length - asked).toBe(1);
+        expect(await rowOf(tenderId)).toMatchObject({
+          organizationId: owner,
+          tenderId,
+          bidId: bids[0]!.bidId,
+          winnerOrganizationId: bids[0]!.bidder,
+          awardedBy: user,
+          status: 'PENDING',
+          outcome: null,
+          doneAt: null,
+          attempts: 0,
+          leaseUntil: null,
+          fence: null,
+        });
+        const row = await rowOf(tenderId);
+        // The window starts at the instant of the standing read the award was made on.
+        expect(row.windowStart.toISOString()).toBe(view.standingAsOf);
+        expect(row.awardedAt.toISOString()).toBe(view.awardedAt);
+        expect([
+          await checks('clear'),
+          await checks('conflict'),
+          await checks('unavailable'),
+        ]).toEqual([clear, conflict, unavailable]);
+        expect(await conflicts(owner, tenderId)).toHaveLength(0);
+      });
+
+      it('survives the process that made the award: a sweeper that starts afterwards makes it, once', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        const before = await checks('clear');
+
+        const restarted = w.awardCheckSweeperWith();
+        expect(await restarted.runOnce(tenderId)).toEqual({
+          claimed: 1,
+          clear: 1,
+          conflict: 0,
+          retry: 0,
+          lost: 0,
+        });
+        expect(await rowOf(tenderId)).toMatchObject({
+          status: 'DONE',
+          outcome: 'CLEAR',
+          attempts: 0,
+          leaseUntil: null,
+          fence: null,
+        });
+        expect((await rowOf(tenderId)).doneAt).not.toBeNull();
+        expect(await checks('clear')).toBe(before + 1);
+        expect(await conflicts(owner, tenderId)).toHaveLength(0);
+        // Settled: not claimed again.
+        expect((await restarted.runOnce(tenderId)).claimed).toBe(0);
+      });
+
+      it('detects a suspension that lands between the answer and the commit: the award stands, the event comes once, a person is told', async () => {
         const { owner, tenderId, bids } = await evaluated({ count: 1 });
         const bidder = bids[0]!.bidder;
         const before = await checks('conflict');
@@ -612,16 +692,16 @@ describe('awarding an evaluated tender', () => {
         const user = newUserId();
         const view = await award(owner, tenderId, bids[0]!.bidId, undefined, user);
 
-        // Not stopped, and not undone.
+        // Not stopped, not undone, and nothing is said in the request.
         expect(view.status).toBe('AWARDED');
+        expect(await conflicts(owner, tenderId)).toHaveLength(0);
+
+        expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
         expect((await tenderRow(tenderId)).status).toBe('AWARDED');
         expect(await checks('conflict')).toBe(before + 1);
+        expect(await rowOf(tenderId)).toMatchObject({ status: 'DONE', outcome: 'CONFLICT' });
 
-        const [detected, ...more] = await eventsOf(
-          owner,
-          'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
-          tenderId,
-        );
+        const [detected, ...more] = await conflicts(owner, tenderId);
         expect(more).toHaveLength(0);
         expect(detected).toMatchObject({ aggregateType: 'Tender', partitionKey: tenderId });
         const payload = payloadOf(detected!) as Record<string, unknown>;
@@ -633,7 +713,6 @@ describe('awarding an evaluated tender', () => {
           winnerOrganizationId: bidder,
           awardedBy: user,
           awardedAt: view.awardedAt,
-          // The window starts at the instant the award was made on and ends at supplier-service's clock after the commit.
           windowStart: view.standingAsOf,
           checkedAt: expect.any(String),
           suspensionIds: [`SUS_RACE_${bidder}`],
@@ -643,55 +722,144 @@ describe('awarding an evaluated tender', () => {
         expect(new Date(payload.checkedAt as string).getTime()).toBeGreaterThanOrEqual(
           new Date(view.awardedAt).getTime() - 1_000,
         );
-        expect(new Date(view.standingAsOf).getTime()).toBeLessThanOrEqual(
-          new Date(view.awardedAt).getTime() + 1_000,
-        );
+        // The event is on the same instant the check was settled at; sweeping again changes nothing.
+        expect(occurredOf(detected!)).toEqual((await rowOf(tenderId)).doneAt);
+        expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);
+        expect(await conflicts(owner, tenderId)).toHaveLength(1);
       });
 
-      it('says nothing when the winner stayed eligible', async () => {
+      it('retries with a backoff while supplier-service cannot say, naming the award in the log and no amount', async () => {
         const { owner, tenderId, bids } = await evaluated({ count: 1 });
-        const [clear, conflict] = [await checks('clear'), await checks('conflict')];
         await award(owner, tenderId, bids[0]!.bidId);
-        expect(await checks('clear')).toBe(clear + 1);
-        expect(await checks('conflict')).toBe(conflict);
-        expect(
-          await eventsOf(owner, 'TENDER_AWARD_STANDING_CONFLICT_DETECTED', tenderId),
-        ).toHaveLength(0);
-      });
-
-      it('counts a check that could not be made, without a retry and without disturbing the award', async () => {
-        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        const lines: string[] = [];
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation((m: unknown) => {
+          lines.push(String(m));
+        });
         const before = await checks('unavailable');
-        SUPPLIER.afterAnswer = () => {
-          SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
-        };
-        const asked = SUPPLIER.asked.length;
-        const view = await award(owner, tenderId, bids[0]!.bidId);
-        expect(view.status).toBe('AWARDED');
+
+        SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
+        expect(await w.awardCheckSweeper.runOnce(tenderId)).toMatchObject({ claimed: 1, retry: 1 });
+        const row = await rowOf(tenderId);
+        expect(row).toMatchObject({
+          status: 'PENDING',
+          attempts: 1,
+          leaseUntil: null,
+          fence: null,
+        });
+        expect(row.nextAttemptAt!.getTime()).toBeGreaterThan(Date.now());
         expect(await checks('unavailable')).toBe(before + 1);
-        // The pre-check and the one attempt after the commit: no retry.
-        expect(SUPPLIER.asked.length - asked).toBe(2);
-        expect(
-          await eventsOf(owner, 'TENDER_AWARD_STANDING_CONFLICT_DETECTED', tenderId),
-        ).toHaveLength(0);
+        // Every failure is tied to its award by ids and a closed code.
+        const line = lines.find((l) => l.includes(tenderId));
+        expect(line).toContain(bids[0]!.bidId);
+        expect(line).toContain('UPSTREAM_UNAVAILABLE');
+        expect(line).not.toMatch(/1000|amount|price/i);
+
+        // Not claimed again until the backoff has passed.
+        expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);
+        SUPPLIER.failure = undefined;
+        await sql(
+          'the suite lets the backoff pass',
+          `UPDATE "tender_award_standing_check" SET "next_attempt_at" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
+        );
+        expect(await w.awardCheckSweeper.runOnce(tenderId)).toMatchObject({ claimed: 1, clear: 1 });
+        expect(await rowOf(tenderId)).toMatchObject({
+          status: 'DONE',
+          outcome: 'CLEAR',
+          attempts: 1,
+        });
       });
 
-      it('does not check a repeat of an award already made, nor a refused one', async () => {
+      it('keeps the check pending when the outcome cannot be written, and names the award in the log', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        SUPPLIER.afterAnswer = () => SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+        await award(owner, tenderId, bids[0]!.bidId);
+        const lines: string[] = [];
+        jest.spyOn(Logger.prototype, 'error').mockImplementation((m: unknown) => {
+          lines.push(String(m));
+        });
+        jest
+          .spyOn(w.awardChecks, 'settle')
+          .mockRejectedValueOnce(new Error('the database went away'));
+
+        expect(await w.awardCheckSweeper.runOnce(tenderId)).toMatchObject({ claimed: 1, retry: 1 });
+        expect(await rowOf(tenderId)).toMatchObject({
+          status: 'PENDING',
+          outcome: null,
+          attempts: 1,
+        });
+        expect(await conflicts(owner, tenderId)).toHaveLength(0);
+        const line = lines.find((l) => l.includes(tenderId));
+        expect(line).toContain(bids[0]!.bidId);
+        expect(line).toContain('INTERNAL');
+        expect(line).not.toContain('the database went away');
+
+        // And once the database is back, the conflict is found and written — once.
+        await sql(
+          'the suite lets the backoff pass',
+          `UPDATE "tender_award_standing_check" SET "next_attempt_at" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
+        );
+        expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
+        expect(await conflicts(owner, tenderId)).toHaveLength(1);
+      });
+
+      it('lets one sweeper own a check at a time, and a lapsed claim writes nothing: no second event', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+
+        const [held] = await w.awardChecks.claimDue(10, 60, 'FENCE_A', tenderId);
+        expect(held).toMatchObject({ tenderId, bidId: bids[0]!.bidId, fence: 'FENCE_A' });
+        // Held under a live lease: another sweeper finds nothing.
+        expect(await w.awardChecks.claimDue(10, 60, 'FENCE_B', tenderId)).toHaveLength(0);
+
+        // The lease lapses; another sweeper takes the check back and settles it.
+        await sql(
+          'the suite lets the lease lapse',
+          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
+        );
+        expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
+
+        // The first one, late, does nothing: the fence is not its any more.
+        expect(await w.awardCheckService.process(held!, backoff)).toBe('LOST');
+        expect(await conflicts(owner, tenderId)).toHaveLength(1);
+        expect(await rowOf(tenderId)).toMatchObject({ status: 'DONE', outcome: 'CONFLICT' });
+      });
+
+      it('settles a check once when two sweepers run at the same time', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+        const [x, y] = await Promise.all([
+          w.awardCheckSweeperWith().runOnce(tenderId),
+          w.awardCheckSweeperWith().runOnce(tenderId),
+        ]);
+        expect(x.claimed + y.claimed).toBe(1);
+        expect(x.conflict + y.conflict).toBe(1);
+        expect(await conflicts(owner, tenderId)).toHaveLength(1);
+      });
+
+      it('counts what is pending, how old, and how many are past the alert age', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        const open = await w.awardChecks.backlog(86_400);
+        const late = await w.awardChecks.backlog(0);
+        expect(open.pending).toBeGreaterThanOrEqual(1);
+        expect(late.overdue).toBeGreaterThanOrEqual(1);
+        expect(late.overdue).toBeGreaterThanOrEqual(open.overdue);
+        expect(late.oldestPendingAgeSeconds).toBeGreaterThanOrEqual(0);
+        await w.awardCheckSweeper.runOnce(tenderId);
+        expect((await w.awardChecks.backlog(0)).pending).toBe(open.pending - 1);
+      });
+
+      it('writes one check per award: a repeat, and a refused award, write none', async () => {
         const { owner, tenderId, bids } = await evaluated({ count: 2 });
         SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
-        const before = [
-          await checks('clear'),
-          await checks('conflict'),
-          await checks('unavailable'),
-        ];
         await refusalOf(award(owner, tenderId, bids[0]!.bidId));
+        expect(await rowCount(tenderId)).toBe(0);
         await award(owner, tenderId, bids[1]!.bidId, 'The first rank is suspended');
         await award(owner, tenderId, bids[1]!.bidId, 'The first rank is suspended');
-        expect([
-          await checks('clear'),
-          await checks('conflict'),
-          await checks('unavailable'),
-        ]).toEqual([before[0]! + 1, before[1], before[2]]);
+        expect(await rowCount(tenderId)).toBe(1);
+        expect((await rowOf(tenderId)).bidId).toBe(bids[1]!.bidId);
       });
     });
 
@@ -1391,6 +1559,110 @@ describe('awarding an evaluated tender', () => {
       });
     });
 
+    it('does not commit an award without its standing check', async () => {
+      const { owner, tenderId, bids } = await evaluated({ count: 2 });
+      const row = insertAward({ owner, tenderId, bidId: bids[0]!.bidId, bidder: bids[0]!.bidder });
+      await expect(
+        runUnscoped('the suite awards without the check', () =>
+          w.prisma.client.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(row);
+            await tx.$executeRawUnsafe(
+              `UPDATE "tender" SET "status" = 'AWARDED' WHERE "id" = '${tenderId}'`,
+            );
+            await tx.$executeRawUnsafe(
+              `UPDATE "bid" SET "status" = 'AWARDED' WHERE "id" = '${bids[0]!.bidId}'`,
+            );
+          }),
+        ),
+      ).rejects.toThrow(/pending standing check/);
+      expect(await stateOf(tenderId, bids)).toEqual({
+        tender: 'EVALUATED',
+        bids: ['QUALIFIED', 'QUALIFIED'],
+        awards: 0,
+      });
+    });
+
+    describe('the standing check row', () => {
+      const insertCheck = (v: {
+        owner: string;
+        tenderId: string;
+        bidId: string;
+        bidder: string;
+        id?: string;
+      }) =>
+        `INSERT INTO "tender_award_standing_check" ("id", "organization_id", "tender_id", "project_id", "bid_id",
+           "winner_organization_id", "awarded_by", "awarded_at", "window_start", "created_at")
+         VALUES ('${v.id ?? `TSC_${newUserId()}`}', '${v.owner}', '${v.tenderId}', 'PRJ_X', '${v.bidId}',
+           '${v.bidder}', 'USR_X', now(), now(), now())`;
+
+      it('is accepted only as the check of the award the tender holds, and only one', async () => {
+        const unawarded = await evaluated({ count: 1 });
+        await expect(
+          attack(
+            insertCheck({
+              owner: unawarded.owner,
+              tenderId: unawarded.tenderId,
+              bidId: unawarded.bids[0]!.bidId,
+              bidder: unawarded.bids[0]!.bidder,
+            }),
+          ),
+        ).rejects.toThrow(/ck_award_standing_check_award/);
+
+        const { owner, tenderId, bids } = await evaluated({ count: 2 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        // A second one for the same tender; and one for a bid the award does not name.
+        await expect(
+          attack(insertCheck({ owner, tenderId, bidId: bids[0]!.bidId, bidder: bids[0]!.bidder })),
+        ).rejects.toThrow(/ck_award_standing_check_award|unique|duplicate/i);
+        await expect(
+          attack(insertCheck({ owner, tenderId, bidId: bids[1]!.bidId, bidder: bids[1]!.bidder })),
+        ).rejects.toThrow(/ck_award_standing_check_award/);
+      });
+
+      it('keeps what it is about, shape and finality: nothing but the claim and the outcome move, and a DONE check is final', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 2 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        await expect(
+          attack(
+            `UPDATE "tender_award_standing_check" SET "winner_organization_id" = '${bids[1]!.bidder}' WHERE "tender_id" = '${tenderId}'`,
+          ),
+        ).rejects.toThrow(/ck_award_standing_check_immutable/);
+        await expect(
+          attack(
+            `UPDATE "tender_award_standing_check" SET "window_start" = now() - interval '1 day' WHERE "tender_id" = '${tenderId}'`,
+          ),
+        ).rejects.toThrow(/ck_award_standing_check_immutable/);
+        // DONE names its outcome and when; a claim is a lease and its fence, or neither.
+        await expect(
+          attack(
+            `UPDATE "tender_award_standing_check" SET "status" = 'DONE' WHERE "tender_id" = '${tenderId}'`,
+          ),
+        ).rejects.toThrow(/ck_award_standing_check_shape/);
+        await expect(
+          attack(
+            `UPDATE "tender_award_standing_check" SET "fence" = 'F' WHERE "tender_id" = '${tenderId}'`,
+          ),
+        ).rejects.toThrow(/ck_award_standing_check_shape/);
+
+        await w.awardCheckSweeper.runOnce(tenderId);
+        for (const change of [
+          `"status" = 'PENDING', "outcome" = NULL, "done_at" = NULL`,
+          `"outcome" = 'CONFLICT'`,
+          `"attempts" = 5`,
+        ]) {
+          await expect(
+            attack(
+              `UPDATE "tender_award_standing_check" SET ${change} WHERE "tender_id" = '${tenderId}'`,
+            ),
+          ).rejects.toThrow(/ck_award_standing_check_immutable/);
+        }
+        // Evidence that the check was made: never deleted.
+        await expect(
+          attack(`DELETE FROM "tender_award_standing_check" WHERE "tender_id" = '${tenderId}'`),
+        ).rejects.toThrow(/ck_bid_append_only/);
+      });
+    });
+
     it('is append-only for the runtime role, and refuses a second award for the tender', async () => {
       const { owner, tenderId, bids } = await evaluated({ count: 2 });
       await award(owner, tenderId, bids[0]!.bidId);
@@ -1461,6 +1733,10 @@ describe('awarding an evaluated tender', () => {
       const { owner, tenderId, bids } = await evaluated({ count: 2 });
       await award(owner, tenderId, bids[0]!.bidId);
       await expect(runAfterLock()).rejects.toThrow(/down refused: award data exists/);
+      // The standing check still pending is named in the refusal.
+      await expect(runAfterLock()).rejects.toThrow(
+        /standing check\(s\) of which \d+ still pending/,
+      );
       expect(await awardRows(tenderId)).toHaveLength(1);
       expect((await tenderRow(tenderId)).status).toBe('AWARDED');
     });

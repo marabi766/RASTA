@@ -91,7 +91,8 @@ groups:
       # standing read the award was made on and the commit (ADR-067 section 3, the residual of the
       # standing check). Conservative, so a false positive is an alert and nothing more. The award
       # stands; a person decides. The counter is born at its first increment, so the plain value
-      # (not a rate) catches the first one.
+      # (not a rate) catches the first one; the event is written in the same commit that settles
+      # the check, so a restart that resets the counter loses the page and never the event.
       - alert: RastaConstructionAwardStandingConflictDetected
         expr: sum(rasta_construction_award_standing_checks_total{outcome="conflict"}) > 0
         labels:
@@ -101,13 +102,16 @@ groups:
           description: 'A POSSIBLE award to a contractor that was not eligible: after an award committed, supplier-service said the winner had a suspension that began inside the window windowStart to checkedAt (windowStart is the instant of the standing read the award was made on; checkedAt is the clock of supplier-service as it answered, after the commit), a suspension still open, or no longer held its contracting qualification. The check is conservative: a suspension that began and ended inside the window is a hit too, which is an alert and nothing more. The award was not undone. TENDER_AWARD_STANDING_CONFLICT_DETECTED names the tender, the bid, the contractor and the suspensions (ids only); this alert deliberately carries none of them.'
           runbook: docs/runbooks/award-standing-conflict.md
 
-      # Warning: supplier-service could not be asked after an award committed, so the check was
-      # not made (and is not retried). A person does it by hand.
-      - alert: RastaConstructionAwardStandingCheckUnavailable
-        expr: sum(rasta_construction_award_standing_checks_total{outcome="unavailable"}) > 0
+      # Warning: a standing check after an award is still pending past the configured age. The
+      # check is a row written in the award's transaction and made by a sweeper (retried with a
+      # backoff while supplier-service cannot answer), so this fires when it is not being made at all
+      # or cannot be, never because a request was lost. The gauge is sampled every upkeep tick.
+      - alert: RastaConstructionAwardStandingCheckOverdue
+        expr: max(rasta_construction_award_standing_check_overdue) > 0
+        for: 2m
         labels:
           severity: warning
         annotations:
-          summary: 'The standing check after an award could not be made ({{ $value }})'
-          description: 'After an award committed, supplier-service could not say whether the winner was suspended in the window around it (unreachable, slow or answering outside its contract), so the check was not made and is not retried. The award stands. Neither a tender nor a tenant is named here; the construction-service log says which.'
+          summary: 'A standing check after an award is overdue ({{ $value }} pending past the alert age)'
+          description: 'At least one standing check after an award has been pending longer than CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: supplier-service could not say whether the winner was suspended in the window around the award (unreachable, slow or answering outside its contract), or the sweeper is not running. The check is retried with a bounded backoff and the award stands, but nobody has yet looked at the winner since the award committed. The construction-service log names the tender, the winning bid and a closed error code for each failed attempt; this alert deliberately carries none of them.'
           runbook: docs/runbooks/award-standing-conflict.md

@@ -180,6 +180,31 @@ describe('project roles (Q-69)', () => {
     });
   });
 
+  describe('the standing-check sweeper after an award (ADR-067 § 3)', () => {
+    it('has bounded defaults', () => {
+      const env = load();
+      expect([
+        env.CONSTRUCTION_AWARD_CHECK_INTERVAL_MS,
+        env.CONSTRUCTION_AWARD_CHECK_BATCH_SIZE,
+        env.CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS,
+        env.CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS,
+        env.CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS,
+        env.CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS,
+      ]).toEqual([10_000, 10, 120, 10, 900, 600]);
+    });
+
+    it.each([
+      ['CONSTRUCTION_AWARD_CHECK_INTERVAL_MS', '100'],
+      ['CONSTRUCTION_AWARD_CHECK_BATCH_SIZE', '0'],
+      ['CONSTRUCTION_AWARD_CHECK_BATCH_SIZE', '101'],
+      ['CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS', '5'],
+      ['CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS', '1'],
+      ['CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS', 'soon'],
+    ])('refuses %s=%s', (name, value) => {
+      expect(() => load({ [name]: value })).toThrow();
+    });
+  });
+
   describe('how many evaluators (Q-88, Q-92: provisional)', () => {
     it('defaults to ADR-067’s MVP: one evaluator per bid, one required', () => {
       const env = load();

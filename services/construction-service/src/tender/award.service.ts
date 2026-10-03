@@ -11,7 +11,6 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import type { BidAccessPurpose } from '../events/events';
 import {
   awardRefusalsTotal,
-  awardStandingChecksTotal,
   tenderTransitionsTotal,
   versionConflictsTotal,
 } from '../observability/metrics';
@@ -53,24 +52,10 @@ export const AWARD_REFUSALS = [
 ] as const;
 export type AwardRefusal = (typeof AWARD_REFUSALS)[number];
 
-/** What the post-commit standing check needs to know about the award it checks. */
-interface AwardFacts {
-  tenderId: string;
-  projectId: string;
-  owner: string;
-  winningBidId: string;
-  winnerOrganizationId: string;
-  awardedBy: string;
-  awardedAt: Date;
-  /** The instant the pre-check read the winner's standing at: the start of the window. */
-  windowFrom: Date;
-}
-
-/** The answer of an award command, and — when it wrote one — what the check after the commit needs. */
+/** The answer of an award command. */
 interface Outcome {
   view: TenderAwardView;
   awarded: boolean;
-  facts?: AwardFacts;
 }
 
 /** What a tender and its bids come to once the command has judged them. */
@@ -117,9 +102,13 @@ type Judged =
  * not eligible is 422 `WINNER_NOT_ELIGIBLE`, unreachable is 503/504, and nothing is awarded. The
  * question is asked before the lock is taken (a network call under the tender's lock would hold every
  * other command behind a slow supplier-service) and the instant it was answered is stored
- * (`standing_as_of`). Residual, as for qualifying: a suspension that lands between that answer and the
- * commit is not stopped; the award row says when the contractor was last seen eligible. A repeat of an
- * award already made does not ask.
+ * (`standing_as_of`). Residual: a suspension that lands between that answer and the commit is not
+ * stopped. The control is **durable and out of the request**: the award's own transaction writes a
+ * pending standing check (window start = that instant), the database refuses to commit an award
+ * without it, and `AwardStandingCheckSweeper` makes it afterwards, exactly once (a conflict ⇒ alert
+ * and `TENDER_AWARD_STANDING_CONFLICT_DETECTED`; unreachable ⇒ retried, and alerted if still pending
+ * past an age). The answer to `award` waits for none of it. A repeat of an award already made does not
+ * ask, and writes no second check.
  *
  * ## Who
  *
@@ -178,7 +167,7 @@ export class AwardService {
     approved: boolean,
   ): Promise<TenderAwardView> {
     const caller = await this.authorize(tenderId, dto.bidId);
-    const { view, awarded, facts } = await this.guarded(
+    const { view, awarded } = await this.guarded(
       caller,
       tenderId,
       dto.bidId,
@@ -256,6 +245,20 @@ export class AwardService {
                 actorSubject: identity.subject,
                 at,
               });
+              // The standing check that follows (ADR-067 § 3, residual) is written here, in this commit:
+              // the database refuses an award without it, a sweeper makes it, and this response waits for nothing.
+              await this.awards.insertStandingCheck(tx, {
+                id: newId(ID_PREFIX.standingCheck),
+                organizationId: principal.organizationId,
+                tenderId,
+                projectId: tender.projectId,
+                bidId: winner.id,
+                winnerOrganizationId: winner.bidderOrganizationId,
+                awardedBy: principal.actor,
+                awardedAt: at,
+                windowStart: asOf,
+                at,
+              });
               const matched = await this.awards.markTenderAwarded(tx, {
                 tenderId,
                 expectedVersion: tender.version,
@@ -327,16 +330,6 @@ export class AwardService {
                   alreadyAwarded: false,
                 },
                 awarded: true,
-                facts: {
-                  tenderId,
-                  projectId: tender.projectId,
-                  owner: principal.organizationId,
-                  winningBidId: winner.id,
-                  winnerOrganizationId: winner.bidderOrganizationId,
-                  awardedBy: principal.actor,
-                  awardedAt: at,
-                  windowFrom: asOf,
-                },
               };
             }),
           { 'rasta.tender.command': 'award' },
@@ -345,71 +338,7 @@ export class AwardService {
       },
     );
     if (awarded) tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'award' });
-    // After the commit and never in the way of the answer: the detective control (ADR-067 § 3).
-    if (facts) await this.checkStandingAfterAward(facts);
     return view;
-  }
-
-  /**
-   * The detective control (ADR-067 § 3, the residual of the standing check). No lock spans
-   * supplier-service and this service, so a suspension that lands between the answer the award was
-   * made on and its commit is not stopped. After the commit supplier-service is asked again, and the
-   * window is `[the pre-check's instant, its own clock as it answers]`: a suspension that began
-   * inside it (even one that has ended since), one still open, or a qualification removed, is a
-   * **possible** conflict, conservative on purpose — a false positive is an alert and nothing more.
-   * On a hit: the alert (a counter that pages) and `TENDER_AWARD_STANDING_CONFLICT_DETECTED` (ids
-   * only) say it, for a person to decide; **the award is not undone**. A check that could not be
-   * made is counted and logged, not retried, and never in the way of the answer.
-   */
-  private async checkStandingAfterAward(facts: AwardFacts): Promise<void> {
-    let report;
-    try {
-      report = await this.standing.windowReport(facts.winnerOrganizationId, facts.windowFrom);
-    } catch (cause) {
-      awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'unavailable' });
-      this.logger.error(
-        `the standing check after an award could not be made: ${cause instanceof Error ? cause.name : 'unknown'}`,
-      );
-      return;
-    }
-    if (report.suspensionCount === 0 && !report.qualificationRemoved) {
-      awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'clear' });
-      return;
-    }
-    // The alert first: it must fire whatever happens to the event below.
-    awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'conflict' });
-    this.logger.error(
-      'a tender was awarded to a contractor that supplier-service shows suspended, or no longer qualified, in the window around the award (detected after the commit)',
-    );
-    try {
-      await this.prisma.transaction(async (tx) => {
-        const at = await transactionNow(tx);
-        await this.events.enqueue(tx, {
-          eventName: 'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
-          aggregateId: facts.tenderId,
-          organizationId: facts.owner,
-          payload: {
-            tenderId: facts.tenderId,
-            projectId: facts.projectId,
-            organizationId: facts.owner,
-            winningBidId: facts.winningBidId,
-            winnerOrganizationId: facts.winnerOrganizationId,
-            awardedBy: facts.awardedBy,
-            awardedAt: facts.awardedAt.toISOString(),
-            windowStart: facts.windowFrom.toISOString(),
-            checkedAt: report.checkedAt.toISOString(),
-            suspensionIds: report.suspensionIds,
-            suspensionCount: report.suspensionCount,
-            qualificationRemoved: report.qualificationRemoved,
-          },
-          occurredAt: at,
-        });
-      });
-    } catch (cause) {
-      this.logger.error(
-        `could not record TENDER_AWARD_STANDING_CONFLICT_DETECTED: ${cause instanceof Error ? cause.name : 'unknown'}`,
-      );
-    }
   }
 
   // -- reading the award -----------------------------------------------------------------

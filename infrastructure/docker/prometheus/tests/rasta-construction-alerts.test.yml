@@ -147,24 +147,31 @@ tests:
               runbook: docs/runbooks/award-standing-conflict.md
 
   # ---------------------------------------------------------------------------
-  # RastaConstructionAwardStandingCheckUnavailable
+  # RastaConstructionAwardStandingCheckOverdue
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="clear",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
-        values: '4 4 4 4'
-      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="unavailable",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
-        values: '_ _ 1 1'
+      # Pending checks inside the alert age never fire it; one past it does, after the `for`.
+      - series: 'rasta_construction_award_standing_check_pending{service="construction-service",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '1 1 1 1 1 1 0'
+      - series: 'rasta_construction_award_standing_check_overdue{service="construction-service",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '0 0 1 1 1 1 0'
     alert_rule_test:
       - eval_time: 1m
-        alertname: RastaConstructionAwardStandingCheckUnavailable
+        alertname: RastaConstructionAwardStandingCheckOverdue
         exp_alerts: []
       - eval_time: 3m
-        alertname: RastaConstructionAwardStandingCheckUnavailable
+        alertname: RastaConstructionAwardStandingCheckOverdue
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaConstructionAwardStandingCheckOverdue
         exp_alerts:
           - exp_labels:
               severity: warning
             exp_annotations:
-              summary: 'The standing check after an award could not be made (1)'
-              description: 'After an award committed, supplier-service could not say whether the winner was suspended in the window around it (unreachable, slow or answering outside its contract), so the check was not made and is not retried. The award stands. Neither a tender nor a tenant is named here; the construction-service log says which.'
+              summary: 'A standing check after an award is overdue (1 pending past the alert age)'
+              description: 'At least one standing check after an award has been pending longer than CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: supplier-service could not say whether the winner was suspended in the window around the award (unreachable, slow or answering outside its contract), or the sweeper is not running. The check is retried with a bounded backoff and the award stands, but nobody has yet looked at the winner since the award committed. The construction-service log names the tender, the winning bid and a closed error code for each failed attempt; this alert deliberately carries none of them.'
               runbook: docs/runbooks/award-standing-conflict.md
+      - eval_time: 6m
+        alertname: RastaConstructionAwardStandingCheckOverdue
+        exp_alerts: []

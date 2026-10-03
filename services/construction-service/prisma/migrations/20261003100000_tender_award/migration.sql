@@ -38,6 +38,40 @@ CREATE UNIQUE INDEX "ux_tender_award_tender" ON "tender_award"("organization_id"
 -- CreateIndex
 CREATE UNIQUE INDEX "ux_tender_award_bid" ON "tender_award"("bid_id");
 
+-- CreateTable
+-- The standing check that follows every award (ADR-067 section 3, residual), kept durable: written in the
+-- award's own transaction, claimed by a sweeper under a lease and a fencing token, done exactly once.
+CREATE TABLE "tender_award_standing_check" (
+    "id" TEXT NOT NULL,
+    "organization_id" TEXT NOT NULL,
+    "tender_id" TEXT NOT NULL,
+    "project_id" TEXT NOT NULL,
+    "bid_id" TEXT NOT NULL,
+    "winner_organization_id" TEXT NOT NULL,
+    "awarded_by" TEXT NOT NULL,
+    "awarded_at" TIMESTAMPTZ(3) NOT NULL,
+    "window_start" TIMESTAMPTZ(3) NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'PENDING',
+    "outcome" TEXT,
+    "done_at" TIMESTAMPTZ(3),
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "next_attempt_at" TIMESTAMPTZ(3),
+    "lease_until" TIMESTAMPTZ(3),
+    "fence" TEXT,
+
+    CONSTRAINT "tender_award_standing_check_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ux_award_standing_check_tender" ON "tender_award_standing_check"("organization_id", "tender_id");
+
+-- SQL-only (a partial index Prisma does not model): the sweeper's scan of what is still pending, oldest first.
+CREATE INDEX "ix_award_standing_check_due" ON "tender_award_standing_check"("created_at", "id") WHERE "status" = 'PENDING';
+
+-- AddForeignKey
+ALTER TABLE "tender_award_standing_check" ADD CONSTRAINT "tender_award_standing_check_organization_id_tender_id_fkey" FOREIGN KEY ("organization_id", "tender_id") REFERENCES "tender"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT;
+
 -- AddForeignKey
 ALTER TABLE "tender_award" ADD CONSTRAINT "tender_award_organization_id_tender_id_fkey" FOREIGN KEY ("organization_id", "tender_id") REFERENCES "tender"("organization_id", "id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
@@ -69,6 +103,18 @@ ALTER TABLE "tender_award" ADD CONSTRAINT "ck_tender_award_actor_pair"
   CHECK (num_nonnulls("awarded_by_issuer", "awarded_by_subject") IN (0, 2)
          AND ("awarded_by_issuer" IS NULL
               OR (btrim("awarded_by_issuer") <> '' AND btrim("awarded_by_subject") <> '')));
+
+-- The check is PENDING or DONE; DONE names its outcome and when, and holds no claim; a claim is a lease and
+-- its fence, or neither.
+ALTER TABLE "tender_award_standing_check" ADD CONSTRAINT "ck_award_standing_check_shape"
+  CHECK ("status" IN ('PENDING', 'DONE')
+         AND ("outcome" IS NULL OR "outcome" IN ('CLEAR', 'CONFLICT'))
+         AND (("status" = 'DONE') = ("outcome" IS NOT NULL AND "done_at" IS NOT NULL))
+         AND num_nonnulls("lease_until", "fence") IN (0, 2)
+         AND ("status" = 'PENDING' OR "lease_until" IS NULL)
+         AND "attempts" >= 0
+         AND btrim("project_id") <> '' AND btrim("bid_id") <> ''
+         AND btrim("winner_organization_id") <> '' AND btrim("awarded_by") <> '');
 
 -- =============================================================================
 -- An award is recorded only for an EVALUATED tender and one of its QUALIFIED bids
@@ -117,6 +163,55 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "tg_tender_award_guard"
   BEFORE INSERT ON "tender_award"
   FOR EACH ROW EXECUTE FUNCTION "tender_award_guard"();
+
+-- A standing check is the check of the award the tender holds: the same bid, the same winner, the same
+-- awarder and instant, new and not yet tried.
+CREATE FUNCTION "award_standing_check_guard"() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT EXISTS (SELECT 1 FROM "tender_award"
+                    WHERE "organization_id" = NEW."organization_id" AND "tender_id" = NEW."tender_id"
+                      AND "bid_id" = NEW."bid_id"
+                      AND "bidder_organization_id" = NEW."winner_organization_id"
+                      AND "awarded_by" = NEW."awarded_by" AND "awarded_at" = NEW."awarded_at") THEN
+      RAISE EXCEPTION 'ck_award_standing_check_award: a standing check is the check of the award the tender holds'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW."status" <> 'PENDING' OR NEW."attempts" <> 0 THEN
+      RAISE EXCEPTION 'ck_award_standing_check_new: a standing check starts PENDING and untried'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
+  -- UPDATE: only the claim, the attempts and the outcome move; what the check is about never does,
+  -- and a DONE check is final.
+  IF NEW."id" <> OLD."id" OR NEW."organization_id" <> OLD."organization_id"
+     OR NEW."tender_id" <> OLD."tender_id" OR NEW."project_id" <> OLD."project_id"
+     OR NEW."bid_id" <> OLD."bid_id" OR NEW."winner_organization_id" <> OLD."winner_organization_id"
+     OR NEW."awarded_by" <> OLD."awarded_by" OR NEW."awarded_at" <> OLD."awarded_at"
+     OR NEW."window_start" <> OLD."window_start" OR NEW."created_at" <> OLD."created_at" THEN
+    RAISE EXCEPTION 'ck_award_standing_check_immutable: what a standing check is about never changes'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF OLD."status" = 'DONE' THEN
+    RAISE EXCEPTION 'ck_award_standing_check_immutable: a standing check that is done is final'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_award_standing_check_guard"
+  BEFORE INSERT OR UPDATE ON "tender_award_standing_check"
+  FOR EACH ROW EXECUTE FUNCTION "award_standing_check_guard"();
+
+-- It is evidence that the check was made: never deleted, never truncated.
+CREATE TRIGGER "tg_award_standing_check_no_delete"
+  BEFORE DELETE ON "tender_award_standing_check"
+  FOR EACH ROW EXECUTE FUNCTION "bid_append_only"();
+CREATE TRIGGER "tg_award_standing_check_no_truncate"
+  BEFORE TRUNCATE ON "tender_award_standing_check"
+  FOR EACH STATEMENT EXECUTE FUNCTION "bid_append_only"();
 
 -- A tender becomes AWARDED only with its award recorded. Only the one edge (EVALUATED → AWARDED) is
 -- judged here; any other edge into AWARDED is the status guard's to refuse, with its own error.
@@ -178,6 +273,12 @@ BEGIN
   SELECT "status"::text INTO bid_status FROM "bid" WHERE "id" = NEW."bid_id";
   IF tender_status IS DISTINCT FROM 'AWARDED' OR bid_status IS DISTINCT FROM 'AWARDED' THEN
     RAISE EXCEPTION 'ck_award_consistent: an award is committed with its tender and winning bid AWARDED'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  -- And with its standing check: an award whose check is not written has nobody to make it.
+  IF NOT EXISTS (SELECT 1 FROM "tender_award_standing_check"
+                  WHERE "organization_id" = NEW."organization_id" AND "tender_id" = NEW."tender_id") THEN
+    RAISE EXCEPTION 'ck_award_consistent: an award is committed with its pending standing check'
       USING ERRCODE = 'check_violation';
   END IF;
   RETURN NULL;
