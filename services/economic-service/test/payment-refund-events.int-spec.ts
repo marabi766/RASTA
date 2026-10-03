@@ -282,6 +282,45 @@ describe('the refund outcome events (real database)', () => {
       expect(await failed(organizationId, made.intentId)).toHaveLength(1);
     });
 
+    it('announces one of each when a declined refund later succeeds', async () => {
+      const organizationId = `${org.a}-DECLINE-THEN-OK`;
+      const made = await topUp(organizationId, 1_100n);
+      jest.spyOn(provider, 'refund').mockResolvedValueOnce({
+        outcome: 'FAILED',
+        providerReference: `mock_${made.intentId}`,
+        failureCode: 'NOT_PERMITTED',
+        simulated: true,
+      });
+
+      await expect(refundBy(organizationId, made.intentId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+      await refundBy(organizationId, made.intentId);
+
+      expect((await intentOf(made.intentId)).status).toBe('REFUNDED');
+      expect(await failed(organizationId, made.intentId)).toHaveLength(1);
+      expect(await refunded(organizationId, made.intentId)).toHaveLength(1);
+    });
+
+    it('announces a decline once however often the provider is asked again for it', async () => {
+      const organizationId = `${org.a}-DECLINE-AGAIN`;
+      const made = await topUp(organizationId, 1_300n, 'fail-refund:NOT_PERMITTED');
+
+      // Each request holds the amount, hears the provider's cached decline for
+      // the same refund key, and returns the hold; only the first announces.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await expect(refundBy(organizationId, made.intentId)).rejects.toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+        });
+      }
+
+      expect(await failed(organizationId, made.intentId)).toHaveLength(1);
+      expect(await intentOf(made.intentId)).toMatchObject({
+        status: 'CAPTURED',
+        failureReason: null,
+      });
+    });
+
     it('refuses a second refund of a refunded intent, and announces nothing more', async () => {
       const organizationId = `${org.a}-TWICE`;
       const made = await topUp(organizationId, 900n);
@@ -306,6 +345,116 @@ describe('the refund outcome events (real database)', () => {
         expect(await refunded(organizationId, made.intentId)).toEqual([]);
         expect(await failed(organizationId, made.intentId)).toEqual([]);
       }
+    });
+  });
+
+  describe('the decline record (payment_refund_decline)', () => {
+    const declineRow = (organizationId: string, paymentIntentId: string, key: string) => ({
+      organizationId,
+      paymentIntentId,
+      providerRefundKey: key,
+      announcedBy: 'USR-THE-SUITE',
+      announcedAt: new Date(),
+    });
+
+    it('holds one row per intent and provider refund key, enforced by PostgreSQL', async () => {
+      const organizationId = `${org.b}-RECORD`;
+      const made = await topUp(organizationId, 600n, 'fail-refund:NOT_PERMITTED');
+      await expect(refundBy(organizationId, made.intentId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+      const intent = await intentOf(made.intentId);
+      const key = `${intent.idempotencyKey}:refund`;
+
+      // The insert the service makes, made again: nothing is added.
+      const again = await asActor({ organizationId }, () =>
+        prisma.client.paymentRefundDecline.createMany({
+          data: [declineRow(organizationId, made.intentId, key)],
+          skipDuplicates: true,
+        }),
+      );
+      expect(again.count).toBe(0);
+
+      // Without ON CONFLICT the primary key refuses it outright.
+      await expect(
+        runUnscoped('the suite writes a duplicate decline row', () =>
+          prisma.client.$executeRawUnsafe(
+            `INSERT INTO payment_refund_decline
+               (organization_id, payment_intent_id, provider_refund_key, announced_by, announced_at)
+             VALUES ($1, $2, $3, 'USR-THE-SUITE', now())`,
+            organizationId,
+            made.intentId,
+            key,
+          ),
+        ),
+      ).rejects.toThrow(/payment_refund_decline_pkey|23505|Unique constraint/);
+
+      // A distinct provider attempt key is its own decline.
+      const distinct = await asActor({ organizationId }, () =>
+        prisma.client.paymentRefundDecline.createMany({
+          data: [declineRow(organizationId, made.intentId, `${intent.idempotencyKey}:refund-2`)],
+          skipDuplicates: true,
+        }),
+      );
+      expect(distinct.count).toBe(1);
+    });
+
+    it('lets one of two concurrent claims of the same decline win', async () => {
+      const organizationId = `${org.b}-RACE`;
+      const made = await topUp(organizationId, 500n);
+      const key = `${(await intentOf(made.intentId)).idempotencyKey}:refund`;
+      let releaseFirst!: () => void;
+      const firstHolds = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstInserted!: () => void;
+      const inserted = new Promise<void>((resolve) => {
+        firstInserted = resolve;
+      });
+      const claim = (pause: boolean) =>
+        asActor({ organizationId }, () =>
+          prisma.transaction(async (tx) => {
+            const { count } = await tx.paymentRefundDecline.createMany({
+              data: [declineRow(organizationId, made.intentId, key)],
+              skipDuplicates: true,
+            });
+            if (pause) {
+              firstInserted();
+              await firstHolds;
+            }
+            return count;
+          }),
+        );
+
+      const first = claim(true);
+      await inserted;
+      // The second waits on the first's uncommitted row, then inserts nothing.
+      const second = claim(false);
+      setTimeout(releaseFirst, 200);
+
+      expect((await Promise.all([first, second])).sort()).toEqual([0, 1]);
+    });
+
+    it('lets no other tenant write a decline row for the intent', async () => {
+      const owner = `${org.b}-REC-OWNER`;
+      const made = await topUp(owner, 400n);
+      const stranger = `${org.c}-REC-STRANGER`;
+
+      // The tenant guard stamps the caller's tenant; the composite foreign key
+      // then finds no such intent in that tenant.
+      await expect(
+        asActor({ organizationId: stranger }, () =>
+          prisma.client.paymentRefundDecline.createMany({
+            data: [{ ...declineRow(stranger, made.intentId, 'K:refund') }],
+            skipDuplicates: true,
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(
+        await runUnscoped('the suite reads the decline record', () =>
+          prisma.client.paymentRefundDecline.count({ where: { paymentIntentId: made.intentId } }),
+        ),
+      ).toBe(0);
     });
   });
 

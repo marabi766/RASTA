@@ -284,7 +284,18 @@ Instrument (S-09)، و ثبت در `docs/07` و `docs/events/README.md`.
 > قواعد: `PAYMENT_REFUNDED` در تراکنش `recordRefund` (یک مسیر برای بازپرداخت اپراتور، آشتی‌دهنده و حل تأییدشدهٔ اپراتور) و
 > `PAYMENT_REFUND_FAILED` در تراکنش `returnDeclinedHold` برای ردِ Provider — و فقط وقتی همان تراکنش Hold را برگرداند، تا
 > تلاش دوباره دوبار اعلام نکند. «نرسیدن به Provider» رد نیست و با `PAYMENT_RECONCILIATION_RESOLVED`
-> (`REFUND_NOT_REACHED`) ثبت می‌شود. بی Migration و بی Endpoint تازه.
+> (`REFUND_NOT_REACHED`) ثبت می‌شود. بی Endpoint تازه.
+>
+> **اصلاح (بازبینی Codex روی #210):** ردِ تجاری کلید Idempotency درخواست را آزاد می‌کند، پس همان درخواست با همان کلید دوباره
+> اجرا می‌شد: Hold تازه، Provider با همان کلید بازپرداخت (`<key>:refund`) ردِ ذخیره‌شده‌اش را تکرار می‌کرد، Hold دوباره برمی‌گشت
+> و `PAYMENT_REFUND_FAILED` دوم برای همان پاسخ Provider نوشته می‌شد. اکنون اعلام ردّ **حداکثر یک بار به‌ازای (Intent، کلید
+> بازپرداخت Provider)** است و پایگاه داده آن را تضمین می‌کند: جدول `payment_refund_decline` (Migration
+> `20261003100000_payment_refund_decline`) با کلید اصلی `(organization_id, payment_intent_id, provider_refund_key)`، در همان
+> تراکنش رویداد با `ON CONFLICT DO NOTHING` درج می‌شود و رویداد فقط وقتی ردیف تازه باشد Enqueue می‌شود. ردیف و نه Insert
+> idempotent در Outbox، چون Outbox شمارهٔ Stream را پیش از ساختن ردیف می‌گیرد (ADR-051 B3) و Insert متعارض یا باید شماره را
+> پس بدهد یا شکاف بگذارد. کلید متمایزِ تلاش Provider، اگر روزی مجاز شود، ردیف و رویداد خودش را دارد. **هنوز نیست:** تکرار همان
+> درخواست هنوز یک Hold می‌گذارد و برمی‌گرداند (بی اثر خالص)؛ پخش دوبارهٔ خودِ ردّ بدون اجرای دوبارهٔ کار، ثبت نتیجهٔ خطای نهایی
+> در `IdempotencyStore` را می‌خواهد که برای هیچ Endpointی امروز چنین نمی‌کند — جدا ارجاع شد.
 
 ### ۱۰. پیکربندی و پایش
 
