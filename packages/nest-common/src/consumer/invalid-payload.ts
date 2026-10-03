@@ -1,0 +1,139 @@
+import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { UnprocessableEventError } from './event-consumer';
+
+/** The shape of a zod error this reads, so no particular zod instance is assumed. */
+interface SchemaIssues {
+  readonly issues: readonly { readonly path: readonly PropertyKey[]; readonly code: string }[];
+}
+
+/** How many issues the message names; the rest are counted. */
+const MAX_NAMED_ISSUES = 5;
+
+/**
+ * The refusal for a KNOWN event whose payload fails the consumer's schema
+ * (audit L7-26, docs/07 § 7.6).
+ *
+ * Such an event is a producer defect that no retry fixes, so it is
+ * dead-lettered at once as `VALIDATION_FAILED` rather than acknowledged as
+ * `SKIPPED` — an inspection failure or a usage reading that silently vanished
+ * left no trace anyone could replay. The handler throws this before writing
+ * its processed-event marker, so a corrected event with the same id, replayed
+ * once the producer is fixed, is still applied. An event name the consumer
+ * does not handle is not this case: it stays a skip (forward compatibility).
+ *
+ * The message reaches the log and `x-dlq-error`, so it carries identifiers and
+ * closed codes only (S-09): the event name and id, and per issue the field
+ * path and zod's issue code. A path segment is shown only when it is one of
+ * `fields` — the names the consumer's schema declares — or an array index;
+ * any other segment is a key the payload supplied and is shown as `*`. Zod's
+ * issue messages are left out because some repeat the value received.
+ */
+export function invalidPayloadError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+  error: SchemaIssues,
+  fields: readonly string[],
+): UnprocessableEventError {
+  const declared = new Set(fields);
+  const segment = (key: PropertyKey): string =>
+    typeof key === 'number' || (typeof key === 'string' && declared.has(key)) ? String(key) : '*';
+  const named = error.issues
+    .slice(0, MAX_NAMED_ISSUES)
+    .map((issue) => `${issue.path.map(segment).join('.') || '(root)'} ${issue.code}`);
+  const more =
+    error.issues.length > MAX_NAMED_ISSUES
+      ? `; and ${error.issues.length - MAX_NAMED_ISSUES} more`
+      : '';
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} payload fails its schema: ${named.join('; ')}${more}`,
+  );
+}
+
+/**
+ * The refusal for a KNOWN tenant-scoped event that carries no tenant anywhere
+ * — neither in its payload nor on its envelope (audit L7-26).
+ *
+ * For an event name the consumer projects into a tenant's rows, a missing
+ * tenant is a broken producer, not an event meant for someone else: there is
+ * no organization to scope the write to, and guessing one would invent the
+ * fact the row exists to carry. Acknowledging it as `SKIPPED` would lose it
+ * without a trace, so it is dead-lettered at once as `VALIDATION_FAILED`,
+ * thrown before the processed-event marker so a corrected replay with the
+ * same id is still applied. Event names the consumer does not handle keep
+ * their skip (forward compatibility).
+ *
+ * The message carries the event name and id only (S-09).
+ */
+export function missingTenantError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+): UnprocessableEventError {
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} carries no tenant`,
+  );
+}
+
+/**
+ * The refusal for a KNOWN tenant-scoped event whose payload names another
+ * organization than its envelope tenant.
+ *
+ * Every producer stamps the envelope tenant from the same organization it puts
+ * in the payload, so a disagreement is a broken or forged event. Neither value
+ * is trusted over the other: the event is dead-lettered at once as
+ * `VALIDATION_FAILED`, before the processed-event marker. The message carries
+ * the event name and id and the closed code `tenant_mismatch` — never either
+ * organization (S-09).
+ */
+export function tenantMismatchError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+): UnprocessableEventError {
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} payload organization differs from its envelope tenant: tenant_mismatch`,
+  );
+}
+
+/**
+ * The tenant a KNOWN tenant-scoped event is applied under: its envelope
+ * tenant, and only that (review #205 r1).
+ *
+ * The payload's organization is never a fallback — an event with no envelope
+ * tenant is refused with {@link missingTenantError} whatever its payload says,
+ * because a write taken from the payload and marked processed could never be
+ * corrected by a replay. When the payload also names an organization it must
+ * be the same one, else {@link tenantMismatchError}. Both are thrown before
+ * any state change and before the processed-event marker.
+ */
+export function requireEnvelopeTenant(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId' | 'tenantId'>,
+  payloadOrganizationId: unknown,
+): string {
+  const tenant = envelope.tenantId;
+  if (typeof tenant !== 'string' || tenant.length === 0) throw missingTenantError(envelope);
+  if (payloadOrganizationId !== undefined && payloadOrganizationId !== null) {
+    if (payloadOrganizationId !== tenant) throw tenantMismatchError(envelope);
+  }
+  return tenant;
+}
+
+/**
+ * The refusal for a KNOWN state event whose tenant is not the owner of the
+ * replica row it would change (review #205 r2).
+ *
+ * The envelope tenant (already agreeing with the payload) names one
+ * organization; the replica, read under its lock, says the asset belongs to
+ * another. Applied, the event would change the other organization's row and be
+ * marked processed. It is refused as `VALIDATION_FAILED` from inside the
+ * consumer's transaction, so the marker rolls back with it and a corrected
+ * event with the same id is still applied. The message carries the event name
+ * and id and the closed code `owner_mismatch` — never either organization
+ * (S-09).
+ */
+export function replicaOwnerMismatchError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+): UnprocessableEventError {
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} names a tenant that does not own the asset: owner_mismatch`,
+  );
+}

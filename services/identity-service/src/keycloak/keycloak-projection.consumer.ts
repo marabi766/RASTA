@@ -1,7 +1,12 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { z } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventHandler, HandlerOutcome } from '@rasta/nest-common';
+import {
+  invalidPayloadError,
+  type EventConsumer,
+  type EventHandler,
+  type HandlerOutcome,
+} from '@rasta/nest-common';
 import { IDENTITY_EVENTS } from '../identity/events';
 import { KeycloakProjector } from './keycloak.projector';
 
@@ -71,9 +76,10 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnModuleDestroy
     const parsed = namesUser.safeParse(envelope.payload);
     if (!parsed.success) {
       // The producer is this service, and publish-time validation requires the
-      // field; a payload without it is a defect a retry cannot fix.
-      this.logger.warn(`${envelope.eventName} ${envelope.eventId} names no user; not projected`);
-      return 'SKIPPED';
+      // field; a payload without it is a defect a retry cannot fix. Dead-lettered
+      // at once rather than acknowledged, so the missed projection has a record
+      // an operator sees (audit L7-26, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, Object.keys(namesUser.shape));
     }
 
     await this.projector.project(parsed.data.userId, 'event');

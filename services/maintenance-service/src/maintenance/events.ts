@@ -488,6 +488,57 @@ export const assetTransferredSchema = z
   });
 
 /**
+ * `ASSET_CREATED`, held to the fields its projection copies (asset-service
+ * `assetCreatedPayload` always carries them). One without its status would
+ * otherwise be written as `REGISTERED`, a status nobody stated (review #205
+ * r1). Still `.passthrough()` for fields added later.
+ */
+export const assetCreatedSchema = assetSourceSchema.extend({
+  name: z.string(),
+  type: z.string(),
+  assetTag: z.string().nullable(),
+  status: z.string().min(1),
+});
+
+/**
+ * `ASSET_STATUS_CHANGED`, held to the status it changes to (asset-service
+ * `assetStatusChangedPayload`). Without `newStatus` the replica would keep the
+ * old status and be marked processed, with no corrected replay able to fix it
+ * (review #205 r1).
+ */
+export const assetStatusChangedSchema = assetSourceSchema.extend({
+  newStatus: z.string().min(1),
+});
+
+/** What a consumed asset event's payload is checked against, and the field names a refusal may repeat (S-09). */
+export interface ConsumedPayloadContract {
+  readonly schema: z.ZodTypeAny;
+  readonly fields: readonly string[];
+}
+
+const contract = (object: z.AnyZodObject) => ({
+  schema: object,
+  fields: Object.keys(object.shape),
+});
+
+/**
+ * Per asset event the replica projects, the producer-contract fields its
+ * projection uses (review #205 r1), checked before the processed marker. The
+ * rest need only the machine; `ASSET_TRANSFERRED` is held to
+ * {@link assetTransferredSchema} by the handler before this.
+ */
+export const ASSET_PAYLOADS: Record<
+  Exclude<ConsumedEventName, typeof CONSUMED_EVENTS.USAGE_RECORDED>,
+  ConsumedPayloadContract
+> = {
+  [CONSUMED_EVENTS.ASSET_CREATED]: contract(assetCreatedSchema),
+  [CONSUMED_EVENTS.ASSET_ACTIVATED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.ASSET_STATUS_CHANGED]: contract(assetStatusChangedSchema),
+  [CONSUMED_EVENTS.ASSET_TRANSFERRED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: contract(assetSourceSchema),
+};
+
+/**
  * The shape of `USAGE_RECORDED` this service depends on.
  *
  * Quantities arrive as strings because they are NUMERIC at the source and a

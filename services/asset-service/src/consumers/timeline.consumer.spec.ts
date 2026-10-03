@@ -137,22 +137,85 @@ describe('TimelineConsumer', () => {
       expect(h.appended).toHaveLength(0);
     });
 
-    it('skips an event that names no asset', async () => {
+    it('dead-letters, rather than skips, a projected event that names no asset (L7-26)', async () => {
+      // A producer defect no retry fixes: refused at once as VALIDATION_FAILED,
+      // before the marker, so a corrected replay of the same id still applies.
       const h = harness();
-      const result = await h.consumer.handle(envelope({ payload: { organizationId: DEH1 } }));
+      const SENTINEL = 'SENTINEL-free-text-0012345678';
 
-      expect(result).toBe('SKIPPED');
+      const refusal = h.consumer.handle(
+        envelope({ payload: { organizationId: DEH1, assetId: 7, notes: SENTINEL } }),
+      );
+
+      await expect(refusal).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'USAGE_RECORDED EVT_1 payload fails its schema: assetId invalid_type',
+      });
+      expect(h.markProcessed).not.toHaveBeenCalled();
       expect(h.appended).toHaveLength(0);
     });
 
-    it('skips an event carrying no tenant', async () => {
-      // Without a tenant there is no organization to scope the write to, and
-      // guessing one would put another dehyari's history on this machine.
+    it('applies the corrected event replayed from the DLQ, once (L7-26)', async () => {
       const h = harness();
-      const result = await h.consumer.handle(envelope({ tenantId: undefined }));
+      const marked = new Set<string>();
+      h.markProcessed.mockImplementation(async (_tx: unknown, eventId: string) => {
+        if (marked.has(eventId)) return false;
+        marked.add(eventId);
+        return true;
+      });
+      const replay = { topic: 'rasta.fleet.v1.retry', partition: 0 };
+
+      await expect(
+        h.consumer.handle(envelope({ payload: { organizationId: DEH1 } })),
+      ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+      await expect(h.consumer.handle(envelope(), replay)).resolves.toBeUndefined();
+      await expect(h.consumer.handle(envelope(), replay)).resolves.toBe('SKIPPED');
+
+      expect(h.appended).toHaveLength(1);
+      expect(h.appended[0]?.sourceEventId).toBe('EVT_1');
+    });
+
+    it('still skips an event it does not project, however malformed (forward compatibility)', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', payload: {} }),
+      );
 
       expect(result).toBe('SKIPPED');
+      expect(h.markProcessed).not.toHaveBeenCalled();
+    });
+
+    it('dead-letters, rather than skips, a projected event carrying no tenant (L7-26)', async () => {
+      // Without a tenant there is no organization to scope the write to, and
+      // guessing one would put another dehyari's history on this machine. For
+      // an event this service projects that is a broken producer: refused at
+      // once, before the marker, so the dossier entry is not lost.
+      const h = harness();
+      const untenanted = envelope({ tenantId: undefined, payload: { assetId: ASSET_ID } });
+
+      await expect(h.consumer.handle(untenanted)).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'USAGE_RECORDED EVT_1 carries no tenant',
+      });
+      expect(h.markProcessed).not.toHaveBeenCalled();
       expect(h.appended).toHaveLength(0);
+
+      // The corrected event, replayed with the same id, is applied.
+      await h.consumer.handle(envelope({ payload: { assetId: ASSET_ID } }));
+      expect(h.markProcessed).toHaveBeenCalledTimes(1);
+      expect(h.appended).toHaveLength(1);
+    });
+
+    it('still skips an event it does not project, with no tenant (forward compatibility)', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', tenantId: undefined, payload: {} }),
+      );
+
+      expect(result).toBe('SKIPPED');
+      expect(h.markProcessed).not.toHaveBeenCalled();
     });
 
     it('skips an event about an asset this service does not hold', async () => {
@@ -329,14 +392,14 @@ describe('TimelineConsumer', () => {
       const h = harness();
       await h.consumer.handle(
         envelope({
-          eventName: 'ORDER_COMPLETED',
-          producer: 'marketplace-service',
-          payload: { assetId: ASSET_ID, totalMinor: '125000000' },
+          eventName: 'REPAIR_COMPLETED',
+          producer: 'maintenance-service',
+          payload: { assetId: ASSET_ID, totalCostMinor: '125000000' },
         }),
       );
 
       expect(h.appended[0]?.amountMinor).toBe(125_000_000n);
-      expect(h.appended[0]?.category).toBe('COST');
+      expect(h.appended[0]?.category).toBe('MAINTENANCE');
     });
 
     it('refuses a money value that arrived as a number', async () => {
@@ -345,9 +408,9 @@ describe('TimelineConsumer', () => {
       const h = harness();
       await h.consumer.handle(
         envelope({
-          eventName: 'ORDER_COMPLETED',
-          producer: 'marketplace-service',
-          payload: { assetId: ASSET_ID, totalMinor: 125000000 },
+          eventName: 'REPAIR_COMPLETED',
+          producer: 'maintenance-service',
+          payload: { assetId: ASSET_ID, totalCostMinor: 125000000 },
         }),
       );
 
@@ -444,18 +507,32 @@ describe('TimelineConsumer', () => {
       expect(h.appended).toHaveLength(0);
     });
 
-    it('still projects ORDER_COMPLETED exactly as before — that contract did not change', async () => {
+    it('skips a real-shaped ORDER_COMPLETED: it names no asset, so it is not projected (review #205 r1)', async () => {
+      // marketplace's `orderCompletedPayload` as published. Projected, every
+      // order completion would have been dead-lettered for want of an asset.
       const h = harness();
-      await h.consumer.handle(
+      const result = await h.consumer.handle(
         envelope({
           eventName: 'ORDER_COMPLETED',
           producer: 'marketplace-service',
-          payload: { assetId: ASSET_ID, totalMinor: '99000' },
+          aggregateType: 'Order',
+          payload: {
+            orderId: 'ORD_1',
+            buyerOrganizationId: DEH1,
+            supplierOrganizationId: 'ORG-SUP',
+            totalAmountMinor: '250000',
+            commissionAmountMinor: '5000',
+            netAmountMinor: '245000',
+            currency: 'IRR',
+            settlementId: 'STL_1',
+            completedAt: '2026-09-17T00:00:00.000Z',
+          },
         }),
       );
 
-      expect(h.appended).toHaveLength(1);
-      expect(h.appended[0]).toMatchObject({ category: 'COST', eventName: 'ORDER_COMPLETED' });
+      expect(result).toBe('SKIPPED');
+      expect(h.markProcessed).not.toHaveBeenCalled();
+      expect(h.appended).toHaveLength(0);
     });
   });
 

@@ -1,6 +1,11 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import type { EventConsumer, EventHandler } from '@rasta/nest-common';
+import {
+  invalidPayloadError,
+  requireEnvelopeTenant,
+  type EventConsumer,
+  type EventHandler,
+} from '@rasta/nest-common';
 import { usageReadingsAppliedTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
@@ -44,6 +49,9 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
  */
 
 const CONSUMER_NAME = 'maintenance-service.usage';
+
+/** The field names a malformed-payload refusal may repeat (S-09). */
+const USAGE_RECORDED_FIELDS = Object.keys(usageRecordedSchema.shape);
 
 /**
  * Builds the broker-facing half.
@@ -101,24 +109,21 @@ export class UsageConsumer implements OnModuleInit, OnModuleDestroy {
 
     const parsed = usageRecordedSchema.safeParse(envelope.payload);
     if (!parsed.success) {
-      // A usage event that names no machine, or no record. A producer defect
-      // worth seeing, but not one a retry fixes — so it is logged and skipped
-      // rather than dead-lettered, where it would only be quieter.
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} is not a usable usage reading; skipping`,
-      );
-      return 'SKIPPED';
+      // A usage event that names no machine, or no record: a producer defect
+      // no retry fixes. Dead-lettered at once, before the marker, so the
+      // reading is not lost and a corrected replay still advances the meter
+      // (audit L7-26, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, USAGE_RECORDED_FIELDS);
     }
 
     const payload = parsed.data;
-    const organizationId = payload.organizationId ?? envelope.tenantId;
-
-    if (!organizationId) {
-      // Without a tenant there is no organization to scope the meter to.
-      // Guessing one would be inventing the fact the meter exists to carry.
-      this.logger.warn(`${envelope.eventName} ${envelope.eventId} carries no tenant; skipping`);
-      return 'SKIPPED';
-    }
+    // The meter is scoped by the ENVELOPE tenant, never by the payload (review
+    // #205 r1): a reading folded into the organization its payload names and
+    // marked processed could not be corrected by any replay. No envelope
+    // tenant, or a payload naming another organization, is a broken producer:
+    // dead-lettered at once, before the marker, so a corrected replay still
+    // advances the meter (L7-26).
+    const organizationId = requireEnvelopeTenant(envelope, payload.organizationId);
 
     const now = new Date();
 

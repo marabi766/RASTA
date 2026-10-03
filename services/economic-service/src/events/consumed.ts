@@ -97,6 +97,16 @@ export const maintenanceApprovedSchema = z
 export type MaintenanceApprovedEvent = z.infer<typeof maintenanceApprovedSchema>;
 
 /**
+ * The names `maintenanceApprovedSchema` declares, at every level — what a
+ * dead-letter message may name of a failing payload (S-09, L7-26).
+ */
+export const MAINTENANCE_APPROVED_FIELDS: readonly string[] = [
+  ...Object.keys(maintenanceApprovedSchema.shape),
+  'category',
+  'amountMinor',
+];
+
+/**
  * A machine is back in service — a reward trigger.
  *
  * Reward rules may condition on `type` (a `PREVENTIVE` completion is the
@@ -119,6 +129,11 @@ export const maintenanceCompletedSchema = z
   .passthrough();
 
 export type MaintenanceCompletedEvent = z.infer<typeof maintenanceCompletedSchema>;
+
+/** The names `maintenanceCompletedSchema` declares (S-09, L7-26). */
+export const MAINTENANCE_COMPLETED_FIELDS: readonly string[] = Object.keys(
+  maintenanceCompletedSchema.shape,
+);
 
 /**
  * Usage was recorded — the platform's most frequent reward trigger
@@ -146,6 +161,9 @@ export const usageRecordedSchema = z
   .passthrough();
 
 export type UsageRecordedEvent = z.infer<typeof usageRecordedSchema>;
+
+/** The names `usageRecordedSchema` declares (S-09, L7-26). */
+export const USAGE_RECORDED_FIELDS: readonly string[] = Object.keys(usageRecordedSchema.shape);
 
 /**
  * Events this service will consume once their contracts are real.

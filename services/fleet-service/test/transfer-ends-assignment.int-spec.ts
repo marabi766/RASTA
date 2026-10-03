@@ -3,7 +3,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
 
 /**
  * ASSET_TRANSFERRED ends the assignments still open on the machine (the
@@ -55,7 +55,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
     aggregateId: String(payload.assetId),
     tenantId,
     correlationId: id('COR'),
-    payload,
+    payload: producerShaped(eventName, payload),
   });
 
   // Tenant = the new owner, as asset-service stamps it; the consumer now
