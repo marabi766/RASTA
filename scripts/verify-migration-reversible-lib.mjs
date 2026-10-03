@@ -2127,16 +2127,35 @@ export function libpqUrl(url) {
 }
 
 /**
+ * How to hand `url` to psql without putting its password on the command line,
+ * where any local user can read it (`ps`, `/proc/<pid>/cmdline`) for as long
+ * as the process runs (D-045 follow-up). `target` is the libpq URL with the
+ * password removed — from the userinfo and from a `password=` parameter alike
+ * — and `env` carries it as `PGPASSWORD`, which libpq reads when the URL has
+ * none. Spread `env` over the child's environment; it is empty when the URL
+ * has no password, so an inherited `PGPASSWORD` or `.pgpass` still applies.
+ */
+export function libpqInvocation(url) {
+  const target = new URL(libpqUrl(url));
+  const password = target.password
+    ? decodeURIComponent(target.password)
+    : target.searchParams.get('password');
+  target.password = '';
+  target.searchParams.delete('password');
+  return { target: target.toString(), env: password ? { PGPASSWORD: password } : {} };
+}
+
+/**
  * Runs one SQL script with psql against `url`'s database. Returns
  * `{ ok, stdout, output, sqlstate }`; `stdout` is unaligned tuples only.
  */
 export function psqlRunner(url) {
-  const target = libpqUrl(url);
+  const { target, env } = libpqInvocation(url);
   return (script) => {
     const result = spawnSync(
       'psql',
       [target, '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=verbose', '-c', script],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', env: { ...process.env, ...env } },
     );
     const stdout = result.stdout ?? '';
     const stderr = result.stderr ?? (result.error ? String(result.error) : '');

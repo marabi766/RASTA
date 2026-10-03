@@ -123,8 +123,14 @@ function prisma(argv, { stdin, env } = {}) {
   return { ok: result.status === 0, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
 }
 
+// `--schema` with the url in the child's environment, never `--url`: an
+// argument is readable by any local user for as long as the process runs
+// (`ps`, /proc/<pid>/cmdline), and this url is the database owner's.
 const sql = (script) =>
-  prisma(['db', 'execute', '--url', scratchUrl, '--stdin'], { stdin: script });
+  prisma(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], {
+    stdin: script,
+    env: { DATABASE_URL: scratchUrl },
+  });
 const dropScratch = () => sql(`DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE;`);
 
 function mustRun(label, script) {

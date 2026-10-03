@@ -48,6 +48,12 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * collision whose row has vanished by the time it is read (released or
  * purged) retries the atomic insert; an expired row is removed by a delete
  * conditioned on that row's own token and expiry, then the insert is retried.
+ *
+ * That delete waits for a domain transaction still holding the expired row
+ * (its completion locked it), and the insert can wait behind an uncommitted
+ * delete of the same key. Both wait only for what is left of
+ * {@link CLAIM_WAIT_MS} from the start of the claim; running out is the
+ * retryable `409 CONFLICT`, never a hang (#194).
  */
 
 /** Records the completion inside the caller's domain transaction. */
@@ -69,6 +75,17 @@ const CLAIM_ATTEMPTS = 3;
 
 /** `Retry-After` on the in-flight 409, as docs/06 § 6.8 states it. */
 const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
+
+/**
+ * The most one claim waits on another transaction's lock on its key, over all
+ * its attempts — the same bound the other services' stores keep.
+ */
+export const CLAIM_WAIT_MS = 5_000;
+/** Slack for a claim-side transaction beyond its lock wait, so the wait ends first. */
+const WAIT_TRANSACTION_SLACK_MS = 2_000;
+
+/** PostgreSQL's `lock_not_available`, raised when `lock_timeout` elapses. */
+const LOCK_NOT_AVAILABLE = '55P03';
 
 @Injectable()
 export class IdempotencyStore {
@@ -98,6 +115,7 @@ export class IdempotencyStore {
     const organizationId = getOrganizationId();
     const requestHash = this.hash(body);
     const where = { organizationId_endpoint_key: { organizationId, endpoint, key } };
+    const deadline = Date.now() + CLAIM_WAIT_MS;
 
     for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt += 1) {
       const now = new Date();
@@ -107,17 +125,19 @@ export class IdempotencyStore {
       );
 
       try {
-        await this.prisma.client.idempotencyKey.create({
-          data: {
-            key,
-            organizationId,
-            endpoint,
-            requestHash,
-            claimToken: token,
-            state: 'IN_PROGRESS',
-            expiresAt,
-          },
-        });
+        await this.withinBudget(endpoint, deadline, (tx) =>
+          tx.idempotencyKey.create({
+            data: {
+              key,
+              organizationId,
+              endpoint,
+              requestHash,
+              claimToken: token,
+              state: 'IN_PROGRESS',
+              expiresAt,
+            },
+          }),
+        );
         return { kind: 'PROCEED', claim: { organizationId, endpoint, key, token } };
       } catch (error) {
         if (!isUniqueViolation(error)) throw error;
@@ -132,15 +152,18 @@ export class IdempotencyStore {
       if (existing.expiresAt <= now) {
         // Only the row that was read, and only while it is still expired: a
         // fresh claim another caller inserted meanwhile is never touched.
-        await this.prisma.client.idempotencyKey.deleteMany({
-          where: {
-            organizationId,
-            endpoint,
-            key,
-            claimToken: existing.claimToken,
-            expiresAt: { lte: now },
-          },
-        });
+        // Waits for a domain transaction still holding it — within the budget only.
+        await this.withinBudget(endpoint, deadline, (tx) =>
+          tx.idempotencyKey.deleteMany({
+            where: {
+              organizationId,
+              endpoint,
+              key,
+              claimToken: existing.claimToken,
+              expiresAt: { lte: now },
+            },
+          }),
+        );
         continue;
       }
 
@@ -153,6 +176,34 @@ export class IdempotencyStore {
     }
 
     throw this.inFlight(endpoint);
+  }
+
+  /**
+   * Runs one claim-side statement in a short transaction of its own, whose
+   * `lock_timeout` is what is left of the claim's budget: a lock it cannot get
+   * in that time is the retryable `409 CONFLICT` (`Retry-After: 1`), never an
+   * unbounded wait. A budget already spent refuses before asking.
+   */
+  private async withinBudget<R>(
+    endpoint: string,
+    deadline: number,
+    statement: (tx: ExtendedPrismaClient) => Promise<R>,
+  ): Promise<R> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw this.inFlight(endpoint);
+    const waitMs = Math.max(1, Math.ceil(remaining));
+    try {
+      return await this.prisma.transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`;
+          return statement(tx);
+        },
+        { timeoutMs: waitMs + WAIT_TRANSACTION_SLACK_MS },
+      );
+    } catch (error) {
+      if (isLockTimeout(error)) throw this.inFlight(endpoint);
+      throw error;
+    }
   }
 
   /**
@@ -342,6 +393,13 @@ export function hashRequestBody(body: unknown): string {
  *
  * `bigint` cannot appear in a parsed request body, and every amount in this
  * API is a string, so no BigInt-aware replacer is needed here.
+ *
+ * Every own key is kept, whatever its name: the sorted copies have no
+ * prototype (`Object.create(null)`). Assigned into a plain `{}`, a
+ * `"__proto__"` key would set the copy's prototype instead of becoming a key,
+ * `JSON.stringify` would drop it, and two different bodies would hash alike —
+ * the second replaying the first's response instead of being refused as
+ * `IDEMPOTENCY_KEY_REUSED` (#194).
  */
 function canonicalise(value: unknown): string {
   return JSON.stringify(sortKeys(value));
@@ -351,9 +409,18 @@ function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) sorted[key] = sortKeys(source[key]);
     return sorted;
   }
   return value;
+}
+
+/** A `lock_timeout` that elapsed, as Prisma reports it. */
+function isLockTimeout(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const meta = (error as { meta?: { code?: unknown } }).meta;
+  if (meta?.code === LOCK_NOT_AVAILABLE) return true;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' && message.includes('lock timeout');
 }

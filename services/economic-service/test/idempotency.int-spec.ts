@@ -109,6 +109,32 @@ describe('idempotency (real database)', () => {
       ).rejects.toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }));
     });
 
+    it.each(['__proto__', 'constructor'])(
+      'refuses a body that differs only under a %s key (#194)',
+      async (name) => {
+        // JSON.parse makes `name` an own key, as the request body parser does.
+        const body = (x: number): unknown => ({
+          amountMinor: '100',
+          extra: JSON.parse(`{"${name}":{"x":${x}}}`) as unknown,
+        });
+        const k = `key-proto-${name}`;
+        let runs = 0;
+        const work = async () => ({ runs: (runs += 1) });
+        const run = (x: number) =>
+          asActor({ organizationId: org.a }, () =>
+            idempotency.run('POST /itest', k, body(x), 201, work),
+          );
+
+        expect(await run(1)).toEqual({ runs: 1 });
+        await expect(run(2)).rejects.toThrow(
+          expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }),
+        );
+        // The same body is still the retry it is: replayed, not run again.
+        expect(await run(1)).toEqual({ runs: 1 });
+        expect(runs).toBe(1);
+      },
+    );
+
     it('refuses a key that is still in flight', async () => {
       // A caller retrying before the first attempt finished. `409 CONFLICT`
       // rather than a second execution, which is the safe way round for a

@@ -75,6 +75,19 @@ Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrat
 بی هیچ درخواستی به Keycloak) و Seedهای نمایشی، که فقط DML لازم دارند و بیرون از development/test هم رد می‌شوند.
 `scripts/service-boot-guard.test.mjs` چنین فایل‌هایی را می‌یابد و دروازه را از هر کدام می‌خواهد.
 
+**کد ما هرگز اعتبار را در argv نمی‌گذارد؛ موتور Schema پریزما هنوز URL را در argv خودش می‌گیرد (D-047).** آرگومان‌های
+هر فرایند را هر کاربر محلی، تا وقتی فرایند زنده است، می‌خواند (`ps`، `/proc/<pid>/cmdline`). پس در کد ما: Prisma
+`db execute` با `--schema prisma/schema.prisma` اجرا می‌شود و URL را از `DATABASE_URL` در محیط فرزند می‌خواند (نه `--url`)؛
+psql URL بی گذرواژه می‌گیرد و گذرواژه را از `PGPASSWORD` (`libpqInvocation` در `scripts/verify-migration-reversible-lib.mjs`)؛
+اسکریپت‌های پوسته (Bootstrap، چرخش گذرواژه، تقسیم) SQL — از جمله `ALTER ROLE … PASSWORD` — را از stdin (`psql -f -`) می‌دهند،
+نه `-c`؛ و در Workflowها URL دارای گذرواژه فقط در انتساب محیط (`KEY: value`) می‌آید. آزمون‌های
+`scripts/verify-migration-reversible-lib.test.mjs` (اسکریپت‌ها، کد و آزمون سرویس‌ها، Workflowها و هر فراخوانی psql/pg\_\*
+در اسکریپت‌های پوسته) و `scripts/infra-preflight.test.mjs` (هیچ گذرواژهٔ نقشی به argv نمی‌رسد) بازگشت آن را رد می‌کنند.
+**باقی‌مانده، بیرون از کد ما (D-047):** خود Prisma (6.19.3) در `migrate deploy`/`dev`/`reset`/`resolve`/`status` و `db push`
+پیش از کار، موتور Schema را با `schema-engine cli --datasource <url> can-connect-to-database` اجرا می‌کند؛ پس URL مهاجر
+برای چند میلی‌ثانیه در argv آن فرایند فرزند هست. **کنترل:** Migration فقط روی میزبان مطمئن یا کار CI اختصاصی اجرا
+می‌شود — هرگز روی ماشین مشترک چندکاربره. ارتقای Prisma که URL را از محیط/stdin بدهد (یا Driver Adapter) آن را می‌بندد.
+
 **عضویت هم مالکیت است.** نقش اجرایی که عضو مهاجر باشد — حتی `WITH INHERIT FALSE`، که چیزی به ارث نمی‌برد — با
 `SET ROLE` مهاجر می‌شود و هر نگهبان را برمی‌دارد. پس هر دو بررسی (`assertRuntimeRole` و `check:db-runtime-privileges`)
 مالکیت را با `pg_has_role … 'MEMBER'` می‌سنجند و هر عضویتی در نقشی که اینجا مالک چیزی است، نامش `*_migrator` است یا

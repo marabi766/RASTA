@@ -128,4 +128,27 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
       expect(seen).toEqual([]);
     });
   });
+
+  it.each(['__proto__', 'constructor'])(
+    'refuses a body that differs only under a %s key, and replays the same body (#194)',
+    async (name) => {
+      const k = key(`proto-${name}`);
+      // JSON.parse makes `name` an own key, as the request body parser does.
+      const body = (x: number): unknown => ({
+        lines: [{ offerId: 'OFR-ITEST', quantity: 1 }],
+        extra: JSON.parse(`{"${name}":{"x":${x}}}`) as unknown,
+      });
+      const claim = await as(org.buyer, () => store().claim(ENDPOINT, k, body(1)));
+      if (claim.kind !== 'PROCEED') throw new Error('expected to own the key');
+      await as(org.buyer, () => store().complete(ENDPOINT, k, claim.token, 201, { id: 'ORD-1' }));
+
+      await expect(as(org.buyer, () => store().claim(ENDPOINT, k, body(2)))).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+      });
+      expect(await as(org.buyer, () => store().claim(ENDPOINT, k, body(1)))).toMatchObject({
+        kind: 'REPLAY',
+        body: { id: 'ORD-1' },
+      });
+    },
+  );
 });

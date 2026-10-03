@@ -1,5 +1,5 @@
 import { runUnscoped } from '@rasta/nest-common';
-import { IdempotencyStore } from '../src/shared/idempotency';
+import { CLAIM_WAIT_MS, IdempotencyStore } from '../src/shared/idempotency';
 import { CREATE_PROJECT_ENDPOINT } from '../src/project/project.service';
 import { projectTransitionsTotal } from '../src/observability/metrics';
 import {
@@ -219,6 +219,97 @@ describe('idempotency store', () => {
     }
     expect(outcomes.some((outcome) => outcome.status === 'fulfilled')).toBe(true);
   });
+
+  it.each(['__proto__', 'constructor'])(
+    'refuses a body that differs only under a %s key, and replays the same body (#194)',
+    async (name) => {
+      const a = org();
+      const key = `proto-${name}`;
+      // JSON.parse makes `name` an own key, as the request body parser does. The
+      // schema refuses such a body today; the store must not rely on that.
+      const body = (x: number): unknown => ({
+        ...PROJECT,
+        extra: JSON.parse(`{"${name}":{"x":${x}}}`) as unknown,
+      });
+      let runs = 0;
+      const run = (x: number) =>
+        asAdmin(a, () =>
+          store.execute(CREATE_PROJECT_ENDPOINT, key, body(x), 201, (record) =>
+            w.prisma.transaction(async (tx) => {
+              runs += 1;
+              const response = { id: `PRJ_PROTO_${runs}` };
+              await record(tx, response.id, response);
+              return response;
+            }),
+          ),
+        );
+
+      const original = await run(1);
+      expect(original).toEqual({ result: { id: 'PRJ_PROTO_1' }, executed: true });
+      await expect(run(2)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      expect(await run(1)).toEqual({ result: original.result, executed: false });
+      expect(runs).toBe(1);
+    },
+  );
+
+  it('bounds the takeover of a lapsed claim: a holder that keeps its lock gets a retryable 409 within the budget, then the retry takes over (#194)', async () => {
+    const a = org();
+    const key = 'lapsed-held';
+    await seedKey(a, key, 'IN_PROGRESS', new Date(Date.now() - 60_000));
+
+    // A holder that keeps the lapsed claim's row lock past any request's
+    // budget, as a domain transaction that recorded its completion would. The
+    // retry's removal of the lapsed row waits on that lock — within the
+    // budget, never longer.
+    let reach!: () => void;
+    const reached = new Promise<void>((resolve) => (reach = resolve));
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    const holder = w.prisma.client.$transaction(
+      async (tx) => {
+        await tx.$queryRawUnsafe(
+          `SELECT 1 FROM idempotency_key
+           WHERE organization_id = $1 AND endpoint = $2 AND key = $3 FOR UPDATE`,
+          a,
+          CREATE_PROJECT_ENDPOINT,
+          key,
+        );
+        reach();
+        await opened;
+      },
+      { timeout: 30_000 },
+    );
+    await reached;
+
+    try {
+      const started = Date.now();
+      const refused = asAdmin(a, () => w.projects.create(PROJECT, key)).catch(
+        (error: unknown) => error,
+      );
+      const until = Date.now() + 5_000;
+      for (;;) {
+        const [{ waiting }] = await w.prisma.client.$queryRawUnsafe<{ waiting: number }[]>(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity
+           WHERE wait_event_type = 'Lock' AND query ILIKE 'DELETE FROM%idempotency_key%'`,
+        );
+        if (waiting > 0) break;
+        if (Date.now() > until) throw new Error('the retry never waited on the held claim');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(await refused).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+      const waited = Date.now() - started;
+      expect(waited).toBeGreaterThanOrEqual(CLAIM_WAIT_MS - 1_000);
+      expect(waited).toBeLessThan(CLAIM_WAIT_MS + 2_500);
+      expect(await projectsOf(a)).toEqual([]);
+    } finally {
+      open();
+      await holder;
+    }
+
+    // Once the holder lets go, the next retry takes the lapsed claim over.
+    const project = await asAdmin(a, () => w.projects.create(PROJECT, key));
+    expect((await projectsOf(a)).map((row) => row.id)).toEqual([project.id]);
+  }, 30_000);
 
   it('hashes a body independently of key order', () => {
     expect(store.hash({ a: 1, b: { c: 2, d: 3 } })).toBe(store.hash({ b: { d: 3, c: 2 }, a: 1 }));

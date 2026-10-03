@@ -38,6 +38,8 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { libpqInvocation } from './verify-migration-reversible-lib.mjs';
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVICES = [
   'asset',
@@ -94,9 +96,11 @@ function psql(url, sql, extraOptions = '') {
   const parsed = new URL(url);
   const schema = parsed.searchParams.get('schema') ?? 'public';
   parsed.search = '';
-  return spawnSync('psql', [parsed.toString(), '-X', '-v', 'ON_ERROR_STOP=1', '-tA', '-c', sql], {
+  // The password travels in the environment, never in psql's argv.
+  const { target, env } = libpqInvocation(parsed.toString());
+  return spawnSync('psql', [target, '-X', '-v', 'ON_ERROR_STOP=1', '-tA', '-c', sql], {
     encoding: 'utf8',
-    env: { ...process.env, PGOPTIONS: `-c search_path=${schema} ${extraOptions}`.trim() },
+    env: { ...process.env, ...env, PGOPTIONS: `-c search_path=${schema} ${extraOptions}`.trim() },
   });
 }
 

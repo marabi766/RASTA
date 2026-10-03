@@ -63,7 +63,9 @@ Domain Services  :31xx    ◄── فقط از شبکه داخلی؛ NetworkPol
 تکراری `409 CONFLICT` با `Retry-After: 1` می‌گیرد (نه خطای فرم: پورتال آن را «در حال پردازش است، کمی بعد دوباره ببینید»
 نشان می‌دهد و همان ارسال را پس از انتظار دوباره پیشنهاد می‌کند، که پاسخ درخواست اول را می‌گیرد). بررسی Claim، ثبت درخواست،
 Outbox و ذخیرهٔ پاسخ **یک تراکنش‌اند** (دور ۱ بازبینی #171): ایجادی که Claim آن منقضی و دوباره گرفته شده، چیزی Commit
-نمی‌کند، و شکست ذخیرهٔ پاسخ چیزی نیمه‌کاره نمی‌گذارد. کلیدها مال مستأجرند (همان کلید در دو سازمان، دو درخواست) و
+نمی‌کند، و شکست ذخیرهٔ پاسخ چیزی نیمه‌کاره نمی‌گذارد. برداشتن Claim منقضی‌ای که درخواستی هنوز قفلش را نگه داشته هم
+بیش از همان ۵ ثانیه منتظر نمی‌ماند: پس از آن `409 CONFLICT` با `Retry-After: 1` (#194). Hash درخواست هر کلید بدنه را، هر
+نامی داشته باشد (حتی `__proto__`)، دربر می‌گیرد. کلیدها مال مستأجرند (همان کلید در دو سازمان، دو درخواست) و
 `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` (پیش‌فرض ۲۴) از لحظهٔ پاسخ نگه داشته می‌شوند. بی کلید، رفتار پیشین.
 
 **`Idempotency-Key` روی `POST /v1/assets`** ([#169](https://github.com/marabi766/RASTA/issues/169)): **اجباری، در خودِ
@@ -217,20 +219,20 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 
-| وضعیت | کدهای نمونه                                                                                                      |
-| ----- | ---------------------------------------------------------------------------------------------------------------- |
-| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                        |
-| 413   | `PAYLOAD_TOO_LARGE`                                                                                              |
-| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                         |
-| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                            |
-| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                        |
-| 404   | `NOT_FOUND`                                                                                                      |
-| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED` |
-| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `CREATOR_IDENTITY_UNKNOWN`            |
-| 429   | `RATE_LIMIT_EXCEEDED`                                                                                            |
-| 500   | `INTERNAL_ERROR`                                                                                                 |
-| 503   | `UPSTREAM_UNAVAILABLE`                                                                                           |
-| 504   | `UPSTREAM_TIMEOUT`                                                                                               |
+| وضعیت | کدهای نمونه                                                                                                                      |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                        |
+| 413   | `PAYLOAD_TOO_LARGE`                                                                                                              |
+| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                         |
+| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                            |
+| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                        |
+| 404   | `NOT_FOUND`                                                                                                                      |
+| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`                 |
+| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `CREATOR_IDENTITY_UNKNOWN` · `ACTOR_IDENTITY_UNKNOWN` |
+| 429   | `RATE_LIMIT_EXCEEDED`                                                                                                            |
+| 500   | `INTERNAL_ERROR`                                                                                                                 |
+| 503   | `UPSTREAM_UNAVAILABLE`                                                                                                           |
+| 504   | `UPSTREAM_TIMEOUT`                                                                                                               |
 
 **CONSTRAINT.** پیام خطا هرگز شامل Stack Trace، نام جدول، بخشی از Query، یا داده مستأجر
 دیگر نیست. `404` و `403` برای منبع متعلق به مستأجر دیگر **هر دو `404` برمی‌گردانند** —
@@ -276,6 +278,10 @@ construction پاسخ را در همان تراکنش دامنه ثبت می‌�
 در هر سازمان **حداکثر یک سفارش** می‌سازد (`uq_order_org_idempotency_key`)، حتی
 پس از انقضا یا از دست رفتن رکورد کلید؛ سفارش دوم با همان کلید `409 CONFLICT`
 است، بدون `Retry-After`، چون صبر آن را حل نمی‌کند.
+
+**Hash بدنه هر کلید را دربر می‌گیرد** — هر نامی داشته باشد، حتی `__proto__` — پس دو بدنهٔ متفاوت هرگز یکی
+شمرده نمی‌شوند (#194). در construction، برداشتن کلید منقضی‌ای که تراکنش دامنه‌ای هنوز قفلش را نگه داشته حداکثر
+۵ ثانیه منتظر می‌ماند و سپس `409 CONFLICT` + `Retry-After: 1` است، نه انتظار بی‌پایان.
 
 **شناسهٔ منبع جزء هویت درخواست است.** کلید زیر الگوی مسیر ذخیره می‌شود
 (`POST /v1/orders/:id/cancel`)، پس روی مسیری که بر یک منبع مشخص عمل می‌کند،

@@ -155,4 +155,23 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
     expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
     expect(reused.headers['retry-after']).toBeUndefined();
   });
+
+  it.each(['__proto__', 'constructor'])(
+    'a body carrying a %s key is refused at the boundary, 400, and claims nothing (#194)',
+    async (name) => {
+      const offerId = await publishOffer();
+      const key = apiKey(`proto-${name}`);
+      const refused = await request(http)
+        .post('/v1/orders')
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', key)
+        .set('content-type', 'application/json')
+        .send(`{"lines":[{"offerId":"${offerId}","quantity":1}],"${name}":{"x":1}}`);
+
+      expect(refused.status).toBe(400);
+      expect(refused.body.code).toBe('VALIDATION_FAILED');
+      // Nothing was claimed: the key is still free for a valid request.
+      await placeOrder(buyerOrg, key, offerId).expect(201);
+    },
+  );
 });

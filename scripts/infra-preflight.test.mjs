@@ -234,9 +234,24 @@ function runWithStubPsql(
     const fails = failWhen ? `  *"${failWhen}"*) exit 2 ;;\n` : '';
     // `rolesExist`: every role-existence query answers 1, as on a cluster that has them all.
     const roles = rolesExist ? `  *"FROM pg_roles WHERE rolname"*) echo 1 ;;\n` : '';
+    // argv and stdin are recorded apart: `argv` is what any local user could
+    // read from the process table, `calls` is argv plus the SQL a helper sent on
+    // stdin (`-f -`), flattened to one line — what the database received.
+    const argvLog = join(dir, 'argv.log');
     writeFileSync(
       stub,
-      `#!/bin/bash\nprintf '%s\\n' "$*" >> '${log}'\ncase "$*" in\n${fails}${exists}${roles}esac\nexit 0\n`,
+      [
+        '#!/bin/bash',
+        'argv="$*"',
+        'call="$argv"',
+        'if [[ " $argv " == *" -f - "* ]]; then call="$argv $(cat)"; fi',
+        `printf '%s\\n' "$argv" >> '${argvLog}'`,
+        `printf '%s\\n' "\${call//$'\\n'/ }" >> '${log}'`,
+        'case "$call" in',
+        `${fails}${exists}${roles}esac`,
+        'exit 0',
+        '',
+      ].join('\n'),
     );
     chmodSync(stub, 0o755);
     const result = spawnSync('bash', [script, ...args], {
@@ -252,8 +267,14 @@ function runWithStubPsql(
         ...env,
       },
     });
-    const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
-    return { status: result.status, stderr: result.stderr, calls };
+    const lines = (file) =>
+      existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+    return {
+      status: result.status,
+      stderr: result.stderr,
+      calls: lines(log),
+      argv: lines(argvLog),
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -636,3 +657,35 @@ test('.env.example holds no owner credential; .env.migrator.example holds every 
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// D-045 follow-up (Codex on #191): a role's password never reaches psql's argv.
+// Bootstrap, rotation and the split all set passwords with ALTER ROLE … PASSWORD;
+// that SQL goes on stdin, because a process's arguments are readable by every
+// local user while it runs.
+// ---------------------------------------------------------------------------
+
+for (const [label, script, options] of [
+  ['bootstrap', BOOTSTRAP, {}],
+  ['rotation', ROTATE, { rolesExist: true }],
+  ['split', SPLIT, { args: ['construction'] }],
+]) {
+  test(`${label}: every ALTER ROLE … PASSWORD goes on stdin, none in psql's argv`, () => {
+    const { status, stderr, calls, argv } = runWithStubPsql(script, {}, options);
+    assert.equal(status, 0, stderr);
+
+    // What the database received: the passwords really were set.
+    const passwords = calls.flatMap((call) =>
+      [...call.matchAll(/PASSWORD '([^']+)'/g)].map((match) => match[1]),
+    );
+    assert.ok(passwords.length > 0, 'no ALTER ROLE … PASSWORD was sent at all');
+
+    // What the process table showed: none of them, and no PASSWORD clause.
+    for (const line of argv) {
+      assert.doesNotMatch(line, /PASSWORD/i, `a password clause reached argv: ${line}`);
+      for (const password of passwords) {
+        assert.ok(!line.includes(password), `a role password reached psql's argv (${label})`);
+      }
+    }
+  });
+}
