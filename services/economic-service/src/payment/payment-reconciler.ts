@@ -46,12 +46,46 @@ export type ReconcileResult =
   | 'escalated'
   | 'lost_lease';
 
-/** Thrown inside an apply transaction whose task another sweeper now holds: rolls it all back. */
-class LeaseLost extends Error {
+/**
+ * Thrown inside an apply transaction whose task its caller no longer holds —
+ * another sweeper re-claimed it, or (for an operator) a sweeper holds it or it
+ * is no longer open: rolls it all back.
+ */
+export class LeaseLost extends Error {
   constructor() {
-    super('The reconciliation task is no longer held by this sweeper');
+    super('The reconciliation task is no longer held by this caller');
   }
 }
+
+/** The task an apply transaction finishes: a claimed one, or one an operator locked. */
+export type AppliedTask = Pick<
+  ClaimedTask,
+  'id' | 'organizationId' | 'paymentIntentId' | 'kind' | 'attempts'
+>;
+
+/**
+ * Who resolves, and what their resolution adds to the record (ADR-064 step B3).
+ * The sweeper is {@link SWEEPER}; an approved operator resolution names the
+ * approver as `actor`, and both actors and the evidence go on the event.
+ */
+export interface Resolver {
+  /** `resolved_by` on the task and the event; the actor of the reversal. */
+  actor: string;
+  /** Why the reversal is recorded, for its journal. */
+  because: string;
+  operator?: {
+    resolutionId: string;
+    proposedBy: string;
+    approvedBy: string;
+    evidenceReference: string;
+    fourEyes: boolean;
+  };
+}
+
+const SWEEPER: Resolver = {
+  actor: PAYMENT_RECONCILER,
+  because: 'the provider confirmed the refund',
+};
 
 /**
  * Resolves one claimed reconciliation task (ADR-064 step B2, plan § 2.3).
@@ -111,7 +145,9 @@ export class PaymentReconciler {
     const ownership = this.tasks.ownershipOf(task);
     let verdict: Verdict;
     try {
-      verdict = await this.prisma.transaction((tx) => this.apply(tx, task, ownership, answer));
+      verdict = await this.prisma.transaction((tx) =>
+        this.apply(tx, task, ownership, answer, SWEEPER),
+      );
     } catch (error) {
       if (error instanceof LeaseLost) {
         this.logger.warn(
@@ -195,11 +231,22 @@ export class PaymentReconciler {
     }
   }
 
-  private async apply(
+  /**
+   * Step 3 for one task, in the caller's transaction: the locks, the fence,
+   * the decision under lock, the effect, the task finished and the event —
+   * or {@link LeaseLost}, and nothing. The sweeper and an approved operator
+   * resolution (step B3) both come through here: one path that moves money.
+   *
+   * A verdict that moves nothing (RETRY, DEFER, ESCALATE) is returned with
+   * nothing written. So is NOOP for an operator: approving "nothing to
+   * reconcile" is refused by the caller, not recorded as a resolution.
+   */
+  async apply(
     tx: ExtendedPrismaClient,
-    task: ClaimedTask,
-    ownership: TaskOwnership,
+    task: AppliedTask,
+    ownership: Pick<TaskOwnership, 'verify' | 'finish'>,
     answer: ProviderRefundAnswer,
+    resolver: Resolver,
   ): Promise<Verdict> {
     const status = await this.payments.lockIntent(tx, task.paymentIntentId, task.organizationId);
     if (status === undefined) throw RastaError.notFound('PaymentIntent', task.paymentIntentId);
@@ -220,20 +267,14 @@ export class PaymentReconciler {
 
     switch (verdict.action) {
       case 'RECORD_REFUNDED':
-        await this.payments.recordRefund(
-          tx,
-          row,
-          wallet,
-          PAYMENT_RECONCILER,
-          'the provider confirmed the refund',
-        );
+        await this.payments.recordRefund(tx, row, wallet, resolver.actor, resolver.because);
         break;
       case 'RETURN_HOLD':
         await this.payments.returnDeclinedHold(
           tx,
           row,
           wallet,
-          PAYMENT_RECONCILER,
+          resolver.actor,
           verdict.resolution === 'REFUND_DECLINED' ? 'DECLINED' : 'NOT_REACHED',
         );
         break;
@@ -253,13 +294,14 @@ export class PaymentReconciler {
         });
         break;
       case 'NOOP':
+        if (resolver.operator) return verdict;
         break;
       default:
         // RETRY, DEFER, ESCALATE: nothing moves in this transaction.
         return verdict;
     }
 
-    if ((await ownership.finish(tx, verdict.resolution, PAYMENT_RECONCILER)) !== 1) {
+    if ((await ownership.finish(tx, verdict.resolution, resolver.actor)) !== 1) {
       throw new LeaseLost();
     }
     await this.ledger.enqueue(tx, {
@@ -274,17 +316,19 @@ export class PaymentReconciler {
         marker: markerOf(row.failureReason),
         providerRefund: providerRefundOf(answer),
         resolution: verdict.resolution,
-        resolvedBy: PAYMENT_RECONCILER,
+        resolvedBy: resolver.actor,
         attempts: task.attempts,
         amountMinor: formatMinor(row.amountMinor),
         currency: row.currency,
         provider: this.provider.name,
         simulated: this.provider.simulated,
         resolvedAt: new Date().toISOString(),
+        ...(resolver.operator ?? {}),
       },
     });
     this.logger.log(
-      `Reconciliation task ${task.id}: payment intent ${row.id} resolved as ${verdict.resolution}`,
+      `Reconciliation task ${task.id}: payment intent ${row.id} resolved as ${verdict.resolution}` +
+        (resolver.operator ? ` by an approved operator resolution` : ''),
     );
     return verdict;
   }

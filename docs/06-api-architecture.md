@@ -47,14 +47,14 @@ Domain Services  :31xx    ◄── فقط از شبکه داخلی؛ NetworkPol
 
 ### درخواست
 
-| Header              | الزام            | شرح                                                                                                            |
-| ------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------- |
-| `Authorization`     | اجباری           | `Bearer <JWT>`                                                                                                 |
-| `X-Correlation-Id`  | اختیاری          | اگر نیاید، Gateway ULID تولید می‌کند                                                                           |
-| `X-Organization-Id` | شرطی             | برای کاربر چندعضویتی، انتخاب مستأجر فعال؛ **در برابر عضویت اعتبارسنجی می‌شود**                                 |
-| `Idempotency-Key`   | اجباری برای بعضی | روی `POST` مالی و عملیات ایجادکننده اثر بیرونی؛ اختیاری و رعایت‌شده روی `POST /v1/maintenance-requests` (#157) |
-| `If-Match`          | اختیاری          | ETag برای قفل خوش‌بینانه در `PATCH`                                                                            |
-| `Accept-Language`   | اختیاری          | `fa-IR` (پیش‌فرض) یا `en`                                                                                      |
+| Header              | الزام            | شرح                                                                                                                                                          |
+| ------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Authorization`     | اجباری           | `Bearer <JWT>`                                                                                                                                               |
+| `X-Correlation-Id`  | اختیاری          | اگر نیاید، Gateway ULID تولید می‌کند                                                                                                                         |
+| `X-Organization-Id` | شرطی             | برای کاربر چندعضویتی، انتخاب مستأجر فعال؛ **در برابر عضویت اعتبارسنجی می‌شود**                                                                               |
+| `Idempotency-Key`   | اجباری برای بعضی | روی `POST` مالی و عملیات ایجادکننده اثر بیرونی؛ اجباری در سرویس روی `POST /v1/assets` (#169)؛ اختیاری و رعایت‌شده روی `POST /v1/maintenance-requests` (#157) |
+| `If-Match`          | اختیاری          | ETag برای قفل خوش‌بینانه در `PATCH`                                                                                                                          |
+| `Accept-Language`   | اختیاری          | `fa-IR` (پیش‌فرض) یا `en`                                                                                                                                    |
 
 **`Idempotency-Key` روی `POST /v1/maintenance-requests`** ([#157](https://github.com/marabi766/RASTA/issues/157)): اختیاری؛
 اگر بیاید، maintenance-service رعایتش می‌کند — همان کلید و همان بدنه از همان کاربر، `201` اصلی را بازپخش می‌کند و کار را
@@ -65,6 +65,19 @@ Domain Services  :31xx    ◄── فقط از شبکه داخلی؛ NetworkPol
 Outbox و ذخیرهٔ پاسخ **یک تراکنش‌اند** (دور ۱ بازبینی #171): ایجادی که Claim آن منقضی و دوباره گرفته شده، چیزی Commit
 نمی‌کند، و شکست ذخیرهٔ پاسخ چیزی نیمه‌کاره نمی‌گذارد. کلیدها مال مستأجرند (همان کلید در دو سازمان، دو درخواست) و
 `MAINTENANCE_IDEMPOTENCY_TTL_HOURS` (پیش‌فرض ۲۴) از لحظهٔ پاسخ نگه داشته می‌شوند. بی کلید، رفتار پیشین.
+
+**`Idempotency-Key` روی `POST /v1/assets`** ([#169](https://github.com/marabi766/RASTA/issues/169)): **اجباری، در خودِ
+asset-service** — نه فقط در Gateway، که برای پیشوند `assets` کلید نمی‌خواهد. نبودن یا خالی بودنش `400 VALIDATION_FAILED`
+با `code: required`، و کلید خارج از ۸ تا ۲۵۵ نویسه همان ۴۰۰ با `code: invalid` است؛ در هر دو هیچ چیز ثبت نمی‌شود. نقش
+فراخوان (`ORGANIZATION_ADMIN`، `FLEET_MANAGER`، `UNION_ADMIN`) **پیش از هر بازپخش** بررسی می‌شود. Hash درخواست، بدنه و
+کاربر را با هم می‌بندد: همان کلید + همان بدنه از همان کاربر = همان `201` اول (همان شناسهٔ دارایی) بی هیچ دارایی یا
+رویداد `ASSET_CREATED` تازه؛ بدنهٔ دیگر یا کاربر دیگر = `409 IDEMPOTENCY_KEY_REUSED` بی هیچ اثری از پاسخ ذخیره‌شده؛
+تکراری هم‌زمان روی قفل ردیف Claim درخواست اول منتظر می‌ماند (حداکثر ۵ ثانیه) و همان `201` را می‌گیرد، وگرنه `409 CONFLICT`
+با `Retry-After: 1`؛ هر انتظار سمت Claim — از جمله برداشتن Claim اجاره‌گذشته‌ای که صاحبش هنوز قفلش را دارد — به باقی‌ماندهٔ همین ۵ ثانیه محدود است. **رزرو کلید (Claim) پیش از کار، در تراکنش کوتاه خودش Commit می‌شود**؛ سپس تراکنش کار، ردیف Claim را با توکنش قفل می‌کند و **پاسخ تکمیل‌شده همراه با خود دارایی و ردیف Outbox در همان یک تراکنش Commit می‌شود** — یا هیچ‌کدام. هر Claim توکن حصار خودش را دارد. Claim «در
+جریان» یک اجارهٔ کوتاه است (`ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS`، پیش‌فرض ۱۲۰، ۳۰ تا ۳۶۰۰، در راه‌اندازی اعتبارسنجی
+می‌شود) و پاسخ تکمیل‌شده `ASSET_IDEMPOTENCY_TTL_HOURS` (پیش‌فرض ۲۴، ۱ تا ۱۶۸) نگه داشته می‌شود: پس از اجاره، تلاش مجدد
+Claim رهاشده را با توکن تازه برمی‌دارد و تکمیل دیرهنگام صاحب قبلی با توکن رد می‌شود. کلیدها مال مستأجرند (`organization_id`
+ستون نخست کلید اصلی): مستأجر B کلید مستأجر A را بازپخش نمی‌کند، دارایی خودش را ثبت می‌کند.
 
 **CONSTRAINT.** `X-Organization-Id` **هرگز** بدون بررسی پذیرفته نمی‌شود، و این
 روی هر دو مسیر صادق است:
@@ -213,7 +226,7 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 | 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                        |
 | 404   | `NOT_FOUND`                                                                                                      |
 | 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED` |
-| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED`                                         |
+| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `CREATOR_IDENTITY_UNKNOWN`            |
 | 429   | `RATE_LIMIT_EXCEEDED`                                                                                            |
 | 500   | `INTERNAL_ERROR`                                                                                                 |
 | 503   | `UPSTREAM_UNAVAILABLE`                                                                                           |
@@ -355,7 +368,7 @@ POST /v1/wallets/{id}/top-up
 
 ```
 GET    /v1/assets                        فهرست با فیلتر
-POST   /v1/assets                        ثبت دارایی
+POST   /v1/assets                        ثبت دارایی   [Idempotency-Key اجباری در سرویس، #169]
 GET    /v1/assets/{id}                   دریافت
 PATCH  /v1/assets/{id}                   به‌روزرسانی
 GET    /v1/assets/{id}/dossier           پرونده الکترونیکی کامل
@@ -586,7 +599,15 @@ PATCH  /v1/rewards/rules/{id}                      اصلاح قاعده   (SYST
 GET    /v1/payment-intents                         فهرست پرداخت‌ها
 GET    /v1/payment-intents/{id}                    یک پرداخت
 POST   /v1/payment-intents/{id}/refund             بازگشت شارژ — با Reversal   [K]
+GET    /v1/payment-intents/{id}/reconciliation     تسک آشتی و پیشنهادهای حل انسانی   (حل‌کننده، ADR-064 B3)
+POST   /v1/payment-intents/{id}/reconciliation/requeue                          بازگرداندن تسک به آشتی‌دهنده   [K] (حل‌کننده)
+POST   /v1/payment-intents/{id}/reconciliation/resolutions                      پیشنهاد حل با شاهد الزامی — بی جابه‌جایی پول   [K] (حل‌کننده)
+POST   /v1/payment-intents/{id}/reconciliation/resolutions/{rid}/approve        تأیید نفر دوم — تنها گام جابه‌جایی پول   [K] (حل‌کننده، نه پیشنهاددهنده، نه سازنده)
+POST   /v1/payment-intents/{id}/reconciliation/resolutions/{rid}/reject         رد نفر دوم   [K] (حل‌کننده، نه پیشنهاددهنده، نه سازنده)
 ```
+
+«حل‌کننده» یعنی کاربر انسانی با یکی از نقش‌های `ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES` (پیش‌فرض
+`SYSTEM_ADMIN`، Q-82)؛ جداسازی وظایف با `ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES` (پیش‌فرض روشن).
 
 **قابلیت‌های هدف — PLANNED، نه API موجود**
 

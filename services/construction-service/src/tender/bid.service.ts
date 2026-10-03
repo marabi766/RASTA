@@ -526,6 +526,7 @@ export class BidService {
       accessorUserId: input.actor,
       purpose: OWN_BID_RECEIPT,
       outcome: input.outcome,
+      refusalCode: input.outcome === 'REFUSED' ? 'NOT_FOUND' : null,
       at: input.at,
     });
     await this.events.enqueue(tx, {
@@ -540,6 +541,7 @@ export class BidService {
         accessedBy: input.actor,
         purpose: OWN_BID_RECEIPT,
         outcome: input.outcome,
+        refusalCode: input.outcome === 'REFUSED' ? 'NOT_FOUND' : null,
         accessedAt: input.at.toISOString(),
       },
       occurredAt: input.at,

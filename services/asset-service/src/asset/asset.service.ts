@@ -17,6 +17,7 @@ import {
   type TransitionActor,
 } from './lifecycle';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { ClaimFence } from './idempotency';
 import {
   DEFAULT_TRANSFER_INSURANCE_POLICY,
   TRANSFER_INSURANCE_POLICY,
@@ -247,7 +248,15 @@ export class AssetService {
   // Writes
   // =========================================================================
 
-  async create(dto: CreateAssetDto): Promise<AssetView> {
+  /**
+   * Registers an asset. Under an Idempotency-Key, `fence` is the caller's claim
+   * on it (#169): checked and locked as the transaction's first statement,
+   * completed with this asset's view as its last — so the claim, the asset,
+   * its location, its outbox row and the response to replay commit together.
+   * `POST /v1/assets` always passes one; the parameter is optional only for
+   * in-process callers such as the integration suites' fixtures.
+   */
+  async create(dto: CreateAssetDto, fence?: ClaimFence<AssetView>): Promise<AssetView> {
     const organizationId = getOrganizationId();
 
     if (dto.serialNumber) {
@@ -268,7 +277,12 @@ export class AssetService {
     const id = `${ID_PREFIXES.asset}_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
 
-    const created = await this.repository.transaction(async (tx) => {
+    return this.repository.transaction(async (tx) => {
+      // Under an Idempotency-Key (#169) the claim is locked by its token
+      // before anything else, so a registration whose claim lapsed and was
+      // re-taken by a retry commits nothing.
+      if (fence) await fence.hold(tx);
+
       // The lookups above are for a readable refusal. Under a concurrent
       // create, both requests pass them, and the unique indexes decide.
       let asset;
@@ -332,10 +346,11 @@ export class AssetService {
         occurredAt: new Date(),
       });
 
-      return asset;
+      // Last: the response to replay commits with the asset and its outbox
+      // row, or none of them does.
+      const view = toView(asset);
+      return fence ? fence.complete(tx, view) : view;
     });
-
-    return toView(created);
   }
 
   async update(id: string, dto: UpdateAssetDto): Promise<AssetView> {

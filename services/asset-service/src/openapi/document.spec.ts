@@ -5,6 +5,7 @@ import { AssetController } from '../asset/asset.controller';
 import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
+import { IdempotencyStore } from '../asset/idempotency';
 import {
   activateAssetSchema,
   changeStatusSchema,
@@ -30,6 +31,7 @@ async function buildDocument() {
       { provide: AssetService, useValue: {} },
       { provide: InsuranceService, useValue: {} },
       { provide: ClaimService, useValue: {} },
+      { provide: IdempotencyStore, useValue: {} },
     ],
   }).compile();
 
@@ -189,5 +191,18 @@ describe.each([
       .filter(([, field]) => !field.isOptional())
       .map(([name]) => name);
     expect([...(body.required ?? [])].sort()).toEqual(required.sort());
+  });
+});
+
+describe('POST /v1/assets in the served document (#169)', () => {
+  it('requires the Idempotency-Key header, as the service itself does', async () => {
+    const document = await buildDocument();
+    const operation = document.paths['/v1/assets']?.post;
+    expect(operation).toBeDefined();
+
+    const header = ((operation?.parameters ?? []) as unknown as Record<string, unknown>[]).find(
+      (parameter) => parameter.name === 'Idempotency-Key',
+    );
+    expect(header).toMatchObject({ in: 'header', required: true });
   });
 });

@@ -99,11 +99,11 @@ describe('the schema keeps history from being erased', () => {
 });
 
 describe('the schema models nothing CON-001 has not decided', () => {
-  it('has the tender and bid models of CON-002 so far and no evaluation model yet', () => {
-    // Evaluation arrives with its own step (ADR-067); each step adds its models
-    // here, so an unplanned one still fails this test.
+  it('has the tender, bid and evaluation models of CON-002 so far and no award model yet', () => {
+    // Each step adds its models here, so an unplanned one still fails this test; the
+    // award arrives with its own step (ADR-067 § 3).
     const names = [...models(SCHEMA).keys()];
-    expect(names.filter((name) => /Tender|Bid|Evaluation/i.test(name))).toEqual([
+    expect(names.filter((name) => /Tender|Bid|Evaluation|Award/i.test(name))).toEqual([
       'Tender',
       'TenderInvitation',
       'TenderKey',
@@ -111,6 +111,10 @@ describe('the schema models nothing CON-001 has not decided', () => {
       'Bid',
       'BidReceipt',
       'BidAccessLog',
+      'BidQualification',
+      'BidEvaluation',
+      'BidEvaluationRecusal',
+      'BidEvaluationScore',
     ]);
   });
 
