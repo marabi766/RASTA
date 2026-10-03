@@ -616,6 +616,8 @@ model PaymentIntent {
   /// Operator resolutions of its unknown refunds (ADR-064 step B3).
   reconciliationResolutions PaymentReconciliationResolution[]
   reconciliationRequeues    PaymentReconciliationRequeue[]
+  /// The provider declines of its refunds that were announced (ADR-064 § 9).
+  refundDeclines            PaymentRefundDecline[]
 
   @@unique([organizationId, idempotencyKey])
   /// The target of the reconciliation task's composite foreign key.
@@ -641,6 +643,29 @@ enum PaymentReconciliationStatus {
   ESCALATED
   /// Finished: `resolution`, `resolvedBy` and `doneAt` say how, by whom, when.
   DONE
+}
+
+/// A provider's decline of one refund attempt, announced as
+/// `PAYMENT_REFUND_FAILED` (ADR-064 § 9) — at most once per payment intent and
+/// provider refund key, which the primary key enforces. Written in the
+/// transaction that returns the declined refund's hold and enqueues the event;
+/// a second transaction for the same decline (the same request replayed after
+/// its idempotency key was released, a new request the provider answers with
+/// its cached decline) finds the row and announces nothing. A distinct
+/// provider attempt key, should one ever be used, gets its own row and event.
+model PaymentRefundDecline {
+  organizationId    String   @map("organization_id")
+  paymentIntentId   String   @map("payment_intent_id")
+  /// The key the provider was asked with (`<intent key>:refund`, provider.ts).
+  providerRefundKey String   @map("provider_refund_key")
+  /// The user or service whose transaction announced it.
+  announcedBy       String   @map("announced_by")
+  announcedAt       DateTime @map("announced_at") @db.Timestamptz(3)
+
+  paymentIntent PaymentIntent @relation(fields: [organizationId, paymentIntentId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([organizationId, paymentIntentId, providerRefundKey])
+  @@map("payment_refund_decline")
 }
 
 /// The durable queue behind an unfinished refund (ADR-064 step B1): one task

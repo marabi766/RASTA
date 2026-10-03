@@ -929,7 +929,7 @@ export class PaymentService {
           providerReference: requested.row.providerReference ?? intentId,
           amountMinor: requested.row.amountMinor,
           currency: requested.row.currency,
-          idempotencyKey: `${requested.row.idempotencyKey}:refund`,
+          idempotencyKey: refundAttemptKey(requested.row),
           reason,
         });
       } catch (error) {
@@ -1042,6 +1042,27 @@ export class PaymentService {
       // Resolved: the marker does not outlive the refund it described.
       data: { status: 'REFUNDED', refundedAt, failureReason: null },
     });
+    // Announced in the transaction that records it (ADR-064 § 9): every path
+    // to a refund — the operator's request, the reconciler, an approved
+    // operator resolution — ends here, so it is announced once, and never for
+    // a refund the ledger does not hold.
+    await this.ledger.enqueue(tx, {
+      eventName: ECONOMIC_EVENTS.PAYMENT_REFUNDED,
+      aggregateId: row.id,
+      organizationId: row.organizationId,
+      payload: {
+        paymentIntentId: row.id,
+        organizationId: row.organizationId,
+        walletId: row.walletId,
+        amountMinor: formatMinor(row.amountMinor),
+        currency: row.currency,
+        reversalJournalId: reversal.id,
+        refundedBy: actor,
+        provider: this.provider.name,
+        simulated: this.provider.simulated,
+        refundedAt: refundedAt.toISOString(),
+      },
+    });
 
     paymentIntentsTotal.inc({
       service: SERVICE_NAME,
@@ -1140,22 +1161,81 @@ export class PaymentService {
     because: 'DECLINED' | 'NOT_REACHED' = 'DECLINED',
   ): Promise<void> {
     const hold = await this.walletRepository.findActiveHold(tx, wallet.id, intent.id);
+    let returned = false;
     if (hold && hold.referenceType === REFUND_HOLD_REFERENCE_TYPE) {
-      await this.wallets.refundHold(tx, {
-        wallet,
-        holdId: hold.id,
-        transactionId: topUpTransactionOf(intent),
-        note:
-          because === 'DECLINED'
-            ? `Returned: the provider declined the refund of payment ${intent.id}`
-            : `Returned: the refund of payment ${intent.id} never reached the provider`,
-        resolvedBy: actor,
-      });
+      returned =
+        (await this.wallets.refundHold(tx, {
+          wallet,
+          holdId: hold.id,
+          transactionId: topUpTransactionOf(intent),
+          note:
+            because === 'DECLINED'
+              ? `Returned: the provider declined the refund of payment ${intent.id}`
+              : `Returned: the refund of payment ${intent.id} never reached the provider`,
+          resolvedBy: actor,
+        })) !== null;
     }
     await tx.paymentIntent.update({
       where: { id: intent.id },
       data: { failureReason: null },
     });
+    // A decline is announced in the transaction that returns its hold (ADR-064
+    // § 9), and only by the one that did: a retry finds the hold already
+    // returned and announces nothing twice. A refund that never reached the
+    // provider is not a decline. And once per provider attempt (Codex on
+    // #210): the same request replayed after its key was released places a new
+    // hold, which this returns — but the provider answered the same refund key
+    // with the decline already announced, so the claim below finds its row.
+    if (
+      because === 'DECLINED' &&
+      returned &&
+      (await this.claimDeclineAnnouncement(tx, intent, actor))
+    ) {
+      await this.ledger.enqueue(tx, {
+        eventName: ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED,
+        aggregateId: intent.id,
+        organizationId: intent.organizationId,
+        payload: {
+          paymentIntentId: intent.id,
+          organizationId: intent.organizationId,
+          walletId: intent.walletId,
+          amountMinor: formatMinor(intent.amountMinor),
+          currency: intent.currency,
+          reason: 'PROVIDER_DECLINED',
+          provider: this.provider.name,
+          simulated: this.provider.simulated,
+          failedAt: new Date().toISOString(),
+        },
+      });
+    }
+  }
+
+  /**
+   * Claims the announcement of this intent's refund decline, in the caller's
+   * transaction: true when the row is new, false when the decline of this
+   * provider refund key was announced already. The primary key of
+   * `payment_refund_decline` decides it — `ON CONFLICT DO NOTHING`, so a
+   * concurrent transaction waits for this one and then inserts nothing — and
+   * the row rolls back with the event if the transaction does.
+   */
+  private async claimDeclineAnnouncement(
+    tx: ExtendedPrismaClient,
+    intent: PaymentIntent,
+    actor: string,
+  ): Promise<boolean> {
+    const { count } = await tx.paymentRefundDecline.createMany({
+      data: [
+        {
+          organizationId: intent.organizationId,
+          paymentIntentId: intent.id,
+          providerRefundKey: refundAttemptKey(intent),
+          announcedBy: actor,
+          announcedAt: new Date(),
+        },
+      ],
+      skipDuplicates: true,
+    });
+    return count === 1;
   }
 
   /**
@@ -1266,6 +1346,15 @@ export function failureCodeFrom(code: string | undefined, fallback: string): str
 }
 
 const FAILURE_CODE = /^[A-Z][A-Z_]{0,63}$/;
+
+/**
+ * The idempotency key a refund of this intent is asked of the provider with —
+ * one fixed attempt per intent (`<key>:refund`, provider.ts) — and the key a
+ * decline is announced once for (`payment_refund_decline`).
+ */
+export function refundAttemptKey(intent: Pick<PaymentIntent, 'idempotencyKey'>): string {
+  return `${intent.idempotencyKey}:refund`;
+}
 
 /**
  * The failure reason an AUTHORIZED intent keeps while the provider holds a

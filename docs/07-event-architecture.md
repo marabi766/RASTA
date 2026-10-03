@@ -482,6 +482,8 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `PAYMENT_FAILED`                         | economic | marketplace (جبران) · notification                  |
 | `PAYMENT_CAPTURE_UNRECONCILED`           | economic | audit · (هشدار عملیات)                              |
 | `PAYMENT_REFUND_UNRECONCILED`            | economic | audit · (هشدار عملیات)                              |
+| `PAYMENT_REFUNDED`                       | economic | audit                                               |
+| `PAYMENT_REFUND_FAILED`                  | economic | audit                                               |
 | `PAYMENT_RECONCILIATION_ESCALATED`       | economic | audit · (هشدار عملیات)                              |
 | `PAYMENT_RECONCILIATION_RESOLVED`        | economic | audit                                               |
 | `PAYMENT_RECONCILIATION_OPERATOR_ACTION` | economic | audit                                               |

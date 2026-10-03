@@ -590,6 +590,7 @@ export async function cleanup(
       'reward_balance',
       // Children first: each foreign key here is ON DELETE RESTRICT.
       'payment_reconciliation_task',
+      'payment_refund_decline',
       'payment_intent',
       'wallet_hold',
       'idempotency_key',
