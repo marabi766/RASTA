@@ -152,6 +152,34 @@ describe('project roles (Q-69)', () => {
     });
   });
 
+  describe('who awards a tender (ADR-067 § 3)', () => {
+    it('is empty by default, which means the owner role set', () => {
+      expect(load().CONSTRUCTION_TENDER_AWARD_ROLES).toEqual([]);
+    });
+
+    it('accepts a configured list, trimmed', () => {
+      expect(
+        load({ CONSTRUCTION_TENDER_AWARD_ROLES: 'ORGANIZATION_ADMIN, PROCUREMENT_USER' })
+          .CONSTRUCTION_TENDER_AWARD_ROLES,
+      ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+    });
+
+    it.each(['AUDITOR', 'SYSTEM_ADMIN', 'CONTRACTOR'])(
+      'refuses to start when it names %s',
+      (role) => {
+        expect(() =>
+          load({ CONSTRUCTION_TENDER_AWARD_ROLES: `ORGANIZATION_ADMIN,${role}` }),
+        ).toThrow(/CONSTRUCTION_TENDER_AWARD_ROLES/);
+      },
+    );
+
+    it('refuses an unknown role rather than ignoring it', () => {
+      expect(() => load({ CONSTRUCTION_TENDER_AWARD_ROLES: 'COMMITTEE_CHAIR' })).toThrow(
+        /Unknown role in CONSTRUCTION_TENDER_AWARD_ROLES/,
+      );
+    });
+  });
+
   describe('how many evaluators (Q-88, Q-92: provisional)', () => {
     it('defaults to ADR-067’s MVP: one evaluator per bid, one required', () => {
       const env = load();

@@ -404,6 +404,7 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `BID_SUBMITTED`                          | construction | notification · **audit (مهر زمانی)**                    |
 | `BIDS_EVALUATED`                         | construction | audit · analytics                                       |
 | `TENDER_AWARDED`                         | construction | **contract (ایجاد پیش‌نویس)** · notification · supplier |
+| `BID_NOT_AWARDED`                        | construction | notification (بازنده) · audit                           |
 | `PROJECT_STARTED`                        | construction | fleet · analytics                                       |
 | `PROJECT_PROGRESS_UPDATED`               | construction | contract · notification · analytics                     |
 | `PROJECT_COMPLETED`                      | construction | contract · supplier (امتیاز) · analytics                |

@@ -146,6 +146,18 @@ export const evaluationRefusalsTotal = new Counter({
 });
 
 /**
+ * Award commands refused (ADR-067 § 3), by closed reason: a conflict of interest, a winner
+ * supplier-service no longer finds eligible (`winner_not_eligible`), a missing justification, the
+ * approval gate, a tender that is not EVALUATED. Never labelled by tender, tenant or person.
+ */
+export const awardRefusalsTotal = new Counter({
+  name: 'rasta_construction_award_refusals_total',
+  help: 'Award commands refused, by reason',
+  labelNames: ['service', 'reason'] as const,
+  registers: [registry],
+});
+
+/**
  * The detective control after an opening committed (ADR-066 § 4): identity-service was asked
  * whether the proposer or the approver was a member of a bidding organization at the commit
  * instant. `clear` is the usual answer; `conflict` is the race the approval cannot close and

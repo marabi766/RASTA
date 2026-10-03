@@ -120,6 +120,7 @@ export class ProjectAccess {
   private readonly policyReaders: readonly string[];
   private readonly bidOpeners: readonly string[];
   private readonly evaluators: readonly string[];
+  private readonly awarders: readonly string[];
 
   constructor(@Inject(ENV) env: ConstructionEnv) {
     this.writers = [SUPER_ROLE, ...env.CONSTRUCTION_PROJECT_ROLES];
@@ -131,6 +132,11 @@ export class ProjectAccess {
     this.evaluators = (
       env.CONSTRUCTION_TENDER_EVALUATE_ROLES.length > 0
         ? env.CONSTRUCTION_TENDER_EVALUATE_ROLES
+        : env.CONSTRUCTION_PROJECT_ROLES
+    ).filter((role) => !BID_EXCLUDED_ROLES.includes(role));
+    this.awarders = (
+      env.CONSTRUCTION_TENDER_AWARD_ROLES.length > 0
+        ? env.CONSTRUCTION_TENDER_AWARD_ROLES
         : env.CONSTRUCTION_PROJECT_ROLES
     ).filter((role) => !BID_EXCLUDED_ROLES.includes(role));
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
@@ -393,6 +399,26 @@ export class ProjectAccess {
   /** `assertCanEvaluate` on the live roles identity-service reports, as for opening. */
   assertLiveRolesMayEvaluate(liveRoles: readonly string[]): void {
     this.assertLiveBidSide(this.evaluators, liveRoles, 'evaluates bids');
+  }
+
+  /**
+   * May the caller award an evaluated tender, and as whom? The owner's side once more (ADR-067
+   * § 3): `CONSTRUCTION_TENDER_AWARD_ROLES`, by default the owner's own role set, and the **same**
+   * refusals as for opening and evaluating — `SYSTEM_ADMIN`, `AUDITOR`, `CONTRACTOR` and a service
+   * token, each whenever present. An award reads the winning bid's price, so it is as much a read of
+   * a bid as opening it is.
+   */
+  assertCanAward(): {
+    organizationId: string;
+    actor: string;
+    organizationIds: readonly string[];
+  } {
+    return this.assertOwnerBidSide(this.awarders, 'award its evaluated tender');
+  }
+
+  /** `assertCanAward` on the live roles identity-service reports, as for opening. */
+  assertLiveRolesMayAward(liveRoles: readonly string[]): void {
+    this.assertLiveBidSide(this.awarders, liveRoles, 'awards a tender');
   }
 
   private assertOwnerBidSide(

@@ -1093,6 +1093,8 @@ export const EXPECTED = {
       'bid_evaluation',
       'bid_evaluation_recusal',
       'bid_evaluation_score',
+      // 20261003100000_tender_award (CON-002 PR 10).
+      'tender_award',
     ],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
     // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
@@ -1126,6 +1128,14 @@ export const EXPECTED = {
       'tg_bid_recusal_no_truncate',
       'tg_bid_score_append_only',
       'tg_bid_score_no_truncate',
+      // 20261003100000_tender_award: an award only for an EVALUATED tender and a QUALIFIED bid of it,
+      // the tender and the bids move only with it, and it commits only with both moved; append-only.
+      'tg_tender_award_guard',
+      'tg_tender_status_requires_award',
+      'tg_bid_status_requires_award',
+      'tg_tender_award_consistent',
+      'tg_tender_award_append_only',
+      'tg_tender_award_no_truncate',
     ],
     functions: [
       'tender_criterion_freeze',
@@ -1141,6 +1151,10 @@ export const EXPECTED = {
       'bid_evaluation_guard',
       'bid_recusal_guard',
       'bid_score_guard',
+      'tender_award_guard',
+      'tender_award_recorded',
+      'bid_award_recorded',
+      'tender_award_consistent',
     ],
     constraints: [
       'ck_project_text_not_blank',
@@ -1258,6 +1272,12 @@ export const EXPECTED = {
       'bid_evaluation_recusal_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_evaluation_id_fkey',
+      'ck_tender_award_shape',
+      'ck_tender_award_not_own',
+      'ck_tender_award_justified',
+      'ck_tender_award_actor_pair',
+      'tender_award_organization_id_tender_id_fkey',
+      'tender_award_bid_id_fkey',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

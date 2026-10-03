@@ -544,6 +544,9 @@ model Tender {
   evaluations    BidEvaluation[]
   recusals       BidEvaluationRecusal[]
   scores         BidEvaluationScore[]
+  /// At most one (`ux_tender_award_tender`): a list because the relation is keyed by the
+  /// (organization, tender) pair, which Prisma cannot see is unique.
+  awards         TenderAward[]
 
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
@@ -866,6 +869,9 @@ model Bid {
   updatedAt   DateTime  @map("updated_at")
   updatedBy   String    @map("updated_by")
 
+  /// At most one, and only on the winning bid (`ux_tender_award_bid`).
+  awards TenderAward[]
+
   @@unique([organizationId, tenderId, bidderOrganizationId], map: "ux_bid_tender_bidder")
   @@index([organizationId, tenderId, status], map: "ix_bid_org_tender_status")
   @@map("bid")
@@ -1026,4 +1032,46 @@ model BidEvaluationScore {
   @@unique([organizationId, evaluationId, criterionCode, revision], map: "ux_bid_score_cell_revision")
   @@index([organizationId, tenderId, bidId], map: "ix_bid_score_org_tender_bid")
   @@map("bid_evaluation_score")
+}
+
+// ---------------------------------------------------------------------------
+// Awarding an evaluated tender (CON-002 PR 10, ADR-067 § 3)
+// ---------------------------------------------------------------------------
+
+/// The owner's choice of one QUALIFIED bid of an EVALUATED tender, once and for good: append-only,
+/// one row per tender. The rank is the winner's place in the frozen matrix (`tied` when it shares
+/// it); anything other than a single first rank carries the reason in words (`justification`,
+/// kept here, never on an event). `amountMinor` is the winner's price, read from its sealed
+/// content at the award, so CON-003 does not reopen a bid. `standingAsOf` is when supplier-service
+/// said the winner was still eligible. The awarder's stable identity (`awardedByIssuer` and
+/// `awardedBySubject`, both or neither) sits beside the user id so that a later check can prove
+/// whether two user ids are one person. The database refuses a row unless the tender is EVALUATED
+/// and the bid is one of its QUALIFIED ones, and commits it only with both AWARDED.
+model TenderAward {
+  id String @id
+
+  organizationId       String @map("organization_id")
+  tenderId             String @map("tender_id")
+  bidId                String @map("bid_id")
+  bidderOrganizationId String @map("bidder_organization_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  bid    Bid    @relation(fields: [bidId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  amountMinor   BigInt  @map("amount_minor")
+  rank          Int
+  tied          Boolean
+  matrixDigest  String  @map("matrix_digest")
+  justification String?
+
+  standingAsOf DateTime @map("standing_as_of") @db.Timestamptz(3)
+
+  awardedAt        DateTime @map("awarded_at") @db.Timestamptz(3)
+  awardedBy        String   @map("awarded_by")
+  awardedByIssuer  String?  @map("awarded_by_issuer")
+  awardedBySubject String?  @map("awarded_by_subject")
+
+  @@unique([organizationId, tenderId], map: "ux_tender_award_tender")
+  @@unique([bidId], map: "ux_tender_award_bid")
+  @@map("tender_award")
 }

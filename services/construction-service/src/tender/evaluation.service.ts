@@ -25,6 +25,7 @@ import { OwnerIdentity, type LivePrincipal, type Principal } from './owner-ident
 import { StandingAuthority } from './standing-authority';
 import { assertTenderTransition } from './tender.state-machine';
 import { buildMatrix, matrixDigest, type MatrixInput } from './evaluation-matrix';
+import { readMatrixInput } from './matrix-input';
 import type {
   EvaluatedView,
   MatrixView,
@@ -758,33 +759,10 @@ export class EvaluationService {
     tender: TenderForEvaluation,
     bids: readonly BidSummary[],
   ): Promise<MatrixInput> {
-    const [criteria, qualifications, evaluations, recusals, scores] = await Promise.all([
-      this.repo.listCriteria(tx, tender.id),
-      this.repo.listQualifications(tx, tender.id),
-      this.repo.listEvaluations(tx, tender.id),
-      this.repo.listRecusals(tx, tender.id),
-      this.repo.listScores(tx, tender.id),
-    ]);
-    return {
-      tenderId: tender.id,
-      status: tender.status,
-      frozen: tender.evaluatedAt !== null,
-      criteria,
-      bids,
-      qualifications: qualifications.map((row) => ({
-        bidId: row.bidId,
-        decision: row.decision,
-        reasonCode: row.reasonCode,
-        reasonText: row.reasonText,
-        decidedBy: row.decidedBy,
-        decidedAt: row.decidedAt,
-      })),
-      evaluations,
-      recusals,
-      scores,
+    return readMatrixInput(this.repo, tx, tender, bids, {
       minEvaluators: this.env.CONSTRUCTION_EVALUATION_MIN_EVALUATORS,
       maxEvaluators: this.env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS,
-    };
+    });
   }
 
   // -- errors ------------------------------------------------------------------------------

@@ -268,6 +268,23 @@ Object.assign(VALID, {
     evaluatedBy: 'USR_1',
     evaluatedAt: AT,
   },
+  TENDER_AWARDED: {
+    ...TENDER,
+    winningBidId: 'BID_1',
+    winnerOrganizationId: 'ORG_B',
+    amountMinor: '1250000000',
+    hasJustification: false,
+    matrixDigest: 'c'.repeat(64),
+    awardedBy: 'USR_1',
+    awardedAt: AT,
+  },
+  BID_NOT_AWARDED: {
+    bidId: 'BID_2',
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    bidderOrganizationId: 'ORG_C',
+    decidedAt: AT,
+  },
   BIDS_OPENED: {
     ...TENDER,
     bidCount: 2,
@@ -329,6 +346,8 @@ const TENDER_EVENTS = [
   'BID_SCORED',
   'BID_EVALUATOR_RECUSED',
   'BIDS_EVALUATED',
+  'TENDER_AWARDED',
+  'BID_NOT_AWARDED',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -363,6 +382,7 @@ describe('the construction event catalogue', () => {
       'BID_ACCESSED',
       'BID_DISQUALIFIED',
       'BID_EVALUATOR_RECUSED',
+      'BID_NOT_AWARDED',
       'BID_OPENING_CONFLICT_DETECTED',
       'BID_OPENING_PROPOSAL_WITHDRAWN',
       'BID_QUALIFIED',
@@ -383,6 +403,7 @@ describe('the construction event catalogue', () => {
       'PROJECT_STARTED',
       'PROJECT_STATUS_CHANGED',
       'PROJECT_UPDATED',
+      'TENDER_AWARDED',
       'TENDER_BIDDER_INVITED',
       'TENDER_CANCELLED',
       'TENDER_CLOSED',
@@ -456,6 +477,72 @@ describe('the construction event catalogue', () => {
       }
     },
   );
+
+  describe('the award events (ADR-067 § 3, Q-89)', () => {
+    it('TENDER_AWARDED carries the winner and its price, and neither a rank, a score nor words', () => {
+      for (const extra of [
+        { rank: 1 },
+        { totalScaled: '10' },
+        { justification: 'The lowest bid was not responsive' },
+        { reason: 'x' },
+        { rankOfWinner: 1 },
+      ]) {
+        expect(() =>
+          validateConstructionPayload('TENDER_AWARDED', { ...VALID.TENDER_AWARDED!, ...extra }),
+        ).toThrow(/does not match its published contract/);
+      }
+    });
+
+    it('TENDER_AWARDED carries the price as whole minor units in a string, never a number', () => {
+      for (const amountMinor of [1250000000, '12.5', '-1', '', '1'.repeat(20)]) {
+        expect(() =>
+          validateConstructionPayload('TENDER_AWARDED', { ...VALID.TENDER_AWARDED!, amountMinor }),
+        ).toThrow();
+      }
+      expect(() =>
+        validateConstructionPayload('TENDER_AWARDED', {
+          ...VALID.TENDER_AWARDED!,
+          amountMinor: '0',
+        }),
+      ).not.toThrow();
+    });
+
+    it('TENDER_AWARDED says only whether the choice was justified, and pins a SHA-256 matrix digest', () => {
+      expect(() =>
+        validateConstructionPayload('TENDER_AWARDED', {
+          ...VALID.TENDER_AWARDED!,
+          hasJustification: 'yes',
+        }),
+      ).toThrow();
+      expect(() =>
+        validateConstructionPayload('TENDER_AWARDED', {
+          ...VALID.TENDER_AWARDED!,
+          matrixDigest: 'not-a-digest',
+        }),
+      ).toThrow();
+    });
+
+    it('BID_NOT_AWARDED names neither the winner, the amount, a rank nor a score: a loser is told its own, only', () => {
+      for (const extra of [
+        { winningBidId: 'BID_1' },
+        { winnerOrganizationId: 'ORG_B' },
+        { amountMinor: '1250000000' },
+        { rank: 2 },
+        { totalScaled: '10' },
+        { justification: 'x' },
+      ]) {
+        expect(() =>
+          validateConstructionPayload('BID_NOT_AWARDED', { ...VALID.BID_NOT_AWARDED!, ...extra }),
+        ).toThrow(/does not match its published contract/);
+      }
+    });
+
+    it('both are keyed by the tender', () => {
+      for (const name of ['TENDER_AWARDED', 'BID_NOT_AWARDED'] as const) {
+        expect(resolvePartitionKey(name, VALID[name]!).key).toBe('TND_1');
+      }
+    });
+  });
 
   it.each(POLICY_EVENTS as typeof NAMES)(
     '%s requires the organization and workflow key',

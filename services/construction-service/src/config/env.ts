@@ -99,6 +99,8 @@ function roleList(name: string, options: { min: number }) {
  *                                       only in development and test.
  *   CONSTRUCTION_TENDER_EVALUATE_ROLES  ADR-067 § 4. Who evaluates opened bids; default the
  *                                       tender owner's role set.
+ *   CONSTRUCTION_TENDER_AWARD_ROLES     ADR-067 § 3. Who awards an evaluated tender; default the
+ *                                       tender owner's role set.
  *   CONSTRUCTION_EVALUATION_MIN_EVALUATORS / _MAX_EVALUATORS
  *                                       Q-88, Q-92. Evaluators that must have scored each
  *                                       qualified bid / may score one. Default 1 and 1.
@@ -202,6 +204,20 @@ export const constructionEnvSchema = baseEnvSchema
       }),
 
     /**
+     * ADR-067 § 3: who awards an evaluated tender. A person decides, never the platform. Empty
+     * (the default) means the tender owner's own role set, `CONSTRUCTION_PROJECT_ROLES`. The same
+     * refusals as for evaluating: `SYSTEM_ADMIN` and `CONTRACTOR` are refused at startup.
+     */
+    CONSTRUCTION_TENDER_AWARD_ROLES: z
+      .string()
+      .default('')
+      .pipe(roleList('CONSTRUCTION_TENDER_AWARD_ROLES', { min: 0 }))
+      .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
+        message:
+          'CONSTRUCTION_TENDER_AWARD_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither awards a tender (ADR-066 § 4, ADR-067 § 3)',
+      }),
+
+    /**
      * Q-88 / Q-92, PROVISIONAL: how many evaluators must have scored every qualified bid
      * before the evaluation may be completed (`MIN`), and how many may score one bid (`MAX`).
      * The defaults are ADR-067's MVP — one evaluator per bid — and make the aggregation of
@@ -214,7 +230,7 @@ export const constructionEnvSchema = baseEnvSchema
     /**
      * Q-90 / Q-92: the conflict-of-interest rules that are OFF unless named, from the closed
      * set in code (`COI_RULES`). `EVALUATOR_NOT_TENDER_AUTHOR` applies to evaluation;
-     * `AWARDER_NOT_EVALUATOR` is recorded here and enforced by `award` (CON-002 PR 10).
+     * `AWARDER_NOT_EVALUATOR` is enforced by `award` (CON-002 PR 10, Q-93).
      * A name outside the set stops the service at startup: a rule that is not implemented is
      * not silently ignored.
      */

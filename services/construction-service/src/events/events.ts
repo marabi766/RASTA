@@ -108,6 +108,13 @@ export const CONSTRUCTION_EVENTS = {
   BID_SCORED: 'BID_SCORED',
   BID_EVALUATOR_RECUSED: 'BID_EVALUATOR_RECUSED',
   BIDS_EVALUATED: 'BIDS_EVALUATED',
+  // CON-002 PR 10 (ADR-067 § 3). `TENDER_AWARDED` is a catalogue event (`docs/04`, `docs/07`);
+  // `BID_NOT_AWARDED` is added so the bidders who lost can be told by event alone (no
+  // notification-service change in this step) and awaits acceptance by the project manager.
+  // Ids, a closed flag, an amount (the winner's, on `TENDER_AWARDED` only) and times: never the
+  // justification in words, never a rank or a score.
+  TENDER_AWARDED: 'TENDER_AWARDED',
+  BID_NOT_AWARDED: 'BID_NOT_AWARDED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -606,6 +613,8 @@ export const BID_ACCESS_PURPOSES = [
   'RECUSE',
   'EVALUATE_BIDS',
   'READ_EVALUATION',
+  // CON-002 PR 10: the owner awards the tender, which reads the winning bid's price (ADR-067 § 3).
+  'AWARD_TENDER',
 ] as const;
 export type BidAccessPurpose = (typeof BID_ACCESS_PURPOSES)[number];
 
@@ -773,6 +782,44 @@ export const bidsEvaluatedPayload = z
   })
   .strict();
 
+/**
+ * The tender was awarded (EVALUATED → AWARDED): which bid won and its bidder, the amount the winner
+ * bid (its price, in minor units, and the winner's alone — CON-003 drafts the contract from it with
+ * `tenderId` as the idempotency key), whether the owner justified the choice (the reason in words
+ * stays in the database), the digest of the frozen matrix the choice was made against, and who and
+ * when. No rank, no score and no other bidder: a losing bidder is told by `BID_NOT_AWARDED`, which
+ * names neither the winner nor the amount (Q-89).
+ */
+export const tenderAwardedPayload = z
+  .object({
+    ...tenderIdentity,
+    winningBidId: identifier,
+    winnerOrganizationId: identifier,
+    amountMinor,
+    hasJustification: z.boolean(),
+    matrixDigest: sha256Hex,
+    awardedBy: identifier,
+    awardedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * A qualified bid was not the one awarded (QUALIFIED → NOT_AWARDED): one event per bid, so the
+ * bidder can be told and nobody else is named. Ids and the instant only — not the winner, not the
+ * amount, not a rank or a score (Q-89: the loser sees its own status and its own total, through the
+ * API, under its own authorization).
+ */
+export const bidNotAwardedPayload = z
+  .object({
+    bidId: identifier,
+    tenderId: identifier,
+    /** The tender's owner. */
+    organizationId: identifier,
+    bidderOrganizationId: identifier,
+    decidedAt: isoTimestamp,
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -815,6 +862,8 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BID_SCORED: bidScoredPayload,
   BID_EVALUATOR_RECUSED: bidEvaluatorRecusedPayload,
   BIDS_EVALUATED: bidsEvaluatedPayload,
+  TENDER_AWARDED: tenderAwardedPayload,
+  BID_NOT_AWARDED: bidNotAwardedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

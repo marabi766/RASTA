@@ -41,6 +41,9 @@ import { TenderOpenService } from '../tender/tender-open.service';
 import { OwnBidService } from '../tender/own-bid.service';
 import { EvaluationController } from '../tender/evaluation.controller';
 import { EvaluationService } from '../tender/evaluation.service';
+import { AwardController } from '../tender/award.controller';
+import { AwardService } from '../tender/award.service';
+import { awardTenderSchema, tenderAwardViewSchema } from '../tender/award.dto';
 import {
   evaluatedViewSchema,
   matrixViewSchema,
@@ -238,6 +241,7 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/tenders/{id}/bids/{bidId}/recusal': { status: '200', schema: recusalViewSchema },
   'POST /v1/tenders/{id}/bids/{bidId}/scores': { status: '200', schema: scoreRecordedViewSchema },
   'POST /v1/tenders/{id}/evaluate': { status: '200', schema: evaluatedViewSchema },
+  'POST /v1/tenders/{id}/award': { status: '200', schema: tenderAwardViewSchema },
   'GET /v1/tenders/{id}/evaluation': { status: '200', schema: matrixViewSchema },
 };
 
@@ -274,6 +278,7 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/tenders/{id}/bids/{bidId}/qualification': qualifyBidSchema,
   'POST /v1/tenders/{id}/bids/{bidId}/recusal': recuseSchema,
   'POST /v1/tenders/{id}/bids/{bidId}/scores': scoreBidSchema,
+  'POST /v1/tenders/{id}/award': awardTenderSchema,
 };
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
@@ -347,6 +352,10 @@ const LIFECYCLE_CREATES = new Set([
   'POST /v1/tenders/{id}/bids/{bidId}/scores',
   'POST /v1/tenders/{id}/evaluate',
   'GET /v1/tenders/{id}/evaluation',
+  // Not EVALUATED, a bid that is not a qualified one, a missing justification, a winner no longer
+  // eligible, a conflict of interest, the approval gate (closed until PR 11), a bid that differs
+  // from the evidence.
+  'POST /v1/tenders/{id}/award',
 ]);
 
 /**
@@ -379,10 +388,14 @@ const RACING_CREATES = new Set([
   'POST /v1/tenders/{id}/bids/{bidId}/recusal',
   'POST /v1/tenders/{id}/bids/{bidId}/scores',
   'POST /v1/tenders/{id}/evaluate',
+  // Another bid on an awarded tender, or two awards at once: 409.
+  'POST /v1/tenders/{id}/award',
 ]);
 
 /** Opening and reading bids ask audit-service for the receipt chain; without it they answer 503/504. */
 const EVIDENCE_CHECKED = new Set([
+  // An award reads the winner's price against the same chain.
+  'POST /v1/tenders/{id}/award',
   'POST /v1/tenders/{id}/open-bids',
   'GET /v1/tenders/{id}/bids',
   'GET /v1/tenders/{id}/bids/{bidId}',
@@ -391,9 +404,11 @@ const EVIDENCE_CHECKED = new Set([
 
 /**
  * Evaluation asks identity-service who the caller is now, and a qualification asks supplier-service
- * for the contractor's standing: unreachable is 503/504, nothing is done (fail closed).
+ * for the contractor's standing — as does an award, for the winner's: unreachable is 503/504,
+ * nothing is done (fail closed).
  */
 const UPSTREAM_CHECKED = new Set([
+  'POST /v1/tenders/{id}/award',
   'POST /v1/tenders/{id}/bids/{bidId}/qualification',
   'POST /v1/tenders/{id}/bids/{bidId}/recusal',
   'POST /v1/tenders/{id}/bids/{bidId}/scores',
@@ -420,13 +435,13 @@ const RETRY_AFTER_HEADER = {
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited.',
+  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR).',
   404: 'Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.',
-  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE).',
+  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry).',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE); awarding (ADR-067 § 3): a tender that is not EVALUATED (NOT_EVALUATED), a bid that is not a qualified one of it (BID_NOT_QUALIFIED), a choice of any rank but the single first without a justification (JUSTIFICATION_REQUIRED), a winner supplier-service no longer finds eligible (WINNER_NOT_ELIGIBLE — nothing falls back to the next rank), an awarder the records cannot show to be a different person from the evaluators (ACTOR_IDENTITY_UNKNOWN), the approval gate (APPROVAL_POLICY_REQUIRED, APPROVAL_REQUIRED — closed until the approval round is wired), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY).',
   500: 'Unexpected server error.',
-  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2). Evaluating bids: identity-service, which says who the caller is now, or — for a qualification — supplier-service, which says whether the contractor is still eligible, cannot be reached; nothing is done (fail closed). A contractor reading its own opened bid: audit-service or the key-encryption key as for the owner.',
-  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused. Opening or reading bids: audit-service did not answer in time. Evaluating bids: identity-service (or supplier-service, for a qualification) did not answer in time.',
+  503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2). Evaluating bids: identity-service, which says who the caller is now, or — for a qualification — supplier-service, which says whether the contractor is still eligible, cannot be reached; nothing is done (fail closed). A contractor reading its own opened bid: audit-service or the key-encryption key as for the owner. Awarding: identity-service, supplier-service (the winner’s standing now), audit-service or the key-encryption key cannot be reached; nothing is awarded.',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused. Opening or reading bids: audit-service did not answer in time. Evaluating bids: identity-service (or supplier-service, for a qualification) did not answer in time. Awarding: identity-service, supplier-service or audit-service did not answer in time.',
 };
 
 const DESCRIPTION =
@@ -476,6 +491,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     BidController,
     BidOpeningController,
     EvaluationController,
+    AwardController,
   ],
   providers: [
     { provide: PublicationService, useValue: {} },
@@ -483,6 +499,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     { provide: TenderOpenService, useValue: {} },
     { provide: OwnBidService, useValue: {} },
     { provide: EvaluationService, useValue: {} },
+    { provide: AwardService, useValue: {} },
     { provide: ProjectService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },

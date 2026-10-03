@@ -45,6 +45,8 @@ import { OwnerIdentity } from '../src/tender/owner-identity';
 import { OwnBidService } from '../src/tender/own-bid.service';
 import { EvaluationRepository } from '../src/tender/evaluation.repository';
 import { EvaluationService } from '../src/tender/evaluation.service';
+import { AwardRepository } from '../src/tender/award.repository';
+import { AwardService } from '../src/tender/award.service';
 import type { LiveAnswer, LiveMembership, MembershipSource } from '../src/tender/membership.client';
 import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
 import { genesisReceipt } from '../src/tender/sealing/sealing';
@@ -201,6 +203,8 @@ export interface Wiring {
   /** CON-002 PR 9: evaluating the opened bids, and a contractor reading its own opened bid. */
   evaluation: EvaluationService;
   ownBids: OwnBidService;
+  /** CON-002 PR 10: awarding an evaluated tender; `awardApproved` is the core with the approval gate satisfied. */
+  award: AwardService;
   close(): Promise<void>;
 }
 
@@ -333,6 +337,21 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       env,
     ),
     ownBids: new OwnBidService(prisma, bidRepository, reader, bidAudit, access),
+    award: new AwardService(
+      prisma,
+      new EvaluationRepository(),
+      new AwardRepository(),
+      bidRepository,
+      tenderOpens,
+      bidAudit,
+      events,
+      access,
+      identity,
+      new StandingAuthority(SUPPLIER),
+      reader,
+      clock,
+      env,
+    ),
     tenderCloses,
     tenderClose,
     tenderCloseSweeper: tenderCloseSweeperWith(),
@@ -707,10 +726,12 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
         ['bid_evaluation', 'tg_bid_evaluation_append_only'],
         ['bid_evaluation_recusal', 'tg_bid_recusal_append_only'],
         ['bid_evaluation_score', 'tg_bid_score_append_only'],
+        ['tender_award', 'tg_tender_award_append_only'],
       ] as const;
       for (const [table, trigger] of APPEND_ONLY) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
       }
+      await tx.tenderAward.deleteMany({ where });
       await tx.bidEvaluationScore.deleteMany({ where });
       await tx.bidEvaluation.deleteMany({ where });
       await tx.bidEvaluationRecusal.deleteMany({ where });
@@ -1125,23 +1146,33 @@ export class FakeHierarchy {
  * the table: the approval module cannot write one until its round is wired (PR 11),
  * and the publication gate is proven against the row it will read.
  */
-export async function activatePublicationPolicy(
+export function activatePublicationPolicy(w: Wiring, organizationId: string): Promise<string> {
+  return activateTenderPolicy(w, organizationId, 'tender.publication');
+}
+
+/** The same for `tender.award` (CON-002 PR 10): the award gate is proven against the row it will read. */
+export function activateAwardPolicy(w: Wiring, organizationId: string): Promise<string> {
+  return activateTenderPolicy(w, organizationId, 'tender.award');
+}
+
+async function activateTenderPolicy(
   w: Wiring,
   organizationId: string,
+  workflowKey: 'tender.publication' | 'tender.award',
 ): Promise<string> {
   const id = `APL_${ulid()}`;
-  await runUnscoped('the suite puts a tender.publication policy in force', () =>
+  await runUnscoped(`the suite puts a ${workflowKey} policy in force`, () =>
     w.prisma.client.approvalPolicy.create({
       data: {
         id,
         organizationId,
         authorOrganizationId: organizationId,
         authorRole: 'SYSTEM_ADMIN',
-        workflowKey: 'tender.publication',
+        workflowKey,
         policyVersion: 1,
         status: 'ACTIVE',
-        label: 'Tender publication',
-        rationale: 'Written by the publication gate suite',
+        label: workflowKey === 'tender.award' ? 'Tender award' : 'Tender publication',
+        rationale: 'Written by the tender gate suites',
         isSample: true,
         createdAt: new Date(),
         createdBy: 'USR_suite',
@@ -1254,6 +1285,8 @@ export async function evaluatingTender(
   w: Wiring,
   organizations: string[],
   count = 2,
+  /** The price bid `i` seals, in minor units; by default `1000 + i`. */
+  prices: readonly string[] = [],
 ): Promise<{
   owner: string;
   tenderId: string;
@@ -1268,7 +1301,7 @@ export async function evaluatingTender(
     organizations.push(bidder);
     await qualify(w, bidder);
     const view = await asBidder(bidder, () =>
-      w.bids.submit(tenderId, { content: bidContent(String(1_000 + i)) }),
+      w.bids.submit(tenderId, { content: bidContent(prices[i] ?? String(1_000 + i)) }),
     );
     bids.push({ bidder, bidId: view.bidId });
   }
@@ -1281,4 +1314,52 @@ export async function evaluatingTender(
   await w.tenderClose.close({ organizationId: owner, tenderId });
   await asAdmin(owner, () => w.tenderOpen.open(tenderId));
   return { owner, tenderId, bids };
+}
+
+/**
+ * A tender in EVALUATED (CON-002 PR 10): `evaluatingTender`, then every bid qualified and scored in
+ * full by one evaluator, who also completes the evaluation. Bid `i` scores `9000 - 1000 × i` on
+ * PRICE (and full marks on LICENCE), so the bids rank 1, 2, 3 … in the order returned — or, with
+ * `tie`, all score alike and share the first rank. The tender is the owner's; the bidders each
+ * hold a standing in supplier-service's fake. Needs a wiring with four-eyes off, as
+ * `evaluatingTender` does.
+ */
+export async function evaluatedTender(
+  w: Wiring,
+  organizations: string[],
+  options: { count?: number; tie?: boolean; prices?: readonly string[] } = {},
+): Promise<{
+  owner: string;
+  tenderId: string;
+  /** The one person who decided on every bid, scored it, and completed the evaluation. */
+  evaluator: string;
+  bids: { bidder: string; bidId: string }[];
+}> {
+  const { owner, tenderId, bids } = await evaluatingTender(
+    w,
+    organizations,
+    options.count ?? 2,
+    options.prices,
+  );
+  const evaluator = newUserId();
+  for (const [index, bid] of bids.entries()) {
+    await asAdmin(
+      owner,
+      () => w.evaluation.qualify(tenderId, bid.bidId, { decision: 'QUALIFIED' }),
+      evaluator,
+    );
+    await asAdmin(
+      owner,
+      () =>
+        w.evaluation.score(tenderId, bid.bidId, {
+          scores: [
+            { criterionCode: 'PRICE', scoreScaled: options.tie ? 8_000 : 9_000 - index * 1_000 },
+            { criterionCode: 'LICENCE', scoreScaled: 100 },
+          ],
+        }),
+      evaluator,
+    );
+  }
+  await asAdmin(owner, () => w.evaluation.evaluate(tenderId), evaluator);
+  return { owner, tenderId, evaluator, bids };
 }

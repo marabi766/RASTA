@@ -84,6 +84,9 @@ import { OwnBidService } from './tender/own-bid.service';
 import { EvaluationRepository } from './tender/evaluation.repository';
 import { EvaluationService } from './tender/evaluation.service';
 import { EvaluationController } from './tender/evaluation.controller';
+import { AwardRepository } from './tender/award.repository';
+import { AwardService } from './tender/award.service';
+import { AwardController } from './tender/award.controller';
 import { TenderOpenRepository } from './tender/tender-open.repository';
 import { TenderOpenService } from './tender/tender-open.service';
 import { DatabaseTenderClock, TenderClock } from './tender/tender-clock';
@@ -143,6 +146,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     BidController,
     BidOpeningController,
     EvaluationController,
+    AwardController,
     HealthController,
     MetricsController,
   ],
@@ -214,6 +218,9 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     EvaluationRepository,
     EvaluationService,
     OwnBidService,
+    // ADR-067 § 3: awarding an evaluated tender to one of its qualified bids.
+    AwardRepository,
+    AwardService,
     // ADR-065 § 3: a bounded, leased, fenced sweep closes tenders past their deadline.
     // The bids are refused by the clock whether or not it runs.
     TenderCloseRepository,
