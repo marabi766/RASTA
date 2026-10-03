@@ -1093,6 +1093,9 @@ export const EXPECTED = {
       'bid_evaluation',
       'bid_evaluation_recusal',
       'bid_evaluation_score',
+      // 20261003100000_tender_award (CON-002 PR 10).
+      'tender_award',
+      'tender_award_standing_check',
     ],
     // 20261003120000_actor_stable_identity (#188): one person is one evaluator of a bid.
     indexes: ['ux_bid_evaluation_person', 'ux_bid_recusal_person'],
@@ -1128,6 +1131,19 @@ export const EXPECTED = {
       'tg_bid_recusal_no_truncate',
       'tg_bid_score_append_only',
       'tg_bid_score_no_truncate',
+      // 20261003100000_tender_award: an award only for an EVALUATED tender and a QUALIFIED bid of it,
+      // the tender and the bids move only with it, and it commits only with both moved; append-only.
+      'tg_tender_award_guard',
+      'tg_tender_status_requires_award',
+      'tg_bid_status_requires_award',
+      'tg_tender_award_consistent',
+      'tg_tender_award_append_only',
+      'tg_tender_award_no_truncate',
+      // The standing check of an award: its guard, and never deleted.
+      'tg_award_standing_check_guard',
+      'tg_award_standing_check_no_delete',
+      'tg_award_standing_check_no_truncate',
+      'tg_award_standing_check_conflict_announced',
     ],
     functions: [
       'tender_criterion_freeze',
@@ -1143,6 +1159,12 @@ export const EXPECTED = {
       'bid_evaluation_guard',
       'bid_recusal_guard',
       'bid_score_guard',
+      'tender_award_guard',
+      'tender_award_recorded',
+      'bid_award_recorded',
+      'tender_award_consistent',
+      'award_standing_check_guard',
+      'award_standing_check_conflict_announced',
     ],
     constraints: [
       'ck_project_text_not_blank',
@@ -1260,6 +1282,14 @@ export const EXPECTED = {
       'bid_evaluation_recusal_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_evaluation_id_fkey',
+      'ck_tender_award_shape',
+      'ck_tender_award_not_own',
+      'ck_tender_award_justified',
+      'ck_tender_award_actor_pair',
+      'tender_award_organization_id_tender_id_fkey',
+      'tender_award_bid_id_fkey',
+      'ck_award_standing_check_shape',
+      'tender_award_standing_check_organization_id_tender_id_fkey',
       // 20261003120000_actor_stable_identity (#188 part B): each person a later check compares
       // carries the token's issuer and subject, both or neither, never blank.
       'ck_tender_created_by_identity',

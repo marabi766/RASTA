@@ -95,10 +95,12 @@ export const EXEMPTIONS = {
   },
   // construction: every child references its parent by (organization_id,
   // parent_id), so per-parent indexes lead with the tenant column without
-  // weakening anything. Two exemptions:
+  // weakening anything. Three exemptions:
   construction: {
     ix_tender_close_due:
       'the close sweeper claims overdue PUBLISHED tenders for every tenant at once, oldest deadline first (TenderCloseRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, so it is small, and each tender is then closed under its own organization_id',
+    ix_award_standing_check_due:
+      'the standing-check sweeper claims the PENDING checks after awards for every tenant at once, oldest first (AwardStandingCheckRepository.claimDue, runUnscoped); a partial index on status = PENDING, so it is small, and each check is then settled under its own organization_id',
     ix_approval_authority_inbox:
       "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
   },

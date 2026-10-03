@@ -156,6 +156,10 @@ export const ID_PREFIX = {
   evaluation: 'BEV',
   recusal: 'BRC',
   score: 'BSC',
+  /** CON-002 PR 10: the award of a tender. */
+  award: 'TAW',
+  /** CON-002 PR 10: the standing check that follows an award. */
+  standingCheck: 'TSC',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

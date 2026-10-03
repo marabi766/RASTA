@@ -152,6 +152,59 @@ describe('project roles (Q-69)', () => {
     });
   });
 
+  describe('who awards a tender (ADR-067 § 3)', () => {
+    it('is empty by default, which means the owner role set', () => {
+      expect(load().CONSTRUCTION_TENDER_AWARD_ROLES).toEqual([]);
+    });
+
+    it('accepts a configured list, trimmed', () => {
+      expect(
+        load({ CONSTRUCTION_TENDER_AWARD_ROLES: 'ORGANIZATION_ADMIN, PROCUREMENT_USER' })
+          .CONSTRUCTION_TENDER_AWARD_ROLES,
+      ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+    });
+
+    it.each(['AUDITOR', 'SYSTEM_ADMIN', 'CONTRACTOR'])(
+      'refuses to start when it names %s',
+      (role) => {
+        expect(() =>
+          load({ CONSTRUCTION_TENDER_AWARD_ROLES: `ORGANIZATION_ADMIN,${role}` }),
+        ).toThrow(/CONSTRUCTION_TENDER_AWARD_ROLES/);
+      },
+    );
+
+    it('refuses an unknown role rather than ignoring it', () => {
+      expect(() => load({ CONSTRUCTION_TENDER_AWARD_ROLES: 'COMMITTEE_CHAIR' })).toThrow(
+        /Unknown role in CONSTRUCTION_TENDER_AWARD_ROLES/,
+      );
+    });
+  });
+
+  describe('the standing-check sweeper after an award (ADR-067 § 3)', () => {
+    it('has bounded defaults', () => {
+      const env = load();
+      expect([
+        env.CONSTRUCTION_AWARD_CHECK_INTERVAL_MS,
+        env.CONSTRUCTION_AWARD_CHECK_BATCH_SIZE,
+        env.CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS,
+        env.CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS,
+        env.CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS,
+        env.CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS,
+      ]).toEqual([10_000, 10, 120, 10, 900, 600]);
+    });
+
+    it.each([
+      ['CONSTRUCTION_AWARD_CHECK_INTERVAL_MS', '100'],
+      ['CONSTRUCTION_AWARD_CHECK_BATCH_SIZE', '0'],
+      ['CONSTRUCTION_AWARD_CHECK_BATCH_SIZE', '101'],
+      ['CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS', '5'],
+      ['CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS', '1'],
+      ['CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS', 'soon'],
+    ])('refuses %s=%s', (name, value) => {
+      expect(() => load({ [name]: value })).toThrow();
+    });
+  });
+
   describe('how many evaluators (Q-88, Q-92: provisional)', () => {
     it('defaults to ADR-067’s MVP: one evaluator per bid, one required', () => {
       const env = load();
@@ -186,8 +239,12 @@ describe('project roles (Q-69)', () => {
   });
 
   describe('the optional conflict-of-interest rules (Q-90, Q-92)', () => {
-    it('are all off by default', () => {
-      expect(load().CONSTRUCTION_COI_RULES).toEqual([]);
+    it('has the awarder rule on by default (strict), and nothing else', () => {
+      expect(load().CONSTRUCTION_COI_RULES).toEqual(['AWARDER_NOT_EVALUATOR']);
+    });
+
+    it('is switched off by an empty value', () => {
+      expect(load({ CONSTRUCTION_COI_RULES: '' }).CONSTRUCTION_COI_RULES).toEqual([]);
     });
 
     it('accepts rules from the closed set, trimmed', () => {

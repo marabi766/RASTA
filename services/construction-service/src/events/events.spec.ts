@@ -268,6 +268,34 @@ Object.assign(VALID, {
     evaluatedBy: 'USR_1',
     evaluatedAt: AT,
   },
+  TENDER_AWARDED: {
+    ...TENDER,
+    winningBidId: 'BID_1',
+    winnerOrganizationId: 'ORG_B',
+    hasJustification: false,
+    matrixDigest: 'c'.repeat(64),
+    awardedBy: 'USR_1',
+    awardedAt: AT,
+  },
+  TENDER_AWARD_STANDING_CONFLICT_DETECTED: {
+    ...TENDER,
+    winningBidId: 'BID_1',
+    winnerOrganizationId: 'ORG_B',
+    awardedBy: 'USR_1',
+    awardedAt: AT,
+    windowStart: AT,
+    checkedAt: AT,
+    suspensionIds: ['SUS_1'],
+    suspensionCount: 1,
+    qualificationRemoved: false,
+  },
+  BID_NOT_AWARDED: {
+    bidId: 'BID_2',
+    tenderId: 'TND_1',
+    organizationId: 'ORG_A',
+    bidderOrganizationId: 'ORG_C',
+    decidedAt: AT,
+  },
   BIDS_OPENED: {
     ...TENDER,
     bidCount: 2,
@@ -329,6 +357,9 @@ const TENDER_EVENTS = [
   'BID_SCORED',
   'BID_EVALUATOR_RECUSED',
   'BIDS_EVALUATED',
+  'TENDER_AWARDED',
+  'BID_NOT_AWARDED',
+  'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
 ];
 const TEMPLATE_EVENTS = ['CRITERIA_TEMPLATE_CREATED'];
 const POLICY_EVENTS = [
@@ -363,6 +394,7 @@ describe('the construction event catalogue', () => {
       'BID_ACCESSED',
       'BID_DISQUALIFIED',
       'BID_EVALUATOR_RECUSED',
+      'BID_NOT_AWARDED',
       'BID_OPENING_CONFLICT_DETECTED',
       'BID_OPENING_PROPOSAL_WITHDRAWN',
       'BID_QUALIFIED',
@@ -383,6 +415,8 @@ describe('the construction event catalogue', () => {
       'PROJECT_STARTED',
       'PROJECT_STATUS_CHANGED',
       'PROJECT_UPDATED',
+      'TENDER_AWARDED',
+      'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
       'TENDER_BIDDER_INVITED',
       'TENDER_CANCELLED',
       'TENDER_CLOSED',
@@ -456,6 +490,91 @@ describe('the construction event catalogue', () => {
       }
     },
   );
+
+  describe('the award events (ADR-067 § 3, Q-89)', () => {
+    it('TENDER_AWARDED carries the winner, and no amount, rank, score nor words', () => {
+      for (const extra of [
+        { amountMinor: '1250000000' },
+        { priceMinor: '1250000000' },
+        { amount: 1250000000 },
+        { rank: 1 },
+        { totalScaled: '10' },
+        { justification: 'The lowest bid was not responsive' },
+        { reason: 'x' },
+        { rankOfWinner: 1 },
+      ]) {
+        expect(() =>
+          validateConstructionPayload('TENDER_AWARDED', { ...VALID.TENDER_AWARDED!, ...extra }),
+        ).toThrow(/does not match its published contract/);
+      }
+    });
+
+    it('the shared topic never carries the winner’s price, whatever it is called', () => {
+      const text = JSON.stringify(VALID.TENDER_AWARDED);
+      expect(text).not.toMatch(/amount|price/i);
+    });
+
+    it('TENDER_AWARD_STANDING_CONFLICT_DETECTED is ids, counts and times only', () => {
+      for (const extra of [
+        { reason: 'suspended for fraud' },
+        { amountMinor: '1' },
+        { name: 'x' },
+      ]) {
+        expect(() =>
+          validateConstructionPayload('TENDER_AWARD_STANDING_CONFLICT_DETECTED', {
+            ...VALID.TENDER_AWARD_STANDING_CONFLICT_DETECTED!,
+            ...extra,
+          }),
+        ).toThrow(/does not match its published contract/);
+      }
+      expect(() =>
+        validateConstructionPayload('TENDER_AWARD_STANDING_CONFLICT_DETECTED', {
+          ...VALID.TENDER_AWARD_STANDING_CONFLICT_DETECTED!,
+          suspensionIds: Array.from({ length: 21 }, (_, i) => `SUS_${i}`),
+        }),
+      ).toThrow();
+    });
+
+    it('TENDER_AWARDED says only whether the choice was justified, and pins a SHA-256 matrix digest', () => {
+      expect(() =>
+        validateConstructionPayload('TENDER_AWARDED', {
+          ...VALID.TENDER_AWARDED!,
+          hasJustification: 'yes',
+        }),
+      ).toThrow();
+      expect(() =>
+        validateConstructionPayload('TENDER_AWARDED', {
+          ...VALID.TENDER_AWARDED!,
+          matrixDigest: 'not-a-digest',
+        }),
+      ).toThrow();
+    });
+
+    it('BID_NOT_AWARDED names neither the winner, the amount, a rank nor a score: a loser is told its own, only', () => {
+      for (const extra of [
+        { winningBidId: 'BID_1' },
+        { winnerOrganizationId: 'ORG_B' },
+        { amountMinor: '1250000000' },
+        { rank: 2 },
+        { totalScaled: '10' },
+        { justification: 'x' },
+      ]) {
+        expect(() =>
+          validateConstructionPayload('BID_NOT_AWARDED', { ...VALID.BID_NOT_AWARDED!, ...extra }),
+        ).toThrow(/does not match its published contract/);
+      }
+    });
+
+    it('both are keyed by the tender', () => {
+      for (const name of [
+        'TENDER_AWARDED',
+        'BID_NOT_AWARDED',
+        'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
+      ] as const) {
+        expect(resolvePartitionKey(name, VALID[name]!).key).toBe('TND_1');
+      }
+    });
+  });
 
   it.each(POLICY_EVENTS as typeof NAMES)(
     '%s requires the organization and workflow key',

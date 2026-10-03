@@ -19,7 +19,7 @@ export interface LivePrincipal extends Principal {
 }
 
 /** Which of the owner's duties a caller is being judged for: they share every refusal but the roles. */
-export type OwnerDuty = 'OPEN_BIDS' | 'EVALUATE_BIDS';
+export type OwnerDuty = 'OPEN_BIDS' | 'EVALUATE_BIDS' | 'AWARD_TENDER';
 
 /**
  * The owner side's judgement of who a caller is **now** (ADR-066 § 4, ADR-067 § 4), shared by
@@ -61,6 +61,7 @@ export class OwnerIdentity {
       );
     }
     if (duty === 'OPEN_BIDS') this.access.assertLiveRolesMayOpenBids(owner.roles);
+    else if (duty === 'AWARD_TENDER') this.access.assertLiveRolesMayAward(owner.roles);
     else this.access.assertLiveRolesMayEvaluate(owner.roles);
     return {
       ...principal,

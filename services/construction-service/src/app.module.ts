@@ -1,4 +1,5 @@
 import {
+  Inject,
   Module,
   type MiddlewareConsumer,
   type NestModule,
@@ -84,6 +85,12 @@ import { OwnBidService } from './tender/own-bid.service';
 import { EvaluationRepository } from './tender/evaluation.repository';
 import { EvaluationService } from './tender/evaluation.service';
 import { EvaluationController } from './tender/evaluation.controller';
+import { AwardRepository } from './tender/award.repository';
+import { AwardService } from './tender/award.service';
+import { AwardController } from './tender/award.controller';
+import { AwardStandingCheckRepository } from './tender/award-standing-check.repository';
+import { AwardStandingCheckService } from './tender/award-standing-check.service';
+import { AwardStandingCheckSweeper } from './tender/award-standing-check.sweeper';
 import { TenderOpenRepository } from './tender/tender-open.repository';
 import { TenderOpenService } from './tender/tender-open.service';
 import { DatabaseTenderClock, TenderClock } from './tender/tender-clock';
@@ -94,6 +101,9 @@ import { EnvKekProvider } from './tender/sealing/key-provider';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import {
+  awardStandingCheckOldestPendingAgeSeconds,
+  awardStandingCheckOverdue,
+  awardStandingCheckPending,
   policyReconciliationBacklog,
   policyReconciliationOldestDueAgeSeconds,
   tenderCloseBacklog,
@@ -143,6 +153,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     BidController,
     BidOpeningController,
     EvaluationController,
+    AwardController,
     HealthController,
     MetricsController,
   ],
@@ -214,6 +225,29 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     EvaluationRepository,
     EvaluationService,
     OwnBidService,
+    // ADR-067 § 3: awarding an evaluated tender to one of its qualified bids.
+    AwardRepository,
+    AwardService,
+    // ADR-067 § 3 (residual): the standing check after every award is a row written in the award's
+    // transaction and made by a bounded, leased, fenced sweep; the award's answer waits for nothing.
+    AwardStandingCheckRepository,
+    AwardStandingCheckService,
+    {
+      provide: AwardStandingCheckSweeper,
+      inject: [AwardStandingCheckRepository, AwardStandingCheckService, ENV],
+      useFactory: (
+        repository: AwardStandingCheckRepository,
+        service: AwardStandingCheckService,
+        env: ConstructionEnv,
+      ) =>
+        new AwardStandingCheckSweeper(repository, service, {
+          intervalMs: env.CONSTRUCTION_AWARD_CHECK_INTERVAL_MS,
+          batchSize: env.CONSTRUCTION_AWARD_CHECK_BATCH_SIZE,
+          leaseSeconds: env.CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS,
+          retryBackoffBaseSeconds: env.CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS,
+          retryBackoffMaxSeconds: env.CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS,
+        }),
+    },
     // ADR-065 § 3: a bounded, leased, fenced sweep closes tenders past their deadline.
     // The bids are refused by the clock whether or not it runs.
     TenderCloseRepository,
@@ -385,6 +419,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly tenderCloser: TenderCloseSweeper,
     private readonly tenderCloses: TenderCloseRepository,
+    private readonly awardChecker: AwardStandingCheckSweeper,
+    private readonly awardChecks: AwardStandingCheckRepository,
+    @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
   ) {}
@@ -412,6 +449,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.bootstrap.start();
     this.sweeper.start();
     this.tenderCloser.start();
+    this.awardChecker.start();
     this.relay.start();
 
     const sample = async () => {
@@ -438,6 +476,16 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
           overdue.oldestOverdueAgeSeconds,
         );
         tenderCloseMaxAttempts.set({ service: SERVICE_NAME }, overdue.maxCloseAttempts);
+        // Standing checks after an award not yet made (ADR-067 § 3): alert when one is pending too long.
+        const checks = await this.awardChecks.backlog(
+          this.env.CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS,
+        );
+        awardStandingCheckPending.set({ service: SERVICE_NAME }, checks.pending);
+        awardStandingCheckOldestPendingAgeSeconds.set(
+          { service: SERVICE_NAME },
+          checks.oldestPendingAgeSeconds,
+        );
+        awardStandingCheckOverdue.set({ service: SERVICE_NAME }, checks.overdue);
         // Expired idempotency records are unusable by definition; removing
         // them keeps the table bounded (docs/06 § 6.8).
         await this.idempotency.purgeExpired();
@@ -459,6 +507,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.bootstrap.stop();
     await this.sweeper.stop();
     await this.tenderCloser.stop();
+    await this.awardChecker.stop();
     await this.relay.stop();
   }
 }
