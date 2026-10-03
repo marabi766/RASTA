@@ -15,6 +15,10 @@ import {
   toOrganizationProjection,
   type OrganizationProjection,
 } from '../audit/organization-projection';
+import {
+  toPaymentReconciliationEvidence,
+  type PaymentReconciliationEvidence,
+} from '../audit/payment-reconciliation-projection';
 import { domainSourceServiceLabel } from '../audit/audit-producer-topology';
 import {
   auditIngestionFailuresTotal,
@@ -137,8 +141,36 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       throw error;
     }
 
+    // D-046. The two payment-reconciliation events that record a human
+    // decision also keep an allow-listed projection of who proposed, who
+    // approved or acted, and on which evidence. Same fail-closed choice as the
+    // hierarchy above, for the same reason: an audit row recorded without the
+    // second actor and the evidence is the gap this projection closes, so a
+    // known event that fails its contract writes nothing. The mapper throws
+    // `UnprocessableEventError`, which the shared consumer dead-letters at
+    // once — a malformed payload does not become well-formed on retry.
+    let reconciliation: PaymentReconciliationEvidence | null;
     try {
-      const outcome = await this.repository.ingest(record, DOMAIN_PROJECTOR_CONSUMER, projection);
+      reconciliation = toPaymentReconciliationEvidence(envelope, delivery);
+    } catch (error) {
+      auditIngestionFailuresTotal.inc({
+        reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_RECONCILIATION_EVENT,
+      });
+      // Key names only, as above; the error itself names field paths and codes.
+      this.logger.error(
+        `Cannot project ${envelope.eventName} ${envelope.eventId} from ${delivery.topic} ` +
+          `as payment-reconciliation evidence (payload keys: ${describePayloadKeys(envelope.payload)})`,
+      );
+      throw error;
+    }
+
+    try {
+      const outcome = await this.repository.ingest(
+        record,
+        DOMAIN_PROJECTOR_CONSUMER,
+        projection,
+        reconciliation,
+      );
 
       if (outcome === 'DUPLICATE') {
         // Not a failure and not counted as one. At-least-once delivery plus

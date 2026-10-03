@@ -8,6 +8,7 @@ import {
   type OrganizationDomainStatus,
   type OrganizationProjection,
 } from './organization-projection';
+import type { PaymentReconciliationEvidence } from './payment-reconciliation-projection';
 import type { AuditEventRow } from './audit.view';
 import type { AuditCursor } from './audit.cursor';
 import type { HashableAuditRecord } from './audit.canonical';
@@ -314,11 +315,21 @@ export class AuditRepository {
    * one tenant in two months, are separate rows and block none of each other's
    * writes — which is why ADR-053 scopes the chain per tenant-month rather than
    * globally.
+   *
+   * ## Payment-reconciliation evidence (D-046)
+   *
+   * `reconciliation` is the allow-listed projection of a
+   * `PAYMENT_RECONCILIATION_RESOLVED` or `_OPERATOR_ACTION` payload. Its row is
+   * written in this transaction, after the audit row, and takes its source
+   * event id, audit row id and time from `record` — so the evidence and the
+   * audit row cannot describe different events, and a duplicate that rolls
+   * back here leaves neither.
    */
   async ingest(
     record: AuditEventRecord,
     consumerName: string,
     projection: OrganizationProjection | null = null,
+    reconciliation: PaymentReconciliationEvidence | null = null,
   ): Promise<IngestOutcome> {
     try {
       return await this.prisma.client.$transaction(async (tx) => {
@@ -517,6 +528,32 @@ export class AuditRepository {
         // The reverse order would let a crash leave the authorization
         // projection ahead of the audit trail that explains it (AUD-002).
         if (projection !== null) await applyOrganizationProjection(tx, projection);
+
+        if (reconciliation !== null) {
+          await tx.paymentReconciliationEvidence.create({
+            data: {
+              sourceEventId: stored.sourceEventId,
+              auditEventId: stored.id,
+              occurredAt: stored.occurredAt,
+              projectionVersion: reconciliation.projectionVersion,
+              organizationId: reconciliation.organizationId,
+              eventName: reconciliation.eventName,
+              paymentIntentId: reconciliation.paymentIntentId,
+              kind: reconciliation.kind,
+              operatorAction: reconciliation.operatorAction,
+              actor: reconciliation.actor,
+              resolution: reconciliation.resolution,
+              resolvedBy: reconciliation.resolvedBy,
+              providerOutcome: reconciliation.providerOutcome,
+              resolutionId: reconciliation.resolutionId,
+              requeueId: reconciliation.requeueId,
+              proposedBy: reconciliation.proposedBy,
+              approvedBy: reconciliation.approvedBy,
+              evidenceReference: reconciliation.evidenceReference,
+              fourEyes: reconciliation.fourEyes,
+            },
+          });
+        }
 
         return 'WRITTEN';
       }, INGEST_TRANSACTION);

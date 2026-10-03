@@ -159,6 +159,14 @@ export const INGESTION_FAILURE_REASONS = {
    * security control that stops advancing.
    */
   UNMAPPABLE_ORGANIZATION_EVENT: 'unmappable_organization_event',
+  /**
+   * A `PAYMENT_RECONCILIATION_RESOLVED` or `_OPERATOR_ACTION` on
+   * `rasta.economic.v1` failed the payment-reconciliation evidence contract
+   * (D-046): neither the audit row nor the evidence row was written, and the
+   * event was dead-lettered. Its own reason because what stops is the record of
+   * who approved a money-moving decision on which evidence.
+   */
+  UNMAPPABLE_RECONCILIATION_EVENT: 'unmappable_reconciliation_event',
 
   // AUD-004 Phase B — a path-B message the audit-trail consumer refuses to
   // record. Five values rather than one because each points an operator at a

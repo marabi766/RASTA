@@ -601,3 +601,117 @@ describe('source_service label on path A', () => {
     expect(await countOf({ source_service: 'unknown' })).toBe(100);
   });
 });
+
+/**
+ * D-046 at the handler: the payment-reconciliation evidence rides into the
+ * same `ingest` call as its audit row, and a known event that fails its
+ * contract reaches no write at all.
+ */
+describe('payment-reconciliation evidence on path A', () => {
+  const delivery: EventDelivery = Object.freeze({ topic: 'rasta.economic.v1', partition: 0 });
+  const SECRET = 'SECRET-EVIDENCE prose that must not be logged';
+
+  function resolved(payloadOverrides: Record<string, unknown> = {}): EventEnvelope {
+    return {
+      eventId: '01JPROJECTORSPECRECON0001',
+      eventName: 'PAYMENT_RECONCILIATION_RESOLVED',
+      eventVersion: 1,
+      occurredAt: '2026-10-03T10:00:00.000Z',
+      producer: 'economic-service',
+      aggregateType: 'PaymentIntent',
+      aggregateId: 'pi_1',
+      tenantId: 'ORG-1',
+      correlationId: 'corr-1',
+      payload: {
+        paymentIntentId: 'pi_1',
+        organizationId: 'ORG-1',
+        walletId: 'wal_1',
+        kind: 'REFUND',
+        marker: 'REFUND_UNKNOWN',
+        providerRefund: null,
+        resolution: 'REFUNDED',
+        resolvedBy: 'usr_b',
+        attempts: 1,
+        amountMinor: '100',
+        currency: 'IRR',
+        provider: 'mock',
+        simulated: true,
+        resolvedAt: '2026-10-03T10:00:00.000Z',
+        resolutionId: 'res_1',
+        proposedBy: 'usr_a',
+        approvedBy: 'usr_b',
+        evidenceReference: 'TICKET-1',
+        fourEyes: true,
+        ...payloadOverrides,
+      },
+    } as EventEnvelope;
+  }
+
+  it('passes the projection to the same ingest call as the audit row', async () => {
+    const calls: unknown[][] = [];
+    const projector = new DomainProjectorConsumer(
+      () => ({}) as EventConsumer,
+      {
+        ingest: async (...args: unknown[]): Promise<IngestOutcome> => {
+          calls.push(args);
+          return 'WRITTEN';
+        },
+      } as unknown as AuditRepository,
+      silentLogger,
+    );
+
+    await projector.handle(resolved(), delivery);
+
+    expect(calls).toHaveLength(1);
+    const [record, , organization, reconciliation] = calls[0] as [
+      AuditEventRecord,
+      string,
+      unknown,
+      Record<string, unknown>,
+    ];
+    expect(record.sourceEventName).toBe('PAYMENT_RECONCILIATION_RESOLVED');
+    expect(organization).toBeNull();
+    expect(reconciliation).toMatchObject({
+      projectionVersion: 1,
+      proposedBy: 'usr_a',
+      approvedBy: 'usr_b',
+      evidenceReference: 'TICKET-1',
+      fourEyes: true,
+    });
+  });
+
+  it('never ingests a malformed one, counts it, and logs no value', async () => {
+    const logged: unknown[][] = [];
+    const logger = {
+      info: (...args: unknown[]) => logged.push(args),
+      warn: (...args: unknown[]) => logged.push(args),
+      error: (...args: unknown[]) => logged.push(args),
+      debug: (...args: unknown[]) => logged.push(args),
+    } as unknown as Logger;
+    let ingested = 0;
+    const projector = new DomainProjectorConsumer(
+      () => ({}) as EventConsumer,
+      {
+        ingest: async (): Promise<IngestOutcome> => {
+          ingested += 1;
+          return 'WRITTEN';
+        },
+      } as unknown as AuditRepository,
+      logger,
+    );
+    const failures = async () =>
+      (await auditIngestionFailuresTotal.get()).values.find(
+        (value) => value.labels.reason === 'unmappable_reconciliation_event',
+      )?.value ?? 0;
+    const before = await failures();
+
+    await expect(
+      projector.handle(resolved({ evidenceReference: SECRET }), delivery),
+    ).rejects.toMatchObject({ name: 'UnprocessableEventError', reason: 'VALIDATION_FAILED' });
+
+    expect(ingested).toBe(0);
+    expect(await failures()).toBe(before + 1);
+    expect(JSON.stringify(logged)).not.toContain(SECRET);
+    expect(JSON.stringify(logged)).toContain('evidenceReference');
+  });
+});
