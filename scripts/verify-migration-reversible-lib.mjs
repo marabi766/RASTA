@@ -1094,6 +1094,8 @@ export const EXPECTED = {
       'bid_evaluation_recusal',
       'bid_evaluation_score',
     ],
+    // 20261003120000_actor_stable_identity (#188): one person is one evaluator of a bid.
+    indexes: ['ux_bid_evaluation_person', 'ux_bid_recusal_person'],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
     // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
     // 20260930180000_tender_publication: a tender's key is never deleted and its
@@ -1258,6 +1260,17 @@ export const EXPECTED = {
       'bid_evaluation_recusal_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_evaluation_id_fkey',
+      // 20261003120000_actor_stable_identity (#188 part B): each person a later check compares
+      // carries the token's issuer and subject, both or neither, never blank.
+      'ck_tender_created_by_identity',
+      'ck_tender_published_by_identity',
+      'ck_tender_evaluated_by_identity',
+      'ck_tender_opening_proposed_by_identity',
+      'ck_policy_created_by_identity',
+      'ck_policy_submitted_by_identity',
+      'ck_bid_qualification_decided_by_identity',
+      'ck_bid_evaluation_evaluator_identity',
+      'ck_bid_recusal_evaluator_identity',
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
       'ck_outbox_attempts_nonneg',

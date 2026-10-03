@@ -602,13 +602,25 @@ export function newUserId(): string {
   return `USR_${ulid()}`;
 }
 
+/** The issuer every test token is verified against (a user token always has one, #188). */
+export const TEST_ISSUER = 'http://test.invalid/realms/rasta';
+
+/**
+ * A request context as the auth guard leaves it. A user's stable identity (#188) is the
+ * issuer and subject: each test user id gets a subject of its own (`sub-<userId>`), so two
+ * user ids are two people unless a test says otherwise (`subject` in `overrides`).
+ */
 export function context(overrides: Partial<RequestContext>): RequestContext {
+  const userId = overrides.userId;
   return {
     requestId: ulid(),
     correlationId: ulid(),
     authType: 'USER',
     roles: [],
     startedAt: Date.now(),
+    ...(userId !== undefined && (overrides.authType ?? 'USER') === 'USER'
+      ? { issuer: TEST_ISSUER, subject: `sub-${userId}`, platformUserId: true }
+      : {}),
     ...overrides,
   } as RequestContext;
 }

@@ -1,9 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, currentActor } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import type { CursorPage } from '@rasta/contracts';
 import type { TenderInvitation } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { storedIdentityOf } from '../shared/stable-actor';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess, assertOwnTender } from '../access/access';
 import { decisionInstant } from '../shared/clock';
@@ -145,6 +146,7 @@ export class PublicationService {
             tenderId,
             expectedVersion: dto.expectedVersion,
             actor,
+            actorIdentity: storedIdentityOf(currentActor()),
             at,
           });
           if (matched === 0) throw this.conflict(tenderId);

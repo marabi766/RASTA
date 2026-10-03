@@ -10,7 +10,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { PolicyService } from './policy.service';
 import { parseIdempotencyKey } from '../project/project.controller';
 import {
@@ -41,6 +41,7 @@ export class PolicyController {
   constructor(private readonly policies: PolicyService) {}
 
   @Post()
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Write an approval policy version (DRAFT) for an organization',
@@ -87,6 +88,7 @@ export class PolicyController {
   }
 
   @Post(':id/submit')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Send a DRAFT policy for platform approval',
@@ -102,6 +104,7 @@ export class PolicyController {
   }
 
   @Post(':id/approve')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Approve a pending policy: it comes into force',

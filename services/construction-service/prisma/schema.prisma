@@ -208,9 +208,16 @@ model ApprovalPolicy {
 
   createdAt            DateTime  @map("created_at")
   createdBy            String    @map("created_by")
+  /// The author's and the submitter's stable identity (#188): the token's issuer and subject,
+  /// both or neither. NULL on a row written before they were recorded: unknown, which the
+  /// four-eyes check treats as the approver's own work (fail closed).
+  createdByIssuer      String?   @map("created_by_issuer")
+  createdBySubject     String?   @map("created_by_subject")
   createdCorrelationId String    @map("created_correlation_id")
   submittedAt          DateTime? @map("submitted_at")
   submittedBy          String?   @map("submitted_by")
+  submittedByIssuer    String?   @map("submitted_by_issuer")
+  submittedBySubject   String?   @map("submitted_by_subject")
   /// The platform approval: the SYSTEM_ADMIN who approved it, and when.
   activatedAt          DateTime? @map("activated_at")
   activatedBy          String?   @map("activated_by")
@@ -491,6 +498,9 @@ model Tender {
 
   createdAt            DateTime @map("created_at")
   createdBy            String   @map("created_by")
+  /// The creator's stable identity (#188): issuer and subject, both or neither; NULL = unknown.
+  createdByIssuer      String?  @map("created_by_issuer")
+  createdBySubject     String?  @map("created_by_subject")
   createdCorrelationId String   @map("created_correlation_id")
   updatedAt            DateTime @map("updated_at")
   updatedBy            String   @map("updated_by")
@@ -499,8 +509,11 @@ model Tender {
   version Int @default(1)
 
   /// When and by whom it was published (ADR-065 § 1); both or neither, and present from PUBLISHED on.
-  publishedAt DateTime? @map("published_at")
-  publishedBy String?   @map("published_by")
+  publishedAt        DateTime? @map("published_at")
+  publishedBy        String?   @map("published_by")
+  /// The publisher's stable identity (#188): both or neither, and only beside `publishedBy`.
+  publishedByIssuer  String?   @map("published_by_issuer")
+  publishedBySubject String?   @map("published_by_subject")
 
   /// When and by whom it was closed (ADR-065 § 3); both or neither, present from CLOSED on.
   closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
@@ -511,14 +524,22 @@ model Tender {
   openedBy String?   @map("opened_by")
 
   /// When and by whom the evaluation was completed (ADR-067 § 2); both or neither, present from EVALUATED on.
-  evaluatedAt DateTime? @map("evaluated_at") @db.Timestamptz(3)
-  evaluatedBy String?   @map("evaluated_by")
+  evaluatedAt        DateTime? @map("evaluated_at") @db.Timestamptz(3)
+  evaluatedBy        String?   @map("evaluated_by")
+  /// The completer's stable identity (#188): both or neither, and only beside `evaluatedBy`.
+  evaluatedByIssuer  String?   @map("evaluated_by_issuer")
+  evaluatedBySubject String?   @map("evaluated_by_subject")
 
   /// Four-eyes for opening (Q-91, provisional): who proposed it and when; both or neither.
   /// Housekeeping, not state: proposing changes neither `status` nor `version`. The opener
   /// (`opened_by`) is a second person, checked by the service.
-  openingProposedAt DateTime? @map("opening_proposed_at") @db.Timestamptz(3)
-  openingProposedBy String?   @map("opening_proposed_by")
+  openingProposedAt        DateTime? @map("opening_proposed_at") @db.Timestamptz(3)
+  openingProposedBy        String?   @map("opening_proposed_by")
+  /// The proposer's stable identity (#188): both or neither, only beside `openingProposedBy`,
+  /// and cleared with it. NULL on a proposal older than the columns: the opening is refused
+  /// (`ACTOR_IDENTITY_UNKNOWN`) until it is withdrawn and proposed again.
+  openingProposedByIssuer  String?   @map("opening_proposed_by_issuer")
+  openingProposedBySubject String?   @map("opening_proposed_by_subject")
 
   /// The close sweeper's claim: a lease and a fencing token, set and cleared together.
   /// Housekeeping, not state: claiming changes neither `version` nor `updated_at`.
@@ -531,15 +552,15 @@ model Tender {
   closeAttempts      Int       @default(0) @map("close_attempts")
   closeNextAttemptAt DateTime? @map("close_next_attempt_at") @db.Timestamptz(3)
 
-  criteria   TenderCriterion[]
-  invitations TenderInvitation[]
+  criteria       TenderCriterion[]
+  invitations    TenderInvitation[]
   /// At most one (`tender_key.tender_id` is its primary key); a list because the
   /// relation is keyed by the (organization, tender) pair, which Prisma cannot
   /// see is unique.
-  keys        TenderKey[]
-  bids        Bid[]
-  bidReceipts BidReceipt[]
-  bidAccesses BidAccessLog[]
+  keys           TenderKey[]
+  bids           Bid[]
+  bidReceipts    BidReceipt[]
+  bidAccesses    BidAccessLog[]
   qualifications BidQualification[]
   evaluations    BidEvaluation[]
   recusals       BidEvaluationRecusal[]
@@ -848,12 +869,12 @@ model Bid {
 
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
-  sealVersion       Int   @map("seal_version")
+  sealVersion       Int    @map("seal_version")
   keyId             String @map("key_id")
   nonce             Bytes
   ciphertext        Bytes
   tag               Bytes
-  wrappedContentKey Bytes @map("wrapped_content_key")
+  wrappedContentKey Bytes  @map("wrapped_content_key")
   /// Safe to publish: reveals neither the price nor the salt.
   contentCommitment String @map("content_commitment")
   ciphertextSha256  String @map("ciphertext_sha256")
@@ -879,17 +900,17 @@ model BidReceipt {
   tenderId String @map("tender_id")
   seq      Int
 
-  organizationId   String   @map("organization_id")
-  bidId            String   @map("bid_id")
-  revision         Int
-  receivedAt       DateTime @map("received_at")
-  ciphertextSha256 String   @map("ciphertext_sha256")
-  contentCommitment String  @map("content_commitment")
-  previousReceipt  String   @map("previous_receipt")
-  receipt          String
+  organizationId    String   @map("organization_id")
+  bidId             String   @map("bid_id")
+  revision          Int
+  receivedAt        DateTime @map("received_at")
+  ciphertextSha256  String   @map("ciphertext_sha256")
+  contentCommitment String   @map("content_commitment")
+  previousReceipt   String   @map("previous_receipt")
+  receipt           String
   /// The instant supplier-service read the contractor's standing at, for this revision:
   /// the eligibility decision's effective time. Award re-checks current standing (ADR-067).
-  eligibleAsOf     DateTime @map("eligible_as_of")
+  eligibleAsOf      DateTime @map("eligible_as_of")
 
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
@@ -951,13 +972,16 @@ model BidQualification {
 
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
-  decision      QualificationDecision
-  reasonCode    String?               @map("reason_code")
-  reasonText    String?               @map("reason_text")
-  standingAsOf  DateTime?             @map("standing_as_of") @db.Timestamptz(3)
+  decision     QualificationDecision
+  reasonCode   String?               @map("reason_code")
+  reasonText   String?               @map("reason_text")
+  standingAsOf DateTime?             @map("standing_as_of") @db.Timestamptz(3)
 
-  decidedAt DateTime @map("decided_at") @db.Timestamptz(3)
-  decidedBy String   @map("decided_by")
+  decidedAt        DateTime @map("decided_at") @db.Timestamptz(3)
+  decidedBy        String   @map("decided_by")
+  /// The decider's stable identity (#188): both or neither; NULL = unknown (an older row).
+  decidedByIssuer  String?  @map("decided_by_issuer")
+  decidedBySubject String?  @map("decided_by_subject")
 
   @@unique([organizationId, tenderId, bidId], map: "ux_bid_qualification_bid")
   @@map("bid_qualification")
@@ -968,16 +992,21 @@ model BidQualification {
 model BidEvaluation {
   id String @id
 
-  organizationId String @map("organization_id")
-  tenderId       String @map("tender_id")
-  bidId          String @map("bid_id")
-  evaluatorId    String @map("evaluator_id")
+  organizationId   String  @map("organization_id")
+  tenderId         String  @map("tender_id")
+  bidId            String  @map("bid_id")
+  evaluatorId      String  @map("evaluator_id")
+  /// The evaluator's stable identity (#188): both or neither; NULL = unknown (an older row).
+  evaluatorIssuer  String? @map("evaluator_issuer")
+  evaluatorSubject String? @map("evaluator_subject")
 
-  tender Tender                @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  tender    Tender               @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
   scoreRows BidEvaluationScore[]
 
   createdAt DateTime @map("created_at") @db.Timestamptz(3)
 
+  // SQL-only (#188): `ux_bid_evaluation_person` — one evaluation per person (issuer, subject) and
+  // bid, partial on a recorded identity.
   @@unique([organizationId, tenderId, bidId, evaluatorId], map: "ux_bid_evaluation_evaluator")
   @@unique([organizationId, id], map: "ux_bid_evaluation_org_id")
   @@map("bid_evaluation")
@@ -988,10 +1017,13 @@ model BidEvaluation {
 model BidEvaluationRecusal {
   id String @id
 
-  organizationId String @map("organization_id")
-  tenderId       String @map("tender_id")
-  bidId          String @map("bid_id")
-  evaluatorId    String @map("evaluator_id")
+  organizationId   String  @map("organization_id")
+  tenderId         String  @map("tender_id")
+  bidId            String  @map("bid_id")
+  evaluatorId      String  @map("evaluator_id")
+  /// The evaluator's stable identity (#188): both or neither; NULL = unknown (an older row).
+  evaluatorIssuer  String? @map("evaluator_issuer")
+  evaluatorSubject String? @map("evaluator_subject")
 
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
@@ -999,6 +1031,8 @@ model BidEvaluationRecusal {
   reasonCode String   @map("reason_code")
   recusedAt  DateTime @map("recused_at") @db.Timestamptz(3)
 
+  // SQL-only (#188): `ux_bid_recusal_person` — one recusal per person (issuer, subject) and bid,
+  // partial on a recorded identity.
   @@unique([organizationId, tenderId, bidId, evaluatorId], map: "ux_bid_recusal_evaluator")
   @@map("bid_evaluation_recusal")
 }
