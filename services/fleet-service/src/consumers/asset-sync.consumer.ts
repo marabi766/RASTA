@@ -3,6 +3,7 @@ import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   createSystemContext,
+  invalidPayloadError,
   isRetryDelivery,
   runWithContext,
   type EventConsumer,
@@ -273,6 +274,9 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_COMPLETED,
 ]);
 
+/** The field names a malformed-payload refusal may repeat (S-09). */
+const ASSET_SOURCE_FIELDS = Object.keys(assetSourceSchema.shape);
+
 /** The events whose in-maintenance flag maintenance-service owns. */
 const MAINTENANCE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_STARTED,
@@ -372,13 +376,12 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     const parsed = assetSourceSchema.safeParse(envelope.payload);
     if (!parsed.success) {
-      // An event this service projects, that names no machine. A producer
-      // defect worth seeing, but not one a retry fixes — so it is logged and
-      // skipped rather than dead-lettered, where it would only be quieter.
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} has no assetId; nothing to apply it to`,
-      );
-      return 'SKIPPED';
+      // An event this service projects, that names no machine: a producer
+      // defect no retry fixes. Dead-lettered at once, before the marker — an
+      // inspection failure or an insurance lapse acknowledged here would leave
+      // the machine dispatchable with no trace, and a corrected replay must
+      // still be applied (audit L7-26, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, ASSET_SOURCE_FIELDS);
     }
 
     const payload = parsed.data as Record<string, unknown>;

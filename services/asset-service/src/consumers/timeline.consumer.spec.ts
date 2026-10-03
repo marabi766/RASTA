@@ -137,12 +137,53 @@ describe('TimelineConsumer', () => {
       expect(h.appended).toHaveLength(0);
     });
 
-    it('skips an event that names no asset', async () => {
+    it('dead-letters, rather than skips, a projected event that names no asset (L7-26)', async () => {
+      // A producer defect no retry fixes: refused at once as VALIDATION_FAILED,
+      // before the marker, so a corrected replay of the same id still applies.
       const h = harness();
-      const result = await h.consumer.handle(envelope({ payload: { organizationId: DEH1 } }));
+      const SENTINEL = 'SENTINEL-free-text-0012345678';
+
+      const refusal = h.consumer.handle(
+        envelope({ payload: { organizationId: DEH1, assetId: 7, notes: SENTINEL } }),
+      );
+
+      await expect(refusal).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'USAGE_RECORDED EVT_1 payload fails its schema: assetId invalid_type',
+      });
+      expect(h.markProcessed).not.toHaveBeenCalled();
+      expect(h.appended).toHaveLength(0);
+    });
+
+    it('applies the corrected event replayed from the DLQ, once (L7-26)', async () => {
+      const h = harness();
+      const marked = new Set<string>();
+      h.markProcessed.mockImplementation(async (_tx: unknown, eventId: string) => {
+        if (marked.has(eventId)) return false;
+        marked.add(eventId);
+        return true;
+      });
+      const replay = { topic: 'rasta.fleet.v1.retry', partition: 0 };
+
+      await expect(
+        h.consumer.handle(envelope({ payload: { organizationId: DEH1 } })),
+      ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+      await expect(h.consumer.handle(envelope(), replay)).resolves.toBeUndefined();
+      await expect(h.consumer.handle(envelope(), replay)).resolves.toBe('SKIPPED');
+
+      expect(h.appended).toHaveLength(1);
+      expect(h.appended[0]?.sourceEventId).toBe('EVT_1');
+    });
+
+    it('still skips an event it does not project, however malformed (forward compatibility)', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', payload: {} }),
+      );
 
       expect(result).toBe('SKIPPED');
-      expect(h.appended).toHaveLength(0);
+      expect(h.markProcessed).not.toHaveBeenCalled();
     });
 
     it('skips an event carrying no tenant', async () => {

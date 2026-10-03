@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
+  invalidPayloadError,
   isRetryDelivery,
   type EventConsumer,
   type EventDelivery,
@@ -89,6 +90,9 @@ const PROJECTIONS: Record<string, Projection> = {
 
 const CONSUMER_NAME = 'asset-service.timeline';
 
+/** The field names a malformed-payload refusal may repeat (S-09). */
+const TIMELINE_SOURCE_FIELDS = Object.keys(timelineSourceSchema.shape);
+
 /**
  * Builds the broker-facing half.
  *
@@ -150,13 +154,11 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
 
     const parsed = timelineSourceSchema.safeParse(envelope.payload);
     if (!parsed.success) {
-      // The event is one we project, but it does not name an asset. That is a
-      // producer bug worth seeing, not something a retry fixes — so it is
-      // logged and skipped rather than dead-lettered.
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} has no assetId; nothing to attach it to`,
-      );
-      return 'SKIPPED';
+      // The event is one we project, but it does not name an asset: a producer
+      // defect no retry fixes. Dead-lettered at once, before the marker, so the
+      // dossier entry is not lost and a corrected replay is still applied
+      // (audit L7-26, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, TIMELINE_SOURCE_FIELDS);
     }
 
     // Without a tenant there is no organization to scope the write to. Skipped

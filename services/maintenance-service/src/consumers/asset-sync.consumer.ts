@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
+  invalidPayloadError,
   isRetryDelivery,
   type EventConsumer,
   type EventDelivery,
@@ -105,6 +106,9 @@ const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
 
 const CONSUMER_NAME = 'maintenance-service.asset-sync';
 
+/** The field names a malformed-payload refusal may repeat (S-09). */
+const ASSET_SOURCE_FIELDS = Object.keys(assetSourceSchema.shape);
+
 /**
  * Builds the broker-facing half.
  *
@@ -158,12 +162,10 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     const parsed = assetSourceSchema.safeParse(envelope.payload);
     if (!parsed.success) {
-      // An event this service projects, that names no machine. A producer
-      // defect worth seeing, but not one a retry fixes.
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} has no assetId; nothing to apply it to`,
-      );
-      return 'SKIPPED';
+      // An event this service projects, that names no machine: a producer
+      // defect no retry fixes. Dead-lettered at once, before the marker, so a
+      // corrected replay is still applied (audit L7-26, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, ASSET_SOURCE_FIELDS);
     }
 
     const payload = parsed.data as Record<string, unknown>;

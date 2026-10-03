@@ -872,17 +872,66 @@ describe('AssetSyncConsumer', () => {
   });
 
   describe('malformed producer output', () => {
-    it('skips an event that names no machine', async () => {
-      // A producer defect worth seeing, but not one a retry fixes — so it is
-      // logged and skipped rather than dead-lettered, where it would only be
-      // quieter.
-      const { consumer, recorded } = buildConsumer({});
+    it('dead-letters, rather than skips, a safety event that names no machine (L7-26)', async () => {
+      // An inspection failure acknowledged here would leave the machine
+      // dispatchable with no trace. Refused at once as VALIDATION_FAILED, before
+      // the marker; the message names the field and the code, never a value.
+      const { consumer, recorded, repository } = buildConsumer({});
+      const SENTINEL = 'SENTINEL-free-text-0012345678';
+
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName: 'INSPECTION_FAILED',
+            payload: { organizationId: 'ORG-DEH-0001', notes: SENTINEL },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'INSPECTION_FAILED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: assetId invalid_type',
+      });
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
+      expect(recorded.upserts).toHaveLength(0);
+    });
+
+    it('applies the corrected safety event replayed from the DLQ, once (L7-26)', async () => {
+      const { consumer, recorded, repository } = buildConsumer({});
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const failed = (payload: Record<string, unknown>) =>
+        envelope({ eventName: 'INSPECTION_FAILED', payload });
+      const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
+
+      await expect(
+        consumer.handle(failed({ organizationId: 'ORG-DEH-0001' })),
+      ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+      const corrected = failed({ assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' });
+      await consumer.handle(corrected, replay);
+      await consumer.handle(corrected, replay);
+
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        inspectionBlockedAt: new Date('2026-08-27T10:00:00.000Z'),
+      });
+    });
+
+    it('still skips an event it does not consume, however malformed (forward compatibility)', async () => {
+      const { consumer, repository } = buildConsumer({});
       const outcome = await consumer.handle(
-        envelope({ eventName: 'ASSET_CREATED', payload: { organizationId: 'ORG-DEH-0001' } }),
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', payload: {} }),
       );
 
       expect(outcome).toBe('SKIPPED');
-      expect(recorded.upserts).toHaveLength(0);
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
     });
 
     it('refuses to invent an organization for a first sighting with no tenant', async () => {

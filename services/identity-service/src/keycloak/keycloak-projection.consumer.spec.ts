@@ -47,11 +47,26 @@ describe('KeycloakProjectionConsumer', () => {
     },
   );
 
-  it('skips, rather than retries, an event that names no user', async () => {
+  it('dead-letters at once, rather than skips or retries, an event that names no user (L7-26)', async () => {
+    await expect(
+      consumer.handle(envelope('ROLE_REVOKED', { membershipId: 'MBR_1', userId: 42 })),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message: 'ROLE_REVOKED EVT_1 payload fails its schema: userId invalid_type',
+    });
+    expect(project).not.toHaveBeenCalled();
+  });
+
+  it('projects the user once the corrected event is replayed from the DLQ (L7-26)', async () => {
     await expect(
       consumer.handle(envelope('ROLE_REVOKED', { membershipId: 'MBR_1' })),
-    ).resolves.toBe('SKIPPED');
-    expect(project).not.toHaveBeenCalled();
+    ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+    // No ledger to consult: the projection rebuilds from the database, so a
+    // second delivery writes the same truth (idempotent by construction).
+    await consumer.handle(envelope('ROLE_REVOKED', { membershipId: 'MBR_1', userId: 'USR_1' }));
+    expect(project).toHaveBeenCalledTimes(1);
+    expect(project).toHaveBeenCalledWith('USR_1', 'event');
   });
 
   it('lets a failed projection throw, so the consumer retries and then dead-letters it', async () => {

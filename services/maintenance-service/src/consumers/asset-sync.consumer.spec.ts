@@ -1,5 +1,6 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import { AssetSyncConsumer, PROJECTIONS } from './asset-sync.consumer';
+import type { AssetSnapshotSource } from './replica-sources';
 import type { MaintenanceRepository } from '../maintenance/maintenance.repository';
 
 /**
@@ -25,17 +26,30 @@ function harness(
     existing?: { organizationId: string } | null;
     already?: boolean;
     openWork?: { openRequests: number; openRepairOrders: number };
+    /** A real ledger: an event id marks once. */
+    ledger?: boolean;
+    assetSource?: AssetSnapshotSource;
   } = {},
 ) {
   const upserts: Upsert[] = [];
   const calls: string[] = [];
+  const marked = new Set<string>();
+  const marks: string[] = [];
 
   const repository = {
     async transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
       return fn({});
     },
-    async markEventProcessed(): Promise<boolean> {
+    async markEventProcessed(_tx: unknown, eventId: string): Promise<boolean> {
+      marks.push(eventId);
+      if (options.ledger) {
+        if (marked.has(eventId)) return false;
+        marked.add(eventId);
+      }
       return !options.already;
+    },
+    async findTransferFence() {
+      return null;
     },
     async findAssetRef() {
       return options.existing ?? null;
@@ -60,7 +74,12 @@ function harness(
     },
   } as unknown as MaintenanceRepository;
 
-  return { consumer: new AssetSyncConsumer(null, repository), upserts, calls };
+  return {
+    consumer: new AssetSyncConsumer(null, repository, options.assetSource),
+    upserts,
+    calls,
+    marks,
+  };
 }
 
 function envelope(eventName: string, payload: object, tenantId?: string): EventEnvelope {
@@ -269,6 +288,62 @@ describe('asset reference replica', () => {
 
     expect(outcome).toBe('SKIPPED');
     expect(upserts).toHaveLength(0);
+  });
+
+  it('dead-letters, rather than skips, a consumed event that names no machine (L7-26)', async () => {
+    // A producer defect no retry fixes: refused at once as VALIDATION_FAILED,
+    // before the marker. The message names the field and the code, never a value.
+    const { consumer, upserts, marks } = harness();
+
+    await expect(
+      consumer.handle(
+        envelope(
+          'ASSET_DECOMMISSIONED',
+          { reason: 'SENTINEL-free-text-0012345678' },
+          'ORG-DEH-0001',
+        ),
+      ),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message:
+        'ASSET_DECOMMISSIONED evt-ASSET_DECOMMISSIONED payload fails its schema: assetId invalid_type',
+    });
+    expect(marks).toHaveLength(0);
+    expect(upserts).toHaveLength(0);
+  });
+
+  it('applies the corrected event replayed from the DLQ, once (L7-26)', async () => {
+    const snapshot = jest.fn(async () => ({
+      assetId: 'AST-SEED-0001',
+      organizationId: 'ORG-DEH-0001',
+      status: 'DECOMMISSIONED',
+      name: 'لودر',
+      type: 'LOADER',
+      assetTag: null,
+      transferGeneration: 0,
+      viaTransfer: false,
+    }));
+    const { consumer, upserts } = harness({
+      existing: { organizationId: 'ORG-DEH-0001' },
+      ledger: true,
+      assetSource: { snapshot } as unknown as AssetSnapshotSource,
+    });
+    const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
+
+    await expect(
+      consumer.handle(envelope('ASSET_DECOMMISSIONED', {}, 'ORG-DEH-0001')),
+    ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+    const corrected = envelope(
+      'ASSET_DECOMMISSIONED',
+      { assetId: 'AST-SEED-0001' },
+      'ORG-DEH-0001',
+    );
+    await consumer.handle(corrected, replay);
+    await consumer.handle(corrected, replay);
+
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toMatchObject({ id: 'AST-SEED-0001', status: 'DECOMMISSIONED' });
   });
 
   it('applies a redelivered event only once', async () => {

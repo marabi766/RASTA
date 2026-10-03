@@ -22,7 +22,12 @@ interface Fold {
   organizationId: string;
 }
 
-function harness(options: { alreadyProcessed?: boolean } = {}) {
+function harness(
+  options: {
+    alreadyProcessed?: boolean;
+    /** A real ledger: an id marks once. */ ledger?: boolean;
+  } = {},
+) {
   const folds: Fold[] = [];
   const announced: string[] = [];
   const marked: string[] = [];
@@ -32,6 +37,7 @@ function harness(options: { alreadyProcessed?: boolean } = {}) {
       return fn({});
     },
     async markEventProcessed(_tx: unknown, eventId: string): Promise<boolean> {
+      if (options.ledger && marked.includes(eventId)) return false;
       marked.push(eventId);
       return !options.alreadyProcessed;
     },
@@ -174,19 +180,36 @@ describe('usage consumer', () => {
     expect(folds).toHaveLength(0);
   });
 
-  it('skips a reading that names no machine', async () => {
-    // Logged and skipped rather than dead-lettered: a retry cannot add an
-    // assetId, and a DLQ would only make the producer defect quieter.
+  it('dead-letters, rather than skips, a reading that names no machine (L7-26)', async () => {
+    // A retry cannot add an assetId, so it is refused at once as
+    // VALIDATION_FAILED — and acknowledged nowhere, so the reading is not lost.
+    // The message names the field and the code, never a value.
     const { consumer, folds, marked } = harness();
 
-    const outcome = await consumer.handle(
-      envelope({ payload: { usageRecordId: 'USG_5', hours: '4.00' } }),
-    );
-
-    expect(outcome).toBe('SKIPPED');
+    await expect(
+      consumer.handle(envelope({ payload: { usageRecordId: 'USG_5', hours: '4318.75' } })),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message:
+        'USAGE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: assetId invalid_type',
+    });
     expect(folds).toHaveLength(0);
-    // Not even marked processed: nothing happened that a redelivery would
-    // repeat.
+    // Not marked processed, so a corrected replay of the same id still folds.
     expect(marked).toHaveLength(0);
+  });
+
+  it('folds the corrected reading replayed from the DLQ, once (L7-26)', async () => {
+    const { consumer, folds, announced } = harness({ ledger: true });
+
+    await expect(
+      consumer.handle(envelope({ payload: { usageRecordId: 'USG_1', hours: '8.00' } })),
+    ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+    await expect(consumer.handle(envelope())).resolves.toBeUndefined();
+    await expect(consumer.handle(envelope())).resolves.toBe('SKIPPED');
+
+    expect(folds).toHaveLength(1);
+    expect(folds[0]).toMatchObject({ assetId: 'AST-SEED-0001', hoursDelta: '8.00' });
+    expect(announced).toEqual(['AST-SEED-0001']);
   });
 });
