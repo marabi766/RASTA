@@ -1820,6 +1820,14 @@ describe('awarding an evaluated tender', () => {
         await expect(
           attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_TWO'`)),
         ).rejects.toThrow(transition);
+        // A takeover of a lapsed lease is a new holder: it keeps no fence of the one it replaces.
+        await ownerSql([
+          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
+        ]);
+        await expect(
+          attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`)),
+        ).rejects.toThrow(/a claim sets a new fence/);
+        await attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_THREE'`));
         // From a live claim: a settlement dated in the future, or one that moves anything else.
         await expect(
           attack(
