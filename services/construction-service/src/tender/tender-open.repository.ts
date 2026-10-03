@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import type { Bid, BidAccessLog, BidReceipt, TenderKey } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { StoredIdentity } from '../shared/stable-actor';
 import type { TenderStateName } from './tender.state-machine';
 
 /**
@@ -28,6 +29,12 @@ export interface TenderForOpening {
   openingProposedBy: string | null;
   /** With `openingProposedBy`, the identity of the proposal: who and when (both set, or neither). */
   openingProposedAt: Date | null;
+  /**
+   * The proposer's stable identity (#188), both or neither: what the four-eyes check compares
+   * with the approver. NULL on a proposal older than the columns: unknown, and refused.
+   */
+  openingProposedByIssuer: string | null;
+  openingProposedBySubject: string | null;
 }
 
 /** Who owns a tender and how far it has got, found by id alone. */
@@ -52,6 +59,8 @@ interface LockRow {
   opened_by: string | null;
   opening_proposed_by: string | null;
   opening_proposed_at: Date | null;
+  opening_proposed_by_issuer: string | null;
+  opening_proposed_by_subject: string | null;
 }
 
 const toLocked = (row: LockRow): TenderForOpening => ({
@@ -66,6 +75,8 @@ const toLocked = (row: LockRow): TenderForOpening => ({
   openedBy: row.opened_by,
   openingProposedBy: row.opening_proposed_by,
   openingProposedAt: row.opening_proposed_at,
+  openingProposedByIssuer: row.opening_proposed_by_issuer,
+  openingProposedBySubject: row.opening_proposed_by_subject,
 });
 
 @Injectable()
@@ -111,7 +122,7 @@ export class TenderOpenRepository {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
              "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by",
-             "opening_proposed_at"
+             "opening_proposed_at", "opening_proposed_by_issuer", "opening_proposed_by_subject"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR UPDATE`;
@@ -130,7 +141,7 @@ export class TenderOpenRepository {
     const rows = await tx.$queryRaw<LockRow[]>`
       SELECT "id", "organization_id", "project_id", "status"::text AS "status", "version",
              "bid_closing_at", "closed_at", "opened_at", "opened_by", "opening_proposed_by",
-             "opening_proposed_at"
+             "opening_proposed_at", "opening_proposed_by_issuer", "opening_proposed_by_subject"
         FROM "tender"
        WHERE "organization_id" = ${organizationId} AND "id" = ${tenderId}
        FOR SHARE`;
@@ -139,15 +150,21 @@ export class TenderOpenRepository {
 
   /**
    * Records the proposal to open (four-eyes, Q-91) on a CLOSED tender, in the lock the
-   * caller holds: the first proposal stands. Returns the rows matched: 0 or 1.
+   * caller holds: the first proposal stands. The proposer's stable identity (#188) is kept
+   * beside the user id, for the approval to compare. Returns the rows matched: 0 or 1.
    */
   async proposeOpening(
     tx: ExtendedPrismaClient,
-    input: { tenderId: string; actor: string; at: Date },
+    input: { tenderId: string; actor: string; identity: StoredIdentity; at: Date },
   ): Promise<number> {
     const result = await tx.tender.updateMany({
       where: { id: input.tenderId, status: 'CLOSED', openedAt: null, openingProposedBy: null },
-      data: { openingProposedAt: input.at, openingProposedBy: input.actor },
+      data: {
+        openingProposedAt: input.at,
+        openingProposedBy: input.actor,
+        openingProposedByIssuer: input.identity.issuer,
+        openingProposedBySubject: input.identity.subject,
+      },
     });
     return result.count;
   }
@@ -169,7 +186,12 @@ export class TenderOpenRepository {
         openingProposedBy: input.proposedBy,
         openingProposedAt: input.proposedAt,
       },
-      data: { openingProposedAt: null, openingProposedBy: null },
+      data: {
+        openingProposedAt: null,
+        openingProposedBy: null,
+        openingProposedByIssuer: null,
+        openingProposedBySubject: null,
+      },
     });
     return result.count;
   }

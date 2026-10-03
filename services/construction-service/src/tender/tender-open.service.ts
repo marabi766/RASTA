@@ -1,6 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash, type KeyObject } from 'node:crypto';
-import { RastaError } from '@rasta/nest-common';
+import {
+  RastaError,
+  actorIdentityUnknown,
+  compareActors,
+  currentActor,
+  type ActorIdentity,
+} from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import type { CursorPage } from '@rasta/contracts';
 import type { Bid } from '../generated/prisma';
@@ -16,6 +22,7 @@ import {
   versionConflictsTotal,
 } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
+import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import { ENV, MEMBERSHIP_SOURCE } from '../tokens';
 import { BidAccessAudit, refusalCodeOf } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
@@ -159,6 +166,14 @@ interface Opened {
  * `open` and whom the opening is recorded under; neither is a member of a bidding
  * organization. Committee size and roles are the product owner's to confirm.
  *
+ * "A second" is proven on the token's issuer and subject (`compareActors`, #188), not on the
+ * user id alone, which one person can hold two of: the proposer's identity is stored with the
+ * proposal. A proposal without one (older than the record) cannot show two people: the second
+ * person's approval clears it (`PROPOSER_IDENTITY_UNKNOWN`, audited) and is refused
+ * `ACTOR_IDENTITY_UNKNOWN`, so it never blocks the tender; the proposer may also withdraw it,
+ * recognised by user id or, where it shows them, by their stable identity. Every route here
+ * needs the platform user id (`@RequirePlatformUserId()`).
+ *
  * The conflict is judged at the **approval**, on both people as they are *now*: their
  * organizations are read from identity-service (`MembershipSource`, fail closed), not taken
  * from the proposal or only from the approver's token — a proposer who has since joined a
@@ -221,6 +236,8 @@ export class TenderOpenService {
         people = await this.readApprovalPeople(principal, found);
         // A proposer who now belongs to a bidder neither stands nor blocks: the proposal is cleared.
         if (people) await this.clearProposalOfConflictedProposer(principal, tenderId, people);
+        // Nor does one who cannot be told apart from this approver (#188): cleared, then refused.
+        if (people) await this.clearProposalOfUnknownProposer(principal, tenderId, people);
         evidence = await this.readEvidence(principal.organizationId, tenderId);
       } else if (found.openedAt === null) {
         throw this.refused('NOT_CLOSED');
@@ -277,8 +294,18 @@ export class TenderOpenService {
     // Four eyes (Q-91): this caller approves what another proposed.
     if (this.env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES) {
       if (locked.openingProposedBy === null) throw this.refused('PROPOSAL_REQUIRED');
-      if (locked.openingProposedBy === principal.actor)
-        throw this.refused('SECOND_PERSON_REQUIRED');
+      // Two people, proven on the token's issuer and subject and not on user ids alone (#188):
+      // one person may hold two user ids. A proposal whose proposer has no recorded identity
+      // (older than the record) cannot be told apart from the approver: refused, fail closed.
+      // Before this lock, `clearProposalOfUnknownProposer` cleared such a proposal; here is the
+      // backstop for one that changed in between.
+      this.assertSecondPerson(
+        storedActor(
+          locked.openingProposedBy,
+          locked.openingProposedByIssuer,
+          locked.openingProposedBySubject,
+        ),
+      );
       // Both people as they are NOW, not as they were at the proposal: someone who has since
       // joined a bidding organization neither proposes nor approves. Read before the lock; it
       // is evidence about THE proposal read with it (who and when), so no read, or one of
@@ -412,6 +439,7 @@ export class TenderOpenService {
         const matched = await this.opens.proposeOpening(tx, {
           tenderId,
           actor: principal.actor,
+          identity: storedIdentityOf(currentActor()),
           at,
         });
         if (matched === 0) throw RastaError.optimisticLockFailed('Tender', tenderId);
@@ -441,7 +469,20 @@ export class TenderOpenService {
         if (locked.openingProposedBy === null || locked.openingProposedAt === null) {
           throw this.refused('NO_PROPOSAL');
         }
-        if (locked.openingProposedBy !== principal.actor) {
+        // The proposer, by the user id they proposed under or, when it shows them, by their
+        // stable identity (#188): a proposal written from a token without `rasta_uid` names the
+        // subject, and that person now arrives with a platform id. An ownership grant: an
+        // identity that cannot be shown to be theirs (UNKNOWN) withdraws nothing — the approval
+        // of a second person clears such a proposal instead.
+        const proposer = storedActor(
+          locked.openingProposedBy,
+          locked.openingProposedByIssuer,
+          locked.openingProposedBySubject,
+        );
+        if (
+          locked.openingProposedBy !== principal.actor &&
+          compareActors(proposer, currentActor()) !== 'SAME'
+        ) {
           throw RastaError.forbidden(
             'Only the proposer may withdraw the proposal to open these bids',
           );
@@ -450,10 +491,10 @@ export class TenderOpenService {
           tx,
           principal,
           locked,
-          { by: principal.actor, at: locked.openingProposedAt },
+          { by: locked.openingProposedBy, at: locked.openingProposedAt },
           'WITHDRAWN_BY_PROPOSER',
         );
-        return { tenderId, withdrawnProposal: principal.actor };
+        return { tenderId, withdrawnProposal: locked.openingProposedBy };
       });
     });
   }
@@ -835,13 +876,62 @@ export class TenderOpenService {
     );
   }
 
+  /**
+   * A proposal whose proposer has no stable identity on record (#188: written before it was
+   * recorded, or under another issuer) cannot be told apart from the approver, so it is never
+   * approved — and, like a conflicted proposer's (#184), it must not block the tender either. The
+   * approval of a second person clears exactly the proposal it evaluated (audited, with
+   * `BID_OPENING_PROPOSAL_WITHDRAWN`, reason `PROPOSER_IDENTITY_UNKNOWN`) in a transaction of its
+   * own, and is then refused `422 ACTOR_IDENTITY_UNKNOWN`. Anyone eligible proposes afresh, and the
+   * new proposal records its identity. The same check under the opening's lock stays the
+   * backstop for a proposal that changed in between.
+   */
+  private async clearProposalOfUnknownProposer(
+    principal: Principal,
+    tenderId: string,
+    people: ApprovalPeople,
+  ): Promise<void> {
+    const approver = currentActor();
+    const outcome = await this.prisma.transaction(async (tx) => {
+      const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
+      if (!locked || locked.openingProposedBy === null) return 'STANDS';
+      // Only the exact proposal the approver evaluated (who and when): another one is asked again.
+      if (
+        locked.openingProposedBy !== people.proposedBy ||
+        locked.openingProposedAt?.getTime() !== people.proposedAt.getTime()
+      ) {
+        return 'REPLACED';
+      }
+      const proposer = storedActor(
+        locked.openingProposedBy,
+        locked.openingProposedByIssuer,
+        locked.openingProposedBySubject,
+      );
+      if (compareActors(proposer, approver) !== 'UNKNOWN') return 'STANDS';
+      await this.clearProposal(
+        tx,
+        principal,
+        locked,
+        { by: people.proposedBy, at: people.proposedAt },
+        'PROPOSER_IDENTITY_UNKNOWN',
+      );
+      return 'CLEARED';
+    });
+    if (outcome === 'STANDS') return;
+    if (outcome === 'REPLACED') throw RastaError.optimisticLockFailed('Tender', tenderId);
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+    throw actorIdentityUnknown(
+      'the approver of an opening is not its proposer; the proposal was cleared and may be made again',
+    );
+  }
+
   /** Clears the proposal in the caller's transaction and leaves its evidence: an access row, BID_ACCESSED and the event. */
   private async clearProposal(
     tx: ExtendedPrismaClient,
     principal: Principal,
     locked: TenderForOpening,
     proposal: { by: string; at: Date },
-    reason: 'WITHDRAWN_BY_PROPOSER' | 'PROPOSER_CONFLICTED',
+    reason: 'WITHDRAWN_BY_PROPOSER' | 'PROPOSER_CONFLICTED' | 'PROPOSER_IDENTITY_UNKNOWN',
   ): Promise<void> {
     const proposedBy = proposal.by;
     const cleared = await this.opens.clearProposal(tx, {
@@ -1026,6 +1116,19 @@ export class TenderOpenService {
   }
 
   // -- errors -------------------------------------------------------------------------
+
+  /**
+   * The approver is provably not the proposer (`compareActors`, #188). The same person is
+   * `SECOND_PERSON_REQUIRED`, as before; a proposer who cannot be told apart from the approver
+   * is `ACTOR_IDENTITY_UNKNOWN` (422): unknown is never "another person".
+   */
+  private assertSecondPerson(proposer: ActorIdentity): void {
+    const comparison = compareActors(proposer, currentActor());
+    if (comparison === 'DISTINCT') return;
+    if (comparison === 'SAME') throw this.refused('SECOND_PERSON_REQUIRED');
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+    throw actorIdentityUnknown('the approver of an opening is not its proposer');
+  }
 
   private refused(reason: OpeningRefusal): RastaError {
     if (

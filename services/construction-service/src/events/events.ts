@@ -660,9 +660,13 @@ export const bidOpeningProposalWithdrawnPayload = z
     tenderId: identifier,
     organizationId: identifier,
     proposedBy: identifier,
-    /** Who took it back (the proposer) or whose approval found the proposer conflicted. */
+    /**
+     * Who took it back (the proposer), or whose approval found the proposer conflicted or with
+     * no stable identity on record (#188: a proposal older than the record cannot be told apart
+     * from the approver, so it neither stands nor blocks).
+     */
     withdrawnBy: identifier,
-    reason: z.enum(['WITHDRAWN_BY_PROPOSER', 'PROPOSER_CONFLICTED']),
+    reason: z.enum(['WITHDRAWN_BY_PROPOSER', 'PROPOSER_CONFLICTED', 'PROPOSER_IDENTITY_UNKNOWN']),
     withdrawnAt: isoTimestamp,
   })
   .strict();
