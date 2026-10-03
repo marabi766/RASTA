@@ -180,16 +180,17 @@ Kafka در دسترس نبودن **عمداً** Readiness را شکست نمی�
 در Log، خط `Rejected …` فقط نام رویداد، `eventId` (اگر شکل شناسه داشته باشد)، Topic/Partition، دلیل Schema و **نام کلیدهای**
 Payload را دارد — نه مقدار. دلیل‌ها با برچسب‌های بستهٔ `rasta_audit_ingestion_failures_total{reason}` یکی‌اند:
 
-| `reason`                            | معنا                                                                       | مالک رفع              |
-| ----------------------------------- | -------------------------------------------------------------------------- | --------------------- |
-| `trail_invalid_envelope`            | Envelope مسیر B Parse نشد                                                  | Producer              |
-| `trail_unsupported_event`           | روی Topic مسیر B، رویدادی جز `AUDIT_EVENT_RECORDED` v1                     | Producer              |
-| `trail_invalid_payload`             | Payload با قرارداد v1 یا عرض ستون نمی‌خواند                                | Producer              |
-| `trail_tenant_mismatch`             | `payload.organizationId` ≠ `envelope.tenantId` — **سیگنال جداسازی مستأجر** | Producer + مالک امنیت |
-| `trail_unredacted_sensitive_change` | میدان `SENSITIVE_KEYS` با مقدار خام — **سیگنال نشت**                       | Producer + مالک امنیت |
-| `unmappable_envelope`               | Envelope مسیر A نگاشت نشد                                                  | Producer دامنه        |
-| `unmappable_organization_event`     | رویداد سازمان برای Projection سلسله‌مراتب نخواند                           | organization-service  |
-| `database_error`                    | پایگاه داده رد کرد یا در دسترس نبود (فقط کلاس و کد Prisma در Log)          | عملیات پایگاه داده    |
+| `reason`                            | معنا                                                                        | مالک رفع              |
+| ----------------------------------- | --------------------------------------------------------------------------- | --------------------- |
+| `trail_invalid_envelope`            | Envelope مسیر B Parse نشد                                                   | Producer              |
+| `trail_unsupported_event`           | روی Topic مسیر B، رویدادی جز `AUDIT_EVENT_RECORDED` v1                      | Producer              |
+| `trail_invalid_payload`             | Payload با قرارداد v1 یا عرض ستون نمی‌خواند                                 | Producer              |
+| `trail_tenant_mismatch`             | `payload.organizationId` ≠ `envelope.tenantId` — **سیگنال جداسازی مستأجر**  | Producer + مالک امنیت |
+| `trail_unredacted_sensitive_change` | میدان `SENSITIVE_KEYS` با مقدار خام — **سیگنال نشت**                        | Producer + مالک امنیت |
+| `unmappable_envelope`               | Envelope مسیر A نگاشت نشد                                                   | Producer دامنه        |
+| `unmappable_organization_event`     | رویداد سازمان برای Projection سلسله‌مراتب نخواند                            | organization-service  |
+| `unmappable_reconciliation_event`   | رویداد حل یا کنش اپراتور آشتی پرداخت با قرارداد نمای شاهد v1 نخواند (D-046) | economic-service      |
+| `database_error`                    | پایگاه داده رد کرد یا در دسترس نبود (فقط کلاس و کد Prisma در Log)           | عملیات پایگاه داده    |
 
 ### ۴. Kafka — Lag و DLQ (فقط‌خواندنی)
 

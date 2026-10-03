@@ -1094,6 +1094,28 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   اینکه ردیف حسابرسی تأییدکننده، پیشنهاددهنده و مرجع شاهد را نگه می‌دارد.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-02 (#175)
+- **وضعیت:** **رفع‌شده** (2026-10-03، #204، `feat/audit-reconciliation-projection`). `audit-service` جدول فقط‌افزودنی
+  `payment_reconciliation_evidence` را دارد: برای هر `PAYMENT_RECONCILIATION_RESOLVED` و
+  `PAYMENT_RECONCILIATION_OPERATOR_ACTION` روی `rasta.economic.v1` یک ردیف، در **همان تراکنش** ردیف `audit_event` (شناسهٔ آن
+  را در `audit_event_id` دارد). فقط فیلدهای فهرست سفید نگه داشته می‌شوند: `resolutionId`، `requeueId`، `proposedBy`،
+  `approvedBy`، `resolvedBy`، `actor`، `evidenceReference`، کد نتیجه یا کنش (`resolution`، `action`، `providerOutcome`)، `kind`
+  و `fourEyes`. هیچ متن آزاد، هیچ مبلغ، ارز یا نام Provider ذخیره نمی‌شود، و فیلدی که economic فردا بیفزاید تا کسی
+  تکلیفش را روشن نکند ذخیره نمی‌شود. محموله هنوز جفت Issuer/Subject ندارد، پس ستونی هم برای آن نیست. ستون
+  `projection_version` نسخهٔ نما را نگه می‌دارد. فعلاً فقط `1` وجود دارد و یک CHECK آن را قفل کرده است. فقط `eventVersion` 1
+  این دو رویداد نگاشت می‌شود و نسخهٔ دیگر با `SCHEMA_VERSION_UNSUPPORTED` به DLQ می‌رود. رویداد شناخته‌شده‌ای که قرارداد را
+  نقض کند **هیچ ردیفی نمی‌نویسد** و با `UnprocessableEventError` (`VALIDATION_FAILED`) بی‌درنگ به `rasta.audit.v1.dlq` می‌رود؛
+  شمارندهٔ آن `unmappable_reconciliation_event` است. نقض قرارداد یعنی یکی از این موارد:
+  - محمولهٔ بدشکل؛
+  - مرجع شاهدی که با الگوی economic نخواند (رد می‌شود، پیراسته نمی‌شود)؛
+  - گروه اپراتور نیمه‌کاره؛
+  - `organizationId` محموله ≠ `tenantId` پاکت، یا `paymentIntentId` ≠ `aggregateId`.
+
+  همین قواعد در CHECKهای پایگاه داده هم تکرار شده‌اند (`_version`، `_values`، `_shape`). جدول برای همه فقط‌افزودنی است:
+  نقش اجرا فقط `SELECT` و `INSERT` دارد، و Trigger جلوی `UPDATE`، `DELETE` و `TRUNCATE` را حتی برای مالک می‌گیرد. `down.sql`
+  جدول را قفل می‌کند و تا ردیفی هست رد می‌شود. آزمون قرارداد (`payment-reconciliation-projection.spec.ts`) `events.ts` در
+  economic را به‌صورت متن می‌خواند (بی import؛ A-02) و با هر فیلد طبقه‌بندی‌نشده یا تغییر الگو یا کدها شکست می‌خورد. باقی‌مانده:
+  ۱. هنوز API خواندنی برای این نما نیست؛ حسابرس آن را با SQL روی پایگاه دادهٔ audit می‌خواند.
+  ۲. ردیف‌های نما مانند شاهد مناقصه فقط‌افزودنی‌اند، اما در زنجیرهٔ Hash نیستند؛ ردیف `audit_event` همان رویداد در زنجیره هست.
 
 ### D-047 · موتور Schema پریزما URL پایگاه داده را در argv خودش می‌گیرد
 

@@ -209,6 +209,19 @@ ADR-024 است.
 - **سابقهٔ حسابرسی:** `audit-service` امروز فقط فیلدهای پاکت رویداد را نگه می‌دارد، نه کنشگر دوم و شاهد محموله را. سابقهٔ کامل
   (هر دو کنشگر، هویت پایدارشان، شاهد، نتیجه، `fourEyes` و دلیل‌ها) در جدول‌های فقط‌افزودنی economic است؛ نمای نسخه‌دار آن در
   `audit-service` پیگیری جداگانه است (D-046).
+  **یادداشت (2026-10-03، #204، D-046 رفع‌شده):** `audit-service` اکنون برای هر `PAYMENT_RECONCILIATION_RESOLVED` و
+  `PAYMENT_RECONCILIATION_OPERATOR_ACTION` در همان تراکنش ردیف حسابرسی یک ردیف در جدول فقط‌افزودنی
+  `payment_reconciliation_evidence` می‌نویسد. این ردیف شامل این‌هاست، با فهرست سفید و `projection_version = 1`:
+  - پیشنهاددهنده، تأییدکننده یا کنشگر، و حل‌کننده؛
+  - `resolutionId` و `requeueId`؛
+  - مرجع شاهد (با همان الگو)؛
+  - کد نتیجه یا کنش؛
+  - `fourEyes`.
+
+  ردیف متن آزاد، مبلغ و هویت Issuer/Subject ندارد؛ هویت پایدار هنوز فقط در economic است. رویدادی که قرارداد را نقض کند
+  هیچ ردیفی نمی‌نویسد و به DLQ می‌رود. پس جداسازی وظایف از خود سابقهٔ `audit-service` پیداست. دلیل‌های متنی همچنان فقط در
+  economic‌اند.
+
 - **رویدادها:** تأیید `PAYMENT_RECONCILIATION_RESOLVED` است با `resolvedBy` = تأییدکننده و `proposedBy`، `approvedBy`،
   `evidenceReference`، `resolutionId`، `fourEyes`؛ بازگرداندن، پیشنهاد و رد رویداد تازهٔ `PAYMENT_RECONCILIATION_OPERATOR_ACTION`
   (`NEVER_AUTO_REPLAY`). `requeue` تسک باز را با تلاش صفرشده بی‌درنگ سررسید می‌کند و تا آشتی‌دهنده آن را دارد یا پیشنهادی منتظر
