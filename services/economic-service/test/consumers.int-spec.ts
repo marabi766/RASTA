@@ -276,7 +276,12 @@ describe('economic consumers', () => {
           currency: 'IRR',
         }),
       ),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({
+      // Dead-lettered at once, never retried (L7-26); paths and codes only (S-09).
+      name: 'UnprocessableEventError',
+      reason: DLQ_REASONS.VALIDATION_FAILED,
+      message: expect.stringMatching(/payload fails its schema: totalCostMinor invalid_type$/),
+    });
   });
 
   // -------------------------------------------------------------------------

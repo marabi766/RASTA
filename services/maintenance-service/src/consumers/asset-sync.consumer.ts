@@ -4,6 +4,7 @@ import {
   UnprocessableEventError,
   invalidPayloadError,
   isRetryDelivery,
+  missingTenantError,
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
@@ -181,11 +182,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     const existing = await this.repository.findAssetRef(assetId);
 
     if (!existing && !organizationId) {
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} is the first sighting of ${assetId} ` +
-          'but carries no tenant; cannot place it in an organization',
-      );
-      return 'SKIPPED';
+      // The first sighting of a machine, with no tenant to place it in: a
+      // broken producer. Dead-lettered at once rather than skipped without a
+      // trace, before the marker, so a corrected replay is still applied
+      // (audit L7-26). A machine already in the replica keeps its own tenant.
+      throw missingTenantError(envelope);
     }
 
     // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery

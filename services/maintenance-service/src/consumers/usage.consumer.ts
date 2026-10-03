@@ -1,6 +1,11 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import { invalidPayloadError, type EventConsumer, type EventHandler } from '@rasta/nest-common';
+import {
+  invalidPayloadError,
+  missingTenantError,
+  type EventConsumer,
+  type EventHandler,
+} from '@rasta/nest-common';
 import { usageReadingsAppliedTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import { MaintenanceRepository } from '../maintenance/maintenance.repository';
@@ -116,9 +121,10 @@ export class UsageConsumer implements OnModuleInit, OnModuleDestroy {
 
     if (!organizationId) {
       // Without a tenant there is no organization to scope the meter to.
-      // Guessing one would be inventing the fact the meter exists to carry.
-      this.logger.warn(`${envelope.eventName} ${envelope.eventId} carries no tenant; skipping`);
-      return 'SKIPPED';
+      // Guessing one would be inventing the fact the meter exists to carry, and
+      // a silent skip would lose the reading: a broken producer, dead-lettered
+      // at once before the marker so a corrected replay still applies (L7-26).
+      throw missingTenantError(envelope);
     }
 
     const now = new Date();

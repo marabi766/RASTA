@@ -5,6 +5,7 @@ import {
   createSystemContext,
   invalidPayloadError,
   isRetryDelivery,
+  missingTenantError,
   runWithContext,
   type EventConsumer,
   type EventDelivery,
@@ -35,6 +36,7 @@ import {
   FLEET_EVENTS,
   assetSourceSchema,
   assetTransferredSchema,
+  insuranceRecordedSchema,
   validateFleetPayload,
   type ConsumedEventName,
 } from '../fleet/events';
@@ -205,8 +207,10 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       const policyId = str(payload.policyId);
       const validFrom = str(payload.validFrom);
       const validTo = str(payload.validTo);
-      // A policy without its dates cannot answer anything; it is recorded as
-      // seen and changes nothing, rather than guessing a validity.
+      // A policy without its coverage, id or dates cannot answer anything.
+      // `handle` dead-letters such an event before its marker (audit L7-26),
+      // so the lapse stays in force and a corrected replay is still applied;
+      // this guard only narrows the types and never guesses a validity.
       if (!coverage || !policyId || !validFrom || !validTo) return {};
 
       const cover = withRecordedPolicy(
@@ -276,6 +280,7 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
 
 /** The field names a malformed-payload refusal may repeat (S-09). */
 const ASSET_SOURCE_FIELDS = Object.keys(assetSourceSchema.shape);
+const INSURANCE_RECORDED_FIELDS = Object.keys(insuranceRecordedSchema.shape);
 
 /** The events whose in-maintenance flag maintenance-service owns. */
 const MAINTENANCE_EVENTS: ReadonlySet<string> = new Set([
@@ -383,6 +388,15 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       // still be applied (audit L7-26, docs/07 § 7.6).
       throw invalidPayloadError(envelope, parsed.error, ASSET_SOURCE_FIELDS);
     }
+    if (envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED) {
+      // The one event that ends a lapse, refused when it lacks what it would
+      // end it with. Before the marker: the lapse stays in force (fail-safe),
+      // and the corrected event replayed with the same id is still applied.
+      const policy = insuranceRecordedSchema.safeParse(envelope.payload);
+      if (!policy.success) {
+        throw invalidPayloadError(envelope, policy.error, INSURANCE_RECORDED_FIELDS);
+      }
+    }
 
     const payload = parsed.data as Record<string, unknown>;
     const assetId = payload.assetId as string;
@@ -397,11 +411,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     const existing = await this.repository.findAssetRef(assetId);
 
     if (!existing && !organizationId) {
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} is the first sighting of ${assetId} ` +
-          'but carries no tenant; cannot place it in an organization',
-      );
-      return 'SKIPPED';
+      // The first sighting of a machine, with no tenant to place it in: a
+      // broken producer. Dead-lettered at once rather than skipped without a
+      // trace — a lost INSPECTION_FAILED would leave the machine dispatchable
+      // once it is seen — before the marker, so a corrected replay is still
+      // applied (audit L7-26). A machine already in the replica keeps its own
+      // tenant.
+      throw missingTenantError(envelope);
     }
 
     // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery

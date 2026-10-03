@@ -1,7 +1,7 @@
 import { DLQ_REASONS } from '@rasta/contracts';
 import { z } from 'zod';
 import { UnprocessableEventError } from './event-consumer';
-import { invalidPayloadError } from './invalid-payload';
+import { invalidPayloadError, missingTenantError } from './invalid-payload';
 
 /**
  * Audit L7-26: a known event with a malformed payload is dead-lettered, and
@@ -66,5 +66,15 @@ describe('invalidPayloadError', () => {
 
     expect(error.message).toMatch(/f4 invalid_type; and 2 more$/);
     expect(error.message).not.toContain('f5');
+  });
+});
+
+describe('missingTenantError', () => {
+  it('is a VALIDATION_FAILED refusal naming the event only', () => {
+    const error = missingTenantError(envelope);
+
+    expect(error).toBeInstanceOf(UnprocessableEventError);
+    expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+    expect(error.message).toBe('USAGE_RECORDED EVT-1 carries no tenant');
   });
 });

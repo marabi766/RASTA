@@ -186,14 +186,36 @@ describe('TimelineConsumer', () => {
       expect(h.markProcessed).not.toHaveBeenCalled();
     });
 
-    it('skips an event carrying no tenant', async () => {
+    it('dead-letters, rather than skips, a projected event carrying no tenant (L7-26)', async () => {
       // Without a tenant there is no organization to scope the write to, and
-      // guessing one would put another dehyari's history on this machine.
+      // guessing one would put another dehyari's history on this machine. For
+      // an event this service projects that is a broken producer: refused at
+      // once, before the marker, so the dossier entry is not lost.
       const h = harness();
-      const result = await h.consumer.handle(envelope({ tenantId: undefined }));
+      const untenanted = envelope({ tenantId: undefined, payload: { assetId: ASSET_ID } });
+
+      await expect(h.consumer.handle(untenanted)).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'USAGE_RECORDED EVT_1 carries no tenant',
+      });
+      expect(h.markProcessed).not.toHaveBeenCalled();
+      expect(h.appended).toHaveLength(0);
+
+      // The corrected event, replayed with the same id, is applied.
+      await h.consumer.handle(envelope({ payload: { assetId: ASSET_ID } }));
+      expect(h.markProcessed).toHaveBeenCalledTimes(1);
+      expect(h.appended).toHaveLength(1);
+    });
+
+    it('still skips an event it does not project, with no tenant (forward compatibility)', async () => {
+      const h = harness();
+      const result = await h.consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', tenantId: undefined, payload: {} }),
+      );
 
       expect(result).toBe('SKIPPED');
-      expect(h.appended).toHaveLength(0);
+      expect(h.markProcessed).not.toHaveBeenCalled();
     });
 
     it('skips an event about an asset this service does not hold', async () => {

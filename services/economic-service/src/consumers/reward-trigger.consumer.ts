@@ -2,6 +2,7 @@ import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/c
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   createSystemContext,
+  invalidPayloadError,
   runWithContext,
   runUnscoped,
   UnprocessableEventError,
@@ -18,7 +19,9 @@ import {
 } from '../reward/reward.service';
 import {
   CONSUMED_EVENTS,
+  MAINTENANCE_COMPLETED_FIELDS,
   maintenanceCompletedSchema,
+  USAGE_RECORDED_FIELDS,
   usageRecordedSchema,
 } from '../events/consumed';
 import {
@@ -569,7 +572,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
 
   /**
    * Which record the event points at: the claim that is checked, and nothing
-   * more.
+   * more. A known event whose payload fails its schema is dead-lettered at once
+   * as VALIDATION_FAILED, before any marker (L7-26), with field paths and zod
+   * codes only in the message (S-09).
    *
    * `sourceReference` is the aggregate that caused the reward (the usage
    * record, the maintenance request), and it is half of the uniqueness
@@ -580,7 +585,11 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
   private extract(envelope: EventEnvelope): Claim | null {
     switch (envelope.eventName) {
       case CONSUMED_EVENTS.USAGE_RECORDED: {
-        const payload = usageRecordedSchema.parse(envelope.payload);
+        const parsed = usageRecordedSchema.safeParse(envelope.payload);
+        if (!parsed.success) {
+          throw invalidPayloadError(envelope, parsed.error, USAGE_RECORDED_FIELDS);
+        }
+        const payload = parsed.data;
         return {
           organizationId: payload.organizationId,
           assetId: payload.assetId,
@@ -588,7 +597,11 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         };
       }
       case CONSUMED_EVENTS.MAINTENANCE_COMPLETED: {
-        const payload = maintenanceCompletedSchema.parse(envelope.payload);
+        const parsed = maintenanceCompletedSchema.safeParse(envelope.payload);
+        if (!parsed.success) {
+          throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_COMPLETED_FIELDS);
+        }
+        const payload = parsed.data;
         return {
           organizationId: payload.organizationId,
           assetId: payload.assetId,

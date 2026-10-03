@@ -193,9 +193,13 @@ COMMIT ──► Commit Offset
 > همان رویداد با همان شناسه، پس از اصلاح تولیدکننده و بازپخش از راه `.retry`، یک بار اعمال می‌شود. پیام فقط نام و شناسهٔ
 > رویداد و برای هر Issue «مسیر میدان + کد zod» است؛ بخشی از مسیر که در فهرست میدان‌های اعلام‌شدهٔ Schema نیست با `*` نشان داده
 > می‌شود (کلیدی که Payload انتخاب کرده)، و متن پیام zod که گاه مقدار دریافتی را تکرار می‌کند حذف می‌شود (S-09). پیش‌تر
-> `timeline` (asset)، `asset-sync` (fleet و maintenance)، `usage` (maintenance) و `keycloak-projection` (identity) چنین
-> رویدادی را Skip می‌کردند و یک شکست بازرسی، انقضای بیمه یا قرائت کارکرد بی‌هیچ ردی گم می‌شد. نام رویداد **ناشناخته** همچنان
-> Skip است.
+> `timeline` (asset)، `asset-sync` (fleet و maintenance)، `usage` (maintenance)، `keycloak-projection` (identity) و
+> `settlement-authority` و `reward-trigger` (economic) چنین رویدادی را Skip یا سه بار Retry می‌کردند و یک شکست بازرسی، انقضای
+> بیمه یا قرائت کارکرد بی‌هیچ ردی گم می‌شد. دو حالت هم‌خانواده نیز همین‌گونه‌اند: (۱) رویداد **شناخته و Tenant-محور** که در
+> Payload و Envelope هیچ Tenantی ندارد (`timeline`، `usage`، نخستین دیدن یک دارایی در `asset-sync` fleet و maintenance) —
+> تولیدکنندهٔ معیوب است، پس `missingTenantError` (همان `VALIDATION_FAILED`، پیام فقط نام و شناسهٔ رویداد)، نه Skip؛ (۲)
+> `INSURANCE_RECORDED` در fleet بدون `coverage`/`policyId`/`validFrom`/`validTo` — پیش از نشانگر رد می‌شود، پس انقضای ثبت‌شده
+> برقرار می‌ماند (Fail-Safe) و بازپخش اصلاح‌شده با همان شناسه اعمال می‌شود. نام رویداد **ناشناخته** همچنان Skip است.
 
 > **CONSTRAINT — Topicهای `.retry` امروز استفاده نمی‌شوند.**
 > `create-topics.sh` به‌ازای هر دامنه یک `rasta.<domain>.v1.retry` می‌سازد و طرح اولیهٔ این بخش یک Retry **مبتنی بر Topic** با

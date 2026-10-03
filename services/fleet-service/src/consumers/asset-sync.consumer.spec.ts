@@ -740,23 +740,93 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.upserts[0]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
     });
 
-    it('changes nothing when a recorded policy carries no validity dates', async () => {
-      const { consumer, recorded } = buildConsumer({ existing: lapsedMachine });
+    it('dead-letters a recorded policy without its dates, leaving the lapse in force (L7-26)', async () => {
+      // The one event that ends a lapse, without what it would end it with.
+      // Refused before the marker, so nothing is written and the lapse the
+      // row already holds stays in force: the machine stays off dispatch.
+      const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
 
-      await consumer.handle(
-        envelope({
-          eventName: 'INSURANCE_RECORDED',
-          payload: {
-            assetId: 'AST-SEED-0001',
-            organizationId: 'ORG-DEH-0001',
-            policyId: 'INS-2',
-            coverage: 'THIRD_PARTY',
-          },
-        }),
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName: 'INSURANCE_RECORDED',
+            payload: {
+              assetId: 'AST-SEED-0001',
+              organizationId: 'ORG-DEH-0001',
+              policyId: 'INS-2',
+              coverage: 'THIRD_PARTY',
+              insurerName: 'SENTINEL-insurer-0099',
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'INSURANCE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: ' +
+          'validFrom invalid_type; validTo invalid_type',
+      });
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
+      expect(repository.lockAssetRef).not.toHaveBeenCalled();
+      expect(recorded.upserts).toHaveLength(0);
+    });
+
+    it.each([['coverage'], ['policyId'], ['validFrom'], ['validTo']])(
+      'dead-letters a recorded policy whose %s is empty',
+      async (field) => {
+        const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
+        const policy = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+
+        await expect(
+          consumer.handle({ ...policy, payload: { ...policy.payload, [field]: '' } }),
+        ).rejects.toMatchObject({
+          reason: 'VALIDATION_FAILED',
+          message: expect.stringMatching(
+            new RegExp(`payload fails its schema: ${field} too_small$`),
+          ),
+        });
+        expect(repository.markEventProcessed).not.toHaveBeenCalled();
+        expect(recorded.upserts).toHaveLength(0);
+      },
+    );
+
+    it('applies the corrected policy replayed from the DLQ with the same id, once (L7-26)', async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
       );
+      const corrected = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+      const { validFrom: _from, validTo: _to, ...undated } = corrected.payload;
+      const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
 
-      expect(recorded.upserts[0]).not.toHaveProperty('insuranceLapsedCoverages');
-      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+      await expect(consumer.handle({ ...corrected, payload: undated })).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+      });
+      expect(marked.size).toBe(0);
+      await consumer.handle(corrected, replay);
+      await consumer.handle(corrected, replay);
+
+      // Same event id: applied once, and the lapse it answers is lifted.
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        insuranceLapsedCoverages: [],
+        insuranceLapsedAt: null,
+        insuranceCover: {
+          THIRD_PARTY: [
+            {
+              policyId: 'INS-2',
+              validFrom: '2020-01-01T00:00:00.000Z',
+              validTo: '2099-01-01T00:00:00.000Z',
+            },
+          ],
+        },
+      });
     });
 
     it('locks the replica row before reading it for a projection', async () => {
@@ -934,20 +1004,53 @@ describe('AssetSyncConsumer', () => {
       expect(repository.markEventProcessed).not.toHaveBeenCalled();
     });
 
-    it('refuses to invent an organization for a first sighting with no tenant', async () => {
+    it('dead-letters, rather than skips, a first sighting with no tenant (L7-26)', async () => {
       // Guessing would invent the very fact the replica exists to carry, and
-      // would place a machine in an organization that does not own it.
-      const { consumer, recorded } = buildConsumer({});
-      const outcome = await consumer.handle(
+      // would place a machine in an organization that does not own it. A
+      // silent skip would lose the event: refused at once, before the marker.
+      const { consumer, recorded, repository } = buildConsumer({});
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const failed = (tenantId: string | undefined) =>
         envelope({
-          eventName: 'ASSET_CREATED',
-          tenantId: undefined,
-          payload: { assetId: 'AST-UNKNOWN', name: 'بی‌سازمان' },
-        }),
+          eventName: 'INSPECTION_FAILED',
+          tenantId,
+          payload: { assetId: 'AST-UNKNOWN', inspectionId: 'INP-9' },
+        });
+
+      await expect(consumer.handle(failed(undefined))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'INSPECTION_FAILED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 carries no tenant',
+      });
+      expect(marked.size).toBe(0);
+      expect(recorded.upserts).toHaveLength(0);
+
+      // The corrected event, replayed with the same id, is applied once.
+      await consumer.handle(failed('ORG-DEH-0001'));
+      await consumer.handle(failed('ORG-DEH-0001'));
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-UNKNOWN',
+        organizationId: 'ORG-DEH-0001',
+        inspectionBlockedAt: new Date('2026-08-27T10:00:00.000Z'),
+      });
+    });
+
+    it('still skips an event it does not project, with no tenant (forward compatibility)', async () => {
+      const { consumer, repository } = buildConsumer({});
+      const outcome = await consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', tenantId: undefined, payload: {} }),
       );
 
       expect(outcome).toBe('SKIPPED');
-      expect(recorded.upserts).toHaveLength(0);
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
     });
 
     it('falls back to the envelope tenant when the payload omits it', async () => {

@@ -48,3 +48,27 @@ export function invalidPayloadError(
     `${envelope.eventName} ${envelope.eventId} payload fails its schema: ${named.join('; ')}${more}`,
   );
 }
+
+/**
+ * The refusal for a KNOWN tenant-scoped event that carries no tenant anywhere
+ * — neither in its payload nor on its envelope (audit L7-26).
+ *
+ * For an event name the consumer projects into a tenant's rows, a missing
+ * tenant is a broken producer, not an event meant for someone else: there is
+ * no organization to scope the write to, and guessing one would invent the
+ * fact the row exists to carry. Acknowledging it as `SKIPPED` would lose it
+ * without a trace, so it is dead-lettered at once as `VALIDATION_FAILED`,
+ * thrown before the processed-event marker so a corrected replay with the
+ * same id is still applied. Event names the consumer does not handle keep
+ * their skip (forward compatibility).
+ *
+ * The message carries the event name and id only (S-09).
+ */
+export function missingTenantError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+): UnprocessableEventError {
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} carries no tenant`,
+  );
+}

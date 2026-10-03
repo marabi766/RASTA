@@ -4,6 +4,7 @@ import {
   UnprocessableEventError,
   invalidPayloadError,
   isRetryDelivery,
+  missingTenantError,
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
@@ -161,12 +162,12 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
       throw invalidPayloadError(envelope, parsed.error, TIMELINE_SOURCE_FIELDS);
     }
 
-    // Without a tenant there is no organization to scope the write to. Skipped
-    // rather than dead-lettered: a missing tenantId is a producer defect, and
-    // parking the message in a DLQ would only move the defect somewhere quieter.
+    // Without a tenant there is no organization to scope the write to. For an
+    // event this service projects that is a broken producer, and a silent skip
+    // would lose the dossier entry without a trace: dead-lettered at once,
+    // before the marker, so a corrected replay is still applied (audit L7-26).
     if (!envelope.tenantId) {
-      this.logger.warn(`${envelope.eventName} ${envelope.eventId} carries no tenantId`);
-      return 'SKIPPED';
+      throw missingTenantError(envelope);
     }
 
     const payload = parsed.data as Record<string, unknown>;

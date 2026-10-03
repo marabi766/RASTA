@@ -231,6 +231,27 @@ export const assetSourceSchema = z
 export type AssetSourceEvent = z.infer<typeof assetSourceSchema>;
 
 /**
+ * `INSURANCE_RECORDED`, held to the four fields its projection acts on
+ * (asset-service `insuranceRecordedPayload` always carries them).
+ *
+ * This is the only event that ends an insurance lapse, and it does so only
+ * from the policy's own window. One without its coverage, policy id or dates
+ * answers nothing; acknowledged, it would be marked processed and a corrected
+ * replay with the same id would then be ignored. So it is refused before the
+ * marker (audit L7-26) while the lapse stays in force. Still `.passthrough()`
+ * for fields added later.
+ */
+export const insuranceRecordedSchema = z
+  .object({
+    assetId: z.string().min(1),
+    policyId: z.string().min(1),
+    coverage: z.string().min(1),
+    validFrom: z.string().min(1),
+    validTo: z.string().min(1),
+  })
+  .passthrough();
+
+/**
  * `ASSET_TRANSFERRED`, held to more than {@link assetSourceSchema} (review
  * #127 #5).
  *

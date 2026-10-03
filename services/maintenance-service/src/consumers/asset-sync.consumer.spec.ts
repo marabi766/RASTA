@@ -281,13 +281,35 @@ describe('asset reference replica', () => {
     expect(upserts).toHaveLength(0);
   });
 
-  it('skips a first sighting that carries no tenant at all', async () => {
-    const { consumer, upserts } = harness();
+  it('dead-letters, rather than skips, a first sighting that carries no tenant at all (L7-26)', async () => {
+    // No organization to place the machine in, and guessing one would invent
+    // it: a broken producer, refused at once before the marker.
+    const { consumer, upserts, marks } = harness({ ledger: true });
 
-    const outcome = await consumer.handle(envelope('ASSET_CREATED', { assetId: 'AST-UNKNOWN' }));
+    await expect(
+      consumer.handle(envelope('ASSET_CREATED', { assetId: 'AST-UNKNOWN' })),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message: 'ASSET_CREATED evt-ASSET_CREATED carries no tenant',
+    });
+    expect(marks).toEqual([]);
+    expect(upserts).toHaveLength(0);
+
+    // The corrected event, replayed with the same id, is applied.
+    await consumer.handle(envelope('ASSET_CREATED', { assetId: 'AST-UNKNOWN' }, 'ORG-DEH-0001'));
+    expect(marks).toEqual(['evt-ASSET_CREATED']);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toMatchObject({ id: 'AST-UNKNOWN', organizationId: 'ORG-DEH-0001' });
+  });
+
+  it('still skips an event it does not project, with no tenant (forward compatibility)', async () => {
+    const { consumer, marks } = harness();
+
+    const outcome = await consumer.handle(envelope('ASSET_LOCATION_UPDATED', {}));
 
     expect(outcome).toBe('SKIPPED');
-    expect(upserts).toHaveLength(0);
+    expect(marks).toEqual([]);
   });
 
   it('dead-letters, rather than skips, a consumed event that names no machine (L7-26)', async () => {

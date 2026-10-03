@@ -2,6 +2,7 @@ import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/c
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   createSystemContext,
+  invalidPayloadError,
   runWithContext,
   runUnscoped,
   UnprocessableEventError,
@@ -10,7 +11,11 @@ import {
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TransactionService } from '../transaction/transaction.service';
-import { CONSUMED_EVENTS, maintenanceApprovedSchema } from '../events/consumed';
+import {
+  CONSUMED_EVENTS,
+  MAINTENANCE_APPROVED_FIELDS,
+  maintenanceApprovedSchema,
+} from '../events/consumed';
 import { SERVICE_NAME } from '../config/env';
 import { sourceVerificationsTotal } from '../observability/metrics';
 import {
@@ -114,7 +119,16 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
   async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
     if (envelope.eventName !== CONSUMED_EVENTS.MAINTENANCE_APPROVED) return 'SKIPPED';
 
-    const payload = maintenanceApprovedSchema.parse(envelope.payload);
+    // A known event whose payload fails its schema is a producer defect no
+    // retry fixes: dead-lettered at once as VALIDATION_FAILED, before the
+    // processed marker, so a corrected replay with the same id still applies
+    // (L7-26). The message names field paths and zod codes only — never zod's
+    // own text, which can quote the value received (S-09).
+    const parsed = maintenanceApprovedSchema.safeParse(envelope.payload);
+    if (!parsed.success) {
+      throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_APPROVED_FIELDS);
+    }
+    const payload = parsed.data;
 
     // Before any skip, any lookup and any token: the envelope's tenant and the
     // payload's organization are one, or the event is refused (ADR-061 § 5).

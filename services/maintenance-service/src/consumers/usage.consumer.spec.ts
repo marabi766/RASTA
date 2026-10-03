@@ -164,20 +164,39 @@ describe('usage consumer', () => {
     expect(folds[0]?.organizationId).toBe('ORG-DEH-0001');
   });
 
-  it('skips a reading with no tenant anywhere, rather than guessing one', async () => {
+  it('dead-letters, rather than skips, a reading with no tenant anywhere (L7-26)', async () => {
     // There is no organization to scope the meter to. Guessing would invent
-    // the fact the meter exists to carry.
-    const { consumer, folds } = harness();
+    // the fact the meter exists to carry, and a silent skip would lose the
+    // reading: refused at once, before the marker.
+    const { consumer, folds, marked } = harness({ ledger: true });
+    const reading = { usageRecordId: 'USG_4', assetId: 'AST-SEED-0001', hours: '4.00' };
+
+    await expect(
+      consumer.handle(envelope({ tenantId: undefined, payload: reading })),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message: 'USAGE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 carries no tenant',
+    });
+    expect(marked).toEqual([]);
+    expect(folds).toHaveLength(0);
+
+    // The corrected event, replayed with the same id, advances the meter once.
+    await consumer.handle(envelope({ payload: reading }));
+    await consumer.handle(envelope({ payload: reading }));
+    expect(folds).toHaveLength(1);
+    expect(folds[0]?.organizationId).toBe('ORG-DEH-0001');
+  });
+
+  it('still skips an event it does not consume, with no tenant (forward compatibility)', async () => {
+    const { consumer, marked } = harness();
 
     const outcome = await consumer.handle(
-      envelope({
-        tenantId: undefined,
-        payload: { usageRecordId: 'USG_4', assetId: 'AST-SEED-0001', hours: '4.00' },
-      }),
+      envelope({ eventName: 'DRIVER_REGISTERED', tenantId: undefined, payload: {} }),
     );
 
     expect(outcome).toBe('SKIPPED');
-    expect(folds).toHaveLength(0);
+    expect(marked).toEqual([]);
   });
 
   it('dead-letters, rather than skips, a reading that names no machine (L7-26)', async () => {

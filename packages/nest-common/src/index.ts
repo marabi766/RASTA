@@ -142,7 +142,7 @@ export type {
   ConsumerLogger,
 } from './consumer/event-consumer';
 export { isRetryDelivery, originalDelivery } from './consumer/original-delivery';
-export { invalidPayloadError } from './consumer/invalid-payload';
+export { invalidPayloadError, missingTenantError } from './consumer/invalid-payload';
 
 // Outbox ---------------------------------------------------------------------
 export {
