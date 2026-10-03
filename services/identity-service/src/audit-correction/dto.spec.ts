@@ -187,3 +187,31 @@ describe('hashCorrectionCommand', () => {
     );
   });
 });
+
+describe('a __proto__ or constructor key (#194)', () => {
+  it.each(['__proto__', 'constructor'])(
+    'is refused by the schema at the top level and in a change: %s',
+    (name) => {
+      const top = JSON.parse(`{"${name}":{"x":1}}`) as object;
+      expect(auditCorrectionCommandSchema.safeParse({ ...VALID, ...top }).success).toBe(false);
+      const change = { ...VALID.changes[0], ...top };
+      expect(auditCorrectionCommandSchema.safeParse({ ...VALID, changes: [change] }).success).toBe(
+        false,
+      );
+    },
+  );
+
+  it.each(['__proto__', 'constructor'])(
+    'still changes the digest, should one ever reach it: %s',
+    (name) => {
+      // The digest does not lean on the schema: every own key is hashed.
+      const withValue = (x: number): AuditCorrectionCommand =>
+        ({
+          ...accepted(VALID),
+          ...(JSON.parse(`{"extra":{"${name}":{"x":${x}}}}`) as object),
+        }) as AuditCorrectionCommand;
+      expect(hashCorrectionCommand(withValue(1))).not.toBe(hashCorrectionCommand(withValue(2)));
+      expect(hashCorrectionCommand(withValue(1))).toBe(hashCorrectionCommand(withValue(1)));
+    },
+  );
+});
