@@ -50,6 +50,29 @@ log_min_duration_statement = 500ms      # Query کند را ثبت کن
 Production: **PgBouncer** در حالت Transaction Pooling جلوی Cluster — ۱۷ سرویس × چند Replica
 به‌سرعت `max_connections` را می‌بلعد.
 
+**منطقهٔ زمانی نشست پشت Pooler (L7-37، [D-048](23-risks-and-tradeoffs.md)).** هر نشست پایگاه داده باید در UTC باشد،
+و **تضمین آن سمت پایگاه داده است، نه سمت Client**: برای پایگاه دادهٔ هر سرویس، Role زمان اجرا و Migrator آن،
+
+```sql
+ALTER DATABASE rasta_<svc> SET TimeZone = 'UTC';
+ALTER ROLE <role> SET TimeZone = 'UTC';
+ALTER ROLE <role> IN DATABASE rasta_<svc> SET TimeZone = 'UTC';   -- بر هر Override قدیمیِ همان پایگاه داده غلبه می‌کند
+```
+
+سرور این پیش‌فرض‌ها را هنگام ساختن هر Backend اعمال می‌کند، بر `timezone` فایل `postgresql.conf` مقدم‌اند، و به هیچ چیزِ
+آمده از Client وابسته نیستند؛ پس Backendی که PgBouncer میان Clientها دست‌به‌دست می‌کند هم در UTC آغاز می‌شود.
+`infrastructure/docker/postgres/lib/session-timezone.bash` همین را در Bootstrap (`00-init-databases.sh`)، در Split هر سرویس
+(`service-privilege-split.bash`) و برای Volume موجود در `pnpm db:rotate-role-passwords` اعمال می‌کند — Idempotent و با SQL روی
+stdin (D-047) — و `pnpm check:db-runtime-privileges` در CI هر پایگاه داده و هر دو Role را می‌سنجد. Provisioning هر خوشهٔ
+Production همین دستورها را اجرا می‌کند.
+
+لایهٔ دوم Client است: سرویس‌ها، `scripts/prisma.mjs`، Seedها و اسکریپت‌ها و آزمون‌هایی که مستقیم وصل می‌شوند، `options=-c
+TimeZone=UTC` را هنگام Startup می‌فرستند (`withUtcSession`). PgBouncer پارامتر Startupی را که نمی‌شناسد رد می‌کند و اتصال
+باز نمی‌شود؛ پس تا وقتی این Option در URL هست، پیکربندی PgBouncer باید `options` را در `ignore_startup_parameters` داشته
+باشد (کنار هر پارامتر دیگری که Clientها می‌فرستند). PgBouncer پارامتر فهرست‌شده را **دور می‌اندازد** و به سرور نمی‌رساند —
+یعنی پشت Pooler فقط تنظیم سمت پایگاه داده اثر دارد، و برای همین تنظیمِ سمت پایگاه داده تضمین است و Option فقط لایهٔ دوم.
+`SET TimeZone` در نشست جایگزین هیچ‌کدام نیست: در Transaction Pooling روی Backend مشترک می‌ماند و به Client بعدی می‌رسد.
+
 **Replication (Production).** یک Primary + حداقل یک Standby همزمان. خواندن‌های سنگین
 گزارشی به Standby می‌روند. `economic` و `audit` روی Cluster اختصاصی.
 
