@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
-import { ledgerRevoke } from './prisma-lib.mjs';
+import { ledgerRevoke, withUtcSession } from './prisma-lib.mjs';
 
 const cwd = process.cwd();
 
@@ -70,15 +70,21 @@ if (ownerRequired && !process.env[migratorKey]) {
   );
   process.exit(1);
 }
-const url = process.env[migratorKey] ?? process.env.DATABASE_URL ?? process.env[key];
+const given = process.env[migratorKey] ?? process.env.DATABASE_URL ?? process.env[key];
 
-if (!url) {
+if (!given) {
   console.error(
     `Neither ${migratorKey} nor ${key} is set. Copy .env.example to .env at the ` +
       `repository root, or set DATABASE_URL for this process.`,
   );
   process.exit(1);
 }
+
+// Every migration session runs in UTC (L7-37): a backfill that writes `now()`
+// into a `timestamp(3)` column stores the session's wall time, which Prisma
+// reads back as UTC. A startup option, so it holds whatever the server's or
+// the migrator role's default is — and for the ledger revoke below too.
+const url = withUtcSession(given);
 
 const result = spawnSync('prisma', process.argv.slice(2), {
   cwd,

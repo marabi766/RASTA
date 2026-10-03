@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { withUtcSession } from './database-session';
 
 /**
  * Environment loading for Rasta services.
@@ -204,9 +205,16 @@ export const baseEnvSchema = z.object({
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
 
-/** Services that own a database. */
+/**
+ * Services that own a database.
+ *
+ * `DATABASE_URL` comes out with `options=-c TimeZone=UTC` added
+ * ({@link withUtcSession}): every client a service opens on it — the runtime
+ * pool, the startup role check, a CLI — runs its sessions in UTC whatever the
+ * server's or the role's default (L7-37).
+ */
 export const databaseEnvSchema = z.object({
-  DATABASE_URL: postgresUrlSchema,
+  DATABASE_URL: postgresUrlSchema.transform(withUtcSession),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
   DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(15_000),
 });

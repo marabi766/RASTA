@@ -1479,6 +1479,20 @@ jobs:
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
 
+      - name: Every database session runs in UTC (L7-37)
+        # A throwaway role whose default TimeZone is Asia/Tehran: a raw `now()`
+        # into a `timestamp(3)` column under it comes back 3½ hours off, which
+        # the control proves. The runtime URL every service builds
+        # (@rasta/config), the migration runner (scripts/prisma.mjs) and the
+        # demo seeds must each open their sessions in UTC regardless, and the
+        # runner's copy of the URL function must agree with the services'.
+        run: pnpm run test:db-session-utc
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
       - name: Retry replay, published as ops-replay
         # D-039: a record the operator's replay principal publishes on
         # `<topic>.retry` is consumed like the original — applied once,
