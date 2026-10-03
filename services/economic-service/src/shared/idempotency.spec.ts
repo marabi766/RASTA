@@ -7,6 +7,20 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { EconomicEnv } from '../config/env';
 
 /**
+ * A claim-side statement runs in a short transaction of its own, its lock
+ * wait bounded (#196): the fake hands that transaction the same delegate.
+ */
+function withTransaction(idempotencyKey: unknown): PrismaService {
+  const tx = { idempotencyKey, $queryRaw: jest.fn().mockResolvedValue([]) };
+  return {
+    client: {
+      idempotencyKey,
+      $transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
+    },
+  } as unknown as PrismaService;
+}
+
+/**
  * Request-body canonicalisation for idempotent writes (docs/06 § 6.8).
  *
  * The failure mode this guards against is subtle and expensive: a client
@@ -121,7 +135,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       findUnique: script.findUnique ?? jest.fn(),
       deleteMany: script.deleteMany ?? jest.fn().mockResolvedValue({ count: 1 }),
     };
-    const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+    const prisma = withTransaction(idempotencyKey);
     const store = new IdempotencyStore(prisma, {
       ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
     } as EconomicEnv);
@@ -307,7 +321,7 @@ describe('IdempotencyStore.run — when the claim is released', () => {
       updateMany,
       deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
-    const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+    const prisma = withTransaction(idempotencyKey);
     const store = new IdempotencyStore(prisma, {
       ECONOMIC_IDEMPOTENCY_TTL_HOURS: 24,
     } as EconomicEnv);

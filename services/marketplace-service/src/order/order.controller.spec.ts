@@ -8,6 +8,20 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { MarketplaceEnv } from '../config/env';
 
 /**
+ * A claim-side statement runs in a short transaction of its own, its lock
+ * wait bounded (#196): the fake hands that transaction the same delegate.
+ */
+function withTransaction(idempotencyKey: unknown): PrismaService {
+  const tx = { idempotencyKey, $queryRaw: jest.fn().mockResolvedValue([]) };
+  return {
+    client: {
+      idempotencyKey,
+      $transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
+    },
+  } as unknown as PrismaService;
+}
+
+/**
  * A replayed command must never reach an order it did not run on.
  *
  * The defect this file pins: every targeted order command stored its
@@ -98,7 +112,7 @@ function inMemoryKeyTable() {
     },
   };
 
-  return { prisma: { client: { idempotencyKey } } as unknown as PrismaService, rows };
+  return { prisma: withTransaction(idempotencyKey), rows };
 }
 
 /**
