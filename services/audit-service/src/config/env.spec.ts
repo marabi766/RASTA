@@ -99,6 +99,19 @@ describe('audit-service configuration', () => {
     });
   });
 
+  it('looks back seven days for missing reconciliation evidence unless told otherwise (D-046)', () => {
+    expect(loadAuditEnv(base()).AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS).toBe(168);
+    expect(
+      loadAuditEnv(base({ AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: '24' }))
+        .AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS,
+    ).toBe(24);
+    for (const value of ['0', '2161', 'soon', '1.5']) {
+      expect(() =>
+        loadAuditEnv(base({ AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: value })),
+      ).toThrow();
+    }
+  });
+
   it('requires a broker list, because the projector is the whole service', () => {
     expect(() => loadAuditEnv({ DATABASE_URL_AUDIT: RUNTIME_URL, ...AUTH })).toThrow();
   });

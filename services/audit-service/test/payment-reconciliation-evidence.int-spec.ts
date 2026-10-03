@@ -4,6 +4,9 @@ import type { Logger } from '@rasta/logging';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
+import { DOMAIN_PROJECTOR_CONSUMER, toAuditEventRecord } from '../src/audit/audit.mapper';
+import { ReconciliationEvidenceMonitor } from '../src/audit/reconciliation-evidence-monitor';
+import { auditReconciliationEvidenceMissing } from '../src/observability/metrics';
 import { cleanupRun, id, newMigratorPrisma, newPrisma } from './helpers';
 
 /**
@@ -84,29 +87,38 @@ describe('payment-reconciliation evidence (real PostgreSQL)', () => {
   }
 
   /** Shaped as `PaymentReconciler.apply` publishes an approved operator resolution. */
-  function approved(at: Scenario, overrides: Record<string, unknown> = {}) {
-    return envelope(at, 'PAYMENT_RECONCILIATION_RESOLVED', {
-      paymentIntentId: at.intent,
-      organizationId: at.org,
-      walletId: 'wal_1',
-      kind: 'REFUND',
-      marker: 'REFUND_UNKNOWN',
-      providerRefund: null,
-      resolution: 'REFUNDED',
-      resolvedBy: 'usr_approver',
-      attempts: 3,
-      amountMinor: '250000',
-      currency: 'IRR',
-      provider: 'mock',
-      simulated: true,
-      resolvedAt: '2026-10-03T10:00:00.000Z',
-      resolutionId: 'res_approved_1',
-      proposedBy: 'usr_proposer',
-      approvedBy: 'usr_approver',
-      evidenceReference: 'TICKET-9001',
-      fourEyes: true,
-      ...overrides,
-    });
+  function approved(
+    at: Scenario,
+    overrides: Record<string, unknown> = {},
+    envelopeOverrides: Partial<EventEnvelope> = {},
+  ) {
+    return envelope(
+      at,
+      'PAYMENT_RECONCILIATION_RESOLVED',
+      {
+        paymentIntentId: at.intent,
+        organizationId: at.org,
+        walletId: 'wal_1',
+        kind: 'REFUND',
+        marker: 'REFUND_UNKNOWN',
+        providerRefund: null,
+        resolution: 'REFUNDED',
+        resolvedBy: 'usr_approver',
+        attempts: 3,
+        amountMinor: '250000',
+        currency: 'IRR',
+        provider: 'mock',
+        simulated: true,
+        resolvedAt: '2026-10-03T10:00:00.000Z',
+        resolutionId: 'res_approved_1',
+        proposedBy: 'usr_proposer',
+        approvedBy: 'usr_approver',
+        evidenceReference: 'TICKET-9001',
+        fourEyes: true,
+        ...overrides,
+      },
+      envelopeOverrides,
+    );
   }
 
   /** Shaped as `PaymentReconciliationOperator.enqueueAction` publishes. */
@@ -360,6 +372,78 @@ describe('payment-reconciliation evidence (real PostgreSQL)', () => {
       1,
     );
     expect(await evidenceOf(event.eventId)).toHaveLength(0);
+  });
+
+  /**
+   * The detective check (Codex on #204, HIGH 1). An audit row written for one
+   * of the two events without its evidence row — by a replica from before the
+   * projection, after which the event is marked processed and a newer replica
+   * returns DUPLICATE before it would project — must be counted and exported,
+   * never silent. Counted as a delta: the database is shared with other runs.
+   */
+  describe('the missing-evidence monitor', () => {
+    const NOW = new Date('2026-10-03T12:00:00.000Z');
+    let monitor: ReconciliationEvidenceMonitor;
+
+    async function gauge(): Promise<number> {
+      return (await auditReconciliationEvidenceMissing.get()).values[0]?.value ?? -1;
+    }
+
+    /** What a replica from before the projection wrote: the audit row and its marker only. */
+    async function writtenByAnOldReplica(event: EventEnvelope): Promise<void> {
+      const outcome = await new AuditRepository(prisma).ingest(
+        toAuditEventRecord(event, delivery),
+        DOMAIN_PROJECTOR_CONSUMER,
+      );
+      expect(outcome).toBe('WRITTEN');
+    }
+
+    beforeAll(() => {
+      monitor = new ReconciliationEvidenceMonitor(new AuditRepository(prisma), {
+        AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
+      } as never);
+    });
+
+    it('counts an audit row with no evidence row, exports it, and keeps counting after a redelivery', async () => {
+      const before = await monitor.sample(NOW);
+      expect(await gauge()).toBe(before);
+
+      const at = scenario();
+      const event = approved(at);
+      await writtenByAnOldReplica(event);
+      expect(await monitor.sample(NOW)).toBe(before + 1);
+      expect(await gauge()).toBe(before + 1);
+
+      // The new projector meets the processed marker and writes nothing: the
+      // gap stays, and stays counted. This is why the check exists.
+      await projector.handle(event, delivery);
+      expect(await evidenceOf(event.eventId)).toHaveLength(0);
+      expect(await monitor.sample(NOW)).toBe(before + 1);
+
+      // An operator action is the other event this covers.
+      await writtenByAnOldReplica(operatorAction(at));
+      expect(await monitor.sample(NOW)).toBe(before + 2);
+    });
+
+    it('does not count an event that has its evidence row, or any other economic event', async () => {
+      const before = await monitor.sample(NOW);
+      const at = scenario();
+      await projector.handle(approved(at), delivery);
+      await projector.handle(operatorAction(at), delivery);
+      await writtenByAnOldReplica(
+        envelope(at, 'PAYMENT_RECONCILIATION_ESCALATED', { anything: true }),
+      );
+      expect(await monitor.sample(NOW)).toBe(before);
+    });
+
+    it('does not count a gap outside the look-back window', async () => {
+      const before = await monitor.sample(NOW);
+      const at = scenario();
+      await writtenByAnOldReplica(approved(at, {}, { occurredAt: '2026-09-20T10:00:00.000Z' }));
+      expect(await monitor.sample(NOW)).toBe(before);
+      // The same row is counted by a window that reaches it.
+      expect(await monitor.sample(new Date('2026-09-21T09:00:00.000Z'))).toBeGreaterThan(0);
+    });
   });
 
   describe('the table itself', () => {

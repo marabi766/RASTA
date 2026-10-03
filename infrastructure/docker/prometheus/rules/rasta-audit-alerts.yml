@@ -72,6 +72,23 @@ groups:
           description: '{{ $value }} bid receipts have waited past the gap alert time for a predecessor that has not arrived; rasta_audit_tender_pending_oldest_age_seconds is the age of the oldest. The tender cannot open its bids until the gap is closed.'
           runbook: docs/runbooks/audit-gap-detected.md
 
+      - alert: RastaAuditReconciliationEvidenceMissing
+        # D-046. A payment-reconciliation audit row (RESOLVED or OPERATOR_ACTION)
+        # inside AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS with no evidence
+        # row: who proposed, who approved and on which evidence is missing from
+        # the audit record. The projector writes both in one transaction, so
+        # this means a replica from before the projection wrote the audit row,
+        # or the event was already marked processed when the projection
+        # shipped. A gauge sampled from the tables: fires while any such row is
+        # in the window. `max` across replicas: each samples the same tables.
+        expr: max(rasta_audit_reconciliation_evidence_missing) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Payment-reconciliation audit rows are missing their evidence'
+          description: '{{ $value }} payment-reconciliation audit rows in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
+          runbook: docs/runbooks/audit-gap-detected.md
+
       - alert: RastaAuditIngestionLagHigh
         # ADR-053 § 13: p95 of event time (`occurredAt`) to audit row written,
         # per source topic, over a 5-minute rate window. Buckets are summed

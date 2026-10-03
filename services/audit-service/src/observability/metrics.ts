@@ -244,6 +244,24 @@ export const auditTenderPendingOldestAgeSeconds = new Gauge({
   registers: [registry],
 });
 
+/**
+ * D-046's detective check: audit rows of `PAYMENT_RECONCILIATION_RESOLVED` or
+ * `_OPERATOR_ACTION` from `rasta.economic.v1`, inside the look-back window, that
+ * have no `payment_reconciliation_evidence` row (Codex on #204, HIGH 1).
+ *
+ * The projector writes both rows in one transaction, so the number is zero
+ * unless an audit row was written without its evidence: by a replica running a
+ * version from before the projection, or for an event marked processed before
+ * it existed. Sampled from the tables every minute (never maintained by
+ * inc/dec); `RastaAuditReconciliationEvidenceMissing` fires while it is above
+ * zero. One number, no labels: identifiers and tenants are never labels.
+ */
+export const auditReconciliationEvidenceMissing = new Gauge({
+  name: 'rasta_audit_reconciliation_evidence_missing',
+  help: 'Payment-reconciliation audit rows in the look-back window with no evidence row (D-046)',
+  registers: [registry],
+});
+
 export type IngestionFailureReason =
   (typeof INGESTION_FAILURE_REASONS)[keyof typeof INGESTION_FAILURE_REASONS];
 

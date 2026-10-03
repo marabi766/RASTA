@@ -8,7 +8,11 @@ import {
   type OrganizationDomainStatus,
   type OrganizationProjection,
 } from './organization-projection';
-import type { PaymentReconciliationEvidence } from './payment-reconciliation-projection';
+import {
+  ECONOMIC_TOPIC,
+  PAYMENT_RECONCILIATION_EVENTS,
+  type PaymentReconciliationEvidence,
+} from './payment-reconciliation-projection';
 import type { AuditEventRow } from './audit.view';
 import type { AuditCursor } from './audit.cursor';
 import type { HashableAuditRecord } from './audit.canonical';
@@ -567,6 +571,35 @@ export class AuditRepository {
       }
       throw error;
     }
+  }
+
+  /**
+   * D-046's detective check: payment-reconciliation audit rows since `since`
+   * that have no evidence row.
+   *
+   * The projector writes the two in one transaction, so a row counted here was
+   * written by something else — a replica from before the projection existed,
+   * or an ingest that found the event already marked processed. Served by
+   * `audit_event_topic_time_idx` (`source_topic, occurred_at`) with partition
+   * pruning on `occurred_at`, and by the unique index on `audit_event_id`.
+   */
+  async countMissingReconciliationEvidence(since: Date): Promise<number> {
+    const rows = await this.prisma.client.$queryRaw<{ missing: bigint }[]>`
+      SELECT count(*) AS missing
+        FROM audit_event a
+       WHERE a.source_topic = ${ECONOMIC_TOPIC}
+         AND a.occurred_at >= ${since}
+         AND a.source_event_name IN (
+               ${PAYMENT_RECONCILIATION_EVENTS.RESOLVED},
+               ${PAYMENT_RECONCILIATION_EVENTS.OPERATOR_ACTION}
+             )
+         AND NOT EXISTS (
+               SELECT 1
+                 FROM payment_reconciliation_evidence e
+                WHERE e.audit_event_id = a.id
+             )
+    `;
+    return Number(rows[0]?.missing ?? 0n);
   }
 
   /**

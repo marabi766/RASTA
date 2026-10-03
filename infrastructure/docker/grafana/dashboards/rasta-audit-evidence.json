@@ -181,7 +181,7 @@
             "type": "prometheus",
             "uid": "rasta-prometheus"
           },
-          "expr": "sum by (alertname, alertstate, severity) (ALERTS{alertname=~\"RastaDeadLetterMessagePublished|RastaAuditIngestionFailure|RastaAuditTenderChainGapOpen|RastaAuditIngestionLagHigh|RastaAuditChainDivergence|RastaSecurityEventCaptureGap|RastaSecurityEventClosedBacklogStale|RastaSecurityEventPublishFailure|RastaIdentityServiceMetricsUnavailable|RastaAuditProducerSilent|RastaAuditServiceMetricsUnavailable|RastaAuditConsumerLag|RastaKafkaExporterUnavailable|RastaAuditConsumerGroupMetricsMissing\"})",
+          "expr": "sum by (alertname, alertstate, severity) (ALERTS{alertname=~\"RastaDeadLetterMessagePublished|RastaAuditIngestionFailure|RastaAuditTenderChainGapOpen|RastaAuditReconciliationEvidenceMissing|RastaAuditIngestionLagHigh|RastaAuditChainDivergence|RastaSecurityEventCaptureGap|RastaSecurityEventClosedBacklogStale|RastaSecurityEventPublishFailure|RastaIdentityServiceMetricsUnavailable|RastaAuditProducerSilent|RastaAuditServiceMetricsUnavailable|RastaAuditConsumerLag|RastaKafkaExporterUnavailable|RastaAuditConsumerGroupMetricsMissing\"})",
           "legendFormat": "{{alertname}}",
           "range": false,
           "instant": true,

@@ -351,6 +351,44 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
+  # RastaAuditReconciliationEvidenceMissing (D-046) — a gauge, like the tender
+  # gap: fires while a payment-reconciliation audit row in the window has no
+  # evidence row, and resolves when the count is back to zero. Zero never fires.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_audit_reconciliation_evidence_missing{job="audit-service",instance="a:3115",environment="local"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0'
+      - series: 'rasta_audit_reconciliation_evidence_missing{job="audit-service",instance="b:3115",environment="local"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaAuditReconciliationEvidenceMissing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaAuditReconciliationEvidenceMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Payment-reconciliation audit rows are missing their evidence'
+              description: '1 payment-reconciliation audit rows in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      # Long after any 5m window: still firing while the row is in the window.
+      - eval_time: 18m
+        alertname: RastaAuditReconciliationEvidenceMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Payment-reconciliation audit rows are missing their evidence'
+              description: '1 payment-reconciliation audit rows in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
+              runbook: docs/runbooks/audit-gap-detected.md
+      - eval_time: 22m
+        alertname: RastaAuditReconciliationEvidenceMissing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
   # RastaAuditIngestionLagHigh — ADR-053 § 13: p95 > 60 s per source_topic.
   #
   # Inputs are cumulative `rasta_audit_ingestion_lag_seconds_bucket` series with
