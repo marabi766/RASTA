@@ -145,7 +145,15 @@ describe('a contractor reads its own opened bid', () => {
     // Nothing of the other bidder is in the answer.
     expect(JSON.stringify(a)).not.toContain(second.bidder);
     expect(JSON.stringify(a)).not.toContain(second.bidId);
-    expect(JSON.stringify(a)).not.toContain('1001');
+    // The other bidder's price, compared value by value rather than as a
+    // substring: the answer carries a random SHA-256 commitment and ULIDs, and
+    // either can contain "1001" by chance (CI flake on 2026-10-03).
+    const values: unknown[] = [];
+    JSON.stringify(a, (_key, value: unknown) => {
+      values.push(value);
+      return value;
+    });
+    expect(values).not.toContain('1001');
 
     // A contractor with no bid on the tender is told what a missing bid is told, and the attempt is logged.
     const stranger = newOrganizationId();
