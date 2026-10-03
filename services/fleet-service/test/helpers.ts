@@ -162,3 +162,24 @@ export async function waitFor<T>(
       (last ? `; last error: ${String(last)}` : ''),
   );
 }
+
+/**
+ * The fields asset-service's `assetCreatedPayload` always carries and fleet's
+ * replica projection copies (review #205 r1). A consumed ASSET_CREATED without
+ * them is dead-lettered, so a fixture spreads these under its own fields:
+ * `{ ...ASSET_CREATED_FIELDS, ...payload }`.
+ */
+export const ASSET_CREATED_FIELDS = {
+  name: 'ماشین آزمون',
+  type: 'GRADER',
+  assetTag: null,
+  serialNumber: null,
+} as const;
+
+/** Spreads {@link ASSET_CREATED_FIELDS} under an ASSET_CREATED fixture's payload; other events pass through. */
+export function producerShaped(
+  eventName: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return eventName === 'ASSET_CREATED' ? { ...ASSET_CREATED_FIELDS, ...payload } : payload;
+}

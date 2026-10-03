@@ -210,15 +210,17 @@ describe('the edit version', () => {
   const dto = parse(read('dto.ts'));
 
   it('is still a **required** `expectedVersion` on the update schema; the portal always sends it', () => {
+    // Since slice 5 the field is one shared constant that the update schema and
+    // the three lifecycle schemas all use by name.
     const update = topLevelConst(dto, 'updateAssetSchema');
-    const version = collect(update, ts.isPropertyAssignment).find(
+    const version = collect(update, ts.isShorthandPropertyAssignment).find(
       (node) => node.name.getText() === 'expectedVersion',
     );
     expect(version).toBeDefined();
     // Required: no `.optional()` and no default, or a direct client that omits
     // it overwrites whatever is current — the lost update this field exists
     // to prevent.
-    const initializer = version!.initializer.getText().replace(/\s+/g, '');
+    const initializer = topLevelConst(dto, 'expectedVersion').getText().replace(/\s+/g, '');
     expect(initializer).toMatch(/^z\.(coerce\.)?number\(\)\.int\(\)\.min\(1\)$/);
   });
 

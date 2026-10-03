@@ -1,9 +1,13 @@
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
-import { runUnscoped } from '@rasta/nest-common';
+import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
-import { TransferClearanceClient } from '../src/asset/transfer-clearance';
+import {
+  TransferClearanceClient,
+  type ClearanceAnswer,
+  type WorkOwner,
+} from '../src/asset/transfer-clearance';
 import { ASSET_EVENTS, INSURANCE_EVENTS } from '../src/asset/events';
 import { createAssetSchema } from '../src/asset/dto';
 import { InsuranceService } from '../src/insurance/insurance.service';
@@ -73,6 +77,15 @@ describe('asset integrity', () => {
       assetId,
     );
     return { status: rows[0]!.status, organizationId: rows[0]!.organization_id };
+  }
+
+  /** The version a read would show now: what a command is made against. */
+  async function versionOf(assetId: string): Promise<number> {
+    const rows = await prisma.client.$queryRawUnsafe<{ version: number }[]>(
+      `SELECT version FROM asset WHERE id = $1`,
+      assetId,
+    );
+    return rows[0]!.version;
   }
 
   /** Holds the asset's row lock until released, so contenders queue behind it. */
@@ -201,14 +214,20 @@ describe('asset integrity', () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
 
+      const version = await versionOf(assetId);
       const release = await holdRowLock(assetId);
-      // Both requests read ACTIVE now and then block on the row lock.
+      // Both requests read ACTIVE, at the same version, now and then block on
+      // the row lock.
       const decommission = asActor(manager(org.a), () =>
-        assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
+        assets.decommission(assetId, { reason: 'فرسودگی کامل', expectedVersion: version }),
       );
       await waitForBlocked(1);
       const idle = asActor(manager(org.a), () =>
-        assets.changeStatus(assetId, { status: 'IDLE', reason: 'فصل غیرکاری' }),
+        assets.changeStatus(assetId, {
+          status: 'IDLE',
+          reason: 'فصل غیرکاری',
+          expectedVersion: version,
+        }),
       );
       // Settle-tracking starts before the release: the loser can be refused
       // while release() still awaits the holder's commit, and an expected
@@ -234,9 +253,10 @@ describe('asset integrity', () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
 
+      const version = await versionOf(assetId);
       const release = await holdRowLock(assetId);
       const decommission = asActor(manager(org.a), () =>
-        assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
+        assets.decommission(assetId, { reason: 'فرسودگی کامل', expectedVersion: version }),
       );
       await waitForBlocked(1);
       // The consumer locks the row before it reads, so it waits behind the
@@ -263,7 +283,7 @@ describe('asset integrity', () => {
       const { version } = await asActor(manager(org.a), () => assets.get(assetId));
       const release = await holdRowLock(assetId);
       const decommission = asActor(manager(org.a), () =>
-        assets.decommission(assetId, { reason: 'فرسودگی کامل' }),
+        assets.decommission(assetId, { reason: 'فرسودگی کامل', expectedVersion: version }),
       );
       await waitForBlocked(1);
       const edit = asActor(manager(org.a), () =>
@@ -702,7 +722,9 @@ describe('asset integrity', () => {
         approvalCeilingMinor: null,
       });
       await expect(
-        asActor(manager(org.b), () => narrowAssets.activate(assetId, {})),
+        asActor(manager(org.b), async () =>
+          narrowAssets.activate(assetId, { expectedVersion: await versionOf(assetId) }),
+        ),
       ).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
         internalContext: expect.objectContaining({
@@ -786,7 +808,9 @@ describe('asset integrity', () => {
         [own.id]: 1,
       });
 
-      const activated = await asActor(manager(org.b), () => assets.activate(assetId, {}));
+      const activated = await asActor(manager(org.b), async () =>
+        assets.activate(assetId, { expectedVersion: await versionOf(assetId) }),
+      );
       expect(activated.status).toBe('ACTIVE');
     });
 
@@ -1174,6 +1198,436 @@ describe('asset integrity', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Lifecycle commands are made against a version (EXP-002 slice 5)
+  // ---------------------------------------------------------------------------
+
+  describe('a lifecycle command sent twice', () => {
+    /** The events and timeline entries a machine holds, by name — what actually happened to it. */
+    async function history(assetId: string) {
+      const outbox = (await outboxFor(assetId)).map((event) => event.eventName);
+      const timeline = await asActor(manager(org.a), () =>
+        assets.timeline(assetId, { limit: 50 } as never),
+      );
+      return { outbox, timeline: timeline.items.map((entry) => entry.eventName) };
+    }
+    const count = (names: string[], name: string) => names.filter((n) => n === name).length;
+
+    async function withDossier(assetId: string) {
+      await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - day).toISOString(),
+          validTo: new Date(Date.now() + 300 * day).toISOString(),
+        }),
+      );
+      await asActor(manager(org.a), () =>
+        assets.attachDocument(assetId, {
+          documentId: id('DOC'),
+          kind: 'OWNERSHIP_TITLE',
+          title: 'سند مالکیت',
+        }),
+      );
+    }
+
+    it('applies a decommission once: the replay is a 409 and writes no second event or entry', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const expectedVersion = await versionOf(assetId);
+      const command = { reason: 'فرسودگی کامل ماشین', expectedVersion };
+
+      await asActor(admin(org.a), () => assets.decommission(assetId, command));
+      const afterFirst = await versionOf(assetId);
+      await expect(
+        asActor(admin(org.a), () => assets.decommission(assetId, command)),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect(await versionOf(assetId)).toBe(afterFirst);
+      expect(afterFirst).toBe(expectedVersion + 1);
+      const { outbox, timeline } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_DECOMMISSIONED)).toBe(1);
+      expect(count(timeline, ASSET_EVENTS.ASSET_DECOMMISSIONED)).toBe(1);
+    });
+
+    it('applies a status change once, and a stale one cannot apply it again after the machine moved back', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const first = await versionOf(assetId);
+      const idle = { status: 'IDLE' as const, reason: 'فصل غیرکاری', expectedVersion: first };
+
+      await asActor(manager(org.a), () => assets.changeStatus(assetId, idle));
+      // The identical form again, at once: refused.
+      await expect(
+        asActor(manager(org.a), () => assets.changeStatus(assetId, idle)),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      // Somebody returns the machine to service; now the old "mark idle" form,
+      // whose status check alone (ACTIVE → IDLE is legal) would pass, is sent.
+      await asActor(manager(org.a), async () =>
+        assets.changeStatus(assetId, {
+          status: 'ACTIVE',
+          reason: 'بازگشت به سرویس',
+          expectedVersion: await versionOf(assetId),
+        }),
+      );
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      await expect(
+        asActor(manager(org.a), () => assets.changeStatus(assetId, idle)),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      expect(await versionOf(assetId)).toBe(first + 2);
+      const { outbox, timeline } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_STATUS_CHANGED)).toBe(2);
+      expect(count(timeline, ASSET_EVENTS.ASSET_STATUS_CHANGED)).toBe(2);
+    });
+
+    it('applies an activation once', async () => {
+      const assetId = await machine(org.a);
+      await withDossier(assetId);
+      const expectedVersion = await versionOf(assetId);
+
+      await asActor(manager(org.a), () => assets.activate(assetId, { expectedVersion }));
+      await expect(
+        asActor(manager(org.a), () => assets.activate(assetId, { expectedVersion })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect((await statusOf(assetId)).status).toBe('ACTIVE');
+      const { outbox, timeline } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_ACTIVATED)).toBe(1);
+      expect(count(timeline, ASSET_EVENTS.ASSET_ACTIVATED)).toBe(1);
+    });
+
+    it('lets one of two identical commands that race win, and the other writes nothing', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const expectedVersion = await versionOf(assetId);
+
+      const release = await holdRowLock(assetId);
+      // Both read the same version, then queue behind the lock on the UPDATE.
+      const send = () =>
+        asActor(manager(org.a), () =>
+          assets.changeStatus(assetId, { status: 'IDLE', reason: 'فصل غیرکاری', expectedVersion }),
+        );
+      const first = send();
+      await waitForBlocked(1);
+      const second = send();
+      const settled = Promise.allSettled([first, second]); // before release(), as above
+      await waitForBlocked(2);
+      await release();
+
+      const [won, lost] = await settled;
+      expect(won.status).toBe('fulfilled');
+      expect(lost).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'OPTIMISTIC_LOCK_FAILED' },
+      });
+      expect(await versionOf(assetId)).toBe(expectedVersion + 1);
+      const { outbox } = await history(assetId);
+      expect(count(outbox, ASSET_EVENTS.ASSET_STATUS_CHANGED)).toBe(1);
+    });
+
+    it('refuses a stale version before it judges the transition, so a replayed decommission is not a 422', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const expectedVersion = await versionOf(assetId);
+      await asActor(admin(org.a), () =>
+        assets.decommission(assetId, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+      );
+
+      // A different command, same stale version, against a terminal asset.
+      await expect(
+        asActor(manager(org.a), () =>
+          assets.changeStatus(assetId, { status: 'IDLE', reason: 'دیرهنگام', expectedVersion }),
+        ),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+    });
+
+    it('does not let a plain status change commission a REGISTERED machine around the dossier check', async () => {
+      const assetId = await machine(org.a);
+      const expectedVersion = await versionOf(assetId);
+
+      await expect(
+        asActor(manager(org.a), () =>
+          assets.changeStatus(assetId, { status: 'ACTIVE', reason: 'دور زدن', expectedVersion }),
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
+
+      expect((await statusOf(assetId)).status).toBe('REGISTERED');
+      expect(await versionOf(assetId)).toBe(expectedVersion);
+      expect((await history(assetId)).outbox).not.toContain(ASSET_EVENTS.ASSET_STATUS_CHANGED);
+    });
+
+    it('still lets an event from another service move the status, with no version', async () => {
+      const assetId = await machine(org.a);
+      await setStatus(assetId, 'ACTIVE');
+      const before = await versionOf(assetId);
+
+      await asActor(manager(org.a), () =>
+        consumer.handle(envelope('ASSET_ASSIGNED', assetId, org.a)),
+      );
+
+      expect((await statusOf(assetId)).status).toBe('ASSIGNED');
+      expect(await versionOf(assetId)).toBe(before + 1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Open work (docs/24 Q-94): no direct withdrawal while another service holds work
+  // ---------------------------------------------------------------------------
+
+  describe('an asset with open work in another service (docs/24 Q-94)', () => {
+    const CASES = [
+      ['ASSIGNED', 'OPEN_ASSIGNMENT', 'ASSIGNMENT_ENDED'],
+      ['IN_MAINTENANCE', 'OPEN_MAINTENANCE', 'MAINTENANCE_COMPLETED'],
+    ] as const;
+
+    it.each(CASES)(
+      '%s: a person cannot take it out of service or decommission it, and nothing is written (%s)',
+      async (status, code) => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, status);
+        const expectedVersion = await versionOf(assetId);
+        const eventsBefore = (await outboxFor(assetId)).length;
+
+        for (const attempt of [
+          () =>
+            asActor(manager(org.a), () =>
+              assets.changeStatus(assetId, {
+                status: 'OUT_OF_SERVICE',
+                reason: 'عیب فنی',
+                expectedVersion,
+              }),
+            ),
+          () =>
+            asActor(admin(org.a), () =>
+              assets.decommission(assetId, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+            ),
+        ]) {
+          await expect(attempt()).rejects.toMatchObject({
+            code: 'INVALID_STATE_TRANSITION',
+            status: 409,
+            details: [{ path: 'status', code }],
+          });
+        }
+
+        expect((await statusOf(assetId)).status).toBe(status);
+        expect(await versionOf(assetId)).toBe(expectedVersion);
+        expect(await outboxFor(assetId)).toHaveLength(eventsBefore);
+      },
+    );
+
+    it.each(CASES)(
+      '%s: once the owning service ends its work, its event frees the asset and the withdrawal goes through (%s, then %s)',
+      async (status, _code, release) => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, status);
+
+        await asActor(manager(org.a), () => consumer.handle(envelope(release, assetId, org.a)));
+        expect((await statusOf(assetId)).status).toBe('ACTIVE');
+
+        await asActor(manager(org.a), async () =>
+          assets.changeStatus(assetId, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: await versionOf(assetId),
+          }),
+        );
+        expect((await statusOf(assetId)).status).toBe('OUT_OF_SERVICE');
+      },
+    );
+
+    describe('the owners of the work are asked before leaving service', () => {
+      const WITHDRAWALS = [
+        [
+          'taking it out of service',
+          'ACTIVE',
+          (service: AssetService, assetId: string, expectedVersion: number) =>
+            asActor(manager(org.a), () =>
+              service.changeStatus(assetId, {
+                status: 'OUT_OF_SERVICE',
+                reason: 'عیب فنی',
+                expectedVersion,
+              }),
+            ),
+        ],
+        [
+          'decommissioning it',
+          'OUT_OF_SERVICE',
+          (service: AssetService, assetId: string, expectedVersion: number) =>
+            asActor(admin(org.a), () =>
+              service.decommission(assetId, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+            ),
+        ],
+      ] as const;
+
+      /** Owners that answer from a script, and remember who was asked and released. */
+      const owners = (answers: Partial<Record<WorkOwner, () => Promise<ClearanceAnswer>>>) => {
+        const fake = clearingOwners();
+        fake.ask = async (owner) => {
+          fake.asked.push(owner);
+          return answers[owner] ? answers[owner]!() : { clear: true };
+        };
+        return fake;
+      };
+
+      it.each(WITHDRAWALS)(
+        '%s: a repair started on an asset that is already OUT_OF_SERVICE refuses it, and nothing is written',
+        async (_name, status, withdraw) => {
+          // The asset's own status shows no open work: maintenance accepts an
+          // OUT_OF_SERVICE asset, and a repair there leaves it OUT_OF_SERVICE.
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const eventsBefore = (await outboxFor(assetId)).length;
+          const fake = owners({
+            'maintenance-service': async () => ({ clear: false, open: { openRepairOrders: 1 } }),
+          });
+
+          await expect(
+            withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion),
+          ).rejects.toMatchObject({
+            code: 'INVALID_STATE_TRANSITION',
+            status: 409,
+            details: [{ path: 'status', code: 'OPEN_MAINTENANCE' }],
+          });
+
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+          expect(await outboxFor(assetId)).toHaveLength(eventsBefore);
+          expect(fake.asked.sort()).toEqual(['fleet-service', 'maintenance-service']);
+          expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: an assignment fleet-service committed and has not yet published refuses it',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const fake = owners({
+            'fleet-service': async () => ({ clear: false, open: { openAssignments: 1 } }),
+          });
+
+          await expect(
+            withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion),
+          ).rejects.toMatchObject({ details: [{ code: 'OPEN_ASSIGNMENT' }] });
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: an owner that cannot answer refuses it (fail closed), and nothing is written',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const fake = owners({
+            'fleet-service': async () => {
+              throw RastaError.upstreamUnavailable('fleet-service');
+            },
+          });
+
+          await expect(
+            withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion),
+          ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+          expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: with the real client and nothing listening, it is refused and nothing is written',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          // Port 9 (discard): nothing listens, so the connection is refused.
+          const unreachable = new TransferClearanceClient({
+            baseUrls: {
+              'fleet-service': 'http://127.0.0.1:9',
+              'maintenance-service': 'http://127.0.0.1:9',
+            },
+            timeoutMs: 500,
+            fenceTtlSeconds: 600,
+            tokens: { issue: async () => 'itest-token' },
+          });
+
+          await expect(
+            withdraw(
+              new AssetService(repository, undefined, unreachable),
+              assetId,
+              expectedVersion,
+            ),
+          ).rejects.toMatchObject({
+            code: expect.stringMatching(/^UPSTREAM_(UNAVAILABLE|TIMEOUT)$/),
+          });
+          expect((await statusOf(assetId)).status).toBe(status);
+          expect(await versionOf(assetId)).toBe(expectedVersion);
+        },
+      );
+
+      it.each(WITHDRAWALS)(
+        '%s: when both owners say nothing is open it goes through, and the fences are lifted',
+        async (_name, status, withdraw) => {
+          const assetId = await machine(org.a);
+          await setStatus(assetId, status);
+          const expectedVersion = await versionOf(assetId);
+          const fake = owners({});
+
+          await withdraw(new AssetService(repository, undefined, fake), assetId, expectedVersion);
+
+          expect(await versionOf(assetId)).toBe(expectedVersion + 1);
+          expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+        },
+      );
+
+      it('rolls back a decommission that commits after half the fences’ life', async () => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, 'ACTIVE');
+        const expectedVersion = await versionOf(assetId);
+        const fake = owners({});
+        let reads = 0;
+        fake.now = () => (reads++ === 0 ? 0 : 400_000);
+        const eventsBefore = (await outboxFor(assetId)).length;
+
+        await expect(
+          asActor(admin(org.a), () =>
+            new AssetService(repository, undefined, fake).decommission(assetId, {
+              reason: 'فرسودگی کامل ماشین',
+              expectedVersion,
+            }),
+          ),
+        ).rejects.toThrow(/took too long to confirm/);
+
+        expect((await statusOf(assetId)).status).toBe('ACTIVE');
+        expect(await versionOf(assetId)).toBe(expectedVersion);
+        expect(await outboxFor(assetId)).toHaveLength(eventsBefore);
+        expect(fake.released.sort()).toEqual(['fleet-service', 'maintenance-service']);
+      });
+    });
+
+    it('still lets a person withdraw an idle or active asset directly', async () => {
+      for (const status of ['ACTIVE', 'IDLE'] as const) {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, status);
+        await asActor(manager(org.a), async () =>
+          assets.changeStatus(assetId, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: await versionOf(assetId),
+          }),
+        );
+        expect((await statusOf(assetId)).status).toBe('OUT_OF_SERVICE');
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Tenant isolation of every changed write path
   // ---------------------------------------------------------------------------
 
@@ -1193,9 +1647,15 @@ describe('asset integrity', () => {
 
       const attempts: Array<[string, () => Promise<unknown>]> = [
         ['update', () => assets.update(assetId, { name: 'ربوده', expectedVersion: 1 })],
-        ['changeStatus', () => assets.changeStatus(assetId, { status: 'IDLE', reason: 'x' })],
-        ['decommission', () => assets.decommission(assetId, { reason: 'ربوده' })],
-        ['activate', () => assets.activate(assetId, {})],
+        [
+          'changeStatus',
+          () => assets.changeStatus(assetId, { status: 'IDLE', reason: 'x', expectedVersion: 1 }),
+        ],
+        [
+          'decommission',
+          () => assets.decommission(assetId, { reason: 'ربوده', expectedVersion: 1 }),
+        ],
+        ['activate', () => assets.activate(assetId, { expectedVersion: 1 })],
         [
           'transfer',
           () =>

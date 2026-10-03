@@ -539,7 +539,7 @@ describe('AssetService', () => {
     it('refuses to activate an asset with no insurance', async () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
-      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(
+      await expect(run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }))).rejects.toThrow(
         /insurance policy currently in force/,
       );
     });
@@ -548,7 +548,7 @@ describe('AssetService', () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
       const error = (await run(() =>
-        h.service.activate(ASSET_ID, {}).catch((e: RastaError) => e),
+        h.service.activate(ASSET_ID, { expectedVersion: 1 }).catch((e: RastaError) => e),
       )) as RastaError;
 
       // An operator who fixes one blocker should not have to retry to discover
@@ -567,7 +567,7 @@ describe('AssetService', () => {
         kind: 'OWNERSHIP_TITLE',
       });
 
-      const result = await run(() => h.service.activate(ASSET_ID, {}));
+      const result = await run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }));
 
       expect(result.status).toBe('ACTIVE');
       expect(h.enqueued.map((e) => e.eventName)).toContain(ASSET_EVENTS.ASSET_ACTIVATED);
@@ -581,7 +581,9 @@ describe('AssetService', () => {
         ownershipGeneration: jest.fn(async () => 1),
       });
 
-      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(/insurance/);
+      await expect(run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }))).rejects.toThrow(
+        /insurance/,
+      );
       expect(h.repository.findActivePolicy).toHaveBeenCalledWith(
         ASSET_ID,
         expect.any(Date),
@@ -591,7 +593,9 @@ describe('AssetService', () => {
 
     it('refuses to activate an asset that is already active', async () => {
       const h = harness({ findById: jest.fn(async () => assetRow({ status: 'ACTIVE' })) });
-      await expect(run(() => h.service.activate(ASSET_ID, {}))).rejects.toThrow(RastaError);
+      await expect(run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }))).rejects.toThrow(
+        RastaError,
+      );
     });
   });
 
@@ -600,9 +604,13 @@ describe('AssetService', () => {
       const h = harness();
       await expect(
         run(() =>
-          // @ts-expect-error — ChangeStatusDto's schema already excludes ASSIGNED; this
-          // proves the service refuses it too if a caller bypasses the DTO.
-          h.service.changeStatus(ASSET_ID, { status: 'ASSIGNED', reason: 'دستی' }),
+          h.service.changeStatus(ASSET_ID, {
+            // @ts-expect-error — ChangeStatusDto's schema already excludes ASSIGNED; this
+            // proves the service refuses it too if a caller bypasses the DTO.
+            status: 'ASSIGNED',
+            reason: 'دستی',
+            expectedVersion: 1,
+          }),
         ),
       ).rejects.toThrow(/not done directly/);
     });
@@ -637,9 +645,34 @@ describe('AssetService', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('does not let a plain status change commission a REGISTERED asset around the dossier check', async () => {
+      const h = harness({ findById: jest.fn(async () => assetRow({ status: 'REGISTERED' })) });
+
+      await expect(
+        run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'ACTIVE',
+            reason: 'دور زدن',
+            expectedVersion: 1,
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'INVALID_STATE_TRANSITION',
+        message: expect.stringContaining('activate command'),
+      });
+      expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+    });
+
     it('records every status change on the timeline', async () => {
       const h = harness();
-      await run(() => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'فصل غیرکاری' }));
+      await run(() =>
+        h.service.changeStatus(ASSET_ID, {
+          status: 'IDLE',
+          reason: 'فصل غیرکاری',
+          expectedVersion: 1,
+        }),
+      );
 
       expect(h.timeline.map((t) => t.category)).toContain('LIFECYCLE');
       expect(h.timeline.at(-1)?.description).toBe('فصل غیرکاری');
@@ -649,23 +682,29 @@ describe('AssetService', () => {
   describe('compare-and-set on status (audit L3-07)', () => {
     it('matches the update on the status the transition was judged from', async () => {
       const h = harness();
-      await run(() => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }));
+      await run(() =>
+        h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x', expectedVersion: 1 }),
+      );
 
       expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
         h.tx,
         ASSET_ID,
         'ACTIVE',
         expect.objectContaining({ status: 'IDLE' }),
-        {},
+        { version: 1 },
       );
     });
 
     it.each<[string, (h: Harness) => Promise<unknown>]>([
       [
         'a user status change',
-        (h: Harness) => h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x' }),
+        (h: Harness) =>
+          h.service.changeStatus(ASSET_ID, { status: 'IDLE', reason: 'x', expectedVersion: 1 }),
       ],
-      ['a decommission', (h: Harness) => h.service.decommission(ASSET_ID, { reason: 'فرسوده' })],
+      [
+        'a decommission',
+        (h: Harness) => h.service.decommission(ASSET_ID, { reason: 'فرسوده', expectedVersion: 1 }),
+      ],
       [
         'an event-driven status change',
         (h: Harness) => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'),
@@ -704,6 +743,586 @@ describe('AssetService', () => {
       await expect(
         run(() => h.service.create({ ...CREATE, assetTag: 'T-1' })),
       ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+    });
+  });
+
+  describe('lifecycle commands are made against a version (EXP-002 slice 5)', () => {
+    const at = (version: number, status: string) =>
+      harness({
+        findById: jest.fn(async () => assetRow({ version, status })),
+        findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+      });
+
+    const commands: Array<[string, string, (h: Harness, version: number) => Promise<unknown>]> = [
+      [
+        'activate',
+        'REGISTERED',
+        (h, expectedVersion) => h.service.activate(ASSET_ID, { expectedVersion }),
+      ],
+      [
+        'change status',
+        'ACTIVE',
+        (h, expectedVersion) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'IDLE',
+            reason: 'فصل غیرکاری',
+            expectedVersion,
+          }),
+      ],
+      [
+        'decommission',
+        'ACTIVE',
+        (h, expectedVersion) =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+      ],
+    ];
+
+    it.each(commands)(
+      '%s: a stale version is a 409 and writes nothing, publishes nothing',
+      async (_name, status, command) => {
+        // The form was drawn at version 2; somebody's command made it 3.
+        const h = at(3, status);
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'D',
+        });
+
+        await expect(run(() => command(h, 2))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+
+        expect(h.repository.transaction).not.toHaveBeenCalled();
+        expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+      },
+    );
+
+    it.each(commands)(
+      '%s: a version from the future is refused the same way',
+      async (_name, status, command) => {
+        const h = at(3, status);
+        await expect(run(() => command(h, 4))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.enqueued).toHaveLength(0);
+      },
+    );
+
+    it.each(commands)(
+      '%s: the write is guarded on the version again, so a command that lost the race writes nothing',
+      async (_name, status, command) => {
+        // The read matched; another request committed before this one's update.
+        const h = harness({
+          findById: jest.fn(async () => assetRow({ version: 3, status })),
+          findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+          compareAndSetStatus: jest.fn(async () => 0),
+        });
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'D',
+        });
+
+        await expect(run(() => command(h, 3))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+
+        expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+          h.tx,
+          ASSET_ID,
+          status,
+          expect.any(Object),
+          { version: 3 },
+        );
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+      },
+    );
+
+    it('a decommission sent twice answers the replay with a 409, not a 422, and writes once', async () => {
+      // The first request commits: DECOMMISSIONED at version 4. The same form,
+      // still carrying version 3, arrives again.
+      let row = assetRow({ version: 3, status: 'ACTIVE' });
+      const h = harness({
+        findById: jest.fn(async () => row),
+        compareAndSetStatus: jest.fn(
+          async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+            row = { ...row, ...data, version: row.version + 1 } as typeof row;
+            return 1;
+          },
+        ),
+      });
+      const sent = { reason: 'فرسودگی کامل ماشین', expectedVersion: 3 };
+
+      await expect(run(() => h.service.decommission(ASSET_ID, sent))).resolves.toMatchObject({
+        status: 'DECOMMISSIONED',
+      });
+      await expect(run(() => h.service.decommission(ASSET_ID, sent))).rejects.toMatchObject({
+        code: 'OPTIMISTIC_LOCK_FAILED',
+      });
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledTimes(1);
+      expect(h.enqueued.map((event) => event.eventName)).toEqual([
+        ASSET_EVENTS.ASSET_DECOMMISSIONED,
+      ]);
+      expect(h.timeline).toHaveLength(1);
+    });
+
+    it('a status change sent twice does not apply again after the asset moved back', async () => {
+      // ACTIVE → IDLE (v1 → v2), somebody returns it IDLE → ACTIVE (v3). A bare
+      // status check would let the stale ACTIVE → IDLE form land a second time.
+      let row = assetRow({ version: 1, status: 'ACTIVE' });
+      const h = harness({
+        findById: jest.fn(async () => row),
+        compareAndSetStatus: jest.fn(
+          async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+            row = { ...row, ...data, version: row.version + 1 } as typeof row;
+            return 1;
+          },
+        ),
+      });
+      const sent = { status: 'IDLE' as const, reason: 'فصل غیرکاری', expectedVersion: 1 };
+
+      await run(() => h.service.changeStatus(ASSET_ID, sent));
+      await run(() =>
+        h.service.changeStatus(ASSET_ID, {
+          status: 'ACTIVE',
+          reason: 'بازگشت',
+          expectedVersion: 2,
+        }),
+      );
+      expect(row).toMatchObject({ status: 'ACTIVE', version: 3 });
+
+      await expect(run(() => h.service.changeStatus(ASSET_ID, sent))).rejects.toMatchObject({
+        code: 'OPTIMISTIC_LOCK_FAILED',
+      });
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledTimes(2);
+      expect(h.enqueued).toHaveLength(2);
+    });
+
+    it('an activation sent twice is a 409 and publishes one event', async () => {
+      let row = assetRow({ version: 1, status: 'REGISTERED' });
+      const h = harness({
+        findById: jest.fn(async () => row),
+        findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        compareAndSetStatus: jest.fn(
+          async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
+            row = { ...row, ...data, version: row.version + 1 } as typeof row;
+            return 1;
+          },
+        ),
+      });
+      (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({ id: 'D' });
+
+      await run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 }));
+      await expect(
+        run(() => h.service.activate(ASSET_ID, { expectedVersion: 1 })),
+      ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+
+      expect(h.enqueued.map((event) => event.eventName)).toEqual([ASSET_EVENTS.ASSET_ACTIVATED]);
+    });
+
+    describe.each([
+      ['ASSIGNED', 'OPEN_ASSIGNMENT', 'fleet-service'],
+      ['IN_MAINTENANCE', 'OPEN_MAINTENANCE', 'maintenance-service'],
+    ] as const)('an asset with open work (%s) — docs/24 Q-94', (status, code, owner) => {
+      const refusedWith = async (command: (h: Harness) => Promise<unknown>) => {
+        const h = at(2, status);
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+        expect(h.repository.transaction).not.toHaveBeenCalled();
+        expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+        return error;
+      };
+
+      it('cannot be taken out of service by a person: 409 INVALID_STATE_TRANSITION with a closed reason code', async () => {
+        const error = await refusedWith((h) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: 2,
+          }),
+        );
+
+        expect(error).toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          status: 409,
+          details: [{ path: 'status', code, message: expect.stringContaining(owner) }],
+        });
+        expect(error.message).toContain(owner);
+      });
+
+      it('cannot be decommissioned by a person either, with the same code', async () => {
+        const error = await refusedWith((h) =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+        );
+        expect(error).toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          details: [{ code }],
+        });
+      });
+
+      it('keeps the closed code out of the logged context as a reason, not a sentence, and carries no input', async () => {
+        const error = await refusedWith((h) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'متن آزاد کاربر',
+            expectedVersion: 2,
+          }),
+        );
+        expect(error.internalContext).toEqual({
+          aggregate: 'Asset',
+          from: status,
+          to: 'OUT_OF_SERVICE',
+          reason: code,
+        });
+        expect(JSON.stringify(error.details)).not.toContain('متن آزاد کاربر');
+      });
+
+      it('is told the version is stale before it is told about the open work', async () => {
+        // A replay is a replay whatever state the machine is in now.
+        const h = at(3, status);
+        await expect(
+          run(() =>
+            h.service.changeStatus(ASSET_ID, {
+              status: 'OUT_OF_SERVICE',
+              reason: 'عیب فنی',
+              expectedVersion: 2,
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      });
+    });
+
+    it('does not give the open-work code to a refusal that is about something else', async () => {
+      const h = at(2, 'ACTIVE');
+      const error = (await run(() =>
+        h.service
+          .changeStatus(ASSET_ID, {
+            // @ts-expect-error — the schema already excludes IN_MAINTENANCE; the service refuses it too.
+            status: 'IN_MAINTENANCE',
+            reason: 'دستی',
+            expectedVersion: 2,
+          })
+          .catch((e: RastaError) => e),
+      )) as RastaError;
+      expect(error.code).toBe('INVALID_STATE_TRANSITION');
+      expect(error.details).toBeUndefined();
+    });
+
+    it('an event from another service is still judged on the status alone, with no version', async () => {
+      const h = harness();
+      await run(() => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'));
+
+      expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+        h.tx,
+        ASSET_ID,
+        'ACTIVE',
+        expect.any(Object),
+        {},
+      );
+    });
+
+    it('still answers an asset in another organization as missing, whatever version is named', async () => {
+      const h = harness({ findById: jest.fn(async () => null) });
+
+      for (const [, , command] of commands) {
+        await expect(run(() => command(h, 1))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+        await expect(run(() => command(h, 999))).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      }
+      expect(h.enqueued).toHaveLength(0);
+    });
+
+    describe('the request bodies, as a direct API client reaches them', () => {
+      const bodyPipe = (handler: string) => {
+        const args = Reflect.getMetadata('__routeArguments__', AssetController, handler) as Record<
+          string,
+          { pipes: Array<{ transform: (value: unknown, meta: { type: 'body' }) => unknown }> }
+        >;
+        const found = Object.values(args).flatMap((entry) => entry.pipes);
+        expect(found).toHaveLength(1);
+        return found[0]!;
+      };
+
+      it.each([
+        ['activate', {}],
+        ['changeStatus', { status: 'IDLE', reason: 'فصل غیرکاری' }],
+        ['decommission', { reason: 'فرسودگی کامل ماشین' }],
+      ])('%s without a version is a 400', (handler, body) => {
+        expect(() => bodyPipe(handler).transform(body, { type: 'body' })).toThrow(
+          expect.objectContaining({ code: 'VALIDATION_FAILED' }),
+        );
+      });
+
+      it.each([
+        ['activate', {}],
+        ['changeStatus', { status: 'IDLE', reason: 'فصل غیرکاری' }],
+        ['decommission', { reason: 'فرسودگی کامل ماشین' }],
+      ])('%s refuses a version of 0, a fraction or a string', (handler, body) => {
+        for (const expectedVersion of [0, -1, 1.5, '3', null]) {
+          expect(() =>
+            bodyPipe(handler).transform({ ...body, expectedVersion }, { type: 'body' }),
+          ).toThrow(expect.objectContaining({ code: 'VALIDATION_FAILED' }));
+        }
+      });
+
+      it('accepts each command with a version', () => {
+        expect(() =>
+          bodyPipe('activate').transform({ expectedVersion: 1 }, { type: 'body' }),
+        ).not.toThrow();
+      });
+    });
+  });
+
+  describe('leaving service asks the owners of the work (docs/24 Q-94)', () => {
+    const OWNERS = ['fleet-service', 'maintenance-service'];
+
+    /** Both commands that take an asset out of service, from a status that shows no open work. */
+    const COMMANDS: Array<[string, string, (h: Harness) => Promise<unknown>]> = [
+      [
+        'taking it out of service',
+        'ACTIVE',
+        (h) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: 2,
+          }),
+      ],
+      [
+        'decommissioning it',
+        'OUT_OF_SERVICE',
+        (h) =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+      ],
+    ];
+
+    const at = (
+      status: string,
+      clearance: FakeClearance,
+      overrides: Record<string, unknown> = {},
+    ) =>
+      harness(
+        { findById: jest.fn(async () => assetRow({ version: 2, status })), ...overrides },
+        clearance,
+      );
+
+    const untouched = (h: Harness) => {
+      expect(h.repository.transaction).not.toHaveBeenCalled();
+      expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+      expect(h.timeline).toHaveLength(0);
+    };
+
+    describe.each(COMMANDS)('%s', (_name, status, command) => {
+      it('asks both owners first, writes, and lifts the fences afterwards', async () => {
+        const h = at(status, fakeClearance());
+
+        await run(() => command(h));
+
+        expect(h.clearance.asked.sort()).toEqual(OWNERS);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+        expect(h.repository.compareAndSetStatus).toHaveBeenCalledTimes(1);
+      });
+
+      it('is refused while maintenance holds a repair the asset’s own status never showed', async () => {
+        // A repair started on an asset that is already OUT_OF_SERVICE: the
+        // status stays as it was, so only the owner knows.
+        const h = at(
+          status,
+          fakeClearance({ 'maintenance-service': { clear: false, open: { openRepairOrders: 1 } } }),
+        );
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(error).toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          status: 409,
+          details: [{ path: 'status', code: 'OPEN_MAINTENANCE' }],
+        });
+        untouched(h);
+        // Every owner, not only the one that answered clear.
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('is refused while a just-committed assignment is not yet projected', async () => {
+        const h = at(
+          status,
+          fakeClearance({ 'fleet-service': { clear: false, open: { openAssignments: 1 } } }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          details: [{ path: 'status', code: 'OPEN_ASSIGNMENT' }],
+        });
+        untouched(h);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('names every kind of open work at once, assignment first', async () => {
+        const h = at(
+          status,
+          fakeClearance({
+            'fleet-service': { clear: false, open: { openAssignments: 2 } },
+            'maintenance-service': { clear: false, open: { openRequests: 1 } },
+          }),
+        );
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(error.details?.map((detail) => detail.code)).toEqual([
+          'OPEN_ASSIGNMENT',
+          'OPEN_MAINTENANCE',
+        ]);
+        untouched(h);
+      });
+
+      it.each([
+        [
+          'is unavailable',
+          () => RastaError.upstreamUnavailable('maintenance-service'),
+          'UPSTREAM_UNAVAILABLE',
+        ],
+        [
+          'times out',
+          () => RastaError.upstreamTimeout('maintenance-service', 3000),
+          'UPSTREAM_TIMEOUT',
+        ],
+      ])('fails closed when an owner %s: nothing is written', async (_how, failure, code) => {
+        const h = at(
+          status,
+          fakeClearance({
+            'maintenance-service': async () => {
+              throw failure();
+            },
+          }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({ code });
+        untouched(h);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('fails closed when an owner has a fence of another transfer in place', async () => {
+        const h = at(
+          status,
+          fakeClearance({
+            'fleet-service': async () => {
+              throw RastaError.invalidStateTransition('Asset', 'ACTIVE', 'TRANSFERRED', 'busy');
+            },
+          }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+        });
+        untouched(h);
+      });
+
+      it('never leaves service when no clearance was configured', async () => {
+        const h = at(status, fakeClearance());
+        const bare = new AssetService(h.repository);
+
+        await expect(
+          run(() =>
+            status === 'ACTIVE'
+              ? bare.changeStatus(ASSET_ID, {
+                  status: 'OUT_OF_SERVICE',
+                  reason: 'عیب فنی',
+                  expectedVersion: 2,
+                })
+              : bare.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+          ),
+        ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+        untouched(h);
+      });
+
+      it('asks nobody about a stale version: that is a 409 before anything else', async () => {
+        const h = at(status, fakeClearance(), {
+          findById: jest.fn(async () => assetRow({ version: 3, status })),
+        });
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.clearance.asked).toEqual([]);
+        untouched(h);
+      });
+
+      it('rolls back a write that finishes after half the fences’ life, and lifts them', async () => {
+        const clearance = fakeClearance();
+        const h = at(status, clearance, {
+          compareAndSetStatus: jest.fn(async () => {
+            clearance.clock = 300_000;
+            return 1;
+          }),
+        });
+
+        await expect(run(() => command(h))).rejects.toThrow(/took too long to confirm/);
+        expect(clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('lifts the fences when the write itself fails', async () => {
+        const h = at(status, fakeClearance(), { compareAndSetStatus: jest.fn(async () => 0) });
+
+        await expect(run(() => command(h))).rejects.toMatchObject({
+          code: 'OPTIMISTIC_LOCK_FAILED',
+        });
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('carries only the closed code and a fixed sentence: no input in the response or the log', async () => {
+        const h = at(
+          status,
+          fakeClearance({ 'maintenance-service': { clear: false, open: { openRepairOrders: 1 } } }),
+        );
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(JSON.stringify([error.message, error.details])).not.toMatch(/عیب فنی|فرسودگی/);
+        expect(error.internalContext).toEqual({
+          aggregate: 'Asset',
+          from: status,
+          to: expect.stringMatching(/OUT_OF_SERVICE|DECOMMISSIONED/),
+          reason: 'OPEN_MAINTENANCE',
+        });
+      });
+    });
+
+    it.each(['IDLE', 'ACTIVE'] as const)(
+      'asks nobody when the asset is only marked %s: that does not leave service',
+      async (target) => {
+        const from = target === 'IDLE' ? 'ACTIVE' : 'IDLE';
+        const h = at(from, fakeClearance());
+
+        await run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: target,
+            reason: 'تغییر عادی',
+            expectedVersion: 2,
+          }),
+        );
+
+        expect(h.clearance.asked).toEqual([]);
+        expect(h.clearance.released).toEqual([]);
+      },
+    );
+
+    it('asks nobody when the status already shows open work: the cheap check refuses first', async () => {
+      const h = at('ASSIGNED', fakeClearance());
+
+      await expect(
+        run(() =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+        ),
+      ).rejects.toMatchObject({ details: [{ code: 'OPEN_ASSIGNMENT' }] });
+      expect(h.clearance.asked).toEqual([]);
+    });
+
+    it('asks nobody about an event: the owners’ own events are what end their work', async () => {
+      const h = harness();
+      await run(() => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'));
+      expect(h.clearance.asked).toEqual([]);
     });
   });
 

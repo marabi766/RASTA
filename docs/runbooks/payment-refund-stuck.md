@@ -215,11 +215,14 @@ POST /v1/payment-intents/{id}/reconciliation/requeue                            
 
 هر گام رویداد دارد: `PAYMENT_RECONCILIATION_OPERATOR_ACTION` (`REQUEUED` با `requeueId`، `PROPOSED`، `REJECTED`) و برای تأیید
 `PAYMENT_RECONCILIATION_RESOLVED` با `proposedBy`، `approvedBy`، `evidenceReference` و `fourEyes` — هر دو به `audit-service`
-می‌رسند — اما **`audit-service` امروز فقط فیلدهای پاکت را نگه می‌دارد** (نام رویداد، یک کنشگر پاکت، مستأجر، Aggregate)، نه
-`proposedBy`، `approvedBy`، شاهد یا `fourEyes` محموله را. پس **سابقهٔ کامل** — کنشگر دوم، شاهد، نتیجه و دلیل‌ها — در
-پایگاه دادهٔ economic است: پیشنهاد و تصمیم در `payment_reconciliation_resolution` و دلیل بازگرداندن در
-`payment_reconciliation_requeue`، هر دو فقط‌افزودنی در خود پایگاه داده، و `GET …/reconciliation` آن‌ها را نشان می‌دهد. نمای
-نسخه‌دار این سابقه در `audit-service` پیگیری جداگانه است (D-046). دلیل‌های متنی در رویداد و Log نیستند.
+می‌رسند. `audit-service` کنار ردیف حسابرسی هر کدام، ردیفی در `payment_reconciliation_evidence` می‌نویسد (D-046، #204). این
+ردیف `proposedBy`، `approvedBy` یا `actor`، `resolutionId` یا `requeueId`، مرجع شاهد، کد نتیجه یا کنش و `fourEyes` را دارد، با
+فهرست سفید و `projection_version = 1`. دلیل‌های متنی و هویت Issuer/Subject را **ندارد**. سابقهٔ کامل — دلیل‌ها و هویت پایدار
+هر دو کنشگر — در پایگاه دادهٔ economic است: پیشنهاد و تصمیم در `payment_reconciliation_resolution` و دلیل بازگرداندن در
+`payment_reconciliation_requeue`. هر دو جدول در خود پایگاه داده فقط‌افزودنی‌اند، و `GET …/reconciliation` آن‌ها را نشان
+می‌دهد. اگر یکی از این رویدادها با قرارداد نخواند، هیچ ردیف حسابرسی برایش نوشته نمی‌شود و به `rasta.audit.v1.dlq` می‌رود
+(`rasta_audit_ingestion_failures_total{reason="unmappable_reconciliation_event"}`؛ `docs/runbooks/audit-gap-detected.md`).
+دلیل‌های متنی در رویداد و Log نیستند.
 تیکت را با شناسهٔ `resolutionId` (یا `requeueId`) ببند.
 
 ---

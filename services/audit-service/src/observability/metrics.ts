@@ -159,6 +159,14 @@ export const INGESTION_FAILURE_REASONS = {
    * security control that stops advancing.
    */
   UNMAPPABLE_ORGANIZATION_EVENT: 'unmappable_organization_event',
+  /**
+   * A `PAYMENT_RECONCILIATION_RESOLVED` or `_OPERATOR_ACTION` on
+   * `rasta.economic.v1` failed the payment-reconciliation evidence contract
+   * (D-046): neither the audit row nor the evidence row was written, and the
+   * event was dead-lettered. Its own reason because what stops is the record of
+   * who approved a money-moving decision on which evidence.
+   */
+  UNMAPPABLE_RECONCILIATION_EVENT: 'unmappable_reconciliation_event',
 
   // AUD-004 Phase B — a path-B message the audit-trail consumer refuses to
   // record. Five values rather than one because each points an operator at a
@@ -233,6 +241,24 @@ export const auditTenderOverdueLinks = new Gauge({
 export const auditTenderPendingOldestAgeSeconds = new Gauge({
   name: 'rasta_audit_tender_pending_oldest_age_seconds',
   help: 'Age in seconds of the oldest bid receipt held for its predecessor',
+  registers: [registry],
+});
+
+/**
+ * D-046's detective check: audit rows of `PAYMENT_RECONCILIATION_RESOLVED` or
+ * `_OPERATOR_ACTION` from `rasta.economic.v1`, inside the look-back window, that
+ * have no `payment_reconciliation_evidence` row (Codex on #204, HIGH 1).
+ *
+ * The projector writes both rows in one transaction, so the number is zero
+ * unless an audit row was written without its evidence: by a replica running a
+ * version from before the projection, or for an event marked processed before
+ * it existed. Sampled from the tables every minute (never maintained by
+ * inc/dec); `RastaAuditReconciliationEvidenceMissing` fires while it is above
+ * zero. One number, no labels: identifiers and tenants are never labels.
+ */
+export const auditReconciliationEvidenceMissing = new Gauge({
+  name: 'rasta_audit_reconciliation_evidence_missing',
+  help: 'Payment-reconciliation audit rows written in the look-back window with no evidence row, all tenants (D-046)',
   registers: [registry],
 });
 

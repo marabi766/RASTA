@@ -187,6 +187,41 @@ COMMIT ──► Commit Offset
 | نقض قاعده کسب‌وکار                  | **DLQ مستقیم** + هشدار                    |
 | رویداد ناشناخته                     | Log + Skip (سازگاری رو به جلو)            |
 
+> **رویداد شناخته با Payload نامعتبر ≠ رویداد ناشناخته (ممیزی L7-26).** Handlerی که نام رویداد را می‌شناسد و Payload آن از
+> Schema خودش رد می‌شود، `invalidPayloadError` از `@rasta/nest-common` را پرتاب می‌کند: `UnprocessableEventError` با
+> `VALIDATION_FAILED`، یعنی DLQ مستقیم بی‌Retry — نه `SKIPPED`. پرتاب **پیش از** نوشتن نشانگر `processed_event` است، پس
+> همان رویداد با همان شناسه، پس از اصلاح تولیدکننده و بازپخش از راه `.retry`، یک بار اعمال می‌شود. پیام فقط نام و شناسهٔ
+> رویداد و برای هر Issue «مسیر میدان + کد zod» است؛ بخشی از مسیر که در فهرست میدان‌های اعلام‌شدهٔ Schema نیست با `*` نشان داده
+> می‌شود (کلیدی که Payload انتخاب کرده)، و متن پیام zod که گاه مقدار دریافتی را تکرار می‌کند حذف می‌شود (S-09). پیش‌تر
+> `timeline` (asset)، `asset-sync` (fleet و maintenance)، `usage` (maintenance)، `keycloak-projection` (identity) و
+> `settlement-authority` و `reward-trigger` (economic) چنین رویدادی را Skip یا سه بار Retry می‌کردند و یک شکست بازرسی، انقضای
+> بیمه یا قرائت کارکرد بی‌هیچ ردی گم می‌شد. چند حالت هم‌خانواده نیز همین‌گونه‌اند، همه پیش از نشانگر:
+>
+> 1. **Tenant فقط از Envelope** (بازبینی #205 r1). رویداد شناخته و Tenant-محور در `asset-sync` (fleet و maintenance) و
+>    `usage` (maintenance) فقط زیر `tenantId` همان Envelope اعمال می‌شود؛ Payload هرگز جایگزین آن نیست، چون نوشتنی که Tenant
+>    را از Payload گرفته و نشانگر خورده با هیچ بازپخشی اصلاح نمی‌شود. بی Tenant در Envelope — هرچه Payload بگوید و چه ردیف
+>    Replica از پیش باشد چه نه — `missingTenantError`؛ `organizationId` در Payload که با Envelope یکی نیست
+>    `tenantMismatchError` (کد بستهٔ `tenant_mismatch`، بی‌نام هیچ‌یک از دو سازمان). هر دو `VALIDATION_FAILED`، از راه
+>    `requireEnvelopeTenant` در `@rasta/nest-common`. `timeline` (asset) از پیش فقط Tenant Envelope را می‌خواند و بی آن
+>    `missingTenantError` می‌دهد.
+>    رویداد وضعیتِ عادی (هر رویداد وضعیت جز `ASSET_CREATED` و `ASSET_TRANSFERRED` که مالک را تعیین می‌کنند) در همین دو
+>    `asset-sync`، پس از قفل و خواندن ردیف Replica، اگر Tenant رویداد مالک آن ردیف نباشد با `replicaOwnerMismatchError` (کد
+>    بستهٔ `owner_mismatch`) رد می‌شود؛ Transaction برمی‌گردد و نشانگری نمی‌ماند (بازبینی #205 r2). استثناها همان‌اند که بودند:
+>    رویدادهای بیمهٔ مالک پیشین پس از انتقال در fleet (docs/24 Q-66)، `INSPECTION_FAILED` که فقط دارایی را از اعزام خارج
+>    می‌کند، و تحویل از `.retry` که پاسخ مالک داده را به‌عنوان Tenant رویداد می‌نویسد.
+> 2. **میدان‌های قرارداد تولیدکننده که Projection به کار می‌برد**، به‌تفکیک نام رویداد: مثلاً `ASSET_STATUS_CHANGED` بی
+>    `newStatus` (وگرنه دارایی خارج از سرویس در fleet قابل اعزام می‌ماند)، `ASSET_CREATED` بی `name`/`type`/`assetTag`/`status`.
+>    رویدادهای ایمنی `INSPECTION_FAILED` و `INSURANCE_EXPIRED` عمداً فقط به دارایی نیاز دارند: رد کردنشان دارایی را تا بازپخش
+>    قابل اعزام می‌گذارد.
+> 3. **`INSURANCE_RECORDED` در fleet** بی `coverage`/`policyId`، یا با تاریخی که ISO نیست یا پنجره‌ای که `validTo` آن پس از
+>    `validFrom` نیست (همان قاعدهٔ تولیدکننده) — انقضای ثبت‌شده برقرار می‌ماند (Fail-Safe) و بازپخش اصلاح‌شده با همان شناسه
+>    اعمال می‌شود.
+>
+> نام رویداد **ناشناخته** همچنان Skip است. **هزینهٔ سفارش در پروندهٔ دارایی نیست:** `timeline` دیگر `ORDER_COMPLETED` را
+> Project نمی‌کند، چون `orderCompletedPayload` بازارگاه هیچ دارایی‌ای نام نمی‌برد (و مبلغ آن `totalAmountMinor` است، نه
+> `totalMinor`)؛ پیش‌تر هر تکمیل سفارش بی‌صدا Skip می‌شد و با L7-26 به DLQ می‌رفت. تا قرارداد بازارگاه پیوندی با دارایی نداشته
+> باشد، هزینهٔ سفارش به پرونده نمی‌رسد — قاعدهٔ کسب‌وکاری تازه‌ای در کار نیست.
+
 > **CONSTRAINT — Topicهای `.retry` امروز استفاده نمی‌شوند.**
 > `create-topics.sh` به‌ازای هر دامنه یک `rasta.<domain>.v1.retry` می‌سازد و طرح اولیهٔ این بخش یک Retry **مبتنی بر Topic** با
 > `attempt < 5` و تأخیر `1s → 5s → 30s → 2m → 10m` را ترسیم می‌کرد. **هیچ مصرف‌کننده‌ای روی هیچ Topic `.retry` تولید نمی‌کند.**

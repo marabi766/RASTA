@@ -44,13 +44,13 @@ function assertCaught(model, pattern) {
 test('the tracked dashboard, provisioning and Compose mount satisfy the contract', () => {
   const { errors, summary } = checkRepository(repoRoot);
   assert.deepEqual(errors, []);
-  assert.equal(summary.alerts, 14);
+  assert.equal(summary.alerts, 15);
   assert.equal(summary.records, 1);
   assert.ok(summary.panels >= 9 && summary.panels <= 12, `panels: ${summary.panels}`);
 });
 
 test('the rules file parser finds every alert and the recording rule', () => {
-  assert.equal(rules.alerts.length, 14);
+  assert.equal(rules.alerts.length, 15);
   assert.ok(rules.alerts.every((name) => name.startsWith('Rasta')));
   assert.deepEqual(rules.records, ['topic:kafka_topic_retained_records:sum']);
 });
@@ -497,7 +497,7 @@ test('the CLI exits nonzero and names the defect for invalid JSON', () => {
     cpSync(join(repoRoot, PATHS.dashboard), join(root, PATHS.dashboard));
     const ok = spawnSync(process.execPath, [cli, '--root', root], { encoding: 'utf8' });
     assert.equal(ok.status, 0, ok.stderr);
-    assert.match(ok.stderr, /14 alerts and 1 recording rule/);
+    assert.match(ok.stderr, /15 alerts and 1 recording rule/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

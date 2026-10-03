@@ -1,0 +1,31 @@
+-- D-046 (Codex on #204, round 2) -- the access path for the missing-evidence
+-- detector, which now looks back by `recorded_at` rather than `occurred_at`.
+--
+-- Additive only: one index, no column, no data change, nothing backfilled.
+--
+-- The detector asks "which payment-reconciliation audit rows were WRITTEN in the
+-- last N hours without an evidence row". Asked by `occurred_at`, an event that
+-- happened long ago but was delivered late (a delayed outbox, an old replica
+-- during a rolling deploy) wrote its gap outside the window and was never
+-- counted. `recorded_at` is the database's own clock at write time, so it is the
+-- column that says when a gap appeared.
+--
+-- `audit_event` is partitioned by `occurred_at`, so a predicate on `recorded_at`
+-- cannot prune partitions: the planner probes this index once per partition. In
+-- every partition but the current one, the probe finds only late deliveries --
+-- the rows this change exists to see -- so each probe is a short range scan.
+-- `source_topic` and `source_event_name` lead because the detector names both
+-- with equality; it is a platform-level aggregate across tenants (runUnscoped,
+-- ReconciliationEvidenceMonitor), so leading with organization_id would make the
+-- index useless to the only query it has (exemption in
+-- scripts/check-tenant-index-order-lib.mjs).
+--
+-- Created on the partitioned parent, so PostgreSQL creates the matching index
+-- on every existing partition and on every partition attached later. Plain
+-- `CREATE INDEX` rather than `CONCURRENTLY`, which PostgreSQL does not support
+-- on a partitioned table; the table is append-only and the lock is brief.
+--
+-- The append-only controls are untouched: an index is not a row, and neither
+-- the privilege split nor `audit_event_append_only` is involved.
+CREATE INDEX audit_event_topic_event_recorded_idx
+  ON audit_event (source_topic, source_event_name, recorded_at);

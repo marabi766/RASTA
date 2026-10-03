@@ -5,7 +5,7 @@ import { AssignmentService } from '../src/fleet/assignment.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { ASSET_CREATED_FIELDS, asActor, cleanup, id, newPrisma, tenants } from './helpers';
 
 /**
  * The internal read asset-service derives an `ASSIGNED` status from when
@@ -67,7 +67,13 @@ describe('assignment state (internal)', () => {
       aggregateId: assetId,
       tenantId: org.a,
       correlationId: id('COR'),
-      payload: { assetId, organizationId: org.a, status: 'ACTIVE', name: 'لودر' },
+      payload: {
+        ...ASSET_CREATED_FIELDS,
+        assetId,
+        organizationId: org.a,
+        status: 'ACTIVE',
+        name: 'لودر',
+      },
     });
     const driverId = id('DRV');
     await asActor({ organizationId: org.a }, () =>

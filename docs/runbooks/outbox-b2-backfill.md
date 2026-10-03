@@ -367,7 +367,7 @@ pnpm test:outbox-b2-pg     # صحت، روی PostgreSQL واقعی (نیازمن
 pnpm test:outbox-b2-vacuum-pg   # D-045: Backfill «required» می‌گوید و Vacuum نمی‌زند؛ دستور نگه‌داری با شمارنده‌ها اثبات می‌کند
 ```
 
-`test:outbox-b2-vacuum-pg` در CI (کار «Integration and security tests») اجرا می‌شود.
+`test:outbox-b2-vacuum-pg` در CI (کار «Migration reversibility and database guards»، از #198 جدا از کار Integration) اجرا می‌شود.
 
 آزمون‌های PostgreSQL هر کدام Schema یک‌بارمصرف خودشان را می‌سازند و در پایان
 حذف می‌کنند؛ هیچ‌کدام به `public` دست نمی‌زند. عمداً در `pnpm verify` نیستند،
