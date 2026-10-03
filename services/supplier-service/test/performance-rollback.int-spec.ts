@@ -144,7 +144,9 @@ describe(`${MIGRATION}: rollback with data, then re-apply and replay`, () => {
     });
 
     // Down, with data in it.
-    prismaCli(['db', 'execute', '--url', scratchUrl, '--stdin'], {
+    // `--schema`, with the owner's url in the child's environment: never `--url`,
+    // where its password would sit in the process's argv (D-045 follow-up).
+    prismaCli(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], {
       url: scratchUrl,
       stdin: readFileSync(join(SERVICE_DIR, 'prisma', 'migrations', MIGRATION, 'down.sql'), 'utf8'),
     });

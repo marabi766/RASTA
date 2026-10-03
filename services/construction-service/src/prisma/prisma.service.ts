@@ -140,9 +140,12 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    */
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { isolationLevel: 'RepeatableRead' },
+    options?: { isolationLevel?: 'RepeatableRead'; timeoutMs?: number },
   ): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), {
+      ...(options?.isolationLevel === undefined ? {} : { isolationLevel: options.isolationLevel }),
+      ...(options?.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+    });
   }
 
   /**

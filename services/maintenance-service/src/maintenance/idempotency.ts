@@ -21,6 +21,8 @@ const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
  */
 export const IN_FLIGHT_WAIT_MS = 5_000;
 const IN_FLIGHT_POLL_MS = 100;
+/** Slack for a claim-side transaction beyond its lock wait, so the wait ends first. */
+const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
 /**
  * How many times one claim tries to reserve a key it keeps finding vanished or
@@ -36,6 +38,9 @@ const IN_FLIGHT = Symbol('in-flight');
 /** Bounds on the header: long enough to be unique, short enough to store. */
 export const IDEMPOTENCY_KEY_MIN_LENGTH = 8;
 export const IDEMPOTENCY_KEY_MAX_LENGTH = 255;
+
+/** PostgreSQL's `lock_not_available`, raised when `lock_timeout` elapses. */
+const LOCK_NOT_AVAILABLE = '55P03';
 
 /** Nothing of the key in what the exception filter logs (S-09): the endpoint locates it. */
 function inFlight(endpoint: string): RastaError {
@@ -189,6 +194,9 @@ export function requiredIdempotencyKey(value: string | undefined): string {
  * nor store a response, because both match on the token it no longer has — and
  * a claim whose work already holds the row's lock cannot be taken from under
  * it, because the removal waits for that lock and then finds the response.
+ * That wait — like the insert's, behind an uncommitted removal — lasts only
+ * what is left of the request's {@link IN_FLIGHT_WAIT_MS}, and running out is
+ * the retryable `409 CONFLICT`, never a hang (#194).
  */
 @Injectable()
 export class IdempotencyStore {
@@ -327,7 +335,7 @@ export class IdempotencyStore {
     const deadline = Date.now() + IN_FLIGHT_WAIT_MS;
     let retries = 0;
     for (;;) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
       if (outcome === RETRY_CLAIM) {
         retries += 1;
         if (retries >= CLAIM_ATTEMPTS) throw inFlight(endpoint);
@@ -347,11 +355,17 @@ export class IdempotencyStore {
    * that lost the insert and then found no row, or an expired one, reserved
    * nothing and tries again. An expired row is removed only while it is still
    * expired, never a fresh claim that replaced it.
+   *
+   * Every statement here that can wait on another transaction's lock — the
+   * insert, behind an uncommitted removal of the same key; the removal,
+   * behind a holder still in its transaction — waits only for what remains of
+   * the request's budget ({@link withinBudget}).
    */
   private async claimOnce(
     endpoint: string,
     key: string,
     requestHash: string,
+    deadline: number,
   ): Promise<Claim | typeof RETRY_CLAIM | typeof IN_FLIGHT> {
     const organizationId = getOrganizationId();
     const now = new Date();
@@ -360,17 +374,19 @@ export class IdempotencyStore {
 
     const token = randomUUID();
     try {
-      await this.prisma.client.idempotencyKey.create({
-        data: {
-          organizationId,
-          endpoint,
-          key,
-          requestHash,
-          claimToken: token,
-          state: 'IN_PROGRESS',
-          expiresAt,
-        },
-      });
+      await this.withinBudget(endpoint, deadline, (tx) =>
+        tx.idempotencyKey.create({
+          data: {
+            organizationId,
+            endpoint,
+            key,
+            requestHash,
+            claimToken: token,
+            state: 'IN_PROGRESS',
+            expiresAt,
+          },
+        }),
+      );
       return { kind: 'PROCEED', token };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
@@ -382,9 +398,14 @@ export class IdempotencyStore {
     if (!existing) return RETRY_CLAIM;
 
     if (existing.expiresAt <= now) {
-      await this.prisma.client.idempotencyKey.deleteMany({
-        where: { organizationId, endpoint, key, expiresAt: { lte: now } },
-      });
+      // Waits for a holder still in its transaction — within the budget only.
+      await this.withinBudget(
+        endpoint,
+        deadline,
+        (tx) => tx.$executeRaw`DELETE FROM idempotency_key
+          WHERE organization_id = ${organizationId} AND endpoint = ${endpoint} AND key = ${key}
+            AND expires_at <= ${now}`,
+      );
       return RETRY_CLAIM;
     }
 
@@ -398,6 +419,34 @@ export class IdempotencyStore {
       status: existing.responseStatus ?? 200,
       body: existing.responseBody,
     };
+  }
+
+  /**
+   * Runs one claim-side statement in a short transaction of its own, whose
+   * `lock_timeout` is what is left of the request's budget: a lock it cannot
+   * get in that time is the retryable `409 CONFLICT` (`Retry-After: 1`), never
+   * an unbounded wait. A budget already spent refuses before asking.
+   */
+  private async withinBudget<R>(
+    endpoint: string,
+    deadline: number,
+    statement: (tx: ExtendedPrismaClient) => Promise<R>,
+  ): Promise<R> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw inFlight(endpoint);
+    const waitMs = Math.max(1, Math.ceil(remaining));
+    try {
+      return await this.prisma.transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`;
+          return statement(tx);
+        },
+        { timeoutMs: waitMs + WAIT_TRANSACTION_SLACK_MS },
+      );
+    } catch (error) {
+      if (isLockTimeout(error)) throw inFlight(endpoint);
+      throw error;
+    }
   }
 
   /**
@@ -435,9 +484,25 @@ export class IdempotencyStore {
   }
 }
 
+/** A `lock_timeout` that elapsed, as Prisma reports it from a raw query. */
+function isLockTimeout(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const meta = (error as { meta?: { code?: unknown } }).meta;
+  if (meta?.code === LOCK_NOT_AVAILABLE) return true;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' && message.includes('lock timeout');
+}
+
 /**
  * Canonical SHA-256 of a request: object keys sorted recursively, so the same
  * request serialised in another key order is recognised as a retry.
+ *
+ * Every own key is hashed, whatever its name. The sorted copies have no
+ * prototype (`Object.create(null)`): assigning `"__proto__"` into a plain `{}`
+ * would set its prototype instead of creating a key, and `JSON.stringify`
+ * would then drop it — two different bodies would hash alike and the second
+ * would replay the first's response instead of being refused as
+ * `IDEMPOTENCY_KEY_REUSED` (#194).
  */
 export function hashRequest(value: unknown): string {
   return createHash('sha256')
@@ -449,7 +514,7 @@ function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) sorted[key] = sortKeys(source[key]);
     return sorted;
   }

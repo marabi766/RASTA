@@ -63,8 +63,24 @@ export interface RequestContext {
 
   /** The platform's user id — what domain rows reference. */
   readonly userId?: string;
-  /** The identity provider's subject, kept for correlating with IdP logs. */
+  /**
+   * The identity provider's subject. With `issuer`, the person's **stable**
+   * identity: one person always has the same pair, while `userId` can differ
+   * between two of their tokens (see `platformUserId`).
+   */
   readonly subject?: string;
+  /** The verified token's issuer — one per deployment (`OIDC_ISSUER_URL`). */
+  readonly issuer?: string;
+  /**
+   * `true` only when the token carried the platform user id (`rasta_uid`).
+   *
+   * Without it the guard falls back to the IdP subject for `userId`, so one
+   * person can appear under two user ids — the subject on one token, the
+   * platform id on another (#188). A rule that keeps two actors apart compares
+   * them with `compareActors`, never `userId` alone, and a route where that
+   * matters carries `@RequirePlatformUserId()`. Absent means `false`.
+   */
+  readonly platformUserId?: boolean;
   readonly roles: readonly string[];
   readonly authType: AuthType;
   /** For service-to-service calls: which service is calling. */

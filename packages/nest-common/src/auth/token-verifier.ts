@@ -15,6 +15,16 @@ import { RastaError } from '../errors/rasta-error';
  */
 
 export interface UserClaims {
+  /**
+   * The token's verified `iss`. `jwtVerify` refuses any other issuer than the
+   * one configured, so this is the same value on every token a service accepts.
+   * With `sub` it names the person stably, whatever `rasta_uid` says (#188).
+   *
+   * Always set by `verifyUserToken`. Optional only so that a hand-built claim
+   * set (a test's stub verifier) still type-checks; the guard then records no
+   * issuer, which makes the stable identity unknown — never invented.
+   */
+  issuer?: string;
   /** The identity provider's subject. Stable, but not our identifier. */
   sub: string;
   /**
@@ -121,6 +131,8 @@ export class TokenVerifier {
     }
 
     return {
+      // `jwtVerify` checked `iss` against the configured issuer above.
+      issuer: payload.iss ?? this.options.issuer,
       sub: payload.sub,
       rastaUserId: readString(payload, 'rasta_uid'),
       organizationId: readString(payload, 'org_id'),

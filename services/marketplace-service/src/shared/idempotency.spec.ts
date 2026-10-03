@@ -6,6 +6,20 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { MarketplaceEnv } from '../config/env';
 
 /**
+ * A claim-side statement runs in a short transaction of its own, its lock
+ * wait bounded (#196): the fake hands that transaction the same delegate.
+ */
+function withTransaction(idempotencyKey: unknown): PrismaService {
+  const tx = { idempotencyKey, $queryRaw: jest.fn().mockResolvedValue([]) };
+  return {
+    client: {
+      idempotencyKey,
+      $transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
+    },
+  } as unknown as PrismaService;
+}
+
+/**
  * S-09 (review of #135, F1): the Idempotency-Key is client text, and a
  * refusal's `internalContext` is logged by the exception filter. Neither
  * conflict — a key in flight, a key reused with another body — may carry it.
@@ -27,7 +41,7 @@ function storeFinding(state: 'IN_PROGRESS' | 'COMPLETED'): IdempotencyStore {
       expiresAt: new Date(Date.now() + 60 * 60 * 1000),
     }),
   };
-  const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+  const prisma = withTransaction(idempotencyKey);
   return new IdempotencyStore(prisma, { MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24 } as MarketplaceEnv);
 }
 
@@ -142,7 +156,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       delete: jest.fn().mockResolvedValue({}),
     };
-    const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+    const prisma = withTransaction(idempotencyKey);
     const store = new IdempotencyStore(prisma, {
       MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
     } as MarketplaceEnv);
@@ -253,7 +267,7 @@ describe('IdempotencyStore.execute — when the claim is released', () => {
       updateMany,
       deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
-    const prisma = { client: { idempotencyKey } } as unknown as PrismaService;
+    const prisma = withTransaction(idempotencyKey);
     const store = new IdempotencyStore(prisma, {
       MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
     } as MarketplaceEnv);
@@ -296,5 +310,25 @@ describe('IdempotencyStore.execute — when the claim is released', () => {
       },
     });
     expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('hashRequestBody — every own key, whatever its name (#194)', () => {
+  // JSON.parse makes the name an own key, as the request body parser does.
+  const body = (name: string, x: number): unknown =>
+    JSON.parse(`{"note":"n","details":{"${name}":{"x":${x}}}}`);
+
+  it.each(['__proto__', 'constructor'])(
+    'tells bodies apart that differ only under a %s key',
+    (name) => {
+      expect(hashRequestBody(body(name, 1))).not.toBe(hashRequestBody(body(name, 2)));
+      expect(hashRequestBody(body(name, 1))).toBe(hashRequestBody(body(name, 1)));
+    },
+  );
+
+  it('tells a body with a __proto__ key from the same body without it', () => {
+    expect(hashRequestBody(JSON.parse('{"a":1,"__proto__":{"b":2}}'))).not.toBe(
+      hashRequestBody({ a: 1 }),
+    );
   });
 });
