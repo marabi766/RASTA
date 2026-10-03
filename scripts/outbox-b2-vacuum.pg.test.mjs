@@ -179,10 +179,13 @@ test('the maintenance command refuses a role that does not own the table, and va
 
 test('the maintenance command takes its credential from the environment only', () => {
   // No URL option exists; one on the command line is refused, never used.
-  const viaArgv = run(VACUUM, ['--service', 'document', '--url', OWNER_URL], {});
+  // A placeholder with no credential in it: this test proves the option is
+  // refused, and must not itself put a password on a command line.
+  const placeholder = 'postgresql://placeholder@127.0.0.1:1/none';
+  const viaArgv = run(VACUUM, ['--service', 'document', '--url', placeholder], {});
   assert.equal(viaArgv.status, 1);
   assert.match(viaArgv.events[0].reason, /Unknown option "--url"/);
-  assert.ok(!viaArgv.stdout.includes(secretOf(OWNER_URL)), 'the password was echoed');
+  assert.ok(!viaArgv.stdout.includes(placeholder), 'the argument was echoed');
 
   const unset = run(VACUUM, ['--service', 'document'], {});
   assert.equal(unset.status, 1);

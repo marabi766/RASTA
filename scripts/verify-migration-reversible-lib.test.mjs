@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,7 @@ import {
   createScratchDatabase,
   dropScratchDatabase,
   ledgerAssertionScript,
+  libpqInvocation,
   libpqUrl,
   newScratchDatabase,
   psqlRunner,
@@ -807,8 +809,10 @@ function psqlAt(url, script, database) {
   const target = new URL(url);
   target.search = '';
   if (database) target.pathname = `/${database}`;
-  return spawnSync('psql', [target.toString(), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', script], {
+  const { target: psqlTarget, env } = libpqInvocation(target.toString());
+  return spawnSync('psql', [psqlTarget, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-c', script], {
     encoding: 'utf8',
+    env: { ...process.env, ...env },
   });
 }
 
@@ -970,6 +974,242 @@ test('psql gets libpq’s own URL parameters, and none of Prisma’s', () => {
   }
 });
 
+test('psql gets the password in its environment, never in its argv', () => {
+  // Built, not written: a fixture password, set through URL so it is encoded
+  // as a real one would be (and no credentialed URI sits in the source).
+  const withPassword = new URL(
+    'postgresql://rasta_x_migrator@db.example:5432/rasta_x?schema=public&sslmode=require',
+  );
+  withPassword.password = 'p@ss:w0rd';
+  assert.match(withPassword.toString(), /:p%40ss%3Aw0rd@/);
+  const inUserinfo = libpqInvocation(withPassword.toString());
+  assert.equal(
+    inUserinfo.target,
+    'postgresql://rasta_x_migrator@db.example:5432/rasta_x?sslmode=require',
+  );
+  assert.deepEqual(inUserinfo.env, { PGPASSWORD: 'p@ss:w0rd' });
+
+  const inQuery = libpqInvocation('postgresql://db.example/rasta_x?user=u&password=s3cret');
+  assert.equal(inQuery.target, 'postgresql://db.example/rasta_x?user=u');
+  assert.deepEqual(inQuery.env, { PGPASSWORD: 's3cret' });
+
+  // No password to move: nothing is set, so an inherited PGPASSWORD or
+  // ~/.pgpass still applies as it did before.
+  const none = libpqInvocation('postgresql://u@db.example/rasta_x');
+  assert.equal(none.target, 'postgresql://u@db.example/rasta_x');
+  assert.deepEqual(none.env, {});
+});
+
+test('psqlRunner starts psql with no password in its argv', (t) => {
+  // A psql on PATH that records what it was started with.
+  const dir = mkdtempSync(join(tmpdir(), 'psql-argv-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const seen = join(dir, 'seen');
+  writeFileSync(
+    join(dir, 'psql'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" > '${seen}'\nprintf 'PGPASSWORD=%s\\n' "$PGPASSWORD" >> '${seen}'\necho 1\n`,
+    { mode: 0o755 },
+  );
+  const path = process.env.PATH;
+  process.env.PATH = `${dir}:${path}`;
+  t.after(() => {
+    process.env.PATH = path;
+  });
+
+  const secret = 'n0t-in-argv';
+  const result = psqlRunner(`postgresql://rasta_x_migrator:${secret}@db.example/rasta_x`)(
+    'SELECT 1',
+  );
+
+  assert.equal(result.ok, true, result.output);
+  const lines = readFileSync(seen, 'utf8').trim().split('\n');
+  const passed = lines.slice(0, -1);
+  assert.equal(passed[0], 'postgresql://rasta_x_migrator@db.example/rasta_x');
+  assert.equal(passed.join('\n').includes(secret), false, passed.join(' '));
+  assert.equal(lines.at(-1), `PGPASSWORD=${secret}`);
+});
+
+/**
+ * Every source file the repository runs, scripts and services alike — never
+ * node_modules or build output.
+ */
+function runnableSources() {
+  const roots = [join(ROOT, 'scripts')];
+  for (const service of readdirSync(join(ROOT, 'services'))) {
+    for (const part of ['src', 'test', 'prisma', 'scripts']) {
+      roots.push(join(ROOT, 'services', service, part));
+    }
+  }
+  const files = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(?:[cm]?js|ts)$/.test(entry.name)) files.push(path);
+    }
+  };
+  roots.forEach(walk);
+  return files;
+}
+
+/**
+ * Tests that hand `--url` to a CLI only to prove it is refused, with a
+ * credential-free placeholder. Nothing else may name the flag.
+ */
+const URL_FLAG_REFUSAL_TESTS = new Set(['scripts/outbox-b2-vacuum.pg.test.mjs']);
+
+/** Every shell script the repository runs, outside node_modules. */
+function shellScripts() {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(?:sh|bash)$/.test(entry.name)) files.push(path);
+    }
+  };
+  ['infrastructure', 'scripts'].forEach((root) => walk(join(ROOT, root)));
+  return files;
+}
+
+const PG_CLIENT =
+  /(?<![\w./-])(psql|pg_dump|pg_dumpall|pg_restore|createdb|createuser|dropdb|dropuser)\b/g;
+
+/**
+ * Each PostgreSQL client command in a shell script, as written: from the
+ * program name to the end of the command — an unquoted newline that is not a
+ * line continuation, or an unquoted `|`, `;` or `&`. Quoted text may span
+ * lines. Comment lines are skipped.
+ */
+function pgClientCommands(source) {
+  const commands = [];
+  for (const match of source.matchAll(PG_CLIENT)) {
+    const lineStart = source.lastIndexOf('\n', match.index) + 1;
+    if (source.slice(lineStart, match.index).trimStart().startsWith('#')) continue;
+    let quote = null;
+    let end = match.index;
+    for (; end < source.length; end += 1) {
+      const char = source[end];
+      if (quote) {
+        if (char === '\\' && quote === '"') end += 1;
+        else if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === '\\') end += 1;
+      else if (char === '\n' || char === '|' || char === ';' || char === '&') break;
+    }
+    commands.push({
+      text: source.slice(match.index, end),
+      line: source.slice(0, match.index).split('\n').length,
+    });
+  }
+  return commands;
+}
+
+/**
+ * Why a PostgreSQL client command's argv could carry a credential, or null.
+ * Its `-c` text must be literal SQL with no password in it — a bare
+ * expansion (`-c "$2"`, `-c "${sql}"`) can carry anything a caller passes,
+ * an ALTER ROLE … PASSWORD included, so such SQL goes on stdin (`-f -`).
+ */
+function pgClientArgvProblem(command) {
+  if (/postgres(?:ql)?:\/\/[^\s"'/@:]+:[^\s"'@$]+@/.test(command)) return 'a credentialed URI';
+  for (const [, quoted] of command.matchAll(
+    /\s(?:-[A-Za-z]*c|--command)(?:\s+|=)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g,
+  )) {
+    if (/PASSWORD/i.test(quoted)) return 'a PASSWORD in its -c text';
+    if (/^["']?\$(?:\{?\w+\}?|\d)["']?$/.test(quoted)) {
+      return `-c ${quoted}, which could carry any SQL, a password included (use -f - and stdin)`;
+    }
+  }
+  return null;
+}
+
+test('no PostgreSQL client in a shell script gets a credential in its argv (D-045 follow-up)', () => {
+  const offenders = [];
+  let seen = 0;
+  for (const file of shellScripts()) {
+    for (const command of pgClientCommands(readFileSync(file, 'utf8'))) {
+      seen += 1;
+      const problem = pgClientArgvProblem(command.text);
+      if (problem) offenders.push(`${file.slice(ROOT.length)}:${command.line}: ${problem}`);
+    }
+  }
+  assert.ok(seen > 5, `only ${seen} psql invocations found — the scan is not reading the scripts`);
+  assert.deepEqual(offenders, []);
+});
+
+test('the shell argv rule catches what it must and passes what it may', () => {
+  for (const bad of [
+    'psql -v ON_ERROR_STOP=1 --dbname "$1" -c "$2"',
+    'psql -X -q -c "${sql}"',
+    'psql -X -tAc "$1"',
+    'psql --command="$2"',
+    `psql -c "ALTER ROLE r WITH PASSWORD '\${pw}'"`,
+    'psql "postgresql://u:secret@db/x" -c "SELECT 1"',
+  ]) {
+    assert.notEqual(pgClientArgvProblem(bad), null, bad);
+  }
+  for (const good of [
+    'psql -v ON_ERROR_STOP=1 --dbname "$1" -f -',
+    `psql -tAc "SELECT 1 FROM pg_database WHERE datname='\${db}'" --username "$POSTGRES_USER" postgres`,
+    'psql -X -q -tA -h 127.0.0.1 --username "$role" -c \'SELECT 1\'',
+    'psql "postgresql://rasta_economic@localhost:5432/rasta_economic" -c "SELECT 1"',
+  ]) {
+    assert.equal(pgClientArgvProblem(good), null, good);
+  }
+});
+
+test('our code puts no database url on a command line (D-045 follow-up; Prisma itself: D-047)', () => {
+  // A process's argv is readable by every local user while it runs (`ps`,
+  // /proc/<pid>/cmdline). Prisma takes the url from the environment through
+  // `--schema`; psql takes the password from PGPASSWORD (libpqInvocation).
+  // This holds for the commands *we* start. Prisma's own schema-engine child
+  // still receives the url as `--datasource` during migrate commands — a
+  // third-party residual recorded as D-047 in docs/23, not covered here.
+  const urlFlag = new RegExp(`['"]--${'url'}['"]`);
+  const spawnsPsql = /spawn(?:Sync)?\(\s*'psql'/;
+  const offenders = [];
+  for (const file of runnableSources()) {
+    const source = readFileSync(file, 'utf8');
+    const name = file.slice(ROOT.length);
+    if (urlFlag.test(source) && !URL_FLAG_REFUSAL_TESTS.has(name)) {
+      offenders.push(`${name}: passes a url to Prisma as an argument`);
+    }
+    if (
+      spawnsPsql.test(source) &&
+      source.includes('new URL(') &&
+      !source.includes('libpqInvocation(')
+    ) {
+      offenders.push(`${name}: builds a url and starts psql without libpqInvocation`);
+    }
+  }
+  // A workflow's credentialed url belongs in an environment assignment
+  // (`KEY: value`, `KEY=value \`), never in a command's arguments.
+  const credentialed = /postgres(?:ql)?:\/\/[^:/@"\s]+:[^@"\s]+@/;
+  const assignment = /^\s*-?\s*[A-Z_][A-Z0-9_]*[:=]\s*/;
+  const workflows = join(ROOT, '.github', 'workflows');
+  for (const name of readdirSync(workflows)) {
+    readFileSync(join(workflows, name), 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (credentialed.test(line) && !assignment.test(line)) {
+          offenders.push(
+            `.github/workflows/${name}:${i + 1}: a credentialed url outside an env assignment`,
+          );
+        }
+      });
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test('the SQLSTATE is read from its field, never from the message', () => {
   assert.equal(
     sqlstateFrom(
@@ -1114,13 +1354,11 @@ async function foreignSession(database, seconds) {
   const target = new URL(foreignDatabaseUrl);
   target.search = '';
   target.pathname = `/${database}`;
-  const child = spawn(
-    'psql',
-    [target.toString(), '-X', '-q', '-c', `SELECT pg_sleep(${seconds})`],
-    {
-      stdio: 'ignore',
-    },
-  );
+  const { target: psqlTarget, env } = libpqInvocation(target.toString());
+  const child = spawn('psql', [psqlTarget, '-X', '-q', '-c', `SELECT pg_sleep(${seconds})`], {
+    stdio: 'ignore',
+    env: { ...process.env, ...env },
+  });
   const exited = new Promise((resolveExit) => child.on('exit', resolveExit));
   for (let i = 0; i < 100; i += 1) {
     const seen = scalarAt(

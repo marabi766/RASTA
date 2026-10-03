@@ -71,8 +71,12 @@
 # scripts/check-db-runtime-privileges.mjs is the check that it held.
 # -----------------------------------------------------------------------------
 
+# SQL goes to psql on stdin (`-f -`), never as `-c` text: some of it carries
+# a role's password (ALTER ROLE … PASSWORD), and a process's argv is readable
+# by every local user while it runs (D-045 follow-up, Codex on #191). `printf`
+# is a shell builtin, so the text is never an argument of any process either.
 _svc_split_psql() {
-  psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -c "$2"
+  printf '%s\n' "$2" | psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -f -
 }
 
 # Prisma's migration ledger, exactly as its schema engine creates it on

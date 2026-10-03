@@ -290,6 +290,7 @@ function verify(service) {
   const run = (argv, stdin) => {
     const result = spawnSync(process.execPath, [prismaCli, ...argv], {
       cwd: serviceDir,
+      env: { ...process.env, DATABASE_URL: scratchUrl },
       input: stdin,
       encoding: 'utf8',
     });
@@ -299,7 +300,11 @@ function verify(service) {
     };
   };
 
-  const sql = (script) => run(['db', 'execute', '--url', scratchUrl, '--stdin'], script);
+  // `--schema` with the url in the child's environment, never `--url`: an
+  // argument is readable by any local user for as long as the process runs
+  // (`ps`, /proc/<pid>/cmdline), and this url is the database owner's.
+  const sql = (script) =>
+    run(['db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'], script);
   // `migrate deploy` reads the datasource url from the environment, so it has
   // to be set on the child rather than passed as a flag.
   const deployScratch = () => {
