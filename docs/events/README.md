@@ -571,7 +571,9 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
   حداکثر ۱۰۰ و `organizationCount`). بازگشایی پس گرفته نمی‌شود.
 - `BID_OPENING_PROPOSAL_WITHDRAWN` — **افزودهٔ CON-002 برای S-06؛ در انتظار پذیرش.** پیشنهادِ بازگشایی را پیشنهاددهنده پس گرفت یا تأییدی که او را
   عضو پیشنهاددهنده یافت پاکش کرد: `tenderId`، `organizationId`، `proposedBy`، `withdrawnBy`، `reason`
-  (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED`)، `withdrawnAt`.
+  (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED | PROPOSER_IDENTITY_UNKNOWN`)، `withdrawnAt`. `PROPOSER_IDENTITY_UNKNOWN` (#188):
+  تأییدِ شخص دوم پیشنهادی را یافت که هویت پایدار پیشنهاددهنده‌اش ثبت نشده (یا با صادرکنندهٔ دیگری)، پس آن را پاک کرد و خودش با
+  `422 ACTOR_IDENTITY_UNKNOWN` رد شد — مقدار افزوده به Enum؛ شکل Payload همان است.
 
 **پیاده‌شده در CON-002 PR 9 (ارزیابی؛ ADR-067).** پنج رویداد (`aggregateType = Tender`، کلید `tenderId`؛ فقط شناسه، کد بسته، شمار و Digest، `.strict()`؛ بی `projectId` جز `BIDS_EVALUATED`):
 
