@@ -60,6 +60,10 @@
 #     scripts/prisma.mjs's post-migration revoke (which stays, belt and braces).
 #     Prisma adopts a ledger it finds: `migrate deploy` reads the table and
 #     applies what it does not list.
+#   * Sessions default to UTC on the database side (lib/session-timezone.bash):
+#     the database, the runtime role and the migrator each carry
+#     `TimeZone = 'UTC'`, so a connection that sends no startup option — one
+#     behind PgBouncer — still runs in UTC (L7-37).
 #
 # ## Upgrading an existing database — the order matters
 #
@@ -78,6 +82,9 @@
 _svc_split_psql() {
   printf '%s\n' "$2" | psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -f -
 }
+
+# shellcheck source=session-timezone.bash
+source "$(dirname "${BASH_SOURCE[0]}")/session-timezone.bash"
 
 # Prisma's migration ledger, exactly as its schema engine creates it on
 # PostgreSQL (prisma 6; compared column for column with a Prisma-made one by
@@ -273,7 +280,9 @@ split_service_privileges() {
   # migration as already applied. Last, so the grants above cannot reach it.
   own_migration_ledger "${db}" public "${migrator}" "${runtime}"
 
-  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights"
+  ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
+
+  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
 }
 
 # split_audit_database_privileges [database] [service]
@@ -324,7 +333,9 @@ split_audit_database_privileges() {
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
 
-  echo "    - ${db}: database, public and audit owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created"
+  ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
+
+  echo "    - ${db}: database, public and audit owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created; sessions default to UTC"
 }
 
 # upgrade_service_split <service> <database> <default|migration|audit>
