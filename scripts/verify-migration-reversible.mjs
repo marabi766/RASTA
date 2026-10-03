@@ -218,13 +218,34 @@ const PRISMA_CLI = (() => {
   return join(manifest, '..', 'build', 'index.js');
 })();
 
+/**
+ * How long one Prisma invocation may take before it is killed. The slowest
+ * today — a whole chain's `migrate deploy` — takes seconds; this bound exists
+ * so a hung connection or lock wait fails this service by name instead of
+ * silently eating the CI job's whole budget (#198).
+ */
+const PRISMA_TIMEOUT_MS = 5 * 60 * 1000;
+
 function prisma(argv, { stdin, env } = {}) {
   const result = spawnSync(process.execPath, [PRISMA_CLI, ...argv], {
     cwd: serviceDir,
     env: { ...process.env, ...env },
     input: stdin,
     encoding: 'utf8',
+    timeout: PRISMA_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
+
+  // Returned, not fail()ed: fail() cleans up through this same function, and a
+  // database that hangs once would hang the cleanup too.
+  if (result.error?.code === 'ETIMEDOUT') {
+    return {
+      ok: false,
+      output:
+        `${service}-service: \`prisma ${argv.slice(0, 2).join(' ')}\` did not finish within ` +
+        `${PRISMA_TIMEOUT_MS / 60_000} minutes and was killed — a hang, not a migration result.\n`,
+    };
+  }
 
   if (result.status !== 0) {
     return { ok: false, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
