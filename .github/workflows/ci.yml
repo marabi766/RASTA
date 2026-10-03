@@ -297,7 +297,7 @@ jobs:
         # the `pnpm install --frozen-lockfile` step above and in every image
         # build. The per-package evidence is in docs/23 D-008.
         run: |
-          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.175.0 \
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.175.0@sha256:b94b53d02fd4a022f9eac4e2af1380f5c3c4c21400e79d3336bdff1d1db5e796 \
             semgrep scan --error --metrics=off \
               --config p/typescript \
               --config p/nodejs \
@@ -328,7 +328,7 @@ jobs:
 
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -342,7 +342,7 @@ jobs:
           --health-retries 10
 
       redis:
-        image: redis:7.4-alpine
+        image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -392,7 +392,7 @@ jobs:
             -e RASTA_KEYCLOAK_DEV_REALM=allow \
             -v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro" \
             --entrypoint /bin/bash \
-            quay.io/keycloak/keycloak:26.0 \
+            quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
             /opt/keycloak/data/import/dev-realm-gate.sh start-dev --import-realm
 
       - run: pnpm install --frozen-lockfile
@@ -724,7 +724,7 @@ jobs:
         # Also fails when a file named in `rule_files` does not exist.
         run: |
           docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
-            --entrypoint promtool prom/prometheus:v3.1.0 \
+            --entrypoint promtool prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
             check config /etc/prometheus/prometheus.yml
 
       - name: Test alert rule behaviour
@@ -736,7 +736,7 @@ jobs:
         # nothing actually runs.
         run: |
           docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
-            --entrypoint sh prom/prometheus:v3.1.0 \
+            --entrypoint sh prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
             -c 'promtool test rules /etc/prometheus/tests/*.test.yml'
 
   # ---------------------------------------------------------------------------
@@ -760,7 +760,7 @@ jobs:
 
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -774,7 +774,7 @@ jobs:
           --health-retries 10
 
       redis:
-        image: redis:7.4-alpine
+        image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -920,7 +920,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1523,7 +1523,7 @@ jobs:
     needs: quality
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1824,7 +1824,7 @@ jobs:
 
     services:
       postgres:
-        image: postgis/postgis:16-3.4
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1838,7 +1838,7 @@ jobs:
           --health-retries 10
 
       redis:
-        image: redis:7.4-alpine
+        image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
         ports:
           - 6379:6379
         options: >-
@@ -1890,7 +1890,7 @@ jobs:
             -e RASTA_KEYCLOAK_DEV_REALM=allow \
             -v "$PWD/infrastructure/docker/keycloak:/opt/keycloak/data/import:ro" \
             --entrypoint /bin/bash \
-            quay.io/keycloak/keycloak:26.0 \
+            quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
             /opt/keycloak/data/import/dev-realm-gate.sh start-dev --import-realm
 
       - run: pnpm install --frozen-lockfile
@@ -2050,7 +2050,7 @@ jobs:
           set -euo pipefail
           docker run -d --name rasta-e2e-temporal --network host \
             --entrypoint temporal \
-            temporalio/admin-tools:1.26.2 \
+            temporalio/admin-tools:1.26.2@sha256:37e2e33dbd7b86a12fa1daecf48f5b42544956ae503a83bd45460587f25591f2 \
             server start-dev --ip 0.0.0.0 --port 7233 --headless
 
           for attempt in $(seq 1 40); do
@@ -2114,7 +2114,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
 
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
@@ -2472,8 +2472,8 @@ jobs:
         # different image than the one deployed and report on it confidently.
         run: |
           set -euo pipefail
-          docker pull clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
-          docker tag clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0 \
+          docker pull clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+          docker tag clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0 \
             rasta/clamav-pinned:ci
 
       - name: Scan the image

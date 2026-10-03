@@ -55,7 +55,7 @@ services:
   # ----------------------------------------------------------------- database
   postgres:
     <<: *restart
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
     container_name: rasta-postgres
     # The migrators' (database owners') passwords, D-045: kept out of .env,
     # which every service loads, and read here from the committed defaults,
@@ -106,7 +106,7 @@ services:
   # -------------------------------------------------------------------- cache
   redis:
     <<: *restart
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     container_name: rasta-redis
     command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
     ports:
@@ -127,7 +127,7 @@ services:
   # infrastructure/docker/kafka/.tls/, for the services and tests on the host.
   # Idempotent: kept while valid.
   kafka-tls:
-    image: apache/kafka:3.9.0
+    image: apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f
     container_name: rasta-kafka-tls
     user: '0'
     entrypoint: ['/bin/bash', '/bootstrap/tls.sh']
@@ -145,7 +145,7 @@ services:
     # The official Apache image. We started on bitnami/kafka and it stopped
     # resolving when Bitnami reorganised their catalogue — a vendor repackage
     # is one publishing decision away from breaking every clone of this repo.
-    image: apache/kafka:3.9.0
+    image: apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f
     container_name: rasta-kafka
     # KRaft, single node (controller + broker). Production runs a 3-node
     # quorum — see docs/deployment/README.md. Authenticated and authorised as
@@ -204,7 +204,7 @@ services:
   # volume was formatted — an existing credential is never overwritten), and
   # creates the platform topics.
   kafka-init:
-    image: apache/kafka:3.9.0
+    image: apache/kafka:3.9.0@sha256:fbc7d7c428e3755cf36518d4976596002477e4c052d1f80b5b9eafd06d0fff2f
     container_name: rasta-kafka-init
     depends_on:
       kafka:
@@ -223,7 +223,7 @@ services:
   # ----------------------------------------------------------------- identity
   keycloak:
     <<: *restart
-    image: quay.io/keycloak/keycloak:26.0
+    image: quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858
     container_name: rasta-keycloak
     # The development realm is loaded only through its gate (L1-05): Keycloak's
     # development mode plus an explicit opt-in. See dev-realm-gate.sh.
@@ -345,7 +345,7 @@ services:
   # correct; there is no arm64 manifest to point at.
   clamav:
     <<: *restart
-    image: clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+    image: clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
     container_name: rasta-clamav
     # `clamd` directly rather than the image's `/init`, which needs root at
     # start to create /run/clamav and link /var/lock. Bypassing it lets the
@@ -405,7 +405,7 @@ services:
   # from there — rather than downloading the whole set before anything works.
   clamav-freshclam:
     <<: *restart
-    image: clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+    image: clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
     container_name: rasta-clamav-freshclam
     user: '100:101'
     entrypoint: ['freshclam', '--daemon', '--foreground']
@@ -437,7 +437,7 @@ services:
   # --------------------------------------------------------- workflow engine
   temporal:
     <<: *restart
-    image: temporalio/auto-setup:1.26.2
+    image: temporalio/auto-setup:1.26.2@sha256:e9245820522233ec6a59ad69c6512ae4450705ee02bf6894fc61ba13b238c1c0
     container_name: rasta-temporal
     environment:
       DB: postgres12
@@ -464,7 +464,7 @@ services:
 
   temporal-ui:
     <<: *restart
-    image: temporalio/ui:2.34.0
+    image: temporalio/ui:2.34.0@sha256:cb17ea423d76a8a19a269d0bcd81fc12eee1f6365acd2a56b590dafb35696a95
     container_name: rasta-temporal-ui
     environment:
       TEMPORAL_ADDRESS: temporal:7233
@@ -478,7 +478,7 @@ services:
   # ------------------------------------------------------------------ search
   opensearch:
     <<: *restart
-    image: opensearchproject/opensearch:2.18.0
+    image: opensearchproject/opensearch:2.18.0@sha256:7f6fa1efee8f39e94ca30a0a31f95d866c8a99f25a86e6cf6691142d1eab4f9e
     container_name: rasta-opensearch
     environment:
       discovery.type: single-node
@@ -502,7 +502,7 @@ services:
   # ----------------------------------------------------------- observability
   otel-collector:
     <<: *restart
-    image: otel/opentelemetry-collector-contrib:0.116.1
+    image: otel/opentelemetry-collector-contrib:0.116.1@sha256:d0ebf65280da2e1b1491d1b93648281afd353d4b9ea19160090303cec9a233bd
     container_name: rasta-otel-collector
     command: ['--config=/etc/otel/config.yaml']
     volumes:
@@ -515,7 +515,7 @@ services:
 
   prometheus:
     <<: *restart
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     container_name: rasta-prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -535,7 +535,7 @@ services:
   # stopped consumer still shows its lag instead of disappearing.
   kafka-exporter:
     <<: *restart
-    image: danielqsj/kafka-exporter:v1.9.0
+    image: danielqsj/kafka-exporter:v1.9.0@sha256:4150e46b2e9697ac30e4be8de03ec1704b4bdc7037577b83b8d35a32be298c16
     container_name: rasta-kafka-exporter
     # As `kafka-exporter`, a development-only principal that may describe the
     # platform's topics and consumer groups and read nothing (RUN-006).
@@ -559,7 +559,7 @@ services:
 
   grafana:
     <<: *restart
-    image: grafana/grafana:11.5.1
+    image: grafana/grafana:11.5.1@sha256:5781759b3d27734d4d548fcbaf60b1180dbf4290e708f01f292faa6ae764c5e6
     container_name: rasta-grafana
     environment:
       GF_SECURITY_ADMIN_USER: admin
@@ -590,7 +590,7 @@ services:
   # --------------------------------------------------------------- dev tools
   kafka-ui:
     <<: *restart
-    image: provectuslabs/kafka-ui:v0.7.2
+    image: provectuslabs/kafka-ui:v0.7.2@sha256:8f2ff02d64b0a7a2b71b6b3b3148b85f66d00ec20ad40c30bdcd415d46d31818
     container_name: rasta-kafka-ui
     environment:
       KAFKA_CLUSTERS_0_NAME: rasta-local
@@ -615,7 +615,7 @@ services:
 
   mailpit:
     <<: *restart
-    image: axllent/mailpit:v1.22
+    image: axllent/mailpit:v1.22@sha256:f7f7c31de4de59540ad6515a0ca057a77525bca2069b6e747d873ca66c10fe08
     container_name: rasta-mailpit
     ports:
       - '${COMPOSE_BIND_ADDRESS:-127.0.0.1}:1025:1025'
