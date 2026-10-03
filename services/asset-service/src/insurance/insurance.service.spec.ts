@@ -116,7 +116,7 @@ describe('InsuranceService', () => {
       } as never;
     }
 
-    it.each([
+    it.each<[string, (h: Harness, f: never) => Promise<unknown>]>([
       ['a policy', (h: Harness, f: never) => h.service.recordPolicy(ASSET_ID, POLICY, f)],
       [
         'an inspection',
@@ -144,7 +144,7 @@ describe('InsuranceService', () => {
       expect(view).toMatchObject({ id: expect.any(String) });
     });
 
-    it.each([
+    it.each<[string, (h: Harness) => Promise<unknown>]>([
       ['a policy', (h: Harness) => h.service.recordPolicy(ASSET_ID, POLICY)],
       ['an inspection', (h: Harness) => h.service.recordInspection(ASSET_ID, INSPECTION)],
     ])('still records %s without a fence (internal callers)', async (_what, record) => {
