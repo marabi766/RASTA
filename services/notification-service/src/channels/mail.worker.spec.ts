@@ -1,4 +1,5 @@
 import { MailWorker, MAIL_ERROR_CLASSES } from './mail.worker';
+import { localMinuteOfDay, MINUTES_PER_DAY, type QuietWindow } from './quiet-hours';
 import { LeaseLostError } from '../notification/notification.repository';
 import type {
   NotificationRepository,
@@ -55,6 +56,21 @@ function delivery(overrides: Partial<SendableDelivery> = {}): SendableDelivery {
 
 type Settled = Parameters<NotificationRepository['settleAttempt']>[0];
 
+/**
+ * A quiet window that holds the moment the test runs: an hour either side of
+ * the local minute now. Not 00:00–23:59: the window is half-open, so that one
+ * left the minute 23:59 outside, and the suite failed every night at 23:59
+ * Tehran time (CI, 2026-10-03 20:29 UTC).
+ */
+function quietAroundNow(timezone: string): QuietWindow {
+  const minute = localMinuteOfDay(new Date(), timezone);
+  return {
+    startMinute: (minute - 60 + MINUTES_PER_DAY) % MINUTES_PER_DAY,
+    endMinute: (minute + 60) % MINUTES_PER_DAY,
+    timezone,
+  };
+}
+
 function fakeRepository(options: { quiet?: boolean; leaseLost?: boolean } = {}) {
   const settled: Settled[] = [];
   const released: { at: Date }[] = [];
@@ -72,9 +88,7 @@ function fakeRepository(options: { quiet?: boolean; leaseLost?: boolean } = {}) 
 
   const repository = {
     claimSendable: jest.fn(async () => []),
-    quietWindowFor: jest.fn(async () =>
-      options.quiet ? { startMinute: 0, endMinute: 24 * 60 - 1, timezone: 'Asia/Tehran' } : null,
-    ),
+    quietWindowFor: jest.fn(async () => (options.quiet ? quietAroundNow('Asia/Tehran') : null)),
     releaseUntil: jest.fn(async (_d: unknown, at: Date) => {
       released.push({ at });
       return true;
