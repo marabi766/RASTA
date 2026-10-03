@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES } from '@rasta/contracts';
+import {
+  cursorPaginationSchema,
+  seedIdSchema,
+  ID_PREFIXES,
+  plainText,
+  referenceId,
+} from '@rasta/contracts';
 
 /**
  * Request and response shapes.
@@ -16,6 +22,10 @@ const organizationId = seedIdSchema(ID_PREFIXES.organization);
  * Latin letters, spaces, ZWNJ (نیم‌فاصله) and hyphens. A name is a label, not
  * an identifier — the rule exists to reject control characters and markup, not
  * to police what a person may be called.
+ *
+ * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
+ * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
+ * One pattern, so the published OpenAPI `pattern` states both rules.
  */
 const personName = z
   .string()
@@ -23,7 +33,7 @@ const personName = z
   .min(1)
   .max(100)
   .regex(
-    /^[\p{Script=Arabic}\p{Script=Latin}\p{Mark}\s‌'’\-.]+$/u,
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Mark}\s‌'’\-.]+$/u,
     'Name contains unsupported characters',
   );
 
@@ -135,15 +145,13 @@ export const updateMembershipRolesSchema = z
   .object({
     roles: z.array(roleSchema).min(1),
     /** Recorded on the audit event. Role changes need a stated why. */
-    reason: z.string().trim().min(3).max(500),
+    reason: plainText().min(3).max(500),
   })
   .strict();
 
 export type UpdateMembershipRolesDto = z.infer<typeof updateMembershipRolesSchema>;
 
-export const revokeMembershipSchema = z
-  .object({ reason: z.string().trim().min(3).max(500) })
-  .strict();
+export const revokeMembershipSchema = z.object({ reason: plainText().min(3).max(500) }).strict();
 
 export type RevokeMembershipDto = z.infer<typeof revokeMembershipSchema>;
 
@@ -172,9 +180,12 @@ export const submitRegistrationSchema = z
       .optional(),
     requestedOrganizationId: organizationId,
     requestedRoles: z.array(roleSchema).min(1),
-    justification: z.string().trim().max(1000).optional(),
-    /** Document ids from document-service. Never file contents. */
-    documentRefs: z.array(z.string().min(1)).max(10).default([]),
+    justification: plainText().max(1000).optional(),
+    /**
+     * Document ids from document-service. Never file contents. Stored as
+     * given, so no control or format character, bidi controls included (#209).
+     */
+    documentRefs: z.array(referenceId().min(1)).max(10).default([]),
   })
   .strict();
 
@@ -193,7 +204,7 @@ export const rejectRegistrationSchema = z
   .object({
     // Required, not optional. A refusal a person cannot understand or appeal
     // is not a decision, and the product document is built on traceability.
-    reason: z.string().trim().min(10).max(1000),
+    reason: plainText().min(10).max(1000),
   })
   .strict();
 
