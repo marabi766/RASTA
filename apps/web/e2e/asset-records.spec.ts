@@ -27,6 +27,16 @@ import { installLiveSession } from './live-session';
  * record and its outbox event). That last number is what shows a repeated send
  * wrote **nothing**, not merely that the page said so.
  *
+ * ## Whose machines, and the gateway's rate limit
+ *
+ * Every request of these scenarios — the API setup and checks, and each page
+ * load's own reads through the portal — is one signed-in user's, and the gateway
+ * allows one user 300 requests a minute (`GATEWAY_RATE_LIMIT_MAX`). The other
+ * browser specs all act as `dehyari.admin`, so this one acts as the other
+ * tenant's administrator (`dehyari.admin.b`, ORG-DEH-0002) and draws on a
+ * different allowance; it signs in as `dehyari.admin` only where the scenario
+ * needs a machine of ORG-DEH-0001 (the operator's, and the foreign tenant's).
+ *
  * ## Cleanup
  *
  * Each test records the id of every machine it registers, and `afterEach`
@@ -41,14 +51,11 @@ test.skip(
 );
 
 /**
- * Why only the two recording scenarios run at the phone's size. Every request
- * of these scenarios — the API setup and checks, and each page load's own reads
- * through the portal — is the same signed-in user's, and the gateway allows one
- * user 300 requests a minute (`GATEWAY_RATE_LIMIT_MAX`). The suite shares one
- * stack and one user, so a second viewport that repeated every scenario spent
- * the allowance the other specs need (a `429` in unrelated tests). What a phone
- * can change is layout and reachability, which the two recording scenarios open
- * the forms and check; the rest is identical logic at any size.
+ * Why only the two recording scenarios run at the phone's size: a second
+ * viewport repeating every scenario multiplies the requests of one user, and the
+ * suite shares one stack (see "Whose machines" above). What a phone can change
+ * is layout and reachability, which the two recording scenarios open the forms
+ * and check; the rest is identical logic at any size.
  */
 const MOBILE_BUDGET =
   'identical at the phone’s size; keeps the shared user inside the gateway limit';
@@ -140,8 +147,11 @@ async function timelineCounts(
   return counts;
 }
 
-/** Ids this test registered, so cleanup touches those and nothing else. */
-const registered = new Set<string>();
+/**
+ * Ids this test registered, each with the token of the person who owns it, so
+ * cleanup touches those and nothing else, as their own owner.
+ */
+const registered = new Map<string, string>();
 
 /** A machine of this test's own, registered and with no policy or inspection yet. */
 async function registerMachine(request: APIRequestContext, token: string): Promise<AssetRecord> {
@@ -156,12 +166,12 @@ async function registerMachine(request: APIRequestContext, token: string): Promi
   });
   expect(created.status()).toBe(201);
   const asset = (await created.json()) as AssetRecord;
-  registered.add(asset.id);
+  registered.set(asset.id, token);
   return read(request, token, asset.id);
 }
 
-async function retireRegistered(request: APIRequestContext, token: string): Promise<void> {
-  for (const id of registered) {
+async function retireRegistered(request: APIRequestContext): Promise<void> {
+  for (const [id, token] of registered) {
     const asset = await read(request, token, id);
     if (asset.status !== 'DECOMMISSIONED') {
       const retired = await request.post(gatewayUrl(`/v1/assets/${id}/decommission`), {
@@ -229,11 +239,11 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   let token: string;
 
   test.beforeEach(async ({ context }) => {
-    token = (await installLiveSession(context, 'orgAdmin')).accessToken;
+    token = (await installLiveSession(context, 'orgAdminB')).accessToken;
   });
 
   test.afterEach(async ({ request }) => {
-    await retireRegistered(request, token);
+    await retireRegistered(request);
   });
 
   test('records a policy, shows it as in force on the server’s clock, and a calendar day never moves by one', async ({
@@ -552,6 +562,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
     isMobile,
   }) => {
     test.skip(isMobile, MOBILE_BUDGET);
+    // The operator belongs to ORG-DEH-0001, so the machine must too: its owner
+    // here is that organization's administrator, not this spec's usual one.
+    const token = (await installLiveSession(context, 'orgAdmin')).accessToken;
     const asset = await registerMachine(request, token);
     const number = `E2E-VIEW-${randomUUID().slice(0, 10)}`;
     const recorded = await request.post(gatewayUrl(`/v1/assets/${asset.id}/insurance-policies`), {
@@ -609,9 +622,8 @@ test.describe('another organization’s machine: records, through the portal and
   // Pure tenant-isolation checks with no layout in them: once, at desktop size.
   test.skip(({ isMobile }) => isMobile, 'identical at the phone’s size, and written once');
 
-  test.afterEach(async ({ context, request }) => {
-    const owner = (await installLiveSession(context, 'orgAdmin')).accessToken;
-    await retireRegistered(request, owner);
+  test.afterEach(async ({ request }) => {
+    await retireRegistered(request);
   });
 
   test('is answered as a machine that does not exist, for both reads and both writes', async ({
@@ -619,10 +631,10 @@ test.describe('another organization’s machine: records, through the portal and
     page,
     request,
   }) => {
-    const owner = (await installLiveSession(context, 'orgAdmin')).accessToken;
+    const owner = (await installLiveSession(context, 'orgAdminB')).accessToken;
     const asset = await registerMachine(request, owner);
     const missing = 'AST_01J00000000000000000000999';
-    const other = (await installLiveSession(context, 'orgAdminB')).accessToken;
+    const other = (await installLiveSession(context, 'orgAdmin')).accessToken;
 
     // Something of the owner's own to protect.
     const number = `E2E-OWN-${randomUUID().slice(0, 10)}`;
