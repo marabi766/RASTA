@@ -35,10 +35,21 @@ function harness(
   const calls: string[] = [];
   const marked = new Set<string>();
   const marks: string[] = [];
+  /** Marks written in the transaction now open; rolled back if it throws, as in PostgreSQL. */
+  let pending: string[] = [];
 
   const repository = {
     async transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
-      return fn({});
+      pending = [];
+      try {
+        return await fn({});
+      } catch (error) {
+        for (const eventId of pending) {
+          marks.splice(marks.lastIndexOf(eventId), 1);
+          marked.delete(eventId);
+        }
+        throw error;
+      }
     },
     async markEventProcessed(_tx: unknown, eventId: string): Promise<boolean> {
       marks.push(eventId);
@@ -46,6 +57,7 @@ function harness(
         if (marked.has(eventId)) return false;
         marked.add(eventId);
       }
+      pending.push(eventId);
       return !options.already;
     },
     async findTransferFence() {
@@ -533,6 +545,93 @@ describe('asset reference replica', () => {
       });
       expect(marks).toEqual([]);
       expect(upserts).toHaveLength(0);
+    });
+  });
+
+  describe("an ordinary state event must come from the replica's owner (review #205 r2)", () => {
+    const A = 'ORG-DEH-0001';
+    const B = 'ORG-DEH-0002';
+    const statusChanged = (tenant: string) =>
+      envelope(
+        'ASSET_STATUS_CHANGED',
+        {
+          assetId: 'AST-SEED-0001',
+          organizationId: tenant,
+          previousStatus: 'ACTIVE',
+          newStatus: 'OUT_OF_SERVICE',
+          reason: 'آزمون',
+        },
+        tenant,
+      );
+
+    it("dead-letters B's status change for A's machine: A's row unchanged, no marker; A's corrected event applies once", async () => {
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: A },
+        ledger: true,
+      });
+
+      await expect(consumer.handle(statusChanged(B))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'ASSET_STATUS_CHANGED evt-ASSET_STATUS_CHANGED names a tenant that does not own the asset: owner_mismatch',
+      });
+      expect(upserts).toHaveLength(0);
+      expect(marks).toEqual([]);
+
+      await consumer.handle(statusChanged(A));
+      await consumer.handle(statusChanged(A));
+      expect(upserts).toHaveLength(1);
+      expect(upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        organizationId: A,
+        status: 'OUT_OF_SERVICE',
+      });
+    });
+
+    it.each([
+      ['ASSET_ACTIVATED', { commissionedAt: '2026-09-01T00:00:00.000Z' }],
+      ['ASSET_DECOMMISSIONED', { reason: 'x', decommissionedAt: '2026-09-01T00:00:00.000Z' }],
+    ])("dead-letters B's %s for A's machine, writing nothing", async (eventName, fields) => {
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: A },
+        ledger: true,
+      });
+
+      await expect(
+        consumer.handle(
+          envelope(eventName, { assetId: 'AST-SEED-0001', organizationId: B, ...fields }, B),
+        ),
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: expect.stringMatching(/owner_mismatch$/),
+      });
+      expect(upserts).toHaveLength(0);
+      expect(marks).toEqual([]);
+    });
+
+    it("still moves A's machine to B on ASSET_TRANSFERRED", async () => {
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: A },
+        ledger: true,
+      });
+
+      await consumer.handle(
+        envelope(
+          'ASSET_TRANSFERRED',
+          {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: A,
+            toOrganizationId: B,
+            transferredAt: '2026-09-27T10:00:00.000Z',
+            reason: 'x',
+          },
+          B,
+        ),
+      );
+
+      expect(marks).toEqual(['evt-ASSET_TRANSFERRED']);
+      expect(upserts[0]).toMatchObject({ organizationId: B, status: 'REGISTERED' });
     });
   });
 });

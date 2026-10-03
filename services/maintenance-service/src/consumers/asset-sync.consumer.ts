@@ -4,6 +4,7 @@ import {
   UnprocessableEventError,
   invalidPayloadError,
   isRetryDelivery,
+  replicaOwnerMismatchError,
   requireEnvelopeTenant,
   type EventConsumer,
   type EventDelivery,
@@ -108,6 +109,17 @@ const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
 const CONSUMER_NAME = 'maintenance-service.asset-sync';
 
 /**
+ * The ordinary state events, which change a row the event's tenant must own
+ * (review #205 r2): every projected event but the two that set the owner —
+ * `ASSET_CREATED` and `ASSET_TRANSFERRED`, both held to the envelope tenant.
+ */
+const OWNER_CHECKED_EVENTS: ReadonlySet<string> = new Set([
+  CONSUMED_EVENTS.ASSET_ACTIVATED,
+  CONSUMED_EVENTS.ASSET_STATUS_CHANGED,
+  CONSUMED_EVENTS.ASSET_DECOMMISSIONED,
+]);
+
+/**
  * Builds the broker-facing half.
  *
  * Passed in rather than constructed here so this class stays a plain
@@ -205,6 +217,21 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // the one a new request takes. This order everywhere.
         await this.repository.lockAssetRef(tx, assetId);
         const current = await this.repository.findAssetRef(assetId, tx);
+
+        // An ordinary state event changes a row its tenant must own. One whose
+        // (envelope and payload) tenant is not the replica's owner is refused
+        // here, under the lock, before any write; the throw rolls the marker
+        // back with the transaction, so the corrected event with the same id
+        // is still applied (review #205 r2). A `.retry` delivery is not
+        // checked here: it writes asset-service's answer, asked as this tenant.
+        if (
+          !replayed &&
+          current &&
+          OWNER_CHECKED_EVENTS.has(envelope.eventName) &&
+          current.organizationId !== organizationId
+        ) {
+          throw replicaOwnerMismatchError(envelope);
+        }
 
         let snapshot: AssetSnapshot | undefined;
         if (replayed) {

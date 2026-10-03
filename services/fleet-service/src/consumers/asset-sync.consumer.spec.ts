@@ -1338,4 +1338,190 @@ describe('AssetSyncConsumer', () => {
       expect(CONSUMED_PAYLOADS.INSURANCE_EXPIRED.fields).toEqual(['assetId', 'organizationId']);
     });
   });
+
+  describe("an ordinary state event must come from the replica's owner (review #205 r2)", () => {
+    const A = 'ORG-DEH-0001';
+    const B = 'ORG-DEH-0002';
+    const ownedByA = {
+      id: 'AST-SEED-0001',
+      organizationId: A,
+      status: 'ACTIVE',
+      inspectionBlockedAt: null,
+      insuranceLapsedCoverages: ['THIRD_PARTY'],
+      insuranceLapsedAt: new Date('2026-09-01T00:00:00.000Z'),
+      insuranceCover: {},
+    };
+
+    /**
+     * A ledger that behaves like the real transaction: a marker written in a
+     * transaction that throws is rolled back with it.
+     */
+    function transactionalLedger(repository: FleetRepository): Set<string> {
+      const marked = new Set<string>();
+      let pending: string[] = [];
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          pending.push(eventId);
+          return true;
+        },
+      );
+      (repository.transaction as jest.Mock).mockImplementation(
+        async (fn: (tx: unknown) => Promise<unknown>) => {
+          pending = [];
+          try {
+            return await fn({});
+          } catch (error) {
+            for (const eventId of pending) marked.delete(eventId);
+            throw error;
+          }
+        },
+      );
+      return marked;
+    }
+
+    const statusChanged = (tenant: string) =>
+      envelope({
+        eventId: 'EVT-OWNER-1',
+        eventName: 'ASSET_STATUS_CHANGED',
+        tenantId: tenant,
+        payload: {
+          assetId: 'AST-SEED-0001',
+          organizationId: tenant,
+          previousStatus: 'ACTIVE',
+          newStatus: 'OUT_OF_SERVICE',
+          reason: 'آزمون',
+        },
+      });
+
+    it("dead-letters B's status change for A's machine: A's row unchanged, no marker; A's corrected event applies once", async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      const marked = transactionalLedger(repository);
+
+      await expect(consumer.handle(statusChanged(B))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'ASSET_STATUS_CHANGED EVT-OWNER-1 names a tenant that does not own the asset: owner_mismatch',
+      });
+      expect(recorded.upserts).toHaveLength(0);
+      expect(marked.size).toBe(0);
+
+      await consumer.handle(statusChanged(A));
+      await consumer.handle(statusChanged(A));
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        organizationId: A,
+        status: 'OUT_OF_SERVICE',
+      });
+    });
+
+    it.each([
+      ['ASSET_UPDATED', { changedFields: ['name'] }],
+      ['ASSET_ACTIVATED', { commissionedAt: '2026-09-01T00:00:00.000Z' }],
+      ['ASSET_DECOMMISSIONED', { reason: 'x', decommissionedAt: '2026-09-01T00:00:00.000Z' }],
+      ['MAINTENANCE_STARTED', { requestId: 'MNT-1' }],
+      ['MAINTENANCE_COMPLETED', { requestId: 'MNT-1' }],
+    ])("dead-letters B's %s for A's machine, writing nothing", async (eventName, fields) => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      const marked = transactionalLedger(repository);
+
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName,
+            tenantId: B,
+            payload: { assetId: 'AST-SEED-0001', organizationId: B, ...fields },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: expect.stringMatching(/owner_mismatch$/),
+      });
+      expect(recorded.upserts).toHaveLength(0);
+      expect(marked.size).toBe(0);
+    });
+
+    it('still applies the previous owner’s insurance events to the vehicle after a transfer (docs/24 Q-66)', async () => {
+      // The machine now belongs to B; A's policy follows the vehicle.
+      const { consumer, recorded, repository } = buildConsumer({
+        existing: { ...ownedByA, organizationId: B },
+      });
+      transactionalLedger(repository);
+
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-Q66-1',
+          eventName: 'INSURANCE_RECORDED',
+          tenantId: A,
+          payload: {
+            assetId: 'AST-SEED-0001',
+            organizationId: A,
+            policyId: 'INS-A',
+            insurerName: 'بیمه',
+            coverage: 'THIRD_PARTY',
+            validFrom: '2026-01-01T00:00:00.000Z',
+            validTo: '2999-01-01T00:00:00.000Z',
+          },
+        }),
+      );
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-Q66-2',
+          eventName: 'INSURANCE_EXPIRED',
+          tenantId: A,
+          payload: { assetId: 'AST-SEED-0001', organizationId: A, coverage: 'COLLISION' },
+        }),
+      );
+
+      expect(recorded.upserts).toHaveLength(2);
+      expect(recorded.upserts.map((row) => row.organizationId)).toEqual([B, B]);
+      expect(recorded.upserts[1]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY', 'COLLISION']);
+    });
+
+    it('still withdraws the machine on a failed inspection whatever tenant reports it', async () => {
+      // A withdrawal only ever takes the machine off dispatch; refusing it
+      // would leave the machine dispatchable until the replay.
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      transactionalLedger(repository);
+
+      await consumer.handle(
+        envelope({
+          eventName: 'INSPECTION_FAILED',
+          tenantId: B,
+          payload: { assetId: 'AST-SEED-0001', organizationId: B, inspectionId: 'INP-1' },
+        }),
+      );
+
+      expect(recorded.upserts[0]).toMatchObject({
+        organizationId: A,
+        inspectionBlockedReason: 'The most recent technical inspection failed',
+      });
+    });
+
+    it("still moves A's machine to B on ASSET_TRANSFERRED", async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      const marked = transactionalLedger(repository);
+
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-TRANSFER-9',
+          eventName: 'ASSET_TRANSFERRED',
+          tenantId: B,
+          payload: {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: A,
+            toOrganizationId: B,
+            transferredAt: '2026-09-27T10:00:00.000Z',
+            reason: 'x',
+          },
+        }),
+      );
+
+      expect(marked.has('EVT-TRANSFER-9')).toBe(true);
+      expect(recorded.upserts[0]).toMatchObject({ organizationId: B, status: 'REGISTERED' });
+    });
+  });
 });

@@ -204,6 +204,11 @@ COMMIT ──► Commit Offset
 >    `tenantMismatchError` (کد بستهٔ `tenant_mismatch`، بی‌نام هیچ‌یک از دو سازمان). هر دو `VALIDATION_FAILED`، از راه
 >    `requireEnvelopeTenant` در `@rasta/nest-common`. `timeline` (asset) از پیش فقط Tenant Envelope را می‌خواند و بی آن
 >    `missingTenantError` می‌دهد.
+>    رویداد وضعیتِ عادی (هر رویداد وضعیت جز `ASSET_CREATED` و `ASSET_TRANSFERRED` که مالک را تعیین می‌کنند) در همین دو
+>    `asset-sync`، پس از قفل و خواندن ردیف Replica، اگر Tenant رویداد مالک آن ردیف نباشد با `replicaOwnerMismatchError` (کد
+>    بستهٔ `owner_mismatch`) رد می‌شود؛ Transaction برمی‌گردد و نشانگری نمی‌ماند (بازبینی #205 r2). استثناها همان‌اند که بودند:
+>    رویدادهای بیمهٔ مالک پیشین پس از انتقال در fleet (docs/24 Q-66)، `INSPECTION_FAILED` که فقط دارایی را از اعزام خارج
+>    می‌کند، و تحویل از `.retry` که پاسخ مالک داده را به‌عنوان Tenant رویداد می‌نویسد.
 > 2. **میدان‌های قرارداد تولیدکننده که Projection به کار می‌برد**، به‌تفکیک نام رویداد: مثلاً `ASSET_STATUS_CHANGED` بی
 >    `newStatus` (وگرنه دارایی خارج از سرویس در fleet قابل اعزام می‌ماند)، `ASSET_CREATED` بی `name`/`type`/`assetTag`/`status`.
 >    رویدادهای ایمنی `INSPECTION_FAILED` و `INSURANCE_EXPIRED` عمداً فقط به دارایی نیاز دارند: رد کردنشان دارایی را تا بازپخش

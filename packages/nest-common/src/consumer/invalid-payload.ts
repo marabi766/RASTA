@@ -115,3 +115,25 @@ export function requireEnvelopeTenant(
   }
   return tenant;
 }
+
+/**
+ * The refusal for a KNOWN state event whose tenant is not the owner of the
+ * replica row it would change (review #205 r2).
+ *
+ * The envelope tenant (already agreeing with the payload) names one
+ * organization; the replica, read under its lock, says the asset belongs to
+ * another. Applied, the event would change the other organization's row and be
+ * marked processed. It is refused as `VALIDATION_FAILED` from inside the
+ * consumer's transaction, so the marker rolls back with it and a corrected
+ * event with the same id is still applied. The message carries the event name
+ * and id and the closed code `owner_mismatch` — never either organization
+ * (S-09).
+ */
+export function replicaOwnerMismatchError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+): UnprocessableEventError {
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} names a tenant that does not own the asset: owner_mismatch`,
+  );
+}

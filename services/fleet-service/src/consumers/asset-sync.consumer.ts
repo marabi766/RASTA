@@ -5,6 +5,7 @@ import {
   createSystemContext,
   invalidPayloadError,
   isRetryDelivery,
+  replicaOwnerMismatchError,
   requireEnvelopeTenant,
   runWithContext,
   type EventConsumer,
@@ -277,6 +278,22 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_COMPLETED,
 ]);
 
+/**
+ * The ordinary state events, which change a row the event's tenant must own
+ * (review #205 r2): every state event but the two that set the owner —
+ * `ASSET_CREATED` and `ASSET_TRANSFERRED`, both held to the envelope tenant.
+ * The safety events are not here: an insurance event from the previous owner
+ * after a transfer applies to the vehicle (docs/24 Q-66), and a failed
+ * inspection only ever withdraws the machine.
+ */
+const OWNER_CHECKED_EVENTS: ReadonlySet<string> = new Set(
+  [...STATE_EVENTS].filter(
+    (eventName) =>
+      eventName !== CONSUMED_EVENTS.ASSET_CREATED &&
+      eventName !== CONSUMED_EVENTS.ASSET_TRANSFERRED,
+  ),
+);
+
 /** The events whose in-maintenance flag maintenance-service owns. */
 const MAINTENANCE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_STARTED,
@@ -437,6 +454,21 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // at once must not each build on a copy that lacks the other's change.
         await this.repository.lockAssetRef(tx, assetId);
         const current = await this.repository.findAssetRef(assetId, tx);
+
+        // An ordinary state event changes a row its tenant must own. One whose
+        // (envelope and payload) tenant is not the replica's owner is refused
+        // here, under the lock, before any write; the throw rolls the marker
+        // back with the transaction, so the corrected event with the same id
+        // is still applied (review #205 r2). A `.retry` delivery is not
+        // checked here: it writes the owners' answer, asked as this tenant.
+        if (
+          !replayed &&
+          current &&
+          OWNER_CHECKED_EVENTS.has(envelope.eventName) &&
+          current.organizationId !== organizationId
+        ) {
+          throw replicaOwnerMismatchError(envelope);
+        }
 
         // An insurance event from the previous owner's tenant, consumed after the
         // transfer, is applied to the row as it now stands, under its current

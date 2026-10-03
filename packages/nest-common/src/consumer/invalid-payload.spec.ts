@@ -4,6 +4,7 @@ import { UnprocessableEventError } from './event-consumer';
 import {
   invalidPayloadError,
   missingTenantError,
+  replicaOwnerMismatchError,
   requireEnvelopeTenant,
   tenantMismatchError,
 } from './invalid-payload';
@@ -122,5 +123,20 @@ describe('requireEnvelopeTenant', () => {
       'ASSET_CREATED EVT-2 payload organization differs from its envelope tenant: tenant_mismatch',
     );
     expect((refusal as Error).message).not.toContain('ORG-');
+  });
+});
+
+describe('replicaOwnerMismatchError', () => {
+  it('is a VALIDATION_FAILED refusal with a closed code, naming the event only', () => {
+    const error = replicaOwnerMismatchError({
+      eventName: 'ASSET_STATUS_CHANGED',
+      eventId: 'EVT-3',
+    });
+
+    expect(error).toBeInstanceOf(UnprocessableEventError);
+    expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+    expect(error.message).toBe(
+      'ASSET_STATUS_CHANGED EVT-3 names a tenant that does not own the asset: owner_mismatch',
+    );
   });
 });

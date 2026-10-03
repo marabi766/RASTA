@@ -145,6 +145,7 @@ export { isRetryDelivery, originalDelivery } from './consumer/original-delivery'
 export {
   invalidPayloadError,
   missingTenantError,
+  replicaOwnerMismatchError,
   requireEnvelopeTenant,
   tenantMismatchError,
 } from './consumer/invalid-payload';
