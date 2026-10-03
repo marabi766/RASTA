@@ -82,7 +82,12 @@ describe('tenant isolation — tenders', () => {
       ],
       [
         'POST /v1/tenders/{id}/cancel',
-        () => w.tenders.cancel(tenderId, { expectedVersion: 1, reason: 'Cross-tenant attempt' }),
+        () =>
+          w.tenders.cancel(tenderId, {
+            expectedVersion: 1,
+            reason: 'Cross-tenant attempt',
+            reasonCode: 'OWNER_REQUEST',
+          }),
       ],
       [
         'POST /v1/projects/{id}/tenders (a tender under another organization’s project)',

@@ -1,6 +1,6 @@
 import type { PolicyAuthorRole } from '../access/access';
 import type { Approval } from '../generated/prisma';
-import type { ApprovalView, PolicyView } from './dto';
+import type { ApprovalBindingView, ApprovalView, PolicyView } from './dto';
 import type { PolicyWithSteps, ProjectBrief } from './approval.repository';
 import type { ApprovalStateName, PolicyStateName, WorkflowKey } from './approval.state-machine';
 
@@ -48,10 +48,16 @@ export function toPolicyView(row: PolicyWithSteps): PolicyView {
   };
 }
 
-export function toApprovalView(row: Approval, project: ProjectBrief): ApprovalView {
+export function toApprovalView(
+  row: Approval,
+  project: ProjectBrief,
+  request: ApprovalBindingView | null = null,
+): ApprovalView {
   return {
     id: row.id,
     projectId: row.projectId,
+    tenderId: row.tenderId,
+    request,
     projectOrganizationId: row.organizationId,
     workflowKey: row.workflowKey as WorkflowKey,
     round: row.round,

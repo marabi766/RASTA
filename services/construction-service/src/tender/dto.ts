@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { cursorPaginationSchema } from '@rasta/contracts';
-import { TENDER_STATES } from './tender.state-machine';
+import { CANCELLATION_CODES, TENDER_STATES } from './tender.state-machine';
 
 /**
  * The request and response shapes of the tender aggregate, validated at the
@@ -133,6 +133,11 @@ export const cancelTenderSchema = z
   .object({
     expectedVersion,
     reason: statedReason,
+    /**
+     * The closed reason code the event carries. `NO_QUALIFIED_BID` is for an EVALUATING tender in which no
+     * bid was qualified (checked under the lock); every other cancellation is `OWNER_REQUEST`.
+     */
+    reasonCode: z.enum(CANCELLATION_CODES).default('OWNER_REQUEST'),
   })
   .strict();
 

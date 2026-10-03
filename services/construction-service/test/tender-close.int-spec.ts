@@ -14,6 +14,9 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  cancelApproved,
+  liftApprovalGuard,
+  restoreApprovalGuard,
 } from './helpers';
 
 /**
@@ -119,6 +122,8 @@ describe('tender close sweeper', () => {
     }
   };
 
+  // This suite moves statuses by raw SQL to probe other guards; the approval guard has its own suite.
+  beforeAll(liftApprovalGuard);
   beforeAll(async () => {
     w = wire();
     await loadStanding(w);
@@ -129,6 +134,7 @@ describe('tender close sweeper', () => {
     w.clock.onDecision = undefined;
   });
 
+  afterAll(restoreApprovalGuard);
   afterAll(async () => {
     await cleanup(w.prisma, organizations);
     await w.close();
@@ -345,7 +351,7 @@ describe('tender close sweeper', () => {
 
       // The owner cancels while the sweeper holds the claim: it must not be rejected.
       const cancelled = await asAdmin(owner, () =>
-        w.tenders.cancel(tenderId, {
+        cancelApproved(w, tenderId, {
           expectedVersion: claimed.version,
           reason: 'Funding withdrawn',
         }),

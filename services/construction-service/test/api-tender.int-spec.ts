@@ -8,7 +8,7 @@ import {
   systemAdminWithoutTenant,
   type ApiHarness,
 } from './api-helpers';
-import { PROJECT, approvedProject, cleanup, wire, type Wiring } from './helpers';
+import { PROJECT, approvedProject, cleanup, ensureGatePolicy, wire, type Wiring } from './helpers';
 
 /**
  * The tender HTTP surface, through the real `AppModule` (real guards, real
@@ -53,6 +53,7 @@ describe('tender API', () => {
       ['get', '/v1/tenders/TND_x', {}],
       ['patch', '/v1/tenders/TND_x', { expectedVersion: 1, title: 'Renamed tender' }],
       ['post', '/v1/tenders/TND_x/cancel', { expectedVersion: 1, reason: 'Funding was withdrawn' }],
+      ['get', '/v1/tenders/TND_x/approvals', {}],
     ];
     for (const [method, path, body] of routes) {
       const call = (token?: string) => {
@@ -117,10 +118,32 @@ describe('tender API', () => {
     expect(stale.status).toBe(409);
     expect(stale.body.code).toBe('OPTIMISTIC_LOCK_FAILED');
 
-    const cancelled = await http()
-      .post(`/v1/tenders/${id}/cancel`)
-      .set(as(token))
-      .send({ expectedVersion: 2, reason: 'Funding was withdrawn' });
+    // Every cancellation is behind the gate: no policy, no cancellation (422); with one, 202, an approval by
+    // someone else, and the same command cancels.
+    const cancel = (as_: string) =>
+      http()
+        .post(`/v1/tenders/${id}/cancel`)
+        .set(as(as_))
+        .send({ expectedVersion: 2, reason: 'Funding was withdrawn' });
+    const ungated = await cancel(token);
+    expect(ungated.status).toBe(422);
+    expect(ungated.body.message).toContain('APPROVAL_POLICY_REQUIRED');
+    await ensureGatePolicy(w, a, 'tender.cancellation');
+    const asked = await cancel(token);
+    expect(asked.status).toBe(202);
+    expect(asked.body).toMatchObject({ workflowKey: 'tender.cancellation', status: 'PENDING' });
+    const stepId = asked.body.steps[0].approvalId as string;
+    const step = await http().get(`/v1/approvals/${stepId}`).set(as(token));
+    expect(step.body.request.cancellation).toEqual({
+      reason: 'Funding was withdrawn',
+      reasonCode: 'OWNER_REQUEST',
+    });
+    const granted = await http()
+      .post(`/v1/approvals/${stepId}/decision`)
+      .set(as(orgAdmin(a)))
+      .send({ decision: 'GRANT', expectedVersion: step.body.version });
+    expect(granted.status).toBe(200);
+    const cancelled = await cancel(token);
     expect(cancelled.status).toBe(200);
     expect(cancelled.body).toMatchObject({
       status: 'CANCELLED',

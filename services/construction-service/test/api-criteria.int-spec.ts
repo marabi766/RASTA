@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { actor, apiTenant, auditorActor, orgAdmin, startApi, type ApiHarness } from './api-helpers';
-import { approvedProject, cleanup, wire, type Wiring } from './helpers';
+import { approvedProject, asAdmin, cancelApproved, cleanup, wire, type Wiring } from './helpers';
 
 /**
  * The criteria HTTP surface through the real `AppModule`: closed without a
@@ -109,10 +109,10 @@ describe('criteria API', () => {
       .send({ expectedVersion: 1, criteria: WHOLE });
     expect(stale.status).toBe(409);
 
-    await http()
-      .post(`/v1/tenders/${tenderId}/cancel`)
-      .set(as(token))
-      .send({ expectedVersion: 2, reason: 'Funding was withdrawn' });
+    // Cancelling is behind the approval gate (Q-84): through it, as the owner's administrator.
+    await asAdmin(a, () =>
+      cancelApproved(w, tenderId, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
+    );
     const late = await http()
       .put(`/v1/tenders/${tenderId}/criteria`)
       .set(as(token))

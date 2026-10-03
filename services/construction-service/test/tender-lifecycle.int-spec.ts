@@ -11,6 +11,8 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  cancelApproved,
+  approveCancellation,
 } from './helpers';
 
 /**
@@ -296,7 +298,7 @@ describe('tender lifecycle', () => {
           w.tenders.update(tender.id, { expectedVersion: 2, title: 'Edited' }),
         );
         await asAdmin(a, () =>
-          w.tenders.cancel(tender.id, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
+          cancelApproved(w, tender.id, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
         );
         expect(spy).toHaveBeenCalled();
         // Every read goes through a transaction's client; none through the pool's.
@@ -309,7 +311,7 @@ describe('tender lifecycle', () => {
     it('refuses an edit once cancelled', async () => {
       const { a, tender } = await withTender();
       await asAdmin(a, () =>
-        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
 
       await expect(
@@ -323,7 +325,7 @@ describe('tender lifecycle', () => {
       const { a, project, tender } = await withTender();
 
       const cancelled = await asAdmin(a, () =>
-        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
 
       expect(cancelled).toMatchObject({
@@ -338,7 +340,8 @@ describe('tender lifecycle', () => {
       expect(event).toMatchObject({
         aggregateType: 'Tender',
         partitionKey: tender.id,
-        streamSeq: 2n,
+        // TENDER_CREATED, then the gate's request, grant and execution, then this.
+        streamSeq: 5n,
       });
       expect(payloadOf(event)).toMatchObject({
         tenderId: tender.id,
@@ -352,12 +355,12 @@ describe('tender lifecycle', () => {
     it('is terminal: no second cancel', async () => {
       const { a, tender } = await withTender();
       await asAdmin(a, () =>
-        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
 
       await expect(
         asAdmin(a, () =>
-          w.tenders.cancel(tender.id, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
+          cancelApproved(w, tender.id, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
         ),
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
     });
@@ -365,13 +368,16 @@ describe('tender lifecycle', () => {
     it('lets exactly one of two concurrent cancellations win', async () => {
       const { a, tender } = await withTender();
 
+      // Approved first: the race is between the two commands, not between two approvals.
+      const body = {
+        expectedVersion: 1,
+        reason: 'Funding was withdrawn',
+        reasonCode: 'OWNER_REQUEST' as const,
+      };
+      await asAdmin(a, () => approveCancellation(w, tender.id, body));
       const results = await Promise.allSettled([
-        asAdmin(a, () =>
-          w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'First cancellation' }),
-        ),
-        asAdmin(a, () =>
-          w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Second cancellation' }),
-        ),
+        asAdmin(a, () => w.tenders.cancel(tender.id, body)),
+        asAdmin(a, () => w.tenders.cancel(tender.id, body)),
       ]);
 
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -385,11 +391,15 @@ describe('tender lifecycle', () => {
     it('serialises an edit with a concurrent cancellation: one applies, the other is refused', async () => {
       const { a, tender } = await withTender();
 
+      const body = {
+        expectedVersion: 1,
+        reason: 'Funding was withdrawn',
+        reasonCode: 'OWNER_REQUEST' as const,
+      };
+      await asAdmin(a, () => approveCancellation(w, tender.id, body));
       const [update, cancel] = await Promise.allSettled([
         asAdmin(a, () => w.tenders.update(tender.id, { expectedVersion: 1, title: 'Edited' })),
-        asAdmin(a, () =>
-          w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
-        ),
+        asAdmin(a, () => w.tenders.cancel(tender.id, body)),
       ]);
 
       expect([update.status, cancel.status].filter((s) => s === 'fulfilled')).toHaveLength(1);
@@ -414,7 +424,7 @@ describe('tender lifecycle', () => {
       expect((await asAdmin(a, () => w.projects.get(project.id))).status).toBe('APPROVED');
 
       await asAdmin(a, () =>
-        w.tenders.cancel(tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, tender.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
       await expect(
         asAdmin(a, () =>
@@ -462,7 +472,7 @@ describe('tender lifecycle', () => {
       const t2 = await asAdmin(a, () => w.tenders.create(one.id, { ...TENDER, title: 'Two' }));
       const t3 = await asAdmin(a, () => w.tenders.create(one.id, { ...TENDER, title: 'Three' }));
       await asAdmin(a, () =>
-        w.tenders.cancel(t2.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
+        cancelApproved(w, t2.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
       );
 
       const page = await asAdmin(a, () => w.tenders.list({ limit: 2 }));

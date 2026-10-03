@@ -9,11 +9,11 @@ import { TOTAL_WEIGHT_BP } from './criteria.dto';
  * reaches an error. All reasons are reported at once: an owner fixing a draft
  * should not need one round trip per mistake.
  *
- * The approval gate (`tender.publication`, Q-84) is a fact like the rest and fails
- * **closed**: no active policy refuses with `APPROVAL_POLICY_REQUIRED`, and while
- * the approval round is not wired (PR 11) a policy in force still refuses with
- * `APPROVAL_REQUIRED` — publishing never goes ahead on an approval nobody gave.
- * Not here: who may publish (the service's authorization).
+ * The approval gate (`tender.publication`, Q-84) fails **closed**: no active policy
+ * refuses with `APPROVAL_POLICY_REQUIRED`. With a policy in force the rest of the gate
+ * — the request, who decides it, its single use — is `TenderApprovalGate`'s, and a
+ * publication that could not succeed is never even asked for. Not here: who may
+ * publish (the service's authorization).
  */
 
 export const PUBLICATION_REFUSALS = [
@@ -32,8 +32,6 @@ export const PUBLICATION_REFUSALS = [
   'INVITATION_REQUIRED',
   /** No active `tender.publication` approval policy: nothing may be published (Q-84, fail closed). */
   'APPROVAL_POLICY_REQUIRED',
-  /** A policy is in force but no approval round has granted this publication (round wiring: PR 11). */
-  'APPROVAL_REQUIRED',
 ] as const;
 
 export type PublicationRefusal = (typeof PUBLICATION_REFUSALS)[number];
@@ -49,12 +47,8 @@ export interface PublicationFacts {
   readonly criteriaCount: number;
   readonly totalWeightBp: number;
   readonly invitationCount: number;
-  /**
-   * The approval gate: `NO_POLICY` (none in force), `NOT_GRANTED` (a policy is in
-   * force and no round has approved this publication), or `GRANTED`. Until PR 11
-   * only the internal `publishApproved` path says `GRANTED`.
-   */
-  readonly approval: 'NO_POLICY' | 'NOT_GRANTED' | 'GRANTED';
+  /** The approval gate: `NO_POLICY` (none in force), or `POLICY_IN_FORCE` (the round is the gate's). */
+  readonly approval: 'NO_POLICY' | 'POLICY_IN_FORCE';
 }
 
 export function publicationRefusals(facts: PublicationFacts): PublicationRefusal[] {
@@ -84,7 +78,6 @@ export function publicationRefusals(facts: PublicationFacts): PublicationRefusal
   }
 
   if (facts.approval === 'NO_POLICY') refusals.push('APPROVAL_POLICY_REQUIRED');
-  else if (facts.approval === 'NOT_GRANTED') refusals.push('APPROVAL_REQUIRED');
 
   return refusals;
 }

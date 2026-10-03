@@ -4,9 +4,6 @@ import type { TenderAward } from '../generated/prisma';
 import { storedActor } from '../shared/stable-actor';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 
-/** The workflow whose active approval policy would gate an award (Q-84); none can be written yet (PR 11). */
-export const AWARD_WORKFLOW_KEY = 'tender.award';
-
 /**
  * What awarding a tender reads and writes (ADR-067 § 3).
  *
@@ -50,14 +47,6 @@ export class AwardRepository {
         storedActor(row.evaluatorId, row.evaluatorIssuer, row.evaluatorSubject),
       ),
     ];
-  }
-
-  /** Whether the organization in context has an ACTIVE `tender.award` approval policy (Q-84). Only ACTIVE counts. */
-  async hasActiveAwardPolicy(tx: ExtendedPrismaClient): Promise<boolean> {
-    const count = await tx.approvalPolicy.count({
-      where: { workflowKey: AWARD_WORKFLOW_KEY, status: 'ACTIVE' },
-    });
-    return count > 0;
   }
 
   async insertAward(

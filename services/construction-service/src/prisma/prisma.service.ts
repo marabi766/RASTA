@@ -39,6 +39,8 @@ export const TENANT_SCOPED_MODELS = [
   'BidEvaluationScore',
   'TenderAward',
   'TenderAwardStandingCheck',
+  'TenderApprovalRequest',
+  'TenderApprovalLog',
   'ContractorStanding',
   'ContractorSuspension',
 ] as const;

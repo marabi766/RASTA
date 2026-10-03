@@ -59,6 +59,8 @@ export interface ApprovalInput {
   id: string;
   organizationId: string;
   projectId: string;
+  /** Set exactly for a tender workflow (`ck_approval_tender_scope`). */
+  tenderId: string | null;
   workflowKey: WorkflowKey;
   round: number;
   stepOrder: number;
@@ -413,7 +415,13 @@ export class ApprovalRepository {
   /** The next undecided step of a round, if any. */
   async nextQueued(
     tx: ExtendedPrismaClient,
-    scope: { organizationId: string; projectId: string; workflowKey: string; round: number },
+    scope: {
+      organizationId: string;
+      projectId: string;
+      tenderId: string | null;
+      workflowKey: string;
+      round: number;
+    },
   ): Promise<Approval | null> {
     return runUnscoped(AUTHORITY_REASON, () =>
       tx.approval.findFirst({
@@ -423,10 +431,18 @@ export class ApprovalRepository {
     );
   }
 
-  /** Ends a round: every undecided step of it becomes SUPERSEDED. */
+  /**
+   * Ends a round: every undecided step of it becomes SUPERSEDED. A project's rounds (`tenderId`
+   * null) and a tender's are kept apart: ending one kind never touches the other.
+   */
   async supersedeOpen(
     tx: ExtendedPrismaClient,
-    scope: { organizationId: string; projectId: string; workflowKey?: string },
+    scope: {
+      organizationId: string;
+      projectId: string;
+      tenderId: string | null;
+      workflowKey?: string;
+    },
     at: Date,
   ): Promise<number> {
     const result = await runUnscoped(AUTHORITY_REASON, () =>
@@ -434,6 +450,7 @@ export class ApprovalRepository {
         where: {
           organizationId: scope.organizationId,
           projectId: scope.projectId,
+          tenderId: scope.tenderId,
           ...(scope.workflowKey ? { workflowKey: scope.workflowKey } : {}),
           status: { in: ['QUEUED', 'PENDING'] },
         },
@@ -448,7 +465,7 @@ export class ApprovalRepository {
     scope: { organizationId: string; projectId: string; workflowKey: string },
   ): Promise<boolean> {
     const count = await runUnscoped(AUTHORITY_REASON, () =>
-      tx.approval.count({ where: { ...scope, status: 'PENDING' } }),
+      tx.approval.count({ where: { ...scope, tenderId: null, status: 'PENDING' } }),
     );
     return count > 0;
   }

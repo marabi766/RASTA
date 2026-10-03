@@ -45,8 +45,25 @@ import { RastaError } from '@rasta/nest-common';
  * Q-73) — and there is no automatic grant of any kind.
  */
 
-export const WORKFLOW_KEYS = ['project.execution', 'project.completion'] as const;
+/** A project's approvals: the project moves with the round (ADR-063). */
+export const PROJECT_WORKFLOW_KEYS = ['project.execution', 'project.completion'] as const;
+/**
+ * A tender's approvals (CON-002 PR 11, Q-84): publication, award and cancellation. The round is
+ * the same machine; what a granted round does is not move a state but allow ONE command, bound
+ * to what was asked, to run once (`tender_approval_request`).
+ */
+export const TENDER_WORKFLOW_KEYS = [
+  'tender.publication',
+  'tender.award',
+  'tender.cancellation',
+] as const;
+export const WORKFLOW_KEYS = [...PROJECT_WORKFLOW_KEYS, ...TENDER_WORKFLOW_KEYS] as const;
 export type WorkflowKey = (typeof WORKFLOW_KEYS)[number];
+export type TenderWorkflowKey = (typeof TENDER_WORKFLOW_KEYS)[number];
+
+export function isTenderWorkflow(key: string): key is TenderWorkflowKey {
+  return (TENDER_WORKFLOW_KEYS as readonly string[]).includes(key);
+}
 
 export const POLICY_STATES = [
   'DRAFT',

@@ -3,6 +3,10 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
+import {
+  tenderApprovalRequestViewSchema,
+  listTenderApprovalsQuerySchema,
+} from '../tender/tender-approval.dto';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema } from './zod-schema';
 import { ProjectController } from '../project/project.controller';
@@ -43,6 +47,8 @@ import { EvaluationController } from '../tender/evaluation.controller';
 import { EvaluationService } from '../tender/evaluation.service';
 import { AwardController } from '../tender/award.controller';
 import { AwardService } from '../tender/award.service';
+import { TenderApprovalController } from '../tender/tender-approval.controller';
+import { TenderApprovalService } from '../tender/tender-approval.service';
 import { awardTenderSchema, tenderAwardViewSchema } from '../tender/award.dto';
 import {
   evaluatedViewSchema,
@@ -160,7 +166,15 @@ const cursorPageOf = (item: z.ZodTypeAny) =>
  * written beside the schema rather than derived from the method: the two
  * creations answer `201`, everything else `200`.
  */
-export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.ZodTypeAny }> = {
+export const RESPONSE_BODIES: Record<
+  string,
+  {
+    status: '200' | '201';
+    schema: z.ZodTypeAny;
+    /** A gated command that opened (or found) its approval request answers 202 with it instead (CON-002 PR 11). */
+    accepted?: z.ZodTypeAny;
+  }
+> = {
   'POST /v1/projects': { status: '201', schema: projectViewSchema },
   'GET /v1/projects': { status: '200', schema: cursorPageOf(projectSummaryViewSchema) },
   'GET /v1/projects/{id}': { status: '200', schema: projectViewSchema },
@@ -203,13 +217,25 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/tenders': { status: '200', schema: cursorPageOf(tenderSummaryViewSchema) },
   'GET /v1/tenders/{id}': { status: '200', schema: tenderViewSchema },
   'PATCH /v1/tenders/{id}': { status: '200', schema: tenderViewSchema },
-  'POST /v1/tenders/{id}/cancel': { status: '200', schema: tenderViewSchema },
+  'POST /v1/tenders/{id}/cancel': {
+    status: '200',
+    schema: tenderViewSchema,
+    accepted: tenderApprovalRequestViewSchema,
+  },
   'POST /v1/criteria-templates': { status: '201', schema: criteriaTemplateViewSchema },
   'GET /v1/criteria-templates': { status: '200', schema: cursorPageOf(criteriaTemplateViewSchema) },
   'GET /v1/criteria-templates/{id}': { status: '200', schema: criteriaTemplateViewSchema },
   'PUT /v1/tenders/{id}/criteria': { status: '200', schema: criteriaViewSchema },
   'GET /v1/tenders/{id}/criteria': { status: '200', schema: criteriaViewSchema },
-  'POST /v1/tenders/{id}/publish': { status: '200', schema: tenderViewSchema },
+  'POST /v1/tenders/{id}/publish': {
+    status: '200',
+    schema: tenderViewSchema,
+    accepted: tenderApprovalRequestViewSchema,
+  },
+  'GET /v1/tenders/{id}/approvals': {
+    status: '200',
+    schema: cursorPageOf(tenderApprovalRequestViewSchema),
+  },
   'POST /v1/tenders/{id}/invitations': { status: '201', schema: invitationViewSchema },
   'GET /v1/tenders/{id}/invitations': { status: '200', schema: cursorPageOf(invitationViewSchema) },
   'GET /v1/open-tenders': { status: '200', schema: cursorPageOf(openTenderViewSchema) },
@@ -241,7 +267,11 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/tenders/{id}/bids/{bidId}/recusal': { status: '200', schema: recusalViewSchema },
   'POST /v1/tenders/{id}/bids/{bidId}/scores': { status: '200', schema: scoreRecordedViewSchema },
   'POST /v1/tenders/{id}/evaluate': { status: '200', schema: evaluatedViewSchema },
-  'POST /v1/tenders/{id}/award': { status: '200', schema: tenderAwardViewSchema },
+  'POST /v1/tenders/{id}/award': {
+    status: '200',
+    schema: tenderAwardViewSchema,
+    accepted: tenderApprovalRequestViewSchema,
+  },
   'GET /v1/tenders/{id}/award': { status: '200', schema: tenderAwardViewSchema },
   'GET /v1/tenders/{id}/evaluation': { status: '200', schema: matrixViewSchema },
 };
@@ -293,6 +323,7 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/tenders': listTendersQuerySchema,
   'GET /v1/criteria-templates': listCriteriaTemplatesQuerySchema,
   'GET /v1/tenders/{id}/invitations': listInvitationsQuerySchema,
+  'GET /v1/tenders/{id}/approvals': listTenderApprovalsQuerySchema,
   'GET /v1/open-tenders': listOpenTendersQuerySchema,
   'GET /v1/tenders/{id}/bid-access-log': listBidAccessLogQuerySchema,
 };
@@ -354,8 +385,8 @@ const LIFECYCLE_CREATES = new Set([
   'POST /v1/tenders/{id}/evaluate',
   'GET /v1/tenders/{id}/evaluation',
   // Not EVALUATED, a bid that is not a qualified one, a missing justification, a winner no longer
-  // eligible, a conflict of interest, the approval gate (closed until PR 11), a bid that differs
-  // from the evidence.
+  // eligible, a conflict of interest, the approval gate (no policy: APPROVAL_POLICY_REQUIRED; a stale
+  // approval: 409), a bid that differs from the evidence.
   'POST /v1/tenders/{id}/award',
 ]);
 
@@ -437,10 +468,10 @@ const RETRY_AFTER_HEADER = {
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator.',
+  403: 'Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR). A user token without `rasta_uid` (the platform user id) on a route that records or compares who acted — proposing, approving or withdrawing a bid opening; creating, submitting or approving an approval policy; creating or publishing a tender; deciding on, scoring, standing down from or completing the evaluation of bids — is 403 with a fixed message (#188). On evaluation, a person who stood down from the bid under another user id (RECUSED) or already evaluates it under another user id (SAME_PERSON_AS_EVALUATOR) — one person is one evaluator. Approval gates of a tender (CON-002 PR 11): deciding a tender approval as the person who made the request (separation of duties through the shared helper; the same person under two user ids or another issuer is one person); on an award approval, a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST — also on reading it), and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (APPROVER_IS_EVALUATOR). Refusals on the caller’s own tender are audited in the tender approval log.',
   404: 'Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.',
-  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry).',
-  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE). ACTOR_IDENTITY_UNKNOWN (#188): a separation of duties cannot be proven because a record names no stable identity (written before issuer and subject were recorded, or under another issuer) — the bid-opening proposer, a policy’s author or submitter, a tender’s creator or publisher, or another evaluator of the bid; never treated as another person. Awarding (ADR-067 § 3): a tender that is not EVALUATED (NOT_EVALUATED), a bid that is not a qualified one of it (BID_NOT_QUALIFIED), a choice of any rank but the single first without a justification (JUSTIFICATION_REQUIRED), a winner supplier-service no longer finds eligible (WINNER_NOT_ELIGIBLE — nothing falls back to the next rank), an awarder the records cannot show to be a different person from the evaluators (ACTOR_IDENTITY_UNKNOWN), the approval gate (APPROVAL_POLICY_REQUIRED, APPROVAL_REQUIRED — closed until the approval round is wired), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY).',
+  409: 'Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.',
+  422: 'Well-formed but refused by the lifecycle (BUSINESS_RULE_VIOLATION): a transition the state machine does not have; requesting approval with no active policy or no step for the estimate (the platform never approves by default) or without the configured preconditions; deciding a step that is not PENDING; starting when a contract is required; completing below 100% progress; progress that goes down; progress outside IN_PROGRESS; creating a tender under a project that is not APPROVED; editing a tender, or setting its criteria, when it is not a DRAFT; cancelling a project that has a tender not yet finished; opening the bids of a tender that is not CLOSED (NOT_CLOSED), reading one that is not opened (NOT_OPENED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY) — nothing is opened; evaluating (ADR-067): a tender that is not EVALUATING (NOT_EVALUATING), a bid not in the state the command needs (BID_NOT_OPENED, BID_NOT_QUALIFIED, BID_NOT_EVALUABLE), a second and different decision on a bid (BID_ALREADY_DECIDED), a qualification of a contractor supplier-service no longer finds eligible (BIDDER_NOT_ELIGIBLE), a criterion the tender does not have (UNKNOWN_CRITERION), a score outside what the criterion allows (SCORE_OUT_OF_RANGE), more evaluators than CONSTRUCTION_EVALUATION_MAX_EVALUATORS (EVALUATOR_LIMIT), completing with no qualified bid (NO_QUALIFIED_BID) or with one not scored in full or an opened bid undecided (EVALUATION_INCOMPLETE). ACTOR_IDENTITY_UNKNOWN (#188): a separation of duties cannot be proven because a record names no stable identity (written before issuer and subject were recorded, or under another issuer) — the bid-opening proposer, a policy’s author or submitter, a tender’s creator or publisher, or another evaluator of the bid; never treated as another person. Awarding (ADR-067 § 3): a tender that is not EVALUATED (NOT_EVALUATED), a bid that is not a qualified one of it (BID_NOT_QUALIFIED), a choice of any rank but the single first without a justification (JUSTIFICATION_REQUIRED), a winner supplier-service no longer finds eligible (WINNER_NOT_ELIGIBLE — nothing falls back to the next rank), an awarder the records cannot show to be a different person from the evaluators (ACTOR_IDENTITY_UNKNOWN), the approval gate (APPROVAL_POLICY_REQUIRED), or a receipt chain or stored bid that differs from what audit-service holds (INTEGRITY). Approval gates of a tender (CON-002 PR 11): publishing, awarding or cancelling with no active approval policy for the workflow, or one with no step that applies (APPROVAL_POLICY_REQUIRED — the platform never approves by default); a request whose maker cannot be told from its approver, or an approver of an award who cannot be told from the evaluators (ACTOR_IDENTITY_UNKNOWN); cancelling with the reason code NO_QUALIFIED_BID when the tender is not EVALUATING with no qualified bid (REASON_CODE_NOT_APPLICABLE).',
   500: 'Unexpected server error.',
   503: 'organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2). Evaluating bids: identity-service, which says who the caller is now, or — for a qualification — supplier-service, which says whether the contractor is still eligible, cannot be reached; nothing is done (fail closed). A contractor reading its own opened bid: audit-service or the key-encryption key as for the owner. Awarding: identity-service, supplier-service (the winner’s standing now), audit-service or the key-encryption key cannot be reached; nothing is awarded.',
   504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused. Opening or reading bids: audit-service did not answer in time. Evaluating bids: identity-service (or supplier-service, for a qualification) did not answer in time. Awarding: identity-service, supplier-service or audit-service did not answer in time.',
@@ -494,6 +525,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     BidOpeningController,
     EvaluationController,
     AwardController,
+    TenderApprovalController,
   ],
   providers: [
     { provide: PublicationService, useValue: {} },
@@ -502,6 +534,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     { provide: OwnBidService, useValue: {} },
     { provide: EvaluationService, useValue: {} },
     { provide: AwardService, useValue: {} },
+    { provide: TenderApprovalService, useValue: {} },
     { provide: ProjectService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },
@@ -576,6 +609,13 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           description: 'Success',
           content: { 'application/json': { schema: toJsonSchema(response.schema) } },
         };
+        if (response.accepted) {
+          operation.responses['202'] = {
+            description:
+              'Accepted: nothing is executed yet. The approval request this command opened (or found) and that is being decided; ask again with the same command once every step is granted.',
+            content: { 'application/json': { schema: toJsonSchema(response.accepted) } },
+          };
+        }
       }
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {

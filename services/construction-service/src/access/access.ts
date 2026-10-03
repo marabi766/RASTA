@@ -416,6 +416,18 @@ export class ProjectAccess {
     return this.assertOwnerBidSide(this.awarders, 'award its evaluated tender');
   }
 
+  /**
+   * The roles an approver of an **award** may not hold (CON-002 PR 11): the same exclusions as for
+   * awarding, opening and evaluating — `SYSTEM_ADMIN`, `AUDITOR`, `CONTRACTOR`, each whenever present,
+   * from the one list `BID_EXCLUDED_ROLES`. The approver does not need the owner's roles (the policy
+   * names who approves, and it may be another organization), only none of these: an award approval
+   * names a bid, so it is as much a matter of the bid side as the award is.
+   */
+  assertMayDecideAward(): void {
+    assertNotServiceCaller();
+    assertNoBidExcludedRole(getContext().roles);
+  }
+
   /** `assertCanAward` on the live roles identity-service reports, as for opening. */
   assertLiveRolesMayAward(liveRoles: readonly string[]): void {
     this.assertLiveBidSide(this.awarders, liveRoles, 'awards a tender');

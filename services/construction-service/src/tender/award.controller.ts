@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   AllowService,
@@ -8,6 +9,7 @@ import {
 } from '@rasta/nest-common';
 import { AwardService } from './award.service';
 import { awardTenderSchema, type AwardTenderDto } from './award.dto';
+import { GATED_NOTE, answerGated } from './gated-response';
 
 /** The one service that reads an award: it drafts the contract from it (CON-003; `TENDER_AWARDED` carries no amount). */
 export const AWARD_READ_CALLER = 'contract-service';
@@ -67,14 +69,19 @@ export class AwardController {
       'qualified bid NOT_AWARDED, TENDER_AWARDED, one BID_NOT_AWARDED per bid that lost. Two awards ' +
       'at once are one award and a 409; the same award again answers itself with ' +
       '`alreadyAwarded: true` and writes nothing, another bid on an awarded tender is 409. ' +
-      '**The approval gate fails closed (Q-84):** with no active `tender.award` approval policy the ' +
-      'answer is 422 naming APPROVAL_POLICY_REQUIRED, and while the approval round is not wired ' +
-      '(CON-002 PR 11) even a policy in force is 422 naming APPROVAL_REQUIRED — so until then this ' +
-      'endpoint awards nothing. ' +
+      `${GATED_NOTE} The request is bound to the tender, its version, the bid, its rank, the ` +
+      'justification, the matrix digest and the standing read it was decided on; its approvers are ' +
+      'judged as the awarder is (the roles the bid side excludes, bidder membership, and ' +
+      'AWARDER_NOT_EVALUATOR). Executing asks supplier-service again — an approval never replaces ' +
+      'that check. ' +
       AWARDER_NOTE,
   })
-  async award(@Param('id') id: string, @Body(zodPipe(awardTenderSchema)) dto: AwardTenderDto) {
-    return this.awards.award(id, dto);
+  async award(
+    @Param('id') id: string,
+    @Body(zodPipe(awardTenderSchema)) dto: AwardTenderDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    return answerGated(response, await this.awards.award(id, dto));
   }
 
   @AllowService(AWARD_READ_CALLER)
