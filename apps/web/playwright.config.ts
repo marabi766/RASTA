@@ -14,7 +14,7 @@ import { defineConfig, devices } from '@playwright/test';
  * `/login` is the first real surface.
  */
 /** The specs that also run at a phone's viewport: read-only, see the project. */
-const MOBILE_SPECS = /(accessibility|tenant-isolation|asset-lifecycle)\.spec\.ts$/;
+const MOBILE_SPECS = /(accessibility|tenant-isolation|asset-lifecycle|asset-records)\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './e2e',

@@ -246,6 +246,34 @@ describe('the electronic dossier', () => {
     });
   });
 
+  describe('the insurance and inspection sections (EXP-002 slice 6)', () => {
+    const records = <section aria-label="records-slot">records</section>;
+
+    it('draws the records the page built, below the compliance box and above the cost', () => {
+      const { getByLabelText, getByText } = render(
+        <DossierScreen result={ok()} assetId="AST_1" records={records} />,
+      );
+      const slot = getByLabelText('records-slot');
+      const compliance = getByText('آمادگی بهره‌برداری').closest('section')!;
+      const costs = getByText('هزینه‌ها').closest('section')!;
+      expect(
+        compliance.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(slot.compareDocumentPosition(costs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it.each([
+      [{ kind: 'NOT_FOUND' }],
+      [{ kind: 'FORBIDDEN' }],
+      [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }],
+    ] as const)('draws no records on a page whose read failed (%j)', (failed) => {
+      const { queryByLabelText } = render(
+        <DossierScreen result={failed} assetId="AST_X" records={records} />,
+      );
+      expect(queryByLabelText('records-slot')).toBeNull();
+    });
+  });
+
   describe('the confirmation after a write', () => {
     it.each([
       ['created', 'ماشین ثبت شد.'],
@@ -253,6 +281,8 @@ describe('the electronic dossier', () => {
       ['activated', 'دارایی فعال شد و به ناوگان پیوست.'],
       ['statusChanged', 'وضعیت دارایی تغییر کرد.'],
       ['decommissioned', 'دارایی اسقاط شد. این وضعیت نهایی است.'],
+      ['policyRecorded', 'بیمه‌نامه ثبت شد.'],
+      ['inspectionRecorded', 'معاینهٔ فنی ثبت شد.'],
     ] as const)('confirms %s', (notice, words) => {
       const { getByText } = render(<DossierScreen result={ok()} assetId="AST_1" notice={notice} />);
       // A confirmation is `status`, which waits for a pause in the screen
