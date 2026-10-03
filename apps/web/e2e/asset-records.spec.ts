@@ -40,6 +40,19 @@ test.skip(
   'needs the live stack the Portal in a browser job starts',
 );
 
+/**
+ * Why only the two recording scenarios run at the phone's size. Every request
+ * of these scenarios — the API setup and checks, and each page load's own reads
+ * through the portal — is the same signed-in user's, and the gateway allows one
+ * user 300 requests a minute (`GATEWAY_RATE_LIMIT_MAX`). The suite shares one
+ * stack and one user, so a second viewport that repeated every scenario spent
+ * the allowance the other specs need (a `429` in unrelated tests). What a phone
+ * can change is layout and reachability, which the two recording scenarios open
+ * the forms and check; the rest is identical logic at any size.
+ */
+const MOBILE_BUDGET =
+  'identical at the phone’s size; keeps the shared user inside the gateway limit';
+
 const NAME_PREFIX = 'آزمون مرورگر - ثبت سوابق';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -333,7 +346,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('judges each record against the server’s clock: expired, current and not yet begun, whatever the browser’s clock says', async ({
     page,
     request,
+    isMobile,
   }) => {
+    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const suffix = randomUUID().slice(0, 8);
 
@@ -396,7 +411,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('a form sent twice records once: a double click, and the same key through the gateway', async ({
     page,
     request,
+    isMobile,
   }) => {
+    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const number = `E2E-DBL-${randomUUID().slice(0, 10)}`;
 
@@ -456,7 +473,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
     context,
     page,
     request,
+    isMobile,
   }) => {
+    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const number = `E2E-SAME-${randomUUID().slice(0, 10)}`;
     const second = await context.newPage();
@@ -486,7 +505,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('says what is wrong at the field, in Persian, without sending anything', async ({
     page,
     request,
+    isMobile,
   }) => {
+    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     await page.goto(`/assets/${asset.id}`);
     await openAndFillPolicy(page, { number: 'ab', from: ymd(10), to: ymd(5) });
@@ -505,7 +526,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('a policy that has already expired is refused in words, and nothing is recorded', async ({
     page,
     request,
+    isMobile,
   }) => {
+    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     await page.goto(`/assets/${asset.id}`);
     await openAndFillPolicy(page, {
@@ -526,7 +549,9 @@ test.describe('a machine’s insurance and inspections, through the portal and t
     context,
     page,
     request,
+    isMobile,
   }) => {
+    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const number = `E2E-VIEW-${randomUUID().slice(0, 10)}`;
     const recorded = await request.post(gatewayUrl(`/v1/assets/${asset.id}/insurance-policies`), {
