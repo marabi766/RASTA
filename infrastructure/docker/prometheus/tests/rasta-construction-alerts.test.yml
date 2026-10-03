@@ -119,3 +119,52 @@ tests:
               summary: 'identity-service could not say whom a reader of bids belongs to (2)'
               description: 'An opening or an owner read of bids was refused with reason "identity_unavailable" (identity-service unreachable, slow or answering outside its contract; nothing was shown), or the check made after an opening could not be made. Neither names a tender or a tenant here; the construction-service log says which.'
               runbook: docs/runbooks/bid-opening-identity-unavailable.md
+
+  # ---------------------------------------------------------------------------
+  # RastaConstructionAwardStandingConflictDetected
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Clear checks never page; the first conflict does. An unavailable check does not either.
+      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="clear",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '4 4 4 4'
+      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="unavailable",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '1 1 1 1'
+      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="conflict",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '_ _ 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaConstructionAwardStandingConflictDetected
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaConstructionAwardStandingConflictDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'A tender may have been awarded to a suspended or no longer qualified contractor (possible conflict, 1 detected)'
+              description: 'A POSSIBLE award to a contractor that was not eligible: after an award committed, supplier-service said the winner had a suspension that began inside the window windowStart to checkedAt (windowStart is the instant of the standing read the award was made on; checkedAt is the clock of supplier-service as it answered, after the commit), a suspension still open, or no longer held its contracting qualification. The check is conservative: a suspension that began and ended inside the window is a hit too, which is an alert and nothing more. The award was not undone. TENDER_AWARD_STANDING_CONFLICT_DETECTED names the tender, the bid, the contractor and the suspensions (ids only); this alert deliberately carries none of them.'
+              runbook: docs/runbooks/award-standing-conflict.md
+
+  # ---------------------------------------------------------------------------
+  # RastaConstructionAwardStandingCheckUnavailable
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="clear",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '4 4 4 4'
+      - series: 'rasta_construction_award_standing_checks_total{service="construction-service",outcome="unavailable",job="rasta-services",instance="host.docker.internal:3000",environment="local"}'
+        values: '_ _ 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaConstructionAwardStandingCheckUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaConstructionAwardStandingCheckUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'The standing check after an award could not be made (1)'
+              description: 'After an award committed, supplier-service could not say whether the winner was suspended in the window around it (unreachable, slow or answering outside its contract), so the check was not made and is not retried. The award stands. Neither a tender nor a tenant is named here; the construction-service log says which.'
+              runbook: docs/runbooks/award-standing-conflict.md

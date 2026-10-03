@@ -3,6 +3,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import {
   actor,
   auditorActor,
+  internalToken,
   multiMemberActor,
   orgAdmin,
   startApi,
@@ -211,6 +212,84 @@ describe('award API', () => {
       'APPROVAL_POLICY_REQUIRED',
       'APPROVAL_REQUIRED',
     ]);
+  });
+
+  it('serves the award, with the winner’s price, to the owner’s person and to contract-service only, through the real guards', async () => {
+    const { owner, tenderId, bids } = await evaluated();
+    const path = `/v1/tenders/${tenderId}/award`;
+    const get = (token?: string) => {
+      const req = http().get(path);
+      return token ? req.set(as(token)) : req;
+    };
+    const service = async (caller: string, org: string) =>
+      http()
+        .get(path)
+        .set('x-internal-token', await internalToken(caller, { organizationId: org }));
+
+    // Not awarded yet: nothing to read, and the refusal is the owner's to see.
+    expect((await get(orgAdmin(owner))).status).toBe(404);
+    expect((await service('contract-service', owner)).status).toBe(404);
+
+    await asAdmin(owner, () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }));
+
+    const read = await get(orgAdmin(owner));
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({
+      tenderId,
+      status: 'AWARDED',
+      bidId: bids[0]!.bidId,
+      amountMinor: '1000',
+      alreadyAwarded: true,
+    });
+    expect(typeof read.body.amountMinor).toBe('string');
+
+    // contract-service, with a token signed for the owner's organization.
+    const viaService = await service('contract-service', owner);
+    expect(viaService.status).toBe(200);
+    expect(viaService.body).toMatchObject({ bidId: bids[0]!.bidId, amountMinor: '1000' });
+
+    // Nobody else: no token, no other service, a token for another organization, a token for none.
+    expect((await get()).status).toBe(401);
+    expect((await service('audit-service', owner)).status).toBe(403);
+    expect((await service('fleet-service', owner)).status).toBe(403);
+    expect((await service('contract-service', 'ORG-APITEST-award-elsewhere')).status).toBe(404);
+    expect(
+      (
+        await http()
+          .get(path)
+          .set('x-internal-token', await internalToken('contract-service'))
+      ).status,
+    ).toBe(404);
+    // A user does not get in by the service door, and a service token does not carry roles.
+    expect((await get(actor(owner, ['SYSTEM_ADMIN']))).status).toBe(403);
+    expect((await get(auditorActor(owner))).status).toBe(403);
+    expect((await get(actor(owner, ['CONTRACTOR']))).status).toBe(403);
+    expect((await get(actor(bids[0]!.bidder, ['CONTRACTOR']))).status).toBe(404);
+    expect((await get(orgAdmin('ORG-APITEST-award-elsewhere'))).status).toBe(404);
+
+    // A member of a bidding organization is refused before the award is shown.
+    const conflicted = await get(
+      multiMemberActor(owner, [bids[1]!.bidder], ['ORGANIZATION_ADMIN']),
+    );
+    expect(conflicted.status).toBe(403);
+    expect(conflicted.body.message).toContain('CONFLICT_OF_INTEREST');
+    expect(JSON.stringify(conflicted.body)).not.toContain('1000');
+
+    // Reads of the price are in the owner's log, the service's under its own name.
+    const rows = await runUnscoped('the suite reads the log', () =>
+      w.prisma.client.bidAccessLog.findMany({ where: { tenderId, purpose: 'READ_AWARD' } }),
+    );
+    expect(
+      rows
+        .filter((r) => r.outcome === 'GRANTED')
+        .map((r) => r.accessorUserId)
+        .sort(),
+    ).toEqual([expect.stringMatching(/^USR-APITEST-/), 'service:contract-service']);
+    // And the price is on no event.
+    const events = JSON.stringify(await outboxFor(api.prisma, owner), (_k, v: unknown) =>
+      typeof v === 'bigint' ? v.toString() : v,
+    );
+    expect(events).not.toMatch(/amountMinor/);
   });
 
   it('shows a contractor its own outcome of an award made through the core, and the owner the bids’ outcome', async () => {

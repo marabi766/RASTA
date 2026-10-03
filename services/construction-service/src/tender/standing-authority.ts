@@ -65,4 +65,50 @@ export class StandingAuthority {
     }
     return { verdict: verdictOf(standing), asOf: new Date(standing.asOf) };
   }
+
+  /**
+   * The detective control after an award committed (ADR-067 § 3, residual): was the contractor
+   * suspended, or its qualification removed, inside `[from, the answer's instant]`? `from` is the
+   * instant the pre-check read the standing at. Asked of supplier-service again, authoritative; the
+   * caller treats a failure as "could not check", never as "clear".
+   */
+  async windowReport(organizationId: string, from: Date): Promise<StandingWindowReport> {
+    const standing = await this.source.fetchStanding(organizationId);
+    if (standing.organizationId !== organizationId) {
+      throw RastaError.upstreamUnavailable('supplier-service');
+    }
+    return { ...standingWindowReport(standing, from), checkedAt: new Date(standing.asOf) };
+  }
+}
+
+/** What a standing says about the window after a check: the episodes inside it, and whether the qualification is gone. */
+export interface StandingWindowReport {
+  suspensionIds: string[];
+  suspensionCount: number;
+  qualificationRemoved: boolean;
+  checkedAt: Date;
+}
+
+/**
+ * Pure. Conservative on purpose, like the bid-opening check (a false positive is an alert and
+ * nothing more): every suspension that **began at or after** `from` counts even if it has ended
+ * since, any suspension still open counts (the pre-check would have refused it, so it is a
+ * contradiction worth a person's look), and a qualification that is no longer approved counts.
+ */
+export function standingWindowReport(
+  standing: Pick<StandingOfOrganization, 'contractingApprovedAt' | 'suspensions'>,
+  from: Date,
+): Omit<StandingWindowReport, 'checkedAt'> {
+  const hits = standing.suspensions
+    .filter(
+      (episode) =>
+        episode.reinstatedAt === null || new Date(episode.suspendedAt).getTime() >= from.getTime(),
+    )
+    .map((episode) => episode.suspensionId)
+    .sort();
+  return {
+    suspensionIds: hits.slice(0, 20),
+    suspensionCount: hits.length,
+    qualificationRemoved: standing.contractingApprovedAt === null,
+  };
 }

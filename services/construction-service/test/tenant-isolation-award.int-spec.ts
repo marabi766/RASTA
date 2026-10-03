@@ -1,8 +1,9 @@
-import { runUnscoped } from '@rasta/nest-common';
+import { runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import {
   asAdmin,
   asBidder,
   cleanup,
+  context,
   evaluatedTender,
   loadStanding,
   newUserId,
@@ -148,6 +149,34 @@ describe('tenant isolation — award', () => {
     );
     expect(own).toMatchObject({ tenderId: b.tenderId, bidId: b.bids[0]!.bidId, rank: 1 });
     expect(await awardsOf(a.tenderId)).toHaveLength(1);
+  });
+
+  it('answers 404 to B on the read of A’s award, as a person and as a service signed for B, and shows B only its own', async () => {
+    const asService = <T>(owner: string, fn: () => T) =>
+      runWithContext(
+        context({
+          authType: 'SERVICE',
+          callerService: 'contract-service',
+          organizationId: owner,
+          roles: [],
+        } as Partial<RequestContext>),
+        fn,
+      );
+    expect(await codeOf(asAdmin(b.owner, () => w.award.getAward(a.tenderId)))).toBe('NOT_FOUND');
+    expect(await codeOf(asService(b.owner, () => w.award.getAward(a.tenderId)))).toBe('NOT_FOUND');
+    const own = await asService(b.owner, () => w.award.getAward(b.tenderId));
+    expect(own).toMatchObject({ tenderId: b.tenderId, bidId: b.bids[0]!.bidId });
+    expect(JSON.stringify(own)).not.toContain(a.tenderId);
+    // A's own read still works, and B's attempts left nothing in A's log.
+    expect(await asService(a.owner, () => w.award.getAward(a.tenderId))).toMatchObject({
+      tenderId: a.tenderId,
+    });
+    const aReads = await runUnscoped('the suite reads A’s log', () =>
+      w.prisma.client.bidAccessLog.findMany({
+        where: { tenderId: a.tenderId, purpose: 'READ_AWARD' },
+      }),
+    );
+    expect(aReads.map((r) => r.accessorUserId)).toEqual(['service:contract-service']);
   });
 
   it('is scoped by the tenant guard itself: B’s client sees none of A’s awards, A’s none of B’s', async () => {

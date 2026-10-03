@@ -158,6 +158,20 @@ export const awardRefusalsTotal = new Counter({
 });
 
 /**
+ * The detective control after an award committed (ADR-067 § 3): supplier-service was asked again
+ * whether the winner was suspended, or lost its qualification, in the window since the pre-check.
+ * `clear` is the usual answer; `conflict` is the race the pre-check cannot close and pages;
+ * `unavailable` says the check could not be made (it is not retried). Never labelled by tender,
+ * tenant or contractor.
+ */
+export const awardStandingChecksTotal = new Counter({
+  name: 'rasta_construction_award_standing_checks_total',
+  help: 'Checks after an award of whether its winner was suspended since the pre-check, by outcome',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
  * The detective control after an opening committed (ADR-066 § 4): identity-service was asked
  * whether the proposer or the approver was a member of a bidding organization at the commit
  * instant. `clear` is the usual answer; `conflict` is the race the approval cannot close and

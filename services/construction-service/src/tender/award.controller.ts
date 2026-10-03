@@ -1,8 +1,11 @@
-import { Body, Controller, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AuditorSelfService, zodPipe } from '@rasta/nest-common';
+import { AllowService, AuditorSelfService, zodPipe } from '@rasta/nest-common';
 import { AwardService } from './award.service';
 import { awardTenderSchema, type AwardTenderDto } from './award.dto';
+
+/** The one service that reads an award: it drafts the contract from it (CON-003; `TENDER_AWARDED` carries no amount). */
+export const AWARD_READ_CALLER = 'contract-service';
 
 const AWARDER_NOTE =
   'Owner side: the roles of CONSTRUCTION_TENDER_AWARD_ROLES, by default the tender owner’s role set ' +
@@ -64,5 +67,27 @@ export class AwardController {
   })
   async award(@Param('id') id: string, @Body(zodPipe(awardTenderSchema)) dto: AwardTenderDto) {
     return this.awards.award(id, dto);
+  }
+
+  @AllowService(AWARD_READ_CALLER)
+  @AuditorSelfService(REFUSED_AND_AUDITED_BY_THE_SERVICE)
+  @Get('tenders/:id/award')
+  @ApiOperation({
+    summary: 'The award of a tender, with the winner’s price',
+    description:
+      'The stored award: the winning bid and contractor, `amountMinor` (the winner’s price, a decimal ' +
+      'string; **it is not on the TENDER_AWARDED event**, which is readable by every service), the ' +
+      'rank in the frozen matrix and whether it is shared, the justification, the matrix digest and ' +
+      'when and by whom. Callers: the owner’s authorised person (the award roles, with the same ' +
+      'exclusions, the live-identity check and the conflict rule as for awarding), or ' +
+      '`contract-service` (CON-003) with an internal token signed for the owner’s organization — ' +
+      'no other service, no user of another organization, and no token signed for no tenant. A ' +
+      'tender that is missing, or another organization’s, is 404 (never 403) and not logged; a ' +
+      'tender not yet awarded is 404. Each read is audited like a read of a bid (READ_AWARD; a ' +
+      'service caller is recorded as `service:<name>`). `alreadyAwarded` is always `true` here. ' +
+      AWARDER_NOTE,
+  })
+  async read(@Param('id') id: string) {
+    return this.awards.getAward(id);
   }
 }

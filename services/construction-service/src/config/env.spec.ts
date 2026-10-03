@@ -214,8 +214,12 @@ describe('project roles (Q-69)', () => {
   });
 
   describe('the optional conflict-of-interest rules (Q-90, Q-92)', () => {
-    it('are all off by default', () => {
-      expect(load().CONSTRUCTION_COI_RULES).toEqual([]);
+    it('has the awarder rule on by default (strict), and nothing else', () => {
+      expect(load().CONSTRUCTION_COI_RULES).toEqual(['AWARDER_NOT_EVALUATOR']);
+    });
+
+    it('is switched off by an empty value', () => {
+      expect(load({ CONSTRUCTION_COI_RULES: '' }).CONSTRUCTION_COI_RULES).toEqual([]);
     });
 
     it('accepts rules from the closed set, trimmed', () => {

@@ -8,8 +8,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess } from '../access/access';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
+import type { BidAccessPurpose } from '../events/events';
 import {
   awardRefusalsTotal,
+  awardStandingChecksTotal,
   tenderTransitionsTotal,
   versionConflictsTotal,
 } from '../observability/metrics';
@@ -50,6 +52,26 @@ export const AWARD_REFUSALS = [
   'APPROVAL_REQUIRED',
 ] as const;
 export type AwardRefusal = (typeof AWARD_REFUSALS)[number];
+
+/** What the post-commit standing check needs to know about the award it checks. */
+interface AwardFacts {
+  tenderId: string;
+  projectId: string;
+  owner: string;
+  winningBidId: string;
+  winnerOrganizationId: string;
+  awardedBy: string;
+  awardedAt: Date;
+  /** The instant the pre-check read the winner's standing at: the start of the window. */
+  windowFrom: Date;
+}
+
+/** The answer of an award command, and — when it wrote one — what the check after the commit needs. */
+interface Outcome {
+  view: TenderAwardView;
+  awarded: boolean;
+  facts?: AwardFacts;
+}
 
 /** What a tender and its bids come to once the command has judged them. */
 type Judged =
@@ -156,32 +178,35 @@ export class AwardService {
     approved: boolean,
   ): Promise<TenderAwardView> {
     const caller = await this.authorize(tenderId, dto.bidId);
-    const { view, awarded } = await this.guarded(caller, tenderId, dto.bidId, async () => {
-      const principal = await this.identity.live(caller, 'AWARD_TENDER');
-      await this.assertNotConflicted(principal, tenderId);
-      if (!approved) await this.refuseWithoutApproval();
+    const { view, awarded, facts } = await this.guarded(
+      caller,
+      tenderId,
+      dto.bidId,
+      async (): Promise<Outcome> => {
+        const principal = await this.identity.live(caller, 'AWARD_TENDER');
+        await this.assertNotConflicted(principal, tenderId);
+        if (!approved) await this.refuseWithoutApproval();
 
-      // A first look decides everything it can without asking anyone: the tender, the bid, the
-      // conflict rules, the justification, a repeat. Advisory — it is all judged again under the lock.
-      const first = await this.prisma.transaction(async (tx) => {
-        const tender = await this.repo.lockSharedForRead(tx, principal.organizationId, tenderId);
-        if (!tender) throw RastaError.notFound('Tender', tenderId);
-        const bids = await this.repo.listBidSummaries(tx, tenderId);
-        return this.judge(tx, principal, tender, bids, dto);
-      });
-      if (first.replay) return { view: first.replay, awarded: false };
+        // A first look decides everything it can without asking anyone: the tender, the bid, the
+        // conflict rules, the justification, a repeat. Advisory — it is all judged again under the lock.
+        const first = await this.prisma.transaction(async (tx) => {
+          const tender = await this.repo.lockSharedForRead(tx, principal.organizationId, tenderId);
+          if (!tender) throw RastaError.notFound('Tender', tenderId);
+          const bids = await this.repo.listBidSummaries(tx, tenderId);
+          return this.judge(tx, principal, tender, bids, dto);
+        });
+        if (first.replay) return { view: first.replay, awarded: false };
 
-      // Outside any lock or transaction: supplier-service's word on the winner now (fail closed),
-      // and the receipt chain as audit-service holds it, to read the winner's price against.
-      const { verdict, asOf } = await this.standing.decisionFor(first.bid.bidderOrganizationId);
-      if (verdict !== 'ELIGIBLE') throw this.rule('WINNER_NOT_ELIGIBLE', { verdict });
-      const evidence = await this.reader.readEvidence(principal.organizationId, tenderId);
+        // Outside any lock or transaction: supplier-service's word on the winner now (fail closed),
+        // and the receipt chain as audit-service holds it, to read the winner's price against.
+        const { verdict, asOf } = await this.standing.decisionFor(first.bid.bidderOrganizationId);
+        if (verdict !== 'ELIGIBLE') throw this.rule('WINNER_NOT_ELIGIBLE', { verdict });
+        const evidence = await this.reader.readEvidence(principal.organizationId, tenderId);
 
-      const committed = await withFinancialSpan(
-        'construction.tender.award',
-        () =>
-          this.prisma.transaction(
-            async (tx): Promise<{ view: TenderAwardView; awarded: boolean }> => {
+        const committed = await withFinancialSpan(
+          'construction.tender.award',
+          () =>
+            this.prisma.transaction(async (tx): Promise<Outcome> => {
               const tender = await this.repo.lockForEvaluation(
                 tx,
                 principal.organizationId,
@@ -261,7 +286,6 @@ export class AwardService {
                   organizationId: principal.organizationId,
                   winningBidId: winner.id,
                   winnerOrganizationId: winner.bidderOrganizationId,
-                  amountMinor: amountMinor.toString(),
                   hasJustification: judged.justification !== null,
                   matrixDigest: judged.digest,
                   awardedBy: principal.actor,
@@ -303,15 +327,167 @@ export class AwardService {
                   alreadyAwarded: false,
                 },
                 awarded: true,
+                facts: {
+                  tenderId,
+                  projectId: tender.projectId,
+                  owner: principal.organizationId,
+                  winningBidId: winner.id,
+                  winnerOrganizationId: winner.bidderOrganizationId,
+                  awardedBy: principal.actor,
+                  awardedAt: at,
+                  windowFrom: asOf,
+                },
               };
-            },
-          ),
-        { 'rasta.tender.command': 'award' },
-      );
-      return committed;
-    });
+            }),
+          { 'rasta.tender.command': 'award' },
+        );
+        return committed;
+      },
+    );
     if (awarded) tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'award' });
+    // After the commit and never in the way of the answer: the detective control (ADR-067 § 3).
+    if (facts) await this.checkStandingAfterAward(facts);
     return view;
+  }
+
+  /**
+   * The detective control (ADR-067 § 3, the residual of the standing check). No lock spans
+   * supplier-service and this service, so a suspension that lands between the answer the award was
+   * made on and its commit is not stopped. After the commit supplier-service is asked again, and the
+   * window is `[the pre-check's instant, its own clock as it answers]`: a suspension that began
+   * inside it (even one that has ended since), one still open, or a qualification removed, is a
+   * **possible** conflict, conservative on purpose — a false positive is an alert and nothing more.
+   * On a hit: the alert (a counter that pages) and `TENDER_AWARD_STANDING_CONFLICT_DETECTED` (ids
+   * only) say it, for a person to decide; **the award is not undone**. A check that could not be
+   * made is counted and logged, not retried, and never in the way of the answer.
+   */
+  private async checkStandingAfterAward(facts: AwardFacts): Promise<void> {
+    let report;
+    try {
+      report = await this.standing.windowReport(facts.winnerOrganizationId, facts.windowFrom);
+    } catch (cause) {
+      awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'unavailable' });
+      this.logger.error(
+        `the standing check after an award could not be made: ${cause instanceof Error ? cause.name : 'unknown'}`,
+      );
+      return;
+    }
+    if (report.suspensionCount === 0 && !report.qualificationRemoved) {
+      awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'clear' });
+      return;
+    }
+    // The alert first: it must fire whatever happens to the event below.
+    awardStandingChecksTotal.inc({ service: SERVICE_NAME, outcome: 'conflict' });
+    this.logger.error(
+      'a tender was awarded to a contractor that supplier-service shows suspended, or no longer qualified, in the window around the award (detected after the commit)',
+    );
+    try {
+      await this.prisma.transaction(async (tx) => {
+        const at = await transactionNow(tx);
+        await this.events.enqueue(tx, {
+          eventName: 'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
+          aggregateId: facts.tenderId,
+          organizationId: facts.owner,
+          payload: {
+            tenderId: facts.tenderId,
+            projectId: facts.projectId,
+            organizationId: facts.owner,
+            winningBidId: facts.winningBidId,
+            winnerOrganizationId: facts.winnerOrganizationId,
+            awardedBy: facts.awardedBy,
+            awardedAt: facts.awardedAt.toISOString(),
+            windowStart: facts.windowFrom.toISOString(),
+            checkedAt: report.checkedAt.toISOString(),
+            suspensionIds: report.suspensionIds,
+            suspensionCount: report.suspensionCount,
+            qualificationRemoved: report.qualificationRemoved,
+          },
+          occurredAt: at,
+        });
+      });
+    } catch (cause) {
+      this.logger.error(
+        `could not record TENDER_AWARD_STANDING_CONFLICT_DETECTED: ${cause instanceof Error ? cause.name : 'unknown'}`,
+      );
+    }
+  }
+
+  // -- reading the award -----------------------------------------------------------------
+
+  /**
+   * The stored award, with the winner's price: the owner's authorised person, or contract-service
+   * (CON-003) with a token signed for the owner's organization. The price is a bid's content, so it
+   * is read through the same door as any other (ownership first and a 404 that is never a 403; the
+   * roles and conflict rules for a person; the audit row `READ_AWARD`, granted or refused, in the
+   * owner's log) and it is no longer on the shared topic (round 1 of #199).
+   */
+  async getAward(tenderId: string): Promise<TenderAwardView> {
+    const context = getContext();
+    const caller =
+      context.authType === 'SERVICE'
+        ? await this.authorizeService(tenderId)
+        : await this.authorize(tenderId, '', 'READ_AWARD');
+    return this.guarded(
+      caller,
+      tenderId,
+      '',
+      async () => {
+        const principal =
+          context.authType === 'SERVICE'
+            ? caller
+            : await this.identity.live(caller, 'AWARD_TENDER');
+        if (context.authType !== 'SERVICE') await this.assertNotConflicted(principal, tenderId);
+        return this.prisma.transaction(async (tx) => {
+          const tender = await this.repo.lockSharedForRead(tx, principal.organizationId, tenderId);
+          if (!tender) throw RastaError.notFound('Tender', tenderId);
+          if (context.authType !== 'SERVICE') {
+            const bids = await this.repo.listBidSummaries(tx, tenderId);
+            this.assertNoBidderMembership(
+              principal,
+              bids.map((bid) => bid.bidderOrganizationId),
+            );
+          }
+          const row = await this.awards.findAward(tx, tenderId);
+          if (!row) throw RastaError.notFound('TenderAward', tenderId);
+          const at = await transactionNow(tx);
+          await this.audit.record(tx, {
+            owner: principal.organizationId,
+            tenderId,
+            bidId: row.bidId,
+            accessorOrganizationId: principal.organizationId,
+            accessorUserId: principal.actor,
+            purpose: 'READ_AWARD',
+            outcome: 'GRANTED',
+            at,
+          });
+          return awardView(row, true);
+        });
+      },
+      'READ_AWARD',
+    );
+  }
+
+  /**
+   * A service caller (contract-service; the guard has admitted only the services `@AllowService`
+   * names) acts for the organization its signed token names: the tender's owner, or the tender is
+   * a 404. It has no user, so it is recorded under its service name.
+   */
+  private async authorizeService(tenderId: string): Promise<Principal> {
+    const context = getContext();
+    const found = await this.opens.findOwnership(tenderId);
+    if (
+      !found ||
+      !context.organizationId ||
+      found.organizationId !== context.organizationId ||
+      !context.callerService
+    ) {
+      throw RastaError.notFound('Tender', tenderId);
+    }
+    return {
+      organizationId: context.organizationId,
+      actor: `service:${context.callerService}`,
+      organizationIds: [],
+    };
   }
 
   // -- the judgement ---------------------------------------------------------------------
@@ -449,7 +625,11 @@ export class AwardService {
    * organization's, or is asked for with no organization to act for is 404 and **not logged** — then
    * the roles (`assertCanAward`), whose refusal on the caller's own tender is audited.
    */
-  private async authorize(tenderId: string, bidId: string): Promise<Principal> {
+  private async authorize(
+    tenderId: string,
+    bidId: string,
+    purpose: BidAccessPurpose = 'AWARD_TENDER',
+  ): Promise<Principal> {
     const context = getContext();
     const found = await this.opens.findOwnership(tenderId);
     if (!found || !context.organizationId || found.organizationId !== context.organizationId) {
@@ -470,6 +650,7 @@ export class AwardService {
             organizationIds: context.organizationIds ?? [],
           },
           error,
+          purpose,
         );
       }
       throw error;
@@ -482,12 +663,20 @@ export class AwardService {
     tenderId: string,
     bidId: string,
     work: () => Promise<T>,
+    purpose: BidAccessPurpose = 'AWARD_TENDER',
   ): Promise<T> {
     try {
       return await work();
     } catch (error) {
       if (error instanceof RastaError) {
-        await this.recordRefusal(principal.organizationId, tenderId, bidId, principal, error);
+        await this.recordRefusal(
+          principal.organizationId,
+          tenderId,
+          bidId,
+          principal,
+          error,
+          purpose,
+        );
       }
       throw error;
     }
@@ -503,6 +692,7 @@ export class AwardService {
     bidId: string,
     principal: Principal,
     error: RastaError,
+    purpose: BidAccessPurpose = 'AWARD_TENDER',
   ): Promise<void> {
     try {
       await this.prisma.transaction(async (tx) => {
@@ -513,7 +703,7 @@ export class AwardService {
           bidId: named?.id ?? null,
           accessorOrganizationId: principal.organizationId,
           accessorUserId: principal.actor,
-          purpose: 'AWARD_TENDER',
+          purpose,
           outcome: 'REFUSED',
           refusalCode: refusalCodeOf(error),
           at: await transactionNow(tx),

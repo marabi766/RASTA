@@ -228,15 +228,17 @@ export const constructionEnvSchema = baseEnvSchema
     CONSTRUCTION_EVALUATION_MAX_EVALUATORS: z.coerce.number().int().min(1).max(9).default(1),
 
     /**
-     * Q-90 / Q-92: the conflict-of-interest rules that are OFF unless named, from the closed
-     * set in code (`COI_RULES`). `EVALUATOR_NOT_TENDER_AUTHOR` applies to evaluation;
-     * `AWARDER_NOT_EVALUATOR` is enforced by `award` (CON-002 PR 10, Q-93).
-     * A name outside the set stops the service at startup: a rule that is not implemented is
-     * not silently ignored.
+     * Q-90 / Q-92 / Q-93: the optional conflict-of-interest rules, from the closed set in code
+     * (`COI_RULES`). `EVALUATOR_NOT_TENDER_AUTHOR` applies to evaluation and is OFF unless named.
+     * `AWARDER_NOT_EVALUATOR` is enforced by `award` (CON-002 PR 10) and is **ON by default and
+     * strict** (project manager, 2026-10-03): a person the records cannot show to be someone other
+     * than an evaluator is refused (fail closed). Setting the variable to an empty value switches
+     * every optional rule off. A name outside the set stops the service at startup: a rule that is
+     * not implemented is not silently ignored.
      */
     CONSTRUCTION_COI_RULES: z
       .string()
-      .default('')
+      .default('AWARDER_NOT_EVALUATOR')
       .pipe(
         commaList().pipe(
           z.array(

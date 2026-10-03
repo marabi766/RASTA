@@ -12253,7 +12253,8 @@
                               "RECUSE",
                               "EVALUATE_BIDS",
                               "READ_EVALUATION",
-                              "AWARD_TENDER"
+                              "AWARD_TENDER",
+                              "READ_AWARD"
                             ]
                           },
                           "outcome": {
@@ -13692,6 +13693,176 @@
             }
           }
         }
+      },
+      "get": {
+        "description": "The stored award: the winning bid and contractor, `amountMinor` (the winner’s price, a decimal string; **it is not on the TENDER_AWARDED event**, which is readable by every service), the rank in the frozen matrix and whether it is shared, the justification, the matrix digest and when and by whom. Callers: the owner’s authorised person (the award roles, with the same exclusions, the live-identity check and the conflict rule as for awarding), or `contract-service` (CON-003) with an internal token signed for the owner’s organization — no other service, no user of another organization, and no token signed for no tenant. A tender that is missing, or another organization’s, is 404 (never 403) and not logged; a tender not yet awarded is 404. Each read is audited like a read of a bid (READ_AWARD; a service caller is recorded as `service:<name>`). `alreadyAwarded` is always `true` here. Owner side: the roles of CONSTRUCTION_TENDER_AWARD_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — ADR-067 § 3. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds) and a service token are refused. The caller is judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is said about the tender; with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, so is anyone who took part in the evaluation (403 `AWARDER_IS_EVALUATOR`; 422 `ACTOR_IDENTITY_UNKNOWN` when the records cannot show they are two people). The route names no role at the guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. On the caller’s own tender every refusal is audited (a REFUSED row in the bid access log with its closed code, and BID_ACCESSED).",
+        "operationId": "AwardController_read_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tenderId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "AWARDED."
+                    },
+                    "bidId": {
+                      "type": "string",
+                      "description": "The winning bid."
+                    },
+                    "bidderOrganizationId": {
+                      "type": "string",
+                      "description": "The winning contractor."
+                    },
+                    "amountMinor": {
+                      "type": "string",
+                      "description": "The price the winner bid, in minor units (rials), a decimal string; never a float."
+                    },
+                    "rank": {
+                      "type": "integer",
+                      "description": "The winner’s rank in the frozen matrix: 1 + the number of bids strictly better."
+                    },
+                    "tied": {
+                      "type": "boolean",
+                      "description": "Whether another bid shares that rank (a tie never makes a winner)."
+                    },
+                    "justification": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "matrixDigest": {
+                      "type": "string",
+                      "description": "SHA-256 (hex) of the frozen matrix the choice was made against (BIDS_EVALUATED’s)."
+                    },
+                    "standingAsOf": {
+                      "type": "string",
+                      "description": "When supplier-service said the winner was still eligible (Q-85)."
+                    },
+                    "awardedAt": {
+                      "type": "string"
+                    },
+                    "awardedBy": {
+                      "type": "string"
+                    },
+                    "alreadyAwarded": {
+                      "type": "boolean",
+                      "description": "True when this very award had been made before; nothing was written."
+                    }
+                  },
+                  "required": [
+                    "tenderId",
+                    "status",
+                    "bidId",
+                    "bidderOrganizationId",
+                    "amountMinor",
+                    "rank",
+                    "tied",
+                    "justification",
+                    "matrixDigest",
+                    "standingAsOf",
+                    "awardedAt",
+                    "awardedBy",
+                    "alreadyAwarded"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not match the published schema. Unknown fields are refused rather than ignored, so `organizationId`, `status` or an actor field in a body is a 400. Also: an operationType outside a configured CONSTRUCTION_OPERATION_TYPES list, and an operating area PostGIS considers invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role the configuration does not grant (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id, on a decision, a caller who can see the project but is not the authority the approval names; on an approval policy, an author who is not a union or platform administrator, a union writing for an organization not beneath it, a caller other than the author organization submitting or retiring it, a non-SYSTEM_ADMIN approving or rejecting it, or the person who wrote or submitted it approving it (four eyes; a union-written policy always); on requesting approval or completing, a union-written policy in force whose union no longer governs the organization (re-confirmed at use); on evaluating bids (ADR-067 § 4), a SYSTEM_ADMIN, AUDITOR or CONTRACTOR, a caller identity-service no longer shows as a member of the organization with an evaluating role, a member of any organization that bid on the tender (CONFLICT_OF_INTEREST), with CONSTRUCTION_COI_RULES naming it the user who created or published the tender (EVALUATOR_IS_TENDER_AUTHOR), and an evaluator who stood down from the bid (RECUSED) — each refusal audited; on awarding a tender (ADR-067 § 3), the same refusals for the same callers (a member of a bidding organization is CONFLICT_OF_INTEREST) and, with CONSTRUCTION_COI_RULES naming AWARDER_NOT_EVALUATOR, one who took part in the evaluation (AWARDER_IS_EVALUATOR).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a project, need, progress report, tender, policy or approval that belongs to another organization (and, for an approval, whose authority the caller is not), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "organization-service could not confirm the union hierarchy (UPSTREAM_UNAVAILABLE); the policy write, or the approval round a union-written policy would open, is refused — never assumed (Q-70 (7), fail closed). Also: publishing a tender when no key-encryption key is configured (CONSTRUCTION_TENDER_KEKS): a tender whose bids cannot be sealed is not opened (ADR-066). Opening or reading bids: audit-service, which holds the receipt chain and its head, is unreachable or has not yet received the newest receipts, or the key-encryption key is not available — never answered from this service’s own copy of the chain (ADR-066 § 2). Evaluating bids: identity-service, which says who the caller is now, or — for a qualification — supplier-service, which says whether the contractor is still eligible, cannot be reached; nothing is done (fail closed). A contractor reading its own opened bid: audit-service or the key-encryption key as for the owner. Awarding: identity-service, supplier-service (the winner’s standing now), audit-service or the key-encryption key cannot be reached; nothing is awarded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT); the policy write, or the approval round, is refused. Opening or reading bids: audit-service did not answer in time. Evaluating bids: identity-service (or supplier-service, for a qualification) did not answer in time. Awarding: identity-service, supplier-service or audit-service did not answer in time.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The award of a tender, with the winner’s price",
+        "tags": ["award"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     }
   },

@@ -129,6 +129,9 @@ export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv
     ...process.env,
     CONSTRUCTION_TENDER_KEKS: `${TEST_KEK_ID}:${TEST_KEK}`,
     CONSTRUCTION_TENDER_KEK_CURRENT: TEST_KEK_ID,
+    // The service's default is the strict awarder rule (Q-93); the suites run with every optional
+    // rule off unless one asks (`CONSTRUCTION_COI_RULES`), since their evaluator rows hold a user id only.
+    CONSTRUCTION_COI_RULES: '',
     DATABASE_URL: databaseUrl(),
     KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? 'localhost:9092',
     // Never used by these suites: they call the domain with an explicit

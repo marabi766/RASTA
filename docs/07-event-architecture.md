@@ -394,27 +394,28 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 
 ### Construction · Contract
 
-| رویداد                                   | Producer     | مصرف‌کنندگان اصلی                                       |
-| ---------------------------------------- | ------------ | ------------------------------------------------------- |
-| `PROJECT_CREATED`                        | construction | analytics · audit                                       |
-| `APPROVAL_REQUESTED`                     | construction | **notification (مرجع تأیید)** · audit                   |
-| `APPROVAL_GRANTED` / `APPROVAL_REJECTED` | construction | notification · audit · analytics                        |
-| `TENDER_CREATED`                         | construction | audit                                                   |
-| `TENDER_PUBLISHED`                       | construction | **notification (پیمانکاران)** · search · analytics      |
-| `BID_SUBMITTED`                          | construction | notification · **audit (مهر زمانی)**                    |
-| `BIDS_EVALUATED`                         | construction | audit · analytics                                       |
-| `TENDER_AWARDED`                         | construction | **contract (ایجاد پیش‌نویس)** · notification · supplier |
-| `BID_NOT_AWARDED`                        | construction | notification (بازنده) · audit                           |
-| `PROJECT_STARTED`                        | construction | fleet · analytics                                       |
-| `PROJECT_PROGRESS_UPDATED`               | construction | contract · notification · analytics                     |
-| `PROJECT_COMPLETED`                      | construction | contract · supplier (امتیاز) · analytics                |
-| `CONTRACT_CREATED`                       | contract     | construction · notification                             |
-| `CONTRACT_SIGNED`                        | contract     | construction · economic · notification                  |
-| `CONTRACT_AMENDED`                       | contract     | audit · analytics                                       |
-| `STATEMENT_SUBMITTED`                    | contract     | notification · analytics                                |
-| `STATEMENT_APPROVED`                     | contract     | **economic (پرداخت)** · analytics                       |
-| `STATEMENT_REJECTED`                     | contract     | notification                                            |
-| `CONTRACT_COMPLETED`                     | contract     | supplier (امتیاز) · analytics                           |
+| رویداد                                    | Producer     | مصرف‌کنندگان اصلی                                       |
+| ----------------------------------------- | ------------ | ------------------------------------------------------- |
+| `PROJECT_CREATED`                         | construction | analytics · audit                                       |
+| `APPROVAL_REQUESTED`                      | construction | **notification (مرجع تأیید)** · audit                   |
+| `APPROVAL_GRANTED` / `APPROVAL_REJECTED`  | construction | notification · audit · analytics                        |
+| `TENDER_CREATED`                          | construction | audit                                                   |
+| `TENDER_PUBLISHED`                        | construction | **notification (پیمانکاران)** · search · analytics      |
+| `BID_SUBMITTED`                           | construction | notification · **audit (مهر زمانی)**                    |
+| `BIDS_EVALUATED`                          | construction | audit · analytics                                       |
+| `TENDER_AWARDED`                          | construction | **contract (ایجاد پیش‌نویس)** · notification · supplier |
+| `BID_NOT_AWARDED`                         | construction | notification (بازنده) · audit                           |
+| `TENDER_AWARD_STANDING_CONFLICT_DETECTED` | construction | audit · هشدار عملیات                                    |
+| `PROJECT_STARTED`                         | construction | fleet · analytics                                       |
+| `PROJECT_PROGRESS_UPDATED`                | construction | contract · notification · analytics                     |
+| `PROJECT_COMPLETED`                       | construction | contract · supplier (امتیاز) · analytics                |
+| `CONTRACT_CREATED`                        | contract     | construction · notification                             |
+| `CONTRACT_SIGNED`                         | contract     | construction · economic · notification                  |
+| `CONTRACT_AMENDED`                        | contract     | audit · analytics                                       |
+| `STATEMENT_SUBMITTED`                     | contract     | notification · analytics                                |
+| `STATEMENT_APPROVED`                      | contract     | **economic (پرداخت)** · analytics                       |
+| `STATEMENT_REJECTED`                      | contract     | notification                                            |
+| `CONTRACT_COMPLETED`                      | contract     | supplier (امتیاز) · analytics                           |
 
 ### Insurance · Participation · Reverse Logistics — PLANNED
 

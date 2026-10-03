@@ -83,3 +83,31 @@ groups:
           summary: 'identity-service could not say whom a reader of bids belongs to ({{ $value }})'
           description: 'An opening or an owner read of bids was refused with reason "identity_unavailable" (identity-service unreachable, slow or answering outside its contract; nothing was shown), or the check made after an opening could not be made. Neither names a tender or a tenant here; the construction-service log says which.'
           runbook: docs/runbooks/bid-opening-identity-unavailable.md
+
+  - name: rasta-construction-award
+    rules:
+      # Page-level, first occurrence: after an award committed, supplier-service says the winner
+      # MAY have been suspended, or lost its contracting qualification, in the window between the
+      # standing read the award was made on and the commit (ADR-067 section 3, the residual of the
+      # standing check). Conservative, so a false positive is an alert and nothing more. The award
+      # stands; a person decides. The counter is born at its first increment, so the plain value
+      # (not a rate) catches the first one.
+      - alert: RastaConstructionAwardStandingConflictDetected
+        expr: sum(rasta_construction_award_standing_checks_total{outcome="conflict"}) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'A tender may have been awarded to a suspended or no longer qualified contractor (possible conflict, {{ $value }} detected)'
+          description: 'A POSSIBLE award to a contractor that was not eligible: after an award committed, supplier-service said the winner had a suspension that began inside the window windowStart to checkedAt (windowStart is the instant of the standing read the award was made on; checkedAt is the clock of supplier-service as it answered, after the commit), a suspension still open, or no longer held its contracting qualification. The check is conservative: a suspension that began and ended inside the window is a hit too, which is an alert and nothing more. The award was not undone. TENDER_AWARD_STANDING_CONFLICT_DETECTED names the tender, the bid, the contractor and the suspensions (ids only); this alert deliberately carries none of them.'
+          runbook: docs/runbooks/award-standing-conflict.md
+
+      # Warning: supplier-service could not be asked after an award committed, so the check was
+      # not made (and is not retried). A person does it by hand.
+      - alert: RastaConstructionAwardStandingCheckUnavailable
+        expr: sum(rasta_construction_award_standing_checks_total{outcome="unavailable"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The standing check after an award could not be made ({{ $value }})'
+          description: 'After an award committed, supplier-service could not say whether the winner was suspended in the window around it (unreachable, slow or answering outside its contract), so the check was not made and is not retried. The award stands. Neither a tender nor a tenant is named here; the construction-service log says which.'
+          runbook: docs/runbooks/award-standing-conflict.md

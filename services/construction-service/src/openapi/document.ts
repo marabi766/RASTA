@@ -242,6 +242,7 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'POST /v1/tenders/{id}/bids/{bidId}/scores': { status: '200', schema: scoreRecordedViewSchema },
   'POST /v1/tenders/{id}/evaluate': { status: '200', schema: evaluatedViewSchema },
   'POST /v1/tenders/{id}/award': { status: '200', schema: tenderAwardViewSchema },
+  'GET /v1/tenders/{id}/award': { status: '200', schema: tenderAwardViewSchema },
   'GET /v1/tenders/{id}/evaluation': { status: '200', schema: matrixViewSchema },
 };
 
@@ -409,6 +410,7 @@ const EVIDENCE_CHECKED = new Set([
  */
 const UPSTREAM_CHECKED = new Set([
   'POST /v1/tenders/{id}/award',
+  'GET /v1/tenders/{id}/award',
   'POST /v1/tenders/{id}/bids/{bidId}/qualification',
   'POST /v1/tenders/{id}/bids/{bidId}/recusal',
   'POST /v1/tenders/{id}/bids/{bidId}/scores',

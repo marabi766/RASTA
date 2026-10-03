@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { PrismaClient } from '../src/generated/prisma';
+import { awardStandingChecksTotal } from '../src/observability/metrics';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
 import {
   SUPPLIER,
@@ -265,12 +266,14 @@ describe('awarding an evaluated tender', () => {
         organizationId: owner,
         winningBidId: bids[0]!.bidId,
         winnerOrganizationId: bids[0]!.bidder,
-        amountMinor: '1000',
         hasJustification: false,
         matrixDigest: digest,
         awardedBy: user,
         awardedAt: row!.awardedAt.toISOString(),
       });
+
+      // The winner's price is a bid's content: it is on the award row and behind the read, never on the shared topic.
+      expect(JSON.stringify(awarded!.payload)).not.toMatch(/amount|price/i);
 
       // One BID_NOT_AWARDED per bid that lost: its own bid and bidder, and nothing of the winner.
       const losers = await eventsOf(owner, 'BID_NOT_AWARDED', tenderId);
@@ -317,8 +320,14 @@ describe('awarding an evaluated tender', () => {
       const view = await award(owner, tenderId, bids[0]!.bidId);
       expect(view.amountMinor).toBe(price);
       expect((await awardRows(tenderId))[0]!.amountMinor).toBe(9007199254740993n);
-      const [event] = await eventsOf(owner, 'TENDER_AWARDED', tenderId);
-      expect((payloadOf(event!) as { amountMinor: string }).amountMinor).toBe(price);
+      expect((await as(owner, () => w.award.getAward(tenderId))).amountMinor).toBe(price);
+      // Nowhere in the owner's event stream or log, whole or as a number.
+      const everything = JSON.stringify(
+        [await outboxFor(w.prisma, owner), await logOf(tenderId)],
+        (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
+      );
+      expect(everything).not.toContain(price);
+      expect(everything).not.toContain('9007199254740992');
     });
 
     it('records the awarder’s issuer and subject beside the user id when the token carries both', async () => {
@@ -532,11 +541,12 @@ describe('awarding an evaluated tender', () => {
       const { owner, tenderId, bids } = await evaluated({ count: 3 });
       const before = SUPPLIER.asked.length;
       await award(owner, tenderId, bids[0]!.bidId);
-      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder]);
+      // The winner alone, twice: the pre-check, and the check after the commit.
+      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder, bids[0]!.bidder]);
       SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
       const again = await award(owner, tenderId, bids[0]!.bidId);
       expect(again.alreadyAwarded).toBe(true);
-      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder]);
+      expect(SUPPLIER.asked.slice(before)).toEqual([bids[0]!.bidder, bids[0]!.bidder]);
     });
 
     it('fails closed when supplier-service cannot be reached: 503, nothing is awarded, the attempt is audited', async () => {
@@ -588,15 +598,101 @@ describe('awarding an evaluated tender', () => {
       }
     });
 
-    it('does not stop a suspension that lands between the answer and the commit: the record says when it was last seen eligible', async () => {
-      const { owner, tenderId, bids } = await evaluated({ count: 1 });
-      const bidder = bids[0]!.bidder;
-      SUPPLIER.afterAnswer = () => SUPPLIER.suspend(bidder, `SUS_RACE_${bidder}`);
-      const view = await award(owner, tenderId, bids[0]!.bidId);
-      expect(view.status).toBe('AWARDED');
-      expect(new Date(view.standingAsOf).getTime()).toBeLessThanOrEqual(
-        new Date(view.awardedAt).getTime(),
-      );
+    describe('the detective control after the commit (ADR-067 § 3, residual)', () => {
+      const checks = async (outcome: string) =>
+        (await awardStandingChecksTotal.get()).values.find(
+          (v) => v.labels.outcome === outcome && v.labels.service === 'construction-service',
+        )?.value ?? 0;
+
+      it('detects a suspension that lands between the answer and the commit: the award stands, a person is told', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        const bidder = bids[0]!.bidder;
+        const before = await checks('conflict');
+        SUPPLIER.afterAnswer = () => SUPPLIER.suspend(bidder, `SUS_RACE_${bidder}`);
+        const user = newUserId();
+        const view = await award(owner, tenderId, bids[0]!.bidId, undefined, user);
+
+        // Not stopped, and not undone.
+        expect(view.status).toBe('AWARDED');
+        expect((await tenderRow(tenderId)).status).toBe('AWARDED');
+        expect(await checks('conflict')).toBe(before + 1);
+
+        const [detected, ...more] = await eventsOf(
+          owner,
+          'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
+          tenderId,
+        );
+        expect(more).toHaveLength(0);
+        expect(detected).toMatchObject({ aggregateType: 'Tender', partitionKey: tenderId });
+        const payload = payloadOf(detected!) as Record<string, unknown>;
+        expect(payload).toEqual({
+          tenderId,
+          projectId: (await tenderRow(tenderId)).projectId,
+          organizationId: owner,
+          winningBidId: bids[0]!.bidId,
+          winnerOrganizationId: bidder,
+          awardedBy: user,
+          awardedAt: view.awardedAt,
+          // The window starts at the instant the award was made on and ends at supplier-service's clock after the commit.
+          windowStart: view.standingAsOf,
+          checkedAt: expect.any(String),
+          suspensionIds: [`SUS_RACE_${bidder}`],
+          suspensionCount: 1,
+          qualificationRemoved: false,
+        });
+        expect(new Date(payload.checkedAt as string).getTime()).toBeGreaterThanOrEqual(
+          new Date(view.awardedAt).getTime() - 1_000,
+        );
+        expect(new Date(view.standingAsOf).getTime()).toBeLessThanOrEqual(
+          new Date(view.awardedAt).getTime() + 1_000,
+        );
+      });
+
+      it('says nothing when the winner stayed eligible', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        const [clear, conflict] = [await checks('clear'), await checks('conflict')];
+        await award(owner, tenderId, bids[0]!.bidId);
+        expect(await checks('clear')).toBe(clear + 1);
+        expect(await checks('conflict')).toBe(conflict);
+        expect(
+          await eventsOf(owner, 'TENDER_AWARD_STANDING_CONFLICT_DETECTED', tenderId),
+        ).toHaveLength(0);
+      });
+
+      it('counts a check that could not be made, without a retry and without disturbing the award', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        const before = await checks('unavailable');
+        SUPPLIER.afterAnswer = () => {
+          SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
+        };
+        const asked = SUPPLIER.asked.length;
+        const view = await award(owner, tenderId, bids[0]!.bidId);
+        expect(view.status).toBe('AWARDED');
+        expect(await checks('unavailable')).toBe(before + 1);
+        // The pre-check and the one attempt after the commit: no retry.
+        expect(SUPPLIER.asked.length - asked).toBe(2);
+        expect(
+          await eventsOf(owner, 'TENDER_AWARD_STANDING_CONFLICT_DETECTED', tenderId),
+        ).toHaveLength(0);
+      });
+
+      it('does not check a repeat of an award already made, nor a refused one', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 2 });
+        SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+        const before = [
+          await checks('clear'),
+          await checks('conflict'),
+          await checks('unavailable'),
+        ];
+        await refusalOf(award(owner, tenderId, bids[0]!.bidId));
+        await award(owner, tenderId, bids[1]!.bidId, 'The first rank is suspended');
+        await award(owner, tenderId, bids[1]!.bidId, 'The first rank is suspended');
+        expect([
+          await checks('clear'),
+          await checks('conflict'),
+          await checks('unavailable'),
+        ]).toEqual([before[0]! + 1, before[1], before[2]]);
+      });
     });
 
     it('fails closed when audit-service cannot say what the winner’s bid was: 503, nothing is awarded', async () => {
@@ -606,6 +702,126 @@ describe('awarding an evaluated tender', () => {
       expect(error.code).toBe('UPSTREAM_UNAVAILABLE');
       expect((await tenderRow(tenderId)).status).toBe('EVALUATED');
       expect(await awardRows(tenderId)).toHaveLength(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+
+  describe('reading the award (the price is behind the door, not on the topic)', () => {
+    const asService = <T>(owner: string, fn: () => T, service = 'contract-service') =>
+      runWithContext(
+        context({
+          authType: 'SERVICE',
+          callerService: service,
+          organizationId: owner,
+          roles: [],
+        } as Partial<RequestContext>),
+        fn,
+      );
+
+    it('gives the owner’s person the award with the winner’s price, and audits the read like a read of a bid', async () => {
+      const { owner, tenderId, bids } = await evaluated({ count: 2 });
+      const made = await award(owner, tenderId, bids[0]!.bidId);
+      const reader = newUserId();
+      const view = await as(owner, () => w.award.getAward(tenderId), reader);
+      expect(view).toEqual({ ...made, alreadyAwarded: true });
+      expect(view.amountMinor).toBe('1000');
+      expect((await logOf(tenderId)).filter((r) => r.purpose === 'READ_AWARD')).toEqual([
+        expect.objectContaining({
+          bidId: bids[0]!.bidId,
+          accessorOrganizationId: owner,
+          accessorUserId: reader,
+          outcome: 'GRANTED',
+        }),
+      ]);
+      const accessed = (await eventsOf(owner, 'BID_ACCESSED', tenderId)).filter(
+        (e) => (payloadOf(e) as { purpose: string }).purpose === 'READ_AWARD',
+      );
+      expect(accessed).toHaveLength(1);
+    });
+
+    it('gives contract-service the same award, recorded as the service, for the organization its token is signed for', async () => {
+      const { owner, tenderId, bids } = await evaluated({ count: 1 });
+      const made = await award(owner, tenderId, bids[0]!.bidId);
+      const view = await asService(owner, () => w.award.getAward(tenderId));
+      expect(view).toEqual({ ...made, alreadyAwarded: true });
+      expect((await logOf(tenderId)).filter((r) => r.purpose === 'READ_AWARD')).toEqual([
+        expect.objectContaining({
+          accessorOrganizationId: owner,
+          accessorUserId: 'service:contract-service',
+          outcome: 'GRANTED',
+        }),
+      ]);
+    });
+
+    it('answers 404 for a tender not yet awarded, and audits that on the owner’s own tender', async () => {
+      const { owner, tenderId } = await evaluated({ count: 1 });
+      const user = newUserId();
+      expect((await codeOf(as(owner, () => w.award.getAward(tenderId), user))).code).toBe(
+        'NOT_FOUND',
+      );
+      expect((await logOf(tenderId)).filter((r) => r.purpose === 'READ_AWARD')).toEqual([
+        expect.objectContaining({
+          accessorUserId: user,
+          outcome: 'REFUSED',
+          refusalCode: 'NOT_FOUND',
+        }),
+      ]);
+    });
+
+    it('answers 404, unlogged, to another organization’s person and to a service token signed for another organization', async () => {
+      const { owner, tenderId, bids } = await evaluated({ count: 1 });
+      await award(owner, tenderId, bids[0]!.bidId);
+      const stranger = (await evaluated({ count: 1 })).owner;
+      const logBefore = (await logOf(tenderId)).length;
+      expect((await codeOf(as(stranger, () => w.award.getAward(tenderId)))).code).toBe('NOT_FOUND');
+      expect((await codeOf(asService(stranger, () => w.award.getAward(tenderId)))).code).toBe(
+        'NOT_FOUND',
+      );
+      // A token signed for no tenant, and a bidder acting for its own organization.
+      expect(
+        (
+          await codeOf(
+            runWithContext(
+              context({
+                authType: 'SERVICE',
+                callerService: 'contract-service',
+                roles: [],
+              } as Partial<RequestContext>),
+              () => w.award.getAward(tenderId),
+            ),
+          )
+        ).code,
+      ).toBe('NOT_FOUND');
+      expect((await codeOf(asBidder(bids[0]!.bidder, () => w.award.getAward(tenderId)))).code).toBe(
+        'NOT_FOUND',
+      );
+      expect((await logOf(tenderId)).length).toBe(logBefore);
+    });
+
+    it('refuses the roles that never see a bid and a member of a bidding organization, each audited', async () => {
+      const { owner, tenderId, bids } = await evaluated({ count: 2 });
+      await award(owner, tenderId, bids[0]!.bidId);
+      const refused: string[] = [];
+      for (const roles of [['SYSTEM_ADMIN'], ['AUDITOR'], ['CONTRACTOR'], ['FLEET_MANAGER']]) {
+        const user = newUserId();
+        refused.push(user);
+        expect(
+          (await codeOf(asUser(owner, roles, () => w.award.getAward(tenderId), user))).code,
+        ).toMatch(/FORBIDDEN|INSUFFICIENT_ROLE/);
+      }
+      const member = newUserId();
+      refused.push(member);
+      w.memberships.of.set(member, [bids[1]!.bidder]);
+      expect(
+        await refusalOf(
+          as(owner, () => w.award.getAward(tenderId), member),
+          'FORBIDDEN',
+        ),
+      ).toContain('CONFLICT_OF_INTEREST');
+      const rows = (await logOf(tenderId)).filter((r) => r.purpose === 'READ_AWARD');
+      expect(rows.map((r) => r.accessorUserId).sort()).toEqual([...refused].sort());
+      expect(new Set(rows.map((r) => r.outcome))).toEqual(new Set(['REFUSED']));
     });
   });
 
