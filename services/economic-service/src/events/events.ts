@@ -277,9 +277,12 @@ export const paymentRefundedPayload = z.object({
  * Published in the transaction that returns the hold — `returnDeclinedHold`,
  * shared by the HTTP refund and the reconciler — and only when that
  * transaction is the one that returned it, so a retry after an ambiguous
- * failure does not announce the decline twice. A refund that never reached the
- * provider is not a decline and is not announced here (its resolution is
- * `PAYMENT_RECONCILIATION_RESOLVED` with `REFUND_NOT_REACHED`). Codes only.
+ * failure does not announce the decline twice. And at most once per intent and
+ * provider refund key (`payment_refund_decline`'s primary key), so the same
+ * request replayed after its idempotency key was released does not either. A
+ * refund that never reached the provider is not a decline and is not announced
+ * here (its resolution is `PAYMENT_RECONCILIATION_RESOLVED` with
+ * `REFUND_NOT_REACHED`). Codes only.
  */
 export const paymentRefundFailedPayload = z.object({
   paymentIntentId: z.string(),
