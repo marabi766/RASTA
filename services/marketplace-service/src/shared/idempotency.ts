@@ -369,6 +369,13 @@ export function hashRequestBody(body: unknown): string {
  *
  * `bigint` cannot appear in a parsed request body, and every amount in this
  * API is a string, so no BigInt-aware replacer is needed here.
+ *
+ * Every own key is kept, whatever its name: the sorted copies have no
+ * prototype (`Object.create(null)`). Assigned into a plain `{}`, a
+ * `"__proto__"` key would set the copy's prototype instead of becoming a key,
+ * `JSON.stringify` would drop it, and two different bodies would hash alike —
+ * the second replaying the first's response instead of being refused as
+ * `IDEMPOTENCY_KEY_REUSED` (#194).
  */
 function canonicalise(value: unknown): string {
   return JSON.stringify(sortKeys(value));
@@ -378,7 +385,7 @@ function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) sorted[key] = sortKeys(source[key]);
     return sorted;
   }
