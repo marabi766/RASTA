@@ -346,3 +346,23 @@ describe('IdempotencyStore.run — when the claim is released', () => {
     expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
   });
 });
+
+describe('hashRequestBody — every own key, whatever its name (#194)', () => {
+  // JSON.parse makes the name an own key, as the request body parser does.
+  const body = (name: string, x: number): unknown =>
+    JSON.parse(`{"note":"n","details":{"${name}":{"x":${x}}}}`);
+
+  it.each(['__proto__', 'constructor'])(
+    'tells bodies apart that differ only under a %s key',
+    (name) => {
+      expect(hashRequestBody(body(name, 1))).not.toBe(hashRequestBody(body(name, 2)));
+      expect(hashRequestBody(body(name, 1))).toBe(hashRequestBody(body(name, 1)));
+    },
+  );
+
+  it('tells a body with a __proto__ key from the same body without it', () => {
+    expect(hashRequestBody(JSON.parse('{"a":1,"__proto__":{"b":2}}'))).not.toBe(
+      hashRequestBody({ a: 1 }),
+    );
+  });
+});
