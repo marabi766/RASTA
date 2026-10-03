@@ -206,3 +206,25 @@ describe('POST /v1/assets in the served document (#169)', () => {
     expect(header).toMatchObject({ in: 'header', required: true });
   });
 });
+
+describe.each([
+  ['/v1/assets/{id}/insurance-policies', 'insurance policy'],
+  ['/v1/assets/{id}/inspections', 'technical inspection'],
+])('POST %s in the served document (EXP-002 slice 6)', (path, _what) => {
+  it('requires the Idempotency-Key header, as the service itself does', async () => {
+    const document = await buildDocument();
+    const operation = document.paths[path]?.post;
+    expect(operation).toBeDefined();
+
+    const header = ((operation?.parameters ?? []) as unknown as Record<string, unknown>[]).find(
+      (parameter) => parameter.name === 'Idempotency-Key',
+    );
+    expect(header).toMatchObject({ in: 'header', required: true });
+  });
+
+  it('says what a replay returns', async () => {
+    const document = await buildDocument();
+    const operation = document.paths[path]?.post as { description?: string } | undefined;
+    expect(operation?.description).toMatch(/Idempotency-Key/);
+  });
+});

@@ -1203,6 +1203,69 @@ describe('AssetService', () => {
         expect(h.clearance.released.sort()).toEqual(OWNERS);
       });
 
+      // The caller cannot know the full picture when one owner did not
+      // answer, so "try again later" outranks a definitive "blocked by open
+      // work" — whichever owner is the one that is unavailable.
+      it.each([
+        [
+          'fleet reports open work, maintenance is unavailable',
+          {
+            'fleet-service': { clear: false, open: { openAssignments: 1 } },
+            'maintenance-service': async () => {
+              throw RastaError.upstreamUnavailable('maintenance-service');
+            },
+          },
+          'UPSTREAM_UNAVAILABLE',
+        ],
+        [
+          'maintenance reports open work, fleet is unavailable',
+          {
+            'fleet-service': async () => {
+              throw RastaError.upstreamUnavailable('fleet-service');
+            },
+            'maintenance-service': { clear: false, open: { openRepairOrders: 1 } },
+          },
+          'UPSTREAM_UNAVAILABLE',
+        ],
+        [
+          'fleet reports open work, maintenance times out',
+          {
+            'fleet-service': { clear: false, open: { openAssignments: 1 } },
+            'maintenance-service': async () => {
+              throw RastaError.upstreamTimeout('maintenance-service', 3000);
+            },
+          },
+          'UPSTREAM_TIMEOUT',
+        ],
+      ])('answers "try again later", not "blocked", when %s', async (_how, outcomes, code) => {
+        const h = at(status, fakeClearance(outcomes as never));
+
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+
+        expect(error.code).toBe(code);
+        expect(error.details?.map((detail) => detail.code) ?? []).not.toContain('OPEN_ASSIGNMENT');
+        expect(error.details?.map((detail) => detail.code) ?? []).not.toContain('OPEN_MAINTENANCE');
+        untouched(h);
+        expect(h.clearance.released.sort()).toEqual(OWNERS);
+      });
+
+      it('prefers an unavailable answer over any other failure of the other owner', async () => {
+        const h = at(
+          status,
+          fakeClearance({
+            'fleet-service': async () => {
+              throw RastaError.invalidStateTransition('Asset', 'ACTIVE', 'TRANSFERRED', 'busy');
+            },
+            'maintenance-service': async () => {
+              throw RastaError.upstreamUnavailable('maintenance-service');
+            },
+          }),
+        );
+
+        await expect(run(() => command(h))).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+        untouched(h);
+      });
+
       it('fails closed when an owner has a fence of another transfer in place', async () => {
         const h = at(
           status,

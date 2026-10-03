@@ -337,7 +337,22 @@ describe('open work in another service (docs/24 Q-94)', () => {
       expect(clear).toContain('WORK_OWNERS.map((owner)=>this.clearance.ask(');
       expect(clear).toContain("outcome.status==='fulfilled'&&outcome.value.clear");
       // An owner that cannot answer is its own error, never a clear.
-      expect(clear).toContain('failure?.reason');
+      expect(clear).toContain("outcome.status==='rejected'");
+      expect(clear).toContain('throwunavailable??failures[0]');
+    });
+
+    it('answers "unavailable" before "blocked by open work" when the owners disagree', () => {
+      // The carried-over LOW of #195: the caller cannot know the full picture
+      // when one owner did not answer, so the portal's 503 sentence — "the check
+      // could not be made", nothing written — is the one that must win over the
+      // open-work refusal. Pinned by source order, and by the codes it prefers.
+      const clear = squash(method('clearForWithdrawal')) ?? '';
+      expect(clear.indexOf('throwunavailable??failures[0]')).toBeGreaterThan(-1);
+      expect(clear.indexOf('throwunavailable??failures[0]')).toBeLessThan(
+        clear.indexOf('throwopenWorkError('),
+      );
+      expect(clear).toContain("reason.code==='UPSTREAM_UNAVAILABLE'");
+      expect(clear).toContain("reason.code==='UPSTREAM_TIMEOUT'");
     });
 
     it('checks the deadline inside the write and lifts the fences whatever happened', () => {
