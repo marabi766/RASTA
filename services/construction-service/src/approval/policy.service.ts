@@ -1,5 +1,13 @@
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
-import { RastaError, getContext } from '@rasta/nest-common';
+import {
+  RastaError,
+  actorIdentityUnknown,
+  compareActors,
+  currentActor,
+  getContext,
+  type ActorComparison,
+  type ActorIdentity,
+} from '@rasta/nest-common';
 import type { CursorPage } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -7,6 +15,7 @@ import { EventPublisher } from '../events/publisher';
 import { ProjectAccess, SUPER_ROLE, UNION_ROLE, type PolicyAuthorRole } from '../access/access';
 import { OrganizationDirectory } from '../organization/organization-directory';
 import { transactionNow } from '../shared/clock';
+import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { IdempotencyStore, type RecordCompletion } from '../shared/idempotency';
 import { ENV } from '../tokens';
@@ -131,6 +140,7 @@ export class PolicyService implements OnModuleInit {
             rationale: dto.rationale,
             isSample: dto.isSample,
             actor: author.actor,
+            actorIdentity: storedIdentityOf(currentActor()),
             correlationId: getContext().correlationId,
             at,
           },
@@ -188,6 +198,7 @@ export class PolicyService implements OnModuleInit {
   async submit(policyId: string, dto: PolicyTransitionDto): Promise<PolicyView> {
     const found = await this.policyOrNotFound(this.prisma.client, policyId);
     const { actor, role } = this.access.assertCanSubmitPolicy(found);
+    const submitter = storedIdentityOf(currentActor());
     // The hierarchy may have changed since the policy was written.
     await this.assertMayGovern(role, found.authorOrganizationId, found.organizationId);
 
@@ -206,7 +217,13 @@ export class PolicyService implements OnModuleInit {
         policyId,
         from: 'DRAFT',
         expectedVersion: dto.expectedVersion,
-        data: { status: 'PENDING_PLATFORM_APPROVAL', submittedAt: at, submittedBy: actor },
+        data: {
+          status: 'PENDING_PLATFORM_APPROVAL',
+          submittedAt: at,
+          submittedBy: actor,
+          submittedByIssuer: submitter.issuer,
+          submittedBySubject: submitter.subject,
+        },
       });
       if (matched === 0) throw this.conflict(policyId);
 
@@ -236,8 +253,9 @@ export class PolicyService implements OnModuleInit {
    */
   async approve(policyId: string, dto: PolicyTransitionDto): Promise<PolicyView> {
     const { actor } = this.access.assertPlatformAdministrator();
+    const approver = currentActor();
     const found = await this.policyOrNotFound(this.prisma.client, policyId);
-    this.assertFourEyes(found, actor);
+    this.assertFourEyes(found, approver);
     await this.assertMayGovern(
       found.authorRole as PolicyAuthorRole,
       found.authorOrganizationId,
@@ -273,7 +291,7 @@ export class PolicyService implements OnModuleInit {
         }
         this.assertVersion(policy.id, policy.version, dto.expectedVersion);
         assertPolicyTransition(policyId, policy.status as PolicyStateName, 'ACTIVE');
-        this.assertFourEyes(policy, actor);
+        this.assertFourEyes(policy, approver);
 
         const workflowKey = policy.workflowKey as WorkflowKey;
         const current = await this.repository.findActivePolicyOf(
@@ -459,20 +477,44 @@ export class PolicyService implements OnModuleInit {
    * policy it wrote itself. A policy a `UNION_ADMIN` wrote is never approved by
    * the person who wrote or submitted it, whatever the flag says: the platform
    * approval exists to check the union, and nobody checks themselves.
+   *
+   * "Different" is proven on the token's issuer and subject (`compareActors`, #188), not on
+   * user ids, which one person can hold two of. An author or submitter whose identity was not
+   * recorded (a policy older than the record) cannot be told apart from the approver: where the
+   * rule applies, that is `422 ACTOR_IDENTITY_UNKNOWN`, never a pass. Such a policy cannot be
+   * approved; the platform rejects it and a new version is written (docs/09 § 9.3).
    */
-  private assertFourEyes(policy: PolicyWithSteps, approver: string): void {
-    const ownWork = policy.createdBy === approver || policy.submittedBy === approver;
-    if (!ownWork) return;
+  private assertFourEyes(policy: PolicyWithSteps, approver: ActorIdentity): void {
+    const people: ActorComparison[] = [
+      compareActors(
+        storedActor(policy.createdBy, policy.createdByIssuer, policy.createdBySubject),
+        approver,
+      ),
+    ];
+    if (policy.submittedBy !== null) {
+      people.push(
+        compareActors(
+          storedActor(policy.submittedBy, policy.submittedByIssuer, policy.submittedBySubject),
+          approver,
+        ),
+      );
+    }
+    if (people.every((comparison) => comparison === 'DISTINCT')) return;
+    const applies = policy.authorRole === UNION_ROLE || this.env.CONSTRUCTION_POLICY_FOUR_EYES;
+    if (!applies) return;
+    if (!people.includes('SAME')) {
+      throw actorIdentityUnknown(
+        'the approver of a policy is neither its author nor its submitter',
+      );
+    }
     if (policy.authorRole === UNION_ROLE) {
       throw RastaError.forbidden(
         'A policy written by a union is approved by a different person, always',
       );
     }
-    if (this.env.CONSTRUCTION_POLICY_FOUR_EYES) {
-      throw RastaError.forbidden(
-        'A different platform administrator must approve this policy (CONSTRUCTION_POLICY_FOUR_EYES)',
-      );
-    }
+    throw RastaError.forbidden(
+      'A different platform administrator must approve this policy (CONSTRUCTION_POLICY_FOUR_EYES)',
+    );
   }
 
   private async announceRetired(

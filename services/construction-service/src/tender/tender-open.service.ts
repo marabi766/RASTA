@@ -1,6 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash, type KeyObject } from 'node:crypto';
-import { RastaError } from '@rasta/nest-common';
+import {
+  RastaError,
+  actorIdentityUnknown,
+  compareActors,
+  currentActor,
+  type ActorIdentity,
+} from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import type { CursorPage } from '@rasta/contracts';
 import type { Bid } from '../generated/prisma';
@@ -16,6 +22,7 @@ import {
   versionConflictsTotal,
 } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
+import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import { ENV, MEMBERSHIP_SOURCE } from '../tokens';
 import { BidAccessAudit, refusalCodeOf } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
@@ -159,6 +166,12 @@ interface Opened {
  * `open` and whom the opening is recorded under; neither is a member of a bidding
  * organization. Committee size and roles are the product owner's to confirm.
  *
+ * "A second" is proven on the token's issuer and subject (`compareActors`, #188), not on the
+ * user id alone, which one person can hold two of: the proposer's identity is stored with the
+ * proposal. A proposal without one (older than the record) cannot show two people and is
+ * refused `ACTOR_IDENTITY_UNKNOWN`; the proposer withdraws it and proposes again. Every route
+ * here needs the platform user id (`@RequirePlatformUserId()`).
+ *
  * The conflict is judged at the **approval**, on both people as they are *now*: their
  * organizations are read from identity-service (`MembershipSource`, fail closed), not taken
  * from the proposal or only from the approver's token — a proposer who has since joined a
@@ -277,8 +290,17 @@ export class TenderOpenService {
     // Four eyes (Q-91): this caller approves what another proposed.
     if (this.env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES) {
       if (locked.openingProposedBy === null) throw this.refused('PROPOSAL_REQUIRED');
-      if (locked.openingProposedBy === principal.actor)
-        throw this.refused('SECOND_PERSON_REQUIRED');
+      // Two people, proven on the token's issuer and subject and not on user ids alone (#188):
+      // one person may hold two user ids. A proposal whose proposer has no recorded identity
+      // (older than the record) cannot be told apart from the approver: refused, fail closed —
+      // the proposer withdraws it and proposes again.
+      this.assertSecondPerson(
+        storedActor(
+          locked.openingProposedBy,
+          locked.openingProposedByIssuer,
+          locked.openingProposedBySubject,
+        ),
+      );
       // Both people as they are NOW, not as they were at the proposal: someone who has since
       // joined a bidding organization neither proposes nor approves. Read before the lock; it
       // is evidence about THE proposal read with it (who and when), so no read, or one of
@@ -412,6 +434,7 @@ export class TenderOpenService {
         const matched = await this.opens.proposeOpening(tx, {
           tenderId,
           actor: principal.actor,
+          identity: storedIdentityOf(currentActor()),
           at,
         });
         if (matched === 0) throw RastaError.optimisticLockFailed('Tender', tenderId);
@@ -1026,6 +1049,19 @@ export class TenderOpenService {
   }
 
   // -- errors -------------------------------------------------------------------------
+
+  /**
+   * The approver is provably not the proposer (`compareActors`, #188). The same person is
+   * `SECOND_PERSON_REQUIRED`, as before; a proposer who cannot be told apart from the approver
+   * is `ACTOR_IDENTITY_UNKNOWN` (422): unknown is never "another person".
+   */
+  private assertSecondPerson(proposer: ActorIdentity): void {
+    const comparison = compareActors(proposer, currentActor());
+    if (comparison === 'DISTINCT') return;
+    if (comparison === 'SAME') throw this.refused('SECOND_PERSON_REQUIRED');
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+    throw actorIdentityUnknown('the approver of an opening is not its proposer');
+  }
 
   private refused(reason: OpeningRefusal): RastaError {
     if (

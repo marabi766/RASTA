@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { PublicationService } from './publication.service';
 import {
   inviteBidderSchema,
@@ -32,6 +32,7 @@ export class PublicationController {
   constructor(private readonly publication: PublicationService) {}
 
   @Post('tenders/:id/publish')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Publish a tender (DRAFT → PUBLISHED)',

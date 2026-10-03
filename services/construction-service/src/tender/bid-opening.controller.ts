@@ -1,6 +1,6 @@
 import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { TenderOpenService } from './tender-open.service';
 import { listBidAccessLogQuerySchema, type ListBidAccessLogQuery } from './bid-opening.dto';
 
@@ -27,6 +27,7 @@ export class BidOpeningController {
   constructor(private readonly opening: TenderOpenService) {}
 
   @Post('tenders/:id/open-bids')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Open the bids of a CLOSED tender (CLOSED → EVALUATING)',
@@ -42,7 +43,10 @@ export class BidOpeningController {
       'digest of the bid ids only; the ids are read with GET /tenders/:id/bids). With four-eyes on ' +
       '(CONSTRUCTION_TENDER_OPEN_FOUR_EYES, default true — Q-91, provisional) this call is the ' +
       'second person’s approval of a proposal another user made: no proposal is 422 ' +
-      '`PROPOSAL_REQUIRED`, the proposer approving their own is 422 `SECOND_PERSON_REQUIRED`. ' +
+      '`PROPOSAL_REQUIRED`, the proposer approving their own is 422 `SECOND_PERSON_REQUIRED` — the ' +
+      'same person under another user id included (issuer and subject are compared, #188) — and a ' +
+      'proposal that names no stable identity is 422 `ACTOR_IDENTITY_UNKNOWN` (withdraw and propose ' +
+      'again). A token without `rasta_uid` is 403 on this route, on proposing and on withdrawing. ' +
       'Opening again answers the same view with `alreadyOpened: true` and writes nothing. ' +
       `${AUDIT_NOTE} ${OWNER_NOTE}`,
   })
@@ -51,6 +55,7 @@ export class BidOpeningController {
   }
 
   @Post('tenders/:id/open-bids/proposal')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Propose opening the bids of a CLOSED tender (four-eyes, the first person)',
@@ -66,6 +71,7 @@ export class BidOpeningController {
   }
 
   @Post('tenders/:id/open-bids/proposal/withdraw')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Withdraw the proposal to open the bids (four-eyes; the proposer only)',

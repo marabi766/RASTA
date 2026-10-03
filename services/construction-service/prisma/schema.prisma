@@ -1005,6 +1005,8 @@ model BidEvaluation {
 
   createdAt DateTime @map("created_at") @db.Timestamptz(3)
 
+  // SQL-only (#188): `ux_bid_evaluation_person` — one evaluation per person (issuer, subject) and
+  // bid, partial on a recorded identity.
   @@unique([organizationId, tenderId, bidId, evaluatorId], map: "ux_bid_evaluation_evaluator")
   @@unique([organizationId, id], map: "ux_bid_evaluation_org_id")
   @@map("bid_evaluation")
@@ -1029,6 +1031,8 @@ model BidEvaluationRecusal {
   reasonCode String   @map("reason_code")
   recusedAt  DateTime @map("recused_at") @db.Timestamptz(3)
 
+  // SQL-only (#188): `ux_bid_recusal_person` — one recusal per person (issuer, subject) and bid,
+  // partial on a recorded identity.
   @@unique([organizationId, tenderId, bidId, evaluatorId], map: "ux_bid_recusal_evaluator")
   @@map("bid_evaluation_recusal")
 }

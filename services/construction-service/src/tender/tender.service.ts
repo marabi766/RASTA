@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { RastaError, getContext } from '@rasta/nest-common';
+import { RastaError, currentActor, getContext } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
 import type { CursorPage } from '@rasta/contracts';
 import type { Prisma } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { storedIdentityOf } from '../shared/stable-actor';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ProjectAccess, assertOwnTender } from '../access/access';
 import { transactionNow } from '../shared/clock';
@@ -104,6 +105,7 @@ export class TenderService {
               bidOpeningAt: dto.bidOpeningAt ? new Date(dto.bidOpeningAt) : null,
               bidClosingAt: dto.bidClosingAt ? new Date(dto.bidClosingAt) : null,
               actor,
+              actorIdentity: storedIdentityOf(currentActor()),
               correlationId: getContext().correlationId,
               at,
             });

@@ -11,7 +11,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { zodPipe } from '@rasta/nest-common';
+import { RequirePlatformUserId, zodPipe } from '@rasta/nest-common';
 import { parseIdempotencyKey } from '../project/project.controller';
 import { TenderService } from './tender.service';
 import {
@@ -53,6 +53,7 @@ export class TenderController {
   constructor(private readonly tenders: TenderService) {}
 
   @Post('projects/:id/tenders')
+  @RequirePlatformUserId()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Create a tender (DRAFT) under an APPROVED project',

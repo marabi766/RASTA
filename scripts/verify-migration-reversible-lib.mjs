@@ -1094,6 +1094,8 @@ export const EXPECTED = {
       'bid_evaluation_recusal',
       'bid_evaluation_score',
     ],
+    // 20261003120000_actor_stable_identity (#188): one person is one evaluator of a bid.
+    indexes: ['ux_bid_evaluation_person', 'ux_bid_recusal_person'],
     // 20260930170000_tender_criteria: a tender's criteria freeze with publication.
     // Also the publish-needs-criteria pair on `tender` and the template's append-only pair.
     // 20260930180000_tender_publication: a tender's key is never deleted and its
