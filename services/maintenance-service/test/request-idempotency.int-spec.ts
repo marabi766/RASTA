@@ -3,7 +3,7 @@ import { RequestService } from '../src/maintenance/request.service';
 import { RepairOrderService } from '../src/maintenance/repair-order.service';
 import { UnverifiedWorkshopDirectory } from '../src/maintenance/workshop.directory';
 import { CREATE_REQUEST_ENDPOINT, RequestController } from '../src/maintenance/request.controller';
-import { IdempotencyStore } from '../src/maintenance/idempotency';
+import { IN_FLIGHT_WAIT_MS, IdempotencyStore } from '../src/maintenance/idempotency';
 import type { CreateRequestDto, MaintenanceRequestView } from '../src/maintenance/dto';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
@@ -271,6 +271,101 @@ describe('maintenance request creation under an Idempotency-Key', () => {
     expect(await retry).toEqual(original);
     expect((await requestsFor(assetId)).map((row) => row.id)).toEqual([original.id]);
   });
+
+  it.each(['__proto__', 'constructor'])(
+    'refuses a body that differs only under a %s key, and creates nothing more (#194)',
+    async (name) => {
+      const assetId = await machine();
+      const key = id('KEY');
+      const dto = breakdown(assetId);
+      // JSON.parse makes `name` an own key, as the request body parser does. The
+      // schema refuses such a body today; the store must not rely on that.
+      const hashed = (x: number): unknown => ({
+        ...dto,
+        extra: JSON.parse(`{"${name}":{"x":${x}}}`) as unknown,
+      });
+      const run = (x: number) =>
+        asActor(actor, () =>
+          store.execute<MaintenanceRequestView>(
+            CREATE_REQUEST_ENDPOINT,
+            key,
+            hashed(x),
+            201,
+            (fence) => requests.create(dto, fence),
+          ),
+        );
+
+      const original = (await run(1)).result;
+      await expect(run(2)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      expect((await requestsFor(assetId)).map((row) => row.id)).toEqual([original.id]);
+      // The same body is still recognised as the retry it is.
+      expect(await run(1)).toEqual({ result: original, executed: false });
+    },
+  );
+
+  /** Until a session waits on a row lock with a statement matching `pattern`. */
+  async function untilBlocked(pattern: string): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const [{ waiting }] = await prisma.client.$queryRawUnsafe<{ waiting: number }[]>(
+        `SELECT count(*)::int AS waiting FROM pg_stat_activity
+         WHERE wait_event_type = 'Lock' AND query ILIKE $1`,
+        pattern,
+      );
+      if (waiting > 0) return;
+      if (Date.now() > deadline) throw new Error(`no session ever blocked on ${pattern}`);
+      await sleep(25);
+    }
+  }
+
+  it('bounds the takeover of a lapsed claim: a holder that keeps its lock gets a retryable 409 within the budget, then the retry takes over (#194)', async () => {
+    const assetId = await machine();
+    const key = id('KEY');
+    const dto = breakdown(assetId);
+    await asActor(actor, () => store.claim(CREATE_REQUEST_ENDPOINT, key, dto));
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE idempotency_key SET expires_at = now() - interval '1 second'
+       WHERE organization_id = $1 AND endpoint = $2 AND key = $3`,
+      org.a,
+      CREATE_REQUEST_ENDPOINT,
+      key,
+    );
+    const held = gate();
+
+    // A holder that keeps the lapsed claim's row lock past any request's
+    // budget. The retry's removal of the lapsed row waits on that lock — for
+    // what is left of the budget, never longer.
+    const holder = prisma.transaction(
+      async (tx) => {
+        await tx.$queryRawUnsafe(
+          `SELECT 1 FROM idempotency_key
+           WHERE organization_id = $1 AND endpoint = $2 AND key = $3 FOR UPDATE`,
+          org.a,
+          CREATE_REQUEST_ENDPOINT,
+          key,
+        );
+        held.reach();
+        await held.opened;
+      },
+      { timeoutMs: 30_000 },
+    );
+    await held.reached;
+
+    const started = Date.now();
+    const refused = create(dto, key).catch((error: unknown) => error);
+    await untilBlocked('DELETE FROM%idempotency_key%');
+    expect(await refused).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+    const waited = Date.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(IN_FLIGHT_WAIT_MS - 1_000);
+    expect(waited).toBeLessThan(IN_FLIGHT_WAIT_MS + 2_500);
+    expect(await requestsFor(assetId)).toEqual([]);
+
+    // Once the holder lets go, the next retry takes the lapsed claim over.
+    held.open();
+    await holder;
+    const taken = (await create(dto, key)) as { id: string };
+    expect((await requestsFor(assetId)).map((row) => row.id)).toEqual([taken.id]);
+  }, 30_000);
 
   it('leaves nothing half-done when the completion fails: no request, no outbox row, the key free', async () => {
     const assetId = await machine();
