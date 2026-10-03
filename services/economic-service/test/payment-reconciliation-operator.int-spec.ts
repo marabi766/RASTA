@@ -459,6 +459,27 @@ describe('the payment reconciliation operator path (real database)', () => {
       }
     });
 
+    it('takes the guard’s word on the platform user id: a rasta_uid that equals the subject is not refused (#188)', async () => {
+      const organizationId = `${org.b}-UID-IS-SUB`;
+      const made = await escalatedUnknown(organizationId, 369n);
+      const operator = operatorWith();
+      const erin = {
+        organizationId,
+        roles: ['SYSTEM_ADMIN'],
+        userId: 'sub-erin',
+        subject: 'sub-erin',
+      };
+      // The token carried rasta_uid, whose value happens to be the subject.
+      const view = await asActor({ ...erin, platformUserId: true }, () =>
+        operator.view(made.intentId),
+      );
+      expect(view.task).not.toBeNull();
+      // The same values from the guard's fallback (no rasta_uid) are refused.
+      await expect(
+        asActor({ ...erin, platformUserId: false }, () => operator.view(made.intentId)),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
     it('recognises the creator by the subject their intent was created under', async () => {
       const organizationId = `${org.b}-CREATOR-ALIAS`;
       // Created by a token without `rasta_uid`: `created_by` holds the subject.

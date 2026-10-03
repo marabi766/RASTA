@@ -598,9 +598,11 @@ export class PaymentReconciliationOperator {
    *
    * Without `rasta_uid` the auth guard falls back to the IdP subject for
    * `userId`, which is how one person comes to hold two user ids (Codex on
-   * #175, HIGH 1). That fallback shows as `userId === subject`, or as no
-   * subject at all; either is refused here. Public so the controller can ask
-   * it before an idempotent replay is answered (MED 3).
+   * #175, HIGH 1). The guard says which it was (`platformUserId`, #188); a
+   * token without the claim, or a context with no verified issuer and subject,
+   * is refused here. Nothing is guessed from the values: a platform id that
+   * happens to equal the subject is a platform id. Public so the controller
+   * can ask it before an idempotent replay is answered (MED 3).
    */
   authorize(): OperatorActor {
     const context = getContext();
@@ -613,13 +615,8 @@ export class PaymentReconciliationOperator {
     ) {
       throw RastaError.forbidden('Only a payment reconciliation resolver may do this');
     }
-    if (context.platformUserId !== true || context.userId === context.subject) {
-      throw RastaError.forbidden(
-        'A payment reconciliation resolver must be signed in with a platform user id',
-      );
-    }
     const { userId, issuer, subject } = currentActor();
-    if (issuer === null || subject === null) {
+    if (context.platformUserId !== true || issuer === null || subject === null) {
       throw RastaError.forbidden(
         'A payment reconciliation resolver must be signed in with a platform user id',
       );

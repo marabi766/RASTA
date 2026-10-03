@@ -230,12 +230,12 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 | 429   | `RATE_LIMIT_EXCEEDED`                                                                                            |
 | 500   | `INTERNAL_ERROR`                                                                                                 |
 | 503   | `UPSTREAM_UNAVAILABLE`                                                                                           |
+| 504   | `UPSTREAM_TIMEOUT`                                                                                               |
 
 **تغییر قرارداد (#188، بخش پ).** `CREATOR_IDENTITY_UNKNOWN` (economic، مسیر اپراتور آشتی پرداخت، ADR-064 § ۶) حذف شد و همان
 حالت اکنون `422 ACTOR_IDENTITY_UNKNOWN` است — همان کدی که هر جدایی وظایفِ اثبات‌ناپذیر در پلتفرم برمی‌گرداند (`docs/09` § ۹٫۳).
 وضعیت HTTP همان `422` است؛ مشتری‌ای که روی نام کد شاخه می‌زد باید به نام تازه برود. هیچ رویدادی تغییر نکرد: هویت پایدار روی
 هیچ رویدادی نیست.
-| 504 | `UPSTREAM_TIMEOUT` |
 
 **CONSTRAINT.** پیام خطا هرگز شامل Stack Trace، نام جدول، بخشی از Query، یا داده مستأجر
 دیگر نیست. `404` و `403` برای منبع متعلق به مستأجر دیگر **هر دو `404` برمی‌گردانند** —
