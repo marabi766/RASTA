@@ -1042,6 +1042,27 @@ export class PaymentService {
       // Resolved: the marker does not outlive the refund it described.
       data: { status: 'REFUNDED', refundedAt, failureReason: null },
     });
+    // Announced in the transaction that records it (ADR-064 § 9): every path
+    // to a refund — the operator's request, the reconciler, an approved
+    // operator resolution — ends here, so it is announced once, and never for
+    // a refund the ledger does not hold.
+    await this.ledger.enqueue(tx, {
+      eventName: ECONOMIC_EVENTS.PAYMENT_REFUNDED,
+      aggregateId: row.id,
+      organizationId: row.organizationId,
+      payload: {
+        paymentIntentId: row.id,
+        organizationId: row.organizationId,
+        walletId: row.walletId,
+        amountMinor: formatMinor(row.amountMinor),
+        currency: row.currency,
+        reversalJournalId: reversal.id,
+        refundedBy: actor,
+        provider: this.provider.name,
+        simulated: this.provider.simulated,
+        refundedAt: refundedAt.toISOString(),
+      },
+    });
 
     paymentIntentsTotal.inc({
       service: SERVICE_NAME,
@@ -1140,22 +1161,46 @@ export class PaymentService {
     because: 'DECLINED' | 'NOT_REACHED' = 'DECLINED',
   ): Promise<void> {
     const hold = await this.walletRepository.findActiveHold(tx, wallet.id, intent.id);
+    let returned = false;
     if (hold && hold.referenceType === REFUND_HOLD_REFERENCE_TYPE) {
-      await this.wallets.refundHold(tx, {
-        wallet,
-        holdId: hold.id,
-        transactionId: topUpTransactionOf(intent),
-        note:
-          because === 'DECLINED'
-            ? `Returned: the provider declined the refund of payment ${intent.id}`
-            : `Returned: the refund of payment ${intent.id} never reached the provider`,
-        resolvedBy: actor,
-      });
+      returned =
+        (await this.wallets.refundHold(tx, {
+          wallet,
+          holdId: hold.id,
+          transactionId: topUpTransactionOf(intent),
+          note:
+            because === 'DECLINED'
+              ? `Returned: the provider declined the refund of payment ${intent.id}`
+              : `Returned: the refund of payment ${intent.id} never reached the provider`,
+          resolvedBy: actor,
+        })) !== null;
     }
     await tx.paymentIntent.update({
       where: { id: intent.id },
       data: { failureReason: null },
     });
+    // A decline is announced in the transaction that returns its hold (ADR-064
+    // § 9), and only by the one that did: a retry finds the hold already
+    // returned and announces nothing twice. A refund that never reached the
+    // provider is not a decline.
+    if (because === 'DECLINED' && returned) {
+      await this.ledger.enqueue(tx, {
+        eventName: ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED,
+        aggregateId: intent.id,
+        organizationId: intent.organizationId,
+        payload: {
+          paymentIntentId: intent.id,
+          organizationId: intent.organizationId,
+          walletId: intent.walletId,
+          amountMinor: formatMinor(intent.amountMinor),
+          currency: intent.currency,
+          reason: 'PROVIDER_DECLINED',
+          provider: this.provider.name,
+          simulated: this.provider.simulated,
+          failedAt: new Date().toISOString(),
+        },
+      });
+    }
   }
 
   /**

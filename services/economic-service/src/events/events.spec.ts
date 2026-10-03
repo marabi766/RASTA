@@ -19,7 +19,7 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the nineteen events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the twenty-one events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -32,6 +32,8 @@ describe('the catalogue', () => {
         'PAYMENT_COMPLETED',
         'PAYMENT_FAILED',
         'PAYMENT_REFUND_UNRECONCILED',
+        'PAYMENT_REFUNDED',
+        'PAYMENT_REFUND_FAILED',
         'PAYMENT_RECONCILIATION_ESCALATED',
         'PAYMENT_RECONCILIATION_RESOLVED',
         'PAYMENT_RECONCILIATION_OPERATOR_ACTION',
@@ -486,4 +488,68 @@ describe('a rule change record', () => {
       }),
     ).toThrow();
   });
+});
+
+describe('the refund outcome events (ADR-064 § 9)', () => {
+  const refunded = {
+    paymentIntentId: 'PAY_1',
+    organizationId: 'ORG-A',
+    walletId: 'WAL_1',
+    amountMinor: '5000',
+    currency: 'IRR',
+    reversalJournalId: 'JRN_1',
+    refundedBy: 'USR-1',
+    provider: 'mock',
+    simulated: true,
+    refundedAt: '2026-10-03T00:00:00.000Z',
+  };
+  const failed = {
+    paymentIntentId: 'PAY_1',
+    organizationId: 'ORG-A',
+    walletId: 'WAL_1',
+    amountMinor: '5000',
+    currency: 'IRR',
+    reason: 'PROVIDER_DECLINED',
+    provider: 'mock',
+    simulated: true,
+    failedAt: '2026-10-03T00:00:00.000Z',
+  };
+
+  it.each([
+    [ECONOMIC_EVENTS.PAYMENT_REFUNDED, refunded],
+    [ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED, failed],
+  ] as const)('%s accepts its canonical shape and never carries an instrument', (name, payload) => {
+    const published = validateEconomicPayload(name, {
+      ...payload,
+      instrument: 'fail-refund:4111111111111111',
+      reason_text: 'free text a caller typed',
+    }) as Record<string, unknown>;
+
+    expect(published).toEqual(payload);
+    expect(JSON.stringify(published)).not.toContain('4111');
+  });
+
+  it.each([
+    ['a float amount', ECONOMIC_EVENTS.PAYMENT_REFUNDED, { ...refunded, amountMinor: '50.5' }],
+    ['a negative amount', ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED, { ...failed, amountMinor: '-1' }],
+    [
+      'no reversal journal',
+      ECONOMIC_EVENTS.PAYMENT_REFUNDED,
+      { ...refunded, reversalJournalId: undefined },
+    ],
+    [
+      'an open-ended reason',
+      ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED,
+      { ...failed, reason: 'card expired' },
+    ],
+  ] as const)('refuses %s', (_label, name, payload) => {
+    expect(() => validateEconomicPayload(name, payload)).toThrow();
+  });
+
+  it.each([ECONOMIC_EVENTS.PAYMENT_REFUNDED, ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED])(
+    '%s is never replayed automatically',
+    (name) => {
+      expect(NEVER_AUTO_REPLAY.has(name)).toBe(true);
+    },
+  );
 });

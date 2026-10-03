@@ -39,6 +39,8 @@ export const ECONOMIC_EVENTS = {
   PAYMENT_FAILED: 'PAYMENT_FAILED',
   PAYMENT_CAPTURE_UNRECONCILED: 'PAYMENT_CAPTURE_UNRECONCILED',
   PAYMENT_REFUND_UNRECONCILED: 'PAYMENT_REFUND_UNRECONCILED',
+  PAYMENT_REFUNDED: 'PAYMENT_REFUNDED',
+  PAYMENT_REFUND_FAILED: 'PAYMENT_REFUND_FAILED',
   PAYMENT_RECONCILIATION_ESCALATED: 'PAYMENT_RECONCILIATION_ESCALATED',
   PAYMENT_RECONCILIATION_RESOLVED: 'PAYMENT_RECONCILIATION_RESOLVED',
   PAYMENT_RECONCILIATION_OPERATOR_ACTION: 'PAYMENT_RECONCILIATION_OPERATOR_ACTION',
@@ -240,6 +242,55 @@ export const paymentRefundUnreconciledPayload = z.object({
     'REVERSAL_FAILED',
   ]),
   detectedAt: z.string(),
+});
+
+/**
+ * A top-up was refunded (ADR-064 § 9): the provider returned the money, the
+ * refund hold went back to the wallet, the top-up journal was reversed and
+ * the intent is `REFUNDED`.
+ *
+ * Published in the transaction that records the refund — `recordRefund`, the
+ * one path the operator's HTTP refund, the reconciler and an approved operator
+ * resolution all share — so it is announced exactly when, and only when, the
+ * refund is on the ledger. `reversalJournalId` is the `REVERSAL` journal that
+ * undid the top-up; `refundedBy` the actor recorded on it. Codes and
+ * identifiers only: no instrument, no free-text reason (S-09).
+ */
+export const paymentRefundedPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  amountMinor,
+  currency,
+  reversalJournalId: z.string(),
+  refundedBy: z.string().min(1),
+  provider: z.string(),
+  simulated: z.boolean(),
+  refundedAt: z.string(),
+});
+
+/**
+ * The provider declined a refund (ADR-064 § 9): it still holds the money, the
+ * refund hold went back to the wallet and the intent is an ordinary CAPTURED
+ * top-up again.
+ *
+ * Published in the transaction that returns the hold — `returnDeclinedHold`,
+ * shared by the HTTP refund and the reconciler — and only when that
+ * transaction is the one that returned it, so a retry after an ambiguous
+ * failure does not announce the decline twice. A refund that never reached the
+ * provider is not a decline and is not announced here (its resolution is
+ * `PAYMENT_RECONCILIATION_RESOLVED` with `REFUND_NOT_REACHED`). Codes only.
+ */
+export const paymentRefundFailedPayload = z.object({
+  paymentIntentId: z.string(),
+  organizationId: z.string(),
+  walletId: z.string(),
+  amountMinor,
+  currency,
+  reason: z.enum(['PROVIDER_DECLINED']),
+  provider: z.string(),
+  simulated: z.boolean(),
+  failedAt: z.string(),
 });
 
 /** What a reconciliation task is for (ADR-064 step B). */
@@ -639,6 +690,8 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.PAYMENT_FAILED]: paymentFailedPayload,
   [ECONOMIC_EVENTS.PAYMENT_CAPTURE_UNRECONCILED]: paymentCaptureUnreconciledPayload,
   [ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED]: paymentRefundUnreconciledPayload,
+  [ECONOMIC_EVENTS.PAYMENT_REFUNDED]: paymentRefundedPayload,
+  [ECONOMIC_EVENTS.PAYMENT_REFUND_FAILED]: paymentRefundFailedPayload,
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_ESCALATED]: paymentReconciliationEscalatedPayload,
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_RESOLVED]: paymentReconciliationResolvedPayload,
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_OPERATOR_ACTION]:

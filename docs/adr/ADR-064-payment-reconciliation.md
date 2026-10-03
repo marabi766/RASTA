@@ -279,6 +279,13 @@ B0 که هنوز در حال اجراست می‌تواند علامتی بی ت
 `PAYMENT_RECONCILIATION_RESOLVED` — همه در `NEVER_AUTO_REPLAY`، کلید پارتیشن `paymentIntentId` (ADR-036)، فقط کد و بی
 Instrument (S-09)، و ثبت در `docs/07` و `docs/events/README.md`.
 
+> **یادداشت (#150 تریاژ دستهٔ ۲، مورد ۷):** `PAYMENT_REFUNDED` و `PAYMENT_REFUND_FAILED` تا این تاریخ تعریف نشده بودند؛
+> بازپرداخت Journal را معکوس و Hold را برمی‌گرداند بی هیچ رویداد سطح Intent. اکنون هر دو در `events.ts` هستند، با همین
+> قواعد: `PAYMENT_REFUNDED` در تراکنش `recordRefund` (یک مسیر برای بازپرداخت اپراتور، آشتی‌دهنده و حل تأییدشدهٔ اپراتور) و
+> `PAYMENT_REFUND_FAILED` در تراکنش `returnDeclinedHold` برای ردِ Provider — و فقط وقتی همان تراکنش Hold را برگرداند، تا
+> تلاش دوباره دوبار اعلام نکند. «نرسیدن به Provider» رد نیست و با `PAYMENT_RECONCILIATION_RESOLVED`
+> (`REFUND_NOT_REACHED`) ثبت می‌شود. بی Migration و بی Endpoint تازه.
+
 ### ۱۰. پیکربندی و پایش
 
 متغیرهای `ECONOMIC_PAYMENT_RECONCILER_*` (فعال، بازه، اندازهٔ دسته، grace، lease، backoff پایه و بیشینه، بیشینهٔ تلاش و
