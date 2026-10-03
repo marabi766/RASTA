@@ -1,11 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  UTC_SESSION_CORPUS,
-  UTC_SESSION_OPTION,
-  ledgerRevoke,
-  withUtcSession,
-} from './prisma-lib.mjs';
+import { UTC_SESSION_OPTION, ledgerRevoke, withUtcSession } from './prisma-lib.mjs';
+import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
 
 const pg = (user, db, schema) =>
   `postgresql://${user}:secret_value_here@127.0.0.1:5433/${db}${schema ? `?schema=${schema}` : ''}`;
@@ -72,8 +68,8 @@ const ENCODED = 'options=-c%20TimeZone%3DUTC';
 
 test('a migration URL gets the UTC startup option, everything else kept byte for byte', () => {
   assert.equal(
-    withUtcSession('postgresql://u:p@db:5432/rasta'),
-    `postgresql://u:p@db:5432/rasta?${ENCODED}`,
+    withUtcSession('postgresql://db:5432/rasta'),
+    `postgresql://db:5432/rasta?${ENCODED}`,
   );
   const url = UTC_SESSION_CORPUS[3];
   assert.equal(withUtcSession(url), `${url}&${ENCODED}`);

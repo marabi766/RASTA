@@ -29,7 +29,8 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { UTC_SESSION_CORPUS, withUtcSession as runnerWithUtcSession } from './prisma-lib.mjs';
+import { withUtcSession as runnerWithUtcSession } from './prisma-lib.mjs';
+import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);

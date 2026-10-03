@@ -82,19 +82,3 @@ export function withUtcSession(url) {
   const kept = pairs.filter((pair) => !isOptions(pair));
   return `${base}?${[...kept, `options=${encodeURIComponent(options)}`].join('&')}${hash}`;
 }
-
-/**
- * URLs both copies of `withUtcSession` must agree on — the parity corpus of
- * `scripts/db-session-utc.pg.test.mjs` and the cases of `prisma-lib.test.mjs`.
- */
-export const UTC_SESSION_CORPUS = [
-  'postgresql://u:p@db:5432/rasta',
-  'postgresql://u:p@db:5432/rasta?schema=public',
-  'postgres://u:p@db:5432/rasta?schema=audit&connection_limit=3',
-  'postgresql://rasta_x:p%40ss%2Fw%3Ard!@db.internal:6432/rasta_x?schema=public&sslmode=verify-full&sslrootcert=%2Fetc%2Fca.pem&application_name=a+b',
-  'postgresql://u:p@db/rasta?options=-c%20TimeZone%3DAsia%2FTehran&schema=public',
-  'postgresql://u:p@db/rasta?options=-c+statement_timeout%3D5000',
-  'postgresql://u:p@db/rasta?options=-c%20TimeZone%3DUTC',
-  'postgresql://u:p@db/rasta?options=-c%20TimeZone%3DUTC%20-c%20TimeZone%3DAsia%2FTehran',
-  'postgresql://u:p@db/rasta?schema=public#x',
-];
