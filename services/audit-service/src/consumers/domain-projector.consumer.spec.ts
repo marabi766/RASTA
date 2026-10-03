@@ -610,6 +610,7 @@ describe('source_service label on path A', () => {
 describe('payment-reconciliation evidence on path A', () => {
   const delivery: EventDelivery = Object.freeze({ topic: 'rasta.economic.v1', partition: 0 });
   const SECRET = 'SECRET-EVIDENCE prose that must not be logged';
+  const KEY_WITH_TEXT = 'nationalId 0012345678 of the payer';
 
   function resolved(payloadOverrides: Record<string, unknown> = {}): EventEnvelope {
     return {
@@ -706,12 +707,20 @@ describe('payment-reconciliation evidence on path A', () => {
     const before = await failures();
 
     await expect(
-      projector.handle(resolved({ evidenceReference: SECRET }), delivery),
+      projector.handle(
+        resolved({ evidenceReference: SECRET, [KEY_WITH_TEXT]: 'x', walletId: undefined }),
+        delivery,
+      ),
     ).rejects.toMatchObject({ name: 'UnprocessableEventError', reason: 'VALIDATION_FAILED' });
 
     expect(ingested).toBe(0);
     expect(await failures()).toBe(before + 1);
     expect(JSON.stringify(logged)).not.toContain(SECRET);
     expect(JSON.stringify(logged)).toContain('evidenceReference');
+    // Not even a key name from the payload (Codex on #204, MED 2): a producer
+    // can put text in a property name, and the old line printed every one.
+    expect(JSON.stringify(logged)).not.toContain('nationalId');
+    expect(JSON.stringify(logged)).not.toContain('0012345678');
+    expect(JSON.stringify(logged)).not.toContain('payload keys');
   });
 });

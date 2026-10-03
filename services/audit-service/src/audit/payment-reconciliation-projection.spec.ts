@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { z } from 'zod';
 import { join } from 'node:path';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
@@ -13,6 +14,7 @@ import {
   RECONCILIATION_KINDS,
   RESOLUTION_CODES,
   RESOLVED_FIELDS,
+  describeIssues,
   toPaymentReconciliationEvidence,
 } from './payment-reconciliation-projection';
 
@@ -463,5 +465,75 @@ describe('what is not projected at all', () => {
   it('ignores every other economic event, even with a malformed payload', () => {
     expect(project(envelope('PAYMENT_RECONCILIATION_ESCALATED', 'nonsense'))).toBeNull();
     expect(project(envelope('PAYMENT_CAPTURED', null))).toBeNull();
+  });
+});
+
+describe("economic's whole contract first (Codex on #204, MED 3)", () => {
+  it.each([
+    ['RESOLVED without walletId', RESOLVED, { walletId: undefined }, 'walletId'],
+    ['RESOLVED without amountMinor', RESOLVED, { amountMinor: undefined }, 'amountMinor'],
+    ['RESOLVED with walletId as an object', RESOLVED, { walletId: { id: 'wal_1' } }, 'walletId'],
+    ['RESOLVED with a fractional amount', RESOLVED, { amountMinor: '1.50' }, 'amountMinor'],
+    ['RESOLVED with an unknown marker', RESOLVED, { marker: 'GUESSED' }, 'marker'],
+    ['RESOLVED without resolvedAt', RESOLVED, { resolvedAt: undefined }, 'resolvedAt'],
+    ['OPERATOR_ACTION without currency', OPERATOR_ACTION, { currency: undefined }, 'currency'],
+    ['OPERATOR_ACTION with simulated as text', OPERATOR_ACTION, { simulated: 'yes' }, 'simulated'],
+    [
+      'OPERATOR_ACTION without occurredAt',
+      OPERATOR_ACTION,
+      { occurredAt: undefined },
+      'occurredAt',
+    ],
+  ])(
+    'refuses %s, though nothing it lacks would be stored',
+    (_label, eventName, overrides, field) => {
+      const payload =
+        eventName === RESOLVED
+          ? approvedResolutionPayload(overrides)
+          : operatorActionPayload(overrides);
+      const refusal = refusalOf(envelope(eventName, payload));
+      expect(refusal.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+      expect(refusal.message).toContain("economic's event contract");
+      expect(refusal.message).toContain(field);
+    },
+  );
+
+  it('still never stores what it validated: amounts, currency, provider', () => {
+    const projection = project(envelope(RESOLVED, approvedResolutionPayload()));
+    expect(JSON.stringify(projection)).not.toMatch(/150000|IRR|mock|wal_01/);
+  });
+});
+
+describe('refusal messages name schema fields only (Codex on #204, MED 2)', () => {
+  const KEY_WITH_TEXT = 'nationalId 0012345678 of the payer';
+
+  it('never repeats a payload-supplied property name', () => {
+    // A malformed payload that also carries a key whose *name* is text. The
+    // refusal must describe the schema field that failed, never that key.
+    const payload = approvedResolutionPayload({
+      evidenceReference: 'not a reference',
+      [KEY_WITH_TEXT]: { nested: true },
+    });
+    const refusal = refusalOf(envelope(RESOLVED, payload));
+    expect(refusal.message).toContain('evidenceReference');
+    expect(refusal.message).not.toContain('nationalId');
+    expect(refusal.message).not.toContain('0012345678');
+  });
+
+  it('reports a non-object payload without naming anything from it', () => {
+    const refusal = refusalOf(envelope(OPERATOR_ACTION, [KEY_WITH_TEXT]));
+    expect(refusal.message).toContain('(payload) invalid_type');
+    expect(refusal.message).not.toContain('nationalId');
+  });
+
+  it('masks any path segment that is not a schema field, whatever produced it', () => {
+    // zod builds these paths from the schema, so a payload key cannot reach
+    // one today; the mask is what keeps it so if a schema ever records keys.
+    const error = new z.ZodError([
+      { code: z.ZodIssueCode.custom, path: [KEY_WITH_TEXT, 'x'], message: KEY_WITH_TEXT },
+      { code: z.ZodIssueCode.custom, path: ['walletId', KEY_WITH_TEXT], message: 'm' },
+      { code: z.ZodIssueCode.custom, path: [3], message: 'm' },
+    ]);
+    expect(describeIssues(error)).toBe('(payload) custom; walletId custom; (payload) custom');
   });
 });

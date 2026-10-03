@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
+import {
+  ECONOMIC_RECONCILIATION_CONTRACT,
+  EVIDENCE_REFERENCE_PATTERN,
+} from './economic-reconciliation-contract';
+
+export { EVIDENCE_REFERENCE_PATTERN };
 
 /**
  * D-046 (ADR-064 § 6): the allow-listed, versioned projection of the two
@@ -30,6 +36,18 @@ import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common'
  * into the row, by name; nothing is copied wholesale, so a field the producer
  * adds tomorrow is not stored until somebody decides it should be. Amounts,
  * currency, provider and any reason text are never kept.
+ *
+ * ## Two stages: economic's whole contract, then the allow-list
+ *
+ * The payload is first parsed **in full** against economic's published contract
+ * (`economic-reconciliation-contract.ts`, a pinned copy tested against
+ * economic's source): every field, including the amounts and the provider this
+ * service never stores. A payload economic could not have published is refused
+ * there. Only then is it parsed against the storage contract below — stricter
+ * about what is kept (identifier shape, the operator group whole or absent, each
+ * action's field set) — and the row built from the allow-list. The evidence
+ * reference is economic's `EVIDENCE_REFERENCE_PATTERN`, re-exported from the
+ * pinned copy; one that does not match is refused, never stripped.
  *
  * ## A known event that fails the contract writes nothing
  *
@@ -112,14 +130,6 @@ export const OPERATOR_ACTION_FIELDS: Readonly<Record<string, boolean>> = Object.
   simulated: false,
   occurredAt: false,
 });
-
-/**
- * economic's `EVIDENCE_REFERENCE_PATTERN`, and `ck_payment_resolution_evidence`
- * there, and `ck_payment_reconciliation_evidence_values` here: a ticket or
- * document id, never prose. A reference that does not match is refused, not
- * stripped — a resolution recorded without its evidence is the gap D-046 is.
- */
-export const EVIDENCE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/;
 
 export const RECONCILIATION_KINDS = ['REFUND', 'UNCREDITED_REFUND'] as const;
 export const RESOLUTION_CODES = [
@@ -256,11 +266,34 @@ export function isPaymentReconciliationEvent(
   return (Object.values(PAYMENT_RECONCILIATION_EVENTS) as string[]).includes(envelope.eventName);
 }
 
-/** Field paths and issue codes; never a message, since some repeat the value. */
-function describeIssues(error: z.ZodError): string {
+/**
+ * The field names an issue may be reported under: the schema's own, fixed at
+ * build time. Anything else — a key taken from the payload — is reported as
+ * `(payload)`, so a property name that carries text never reaches a log line or
+ * a dead-letter header (S-09).
+ */
+const REPORTABLE_FIELDS: ReadonlySet<string> = new Set([
+  ...Object.keys(RESOLVED_FIELDS),
+  ...Object.keys(OPERATOR_ACTION_FIELDS),
+  'operator',
+]);
+
+/** The top-level schema field an issue is about, or `(payload)`. Never a payload-supplied name. */
+function fieldOf(issue: z.ZodIssue): string {
+  const [first] = issue.path;
+  if (first === undefined) return '(payload)';
+  return typeof first === 'string' && REPORTABLE_FIELDS.has(first) ? first : '(payload)';
+}
+
+/**
+ * Schema field names and zod issue codes — both closed sets — and nothing else:
+ * never an issue message (some repeat the value received) and never a path
+ * segment the payload supplied.
+ */
+export function describeIssues(error: z.ZodError): string {
   const issues = error.issues
     .slice(0, 8)
-    .map((issue) => `${issue.path.join('.') || '(root)'} ${issue.code}`)
+    .map((issue) => `${fieldOf(issue)} ${issue.code}`)
     .join('; ');
   return error.issues.length > 8 ? `${issues}; and ${error.issues.length - 8} more` : issues;
 }
@@ -313,10 +346,23 @@ export function toPaymentReconciliationEvidence(
   return projection;
 }
 
+/**
+ * Stage one: the whole payload against economic's published contract. A
+ * payload economic could not have published is refused here, whatever the
+ * allow-list would have kept from it.
+ */
+function assertEconomicContract(eventName: PaymentReconciliationEventName, payload: unknown): void {
+  const parsed = ECONOMIC_RECONCILIATION_CONTRACT[eventName].safeParse(payload);
+  if (!parsed.success) {
+    throw refuse(eventName, `economic's event contract: ${describeIssues(parsed.error)}`);
+  }
+}
+
 function fromResolved(
   eventName: PaymentReconciliationEventName,
   payload: unknown,
 ): PaymentReconciliationEvidence {
+  assertEconomicContract(eventName, payload);
   const parsed = resolvedPayload.safeParse(payload);
   if (!parsed.success) throw refuse(eventName, describeIssues(parsed.error));
   const value = parsed.data;
@@ -344,6 +390,7 @@ function fromOperatorAction(
   eventName: PaymentReconciliationEventName,
   payload: unknown,
 ): PaymentReconciliationEvidence {
+  assertEconomicContract(eventName, payload);
   const parsed = operatorActionPayload.safeParse(payload);
   if (!parsed.success) throw refuse(eventName, describeIssues(parsed.error));
   const value = parsed.data;

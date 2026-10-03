@@ -1,6 +1,11 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import { originalDelivery, type EventConsumer, type EventDelivery } from '@rasta/nest-common';
+import {
+  originalDelivery,
+  UnprocessableEventError,
+  type EventConsumer,
+  type EventDelivery,
+} from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 // Type-only, like `Logger` above: this provider is built by an explicit
 // `useFactory` in `app.module.ts`, so Nest never reads `design:paramtypes` for
@@ -156,10 +161,19 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       auditIngestionFailuresTotal.inc({
         reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_RECONCILIATION_EVENT,
       });
-      // Key names only, as above; the error itself names field paths and codes.
+      // Nothing taken from the payload — not even its key names, which a
+      // producer can fill with text (S-09; Codex on #204). The event name is one
+      // of the two fixed names this mapper accepts, the topic is broker
+      // metadata, and the refusal's message is built from schema field names
+      // and zod issue codes only. The event id is logged, escaped, by the
+      // shared consumer that dead-letters the message.
+      const why =
+        error instanceof UnprocessableEventError
+          ? error.message
+          : 'the projection failed unexpectedly';
       this.logger.error(
-        `Cannot project ${envelope.eventName} ${envelope.eventId} from ${delivery.topic} ` +
-          `as payment-reconciliation evidence (payload keys: ${describePayloadKeys(envelope.payload)})`,
+        `Cannot project ${envelope.eventName} from ${delivery.topic} as payment-reconciliation ` +
+          `evidence: ${why}`,
       );
       throw error;
     }
