@@ -778,7 +778,10 @@ describe('AssetSyncConsumer', () => {
         const policy = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
 
         await expect(
-          consumer.handle({ ...policy, payload: { ...policy.payload, [field]: '' } }),
+          consumer.handle({
+            ...policy,
+            payload: { ...(policy.payload as Record<string, unknown>), [field]: '' },
+          }),
         ).rejects.toMatchObject({
           reason: 'VALIDATION_FAILED',
           message: expect.stringMatching(
@@ -801,7 +804,11 @@ describe('AssetSyncConsumer', () => {
         },
       );
       const corrected = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
-      const { validFrom: _from, validTo: _to, ...undated } = corrected.payload;
+      const {
+        validFrom: _from,
+        validTo: _to,
+        ...undated
+      } = corrected.payload as Record<string, unknown>;
       const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
 
       await expect(consumer.handle({ ...corrected, payload: undated })).rejects.toMatchObject({
