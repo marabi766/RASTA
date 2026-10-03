@@ -1128,8 +1128,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
     DLQ می‌رود. فقط پس از آن ردیف از فهرست سفید ساخته می‌شود.
   - **Log بی نام کلید محموله (S-09).** ردِ این دو رویداد فقط نام فیلدهای Schema و کد بستهٔ مسئلهٔ zod را می‌گوید. هر جزء مسیری
     که از Schema نیاید `(payload)` نوشته می‌شود.
-  - **کنترل کشفی شکاف.** شمارندهٔ `rasta_audit_reconciliation_evidence_missing` ردیف‌های حسابرسی این دو رویداد در پنجرهٔ
-    `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS` (پیش‌فرض ۱۶۸) را می‌شمارد که ردیف شاهد ندارند. `ReconciliationEvidenceMonitor`
+  - **کنترل کشفی شکاف.** شمارندهٔ `rasta_audit_reconciliation_evidence_missing` ردیف‌های حسابرسی این دو رویداد را که در پنجرهٔ
+    `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS` (پیش‌فرض ۱۶۸) **نوشته شده‌اند** (`recorded_at`، نه `occurred_at`) و ردیف شاهد
+    ندارند می‌شمارد؛ پس تحویل دیرهنگام رویداد قدیمی هم شمرده می‌شود (Codex دور ۲). Index آن
+    `audit_event_topic_event_recorded_idx` است. پرسش میان‌مستأجری است و عمداً: زیر `runUnscoped` با دلیل مکتوب، فقط یک
+    `count(*)` برمی‌گرداند — نه ردیف، نه شناسه، نه شناسهٔ مستأجر — و Gauge برچسب مستأجر ندارد (استثنای مستند A-04؛ در
+    `EXEMPTIONS` بررسی ترتیب Index مستأجر هم ثبت است). `ReconciliationEvidenceMonitor`
     آن را هر دقیقه از جدول‌ها نمونه می‌گیرد. هشدار `RastaAuditReconciliationEvidenceMissing` تا وقتی این عدد بالای صفر است
     می‌سوزد؛ Runbook: `audit-gap-detected.md` § ۹. پس شکاف از هر دو علت شناخته‌شده‌اش (Replica قدیمی در میانهٔ استقرار، یا
     نشانگر پیش از این نسخه) بی‌صدا نمی‌ماند.

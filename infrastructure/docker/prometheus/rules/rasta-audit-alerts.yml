@@ -74,7 +74,8 @@ groups:
 
       - alert: RastaAuditReconciliationEvidenceMissing
         # D-046. A payment-reconciliation audit row (RESOLVED or OPERATOR_ACTION)
-        # inside AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS with no evidence
+        # written (recorded_at, not occurred_at, so a late delivery of an old
+        # event counts) inside AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS with no evidence
         # row: who proposed, who approved and on which evidence is missing from
         # the audit record. The projector writes both in one transaction, so
         # this means a replica from before the projection wrote the audit row,
@@ -86,7 +87,7 @@ groups:
           severity: warning
         annotations:
           summary: 'Payment-reconciliation audit rows are missing their evidence'
-          description: '{{ $value }} payment-reconciliation audit rows in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
+          description: '{{ $value }} payment-reconciliation audit rows written in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
           runbook: docs/runbooks/audit-gap-detected.md
 
       - alert: RastaAuditIngestionLagHigh

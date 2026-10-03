@@ -332,14 +332,18 @@ Replica: شکست Scrape فقط یک Instance هم می‌سوزاند، چون 
 
 `rasta_audit_reconciliation_evidence_missing` شمار ردیف‌های `audit_event` از `PAYMENT_RECONCILIATION_RESOLVED` یا
 `PAYMENT_RECONCILIATION_OPERATOR_ACTION` روی `rasta.economic.v1` است که در پنجرهٔ `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS`
-(پیش‌فرض ۱۶۸ ساعت) هستند ولی ردیف `payment_reconciliation_evidence` ندارند. Projector این دو ردیف را در یک تراکنش می‌نویسد، پس
+(پیش‌فرض ۱۶۸ ساعت) **نوشته شده‌اند** (`recorded_at`، ساعت خود پایگاه داده) ولی ردیف `payment_reconciliation_evidence` ندارند.
+پنجره روی زمان نوشتن است، نه `occurred_at`: رویداد قدیمی‌ای که دیر تحویل شده (Outbox عقب‌مانده، Replica قدیمی در میانهٔ استقرار)
+شکافش را همین حالا باز می‌کند و همین حالا شمرده می‌شود. این عدد یک شمار واحد در سطح پلتفرم برای همهٔ مستأجرهاست (بی برچسب؛
+`runUnscoped` در `AuditRepository.countMissingReconciliationEvidence`) و هیچ ردیف یا شناسهٔ مستأجری از آن بیرون نمی‌آید؛ خود
+ردیف‌ها را با گام ۱ پیدا کن. Projector این دو ردیف را در یک تراکنش می‌نویسد، پس
 عدد بالای صفر یعنی ردیف حسابرسی را چیز دیگری نوشته است. دو علت شناخته‌شده دارد:
 
 - Replicaای از نسخهٔ پیش از این نما رویداد را ثبت کرده است، مثلاً در میانهٔ استقرار غلتان.
 - رویداد پیش از این نسخه `processed_event` گرفته بوده است. در این حالت نسخهٔ تازه `DUPLICATE` برمی‌گرداند و دیگر نمی‌نویسد.
 
 1. **ردیف‌ها را پیدا کن** (فقط‌خواندنی، با نقش خواندن):
-   `SELECT a.id, a.source_event_id, a.organization_id, a.resource_id, a.occurred_at FROM audit_event a WHERE a.source_topic = 'rasta.economic.v1' AND a.source_event_name IN ('PAYMENT_RECONCILIATION_RESOLVED', 'PAYMENT_RECONCILIATION_OPERATOR_ACTION') AND a.occurred_at >= now() - interval '168 hours' AND NOT EXISTS (SELECT 1 FROM payment_reconciliation_evidence e WHERE e.audit_event_id = a.id);`
+   `SELECT a.id, a.source_event_id, a.organization_id, a.resource_id, a.occurred_at, a.recorded_at FROM audit_event a WHERE a.source_topic = 'rasta.economic.v1' AND a.source_event_name IN ('PAYMENT_RECONCILIATION_RESOLVED', 'PAYMENT_RECONCILIATION_OPERATOR_ACTION') AND a.recorded_at >= now() - interval '168 hours' AND NOT EXISTS (SELECT 1 FROM payment_reconciliation_evidence e WHERE e.audit_event_id = a.id);`
 2. **استقرار را تمام کن.** اگر استقرار `audit-service` در جریان است یا Replica قدیمی هنوز بالاست، آن را تخلیه کن. شمار نباید
    پس از آن بالا برود.
 3. **سابقهٔ کامل را از economic بخوان.** شاهد، پیشنهاددهنده، تأییدکننده، دلیل‌ها و هویت پایدار برای هر `resource_id` (همان

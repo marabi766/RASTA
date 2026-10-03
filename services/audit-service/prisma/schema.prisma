@@ -198,6 +198,9 @@ model AuditEvent {
   /// `correctedBy`: the later rows whose `correction_of` names a record
   /// (AUD-003 correction). Probed once per page, bounded below by the earliest target.
   @@index([correctionOf, occurredAt], map: "audit_event_correction_idx")
+  /// D-046's missing-evidence detector: payment-reconciliation rows by when
+  /// they were written, across tenants (an aggregate count, never rows).
+  @@index([sourceTopic, sourceEventName, recordedAt], map: "audit_event_topic_event_recorded_idx")
   @@map("audit_event")
 }
 

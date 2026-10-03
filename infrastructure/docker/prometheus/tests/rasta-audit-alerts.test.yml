@@ -372,7 +372,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'Payment-reconciliation audit rows are missing their evidence'
-              description: '1 payment-reconciliation audit rows in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
+              description: '1 payment-reconciliation audit rows written in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
               runbook: docs/runbooks/audit-gap-detected.md
       # Long after any 5m window: still firing while the row is in the window.
       - eval_time: 18m
@@ -382,7 +382,7 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'Payment-reconciliation audit rows are missing their evidence'
-              description: '1 payment-reconciliation audit rows in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
+              description: '1 payment-reconciliation audit rows written in the look-back window have no payment_reconciliation_evidence row: the audit record does not show who proposed, who approved or on which evidence. economic-service still holds the full history.'
               runbook: docs/runbooks/audit-gap-detected.md
       - eval_time: 22m
         alertname: RastaAuditReconciliationEvidenceMissing

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { runUnscoped } from '@rasta/nest-common';
 import { Prisma } from '../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AuditEventRecord } from './audit.mapper';
@@ -574,31 +575,57 @@ export class AuditRepository {
   }
 
   /**
-   * D-046's detective check: payment-reconciliation audit rows since `since`
-   * that have no evidence row.
+   * D-046's detective check: how many payment-reconciliation audit rows were
+   * **written** since `since` without an evidence row. One number, nothing else.
    *
    * The projector writes the two in one transaction, so a row counted here was
    * written by something else — a replica from before the projection existed,
-   * or an ingest that found the event already marked processed. Served by
-   * `audit_event_topic_time_idx` (`source_topic, occurred_at`) with partition
-   * pruning on `occurred_at`, and by the unique index on `audit_event_id`.
+   * or an ingest that found the event already marked processed.
+   *
+   * ## By `recorded_at`, not `occurred_at` (Codex on #204, round 2)
+   *
+   * The gap appears when the audit row is written. An event that happened long
+   * ago but was delivered late — a delayed outbox, an old replica during a
+   * rolling deploy — has an old `occurred_at` and a fresh `recorded_at`; a
+   * window on `occurred_at` would never see it. `recorded_at` is the database's
+   * clock inside the writing transaction, not anything a producer sent. Served
+   * by `audit_event_topic_event_recorded_idx` (`source_topic,
+   * source_event_name, recorded_at`), one probe per partition — no partition
+   * pruning is possible on a column that is not the partition key — and by the
+   * unique index on `audit_event_id`.
+   *
+   * ## Cross-tenant on purpose, and aggregate-only (AGENTS.md A-04)
+   *
+   * This is the one read in this service with no `organization_id` predicate
+   * that is not a `SYSTEM_ADMIN` request: a platform health signal, exported as
+   * a single unlabelled gauge. It runs under `runUnscoped` so the crossing is
+   * named and greppable like every other platform-wide path (the outbox relay,
+   * the close sweeper). What makes it acceptable is what leaves the query:
+   * `count(*)` and nothing else — no row, no id, no organization id, no event
+   * name, no per-tenant breakdown. The runbook finds the rows themselves through
+   * the `SYSTEM_ADMIN` read path, which is scoped and audited as such. Do not
+   * add a column or a `GROUP BY` here; a per-tenant number is a tenant-scoped
+   * read and belongs behind that path.
    */
   async countMissingReconciliationEvidence(since: Date): Promise<number> {
-    const rows = await this.prisma.client.$queryRaw<{ missing: bigint }[]>`
-      SELECT count(*) AS missing
-        FROM audit_event a
-       WHERE a.source_topic = ${ECONOMIC_TOPIC}
-         AND a.occurred_at >= ${since}
-         AND a.source_event_name IN (
-               ${PAYMENT_RECONCILIATION_EVENTS.RESOLVED},
-               ${PAYMENT_RECONCILIATION_EVENTS.OPERATOR_ACTION}
-             )
-         AND NOT EXISTS (
-               SELECT 1
-                 FROM payment_reconciliation_evidence e
-                WHERE e.audit_event_id = a.id
-             )
-    `;
+    const rows = await runUnscoped(
+      'D-046 detective check: one platform-level count of reconciliation audit rows without evidence, no rows or tenant ids leave the query',
+      () => this.prisma.client.$queryRaw<{ missing: bigint }[]>`
+        SELECT count(*) AS missing
+          FROM audit_event a
+         WHERE a.source_topic = ${ECONOMIC_TOPIC}
+           AND a.source_event_name IN (
+                 ${PAYMENT_RECONCILIATION_EVENTS.RESOLVED},
+                 ${PAYMENT_RECONCILIATION_EVENTS.OPERATOR_ACTION}
+               )
+           AND a.recorded_at >= ${since}
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM payment_reconciliation_evidence e
+                  WHERE e.audit_event_id = a.id
+               )
+      `,
+    );
     return Number(rows[0]?.missing ?? 0n);
   }
 

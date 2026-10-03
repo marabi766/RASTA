@@ -110,6 +110,8 @@ export const EXEMPTIONS = {
     audit_event_resource_idx:
       'serves platform-scope search (ADR-053 § 10) as well as tenant search; tenant search has audit_event_org_time_idx',
     audit_event_topic_time_idx: 'operational replay by source topic, across tenants',
+    audit_event_topic_event_recorded_idx:
+      "D-046's missing-evidence detector (AuditRepository.countMissingReconciliationEvidence, runUnscoped): one platform-level count across tenants, never rows or tenant ids, by when the row was written",
     audit_event_correction_idx:
       'the correctedBy probe is keyed by the corrected record id, whose scope was checked when that record was read',
     audit_chain_head_pkey:

@@ -258,7 +258,7 @@ export const auditTenderPendingOldestAgeSeconds = new Gauge({
  */
 export const auditReconciliationEvidenceMissing = new Gauge({
   name: 'rasta_audit_reconciliation_evidence_missing',
-  help: 'Payment-reconciliation audit rows in the look-back window with no evidence row (D-046)',
+  help: 'Payment-reconciliation audit rows written in the look-back window with no evidence row, all tenants (D-046)',
   registers: [registry],
 });
 

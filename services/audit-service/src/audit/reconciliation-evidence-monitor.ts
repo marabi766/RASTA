@@ -14,10 +14,20 @@ import { AuditRepository } from './audit.repository';
  * write time: a replica running a version from before the projection (during a
  * rolling deploy), and an event already marked processed before the projection
  * existed — `ingest` returns `DUPLICATE` before it would write. So this samples
- * the tables, once a minute, for audit rows of those two events inside
- * `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS` that have no evidence row, and
- * exports the count; `RastaAuditReconciliationEvidenceMissing` fires while it
- * is above zero. Runbook: `docs/runbooks/audit-gap-detected.md`.
+ * the tables, once a minute, for audit rows of those two events **written**
+ * (`recorded_at`) inside `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS` that
+ * have no evidence row, and exports the count;
+ * `RastaAuditReconciliationEvidenceMissing` fires while it is above zero.
+ * Runbook: `docs/runbooks/audit-gap-detected.md`.
+ *
+ * The window is on when the row was written, not when the event happened
+ * (Codex on #204, round 2): a late delivery of an old event — the case an old
+ * replica during a rollout produces — opens its gap now, and is counted now.
+ *
+ * The count is one platform-level number across tenants, read under
+ * `runUnscoped` and exported with no label; see
+ * `AuditRepository.countMissingReconciliationEvidence` for why that is the
+ * documented exception to A-04 and what it may never return.
  */
 @Injectable()
 export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDestroy {
@@ -43,7 +53,7 @@ export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDest
     if (this.timer) clearInterval(this.timer);
   }
 
-  /** Counts the gaps inside the look-back window and exports the number. */
+  /** Counts the gaps written inside the look-back window and exports the number. */
   async sample(now: Date = new Date()): Promise<number> {
     const since = new Date(
       now.getTime() - this.env.AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS * 3_600_000,

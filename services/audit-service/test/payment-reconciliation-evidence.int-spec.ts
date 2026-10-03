@@ -380,9 +380,13 @@ describe('payment-reconciliation evidence (real PostgreSQL)', () => {
    * projection, after which the event is marked processed and a newer replica
    * returns DUPLICATE before it would project — must be counted and exported,
    * never silent. Counted as a delta: the database is shared with other runs.
+   *
+   * The window is on `recorded_at` — the database's clock when the row was
+   * written (Codex on #204, round 2) — so "now" here is the real clock, not a
+   * fixed instant: a fixed one would drift away from the rows it writes.
    */
   describe('the missing-evidence monitor', () => {
-    const NOW = new Date('2026-10-03T12:00:00.000Z');
+    const NOW = (): Date => new Date();
     let monitor: ReconciliationEvidenceMonitor;
 
     async function gauge(): Promise<number> {
@@ -405,44 +409,64 @@ describe('payment-reconciliation evidence (real PostgreSQL)', () => {
     });
 
     it('counts an audit row with no evidence row, exports it, and keeps counting after a redelivery', async () => {
-      const before = await monitor.sample(NOW);
+      const before = await monitor.sample(NOW());
       expect(await gauge()).toBe(before);
 
       const at = scenario();
       const event = approved(at);
       await writtenByAnOldReplica(event);
-      expect(await monitor.sample(NOW)).toBe(before + 1);
+      expect(await monitor.sample(NOW())).toBe(before + 1);
       expect(await gauge()).toBe(before + 1);
 
       // The new projector meets the processed marker and writes nothing: the
       // gap stays, and stays counted. This is why the check exists.
       await projector.handle(event, delivery);
       expect(await evidenceOf(event.eventId)).toHaveLength(0);
-      expect(await monitor.sample(NOW)).toBe(before + 1);
+      expect(await monitor.sample(NOW())).toBe(before + 1);
 
       // An operator action is the other event this covers.
       await writtenByAnOldReplica(operatorAction(at));
-      expect(await monitor.sample(NOW)).toBe(before + 2);
+      expect(await monitor.sample(NOW())).toBe(before + 2);
     });
 
     it('does not count an event that has its evidence row, or any other economic event', async () => {
-      const before = await monitor.sample(NOW);
+      const before = await monitor.sample(NOW());
       const at = scenario();
       await projector.handle(approved(at), delivery);
       await projector.handle(operatorAction(at), delivery);
       await writtenByAnOldReplica(
         envelope(at, 'PAYMENT_RECONCILIATION_ESCALATED', { anything: true }),
       );
-      expect(await monitor.sample(NOW)).toBe(before);
+      expect(await monitor.sample(NOW())).toBe(before);
     });
 
-    it('does not count a gap outside the look-back window', async () => {
-      const before = await monitor.sample(NOW);
+    it('counts a late delivery of an old event, by when its row was written', async () => {
+      // An event that happened weeks ago — well outside a 24-hour window, and
+      // outside the 168-hour default — delivered only now, by a replica that
+      // does not project. Its gap opened now, so it is counted now.
+      const before = await monitor.sample(NOW());
       const at = scenario();
-      await writtenByAnOldReplica(approved(at, {}, { occurredAt: '2026-09-20T10:00:00.000Z' }));
-      expect(await monitor.sample(NOW)).toBe(before);
-      // The same row is counted by a window that reaches it.
-      expect(await monitor.sample(new Date('2026-09-21T09:00:00.000Z'))).toBeGreaterThan(0);
+      const late = approved(at, {}, { occurredAt: '2026-09-02T10:00:00.000Z' });
+      await writtenByAnOldReplica(late);
+
+      const [row] = await prisma.client.$queryRawUnsafe<{ occurred: Date; recorded: Date }[]>(
+        'SELECT occurred_at AS occurred, recorded_at AS recorded FROM audit_event WHERE source_event_id = $1',
+        late.eventId,
+      );
+      expect(row?.occurred.toISOString()).toBe('2026-09-02T10:00:00.000Z');
+      expect(Date.now() - (row?.recorded.getTime() ?? 0)).toBeLessThan(3_600_000);
+
+      expect(await monitor.sample(NOW())).toBe(before + 1);
+      expect(await gauge()).toBe(before + 1);
+    });
+
+    it('stops counting a gap once its row was written before the window', async () => {
+      const at = scenario();
+      await writtenByAnOldReplica(approved(at));
+      expect(await monitor.sample(NOW())).toBeGreaterThan(0);
+      // Seen from two days on, the row was written more than 24 hours earlier.
+      // Every row this suite (or any other) wrote is as old, so nothing is left.
+      expect(await monitor.sample(new Date(Date.now() + 48 * 3_600_000))).toBe(0);
     });
   });
 
