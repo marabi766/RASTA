@@ -50,6 +50,8 @@ async function until(
 test.describe.serial('the marketplace critical path', () => {
   let productId: string;
   let offerId: string;
+  /** The order the critical path completed, for the reversal check after it. */
+  let completedOrder: { id: string; transactionId: string; settlementId: string } | undefined;
 
   test('a supplier publishes an offer and a buyer can find it', async ({ tenantA, tenantB }) => {
     const sku = `E2E-SKU-${Date.now()}`;
@@ -248,6 +250,89 @@ test.describe.serial('the marketplace critical path', () => {
     // The obligation names the order it came from, so an auditor can walk from
     // a ledger entry back to the purchase without a cross-service join.
     expect(settled.sourceReference).toBe(order.id);
+
+    completedOrder = {
+      id: order.id,
+      transactionId: String(completed.economicTransactionId),
+      settlementId: String(completed.economicSettlementId),
+    };
+  });
+
+  test('the settlement journal of the completed order is not reversed through the ledger (L7-07)', async ({
+    tenantA,
+    platformAdmin,
+    config,
+  }) => {
+    // A settlement is owned by the settlement, its commission, the SETTLED
+    // transaction, the released hold and this COMPLETED order. Reversing its
+    // journal alone would leave every one of them claiming money that moved
+    // back, so the endpoint refuses and writes nothing; how a settlement is
+    // undone is docs/24 Q-76.
+    //
+    // The refusal a platform caller acting in the payer's organization gets is
+    // 422 naming Q-76 (test/journal-reversal.int-spec.ts). The seeded platform
+    // administrator holds no membership in the payer's organization, and the
+    // lookup is tenant-scoped, so through the front door it gets the same 404
+    // a journal that never existed gets (docs/24 Q-27). Either way: nothing is
+    // posted, and every owner stays as it was.
+    expect(completedOrder).toBeDefined();
+    const { id: orderId, transactionId, settlementId } = completedOrder!;
+
+    const settlement = await tenantA.get(`/v1/settlements/${settlementId}`);
+    expect(settlement.status).toBe(200);
+    const journalId = (settlement.body as { journalId: string }).journalId;
+    // Read from economic-service directly, as economic/02 does: the gateway
+    // routes the ledger prefix to platform roles only (docs/24 Q-27).
+    const journal = await tenantA.get(`/v1/ledger/journals/${journalId}`, {
+      baseUrl: config.economicUrl,
+    });
+    expect(journal.status).toBe(200);
+    const posted = journal.body as {
+      journalType: string;
+      entries: { accountId: string }[];
+    };
+    expect(posted.journalType).toBe('SETTLEMENT');
+    const legs = new Set(posted.entries.map((entry) => entry.accountId));
+
+    type TrialBalance = {
+      balanced: boolean;
+      totalDebitMinor: string;
+      totalCreditMinor: string;
+      lines: { accountId: string; debitMinor: string; creditMinor: string }[];
+    };
+    const trialBalance = async (): Promise<TrialBalance> => {
+      const response = await platformAdmin.get('/v1/ledger/trial-balance?currency=IRR');
+      expect(response.status).toBe(200);
+      return response.body as TrialBalance;
+    };
+    /** The settlement's own accounts, as the trial balance totals them. */
+    const legTotals = (balance: TrialBalance) =>
+      balance.lines
+        .filter((line) => legs.has(line.accountId))
+        .map((line) => `${line.accountId}:${line.debitMinor}:${line.creditMinor}`)
+        .sort();
+    const before = await trialBalance();
+
+    const attempt = await platformAdmin.post(`/v1/ledger/journals/${journalId}/reverse`, {
+      body: { reason: 'e2e: a platform administrator tries to unwind a completed order' },
+    });
+    expect(attempt.status).toBe(404);
+    expect(errorCode(attempt.body)).toBe('NOT_FOUND');
+
+    // Every owner is as it was.
+    const order = await tenantA.get(`/v1/orders/${orderId}`);
+    expect((order.body as { status: string }).status).toBe('COMPLETED');
+    const transaction = await tenantA.get(`/v1/transactions/${transactionId}`);
+    expect((transaction.body as { status: string }).status).toBe('SETTLED');
+
+    // And the ledger: still balanced, and no reversal touched the settlement's
+    // accounts — a REVERSAL journal would post the same legs with the
+    // directions flipped.
+    const after = await trialBalance();
+    expect(after.balanced).toBe(true);
+    expect(minor(after.totalDebitMinor)).toBe(minor(after.totalCreditMinor));
+    expect(legTotals(after)).toEqual(legTotals(before));
+    expect(legTotals(after).length).toBeGreaterThan(0);
   });
 
   test('permits a review only after the order completed', async ({ tenantA }) => {

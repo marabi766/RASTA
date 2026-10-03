@@ -89,6 +89,23 @@ describe('journal reversal refusals (real database)', () => {
     return journal;
   };
 
+  const entriesOf = (journalId: string) =>
+    runUnscoped('the suite reads a journal’s legs', () =>
+      prisma.client.ledgerEntry.findMany({ where: { journalId } }),
+    );
+
+  const reversalOf = (journalId: string) =>
+    runUnscoped('the suite looks for a reversal of a journal', () =>
+      prisma.client.journal.findFirst({ where: { reversesId: journalId } }),
+    );
+
+  const journalPostedRows = (organizationId: string) =>
+    runUnscoped('the suite reads the JOURNAL_POSTED rows it produced', () =>
+      prisma.client.outboxMessage.findMany({
+        where: { organizationId, eventName: 'JOURNAL_POSTED' },
+      }),
+    );
+
   const journalOf = async (transactionId: string, journalType: JournalType) =>
     runUnscoped('the suite finds a transaction’s journal', () =>
       prisma.client.journal.findFirstOrThrow({ where: { transactionId, journalType } }),
@@ -286,7 +303,7 @@ describe('journal reversal refusals (real database)', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
-  it('posts the reversal and recomputes every touched wallet for a journal no record owns', async () => {
+  it('posts a balanced reversal, announced in its own transaction, and recomputes every touched wallet for a journal no record owns', async () => {
     // No journal type is unowned today, so the posting path is reached by
     // declaring one unowned in a subclass — the path a future type without
     // an owner would take. A top-up's legs are the payer's wallet account and
@@ -308,12 +325,62 @@ describe('journal reversal refusals (real database)', () => {
     const topUp = await latestJournal(organizationId, 'WALLET_TOP_UP');
     expect((await readBalances(prisma, walletId)).available).toBe(40_000n);
 
+    // Atomic with its announcement: a reversal whose transaction rolls back
+    // leaves neither the journal nor its JOURNAL_POSTED row behind.
+    const outboxBefore = await journalPostedRows(organizationId);
+    await expect(
+      asPlatform(organizationId, () =>
+        prisma.transaction(async (tx) => {
+          await wiring.ledger.reverse(tx, topUp.id, 'the suite rolls this back', 'itest');
+          throw new Error('rolled back by the suite');
+        }),
+      ),
+    ).rejects.toThrow('rolled back by the suite');
+    expect(await reversalOf(topUp.id)).toBeNull();
+    expect(await journalPostedRows(organizationId)).toHaveLength(outboxBefore.length);
+
     const result = await asPlatform(organizationId, () =>
       unowned.reverse(topUp.id, 'the suite reverses an unowned journal'),
     );
     expect(result.reversesId).toBe(topUp.id);
     // Recomputed in the same transaction: the wallet agrees with the ledger.
     expect((await readBalances(prisma, walletId)).available).toBe(0n);
+
+    // The reversal balances per currency (Σdebit = Σcredit) and mirrors the
+    // original leg for leg with the direction flipped.
+    const [original, reversed] = await Promise.all([
+      entriesOf(topUp.id),
+      entriesOf(result.journalId),
+    ]);
+    expect(reversed.length).toBeGreaterThanOrEqual(2);
+    const totals = new Map<string, { DEBIT: bigint; CREDIT: bigint }>();
+    for (const entry of reversed) {
+      const total = totals.get(entry.currency) ?? { DEBIT: 0n, CREDIT: 0n };
+      total[entry.direction] += entry.amountMinor;
+      totals.set(entry.currency, total);
+    }
+    for (const total of totals.values()) {
+      expect(total.DEBIT).toBe(total.CREDIT);
+      expect(total.DEBIT).toBeGreaterThan(0n);
+    }
+    const leg = (entry: (typeof reversed)[number], flip: boolean) =>
+      `${entry.accountId}|${entry.currency}|${entry.amountMinor}|${
+        flip ? (entry.direction === 'DEBIT' ? 'CREDIT' : 'DEBIT') : entry.direction
+      }`;
+    expect(reversed.map((entry) => leg(entry, false)).sort()).toEqual(
+      original.map((entry) => leg(entry, true)).sort(),
+    );
+
+    // Its JOURNAL_POSTED row was committed with it: exactly one, for this
+    // journal, announcing a REVERSAL.
+    const announced = (await journalPostedRows(organizationId)).filter(
+      (row) => row.aggregateId === result.journalId,
+    );
+    expect(announced).toHaveLength(1);
+    expect((announced[0]!.payload as { payload?: unknown }).payload).toMatchObject({
+      journalId: result.journalId,
+      journalType: 'REVERSAL',
+    });
 
     // And at most once.
     await expect(
