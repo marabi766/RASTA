@@ -3,7 +3,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
 
 /**
  * L3-02, end to end against PostgreSQL: the audit's own proof. An insurance
@@ -47,7 +47,7 @@ describe('dispatch blocks (L3-02)', () => {
     aggregateId: String(payload.assetId),
     tenantId: org.a,
     correlationId: id('COR'),
-    payload: { organizationId: org.a, ...payload },
+    payload: producerShaped(eventName, { organizationId: org.a, ...payload }),
   });
 
   /** A machine in service and a driver free to take it. */

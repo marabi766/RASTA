@@ -2,6 +2,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { tryGetContext, type OutboxMessageInput } from '@rasta/nest-common';
 import { AssetSyncConsumer, CONSUMER_NAME } from './asset-sync.consumer';
 import type { FleetRepository } from '../fleet/fleet.repository';
+import { CONSUMED_EVENTS, CONSUMED_PAYLOADS } from '../fleet/events';
 
 /**
  * The consumer drives the replica that every availability answer is built on,
@@ -740,23 +741,175 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.upserts[0]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
     });
 
-    it('changes nothing when a recorded policy carries no validity dates', async () => {
-      const { consumer, recorded } = buildConsumer({ existing: lapsedMachine });
+    it('dead-letters a recorded policy without its dates, leaving the lapse in force (L7-26)', async () => {
+      // The one event that ends a lapse, without what it would end it with.
+      // Refused before the marker, so nothing is written and the lapse the
+      // row already holds stays in force: the machine stays off dispatch.
+      const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
 
-      await consumer.handle(
-        envelope({
-          eventName: 'INSURANCE_RECORDED',
-          payload: {
-            assetId: 'AST-SEED-0001',
-            organizationId: 'ORG-DEH-0001',
-            policyId: 'INS-2',
-            coverage: 'THIRD_PARTY',
-          },
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName: 'INSURANCE_RECORDED',
+            payload: {
+              assetId: 'AST-SEED-0001',
+              organizationId: 'ORG-DEH-0001',
+              policyId: 'INS-2',
+              coverage: 'THIRD_PARTY',
+              insurerName: 'SENTINEL-insurer-0099',
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'INSURANCE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: ' +
+          'validFrom invalid_type; validTo invalid_type',
+      });
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
+      expect(repository.lockAssetRef).not.toHaveBeenCalled();
+      expect(recorded.upserts).toHaveLength(0);
+    });
+
+    it.each([
+      ['coverage', 'too_small'],
+      ['policyId', 'too_small'],
+      ['validFrom', 'invalid_string; validTo custom'],
+      ['validTo', 'invalid_string; validTo custom'],
+    ])('dead-letters a recorded policy whose %s is empty', async (field, code) => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
+      const policy = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+
+      await expect(
+        consumer.handle({
+          ...policy,
+          payload: { ...(policy.payload as Record<string, unknown>), [field]: '' },
         }),
-      );
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: expect.stringMatching(new RegExp(`payload fails its schema: ${field} ${code}$`)),
+      });
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
+      expect(recorded.upserts).toHaveLength(0);
+    });
 
-      expect(recorded.upserts[0]).not.toHaveProperty('insuranceLapsedCoverages');
-      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    it.each([
+      [
+        'dates that do not parse',
+        'SENTINEL-next-spring',
+        'not-a-date',
+        'validFrom invalid_string; validTo invalid_string; validTo custom',
+      ],
+      [
+        'a date in a thirteenth month',
+        '2026-01-01T00:00:00.000Z',
+        '2026-13-45T00:00:00.000Z',
+        'validTo invalid_string; validTo custom',
+      ],
+      [
+        'a window that ends before it starts',
+        '2027-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z',
+        'validTo custom',
+      ],
+      [
+        'a window that ends as it starts',
+        '2027-01-01T00:00:00.000Z',
+        '2027-01-01T00:00:00.000Z',
+        'validTo custom',
+      ],
+    ])(
+      'dead-letters a recorded policy with %s, leaving the lapse in force (review #205 r1)',
+      async (_label, validFrom, validTo, issues) => {
+        // Non-empty but unusable: dispatch-blocks would treat the window as
+        // never in force, yet with the marker committed no corrected replay
+        // could restore the cover. Held to the producer's own rule instead.
+        const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
+
+        const refusal = consumer.handle(recordedPolicy(validFrom, validTo));
+
+        await expect(refusal).rejects.toMatchObject({
+          reason: 'VALIDATION_FAILED',
+          message: `INSURANCE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: ${issues}`,
+        });
+        await expect(refusal).rejects.not.toHaveProperty(
+          'message',
+          expect.stringContaining('SENTINEL'),
+        );
+        expect(repository.markEventProcessed).not.toHaveBeenCalled();
+        expect(repository.lockAssetRef).not.toHaveBeenCalled();
+        expect(recorded.upserts).toHaveLength(0);
+      },
+    );
+
+    it('applies the corrected policy after an inverted window was refused, once (review #205 r1)', async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const replay = { topic: 'rasta.insurance.v1.retry', partition: 0 };
+
+      await expect(
+        consumer.handle(recordedPolicy('2099-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')),
+      ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+      const corrected = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+      await consumer.handle(corrected, replay);
+      await consumer.handle(corrected, replay);
+
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        insuranceLapsedCoverages: [],
+        insuranceCover: { THIRD_PARTY: [{ policyId: 'INS-2' }] },
+      });
+    });
+
+    it('applies the corrected policy replayed from the DLQ with the same id, once (L7-26)', async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: lapsedMachine });
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const corrected = recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+      const {
+        validFrom: _from,
+        validTo: _to,
+        ...undated
+      } = corrected.payload as Record<string, unknown>;
+      const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
+
+      await expect(consumer.handle({ ...corrected, payload: undated })).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+      });
+      expect(marked.size).toBe(0);
+      await consumer.handle(corrected, replay);
+      await consumer.handle(corrected, replay);
+
+      // Same event id: applied once, and the lapse it answers is lifted.
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        insuranceLapsedCoverages: [],
+        insuranceLapsedAt: null,
+        insuranceCover: {
+          THIRD_PARTY: [
+            {
+              policyId: 'INS-2',
+              validFrom: '2020-01-01T00:00:00.000Z',
+              validTo: '2099-01-01T00:00:00.000Z',
+            },
+          ],
+        },
+      });
     });
 
     it('locks the replica row before reading it for a projection', async () => {
@@ -872,46 +1025,503 @@ describe('AssetSyncConsumer', () => {
   });
 
   describe('malformed producer output', () => {
-    it('skips an event that names no machine', async () => {
-      // A producer defect worth seeing, but not one a retry fixes — so it is
-      // logged and skipped rather than dead-lettered, where it would only be
-      // quieter.
-      const { consumer, recorded } = buildConsumer({});
-      const outcome = await consumer.handle(
-        envelope({ eventName: 'ASSET_CREATED', payload: { organizationId: 'ORG-DEH-0001' } }),
-      );
+    it('dead-letters, rather than skips, a safety event that names no machine (L7-26)', async () => {
+      // An inspection failure acknowledged here would leave the machine
+      // dispatchable with no trace. Refused at once as VALIDATION_FAILED, before
+      // the marker; the message names the field and the code, never a value.
+      const { consumer, recorded, repository } = buildConsumer({});
+      const SENTINEL = 'SENTINEL-free-text-0012345678';
 
-      expect(outcome).toBe('SKIPPED');
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName: 'INSPECTION_FAILED',
+            payload: { organizationId: 'ORG-DEH-0001', notes: SENTINEL },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'INSPECTION_FAILED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: assetId invalid_type',
+      });
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
       expect(recorded.upserts).toHaveLength(0);
     });
 
-    it('refuses to invent an organization for a first sighting with no tenant', async () => {
+    it('applies the corrected safety event replayed from the DLQ, once (L7-26)', async () => {
+      const { consumer, recorded, repository } = buildConsumer({});
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const failed = (payload: Record<string, unknown>) =>
+        envelope({ eventName: 'INSPECTION_FAILED', payload });
+      const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
+
+      await expect(
+        consumer.handle(failed({ organizationId: 'ORG-DEH-0001' })),
+      ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+      const corrected = failed({ assetId: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' });
+      await consumer.handle(corrected, replay);
+      await consumer.handle(corrected, replay);
+
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        inspectionBlockedAt: new Date('2026-08-27T10:00:00.000Z'),
+      });
+    });
+
+    it('still skips an event it does not consume, however malformed (forward compatibility)', async () => {
+      const { consumer, repository } = buildConsumer({});
+      const outcome = await consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', payload: {} }),
+      );
+
+      expect(outcome).toBe('SKIPPED');
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
+    });
+
+    it('dead-letters, rather than skips, a first sighting with no tenant (L7-26)', async () => {
       // Guessing would invent the very fact the replica exists to carry, and
-      // would place a machine in an organization that does not own it.
-      const { consumer, recorded } = buildConsumer({});
-      const outcome = await consumer.handle(
+      // would place a machine in an organization that does not own it. A
+      // silent skip would lose the event: refused at once, before the marker.
+      const { consumer, recorded, repository } = buildConsumer({});
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const failed = (tenantId: string | undefined) =>
         envelope({
-          eventName: 'ASSET_CREATED',
-          tenantId: undefined,
-          payload: { assetId: 'AST-UNKNOWN', name: 'بی‌سازمان' },
-        }),
+          eventName: 'INSPECTION_FAILED',
+          tenantId,
+          payload: { assetId: 'AST-UNKNOWN', inspectionId: 'INP-9' },
+        });
+
+      await expect(consumer.handle(failed(undefined))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'INSPECTION_FAILED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 carries no tenant',
+      });
+      expect(marked.size).toBe(0);
+      expect(recorded.upserts).toHaveLength(0);
+
+      // The corrected event, replayed with the same id, is applied once.
+      await consumer.handle(failed('ORG-DEH-0001'));
+      await consumer.handle(failed('ORG-DEH-0001'));
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-UNKNOWN',
+        organizationId: 'ORG-DEH-0001',
+        inspectionBlockedAt: new Date('2026-08-27T10:00:00.000Z'),
+      });
+    });
+
+    it('still skips an event it does not project, with no tenant (forward compatibility)', async () => {
+      const { consumer, repository } = buildConsumer({});
+      const outcome = await consumer.handle(
+        envelope({ eventName: 'ASSET_LOCATION_UPDATED', tenantId: undefined, payload: {} }),
       );
 
       expect(outcome).toBe('SKIPPED');
-      expect(recorded.upserts).toHaveLength(0);
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
     });
 
-    it('falls back to the envelope tenant when the payload omits it', async () => {
+    it('takes the envelope tenant when the payload omits its organization', async () => {
       const { consumer, recorded } = buildConsumer({});
       await consumer.handle(
         envelope({
           eventName: 'ASSET_CREATED',
           tenantId: 'ORG-DEH-0002',
-          payload: { assetId: 'AST-SEED-0010', name: 'کامیون', status: 'REGISTERED' },
+          payload: {
+            assetId: 'AST-SEED-0010',
+            name: 'کامیون',
+            type: 'TRUCK',
+            assetTag: null,
+            status: 'REGISTERED',
+          },
         }),
       );
 
       expect(recorded.upserts[0]!.organizationId).toBe('ORG-DEH-0002');
+    });
+  });
+
+  describe('the tenant comes from the envelope only (review #205 r1)', () => {
+    /** A ledger that marks an id once, so a refused event leaves no marker. */
+    function withLedger(repository: FleetRepository): Set<string> {
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      return marked;
+    }
+
+    const inspectionFailed = (tenantId: string | undefined, organizationId?: string) =>
+      envelope({
+        eventName: 'INSPECTION_FAILED',
+        tenantId,
+        payload: {
+          assetId: 'AST-SEED-0001',
+          inspectionId: 'INP-7',
+          ...(organizationId ? { organizationId } : {}),
+        },
+      });
+
+    it.each([
+      ['no payload organization, no replica row', undefined, null],
+      ['a payload organization, no replica row', 'ORG-DEH-0001', null],
+      [
+        'no payload organization, a replica row',
+        undefined,
+        { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+      ],
+      [
+        'a payload organization, a replica row',
+        'ORG-DEH-0001',
+        { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+      ],
+    ])(
+      'dead-letters an event with no envelope tenant (%s): nothing written, no marker',
+      async (_label, organizationId, existing) => {
+        // Taken from the payload (or the row) and marked processed, a wrong
+        // tenant could never be corrected by a replay.
+        const { consumer, recorded, repository } = buildConsumer({ existing });
+        const marked = withLedger(repository);
+
+        await expect(
+          consumer.handle(inspectionFailed(undefined, organizationId)),
+        ).rejects.toMatchObject({
+          name: 'UnprocessableEventError',
+          reason: 'VALIDATION_FAILED',
+          message: 'INSPECTION_FAILED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 carries no tenant',
+        });
+        expect(marked.size).toBe(0);
+        expect(repository.lockAssetRef).not.toHaveBeenCalled();
+        expect(recorded.upserts).toHaveLength(0);
+
+        // The corrected event, replayed with the same id, is applied once.
+        await consumer.handle(inspectionFailed('ORG-DEH-0001', organizationId));
+        await consumer.handle(inspectionFailed('ORG-DEH-0001', organizationId));
+        expect(recorded.upserts).toHaveLength(1);
+        expect(recorded.upserts[0]).toMatchObject({
+          id: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0001',
+          inspectionBlockedReason: 'The most recent technical inspection failed',
+        });
+      },
+    );
+
+    it.each([
+      ['no replica row', null],
+      ['a replica row', { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' }],
+    ])(
+      'dead-letters a payload organization other than the envelope tenant (%s), naming neither',
+      async (_label, existing) => {
+        const { consumer, recorded, repository } = buildConsumer({ existing });
+        const marked = withLedger(repository);
+
+        const refusal = consumer.handle(inspectionFailed('ORG-DEH-0001', 'ORG-DEH-SENTINEL'));
+
+        await expect(refusal).rejects.toMatchObject({
+          reason: 'VALIDATION_FAILED',
+          message:
+            'INSPECTION_FAILED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload organization differs ' +
+            'from its envelope tenant: tenant_mismatch',
+        });
+        expect(marked.size).toBe(0);
+        expect(recorded.upserts).toHaveLength(0);
+
+        await consumer.handle(inspectionFailed('ORG-DEH-0001', 'ORG-DEH-0001'));
+        await consumer.handle(inspectionFailed('ORG-DEH-0001', 'ORG-DEH-0001'));
+        expect(recorded.upserts).toHaveLength(1);
+        expect(recorded.upserts[0]!.organizationId).toBe('ORG-DEH-0001');
+      },
+    );
+  });
+
+  describe("each event is held to the producer contract's fields its projection uses (review #205 r1)", () => {
+    it('dead-letters ASSET_STATUS_CHANGED without newStatus, keeping the machine out of dispatch', async () => {
+      // Accepted, the replica would keep its old status and be marked
+      // processed: a machine taken OUT_OF_SERVICE could stay dispatchable.
+      const { consumer, recorded, repository } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001', status: 'ACTIVE' },
+      });
+      const marked = new Set<string>();
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          return true;
+        },
+      );
+      const changed = (fields: Record<string, unknown>) =>
+        envelope({
+          eventName: 'ASSET_STATUS_CHANGED',
+          payload: {
+            assetId: 'AST-SEED-0001',
+            organizationId: 'ORG-DEH-0001',
+            previousStatus: 'ACTIVE',
+            reason: 'SENTINEL-free-text',
+            ...fields,
+          },
+        });
+
+      await expect(consumer.handle(changed({}))).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message:
+          'ASSET_STATUS_CHANGED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: newStatus invalid_type',
+      });
+      await expect(consumer.handle(changed({ newStatus: '' }))).rejects.toMatchObject({
+        message: expect.stringMatching(/newStatus too_small$/),
+      });
+      expect(marked.size).toBe(0);
+      expect(recorded.upserts).toHaveLength(0);
+
+      await consumer.handle(changed({ newStatus: 'OUT_OF_SERVICE' }));
+      await consumer.handle(changed({ newStatus: 'OUT_OF_SERVICE' }));
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]!.status).toBe('OUT_OF_SERVICE');
+    });
+
+    it.each([
+      ['status', { status: undefined }, 'status invalid_type'],
+      ['an empty status', { status: '' }, 'status too_small'],
+      ['name', { name: undefined }, 'name invalid_type'],
+      ['type', { type: undefined }, 'type invalid_type'],
+      ['assetTag (nullable, not optional)', { assetTag: undefined }, 'assetTag invalid_type'],
+    ])('dead-letters ASSET_CREATED without %s', async (_label, override, issues) => {
+      const { consumer, recorded, repository } = buildConsumer({});
+
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName: 'ASSET_CREATED',
+            payload: {
+              assetId: 'AST-SEED-0011',
+              organizationId: 'ORG-DEH-0001',
+              name: 'لودر',
+              type: 'LOADER',
+              assetTag: null,
+              serialNumber: null,
+              status: 'REGISTERED',
+              ...override,
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: `ASSET_CREATED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload fails its schema: ${issues}`,
+      });
+      expect(repository.markEventProcessed).not.toHaveBeenCalled();
+      expect(recorded.upserts).toHaveLength(0);
+    });
+
+    it('holds every consumed event to a contract, and the safety withdrawals to the machine alone', () => {
+      expect(Object.keys(CONSUMED_PAYLOADS).sort()).toEqual(Object.values(CONSUMED_EVENTS).sort());
+      // Refusing a lapse or a failed inspection would leave the machine
+      // dispatchable until the replay: they need only the machine.
+      expect(CONSUMED_PAYLOADS.INSPECTION_FAILED.fields).toEqual(['assetId', 'organizationId']);
+      expect(CONSUMED_PAYLOADS.INSURANCE_EXPIRED.fields).toEqual(['assetId', 'organizationId']);
+    });
+  });
+
+  describe("an ordinary state event must come from the replica's owner (review #205 r2)", () => {
+    const A = 'ORG-DEH-0001';
+    const B = 'ORG-DEH-0002';
+    const ownedByA = {
+      id: 'AST-SEED-0001',
+      organizationId: A,
+      status: 'ACTIVE',
+      inspectionBlockedAt: null,
+      insuranceLapsedCoverages: ['THIRD_PARTY'],
+      insuranceLapsedAt: new Date('2026-09-01T00:00:00.000Z'),
+      insuranceCover: {},
+    };
+
+    /**
+     * A ledger that behaves like the real transaction: a marker written in a
+     * transaction that throws is rolled back with it.
+     */
+    function transactionalLedger(repository: FleetRepository): Set<string> {
+      const marked = new Set<string>();
+      let pending: string[] = [];
+      (repository.markEventProcessed as jest.Mock).mockImplementation(
+        async (_tx: unknown, eventId: string) => {
+          if (marked.has(eventId)) return false;
+          marked.add(eventId);
+          pending.push(eventId);
+          return true;
+        },
+      );
+      (repository.transaction as jest.Mock).mockImplementation(
+        async (fn: (tx: unknown) => Promise<unknown>) => {
+          pending = [];
+          try {
+            return await fn({});
+          } catch (error) {
+            for (const eventId of pending) marked.delete(eventId);
+            throw error;
+          }
+        },
+      );
+      return marked;
+    }
+
+    const statusChanged = (tenant: string) =>
+      envelope({
+        eventId: 'EVT-OWNER-1',
+        eventName: 'ASSET_STATUS_CHANGED',
+        tenantId: tenant,
+        payload: {
+          assetId: 'AST-SEED-0001',
+          organizationId: tenant,
+          previousStatus: 'ACTIVE',
+          newStatus: 'OUT_OF_SERVICE',
+          reason: 'آزمون',
+        },
+      });
+
+    it("dead-letters B's status change for A's machine: A's row unchanged, no marker; A's corrected event applies once", async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      const marked = transactionalLedger(repository);
+
+      await expect(consumer.handle(statusChanged(B))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'ASSET_STATUS_CHANGED EVT-OWNER-1 names a tenant that does not own the asset: owner_mismatch',
+      });
+      expect(recorded.upserts).toHaveLength(0);
+      expect(marked.size).toBe(0);
+
+      await consumer.handle(statusChanged(A));
+      await consumer.handle(statusChanged(A));
+      expect(recorded.upserts).toHaveLength(1);
+      expect(recorded.upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        organizationId: A,
+        status: 'OUT_OF_SERVICE',
+      });
+    });
+
+    it.each([
+      ['ASSET_UPDATED', { changedFields: ['name'] }],
+      ['ASSET_ACTIVATED', { commissionedAt: '2026-09-01T00:00:00.000Z' }],
+      ['ASSET_DECOMMISSIONED', { reason: 'x', decommissionedAt: '2026-09-01T00:00:00.000Z' }],
+      ['MAINTENANCE_STARTED', { requestId: 'MNT-1' }],
+      ['MAINTENANCE_COMPLETED', { requestId: 'MNT-1' }],
+    ])("dead-letters B's %s for A's machine, writing nothing", async (eventName, fields) => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      const marked = transactionalLedger(repository);
+
+      await expect(
+        consumer.handle(
+          envelope({
+            eventName,
+            tenantId: B,
+            payload: { assetId: 'AST-SEED-0001', organizationId: B, ...fields },
+          }),
+        ),
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: expect.stringMatching(/owner_mismatch$/),
+      });
+      expect(recorded.upserts).toHaveLength(0);
+      expect(marked.size).toBe(0);
+    });
+
+    it('still applies the previous owner’s insurance events to the vehicle after a transfer (docs/24 Q-66)', async () => {
+      // The machine now belongs to B; A's policy follows the vehicle.
+      const { consumer, recorded, repository } = buildConsumer({
+        existing: { ...ownedByA, organizationId: B },
+      });
+      transactionalLedger(repository);
+
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-Q66-1',
+          eventName: 'INSURANCE_RECORDED',
+          tenantId: A,
+          payload: {
+            assetId: 'AST-SEED-0001',
+            organizationId: A,
+            policyId: 'INS-A',
+            insurerName: 'بیمه',
+            coverage: 'THIRD_PARTY',
+            validFrom: '2026-01-01T00:00:00.000Z',
+            validTo: '2999-01-01T00:00:00.000Z',
+          },
+        }),
+      );
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-Q66-2',
+          eventName: 'INSURANCE_EXPIRED',
+          tenantId: A,
+          payload: { assetId: 'AST-SEED-0001', organizationId: A, coverage: 'COLLISION' },
+        }),
+      );
+
+      expect(recorded.upserts).toHaveLength(2);
+      expect(recorded.upserts.map((row) => row.organizationId)).toEqual([B, B]);
+      expect(recorded.upserts[1]!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY', 'COLLISION']);
+    });
+
+    it('still withdraws the machine on a failed inspection whatever tenant reports it', async () => {
+      // A withdrawal only ever takes the machine off dispatch; refusing it
+      // would leave the machine dispatchable until the replay.
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      transactionalLedger(repository);
+
+      await consumer.handle(
+        envelope({
+          eventName: 'INSPECTION_FAILED',
+          tenantId: B,
+          payload: { assetId: 'AST-SEED-0001', organizationId: B, inspectionId: 'INP-1' },
+        }),
+      );
+
+      expect(recorded.upserts[0]).toMatchObject({
+        organizationId: A,
+        inspectionBlockedReason: 'The most recent technical inspection failed',
+      });
+    });
+
+    it("still moves A's machine to B on ASSET_TRANSFERRED", async () => {
+      const { consumer, recorded, repository } = buildConsumer({ existing: ownedByA });
+      const marked = transactionalLedger(repository);
+
+      await consumer.handle(
+        envelope({
+          eventId: 'EVT-TRANSFER-9',
+          eventName: 'ASSET_TRANSFERRED',
+          tenantId: B,
+          payload: {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: A,
+            toOrganizationId: B,
+            transferredAt: '2026-09-27T10:00:00.000Z',
+            reason: 'x',
+          },
+        }),
+      );
+
+      expect(marked.has('EVT-TRANSFER-9')).toBe(true);
+      expect(recorded.upserts[0]).toMatchObject({ organizationId: B, status: 'REGISTERED' });
     });
   });
 });

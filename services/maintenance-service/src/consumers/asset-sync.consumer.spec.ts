@@ -1,5 +1,6 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import { AssetSyncConsumer, PROJECTIONS } from './asset-sync.consumer';
+import type { AssetSnapshotSource } from './replica-sources';
 import type { MaintenanceRepository } from '../maintenance/maintenance.repository';
 
 /**
@@ -25,17 +26,42 @@ function harness(
     existing?: { organizationId: string } | null;
     already?: boolean;
     openWork?: { openRequests: number; openRepairOrders: number };
+    /** A real ledger: an event id marks once. */
+    ledger?: boolean;
+    assetSource?: AssetSnapshotSource;
   } = {},
 ) {
   const upserts: Upsert[] = [];
   const calls: string[] = [];
+  const marked = new Set<string>();
+  const marks: string[] = [];
+  /** Marks written in the transaction now open; rolled back if it throws, as in PostgreSQL. */
+  let pending: string[] = [];
 
   const repository = {
     async transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
-      return fn({});
+      pending = [];
+      try {
+        return await fn({});
+      } catch (error) {
+        for (const eventId of pending) {
+          marks.splice(marks.lastIndexOf(eventId), 1);
+          marked.delete(eventId);
+        }
+        throw error;
+      }
     },
-    async markEventProcessed(): Promise<boolean> {
+    async markEventProcessed(_tx: unknown, eventId: string): Promise<boolean> {
+      marks.push(eventId);
+      if (options.ledger) {
+        if (marked.has(eventId)) return false;
+        marked.add(eventId);
+      }
+      pending.push(eventId);
       return !options.already;
+    },
+    async findTransferFence() {
+      return null;
     },
     async findAssetRef() {
       return options.existing ?? null;
@@ -60,10 +86,20 @@ function harness(
     },
   } as unknown as MaintenanceRepository;
 
-  return { consumer: new AssetSyncConsumer(null, repository), upserts, calls };
+  return {
+    consumer: new AssetSyncConsumer(null, repository, options.assetSource),
+    upserts,
+    calls,
+    marks,
+  };
 }
 
-function envelope(eventName: string, payload: object, tenantId?: string): EventEnvelope {
+/** `tenantId: null` leaves the envelope without a tenant; the default is the machine's owner. */
+function envelope(
+  eventName: string,
+  payload: object,
+  tenantId: string | null = 'ORG-DEH-0001',
+): EventEnvelope {
   return {
     eventId: `evt-${eventName}`,
     eventName,
@@ -76,6 +112,20 @@ function envelope(eventName: string, payload: object, tenantId?: string): EventE
     payload,
     ...(tenantId ? { tenantId } : {}),
   } as EventEnvelope;
+}
+
+/** A real-shaped ASSET_CREATED payload (asset-service `assetCreatedPayload`). */
+function created(assetId: string, overrides: Record<string, unknown> = {}): object {
+  return {
+    assetId,
+    organizationId: 'ORG-DEH-0001',
+    name: 'لودر',
+    type: 'LOADER',
+    assetTag: null,
+    serialNumber: null,
+    status: 'REGISTERED',
+    ...overrides,
+  };
 }
 
 describe('asset reference replica', () => {
@@ -175,6 +225,8 @@ describe('asset reference replica', () => {
         organizationId: 'ORG-DEH-0001',
         name: 'گریدر شهرداری',
         type: 'GRADER',
+        assetTag: null,
+        serialNumber: null,
         status: 'REGISTERED',
       }),
     );
@@ -195,7 +247,7 @@ describe('asset reference replica', () => {
     const { consumer, upserts } = harness();
 
     await consumer.handle(
-      envelope('ASSET_CREATED', { assetId: 'AST-SEED-0009', name: 'لودر' }, 'ORG-DEH-0001'),
+      envelope('ASSET_CREATED', created('AST-SEED-0009', { organizationId: undefined })),
     );
 
     expect(upserts[0]?.organizationId).toBe('ORG-DEH-0001');
@@ -262,13 +314,91 @@ describe('asset reference replica', () => {
     expect(upserts).toHaveLength(0);
   });
 
-  it('skips a first sighting that carries no tenant at all', async () => {
-    const { consumer, upserts } = harness();
+  it('dead-letters, rather than skips, a first sighting that carries no tenant at all (L7-26)', async () => {
+    // No organization to place the machine in, and guessing one would invent
+    // it: a broken producer, refused at once before the marker.
+    const { consumer, upserts, marks } = harness({ ledger: true });
 
-    const outcome = await consumer.handle(envelope('ASSET_CREATED', { assetId: 'AST-UNKNOWN' }));
+    await expect(
+      consumer.handle(envelope('ASSET_CREATED', created('AST-UNKNOWN'), null)),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message: 'ASSET_CREATED evt-ASSET_CREATED carries no tenant',
+    });
+    expect(marks).toEqual([]);
+    expect(upserts).toHaveLength(0);
+
+    // The corrected event, replayed with the same id, is applied.
+    await consumer.handle(envelope('ASSET_CREATED', created('AST-UNKNOWN')));
+    expect(marks).toEqual(['evt-ASSET_CREATED']);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toMatchObject({ id: 'AST-UNKNOWN', organizationId: 'ORG-DEH-0001' });
+  });
+
+  it('still skips an event it does not project, with no tenant (forward compatibility)', async () => {
+    const { consumer, marks } = harness();
+
+    const outcome = await consumer.handle(envelope('ASSET_LOCATION_UPDATED', {}, null));
 
     expect(outcome).toBe('SKIPPED');
+    expect(marks).toEqual([]);
+  });
+
+  it('dead-letters, rather than skips, a consumed event that names no machine (L7-26)', async () => {
+    // A producer defect no retry fixes: refused at once as VALIDATION_FAILED,
+    // before the marker. The message names the field and the code, never a value.
+    const { consumer, upserts, marks } = harness();
+
+    await expect(
+      consumer.handle(
+        envelope(
+          'ASSET_DECOMMISSIONED',
+          { reason: 'SENTINEL-free-text-0012345678' },
+          'ORG-DEH-0001',
+        ),
+      ),
+    ).rejects.toMatchObject({
+      name: 'UnprocessableEventError',
+      reason: 'VALIDATION_FAILED',
+      message:
+        'ASSET_DECOMMISSIONED evt-ASSET_DECOMMISSIONED payload fails its schema: assetId invalid_type',
+    });
+    expect(marks).toHaveLength(0);
     expect(upserts).toHaveLength(0);
+  });
+
+  it('applies the corrected event replayed from the DLQ, once (L7-26)', async () => {
+    const snapshot = jest.fn(async () => ({
+      assetId: 'AST-SEED-0001',
+      organizationId: 'ORG-DEH-0001',
+      status: 'DECOMMISSIONED',
+      name: 'لودر',
+      type: 'LOADER',
+      assetTag: null,
+      transferGeneration: 0,
+      viaTransfer: false,
+    }));
+    const { consumer, upserts } = harness({
+      existing: { organizationId: 'ORG-DEH-0001' },
+      ledger: true,
+      assetSource: { snapshot } as unknown as AssetSnapshotSource,
+    });
+    const replay = { topic: 'rasta.asset.v1.retry', partition: 0 };
+
+    await expect(
+      consumer.handle(envelope('ASSET_DECOMMISSIONED', {}, 'ORG-DEH-0001')),
+    ).rejects.toMatchObject({ reason: 'VALIDATION_FAILED' });
+    const corrected = envelope(
+      'ASSET_DECOMMISSIONED',
+      { assetId: 'AST-SEED-0001' },
+      'ORG-DEH-0001',
+    );
+    await consumer.handle(corrected, replay);
+    await consumer.handle(corrected, replay);
+
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toMatchObject({ id: 'AST-SEED-0001', status: 'DECOMMISSIONED' });
   });
 
   it('applies a redelivered event only once', async () => {
@@ -286,5 +416,222 @@ describe('asset reference replica', () => {
     // Listed in the table as null rather than omitted, so the table stays a
     // complete answer to "what does this service consume".
     expect(PROJECTIONS.USAGE_RECORDED).toBeNull();
+  });
+
+  describe('the tenant comes from the envelope only (review #205 r1)', () => {
+    const decommissioned = (organizationId?: string) => ({
+      assetId: 'AST-SEED-0001',
+      ...(organizationId ? { organizationId } : {}),
+      reason: 'اسقاط',
+      decommissionedAt: '2026-09-27T10:00:00.000Z',
+    });
+
+    it.each([
+      ['no payload organization, no replica row', undefined, null],
+      ['a payload organization, no replica row', 'ORG-DEH-0001', null],
+      ['no payload organization, a replica row', undefined, { organizationId: 'ORG-DEH-0001' }],
+      ['a payload organization, a replica row', 'ORG-DEH-0001', { organizationId: 'ORG-DEH-0001' }],
+    ])(
+      'dead-letters an event with no envelope tenant (%s): nothing written, no marker',
+      async (_label, organizationId, existing) => {
+        // Taken from the payload (or the row) and marked processed, a wrong
+        // tenant could never be corrected by a replay.
+        const { consumer, upserts, marks } = harness({ existing, ledger: true });
+
+        await expect(
+          consumer.handle(envelope('ASSET_DECOMMISSIONED', decommissioned(organizationId), null)),
+        ).rejects.toMatchObject({
+          name: 'UnprocessableEventError',
+          reason: 'VALIDATION_FAILED',
+          message: 'ASSET_DECOMMISSIONED evt-ASSET_DECOMMISSIONED carries no tenant',
+        });
+        expect(marks).toEqual([]);
+        expect(upserts).toHaveLength(0);
+
+        // The corrected event, replayed with the same id, is applied once.
+        await consumer.handle(envelope('ASSET_DECOMMISSIONED', decommissioned(organizationId)));
+        await consumer.handle(envelope('ASSET_DECOMMISSIONED', decommissioned(organizationId)));
+        expect(upserts).toHaveLength(1);
+        expect(upserts[0]).toMatchObject({
+          id: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0001',
+          status: 'DECOMMISSIONED',
+        });
+      },
+    );
+
+    it.each([
+      ['no replica row', null],
+      ['a replica row', { organizationId: 'ORG-DEH-0001' }],
+    ])(
+      'dead-letters a payload organization other than the envelope tenant (%s), naming neither',
+      async (_label, existing) => {
+        const { consumer, upserts, marks } = harness({ existing, ledger: true });
+
+        const refusal = consumer.handle(
+          envelope(
+            'ASSET_CREATED',
+            created('AST-SEED-0001', { organizationId: 'ORG-DEH-SENTINEL' }),
+          ),
+        );
+
+        await expect(refusal).rejects.toMatchObject({
+          reason: 'VALIDATION_FAILED',
+          message:
+            'ASSET_CREATED evt-ASSET_CREATED payload organization differs from its envelope ' +
+            'tenant: tenant_mismatch',
+        });
+        await expect(refusal).rejects.not.toHaveProperty(
+          'message',
+          expect.stringContaining('SENTINEL'),
+        );
+        expect(marks).toEqual([]);
+        expect(upserts).toHaveLength(0);
+
+        await consumer.handle(envelope('ASSET_CREATED', created('AST-SEED-0001')));
+        await consumer.handle(envelope('ASSET_CREATED', created('AST-SEED-0001')));
+        expect(upserts).toHaveLength(1);
+        expect(upserts[0]?.organizationId).toBe('ORG-DEH-0001');
+      },
+    );
+  });
+
+  describe("each event is held to the producer contract's fields its projection uses (review #205 r1)", () => {
+    it('dead-letters ASSET_STATUS_CHANGED without newStatus, then applies the corrected replay once', async () => {
+      // Accepted, the replica would keep its old status and be marked processed.
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: 'ORG-DEH-0001' },
+        ledger: true,
+      });
+      const changed = (fields: Record<string, unknown>) =>
+        envelope('ASSET_STATUS_CHANGED', {
+          assetId: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0001',
+          previousStatus: 'ACTIVE',
+          reason: 'SENTINEL-free-text',
+          ...fields,
+        });
+
+      await expect(consumer.handle(changed({}))).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message:
+          'ASSET_STATUS_CHANGED evt-ASSET_STATUS_CHANGED payload fails its schema: newStatus invalid_type',
+      });
+      await expect(consumer.handle(changed({ newStatus: '' }))).rejects.toMatchObject({
+        message: expect.stringMatching(/newStatus too_small$/),
+      });
+      expect(marks).toEqual([]);
+      expect(upserts).toHaveLength(0);
+
+      await consumer.handle(changed({ newStatus: 'OUT_OF_SERVICE' }));
+      await consumer.handle(changed({ newStatus: 'OUT_OF_SERVICE' }));
+      expect(upserts).toHaveLength(1);
+      expect(upserts[0]?.status).toBe('OUT_OF_SERVICE');
+    });
+
+    it.each([
+      ['status', { status: undefined }, 'status invalid_type'],
+      ['name', { name: undefined }, 'name invalid_type'],
+      ['type', { type: undefined }, 'type invalid_type'],
+      ['assetTag (nullable, not optional)', { assetTag: undefined }, 'assetTag invalid_type'],
+    ])('dead-letters ASSET_CREATED without %s', async (_label, override, issues) => {
+      const { consumer, upserts, marks } = harness();
+
+      await expect(
+        consumer.handle(envelope('ASSET_CREATED', created('AST-SEED-0011', override))),
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: `ASSET_CREATED evt-ASSET_CREATED payload fails its schema: ${issues}`,
+      });
+      expect(marks).toEqual([]);
+      expect(upserts).toHaveLength(0);
+    });
+  });
+
+  describe("an ordinary state event must come from the replica's owner (review #205 r2)", () => {
+    const A = 'ORG-DEH-0001';
+    const B = 'ORG-DEH-0002';
+    const statusChanged = (tenant: string) =>
+      envelope(
+        'ASSET_STATUS_CHANGED',
+        {
+          assetId: 'AST-SEED-0001',
+          organizationId: tenant,
+          previousStatus: 'ACTIVE',
+          newStatus: 'OUT_OF_SERVICE',
+          reason: 'آزمون',
+        },
+        tenant,
+      );
+
+    it("dead-letters B's status change for A's machine: A's row unchanged, no marker; A's corrected event applies once", async () => {
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: A },
+        ledger: true,
+      });
+
+      await expect(consumer.handle(statusChanged(B))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message:
+          'ASSET_STATUS_CHANGED evt-ASSET_STATUS_CHANGED names a tenant that does not own the asset: owner_mismatch',
+      });
+      expect(upserts).toHaveLength(0);
+      expect(marks).toEqual([]);
+
+      await consumer.handle(statusChanged(A));
+      await consumer.handle(statusChanged(A));
+      expect(upserts).toHaveLength(1);
+      expect(upserts[0]).toMatchObject({
+        id: 'AST-SEED-0001',
+        organizationId: A,
+        status: 'OUT_OF_SERVICE',
+      });
+    });
+
+    it.each([
+      ['ASSET_ACTIVATED', { commissionedAt: '2026-09-01T00:00:00.000Z' }],
+      ['ASSET_DECOMMISSIONED', { reason: 'x', decommissionedAt: '2026-09-01T00:00:00.000Z' }],
+    ])("dead-letters B's %s for A's machine, writing nothing", async (eventName, fields) => {
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: A },
+        ledger: true,
+      });
+
+      await expect(
+        consumer.handle(
+          envelope(eventName, { assetId: 'AST-SEED-0001', organizationId: B, ...fields }, B),
+        ),
+      ).rejects.toMatchObject({
+        reason: 'VALIDATION_FAILED',
+        message: expect.stringMatching(/owner_mismatch$/),
+      });
+      expect(upserts).toHaveLength(0);
+      expect(marks).toEqual([]);
+    });
+
+    it("still moves A's machine to B on ASSET_TRANSFERRED", async () => {
+      const { consumer, upserts, marks } = harness({
+        existing: { organizationId: A },
+        ledger: true,
+      });
+
+      await consumer.handle(
+        envelope(
+          'ASSET_TRANSFERRED',
+          {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: A,
+            toOrganizationId: B,
+            transferredAt: '2026-09-27T10:00:00.000Z',
+            reason: 'x',
+          },
+          B,
+        ),
+      );
+
+      expect(marks).toEqual(['evt-ASSET_TRANSFERRED']);
+      expect(upserts[0]).toMatchObject({ organizationId: B, status: 'REGISTERED' });
+    });
   });
 });

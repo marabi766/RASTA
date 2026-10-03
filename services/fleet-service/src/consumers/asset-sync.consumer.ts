@@ -3,7 +3,10 @@ import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   createSystemContext,
+  invalidPayloadError,
   isRetryDelivery,
+  replicaOwnerMismatchError,
+  requireEnvelopeTenant,
   runWithContext,
   type EventConsumer,
   type EventDelivery,
@@ -31,8 +34,8 @@ import {
 } from '../fleet/dispatch-blocks';
 import {
   CONSUMED_EVENTS,
+  CONSUMED_PAYLOADS,
   FLEET_EVENTS,
-  assetSourceSchema,
   assetTransferredSchema,
   validateFleetPayload,
   type ConsumedEventName,
@@ -204,8 +207,10 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       const policyId = str(payload.policyId);
       const validFrom = str(payload.validFrom);
       const validTo = str(payload.validTo);
-      // A policy without its dates cannot answer anything; it is recorded as
-      // seen and changes nothing, rather than guessing a validity.
+      // A policy without its coverage, id or dates cannot answer anything.
+      // `handle` dead-letters such an event before its marker (audit L7-26),
+      // so the lapse stays in force and a corrected replay is still applied;
+      // this guard only narrows the types and never guesses a validity.
       if (!coverage || !policyId || !validFrom || !validTo) return {};
 
       const cover = withRecordedPolicy(
@@ -272,6 +277,22 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_STARTED,
   CONSUMED_EVENTS.MAINTENANCE_COMPLETED,
 ]);
+
+/**
+ * The ordinary state events, which change a row the event's tenant must own
+ * (review #205 r2): every state event but the two that set the owner —
+ * `ASSET_CREATED` and `ASSET_TRANSFERRED`, both held to the envelope tenant.
+ * The safety events are not here: an insurance event from the previous owner
+ * after a transfer applies to the vehicle (docs/24 Q-66), and a failed
+ * inspection only ever withdraws the machine.
+ */
+const OWNER_CHECKED_EVENTS: ReadonlySet<string> = new Set(
+  [...STATE_EVENTS].filter(
+    (eventName) =>
+      eventName !== CONSUMED_EVENTS.ASSET_CREATED &&
+      eventName !== CONSUMED_EVENTS.ASSET_TRANSFERRED,
+  ),
+);
 
 /** The events whose in-maintenance flag maintenance-service owns. */
 const MAINTENANCE_EVENTS: ReadonlySet<string> = new Set([
@@ -370,36 +391,32 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       assertTransferEnvelope(envelope);
     }
 
-    const parsed = assetSourceSchema.safeParse(envelope.payload);
+    const contract = CONSUMED_PAYLOADS[envelope.eventName as ConsumedEventName];
+    const parsed = contract.schema.safeParse(envelope.payload);
     if (!parsed.success) {
-      // An event this service projects, that names no machine. A producer
-      // defect worth seeing, but not one a retry fixes — so it is logged and
-      // skipped rather than dead-lettered, where it would only be quieter.
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} has no assetId; nothing to apply it to`,
-      );
-      return 'SKIPPED';
+      // An event this service projects, without a field of its producer's
+      // contract that the projection uses — no machine, a status change with
+      // no status, a policy with no usable window: a producer defect no retry
+      // fixes. Dead-lettered at once, before the marker — an inspection
+      // failure acknowledged here would leave the machine dispatchable with no
+      // trace, and a corrected replay must still be applied (audit L7-26,
+      // review #205 r1, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, contract.fields);
     }
 
     const payload = parsed.data as Record<string, unknown>;
     const assetId = payload.assetId as string;
 
-    // The replica is keyed by asset and scoped by the tenant the *event*
-    // declares, never by a request context — there is no request here. An
-    // event with no tenant cannot be placed in an organization, and guessing
-    // one would be inventing the fact the whole replica exists to carry.
-    const organizationId =
-      str(payload.organizationId) ?? str(payload.toOrganizationId) ?? envelope.tenantId;
-
-    const existing = await this.repository.findAssetRef(assetId);
-
-    if (!existing && !organizationId) {
-      this.logger.warn(
-        `${envelope.eventName} ${envelope.eventId} is the first sighting of ${assetId} ` +
-          'but carries no tenant; cannot place it in an organization',
-      );
-      return 'SKIPPED';
-    }
+    // The replica is keyed by asset and scoped by the tenant the *envelope*
+    // declares — never by a request context, there is none here, and never by
+    // the payload (review #205 r1). Taken from the payload and marked
+    // processed, a wrong tenant could not be corrected by any replay. So an
+    // event with no envelope tenant is refused whatever its payload says and
+    // whether or not the machine is already in the replica, and a payload
+    // naming another organization is refused as a mismatch: both before the
+    // marker and before any write. A transfer's new owner was checked against
+    // the envelope above.
+    const organizationId = requireEnvelopeTenant(envelope, payload.organizationId);
 
     // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery
     // on `.retry` may be older than events applied since. A state event on it
@@ -413,7 +430,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // and the stale payload is never applied.
     const replayed =
       delivery !== undefined && isRetryDelivery(delivery) && STATE_EVENTS.has(envelope.eventName);
-    const eventTenant = envelope.tenantId ?? organizationId;
 
     const now = new Date();
     // The producer's clock, for ordering. An unreadable timestamp falls back to
@@ -421,7 +437,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // and a repair clears only failures that are genuinely older.
     const stated = new Date(envelope.occurredAt);
     const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
-    let skipped = false;
 
     await this.repository.transaction(
       async (tx: ExtendedPrismaClient) => {
@@ -440,13 +455,28 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         await this.repository.lockAssetRef(tx, assetId);
         const current = await this.repository.findAssetRef(assetId, tx);
 
+        // An ordinary state event changes a row its tenant must own. One whose
+        // (envelope and payload) tenant is not the replica's owner is refused
+        // here, under the lock, before any write; the throw rolls the marker
+        // back with the transaction, so the corrected event with the same id
+        // is still applied (review #205 r2). A `.retry` delivery is not
+        // checked here: it writes the owners' answer, asked as this tenant.
+        if (
+          !replayed &&
+          current &&
+          OWNER_CHECKED_EVENTS.has(envelope.eventName) &&
+          current.organizationId !== organizationId
+        ) {
+          throw replicaOwnerMismatchError(envelope);
+        }
+
         // An insurance event from the previous owner's tenant, consumed after the
         // transfer, is applied to the row as it now stands, under its current
         // owner: the policy is the vehicle's, not the organization's (docs/24
         // Q-66). The tenant below comes from the row, never from such an event.
         let patch = projection.patch(payload, current, now, occurredAt);
         const refresh = replayed
-          ? await this.readAuthoritativeState(envelope, assetId, eventTenant)
+          ? await this.readAuthoritativeState(envelope, assetId, organizationId)
           : undefined;
         if (refresh) {
           // The replica fields come from the owners. What stays of the payload's
@@ -459,14 +489,10 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
             : { ...withoutStateFields(patch), ...refresh.patch };
         }
 
-        // Narrowed rather than asserted: the guard above already established
-        // that one of these is present, and spelling it out here keeps that true
-        // if the guard is ever edited.
+        // The row's organization: the one an ASSET_CREATED or a transfer
+        // states, both already held to the envelope tenant; else the row's own;
+        // else, on a first sighting, the envelope tenant.
         const tenant = patch.organizationId ?? current?.organizationId ?? organizationId;
-        if (!tenant) {
-          skipped = true;
-          return;
-        }
 
         await this.repository.upsertAssetRef(tx, {
           // The patch first, then the resolved values — never the other way
@@ -506,8 +532,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       },
       replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
     );
-
-    return skipped ? 'SKIPPED' : undefined;
   }
 
   /**

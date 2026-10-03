@@ -10,7 +10,7 @@ import type {
   MaintenanceStateSource,
 } from '../src/consumers/replica-sources';
 import type { TransferRecordSource } from '../src/fleet/transfer-record';
-import { asActor, cleanup, databaseUrl, id, newPrisma, tenants } from './helpers';
+import { asActor, cleanup, databaseUrl, id, newPrisma, tenants, producerShaped } from './helpers';
 
 /**
  * D-039 — a state event replayed on `<topic>.retry` never applies its payload:
@@ -132,7 +132,7 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
     aggregateId: String(payload.assetId),
     tenantId,
     correlationId: id('COR'),
-    payload,
+    payload: producerShaped(eventName, payload),
   });
 
   function truth(assetId: string, overrides: Partial<Truth>): Truth {

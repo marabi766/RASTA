@@ -99,6 +99,8 @@ function roleList(name: string, options: { min: number }) {
  *                                       only in development and test.
  *   CONSTRUCTION_TENDER_EVALUATE_ROLES  ADR-067 § 4. Who evaluates opened bids; default the
  *                                       tender owner's role set.
+ *   CONSTRUCTION_TENDER_AWARD_ROLES     ADR-067 § 3. Who awards an evaluated tender; default the
+ *                                       tender owner's role set.
  *   CONSTRUCTION_EVALUATION_MIN_EVALUATORS / _MAX_EVALUATORS
  *                                       Q-88, Q-92. Evaluators that must have scored each
  *                                       qualified bid / may score one. Default 1 and 1.
@@ -202,6 +204,20 @@ export const constructionEnvSchema = baseEnvSchema
       }),
 
     /**
+     * ADR-067 § 3: who awards an evaluated tender. A person decides, never the platform. Empty
+     * (the default) means the tender owner's own role set, `CONSTRUCTION_PROJECT_ROLES`. The same
+     * refusals as for evaluating: `SYSTEM_ADMIN` and `CONTRACTOR` are refused at startup.
+     */
+    CONSTRUCTION_TENDER_AWARD_ROLES: z
+      .string()
+      .default('')
+      .pipe(roleList('CONSTRUCTION_TENDER_AWARD_ROLES', { min: 0 }))
+      .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
+        message:
+          'CONSTRUCTION_TENDER_AWARD_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither awards a tender (ADR-066 § 4, ADR-067 § 3)',
+      }),
+
+    /**
      * Q-88 / Q-92, PROVISIONAL: how many evaluators must have scored every qualified bid
      * before the evaluation may be completed (`MIN`), and how many may score one bid (`MAX`).
      * The defaults are ADR-067's MVP — one evaluator per bid — and make the aggregation of
@@ -212,15 +228,17 @@ export const constructionEnvSchema = baseEnvSchema
     CONSTRUCTION_EVALUATION_MAX_EVALUATORS: z.coerce.number().int().min(1).max(9).default(1),
 
     /**
-     * Q-90 / Q-92: the conflict-of-interest rules that are OFF unless named, from the closed
-     * set in code (`COI_RULES`). `EVALUATOR_NOT_TENDER_AUTHOR` applies to evaluation;
-     * `AWARDER_NOT_EVALUATOR` is recorded here and enforced by `award` (CON-002 PR 10).
-     * A name outside the set stops the service at startup: a rule that is not implemented is
-     * not silently ignored.
+     * Q-90 / Q-92 / Q-93: the optional conflict-of-interest rules, from the closed set in code
+     * (`COI_RULES`). `EVALUATOR_NOT_TENDER_AUTHOR` applies to evaluation and is OFF unless named.
+     * `AWARDER_NOT_EVALUATOR` is enforced by `award` (CON-002 PR 10) and is **ON by default and
+     * strict** (project manager, 2026-10-03): a person the records cannot show to be someone other
+     * than an evaluator is refused (fail closed). Setting the variable to an empty value switches
+     * every optional rule off. A name outside the set stops the service at startup: a rule that is
+     * not implemented is not silently ignored.
      */
     CONSTRUCTION_COI_RULES: z
       .string()
-      .default('')
+      .default('AWARDER_NOT_EVALUATOR')
       .pipe(
         commaList().pipe(
           z.array(
@@ -387,6 +405,43 @@ export const constructionEnvSchema = baseEnvSchema
       .min(1)
       .max(86_400)
       .default(900),
+
+    /**
+     * The sweeper that makes the standing check after an award (ADR-067 § 3, residual), the close
+     * sweeper's shape: a sweep every `INTERVAL_MS` claims at most `BATCH_SIZE` pending checks under a
+     * lease of `LEASE_SECONDS` and a fencing token, asks supplier-service about each winner (a network
+     * call, outside any transaction) and settles each in one short transaction. `LEASE_SECONDS` must
+     * exceed one sweep (`BATCH_SIZE` × the supplier request timeout). A check whose answer could not be
+     * had is not claimed again for `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^attempts)`.
+     * `ALERT_AGE_SECONDS`: a check still PENDING past this age is counted by the overdue gauge, which
+     * `RastaConstructionAwardStandingCheckOverdue` alerts on.
+     */
+    CONSTRUCTION_AWARD_CHECK_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .default(10_000),
+    CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+    CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
+    CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .default(10),
+    CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .default(900),
+    CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(604_800)
+      .default(600),
 
     CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),

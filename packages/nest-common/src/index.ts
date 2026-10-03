@@ -142,6 +142,13 @@ export type {
   ConsumerLogger,
 } from './consumer/event-consumer';
 export { isRetryDelivery, originalDelivery } from './consumer/original-delivery';
+export {
+  invalidPayloadError,
+  missingTenantError,
+  replicaOwnerMismatchError,
+  requireEnvelopeTenant,
+  tenantMismatchError,
+} from './consumer/invalid-payload';
 
 // Outbox ---------------------------------------------------------------------
 export {

@@ -95,10 +95,12 @@ export const EXEMPTIONS = {
   },
   // construction: every child references its parent by (organization_id,
   // parent_id), so per-parent indexes lead with the tenant column without
-  // weakening anything. Two exemptions:
+  // weakening anything. Three exemptions:
   construction: {
     ix_tender_close_due:
       'the close sweeper claims overdue PUBLISHED tenders for every tenant at once, oldest deadline first (TenderCloseRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, so it is small, and each tender is then closed under its own organization_id',
+    ix_award_standing_check_due:
+      'the standing-check sweeper claims the PENDING checks after awards for every tenant at once, oldest first (AwardStandingCheckRepository.claimDue, runUnscoped); a partial index on status = PENDING, so it is small, and each check is then settled under its own organization_id',
     ix_approval_authority_inbox:
       "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
   },
@@ -110,6 +112,8 @@ export const EXEMPTIONS = {
     audit_event_resource_idx:
       'serves platform-scope search (ADR-053 § 10) as well as tenant search; tenant search has audit_event_org_time_idx',
     audit_event_topic_time_idx: 'operational replay by source topic, across tenants',
+    audit_event_topic_event_recorded_idx:
+      "D-046's missing-evidence detector (AuditRepository.countMissingReconciliationEvidence, runUnscoped): one platform-level count across tenants, never rows or tenant ids, by when the row was written",
     audit_event_correction_idx:
       'the correctedBy probe is keyed by the corrected record id, whose scope was checked when that record was read',
     audit_chain_head_pkey:

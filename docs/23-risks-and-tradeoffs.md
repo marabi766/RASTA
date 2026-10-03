@@ -1094,6 +1094,52 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   اینکه ردیف حسابرسی تأییدکننده، پیشنهاددهنده و مرجع شاهد را نگه می‌دارد.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-02 (#175)
+- **وضعیت:** **از این نسخه به بعد رفع‌شده** (2026-10-03، #204، `feat/audit-reconciliation-projection`). رویدادهای آشتی پرداختی
+  که پیش از این نسخه پردازش شده‌اند همان ردیف حسابرسیِ فقط‌پاکت را نگه می‌دارند و ردیف شاهد نمی‌گیرند: `ingest` با دیدن
+  نشانگر `processed_event` پیش از هر نوشتنی `DUPLICATE` برمی‌گرداند، و پرکردن پسینی (Backfill) وجود ندارد. **در Production
+  چنین رویدادی نیست**؛ هنوز چیزی در Production مستقر نشده است. `audit-service` جدول فقط‌افزودنی
+  `payment_reconciliation_evidence` را دارد: برای هر `PAYMENT_RECONCILIATION_RESOLVED` و
+  `PAYMENT_RECONCILIATION_OPERATOR_ACTION` روی `rasta.economic.v1` یک ردیف، در **همان تراکنش** ردیف `audit_event` (شناسهٔ آن
+  را در `audit_event_id` دارد). فقط فیلدهای فهرست سفید نگه داشته می‌شوند: `resolutionId`، `requeueId`، `proposedBy`،
+  `approvedBy`، `resolvedBy`، `actor`، `evidenceReference`، کد نتیجه یا کنش (`resolution`، `action`، `providerOutcome`)، `kind`
+  و `fourEyes`. هیچ متن آزاد، هیچ مبلغ، ارز یا نام Provider ذخیره نمی‌شود، و فیلدی که economic فردا بیفزاید تا کسی
+  تکلیفش را روشن نکند ذخیره نمی‌شود. محموله هنوز جفت Issuer/Subject ندارد، پس ستونی هم برای آن نیست. ستون
+  `projection_version` نسخهٔ نما را نگه می‌دارد. فعلاً فقط `1` وجود دارد و یک CHECK آن را قفل کرده است. فقط `eventVersion` 1
+  این دو رویداد نگاشت می‌شود و نسخهٔ دیگر با `SCHEMA_VERSION_UNSUPPORTED` به DLQ می‌رود. رویداد شناخته‌شده‌ای که قرارداد را
+  نقض کند **هیچ ردیفی نمی‌نویسد** و با `UnprocessableEventError` (`VALIDATION_FAILED`) بی‌درنگ به `rasta.audit.v1.dlq` می‌رود؛
+  شمارندهٔ آن `unmappable_reconciliation_event` است. نقض قرارداد یعنی یکی از این موارد:
+  - محمولهٔ بدشکل؛
+  - مرجع شاهدی که با الگوی economic نخواند (رد می‌شود، پیراسته نمی‌شود)؛
+  - گروه اپراتور نیمه‌کاره؛
+  - `organizationId` محموله ≠ `tenantId` پاکت، یا `paymentIntentId` ≠ `aggregateId`.
+
+  همین قواعد در CHECKهای پایگاه داده هم تکرار شده‌اند (`_version`، `_values`، `_shape`). جدول برای همه فقط‌افزودنی است:
+  نقش اجرا فقط `SELECT` و `INSERT` دارد، و Trigger جلوی `UPDATE`، `DELETE` و `TRUNCATE` را حتی برای مالک می‌گیرد. `down.sql`
+  جدول را قفل می‌کند و تا ردیفی هست رد می‌شود. آزمون قرارداد (`payment-reconciliation-projection.spec.ts`) `events.ts` در
+  economic را به‌صورت متن می‌خواند (بی import؛ A-02) و با هر فیلد طبقه‌بندی‌نشده یا تغییر الگو یا کدها شکست می‌خورد. باقی‌مانده:
+  ۱. هنوز API خواندنی برای این نما نیست؛ حسابرس آن را با SQL روی پایگاه دادهٔ audit می‌خواند.
+  ۲. ردیف‌های نما مانند شاهد مناقصه فقط‌افزودنی‌اند، اما در زنجیرهٔ Hash نیستند؛ ردیف `audit_event` همان رویداد در زنجیره هست.
+
+  **بازبینی Codex روی #204:**
+  - **قرارداد کامل economic پیش از فهرست سفید.** محموله نخست **به‌طور کامل** با قرارداد منتشرشدهٔ economic سنجیده می‌شود،
+    از جمله مبلغ، ارز، Provider، `walletId` و زمان‌ها که هرگز ذخیره نمی‌شوند. این قرارداد در `economic-reconciliation-contract.ts`
+    است: رونوشتی میخ‌شده از `events.ts` در economic، که `economic-reconciliation-contract.spec.ts` هر Declaration آن را با منبع
+    economic مقایسه می‌کند. محموله‌ای که economic نمی‌توانست منتشر کند (بی `walletId` یا `amountMinor`، یا `walletId` شیء) به
+    DLQ می‌رود. فقط پس از آن ردیف از فهرست سفید ساخته می‌شود.
+  - **Log بی نام کلید محموله (S-09).** ردِ این دو رویداد فقط نام فیلدهای Schema و کد بستهٔ مسئلهٔ zod را می‌گوید. هر جزء مسیری
+    که از Schema نیاید `(payload)` نوشته می‌شود.
+  - **کنترل کشفی شکاف.** شمارندهٔ `rasta_audit_reconciliation_evidence_missing` ردیف‌های حسابرسی این دو رویداد را که در پنجرهٔ
+    `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS` (پیش‌فرض ۱۶۸) **نوشته شده‌اند** (`recorded_at`، نه `occurred_at`) و ردیف شاهد
+    ندارند می‌شمارد؛ پس تحویل دیرهنگام رویداد قدیمی هم شمرده می‌شود (Codex دور ۲). Index آن
+    `audit_event_topic_event_recorded_idx` است. پرسش میان‌مستأجری است و عمداً: زیر `runUnscoped` با دلیل مکتوب، فقط یک
+    `count(*)` برمی‌گرداند — نه ردیف، نه شناسه، نه شناسهٔ مستأجر — و Gauge برچسب مستأجر ندارد (استثنای مستند A-04؛ در
+    `EXEMPTIONS` بررسی ترتیب Index مستأجر هم ثبت است). `ReconciliationEvidenceMonitor`
+    آن را هر دقیقه از جدول‌ها نمونه می‌گیرد. هشدار `RastaAuditReconciliationEvidenceMissing` تا وقتی این عدد بالای صفر است
+    می‌سوزد؛ Runbook: `audit-gap-detected.md` § ۹. پس شکاف از هر دو علت شناخته‌شده‌اش (Replica قدیمی در میانهٔ استقرار، یا
+    نشانگر پیش از این نسخه) بی‌صدا نمی‌ماند.
+  - **یادداشت استقرار:** پیش از تکیه بر این نما، Projector تازهٔ `audit-service` را روی **همهٔ** Replicaها مستقر کن و Replica
+    قدیمی را تخلیه کن. Replica قدیمی ردیف حسابرسی را بی شاهد می‌نویسد و نسخهٔ تازه آن رویداد را دوباره نمی‌نویسد. هشدار بالا
+    همین را نشان می‌دهد.
 
 ### D-047 · موتور Schema پریزما URL پایگاه داده را در argv خودش می‌گیرد
 

@@ -169,6 +169,20 @@ export const auditEnvSchema = baseEnvSchema
      * withheld event, and the externally held head is behind because of it.
      */
     AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).default(300),
+    /**
+     * How far back the D-046 detective check looks for payment-reconciliation
+     * audit rows without their evidence row, in hours (default 7 days). A
+     * window rather than all history so the query stays on the recent
+     * partitions; a gap is alerted for as long as it is inside it, which is long
+     * enough to be seen and short enough that one investigated gap does not
+     * hold the alert forever.
+     */
+    AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(2_160)
+      .default(168),
   });
 
 export type AuditEnv = z.infer<typeof auditEnvSchema>;

@@ -108,6 +108,16 @@ export const CONSTRUCTION_EVENTS = {
   BID_SCORED: 'BID_SCORED',
   BID_EVALUATOR_RECUSED: 'BID_EVALUATOR_RECUSED',
   BIDS_EVALUATED: 'BIDS_EVALUATED',
+  // CON-002 PR 10 (ADR-067 § 3). `TENDER_AWARDED` is a catalogue event (`docs/04`, `docs/07`);
+  // `BID_NOT_AWARDED` is added so the bidders who lost can be told by event alone (no
+  // notification-service change in this step) and awaits acceptance by the project manager.
+  // Ids, a closed flag, a digest and times: never an amount (round 1 of #199), the justification
+  // in words, a rank or a score.
+  TENDER_AWARDED: 'TENDER_AWARDED',
+  BID_NOT_AWARDED: 'BID_NOT_AWARDED',
+  // CON-002 PR 10, round 1: the detective control after an award committed (ADR-067 § 3,
+  // the residual of the winner's standing check). Ids and times only.
+  TENDER_AWARD_STANDING_CONFLICT_DETECTED: 'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -606,6 +616,10 @@ export const BID_ACCESS_PURPOSES = [
   'RECUSE',
   'EVALUATE_BIDS',
   'READ_EVALUATION',
+  // CON-002 PR 10: the owner awards the tender, which reads the winning bid's price (ADR-067 § 3).
+  'AWARD_TENDER',
+  // The owner's person (or contract-service) reads the stored award, which holds the winner's price.
+  'READ_AWARD',
 ] as const;
 export type BidAccessPurpose = (typeof BID_ACCESS_PURPOSES)[number];
 
@@ -777,6 +791,67 @@ export const bidsEvaluatedPayload = z
   })
   .strict();
 
+/**
+ * The tender was awarded (EVALUATED → AWARDED): which bid won and its bidder, whether the owner
+ * justified the choice (the reason in words stays in the database), the digest of the frozen matrix
+ * the choice was made against, and who and when. **No amount**: the winner's price is a bid's
+ * content and this topic is readable by every service (round 1 of #199); CON-003 reads it through
+ * the authenticated, tenant-scoped `GET /v1/tenders/{id}/award` and drafts the contract with
+ * `tenderId` as the idempotency key. No rank, no score and no other bidder: a losing bidder is told
+ * by `BID_NOT_AWARDED`, which names neither the winner nor the amount (Q-89).
+ */
+export const tenderAwardedPayload = z
+  .object({
+    ...tenderIdentity,
+    winningBidId: identifier,
+    winnerOrganizationId: identifier,
+    hasJustification: z.boolean(),
+    matrixDigest: sha256Hex,
+    awardedBy: identifier,
+    awardedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * A qualified bid was not the one awarded (QUALIFIED → NOT_AWARDED): one event per bid, so the
+ * bidder can be told and nobody else is named. Ids and the instant only — not the winner, not the
+ * amount, not a rank or a score (Q-89: the loser sees its own status and its own total, through the
+ * API, under its own authorization).
+ */
+export const bidNotAwardedPayload = z
+  .object({
+    bidId: identifier,
+    tenderId: identifier,
+    /** The tender's owner. */
+    organizationId: identifier,
+    bidderOrganizationId: identifier,
+    decidedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * After an award committed, supplier-service said the winner MAY have been suspended, or lost its
+ * contracting qualification, inside the window `windowStart`..`checkedAt` — the race the standing
+ * check before the award cannot close (ADR-067 § 3, residual). `windowStart` is the instant the
+ * pre-check read the standing at; `checkedAt` is supplier-service's clock as it answered after the
+ * commit. Conservative: a suspension that began and ended inside the window is a hit too. The award
+ * is not undone; a person decides. Ids, counts and times only.
+ */
+export const tenderAwardStandingConflictDetectedPayload = z
+  .object({
+    ...tenderIdentity,
+    winningBidId: identifier,
+    winnerOrganizationId: identifier,
+    awardedBy: identifier,
+    awardedAt: isoTimestamp,
+    windowStart: isoTimestamp,
+    checkedAt: isoTimestamp,
+    suspensionIds: z.array(identifier).max(20),
+    suspensionCount: z.number().int().nonnegative(),
+    qualificationRemoved: z.boolean(),
+  })
+  .strict();
+
 export const CONSTRUCTION_EVENT_SCHEMAS = {
   PROJECT_CREATED: projectCreatedPayload,
   PROJECT_UPDATED: projectUpdatedPayload,
@@ -819,6 +894,9 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   BID_SCORED: bidScoredPayload,
   BID_EVALUATOR_RECUSED: bidEvaluatorRecusedPayload,
   BIDS_EVALUATED: bidsEvaluatedPayload,
+  TENDER_AWARDED: tenderAwardedPayload,
+  BID_NOT_AWARDED: bidNotAwardedPayload,
+  TENDER_AWARD_STANDING_CONFLICT_DETECTED: tenderAwardStandingConflictDetectedPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

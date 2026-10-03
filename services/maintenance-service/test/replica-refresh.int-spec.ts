@@ -5,7 +5,7 @@ import type { AssetSnapshot, AssetSnapshotSource } from '../src/consumers/replic
 import type { TransferRecordSource } from '../src/maintenance/transfer-record';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { databaseUrl, id, newPrisma, tenants } from './helpers';
+import { databaseUrl, id, newPrisma, producerShaped, tenants } from './helpers';
 
 /**
  * D-039 — a state event replayed on `<topic>.retry` never applies its payload:
@@ -104,7 +104,7 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
     aggregateId: String(payload.assetId),
     tenantId,
     correlationId: id('COR'),
-    payload,
+    payload: producerShaped(eventName, payload),
   });
 
   function truth(assetId: string, overrides: Partial<Truth>): void {

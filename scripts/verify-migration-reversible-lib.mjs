@@ -504,6 +504,9 @@ export const EXPECTED = {
       'bid_access_evidence',
       // 20261001130000_tender_receipt_pending: receipts held until their predecessor arrives.
       'tender_receipt_pending',
+      // 20261003120000_payment_reconciliation_evidence (D-046): who proposed and
+      // approved a payment-reconciliation resolution, on which evidence.
+      'payment_reconciliation_evidence',
     ],
     triggers: [
       'tg_tender_receipt_link_append_only',
@@ -517,6 +520,8 @@ export const EXPECTED = {
       // sees a TRUNCATE. Both names or the head is forward-only in name only.
       'audit_chain_head_forward_only',
       'audit_chain_head_no_truncate',
+      'tg_payment_reconciliation_evidence_append_only',
+      'tg_payment_reconciliation_evidence_no_truncate',
     ],
     indexes: [
       // Verification walks one chain in `sequence_no` order within a partition.
@@ -539,6 +544,8 @@ export const EXPECTED = {
       'ux_tender_receipt_pending_previous',
       'ux_tender_receipt_pending_receipt',
       'ix_tender_receipt_pending_held',
+      'ux_payment_reconciliation_evidence_audit_event',
+      'ix_payment_reconciliation_evidence_intent',
     ],
     types: ['audit_chain_scope'],
     // The two trigger functions, named separately from the triggers that call
@@ -547,7 +554,12 @@ export const EXPECTED = {
     // `DROP FUNCTION` the forward migration forgets to restore leaves a trigger
     // definition pointing at nothing -- which PostgreSQL refuses to create, so
     // the rollback and the re-apply are the only place either shows up.
-    functions: ['refuse_mutation', 'refuse_chain_head_regression', 'tender_evidence_append_only'],
+    functions: [
+      'refuse_mutation',
+      'refuse_chain_head_regression',
+      'tender_evidence_append_only',
+      'payment_reconciliation_evidence_append_only',
+    ],
     constraints: [
       'audit_event_source_event_id_not_blank',
       'audit_event_source_topic_not_blank',
@@ -583,6 +595,10 @@ export const EXPECTED = {
       'ck_bid_access_evidence_shape',
       'ck_bid_access_evidence_refusal_code',
       'ck_tender_receipt_pending_shape',
+      // D-046: the version, the allow-listed values and which fields each event carries.
+      'ck_payment_reconciliation_evidence_version',
+      'ck_payment_reconciliation_evidence_values',
+      'ck_payment_reconciliation_evidence_shape',
     ],
   },
   /**
@@ -1093,6 +1109,9 @@ export const EXPECTED = {
       'bid_evaluation',
       'bid_evaluation_recusal',
       'bid_evaluation_score',
+      // 20261003100000_tender_award (CON-002 PR 10).
+      'tender_award',
+      'tender_award_standing_check',
     ],
     // 20261003120000_actor_stable_identity (#188): one person is one evaluator of a bid.
     indexes: ['ux_bid_evaluation_person', 'ux_bid_recusal_person'],
@@ -1128,6 +1147,19 @@ export const EXPECTED = {
       'tg_bid_recusal_no_truncate',
       'tg_bid_score_append_only',
       'tg_bid_score_no_truncate',
+      // 20261003100000_tender_award: an award only for an EVALUATED tender and a QUALIFIED bid of it,
+      // the tender and the bids move only with it, and it commits only with both moved; append-only.
+      'tg_tender_award_guard',
+      'tg_tender_status_requires_award',
+      'tg_bid_status_requires_award',
+      'tg_tender_award_consistent',
+      'tg_tender_award_append_only',
+      'tg_tender_award_no_truncate',
+      // The standing check of an award: its guard, and never deleted.
+      'tg_award_standing_check_guard',
+      'tg_award_standing_check_no_delete',
+      'tg_award_standing_check_no_truncate',
+      'tg_award_standing_check_conflict_announced',
     ],
     functions: [
       'tender_criterion_freeze',
@@ -1143,6 +1175,12 @@ export const EXPECTED = {
       'bid_evaluation_guard',
       'bid_recusal_guard',
       'bid_score_guard',
+      'tender_award_guard',
+      'tender_award_recorded',
+      'bid_award_recorded',
+      'tender_award_consistent',
+      'award_standing_check_guard',
+      'award_standing_check_conflict_announced',
     ],
     constraints: [
       'ck_project_text_not_blank',
@@ -1260,6 +1298,14 @@ export const EXPECTED = {
       'bid_evaluation_recusal_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_tender_id_fkey',
       'bid_evaluation_score_organization_id_evaluation_id_fkey',
+      'ck_tender_award_shape',
+      'ck_tender_award_not_own',
+      'ck_tender_award_justified',
+      'ck_tender_award_actor_pair',
+      'tender_award_organization_id_tender_id_fkey',
+      'tender_award_bid_id_fkey',
+      'ck_award_standing_check_shape',
+      'tender_award_standing_check_organization_id_tender_id_fkey',
       // 20261003120000_actor_stable_identity (#188 part B): each person a later check compares
       // carries the token's issuer and subject, both or neither, never blank.
       'ck_tender_created_by_identity',

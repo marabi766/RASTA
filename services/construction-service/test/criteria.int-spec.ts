@@ -571,10 +571,14 @@ describe('evaluation criteria', () => {
         w.criteria.setCriteria(tender.id, { expectedVersion: 1, criteria: WHOLE }),
       );
       await w.prisma.client.$executeRawUnsafe(publishSql(tender.id));
-      for (const next of ['CLOSED', 'EVALUATING', 'EVALUATED', 'AWARDED']) {
+      for (const next of ['CLOSED', 'EVALUATING', 'EVALUATED']) {
         await expect(setStatus(tender.id, next)).resolves.toBe(1);
       }
-      await expect(setStatus(tender.id, 'CANCELLED')).rejects.toThrow(
+      // EVALUATED → AWARDED is a documented edge, but the database lets a tender through it only with
+      // its award recorded (CON-002 PR 10, tender_award); award.int-spec.ts walks it and its terminal state.
+      await expect(setStatus(tender.id, 'AWARDED')).rejects.toThrow(/ck_tender_award_recorded/);
+      // And a return is not an edge.
+      await expect(setStatus(tender.id, 'EVALUATING')).rejects.toThrow(
         /ck_tender_status_transition/,
       );
     });

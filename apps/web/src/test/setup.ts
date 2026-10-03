@@ -2,6 +2,8 @@ import { TextDecoder, TextEncoder } from 'node:util';
 import '@testing-library/jest-dom';
 import { toHaveNoViolations } from 'jest-axe';
 
+import { installTurboInputsGuard } from './turbo-inputs-guard';
+
 /**
  * jsdom does not publish `TextEncoder` or `TextDecoder`, and every real
  * browser does.
@@ -22,3 +24,8 @@ Object.assign(globalThis, {
 // remembering to wire it up, and a suite that forgets to assert accessibility
 // is a review finding rather than a silent pass.
 expect.extend(toHaveNoViolations);
+
+// A spec that reads another package's source as text must have turbo hash it
+// (see `turbo-inputs-guard.ts`); a forgotten input is a failure here, not a
+// stale cached green later.
+installTurboInputsGuard();
