@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, plainText } from '@rasta/contracts';
+import { cursorPaginationSchema, plainText, referenceId } from '@rasta/contracts';
 import { SUPPLIER_CAPABILITIES } from './capabilities';
 import { QUALIFICATION_STATES } from './qualification.state-machine';
 import { SUPPLIER_STATUSES } from './suspension.state-machine';
@@ -29,7 +29,12 @@ import { SUPPLIER_STATUSES } from './suspension.state-machine';
  * than merely "the service happens not to read it today".
  */
 
-const identifier = z.string().trim().min(1).max(64);
+/**
+ * An id this service is given and stores without resolving — a document id
+ * above all. It refuses every control and format character, bidi controls
+ * included, so two references never look alike while differing (#209).
+ */
+const identifier = referenceId().min(1).max(64);
 const capability = z.enum(SUPPLIER_CAPABILITIES);
 
 /**
@@ -38,8 +43,11 @@ const capability = z.enum(SUPPLIER_CAPABILITIES);
  * The eight-character floor is the same one document-service uses on a deletion
  * reason, and for the same reason: a required field that "x" satisfies answers
  * who and when but not why, which is the question an audit actually asks.
+ *
+ * Stored and published on the supplier events, and read by the supplier and by
+ * operators, so it refuses every bidi control like any other free text (#209).
  */
-const statedReason = z.string().trim().min(8).max(500);
+const statedReason = plainText().min(8).max(500);
 
 // ---------------------------------------------------------------------------
 // RegisterSupplier

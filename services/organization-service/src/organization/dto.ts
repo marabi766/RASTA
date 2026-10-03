@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES, plainText } from '@rasta/contracts';
+import {
+  cursorPaginationSchema,
+  seedIdSchema,
+  ID_PREFIXES,
+  plainText,
+  withoutBidiControlDeep,
+} from '@rasta/contracts';
 
 /**
  * Request and response shapes for organizations.
@@ -77,6 +83,12 @@ const locationInput = z
 // Organizations
 // ---------------------------------------------------------------------------
 
+/**
+ * Free-form attributes: any shape, but no bidi control in any key or string
+ * value at any depth (#209) — they are stored and shown like any other text.
+ */
+const freeFormMetadata = withoutBidiControlDeep(z.record(z.unknown()));
+
 export const createOrganizationSchema = z
   .object({
     name: displayName,
@@ -86,7 +98,7 @@ export const createOrganizationSchema = z
     parentId: organizationId.optional(),
     externalCode: plainText().min(1).max(64).optional(),
     /** Type-specific attributes. Kept free-form so a new type needs no migration. */
-    metadata: z.record(z.unknown()).default({}),
+    metadata: freeFormMetadata.default({}),
     location: locationInput.optional(),
   })
   .strict();
@@ -98,7 +110,7 @@ export const updateOrganizationSchema = z
     name: displayName.optional(),
     shortName: displayName.nullable().optional(),
     externalCode: plainText().min(1).max(64).nullable().optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: freeFormMetadata.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -151,7 +163,12 @@ export const setPolicySchema = z
       .min(3)
       .max(120)
       .regex(/^[a-z][a-z0-9]*(\.[a-z0-9_]+)+$/, 'Policy key must be dot-namespaced lowercase'),
-    value: z.unknown(),
+    /**
+     * Any JSON value. Stored, published on `ORGANIZATION_POLICY_CHANGED` and
+     * read by whoever the policy governs, so no bidi control in any key or
+     * string value at any depth (#209).
+     */
+    value: withoutBidiControlDeep(z.unknown()),
     inheritable: z.boolean().default(true),
     /**
      * Why this value was set. Required: a governance setting nobody can

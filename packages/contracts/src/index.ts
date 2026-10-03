@@ -18,7 +18,15 @@ export {
 } from './common/identifiers';
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
-export { WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS, plainText } from './common/text';
+export {
+  WITHOUT_BIDI_CONTROL,
+  WITHOUT_CONTROL_CHARACTER,
+  UNSUPPORTED_CHARACTERS,
+  containsBidiControl,
+  plainText,
+  referenceId,
+  withoutBidiControlDeep,
+} from './common/text';
 
 export {
   CURRENCIES,

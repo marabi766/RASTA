@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES, plainText } from '@rasta/contracts';
+import {
+  cursorPaginationSchema,
+  seedIdSchema,
+  ID_PREFIXES,
+  plainText,
+  referenceId,
+} from '@rasta/contracts';
 
 /**
  * Request and response shapes.
@@ -175,8 +181,11 @@ export const submitRegistrationSchema = z
     requestedOrganizationId: organizationId,
     requestedRoles: z.array(roleSchema).min(1),
     justification: plainText().max(1000).optional(),
-    /** Document ids from document-service. Never file contents. */
-    documentRefs: z.array(z.string().min(1)).max(10).default([]),
+    /**
+     * Document ids from document-service. Never file contents. Stored as
+     * given, so no control or format character, bidi controls included (#209).
+     */
+    documentRefs: z.array(referenceId().min(1)).max(10).default([]),
   })
   .strict();
 

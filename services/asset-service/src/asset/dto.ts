@@ -6,6 +6,8 @@ import {
   ID_PREFIXES,
   amountMinorSchema,
   plainText,
+  referenceId,
+  withoutBidiControlDeep,
 } from '@rasta/contracts';
 import { canonicalIdentifier } from './identifier';
 
@@ -86,6 +88,18 @@ const displayText = (min: number, max: number) =>
 const identifierText = (min: number, max: number) =>
   plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
 
+/**
+ * Type-specific attributes: any shape, but no bidi control in any key or string
+ * value at any depth (#209) — they are stored and shown like any other text.
+ */
+const freeFormSpecifications = withoutBidiControlDeep(z.record(z.unknown()));
+
+/**
+ * A document-service id, stored as given and never resolved here. No control
+ * or format character, bidi controls included (#209).
+ */
+const documentReference = referenceId().max(64);
+
 const coordinate = z
   .object({
     latitude: z.number().min(-90).max(90),
@@ -115,7 +129,7 @@ export const createAssetSchema = z
     manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
 
     /** Type-specific attributes; free-form so a new type needs no migration. */
-    specifications: z.record(z.unknown()).default({}),
+    specifications: freeFormSpecifications.default({}),
 
     location: z
       .object({
@@ -156,7 +170,7 @@ export const updateAssetSchema = z
     manufacturer: displayText(1, 120).nullable().optional(),
     model: z.string().trim().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
-    specifications: z.record(z.unknown()).optional(),
+    specifications: freeFormSpecifications.optional(),
     expectedVersion,
   })
   .strict()
@@ -243,7 +257,7 @@ export type RecordLocationDto = z.infer<typeof recordLocationSchema>;
 export const attachDocumentSchema = z
   .object({
     /** The id issued by document-service. The file never passes through here. */
-    documentId: z.string().trim().min(1).max(64),
+    documentId: documentReference.min(1),
     kind: z.enum(DOCUMENT_KINDS),
     title: displayText(2, 200),
     issuedAt: z.string().datetime().optional(),
@@ -429,7 +443,7 @@ export const createPolicySchema = z
     insuredValueMinor: amountMinorSchema.optional(),
     validFrom: z.string().datetime(),
     validTo: z.string().datetime(),
-    documentId: z.string().trim().max(64).optional(),
+    documentId: documentReference.optional(),
   })
   .strict()
   .refine((v) => new Date(v.validTo) > new Date(v.validFrom), {
@@ -446,7 +460,7 @@ export const createInspectionSchema = z
     validTo: z.string().datetime(),
     result: z.enum(['PASSED', 'CONDITIONAL', 'FAILED']),
     notes: z.string().trim().max(1000).optional(),
-    documentId: z.string().trim().max(64).optional(),
+    documentId: documentReference.optional(),
   })
   .strict()
   .refine((v) => new Date(v.validTo) > new Date(v.inspectedAt), {
