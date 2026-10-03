@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES } from '@rasta/contracts';
+import { cursorPaginationSchema, seedIdSchema, ID_PREFIXES, plainText } from '@rasta/contracts';
 
 /**
  * Request and response shapes for organizations.
@@ -34,14 +34,18 @@ export const CONTACT_KINDS = ['ADMINISTRATIVE', 'FINANCIAL', 'TECHNICAL', 'EMERG
 export const organizationTypeSchema = z.enum(ORGANIZATION_TYPES);
 export type OrganizationTypeValue = z.infer<typeof organizationTypeSchema>;
 
-/** Persian display names, allowing ZWNJ (نیم‌فاصله) and the usual punctuation. */
+/** Persian display names, allowing ZWNJ (نیم‌فاصله) and the usual punctuation. *
+ * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
+ * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
+ * One pattern, so the published OpenAPI `pattern` states both rules.
+ */
 const displayName = z
   .string()
   .trim()
   .min(2)
   .max(200)
   .regex(
-    /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/]+$/u,
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/]+$/u,
     'Name contains unsupported characters',
   );
 
@@ -56,10 +60,10 @@ const coordinate = z
 const locationInput = z
   .object({
     kind: z.enum(LOCATION_KINDS).default('PRIMARY'),
-    addressLine: z.string().trim().max(500).optional(),
-    city: z.string().trim().max(100).optional(),
-    county: z.string().trim().max(100).optional(),
-    province: z.string().trim().max(100).optional(),
+    addressLine: plainText().max(500).optional(),
+    city: plainText().max(100).optional(),
+    county: plainText().max(100).optional(),
+    province: plainText().max(100).optional(),
     postalCode: z
       .string()
       .trim()
@@ -80,7 +84,7 @@ export const createOrganizationSchema = z
     type: organizationTypeSchema,
     /** Omit for a root. Anything else must be an organization the caller may write to. */
     parentId: organizationId.optional(),
-    externalCode: z.string().trim().min(1).max(64).optional(),
+    externalCode: plainText().min(1).max(64).optional(),
     /** Type-specific attributes. Kept free-form so a new type needs no migration. */
     metadata: z.record(z.unknown()).default({}),
     location: locationInput.optional(),
@@ -93,7 +97,7 @@ export const updateOrganizationSchema = z
   .object({
     name: displayName.optional(),
     shortName: displayName.nullable().optional(),
-    externalCode: z.string().trim().min(1).max(64).nullable().optional(),
+    externalCode: plainText().min(1).max(64).nullable().optional(),
     metadata: z.record(z.unknown()).optional(),
   })
   .strict()
@@ -119,7 +123,7 @@ export const moveOrganizationSchema = z
     /** New parent, or null to make this a root. */
     parentId: organizationId.nullable(),
     /** Recorded on the audit event. Restructuring a hierarchy needs a stated why. */
-    reason: z.string().trim().min(3).max(500),
+    reason: plainText().min(3).max(500),
   })
   .strict();
 
@@ -128,7 +132,7 @@ export type MoveOrganizationDto = z.infer<typeof moveOrganizationSchema>;
 export const changeStatusSchema = z
   .object({
     status: z.enum(ORGANIZATION_STATUSES),
-    reason: z.string().trim().min(3).max(500),
+    reason: plainText().min(3).max(500),
   })
   .strict();
 
@@ -154,7 +158,7 @@ export const setPolicySchema = z
      * explain later is not auditable, and these rows decide who may approve
      * what.
      */
-    description: z.string().trim().min(3).max(1000),
+    description: plainText().min(3).max(1000),
     effectiveFrom: z.string().datetime().optional(),
     effectiveTo: z.string().datetime().optional(),
   })

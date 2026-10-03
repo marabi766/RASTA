@@ -5,6 +5,7 @@ import {
   currencySchema,
   seedIdSchema,
   ID_PREFIXES,
+  plainText,
 } from '@rasta/contracts';
 
 /**
@@ -86,7 +87,13 @@ export const repairOrderStatusSchema = z.enum(REPAIR_ORDER_STATUS_VALUES);
 export const partSourceSchema = z.enum(PART_SOURCES);
 export const directCostCategorySchema = z.enum(DIRECT_COST_CATEGORIES);
 
-/** Persian display text, allowing ZWNJ and the usual punctuation. */
+/**
+ * Persian display text, allowing ZWNJ and the usual punctuation.
+ *
+ * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
+ * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
+ * One pattern, so the published OpenAPI `pattern` states both rules.
+ */
 const displayText = (min: number, max: number) =>
   z
     .string()
@@ -94,7 +101,7 @@ const displayText = (min: number, max: number) =>
     .min(min)
     .max(max)
     .regex(
-      /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
+      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
       'Contains unsupported characters',
     );
 
@@ -441,7 +448,7 @@ export const recordPartSchema = z
   .object({
     partName: displayText(2, 200),
     /** The part's identifier in whichever system supplied it. */
-    partReference: z.string().trim().min(1).max(128).optional(),
+    partReference: plainText().min(1).max(128).optional(),
     quantity: partQuantity,
     /** The workshop's own unit — عدد, لیتر, متر. */
     unit: displayText(1, 32),
@@ -452,7 +459,7 @@ export const recordPartSchema = z
      * service. A reference only: inventory-service owns stock and
      * marketplace-service owns orders, and neither is touched from here.
      */
-    sourceReference: z.string().trim().min(1).max(128).optional(),
+    sourceReference: plainText().min(1).max(128).optional(),
     recordedAt: z.string().datetime().optional(),
   })
   .strict();

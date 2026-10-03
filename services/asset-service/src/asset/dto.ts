@@ -5,6 +5,7 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   amountMinorSchema,
+  plainText,
 } from '@rasta/contracts';
 import { canonicalIdentifier } from './identifier';
 
@@ -59,7 +60,13 @@ export const DOCUMENT_KINDS = [
 export const assetTypeSchema = z.enum(ASSET_TYPES);
 export const operationalStatusSchema = z.enum(OPERATIONAL_STATUSES);
 
-/** Persian display text, allowing ZWNJ and the usual punctuation. */
+/**
+ * Persian display text, allowing ZWNJ and the usual punctuation.
+ *
+ * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
+ * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
+ * One pattern, so the published OpenAPI `pattern` states both rules.
+ */
 const displayText = (min: number, max: number) =>
   z
     .string()
@@ -67,7 +74,7 @@ const displayText = (min: number, max: number) =>
     .min(min)
     .max(max)
     .regex(
-      /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
+      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
       'Contains unsupported characters',
     );
 
@@ -77,7 +84,7 @@ const displayText = (min: number, max: number) =>
  * lookups and the unique index see one spelling (audit L3-10).
  */
 const identifierText = (min: number, max: number) =>
-  z.string().trim().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
+  plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
 
 const coordinate = z
   .object({
@@ -103,7 +110,7 @@ export const createAssetSchema = z
     assetTag: identifierText(1, 64).optional(),
 
     manufacturer: displayText(1, 120).optional(),
-    model: z.string().trim().min(1).max(120).optional(),
+    model: plainText().min(1).max(120).optional(),
     serialNumber: identifierText(3, 120).optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
 
@@ -113,7 +120,7 @@ export const createAssetSchema = z
     location: z
       .object({
         siteName: displayText(1, 200).optional(),
-        addressLine: z.string().trim().max(500).optional(),
+        addressLine: plainText().max(500).optional(),
         coordinate: coordinate.optional(),
       })
       .strict()
@@ -147,7 +154,7 @@ export const updateAssetSchema = z
     name: displayText(2, 200).optional(),
     assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
-    model: z.string().trim().min(1).max(120).nullable().optional(),
+    model: plainText().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
     specifications: z.record(z.unknown()).optional(),
     expectedVersion,
@@ -191,7 +198,7 @@ export const changeStatusSchema = z
     status: z.enum(['ACTIVE', 'IDLE', 'OUT_OF_SERVICE']),
     /** Recorded on the event and the timeline. Withdrawing a machine from
      *  service without a stated why is not reviewable later. */
-    reason: z.string().trim().min(3).max(500),
+    reason: plainText().min(3).max(500),
     expectedVersion,
   })
   .strict();
@@ -200,7 +207,7 @@ export type ChangeStatusDto = z.infer<typeof changeStatusSchema>;
 
 export const decommissionSchema = z
   .object({
-    reason: z.string().trim().min(10).max(1000),
+    reason: plainText().min(10).max(1000),
     decommissionedAt: z.string().datetime().optional(),
     expectedVersion,
   })
@@ -211,9 +218,9 @@ export type DecommissionDto = z.infer<typeof decommissionSchema>;
 export const transferAssetSchema = z
   .object({
     toOrganizationId: organizationId,
-    reason: z.string().trim().min(10).max(1000),
+    reason: plainText().min(10).max(1000),
     /** Board resolution or handover document number, where one exists. */
-    referenceNo: z.string().trim().max(120).optional(),
+    referenceNo: plainText().max(120).optional(),
   })
   .strict();
 
@@ -223,7 +230,7 @@ export const recordLocationSchema = z
   .object({
     coordinate: coordinate.optional(),
     siteName: displayText(1, 200).optional(),
-    addressLine: z.string().trim().max(500).optional(),
+    addressLine: plainText().max(500).optional(),
     source: z.enum(['MANUAL', 'TELEMATICS', 'IMPORTED']).default('MANUAL'),
   })
   .strict()
@@ -433,12 +440,12 @@ export type CreatePolicyDto = z.infer<typeof createPolicySchema>;
 
 export const createInspectionSchema = z
   .object({
-    certificateNo: z.string().trim().min(3).max(64),
+    certificateNo: plainText().min(3).max(64),
     centerName: displayText(2, 200).optional(),
     inspectedAt: z.string().datetime(),
     validTo: z.string().datetime(),
     result: z.enum(['PASSED', 'CONDITIONAL', 'FAILED']),
-    notes: z.string().trim().max(1000).optional(),
+    notes: plainText().max(1000).optional(),
     documentId: z.string().trim().max(64).optional(),
   })
   .strict()
@@ -469,8 +476,8 @@ export const submitClaimSchema = z
     /** The policy the incident is claimed under. It must belong to this asset. */
     policyId,
     /** The insurer's file number, where one has been issued already. */
-    claimNumber: z.string().trim().min(1).max(64).optional(),
-    description: z.string().trim().min(10).max(2000),
+    claimNumber: plainText().min(1).max(64).optional(),
+    description: plainText().min(10).max(2000),
     incidentAt: z.string().datetime(),
     claimedAmountMinor: amountMinorSchema.optional(),
   })
@@ -484,7 +491,7 @@ export type SubmitClaimDto = z.infer<typeof submitClaimSchema>;
 
 export const reviewClaimSchema = z
   .object({
-    notes: z.string().trim().min(1).max(1000).optional(),
+    notes: plainText().min(1).max(1000).optional(),
   })
   .strict();
 
@@ -502,7 +509,7 @@ export const decideClaimSchema = z
   .object({
     decision: z.enum(['APPROVED', 'REJECTED']),
     approvedAmountMinor: amountMinorSchema.optional(),
-    notes: z.string().trim().min(3).max(1000).optional(),
+    notes: plainText().min(3).max(1000).optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -529,8 +536,8 @@ export const recordClaimSettlementSchema = z
     settledAt: z.string().datetime().optional(),
     /** The reference under which settlement happened elsewhere — the insurer's
      *  payment reference or an economic-service transaction id. */
-    settlementReference: z.string().trim().min(1).max(120).optional(),
-    notes: z.string().trim().min(1).max(1000).optional(),
+    settlementReference: plainText().min(1).max(120).optional(),
+    notes: plainText().min(1).max(1000).optional(),
   })
   .strict()
   .refine((v) => !v.settledAt || new Date(v.settledAt) <= new Date(), {

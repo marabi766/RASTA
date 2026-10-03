@@ -18,6 +18,8 @@ export {
 } from './common/identifiers';
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
+export { WITHOUT_BIDI_CONTROL, UNSUPPORTED_CHARACTERS, plainText } from './common/text';
+
 export {
   CURRENCIES,
   MAX_AMOUNT_MINOR,

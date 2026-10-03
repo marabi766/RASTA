@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, plainText } from '@rasta/contracts';
 import { SUPPLIER_CAPABILITIES } from './capabilities';
 import { QUALIFICATION_STATES } from './qualification.state-machine';
 import { SUPPLIER_STATUSES } from './suspension.state-machine';
@@ -47,7 +47,7 @@ const statedReason = z.string().trim().min(8).max(500);
 
 export const registerSupplierSchema = z
   .object({
-    displayName: z.string().trim().min(2).max(200),
+    displayName: plainText().min(2).max(200),
     /**
      * What this organization claims it does. Claiming is not qualification —
      * nothing here grants anything, and `SUPPLIER_REGISTERED` names the field
@@ -91,7 +91,7 @@ export const qualificationEvidenceInputSchema = z
   .object({
     documentId: identifier,
     /** What the submitter says this document is. Their words, not a verdict. */
-    label: z.string().trim().min(1).max(200).optional(),
+    label: plainText().min(1).max(200).optional(),
   })
   .strict();
 
@@ -99,7 +99,7 @@ export const submitQualificationSchema = z
   .object({
     capability,
     /** What the supplier says about itself. Optional, and never a decision. */
-    statement: z.string().trim().min(1).max(2000).optional(),
+    statement: plainText().min(1).max(2000).optional(),
     /**
      * Evidence is optional.
      *
@@ -135,7 +135,7 @@ export const approveQualificationSchema = z
      * shown to the supplier's own organization and to platform operators, and
      * never published on an event or through the directory.
      */
-    note: z.string().trim().min(1).max(2000).optional(),
+    note: plainText().min(1).max(2000).optional(),
   })
   .strict();
 
@@ -150,7 +150,7 @@ export const rejectQualificationSchema = z
      */
     reason: statedReason,
     /** The reviewer's private note. Never published. */
-    note: z.string().trim().min(1).max(2000).optional(),
+    note: plainText().min(1).max(2000).optional(),
   })
   .strict();
 
