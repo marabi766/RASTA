@@ -39,6 +39,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { withUtcSession } from './prisma-lib.mjs';
 
 // What each service's schema must contain, and the SQL that checks it. Kept in
 // a module of its own so `verify-migration-reversible-lib.test.mjs` can execute
@@ -98,7 +99,8 @@ if (connection.error) {
   console.error(connection.error);
   process.exit(1);
 }
-const baseUrl = connection.url;
+// In UTC whatever the server's or the role's default (L7-37).
+const baseUrl = withUtcSession(connection.url);
 
 // …and that variable really names the migrator, not a superuser or any other
 // role (verifierRoleProblem in the lib).
