@@ -110,7 +110,7 @@ export const createAssetSchema = z
     assetTag: identifierText(1, 64).optional(),
 
     manufacturer: displayText(1, 120).optional(),
-    model: plainText().min(1).max(120).optional(),
+    model: z.string().trim().min(1).max(120).optional(),
     serialNumber: identifierText(3, 120).optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
 
@@ -154,7 +154,7 @@ export const updateAssetSchema = z
     name: displayText(2, 200).optional(),
     assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
-    model: plainText().min(1).max(120).nullable().optional(),
+    model: z.string().trim().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
     specifications: z.record(z.unknown()).optional(),
     expectedVersion,
@@ -198,7 +198,7 @@ export const changeStatusSchema = z
     status: z.enum(['ACTIVE', 'IDLE', 'OUT_OF_SERVICE']),
     /** Recorded on the event and the timeline. Withdrawing a machine from
      *  service without a stated why is not reviewable later. */
-    reason: plainText().min(3).max(500),
+    reason: z.string().trim().min(3).max(500),
     expectedVersion,
   })
   .strict();
@@ -207,7 +207,7 @@ export type ChangeStatusDto = z.infer<typeof changeStatusSchema>;
 
 export const decommissionSchema = z
   .object({
-    reason: plainText().min(10).max(1000),
+    reason: z.string().trim().min(10).max(1000),
     decommissionedAt: z.string().datetime().optional(),
     expectedVersion,
   })
@@ -440,12 +440,12 @@ export type CreatePolicyDto = z.infer<typeof createPolicySchema>;
 
 export const createInspectionSchema = z
   .object({
-    certificateNo: plainText().min(3).max(64),
+    certificateNo: z.string().trim().min(3).max(64),
     centerName: displayText(2, 200).optional(),
     inspectedAt: z.string().datetime(),
     validTo: z.string().datetime(),
     result: z.enum(['PASSED', 'CONDITIONAL', 'FAILED']),
-    notes: plainText().max(1000).optional(),
+    notes: z.string().trim().max(1000).optional(),
     documentId: z.string().trim().max(64).optional(),
   })
   .strict()

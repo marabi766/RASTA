@@ -5,7 +5,6 @@ import {
   currencySchema,
   seedIdSchema,
   ID_PREFIXES,
-  plainText,
 } from '@rasta/contracts';
 
 /**
@@ -448,7 +447,7 @@ export const recordPartSchema = z
   .object({
     partName: displayText(2, 200),
     /** The part's identifier in whichever system supplied it. */
-    partReference: plainText().min(1).max(128).optional(),
+    partReference: z.string().trim().min(1).max(128).optional(),
     quantity: partQuantity,
     /** The workshop's own unit — عدد, لیتر, متر. */
     unit: displayText(1, 32),
@@ -459,7 +458,7 @@ export const recordPartSchema = z
      * service. A reference only: inventory-service owns stock and
      * marketplace-service owns orders, and neither is touched from here.
      */
-    sourceReference: plainText().min(1).max(128).optional(),
+    sourceReference: z.string().trim().min(1).max(128).optional(),
     recordedAt: z.string().datetime().optional(),
   })
   .strict();
