@@ -20,7 +20,8 @@ import type { WebSession } from './session';
  * Whether a repeat of it produces **one** record is entirely the receiving
  * service's decision, and services differ: a service that stores it makes a
  * retry one record — maintenance-service's create path does since issue 157,
- * answering the same key and body with the original 201 while the key lives
+ * and so do its six repair-order writes (start, complete, withdraw, and a part,
+ * labour or other cost), answering the same key and body with the original 201 while the key lives
  * (MAINTENANCE_IDEMPOTENCY_TTL_HOURS, 24 by default), or, while the first is
  * still being processed, with 409 CONFLICT and Retry-After (`IN_PROGRESS` in
  * `write.ts`); a service that ignores

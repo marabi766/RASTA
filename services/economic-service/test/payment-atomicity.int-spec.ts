@@ -1,6 +1,15 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
-import { asActor, cleanup, newPrisma, readBalances, tenants, wire, type Wiring } from './helpers';
+import {
+  asActor,
+  cleanup,
+  newPrisma,
+  readBalances,
+  tenants,
+  wire,
+  type Wiring,
+  testEnv,
+} from './helpers';
 import { PaymentService } from '../src/payment/payment.service';
 import { walletBalanceLimit } from '../src/wallet/wallet.repository';
 import { MockPaymentProvider } from '../src/payment/mock.provider';
@@ -35,6 +44,7 @@ describe('payment authorisation atomicity (real database)', () => {
       wiring.walletRepository,
       provider,
       wiring.paymentReconciliation,
+      testEnv(),
     );
   });
 

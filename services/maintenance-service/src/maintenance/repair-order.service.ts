@@ -38,6 +38,8 @@ import {
   type RepairOrderRow,
 } from './views';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { ClaimFence } from './idempotency';
+import { MAX_AMOUNT_MINOR } from './dto';
 import type {
   AssignWorkshopDto,
   CancelRepairDto,
@@ -113,6 +115,20 @@ export class RepairOrderService {
       labour: order.labour.map((entry) => toLabourView(entry as LabourRow)),
       costs: order.costs.map((cost) => toCostView(cost as CostRow)),
     };
+  }
+
+  /**
+   * Whether this caller may act on the order at all: it exists in their
+   * organization and, for a narrowed caller, is on a request they reported.
+   * Answers 404 otherwise, as every read of an order does.
+   *
+   * Asked before an `Idempotency-Key` is claimed, so a stored response is never
+   * replayed to somebody who could not have caused it.
+   */
+  async assertAccessible(id: string): Promise<void> {
+    const order = await this.repository.findRepairOrderById(id);
+    if (!order) throw RastaError.notFound('RepairOrder', id);
+    await this.assertVisible(order.maintenanceRequestId, 'RepairOrder', id);
   }
 
   async list(query: ListRepairOrdersQuery) {
@@ -267,7 +283,11 @@ export class RepairOrderService {
    * `asset_ref.inMaintenance`, so no driver can be assigned to it. Neither is
    * instructed to — each decides from the fact that it happened (ADR-026).
    */
-  async start(id: string, dto: StartRepairDto): Promise<RepairOrderView> {
+  async start(
+    id: string,
+    dto: StartRepairDto,
+    fence?: ClaimFence<RepairOrderView>,
+  ): Promise<RepairOrderView> {
     const order = await this.repository.findRepairOrderById(id);
     if (!order) throw RastaError.notFound('RepairOrder', id);
 
@@ -292,8 +312,10 @@ export class RepairOrderService {
       });
     }
 
-    const updated = await this.repository.transaction(async (tx) => {
-      // The per-asset lock first, as every write that starts work takes it
+    return this.repository.transaction(async (tx) => {
+      // First: still this caller's claim on its Idempotency-Key, held to the commit.
+      if (fence) await fence.hold(tx);
+      // The per-asset lock next, as every write that starts work takes it
       // (review #127 #1): starting publishes MAINTENANCE_STARTED under this
       // owner, so the owner and the fence are checked again under it.
       await this.repository.lockAssetForWork(tx, order.assetId, 'SHARED');
@@ -353,10 +375,12 @@ export class RepairOrderService {
         }),
       });
 
-      return tx.repairOrder.findFirstOrThrow({ where: { id } });
+      const view = toRepairOrderView(
+        (await tx.repairOrder.findFirstOrThrow({ where: { id } })) as RepairOrderRow,
+      );
+      // Last: the response to replay, in the same commit.
+      return fence ? fence.complete(tx, view) : view;
     });
-
-    return toRepairOrderView(updated as RepairOrderRow);
   }
 
   /**
@@ -372,7 +396,11 @@ export class RepairOrderService {
    * The request moves to `COMPLETED`, not to `APPROVED`. Nothing settles until
    * an owner has looked at the bill (docs/17, ADR-028).
    */
-  async complete(id: string, dto: CompleteRepairDto): Promise<RepairOrderView> {
+  async complete(
+    id: string,
+    dto: CompleteRepairDto,
+    fence?: ClaimFence<RepairOrderView>,
+  ): Promise<RepairOrderView> {
     const order = await this.repository.findRepairOrderById(id);
     if (!order) throw RastaError.notFound('RepairOrder', id);
 
@@ -419,7 +447,9 @@ export class RepairOrderService {
       Math.round((returnedToServiceAt.getTime() - downtimeFrom.getTime()) / 60_000),
     );
 
-    const updated = await this.repository.transaction(async (tx) => {
+    const view = await this.repository.transaction(async (tx) => {
+      // First: still this caller's claim on its Idempotency-Key, held to the commit.
+      if (fence) await fence.hold(tx);
       // The request before the order (PR #116 review #3): request
       // cancellation takes them in that order, and so does cost entry.
       await this.lockRequest(tx, request.id, order.organizationId);
@@ -448,6 +478,22 @@ export class RepairOrderService {
       // approves and the figure that reaches economic-service, and it is worth
       // it not resting on the last write having got it right.
       const totals = await this.recomputeTotals(tx, order.organizationId, id, request.id);
+
+      // The cost writes take this request's lock before they touch a line, and
+      // this transaction holds it, so the total just recomputed is the final
+      // one: no line can land between this comparison and the commit. A
+      // mismatch rolls the whole completion back.
+      if (
+        dto.expectedTotalCostMinor !== undefined &&
+        dto.expectedTotalCostMinor !== totals.orderTotal.toString()
+      ) {
+        throw RastaError.businessRule(
+          'The cost has changed since it was shown to you; review it again before completing.',
+          // The rule and the order only: the figures are the person's own
+          // money and the portal reads the new one from the service (S-09).
+          { rule: 'COMPLETION_TOTAL_MISMATCH', repairOrderId: id },
+        );
+      }
 
       const requestResult = await tx.maintenanceRequest.updateMany({
         where: { id: request.id, status: 'IN_PROGRESS' },
@@ -520,13 +566,17 @@ export class RepairOrderService {
         });
       }
 
-      return tx.repairOrder.findFirstOrThrow({ where: { id } });
+      const completed = toRepairOrderView(
+        (await tx.repairOrder.findFirstOrThrow({ where: { id } })) as RepairOrderRow,
+      );
+      // Last: the response to replay, in the same commit.
+      return fence ? fence.complete(tx, completed) : completed;
     });
 
     requestsCompletedTotal.inc({ service: SERVICE_NAME, type: request.type });
     downtimeHours.observe({ service: SERVICE_NAME, type: request.type }, downtimeMinutes / 60);
 
-    return toRepairOrderView(updated as RepairOrderRow);
+    return view;
   }
 
   /**
@@ -536,7 +586,11 @@ export class RepairOrderService {
    * workshop turning a job down is not the job going away. Costs already
    * recorded are kept: they were really incurred.
    */
-  async cancel(id: string, dto: CancelRepairDto): Promise<RepairOrderView> {
+  async cancel(
+    id: string,
+    dto: CancelRepairDto,
+    fence?: ClaimFence<RepairOrderView>,
+  ): Promise<RepairOrderView> {
     const order = await this.repository.findRepairOrderById(id);
     if (!order) throw RastaError.notFound('RepairOrder', id);
 
@@ -546,7 +600,9 @@ export class RepairOrderService {
     const cancelledAt = new Date();
     const previousStatus = order.status;
 
-    const updated = await this.repository.transaction(async (tx) => {
+    return this.repository.transaction(async (tx) => {
+      // First: still this caller's claim on its Idempotency-Key, held to the commit.
+      if (fence) await fence.hold(tx);
       // Guarded on the exact status read above, not on "either cancellable
       // state": the event records `previousStatus`, and a concurrent start
       // between the read and this write would otherwise publish a status the
@@ -591,20 +647,26 @@ export class RepairOrderService {
         }),
       });
 
-      return tx.repairOrder.findFirstOrThrow({ where: { id } });
+      const view = toRepairOrderView(
+        (await tx.repairOrder.findFirstOrThrow({ where: { id } })) as RepairOrderRow,
+      );
+      // Last: the response to replay, in the same commit.
+      return fence ? fence.complete(tx, view) : view;
     });
-
-    return toRepairOrderView(updated as RepairOrderRow);
   }
 
   // =========================================================================
   // Cost
   // =========================================================================
 
-  async recordPart(id: string, dto: RecordPartDto): Promise<PartUsageView> {
+  async recordPart(
+    id: string,
+    dto: RecordPartDto,
+    fence?: ClaimFence<PartUsageView>,
+  ): Promise<PartUsageView> {
     const order = await this.assertCostable(id);
 
-    const unitCostMinor = BigInt(dto.unitCostMinor);
+    const unitCostMinor = assertAmountWithinBound(dto.unitCostMinor);
     const totalCostMinor = lineTotalMinor(dto.quantity, unitCostMinor, PART_QUANTITY_DECIMALS);
     if (totalCostMinor === null) {
       throw RastaError.businessRule('That quantity cannot be priced.', {
@@ -612,6 +674,7 @@ export class RepairOrderService {
         quantity: dto.quantity,
       });
     }
+    assertLineWithinBound(totalCostMinor);
 
     const actor = getContext().userId ?? 'SYSTEM';
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
@@ -619,6 +682,8 @@ export class RepairOrderService {
     const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
     const part = await this.repository.transaction(async (tx) => {
+      // First: still this caller's claim on its Idempotency-Key, held to the commit.
+      if (fence) await fence.hold(tx);
       await this.lockCostable(tx, order);
 
       const created = await tx.partUsage.create({
@@ -683,17 +748,23 @@ export class RepairOrderService {
         }),
       });
 
-      return created;
+      const view = toPartView(created as PartRow);
+      // Last: the response to replay, in the same commit.
+      return fence ? fence.complete(tx, view) : view;
     });
 
     partsRecordedTotal.inc({ service: SERVICE_NAME, source: dto.source });
-    return toPartView(part as PartRow);
+    return part;
   }
 
-  async recordLabour(id: string, dto: RecordLabourDto): Promise<LabourEntryView> {
+  async recordLabour(
+    id: string,
+    dto: RecordLabourDto,
+    fence?: ClaimFence<LabourEntryView>,
+  ): Promise<LabourEntryView> {
     const order = await this.assertCostable(id);
 
-    const hourlyRateMinor = BigInt(dto.hourlyRateMinor);
+    const hourlyRateMinor = assertAmountWithinBound(dto.hourlyRateMinor);
     const totalCostMinor = lineTotalMinor(dto.hours, hourlyRateMinor, LABOUR_HOUR_DECIMALS);
     if (totalCostMinor === null) {
       throw RastaError.businessRule('Those hours cannot be priced.', {
@@ -701,6 +772,7 @@ export class RepairOrderService {
         hours: dto.hours,
       });
     }
+    assertLineWithinBound(totalCostMinor);
 
     const actor = getContext().userId ?? 'SYSTEM';
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
@@ -709,6 +781,8 @@ export class RepairOrderService {
     const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
     const entry = await this.repository.transaction(async (tx) => {
+      // First: still this caller's claim on its Idempotency-Key, held to the commit.
+      if (fence) await fence.hold(tx);
       await this.lockCostable(tx, order);
 
       const created = await tx.laborEntry.create({
@@ -766,10 +840,12 @@ export class RepairOrderService {
         }),
       });
 
-      return created;
+      const view = toLabourView(created as LabourRow);
+      // Last: the response to replay, in the same commit.
+      return fence ? fence.complete(tx, view) : view;
     });
 
-    return toLabourView(entry as LabourRow);
+    return entry;
   }
 
   /**
@@ -781,7 +857,11 @@ export class RepairOrderService {
    * That is what makes the provenance on a cost line meaningful rather than
    * advisory.
    */
-  async recordCost(id: string, dto: RecordCostDto): Promise<MaintenanceCostView> {
+  async recordCost(
+    id: string,
+    dto: RecordCostDto,
+    fence?: ClaimFence<MaintenanceCostView>,
+  ): Promise<MaintenanceCostView> {
     const order = await this.assertCostable(id);
 
     if (dto.currency !== order.currency) {
@@ -796,9 +876,11 @@ export class RepairOrderService {
     const recordedAt = dto.recordedAt ? new Date(dto.recordedAt) : new Date();
     const costId = `${ID_PREFIXES.maintenanceCost}_${ulid()}`;
 
-    const amount = BigInt(dto.amountMinor);
+    const amount = assertAmountWithinBound(dto.amountMinor);
 
     const cost = await this.repository.transaction(async (tx) => {
+      // First: still this caller's claim on its Idempotency-Key, held to the commit.
+      if (fence) await fence.hold(tx);
       await this.lockCostable(tx, order);
 
       const created = await tx.maintenanceCost.create({
@@ -836,10 +918,12 @@ export class RepairOrderService {
         }),
       });
 
-      return created;
+      const view = toCostView(created as CostRow);
+      // Last: the response to replay, in the same commit.
+      return fence ? fence.complete(tx, view) : view;
     });
 
-    return toCostView(cost as CostRow);
+    return cost;
   }
 
   // =========================================================================
@@ -874,6 +958,27 @@ export class RepairOrderService {
 
     const orderTotal = parts + labour + other;
 
+    // The request's total spans every referral it ever had, including the
+    // cancelled ones. A workshop that stripped the machine down and then gave
+    // up still charged for it, and a history cheaper than the bank statement
+    // is not a history.
+    const requestLines = await this.repository.sumCostsByCategory(tx, organizationId, {
+      maintenanceRequestId,
+    });
+    const requestTotal = requestLines.reduce((sum, row) => sum + row.total, 0n);
+
+    // Every figure about to be stored, checked before any is written: a sum the
+    // ledger cannot hold fails here, as a refusal that rolls the line back,
+    // instead of as a database error with a 500 once a column was written.
+    for (const figure of [parts, labour, other, orderTotal, requestTotal]) {
+      if (figure > MAX_AMOUNT_MINOR) {
+        throw RastaError.businessRule(
+          'The total would be larger than the maximum this system can hold; nothing was recorded.',
+          { rule: 'COST_TOTAL_TOO_LARGE', repairOrderId, requestId: maintenanceRequestId },
+        );
+      }
+    }
+
     await tx.repairOrder.update({
       where: { id: repairOrderId },
       data: {
@@ -883,15 +988,6 @@ export class RepairOrderService {
         totalCostMinor: orderTotal,
       },
     });
-
-    // The request's total spans every referral it ever had, including the
-    // cancelled ones. A workshop that stripped the machine down and then gave
-    // up still charged for it, and a history cheaper than the bank statement
-    // is not a history.
-    const requestLines = await this.repository.sumCostsByCategory(tx, organizationId, {
-      maintenanceRequestId,
-    });
-    const requestTotal = requestLines.reduce((sum, row) => sum + row.total, 0n);
 
     await tx.maintenanceRequest.update({
       where: { id: maintenanceRequestId },
@@ -1148,3 +1244,34 @@ const SERVICE_ANCHOR_FIELDS = [
 /** Part quantities carry three decimals; labour hours carry two. */
 const PART_QUANTITY_DECIMALS = 3;
 const LABOUR_HOUR_DECIMALS = 2;
+
+/**
+ * An amount that arrived as a string, as a bigint — refused when the ledger
+ * cannot hold it.
+ *
+ * The DTO already refuses one past the bound (`boundedAmountMinorSchema`); this
+ * is the same rule at the service, because a caller that does not come through
+ * the DTO (a test, a future consumer) must meet a refusal, not a database error.
+ */
+function assertAmountWithinBound(amountMinor: string): bigint {
+  const amount = BigInt(amountMinor);
+  if (amount > MAX_AMOUNT_MINOR) {
+    throw RastaError.businessRule('That amount is larger than the maximum this system can hold.', {
+      rule: 'AMOUNT_TOO_LARGE',
+    });
+  }
+  return amount;
+}
+
+/**
+ * A computed line total (quantity × unit price) the ledger can hold. Each
+ * operand can be within the bound while their product is not.
+ */
+function assertLineWithinBound(totalCostMinor: bigint): void {
+  if (totalCostMinor > MAX_AMOUNT_MINOR) {
+    throw RastaError.businessRule(
+      'That line is larger than the maximum this system can hold; reduce the quantity or the price.',
+      { rule: 'LINE_TOTAL_TOO_LARGE' },
+    );
+  }
+}

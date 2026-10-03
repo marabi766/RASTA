@@ -137,6 +137,25 @@ const PAYLOADS = {
     simulated: true,
     resolvedAt: '2026-08-29T00:00:05.000Z',
   },
+  PAYMENT_RECONCILIATION_OPERATOR_ACTION: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    kind: 'REFUND',
+    action: 'PROPOSED',
+    actor: 'USR_PROPOSER',
+    requeueId: null,
+    resolutionId: 'PRR_1',
+    providerOutcome: 'DECLINED',
+    evidenceReference: 'TICKET-1234',
+    proposedBy: null,
+    fourEyes: true,
+    amountMinor: '5000',
+    currency: 'IRR',
+    provider: 'mock',
+    simulated: true,
+    occurredAt: '2026-08-29T00:00:06.000Z',
+  },
   COMMISSION_APPLIED: {
     commissionId: 'CMS_1',
     transactionId: TXN,
@@ -274,6 +293,7 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   PAYMENT_REFUND_UNRECONCILED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_RECONCILIATION_ESCALATED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_RECONCILIATION_RESOLVED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_RECONCILIATION_OPERATOR_ACTION: { scope: 'PAYMENT_INTENT', key: INTENT },
   COMMISSION_APPLIED: { scope: 'TRANSACTION', key: TXN },
   REWARD_GRANTED: { scope: 'REWARD', key: 'RWD_1' },
   REWARD_LEVEL_CHANGED: { scope: 'REWARD_SUBJECT', key: `${ORG}:USR-1` },
@@ -296,13 +316,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the eighteen events the catalogue publishes', () => {
+  it('covers exactly the nineteen events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(18);
+    expect(NAMES).toHaveLength(19);
   });
 });
 
@@ -435,6 +455,7 @@ describe('aggregate identity is untouched by this change', () => {
       PAYMENT_REFUND_UNRECONCILED: 'PaymentIntent',
       PAYMENT_RECONCILIATION_ESCALATED: 'PaymentIntent',
       PAYMENT_RECONCILIATION_RESOLVED: 'PaymentIntent',
+      PAYMENT_RECONCILIATION_OPERATOR_ACTION: 'PaymentIntent',
       COMMISSION_APPLIED: 'Commission',
       REWARD_GRANTED: 'Reward',
       REWARD_LEVEL_CHANGED: 'RewardBalance',

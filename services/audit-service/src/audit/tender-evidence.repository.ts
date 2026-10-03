@@ -272,6 +272,7 @@ export class TenderEvidenceRepository {
           accessedBy: access.accessedBy,
           purpose: access.purpose,
           outcome: access.outcome,
+          refusalCode: access.refusalCode ?? null,
           accessedAt: new Date(access.accessedAt),
         },
       });

@@ -16,27 +16,18 @@ import {
   versionConflictsTotal,
 } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
-import { ENV, MEMBERSHIP_SOURCE, TENDER_EVIDENCE_SOURCE, TENDER_KEY_PROVIDER } from '../tokens';
-import { BidAccessAudit } from './bid-access-audit';
+import { ENV, MEMBERSHIP_SOURCE } from '../tokens';
+import { BidAccessAudit, refusalCodeOf } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
 import { TenderOpenRepository, type TenderForOpening } from './tender-open.repository';
 import { compareChains } from './chain-agreement';
 import type { LiveAnswer, MembershipSource } from './membership.client';
-import { SealingError } from './sealing/errors';
-import type { TenderKeyProvider } from './sealing/key-provider';
-import {
-  openBid,
-  privateKeyFromDer,
-  type SealedBid,
-  type TrustedReceipts,
-} from './sealing/sealing';
-import {
-  trustedReceiptsOf,
-  type TenderChain,
-  type TenderEvidenceSource,
-} from './tender-evidence.client';
+import { BidContentReader, integrityRefusal, type Evidence } from './bid-content-reader';
+import type { TrustedReceipts } from './sealing/sealing';
+import { OwnerIdentity, type LivePrincipal, type Principal } from './owner-identity';
+import type { TenderChain } from './tender-evidence.client';
 import { assertTenderTransition } from './tender.state-machine';
-import { bidContentSchema, type BidContent } from './bid.dto';
+import type { BidContent } from './bid.dto';
 import type {
   BidAccessLogEntry,
   BidOpeningProposalView,
@@ -100,23 +91,6 @@ interface Opened {
   view: BidsOpenedView;
   /** Absent when the bids had been opened before: there is nothing new to check. */
   opening?: OpeningFacts;
-}
-
-interface Principal {
-  organizationId: string;
-  actor: string;
-  organizationIds: readonly string[];
-}
-
-/** A caller identity-service has been asked about: and when (its clock) it answered. */
-interface LivePrincipal extends Principal {
-  identityReadAt: Date;
-}
-
-/** The evidence, read and checked: the chain as audit-service holds it, and the receipts made from it. */
-interface Evidence {
-  chain: TenderChain;
-  receipts: TrustedReceipts;
 }
 
 /**
@@ -225,8 +199,8 @@ export class TenderOpenService {
     private readonly access: ProjectAccess,
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly clock: TenderClock,
-    @Inject(TENDER_EVIDENCE_SOURCE) private readonly evidence: TenderEvidenceSource,
-    @Inject(TENDER_KEY_PROVIDER) private readonly keys: TenderKeyProvider,
+    private readonly reader: BidContentReader,
+    private readonly identity: OwnerIdentity,
     @Inject(MEMBERSHIP_SOURCE) private readonly memberships: MembershipSource,
   ) {}
 
@@ -680,7 +654,14 @@ export class TenderOpenService {
     if (!found) throw RastaError.notFound('Tender', tenderId);
     if (found.organizationId !== principal.organizationId) {
       // Not theirs: they are told what a missing tender is told, and the owner is told who asked.
-      await this.recordRefusal(found.organizationId, tenderId, null, principal, purpose);
+      await this.recordRefusal(
+        found.organizationId,
+        tenderId,
+        null,
+        principal,
+        purpose,
+        RastaError.notFound('Tender', tenderId),
+      );
       throw RastaError.notFound('Tender', tenderId);
     }
     try {
@@ -688,7 +669,7 @@ export class TenderOpenService {
     } catch (error) {
       // No bid id: what the caller named is not stored unless it is a bid (it is not looked up here).
       if (error instanceof RastaError) {
-        await this.recordRefusal(found.organizationId, tenderId, null, principal, purpose);
+        await this.recordRefusal(found.organizationId, tenderId, null, principal, purpose, error);
       }
       throw error;
     }
@@ -701,6 +682,7 @@ export class TenderOpenService {
     bidId: string | null,
     principal: Principal,
     purpose: BidAccessPurpose,
+    error: RastaError,
   ): Promise<void> {
     try {
       await this.prisma.transaction(async (tx) => {
@@ -712,6 +694,7 @@ export class TenderOpenService {
           accessorUserId: principal.actor,
           purpose,
           outcome: 'REFUSED',
+          refusalCode: refusalCodeOf(error),
           at: await transactionNow(tx),
         });
       });
@@ -726,20 +709,8 @@ export class TenderOpenService {
   // -- the evidence ------------------------------------------------------------------
 
   /** The chain and head from audit-service, checked to be sound. Fails closed, always. */
-  private async readEvidence(ownerOrganizationId: string, tenderId: string): Promise<Evidence> {
-    let chain: TenderChain;
-    try {
-      chain = await this.evidence.fetchChain(ownerOrganizationId, tenderId);
-    } catch (error) {
-      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'evidence_unavailable' });
-      if (error instanceof RastaError) throw error;
-      throw RastaError.upstreamUnavailable('audit-service', error);
-    }
-    try {
-      return { chain, receipts: trustedReceiptsOf(chain) };
-    } catch (error) {
-      throw this.refusalOf(error);
-    }
+  private readEvidence(ownerOrganizationId: string, tenderId: string): Promise<Evidence> {
+    return this.reader.readEvidence(ownerOrganizationId, tenderId);
   }
 
   /** This service's own copy must be the evidence, or nothing is opened. */
@@ -765,7 +736,7 @@ export class TenderOpenService {
     this.logger.error(
       'the stored receipts of a tender differ from the evidence; nothing was opened',
     );
-    throw this.refused('INTEGRITY');
+    throw integrityRefusal();
   }
 
   /** The conflict check before anything is said about the tender's state: the bidders are read on their own. */
@@ -807,46 +778,16 @@ export class TenderOpenService {
   }
 
   /** Identity-service's word on whom a user belongs to now; anything less is a refusal, counted (a warning alert). */
-  private async fetchMemberships(userId: string): Promise<LiveAnswer> {
-    try {
-      return await this.memberships.fetchMemberships(userId);
-    } catch (error) {
-      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'identity_unavailable' });
-      throw error instanceof RastaError
-        ? error
-        : RastaError.upstreamUnavailable('identity-service', error);
-    }
+  private fetchMemberships(userId: string): Promise<LiveAnswer> {
+    return this.identity.fetchMemberships(userId);
   }
 
   /**
-   * The caller as identity-service says they are **now**. Its answer is authoritative for
-   * what the caller may do, and the token may only narrow it, never widen it: the caller must
-   * hold a live membership of the organization they act for with a role that opens bids, or
-   * they are refused — a revoked or demoted administrator with a still-valid token reads
-   * nothing. For the conflict of interest the two are added (the stricter, a narrowing): a
-   * reader who joined a bidding organization after the token was issued is a member of it
-   * here, and an organization the token claims still counts. Every owner-side read of a bid's
-   * content or metadata, and every opening, repeat ones included, goes through this.
+   * The caller as identity-service says they are **now** (see `OwnerIdentity`): every owner-side
+   * read of a bid's content or metadata, and every opening, repeat ones included, goes through this.
    */
-  private async livePrincipal(principal: Principal): Promise<LivePrincipal> {
-    const { memberships: live, asOf } = await this.fetchMemberships(principal.actor);
-    const owner = live.find((membership) => membership.organizationId === principal.organizationId);
-    if (!owner) {
-      throw RastaError.forbidden(
-        'The caller is not a member of the organization they act for, as of now',
-      );
-    }
-    this.access.assertLiveRolesMayOpenBids(owner.roles);
-    return {
-      ...principal,
-      identityReadAt: asOf,
-      organizationIds: [
-        ...new Set([
-          ...live.map((membership) => membership.organizationId),
-          ...principal.organizationIds,
-        ]),
-      ],
-    };
+  private livePrincipal(principal: Principal): Promise<LivePrincipal> {
+    return this.identity.live(principal, 'OPEN_BIDS');
   }
 
   /**
@@ -1054,21 +995,14 @@ export class TenderOpenService {
     memberOf: readonly string[],
     bidderOrganizationIds: readonly string[],
   ): void {
-    const bidders = new Set(bidderOrganizationIds);
-    if (memberOf.some((organization) => bidders.has(organization))) {
-      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
-      throw RastaError.forbidden(
-        'A member of an organization that bid on this tender does not open or read its bids',
-      );
-    }
+    this.identity.assertNoConflict(memberOf, bidderOrganizationIds);
   }
 
   // -- the key -----------------------------------------------------------------------
 
   /**
-   * Unwraps the tender's private key for the duration of `use` and no longer: the DER
-   * bytes are zeroised in the `finally`, whatever `use` did. `needed` false (no bid to
-   * open) never touches the key.
+   * Unwraps the tender's private key for the duration of `use` and no longer (see
+   * `BidContentReader`). `needed` false (no bid to open) never touches the key.
    */
   private async withPrivateKey(
     tx: ExtendedPrismaClient,
@@ -1077,26 +1011,7 @@ export class TenderOpenService {
     use: (privateKey: KeyObject, keyId: string) => void,
   ): Promise<void> {
     if (!needed) return;
-    const key = await this.opens.findKey(tx, tenderId);
-    if (!key) throw RastaError.internal('A published tender has no key; its bids cannot be opened');
-
-    let der: Buffer | undefined;
-    try {
-      der = this.keys.unwrap(
-        {
-          kekId: key.kekId,
-          nonce: Buffer.from(key.wrapNonce),
-          ciphertext: Buffer.from(key.wrappedPrivateKey),
-          tag: Buffer.from(key.wrapTag),
-        },
-        { tenderId, keyId: key.keyId },
-      );
-      use(privateKeyFromDer(der), key.keyId);
-    } catch (error) {
-      throw this.refusalOf(error);
-    } finally {
-      der?.fill(0);
-    }
+    this.reader.withPrivateKey(await this.opens.findKey(tx, tenderId), tenderId, use);
   }
 
   /** One bid, opened against the evidence's receipts and read as the content the bidder sealed. */
@@ -1107,47 +1022,10 @@ export class TenderOpenService {
     bid: Bid,
     receipts: TrustedReceipts,
   ): BidContent {
-    const sealed: SealedBid = {
-      version: bid.sealVersion,
-      keyId: bid.keyId,
-      nonce: Buffer.from(bid.nonce),
-      ciphertext: Buffer.from(bid.ciphertext),
-      tag: Buffer.from(bid.tag),
-      wrappedContentKey: Buffer.from(bid.wrappedContentKey),
-      contentCommitment: bid.contentCommitment,
-      ciphertextSha256: bid.ciphertextSha256,
-    };
-    const opened = openBid({
-      privateKey,
-      binding: {
-        tenderId,
-        bidId: bid.id,
-        bidderOrganizationId: bid.bidderOrganizationId,
-        revision: bid.revision,
-        keyId,
-      },
-      sealed,
-      receipts,
-    });
-    const content = bidContentSchema.safeParse(opened);
-    // The commitment held, so this is what was sealed; a shape this service no longer reads is not a bid it can show.
-    if (!content.success) throw new SealingError('TAMPERED');
-    return content.data;
+    return this.reader.openOne(privateKey, keyId, tenderId, bid, receipts);
   }
 
   // -- errors -------------------------------------------------------------------------
-
-  /** A sealing failure is an integrity refusal (or a missing key); nothing about which part failed is said. */
-  private refusalOf(error: unknown): unknown {
-    if (!(error instanceof SealingError)) return error;
-    if (error.code === 'KEY_UNAVAILABLE') {
-      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'key_unavailable' });
-      return RastaError.upstreamUnavailable('tender-key-provider');
-    }
-    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'integrity' });
-    this.logger.error(`a bid did not verify against its receipt: ${error.code}`);
-    return this.refused('INTEGRITY');
-  }
 
   private refused(reason: OpeningRefusal): RastaError {
     if (

@@ -9,6 +9,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  testEnv,
 } from './helpers';
 import { JournalReversalService } from '../src/ledger/journal-reversal.service';
 import { PaymentService, type TopUpResult } from '../src/payment/payment.service';
@@ -55,6 +56,7 @@ describe('journal reversal refusals (real database)', () => {
       wiring.walletRepository,
       new MockPaymentProvider(),
       wiring.paymentReconciliation,
+      testEnv(),
     );
     const wallet = await asActor({ organizationId: payer }, () => wiring.wallets.getOrOpen('IRR'));
     const topUp: TopUpResult = await asActor({ organizationId: payer }, () =>

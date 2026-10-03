@@ -529,7 +529,12 @@ describe('the tender-evidence projection', () => {
   });
 
   describe('every read of a bid', () => {
-    const access = (tenderId: string, outcome: 'GRANTED' | 'REFUSED', bidId: string | null) =>
+    const access = (
+      tenderId: string,
+      outcome: 'GRANTED' | 'REFUSED',
+      bidId: string | null,
+      extra: Record<string, unknown> = {},
+    ) =>
       envelope('BID_ACCESSED', tenderId, {
         bidId,
         tenderId,
@@ -539,7 +544,61 @@ describe('the tender-evidence projection', () => {
         purpose: 'OWN_BID_RECEIPT',
         outcome,
         accessedAt: new Date().toISOString(),
+        ...extra,
       });
+
+    it('keeps why a read was refused: the closed refusal code construction-service emits, and only for a refusal', async () => {
+      const tenderId = id('TND');
+      // Exactly as construction-service emits a refused evaluation read (CON-002 PR 9).
+      await consumer.handle(
+        access(tenderId, 'REFUSED', null, {
+          purpose: 'SCORE_BID',
+          refusalCode: 'CONFLICT_OF_INTEREST',
+        }),
+        DELIVERY,
+      );
+      await consumer.handle(
+        access(tenderId, 'GRANTED', id('BID'), { purpose: 'READ_BID', refusalCode: null }),
+        DELIVERY,
+      );
+      // An event from before the field existed still projects, with no code.
+      await consumer.handle(access(tenderId, 'REFUSED', null), DELIVERY);
+
+      const rows = await migrator.client.$queryRawUnsafe<
+        { outcome: string; purpose: string; refusal_code: string | null }[]
+      >(
+        `SELECT outcome, purpose, refusal_code FROM bid_access_evidence
+          WHERE tender_id = $1 ORDER BY outcome, purpose`,
+        tenderId,
+      );
+      expect(rows).toEqual([
+        { outcome: 'GRANTED', purpose: 'READ_BID', refusal_code: null },
+        { outcome: 'REFUSED', purpose: 'OWN_BID_RECEIPT', refusal_code: null },
+        { outcome: 'REFUSED', purpose: 'SCORE_BID', refusal_code: 'CONFLICT_OF_INTEREST' },
+      ]);
+    });
+
+    it('refuses a refusal code on a granted read, and one that is not a closed code', async () => {
+      for (const bad of [
+        access(id('TND'), 'GRANTED', id('BID'), { refusalCode: 'CONFLICT_OF_INTEREST' }),
+        access(id('TND'), 'REFUSED', null, { refusalCode: 'a free-text reason' }),
+        access(id('TND'), 'REFUSED', null, { refusalCode: 'x'.repeat(65) }),
+      ]) {
+        await expect(consumer.handle(bad, DELIVERY)).rejects.toBeInstanceOf(
+          TenderEvidenceUnmappableError,
+        );
+      }
+    });
+
+    it('cannot hold a refusal code on a granted read, whatever writes it (the database)', async () => {
+      await expect(
+        migrator.client.$executeRawUnsafe(
+          `INSERT INTO bid_access_evidence (source_event_id, tender_id, organization_id, accessor_organization_id,
+             accessed_by, purpose, outcome, refusal_code, accessed_at)
+           VALUES ('${id('EVT')}', 'TND_X', 'ORG_X', 'ORG_Y', 'USR_1', 'READ_BID', 'GRANTED', 'NOT_FOUND', now())`,
+        ),
+      ).rejects.toThrow(/ck_bid_access_evidence_refusal_code/);
+    });
 
     it('is stored with the identifier-only fields and the real outcome, granted or refused', async () => {
       const tenderId = id('TND');

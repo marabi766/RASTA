@@ -34,6 +34,7 @@ import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { AssetRepository } from './asset/asset.repository';
+import { IdempotencyStore } from './asset/idempotency';
 import { AssetService } from './asset/asset.service';
 import { TRANSFER_INSURANCE_POLICY, type TransferInsurancePolicy } from './insurance/ownership';
 import {
@@ -149,6 +150,12 @@ const CONSUMED_TOPICS = [
         }),
     },
     AssetService,
+    {
+      // Idempotency-Key on POST /v1/assets (#169).
+      provide: IdempotencyStore,
+      inject: [PrismaService, ENV],
+      useFactory: (prisma: PrismaService, env: AssetEnv) => new IdempotencyStore(prisma, env),
+    },
     TransferRecordService,
     AssetSnapshotService,
 
@@ -281,6 +288,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly insurance: InsuranceService,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -306,6 +314,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
         );
       } catch {
         // Metrics must never take the service down.
+      }
+      try {
+        // Expired Idempotency-Key records (#169), removed by age alone:
+        // unscoped by necessity, safe because they are already unusable.
+        await this.idempotency.purgeExpired();
+      } catch {
+        // Upkeep must never take the service down either.
       }
     };
 

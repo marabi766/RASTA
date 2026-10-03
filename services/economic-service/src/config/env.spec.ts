@@ -229,6 +229,47 @@ describe('loadEconomicEnv', () => {
     }
   });
 
+  it('lets only SYSTEM_ADMIN resolve an escalated payment by default (Q-82)', () => {
+    expect(loadEconomicEnv(base).ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES).toEqual([
+      'SYSTEM_ADMIN',
+    ]);
+    expect(
+      loadEconomicEnv({
+        ...base,
+        ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES: 'SYSTEM_ADMIN, UNION_ADMIN',
+      }).ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES,
+    ).toEqual(['SYSTEM_ADMIN', 'UNION_ADMIN']);
+    // Configuration may narrow or widen within the platform roles, never past them.
+    for (const value of ['', 'ORGANIZATION_ADMIN', 'SYSTEM_ADMIN,AUDITOR']) {
+      expect(() =>
+        loadEconomicEnv({ ...base, ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES: value }),
+      ).toThrow(EnvValidationError);
+    }
+  });
+
+  it('keeps four-eyes on, and refuses to turn it off outside development and test (Q-B3)', () => {
+    expect(loadEconomicEnv(base).ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES).toBe(true);
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(
+        loadEconomicEnv({
+          ...base,
+          NODE_ENV,
+          ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES: 'false',
+        }).ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES,
+      ).toBe(false);
+    }
+    // An unset NODE_ENV is not development: the refusal reads it as given.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(() =>
+        loadEconomicEnv({
+          ...base,
+          NODE_ENV,
+          ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES: 'false',
+        }),
+      ).toThrow(/ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES/);
+    }
+  });
+
   it('refuses to start without the identity provider or the internal secret', () => {
     // Validated once, at startup, and loudly: a service that boots without
     // these discovers it on the first request, which turns a deployment error

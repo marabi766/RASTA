@@ -179,6 +179,72 @@ describe('maintenance request lifecycle', () => {
       expect(approved.approvedBy).toBeTruthy();
     });
 
+    it('completes a repair only at the total the caller was shown, and changes nothing otherwise', async () => {
+      const assetId = await machine();
+      const request = await asActor({ organizationId: org.a }, () =>
+        requests.create({ assetId, type: 'PREVENTIVE', title: 'سرویس' }),
+      );
+      const order = await asActor({ organizationId: org.a }, () =>
+        repairOrders.assign(request.id, { workshopOrganizationId: workshop }),
+      );
+      await asActor({ organizationId: org.a }, () => repairOrders.start(order.id, {}));
+      await asActor({ organizationId: org.a }, () =>
+        repairOrders.recordCost(order.id, {
+          category: 'SERVICE',
+          amountMinor: '500000',
+          currency: 'IRR',
+          description: 'ایاب و ذهاب',
+        }),
+      );
+
+      // A charge lands after the caller read the order at 500000.
+      await asActor({ organizationId: org.a }, () =>
+        repairOrders.recordCost(order.id, {
+          category: 'SERVICE',
+          amountMinor: '250000',
+          currency: 'IRR',
+          description: 'هزینهٔ دیرهنگام',
+        }),
+      );
+
+      await expect(
+        asActor({ organizationId: org.a }, () =>
+          repairOrders.complete(order.id, {
+            workPerformed: 'انجام شد',
+            expectedTotalCostMinor: '500000',
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+
+      // Refused whole: the order and the request are where they were, and no
+      // completion event was written for a completion that did not happen.
+      const stillOpen = await asActor({ organizationId: org.a }, () =>
+        prisma.client.repairOrder.findFirstOrThrow({ where: { id: order.id } }),
+      );
+      expect(stillOpen.status).toBe('IN_PROGRESS');
+      expect(
+        (await asActor({ organizationId: org.a }, () => requests.get(request.id))).status,
+      ).toBe('IN_PROGRESS');
+      const events = await prisma.client.outboxMessage.findMany({
+        where: {
+          organizationId: org.a,
+          eventName: { in: ['REPAIR_COMPLETED', 'MAINTENANCE_COMPLETED'] },
+          aggregateId: { in: [order.id, request.id] },
+        },
+      });
+      expect(events).toHaveLength(0);
+
+      // At the total the caller now sees, it goes through.
+      const done = await asActor({ organizationId: org.a }, () =>
+        repairOrders.complete(order.id, {
+          workPerformed: 'انجام شد',
+          expectedTotalCostMinor: '750000',
+        }),
+      );
+      expect(done.status).toBe('COMPLETED');
+      expect(done.totalCostMinor).toBe('750000');
+    });
+
     it('refuses to approve work that is not finished', async () => {
       const assetId = await machine();
       const request = await asActor({ organizationId: org.a }, () =>

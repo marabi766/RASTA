@@ -42,6 +42,7 @@ export const AGGREGATE_OF = {
   PAYMENT_REFUND_UNRECONCILED: 'PaymentIntent',
   PAYMENT_RECONCILIATION_ESCALATED: 'PaymentIntent',
   PAYMENT_RECONCILIATION_RESOLVED: 'PaymentIntent',
+  PAYMENT_RECONCILIATION_OPERATOR_ACTION: 'PaymentIntent',
   COMMISSION_APPLIED: 'Commission',
   REWARD_GRANTED: 'Reward',
   REWARD_LEVEL_CHANGED: 'RewardBalance',
@@ -152,6 +153,10 @@ export const PARTITION_KEY_POLICY: { [N in EconomicEventName]: PartitionRule<N> 
     key: payload.paymentIntentId,
   }),
   PAYMENT_RECONCILIATION_RESOLVED: (payload) => ({
+    scope: 'PAYMENT_INTENT',
+    key: payload.paymentIntentId,
+  }),
+  PAYMENT_RECONCILIATION_OPERATOR_ACTION: (payload) => ({
     scope: 'PAYMENT_INTENT',
     key: payload.paymentIntentId,
   }),

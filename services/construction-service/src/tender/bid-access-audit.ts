@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { RastaError } from '@rasta/nest-common';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import type { BidAccessPurpose } from '../events/events';
@@ -15,7 +16,21 @@ export interface BidAccess {
   accessorUserId: string;
   purpose: BidAccessPurpose;
   outcome: 'GRANTED' | 'REFUSED';
+  /** Why it was refused: a closed code (see `refusalCodeOf`); absent when granted. */
+  refusalCode?: string;
   at: Date;
+}
+
+/**
+ * The closed code a refusal is logged under: the first of the refusals the error names
+ * (`NOT_CLOSED`, `CONFLICT_OF_INTEREST` …), else its platform error code (`NOT_FOUND`, `FORBIDDEN` …).
+ * Never the message, which may name records.
+ */
+export function refusalCodeOf(error: unknown): string {
+  if (!(error instanceof RastaError)) return 'ERROR';
+  const refusals = error.internalContext?.refusals;
+  const named = Array.isArray(refusals) ? refusals[0] : undefined;
+  return (typeof named === 'string' && named.length > 0 ? named : error.code).slice(0, 64);
 }
 
 /**
@@ -41,6 +56,7 @@ export class BidAccessAudit {
       accessorUserId: access.accessorUserId,
       purpose: access.purpose,
       outcome: access.outcome,
+      refusalCode: access.outcome === 'REFUSED' ? (access.refusalCode ?? 'REFUSED') : null,
       at: access.at,
     });
     await this.events.enqueue(tx, {
@@ -55,6 +71,7 @@ export class BidAccessAudit {
         accessedBy: access.accessorUserId,
         purpose: access.purpose,
         outcome: access.outcome,
+        refusalCode: access.outcome === 'REFUSED' ? (access.refusalCode ?? 'REFUSED') : null,
         accessedAt: access.at.toISOString(),
       },
       occurredAt: access.at,

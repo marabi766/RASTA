@@ -126,7 +126,11 @@ export const ROUTES: readonly RouteRule[] = [
   // ---- maintenance -------------------------------------------------------
   { prefix: 'maintenance-requests', service: 'maintenance' },
   { prefix: 'maintenance-schedules', service: 'maintenance' },
-  { prefix: 'repair-orders', service: 'maintenance' },
+  // Every unsafe method here adds a cost line, closes a bill or withdraws a
+  // referral, and a form posted twice must be one of them: the key is required
+  // (unsafe methods only; reads need none) and maintenance-service enforces it
+  // again, storing the response with the write.
+  { prefix: 'repair-orders', service: 'maintenance', requiresIdempotencyKey: true },
 
   // ---- commerce ----------------------------------------------------------
   // Search is read-heavy and cheap to abuse, so it carries the tighter limit

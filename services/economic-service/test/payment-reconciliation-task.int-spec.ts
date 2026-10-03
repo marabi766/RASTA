@@ -47,6 +47,7 @@ describe('payment reconciliation tasks (real database)', () => {
       wiring.walletRepository,
       provider,
       wiring.paymentReconciliation,
+      testEnv(),
     );
   });
 

@@ -70,6 +70,7 @@ describe('the payment reconciler (real database)', () => {
       wiring.walletRepository,
       provider,
       wiring.paymentReconciliation,
+      testEnv(),
     );
   });
 
