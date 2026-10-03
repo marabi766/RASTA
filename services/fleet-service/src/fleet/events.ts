@@ -231,25 +231,64 @@ export const assetSourceSchema = z
 export type AssetSourceEvent = z.infer<typeof assetSourceSchema>;
 
 /**
- * `INSURANCE_RECORDED`, held to the four fields its projection acts on
- * (asset-service `insuranceRecordedPayload` always carries them).
+ * `ASSET_CREATED`, held to the fields its projection copies (asset-service
+ * `assetCreatedPayload` always carries them). One without its status would
+ * otherwise be written as `REGISTERED`, a status nobody stated (review #205
+ * r1). Still `.passthrough()` for fields added later.
+ */
+export const assetCreatedSchema = assetSourceSchema.extend({
+  name: z.string(),
+  type: z.string(),
+  assetTag: z.string().nullable(),
+  status: z.string().min(1),
+});
+
+/**
+ * `ASSET_STATUS_CHANGED`, held to the status it changes to (asset-service
+ * `assetStatusChangedPayload`). Without `newStatus` the replica would keep the
+ * old status and be marked processed — an asset taken OUT_OF_SERVICE could
+ * stay dispatchable, with no corrected replay able to fix it (review #205 r1).
+ */
+export const assetStatusChangedSchema = assetSourceSchema.extend({
+  newStatus: z.string().min(1),
+});
+
+/** An instant as asset-service writes it (`toISOString()`); an offset is accepted too. */
+const isoInstant = z.string().datetime({ offset: true });
+
+/**
+ * `INSURANCE_RECORDED`, held to the four fields its projection acts on and to
+ * the producer's own rule for them (asset-service `insuranceRecordedPayload`,
+ * `CreatePolicyDto`: ISO instants, `validTo` after `validFrom`).
  *
  * This is the only event that ends an insurance lapse, and it does so only
- * from the policy's own window. One without its coverage, policy id or dates
+ * from the policy's own window. One without its coverage or policy id, or
+ * with dates that do not parse or a window that ends before it starts,
  * answers nothing; acknowledged, it would be marked processed and a corrected
  * replay with the same id would then be ignored. So it is refused before the
- * marker (audit L7-26) while the lapse stays in force. Still `.passthrough()`
- * for fields added later.
+ * marker (audit L7-26, review #205 r1) while the lapse stays in force. Still
+ * `.passthrough()` for fields added later.
  */
-export const insuranceRecordedSchema = z
-  .object({
-    assetId: z.string().min(1),
-    policyId: z.string().min(1),
-    coverage: z.string().min(1),
-    validFrom: z.string().min(1),
-    validTo: z.string().min(1),
-  })
-  .passthrough();
+export const insuranceRecordedFields = assetSourceSchema.extend({
+  policyId: z.string().min(1),
+  coverage: z.string().min(1),
+  validFrom: isoInstant,
+  validTo: isoInstant,
+});
+
+/**
+ * The window itself: both instants parse and `validTo` is after `validFrom`.
+ * An unparseable date fails here as well as in the format check, so the
+ * refusal never rests on the format check alone.
+ */
+export const insuranceRecordedSchema = insuranceRecordedFields.refine(
+  (payload) => {
+    const from = Date.parse(payload.validFrom);
+    const to = Date.parse(payload.validTo);
+    return Number.isFinite(from) && Number.isFinite(to) && from < to;
+  },
+  { path: ['validTo'], message: 'validTo must be an instant after validFrom' },
+);
 
 /**
  * `ASSET_TRANSFERRED`, held to more than {@link assetSourceSchema} (review
@@ -275,3 +314,41 @@ export const assetTransferredSchema = z
   .refine((payload) => payload.fromOrganizationId !== payload.toOrganizationId, {
     message: 'a transfer moves the asset to another organization',
   });
+
+/** What a consumed event's payload is checked against, and the field names a refusal may repeat (S-09). */
+export interface ConsumedPayloadContract {
+  readonly schema: z.ZodTypeAny;
+  readonly fields: readonly string[];
+}
+
+const contract = (object: z.AnyZodObject, schema: z.ZodTypeAny = object) => ({
+  schema,
+  fields: Object.keys(object.shape),
+});
+
+/**
+ * Per consumed event, the producer-contract fields its projection uses
+ * (review #205 r1). Checked before the processed marker: a known event that
+ * fails is dead-lettered as `VALIDATION_FAILED` and a corrected replay with
+ * the same id is still applied.
+ *
+ * The rest need only the machine. `ASSET_TRANSFERRED` is held to
+ * {@link assetTransferredSchema} by the handler before this. The safety
+ * withdrawals — `INSPECTION_FAILED`, `INSURANCE_EXPIRED` — are deliberately not
+ * held to more: refusing one would leave the machine dispatchable until the
+ * replay, which is the failure they exist to prevent; a lapse naming no
+ * coverage is recorded as `UNKNOWN`, which blocks.
+ */
+export const CONSUMED_PAYLOADS: Record<ConsumedEventName, ConsumedPayloadContract> = {
+  [CONSUMED_EVENTS.ASSET_CREATED]: contract(assetCreatedSchema),
+  [CONSUMED_EVENTS.ASSET_UPDATED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.ASSET_ACTIVATED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.ASSET_STATUS_CHANGED]: contract(assetStatusChangedSchema),
+  [CONSUMED_EVENTS.ASSET_TRANSFERRED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.INSPECTION_FAILED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.INSURANCE_EXPIRED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.INSURANCE_RECORDED]: contract(insuranceRecordedFields, insuranceRecordedSchema),
+  [CONSUMED_EVENTS.MAINTENANCE_STARTED]: contract(assetSourceSchema),
+  [CONSUMED_EVENTS.MAINTENANCE_COMPLETED]: contract(assetSourceSchema),
+};

@@ -1,7 +1,12 @@
 import { DLQ_REASONS } from '@rasta/contracts';
 import { z } from 'zod';
 import { UnprocessableEventError } from './event-consumer';
-import { invalidPayloadError, missingTenantError } from './invalid-payload';
+import {
+  invalidPayloadError,
+  missingTenantError,
+  requireEnvelopeTenant,
+  tenantMismatchError,
+} from './invalid-payload';
 
 /**
  * Audit L7-26: a known event with a malformed payload is dead-lettered, and
@@ -76,5 +81,46 @@ describe('missingTenantError', () => {
     expect(error).toBeInstanceOf(UnprocessableEventError);
     expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
     expect(error.message).toBe('USAGE_RECORDED EVT-1 carries no tenant');
+  });
+});
+
+describe('requireEnvelopeTenant', () => {
+  const event = { eventName: 'ASSET_CREATED', eventId: 'EVT-2' };
+
+  it('returns the envelope tenant when the payload agrees or names none', () => {
+    expect(requireEnvelopeTenant({ ...event, tenantId: 'ORG-A' }, 'ORG-A')).toBe('ORG-A');
+    expect(requireEnvelopeTenant({ ...event, tenantId: 'ORG-A' }, undefined)).toBe('ORG-A');
+    expect(requireEnvelopeTenant({ ...event, tenantId: 'ORG-A' }, null)).toBe('ORG-A');
+  });
+
+  it.each([[undefined], ['ORG-A']])(
+    'never takes the tenant from the payload (payload organization %s)',
+    (payloadOrganizationId) => {
+      expect(() => requireEnvelopeTenant({ ...event }, payloadOrganizationId)).toThrow(
+        expect.objectContaining({
+          reason: DLQ_REASONS.VALIDATION_FAILED,
+          message: 'ASSET_CREATED EVT-2 carries no tenant',
+        }),
+      );
+      expect(() =>
+        requireEnvelopeTenant({ ...event, tenantId: '' }, payloadOrganizationId),
+      ).toThrow(expect.objectContaining({ message: 'ASSET_CREATED EVT-2 carries no tenant' }));
+    },
+  );
+
+  it('refuses a payload organization other than the envelope tenant, naming neither', () => {
+    let refusal: unknown;
+    try {
+      requireEnvelopeTenant({ ...event, tenantId: 'ORG-A' }, 'ORG-SENTINEL-B');
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(refusal).toBeInstanceOf(UnprocessableEventError);
+    expect(refusal).toEqual(tenantMismatchError(event));
+    expect((refusal as Error).message).toBe(
+      'ASSET_CREATED EVT-2 payload organization differs from its envelope tenant: tenant_mismatch',
+    );
+    expect((refusal as Error).message).not.toContain('ORG-');
   });
 });

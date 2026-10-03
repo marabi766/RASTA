@@ -72,3 +72,46 @@ export function missingTenantError(
     `${envelope.eventName} ${envelope.eventId} carries no tenant`,
   );
 }
+
+/**
+ * The refusal for a KNOWN tenant-scoped event whose payload names another
+ * organization than its envelope tenant.
+ *
+ * Every producer stamps the envelope tenant from the same organization it puts
+ * in the payload, so a disagreement is a broken or forged event. Neither value
+ * is trusted over the other: the event is dead-lettered at once as
+ * `VALIDATION_FAILED`, before the processed-event marker. The message carries
+ * the event name and id and the closed code `tenant_mismatch` — never either
+ * organization (S-09).
+ */
+export function tenantMismatchError(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
+): UnprocessableEventError {
+  return new UnprocessableEventError(
+    DLQ_REASONS.VALIDATION_FAILED,
+    `${envelope.eventName} ${envelope.eventId} payload organization differs from its envelope tenant: tenant_mismatch`,
+  );
+}
+
+/**
+ * The tenant a KNOWN tenant-scoped event is applied under: its envelope
+ * tenant, and only that (review #205 r1).
+ *
+ * The payload's organization is never a fallback — an event with no envelope
+ * tenant is refused with {@link missingTenantError} whatever its payload says,
+ * because a write taken from the payload and marked processed could never be
+ * corrected by a replay. When the payload also names an organization it must
+ * be the same one, else {@link tenantMismatchError}. Both are thrown before
+ * any state change and before the processed-event marker.
+ */
+export function requireEnvelopeTenant(
+  envelope: Pick<EventEnvelope, 'eventName' | 'eventId' | 'tenantId'>,
+  payloadOrganizationId: unknown,
+): string {
+  const tenant = envelope.tenantId;
+  if (typeof tenant !== 'string' || tenant.length === 0) throw missingTenantError(envelope);
+  if (payloadOrganizationId !== undefined && payloadOrganizationId !== null) {
+    if (payloadOrganizationId !== tenant) throw tenantMismatchError(envelope);
+  }
+  return tenant;
+}

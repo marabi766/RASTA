@@ -81,9 +81,16 @@ const PROJECTIONS: Record<string, Projection> = {
   BREAKDOWN_REPORTED: { category: 'MAINTENANCE', title: 'گزارش خرابی' },
 
   // ---- marketplace-service ------------------------------------------------
-  ORDER_COMPLETED: { category: 'COST', title: 'سفارش تکمیل‌شده', amountField: 'totalMinor' },
+  // Nothing. `ORDER_COMPLETED` used to be listed (category COST, amount
+  // `totalMinor`), but marketplace's real `orderCompletedPayload` names no
+  // asset and calls its amount `totalAmountMinor`: every order completion was
+  // skipped, and with L7-26 would have been dead-lettered. Order cost reaches
+  // the dossier only once the marketplace contract carries an asset
+  // association (review #205 r1, docs/07 § 7.6).
 
   // ---- construction-service -----------------------------------------------
+  // Planned events with no producer yet (docs/04, docs/events/README.md); when
+  // their contract is written it must name the asset, or the row goes.
   PROJECT_ASSET_ASSIGNED: { category: 'PROJECT', title: 'تخصیص به پروژه' },
   MISSION_STARTED: { category: 'PROJECT', title: 'شروع مأموریت' },
   MISSION_COMPLETED: { category: 'PROJECT', title: 'پایان مأموریت' },

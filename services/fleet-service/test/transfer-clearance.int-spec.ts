@@ -11,7 +11,7 @@ import {
   TransferClearanceService,
 } from '../src/fleet/transfer-clearance';
 import type { TransferRecordSource } from '../src/fleet/transfer-record';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
 
 /**
  * The transfer clearance and its fence (ADR-062, docs/23 D-033), against
@@ -87,7 +87,7 @@ describe('transfer clearance', () => {
     aggregateId: String(payload.assetId),
     tenantId,
     correlationId: id('COR'),
-    payload,
+    payload: producerShaped(eventName, payload),
   });
 
   async function machine(organizationId: string): Promise<string> {

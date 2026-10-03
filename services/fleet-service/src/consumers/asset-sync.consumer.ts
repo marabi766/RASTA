@@ -5,7 +5,7 @@ import {
   createSystemContext,
   invalidPayloadError,
   isRetryDelivery,
-  missingTenantError,
+  requireEnvelopeTenant,
   runWithContext,
   type EventConsumer,
   type EventDelivery,
@@ -33,10 +33,9 @@ import {
 } from '../fleet/dispatch-blocks';
 import {
   CONSUMED_EVENTS,
+  CONSUMED_PAYLOADS,
   FLEET_EVENTS,
-  assetSourceSchema,
   assetTransferredSchema,
-  insuranceRecordedSchema,
   validateFleetPayload,
   type ConsumedEventName,
 } from '../fleet/events';
@@ -278,10 +277,6 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_COMPLETED,
 ]);
 
-/** The field names a malformed-payload refusal may repeat (S-09). */
-const ASSET_SOURCE_FIELDS = Object.keys(assetSourceSchema.shape);
-const INSURANCE_RECORDED_FIELDS = Object.keys(insuranceRecordedSchema.shape);
-
 /** The events whose in-maintenance flag maintenance-service owns. */
 const MAINTENANCE_EVENTS: ReadonlySet<string> = new Set([
   CONSUMED_EVENTS.MAINTENANCE_STARTED,
@@ -379,46 +374,32 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       assertTransferEnvelope(envelope);
     }
 
-    const parsed = assetSourceSchema.safeParse(envelope.payload);
+    const contract = CONSUMED_PAYLOADS[envelope.eventName as ConsumedEventName];
+    const parsed = contract.schema.safeParse(envelope.payload);
     if (!parsed.success) {
-      // An event this service projects, that names no machine: a producer
-      // defect no retry fixes. Dead-lettered at once, before the marker — an
-      // inspection failure or an insurance lapse acknowledged here would leave
-      // the machine dispatchable with no trace, and a corrected replay must
-      // still be applied (audit L7-26, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, ASSET_SOURCE_FIELDS);
-    }
-    if (envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED) {
-      // The one event that ends a lapse, refused when it lacks what it would
-      // end it with. Before the marker: the lapse stays in force (fail-safe),
-      // and the corrected event replayed with the same id is still applied.
-      const policy = insuranceRecordedSchema.safeParse(envelope.payload);
-      if (!policy.success) {
-        throw invalidPayloadError(envelope, policy.error, INSURANCE_RECORDED_FIELDS);
-      }
+      // An event this service projects, without a field of its producer's
+      // contract that the projection uses — no machine, a status change with
+      // no status, a policy with no usable window: a producer defect no retry
+      // fixes. Dead-lettered at once, before the marker — an inspection
+      // failure acknowledged here would leave the machine dispatchable with no
+      // trace, and a corrected replay must still be applied (audit L7-26,
+      // review #205 r1, docs/07 § 7.6).
+      throw invalidPayloadError(envelope, parsed.error, contract.fields);
     }
 
     const payload = parsed.data as Record<string, unknown>;
     const assetId = payload.assetId as string;
 
-    // The replica is keyed by asset and scoped by the tenant the *event*
-    // declares, never by a request context — there is no request here. An
-    // event with no tenant cannot be placed in an organization, and guessing
-    // one would be inventing the fact the whole replica exists to carry.
-    const organizationId =
-      str(payload.organizationId) ?? str(payload.toOrganizationId) ?? envelope.tenantId;
-
-    const existing = await this.repository.findAssetRef(assetId);
-
-    if (!existing && !organizationId) {
-      // The first sighting of a machine, with no tenant to place it in: a
-      // broken producer. Dead-lettered at once rather than skipped without a
-      // trace — a lost INSPECTION_FAILED would leave the machine dispatchable
-      // once it is seen — before the marker, so a corrected replay is still
-      // applied (audit L7-26). A machine already in the replica keeps its own
-      // tenant.
-      throw missingTenantError(envelope);
-    }
+    // The replica is keyed by asset and scoped by the tenant the *envelope*
+    // declares — never by a request context, there is none here, and never by
+    // the payload (review #205 r1). Taken from the payload and marked
+    // processed, a wrong tenant could not be corrected by any replay. So an
+    // event with no envelope tenant is refused whatever its payload says and
+    // whether or not the machine is already in the replica, and a payload
+    // naming another organization is refused as a mismatch: both before the
+    // marker and before any write. A transfer's new owner was checked against
+    // the envelope above.
+    const organizationId = requireEnvelopeTenant(envelope, payload.organizationId);
 
     // D-039: `<topic>` and `<topic>.retry` are separate streams, so a delivery
     // on `.retry` may be older than events applied since. A state event on it
@@ -432,7 +413,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // and the stale payload is never applied.
     const replayed =
       delivery !== undefined && isRetryDelivery(delivery) && STATE_EVENTS.has(envelope.eventName);
-    const eventTenant = envelope.tenantId ?? organizationId;
 
     const now = new Date();
     // The producer's clock, for ordering. An unreadable timestamp falls back to
@@ -440,7 +420,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // and a repair clears only failures that are genuinely older.
     const stated = new Date(envelope.occurredAt);
     const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
-    let skipped = false;
 
     await this.repository.transaction(
       async (tx: ExtendedPrismaClient) => {
@@ -465,7 +444,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // Q-66). The tenant below comes from the row, never from such an event.
         let patch = projection.patch(payload, current, now, occurredAt);
         const refresh = replayed
-          ? await this.readAuthoritativeState(envelope, assetId, eventTenant)
+          ? await this.readAuthoritativeState(envelope, assetId, organizationId)
           : undefined;
         if (refresh) {
           // The replica fields come from the owners. What stays of the payload's
@@ -478,14 +457,10 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
             : { ...withoutStateFields(patch), ...refresh.patch };
         }
 
-        // Narrowed rather than asserted: the guard above already established
-        // that one of these is present, and spelling it out here keeps that true
-        // if the guard is ever edited.
+        // The row's organization: the one an ASSET_CREATED or a transfer
+        // states, both already held to the envelope tenant; else the row's own;
+        // else, on a first sighting, the envelope tenant.
         const tenant = patch.organizationId ?? current?.organizationId ?? organizationId;
-        if (!tenant) {
-          skipped = true;
-          return;
-        }
 
         await this.repository.upsertAssetRef(tx, {
           // The patch first, then the resolved values — never the other way
@@ -525,8 +500,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       },
       replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
     );
-
-    return skipped ? 'SKIPPED' : undefined;
   }
 
   /**

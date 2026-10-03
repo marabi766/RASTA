@@ -392,14 +392,14 @@ describe('TimelineConsumer', () => {
       const h = harness();
       await h.consumer.handle(
         envelope({
-          eventName: 'ORDER_COMPLETED',
-          producer: 'marketplace-service',
-          payload: { assetId: ASSET_ID, totalMinor: '125000000' },
+          eventName: 'REPAIR_COMPLETED',
+          producer: 'maintenance-service',
+          payload: { assetId: ASSET_ID, totalCostMinor: '125000000' },
         }),
       );
 
       expect(h.appended[0]?.amountMinor).toBe(125_000_000n);
-      expect(h.appended[0]?.category).toBe('COST');
+      expect(h.appended[0]?.category).toBe('MAINTENANCE');
     });
 
     it('refuses a money value that arrived as a number', async () => {
@@ -408,9 +408,9 @@ describe('TimelineConsumer', () => {
       const h = harness();
       await h.consumer.handle(
         envelope({
-          eventName: 'ORDER_COMPLETED',
-          producer: 'marketplace-service',
-          payload: { assetId: ASSET_ID, totalMinor: 125000000 },
+          eventName: 'REPAIR_COMPLETED',
+          producer: 'maintenance-service',
+          payload: { assetId: ASSET_ID, totalCostMinor: 125000000 },
         }),
       );
 
@@ -507,18 +507,32 @@ describe('TimelineConsumer', () => {
       expect(h.appended).toHaveLength(0);
     });
 
-    it('still projects ORDER_COMPLETED exactly as before — that contract did not change', async () => {
+    it('skips a real-shaped ORDER_COMPLETED: it names no asset, so it is not projected (review #205 r1)', async () => {
+      // marketplace's `orderCompletedPayload` as published. Projected, every
+      // order completion would have been dead-lettered for want of an asset.
       const h = harness();
-      await h.consumer.handle(
+      const result = await h.consumer.handle(
         envelope({
           eventName: 'ORDER_COMPLETED',
           producer: 'marketplace-service',
-          payload: { assetId: ASSET_ID, totalMinor: '99000' },
+          aggregateType: 'Order',
+          payload: {
+            orderId: 'ORD_1',
+            buyerOrganizationId: DEH1,
+            supplierOrganizationId: 'ORG-SUP',
+            totalAmountMinor: '250000',
+            commissionAmountMinor: '5000',
+            netAmountMinor: '245000',
+            currency: 'IRR',
+            settlementId: 'STL_1',
+            completedAt: '2026-09-17T00:00:00.000Z',
+          },
         }),
       );
 
-      expect(h.appended).toHaveLength(1);
-      expect(h.appended[0]).toMatchObject({ category: 'COST', eventName: 'ORDER_COMPLETED' });
+      expect(result).toBe('SKIPPED');
+      expect(h.markProcessed).not.toHaveBeenCalled();
+      expect(h.appended).toHaveLength(0);
     });
   });
 

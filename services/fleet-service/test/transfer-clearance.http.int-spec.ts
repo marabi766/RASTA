@@ -20,7 +20,7 @@ import {
   CLEARANCE_CLOCK,
   CLEARANCE_HANDLER_MAX_MS,
 } from '../src/fleet/transfer-clearance';
-import { cleanup, databaseUrl, id, tenants } from './helpers';
+import { ASSET_CREATED_FIELDS, cleanup, databaseUrl, id, tenants } from './helpers';
 
 /**
  * The clearance bound over HTTP, through the real module wiring (review #127
@@ -112,7 +112,7 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
       aggregateId: assetId,
       tenantId: org.a,
       correlationId: id('COR'),
-      payload: { assetId, organizationId: org.a, status: 'ACTIVE' },
+      payload: { ...ASSET_CREATED_FIELDS, assetId, organizationId: org.a, status: 'ACTIVE' },
     });
     return assetId;
   }

@@ -152,7 +152,7 @@ describe('usage consumer', () => {
     });
   });
 
-  it('falls back to the envelope tenant when the payload omits it', async () => {
+  it('takes the envelope tenant when the payload omits its organization', async () => {
     const { consumer, folds } = harness();
 
     await consumer.handle(
@@ -164,26 +164,67 @@ describe('usage consumer', () => {
     expect(folds[0]?.organizationId).toBe('ORG-DEH-0001');
   });
 
-  it('dead-letters, rather than skips, a reading with no tenant anywhere (L7-26)', async () => {
-    // There is no organization to scope the meter to. Guessing would invent
-    // the fact the meter exists to carry, and a silent skip would lose the
-    // reading: refused at once, before the marker.
-    const { consumer, folds, marked } = harness({ ledger: true });
-    const reading = { usageRecordId: 'USG_4', assetId: 'AST-SEED-0001', hours: '4.00' };
+  it.each([
+    ['without a payload organization', undefined],
+    ['even with a payload organization', 'ORG-DEH-0001'],
+  ])(
+    'dead-letters a reading with no envelope tenant, %s (L7-26, review #205 r1)',
+    async (_label, organizationId) => {
+      // The meter is scoped by the envelope tenant only. Folded into the
+      // organization the payload names and marked processed, a wrong tenant
+      // could never be corrected by a replay: refused at once, before the marker.
+      const { consumer, folds, marked } = harness({ ledger: true });
+      const reading = {
+        usageRecordId: 'USG_4',
+        assetId: 'AST-SEED-0001',
+        hours: '4.00',
+        ...(organizationId ? { organizationId } : {}),
+      };
 
-    await expect(
-      consumer.handle(envelope({ tenantId: undefined, payload: reading })),
-    ).rejects.toMatchObject({
-      name: 'UnprocessableEventError',
-      reason: 'VALIDATION_FAILED',
-      message: 'USAGE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 carries no tenant',
+      await expect(
+        consumer.handle(envelope({ tenantId: undefined, payload: reading })),
+      ).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+        message: 'USAGE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 carries no tenant',
+      });
+      expect(marked).toEqual([]);
+      expect(folds).toHaveLength(0);
+
+      // The corrected event, replayed with the same id, advances the meter once.
+      await consumer.handle(envelope({ payload: reading }));
+      await consumer.handle(envelope({ payload: reading }));
+      expect(folds).toHaveLength(1);
+      expect(folds[0]?.organizationId).toBe('ORG-DEH-0001');
+    },
+  );
+
+  it('dead-letters a reading whose payload names another organization than its envelope (review #205 r1)', async () => {
+    const { consumer, folds, marked } = harness({ ledger: true });
+    const reading = (organizationId: string) => ({
+      usageRecordId: 'USG_6',
+      assetId: 'AST-SEED-0001',
+      organizationId,
+      hours: '4.00',
     });
+
+    const refusal = consumer.handle(envelope({ payload: reading('ORG-DEH-SENTINEL') }));
+
+    await expect(refusal).rejects.toMatchObject({
+      reason: 'VALIDATION_FAILED',
+      message:
+        'USAGE_RECORDED 01JBQ8Z4K7M2N5P8R1T3V6X9Y2 payload organization differs from its ' +
+        'envelope tenant: tenant_mismatch',
+    });
+    await expect(refusal).rejects.not.toHaveProperty(
+      'message',
+      expect.stringContaining('SENTINEL'),
+    );
     expect(marked).toEqual([]);
     expect(folds).toHaveLength(0);
 
-    // The corrected event, replayed with the same id, advances the meter once.
-    await consumer.handle(envelope({ payload: reading }));
-    await consumer.handle(envelope({ payload: reading }));
+    await consumer.handle(envelope({ payload: reading('ORG-DEH-0001') }));
+    await consumer.handle(envelope({ payload: reading('ORG-DEH-0001') }));
     expect(folds).toHaveLength(1);
     expect(folds[0]?.organizationId).toBe('ORG-DEH-0001');
   });

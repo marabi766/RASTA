@@ -195,11 +195,27 @@ COMMIT ──► Commit Offset
 > می‌شود (کلیدی که Payload انتخاب کرده)، و متن پیام zod که گاه مقدار دریافتی را تکرار می‌کند حذف می‌شود (S-09). پیش‌تر
 > `timeline` (asset)، `asset-sync` (fleet و maintenance)، `usage` (maintenance)، `keycloak-projection` (identity) و
 > `settlement-authority` و `reward-trigger` (economic) چنین رویدادی را Skip یا سه بار Retry می‌کردند و یک شکست بازرسی، انقضای
-> بیمه یا قرائت کارکرد بی‌هیچ ردی گم می‌شد. دو حالت هم‌خانواده نیز همین‌گونه‌اند: (۱) رویداد **شناخته و Tenant-محور** که در
-> Payload و Envelope هیچ Tenantی ندارد (`timeline`، `usage`، نخستین دیدن یک دارایی در `asset-sync` fleet و maintenance) —
-> تولیدکنندهٔ معیوب است، پس `missingTenantError` (همان `VALIDATION_FAILED`، پیام فقط نام و شناسهٔ رویداد)، نه Skip؛ (۲)
-> `INSURANCE_RECORDED` در fleet بدون `coverage`/`policyId`/`validFrom`/`validTo` — پیش از نشانگر رد می‌شود، پس انقضای ثبت‌شده
-> برقرار می‌ماند (Fail-Safe) و بازپخش اصلاح‌شده با همان شناسه اعمال می‌شود. نام رویداد **ناشناخته** همچنان Skip است.
+> بیمه یا قرائت کارکرد بی‌هیچ ردی گم می‌شد. چند حالت هم‌خانواده نیز همین‌گونه‌اند، همه پیش از نشانگر:
+>
+> 1. **Tenant فقط از Envelope** (بازبینی #205 r1). رویداد شناخته و Tenant-محور در `asset-sync` (fleet و maintenance) و
+>    `usage` (maintenance) فقط زیر `tenantId` همان Envelope اعمال می‌شود؛ Payload هرگز جایگزین آن نیست، چون نوشتنی که Tenant
+>    را از Payload گرفته و نشانگر خورده با هیچ بازپخشی اصلاح نمی‌شود. بی Tenant در Envelope — هرچه Payload بگوید و چه ردیف
+>    Replica از پیش باشد چه نه — `missingTenantError`؛ `organizationId` در Payload که با Envelope یکی نیست
+>    `tenantMismatchError` (کد بستهٔ `tenant_mismatch`، بی‌نام هیچ‌یک از دو سازمان). هر دو `VALIDATION_FAILED`، از راه
+>    `requireEnvelopeTenant` در `@rasta/nest-common`. `timeline` (asset) از پیش فقط Tenant Envelope را می‌خواند و بی آن
+>    `missingTenantError` می‌دهد.
+> 2. **میدان‌های قرارداد تولیدکننده که Projection به کار می‌برد**، به‌تفکیک نام رویداد: مثلاً `ASSET_STATUS_CHANGED` بی
+>    `newStatus` (وگرنه دارایی خارج از سرویس در fleet قابل اعزام می‌ماند)، `ASSET_CREATED` بی `name`/`type`/`assetTag`/`status`.
+>    رویدادهای ایمنی `INSPECTION_FAILED` و `INSURANCE_EXPIRED` عمداً فقط به دارایی نیاز دارند: رد کردنشان دارایی را تا بازپخش
+>    قابل اعزام می‌گذارد.
+> 3. **`INSURANCE_RECORDED` در fleet** بی `coverage`/`policyId`، یا با تاریخی که ISO نیست یا پنجره‌ای که `validTo` آن پس از
+>    `validFrom` نیست (همان قاعدهٔ تولیدکننده) — انقضای ثبت‌شده برقرار می‌ماند (Fail-Safe) و بازپخش اصلاح‌شده با همان شناسه
+>    اعمال می‌شود.
+>
+> نام رویداد **ناشناخته** همچنان Skip است. **هزینهٔ سفارش در پروندهٔ دارایی نیست:** `timeline` دیگر `ORDER_COMPLETED` را
+> Project نمی‌کند، چون `orderCompletedPayload` بازارگاه هیچ دارایی‌ای نام نمی‌برد (و مبلغ آن `totalAmountMinor` است، نه
+> `totalMinor`)؛ پیش‌تر هر تکمیل سفارش بی‌صدا Skip می‌شد و با L7-26 به DLQ می‌رفت. تا قرارداد بازارگاه پیوندی با دارایی نداشته
+> باشد، هزینهٔ سفارش به پرونده نمی‌رسد — قاعدهٔ کسب‌وکاری تازه‌ای در کار نیست.
 
 > **CONSTRAINT — Topicهای `.retry` امروز استفاده نمی‌شوند.**
 > `create-topics.sh` به‌ازای هر دامنه یک `rasta.<domain>.v1.retry` می‌سازد و طرح اولیهٔ این بخش یک Retry **مبتنی بر Topic** با

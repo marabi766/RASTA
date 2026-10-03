@@ -2,7 +2,7 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import type { EventEnvelope } from '@rasta/contracts';
 import {
   invalidPayloadError,
-  missingTenantError,
+  requireEnvelopeTenant,
   type EventConsumer,
   type EventHandler,
 } from '@rasta/nest-common';
@@ -117,15 +117,13 @@ export class UsageConsumer implements OnModuleInit, OnModuleDestroy {
     }
 
     const payload = parsed.data;
-    const organizationId = payload.organizationId ?? envelope.tenantId;
-
-    if (!organizationId) {
-      // Without a tenant there is no organization to scope the meter to.
-      // Guessing one would be inventing the fact the meter exists to carry, and
-      // a silent skip would lose the reading: a broken producer, dead-lettered
-      // at once before the marker so a corrected replay still applies (L7-26).
-      throw missingTenantError(envelope);
-    }
+    // The meter is scoped by the ENVELOPE tenant, never by the payload (review
+    // #205 r1): a reading folded into the organization its payload names and
+    // marked processed could not be corrected by any replay. No envelope
+    // tenant, or a payload naming another organization, is a broken producer:
+    // dead-lettered at once, before the marker, so a corrected replay still
+    // advances the meter (L7-26).
+    const organizationId = requireEnvelopeTenant(envelope, payload.organizationId);
 
     const now = new Date();
 
