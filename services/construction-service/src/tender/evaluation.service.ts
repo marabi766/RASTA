@@ -557,7 +557,14 @@ export class EvaluationService {
         this.assertEvaluatorMayAct(principal, tender, bids);
         if (tender.openedAt === null) throw this.rule('NOT_OPENED');
         const at = await transactionNow(tx);
-        const matrix = buildMatrix(await this.matrixInput(tx, tender, bids));
+        const counted = buildMatrix(await this.matrixInput(tx, tender, bids));
+        // `ready` is what `evaluate` would answer: the counted evaluators are people too (#188).
+        const blockedBy = await this.readinessOfPeople(tx, tenderId, counted);
+        const matrix: MatrixView = {
+          ...counted,
+          ready: counted.ready && blockedBy === null,
+          readinessBlockedBy: blockedBy,
+        };
         for (const bidId of bids.length > 0 ? bids.map((bid) => bid.id) : [null]) {
           await this.record(tx, principal, tenderId, bidId, 'READ_EVALUATION', at);
         }
@@ -840,6 +847,31 @@ export class EvaluationService {
     tenderId: string,
     matrix: MatrixView,
   ): Promise<void> {
+    const blockedBy = await this.readinessOfPeople(tx, tenderId, matrix);
+    if (blockedBy === 'SAME_PERSON_AS_EVALUATOR') {
+      throw this.forbid(
+        'SAME_PERSON_AS_EVALUATOR',
+        'One person is counted as more than one evaluator of a bid, or keeps scores of a bid they stood down from',
+      );
+    }
+    if (blockedBy === 'ACTOR_IDENTITY_UNKNOWN') {
+      evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
+      throw actorIdentityUnknown(
+        'the evaluators a completed evaluation counts are distinct people',
+      );
+    }
+  }
+
+  /**
+   * The one judgement both completion and the matrix read use, so that `ready` never says yes
+   * where `evaluate` would refuse: null when the counted evaluators are provably distinct
+   * people, else the closed code of what stands in the way (`evaluatorPeople`).
+   */
+  private async readinessOfPeople(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    matrix: MatrixView,
+  ): Promise<MatrixView['readinessBlockedBy']> {
     const [evaluations, recusals] = await Promise.all([
       this.repo.listEvaluations(tx, tenderId),
       this.repo.listRecusals(tx, tenderId),
@@ -854,22 +886,13 @@ export class EvaluationService {
         }
       }
     }
-    const people = evaluatorPeople(
+    const { verdict } = evaluatorPeople(
       evaluations.filter((row) => counts.has(`${row.bidId}|${row.evaluatorId}`)),
       recusals,
     );
-    if (people.verdict === 'SAME') {
-      throw this.forbid(
-        'SAME_PERSON_AS_EVALUATOR',
-        'One person is counted as more than one evaluator of a bid, or keeps scores of a bid they stood down from',
-      );
-    }
-    if (people.verdict === 'UNKNOWN') {
-      evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'actor_identity_unknown' });
-      throw actorIdentityUnknown(
-        'the evaluators a completed evaluation counts are distinct people',
-      );
-    }
+    if (verdict === 'SAME') return 'SAME_PERSON_AS_EVALUATOR';
+    if (verdict === 'UNKNOWN') return 'ACTOR_IDENTITY_UNKNOWN';
+    return null;
   }
 
   /** Supplier-service's word on the contractor's standing now, asked outside any lock (fail closed). */

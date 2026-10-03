@@ -111,6 +111,10 @@ describe('one person, one evaluator (#188 E1, E2)', () => {
     // A second person completes the minimum.
     const quinn = person().as(o);
     for (const { bidId } of bids) await quinn(() => w.evaluation.score(tenderId, bidId, SCORES));
+    expect(await asU1(() => w.evaluation.getMatrix(tenderId))).toMatchObject({
+      ready: true,
+      readinessBlockedBy: null,
+    });
     expect((await asU1(() => w.evaluation.evaluate(tenderId))).alreadyEvaluated).toBe(false);
     const evaluations = await runUnscoped('the suite reads the claims', () =>
       w.prisma.client.bidEvaluation.findMany({ where: { tenderId } }),
@@ -246,9 +250,14 @@ describe('one person, one evaluator (#188 E1, E2)', () => {
       const { o, tenderId, bidId } = await oneQualifiedBid();
       await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`);
       await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`);
-      // The matrix, which counts user ids, would call this ready.
+      // Two complete evaluations by user id — but the matrix says what `evaluate` would answer.
       const matrix = await person().as(o)(() => w.evaluation.getMatrix(tenderId));
-      expect(matrix.ready).toBe(true);
+      expect(matrix).toMatchObject({
+        blockers: [],
+        ready: false,
+        readinessBlockedBy: 'ACTOR_IDENTITY_UNKNOWN',
+      });
+      expect(matrix.bids[0]!.evaluatorCount).toBe(2);
 
       const refused = await refusal(person().as(o)(() => w.evaluation.evaluate(tenderId)));
       expect(refused.code).toBe('ACTOR_IDENTITY_UNKNOWN');
@@ -269,6 +278,10 @@ describe('one person, one evaluator (#188 E1, E2)', () => {
                                                "reason_code", "recused_at")
          VALUES ('REC_${ulid()}', '${o}', '${tenderId}', '${bidId}', 'USR_${ulid()}', 'CONFLICT_OF_INTEREST', now())`,
       );
+      expect(await person().as(o)(() => w.evaluation.getMatrix(tenderId))).toMatchObject({
+        ready: false,
+        readinessBlockedBy: 'ACTOR_IDENTITY_UNKNOWN',
+      });
       const refused = await refusal(person().as(o)(() => w.evaluation.evaluate(tenderId)));
       expect(refused.code).toBe('ACTOR_IDENTITY_UNKNOWN');
       expect(await statusOf(tenderId)).toBe('EVALUATING');
@@ -280,6 +293,10 @@ describe('one person, one evaluator (#188 E1, E2)', () => {
       // Written from a token without rasta_uid: the user id is the subject.
       await legacyEvaluation(o, tenderId, bidId, subject);
       await legacyEvaluation(o, tenderId, bidId, `USR_${ulid()}`, subject);
+      expect(await person().as(o)(() => w.evaluation.getMatrix(tenderId))).toMatchObject({
+        ready: false,
+        readinessBlockedBy: 'SAME_PERSON_AS_EVALUATOR',
+      });
       const refused = await refusal(person().as(o)(() => w.evaluation.evaluate(tenderId)));
       expect(refused.code).toBe('FORBIDDEN');
       expect(refused.message).toContain('SAME_PERSON_AS_EVALUATOR');

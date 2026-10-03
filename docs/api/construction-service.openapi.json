@@ -13187,7 +13187,13 @@
                     },
                     "ready": {
                       "type": "boolean",
-                      "description": "Whether the evaluation may be completed: at least one QUALIFIED bid, every QUALIFIED bid has enough complete evaluators, and no opened bid is left undecided."
+                      "description": "Whether the evaluation may be completed — true only if `evaluate` would pass: at least one QUALIFIED bid, every QUALIFIED bid has enough complete evaluators who are provably distinct people (none of whom stood down from it under another user id), and no opened bid is left undecided."
+                    },
+                    "readinessBlockedBy": {
+                      "type": "string",
+                      "enum": ["SAME_PERSON_AS_EVALUATOR", "ACTOR_IDENTITY_UNKNOWN"],
+                      "nullable": true,
+                      "description": "Why the counted evaluators keep the evaluation from completing (#188), else null: `SAME_PERSON_AS_EVALUATOR` — one person counts twice on a bid, or keeps scores of a bid they stood down from under another user id; `ACTOR_IDENTITY_UNKNOWN` — two of them cannot be told apart (a row written before the stable identity was recorded, or under another issuer). `evaluate` refuses with the same code; the remedy is to cancel the tender and evaluate again."
                     },
                     "undecidedBidCount": {
                       "type": "integer",
@@ -13376,6 +13382,7 @@
                     "minEvaluators",
                     "maxEvaluators",
                     "ready",
+                    "readinessBlockedBy",
                     "undecidedBidCount",
                     "blockers",
                     "bids"
