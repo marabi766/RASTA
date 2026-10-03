@@ -48,12 +48,25 @@ export interface DossierScreenProps {
    */
   readonly editForm?: ReactNode;
   /**
+   * The lifecycle commands this person may use on this machine as it is now —
+   * commission, change status, decommission — built by the page like the edit
+   * form, from the same read. Absent when there is nothing to offer.
+   */
+  readonly lifecycle?: ReactNode;
+  /**
    * What the write that sent the person here did — decided by the page, which
    * accepts it only from a flash the server signed for this session and this
    * machine (`server/flash.ts`), never from a bare query value. Not rendered at
    * all when the read failed.
    */
-  readonly notice?: 'created' | 'updated' | 'conflict';
+  readonly notice?:
+    | 'created'
+    | 'updated'
+    | 'conflict'
+    | 'activated'
+    | 'statusChanged'
+    | 'decommissioned'
+    | 'lifecycleConflict';
 }
 
 const NOTICES = {
@@ -62,6 +75,13 @@ const NOTICES = {
   conflict: {
     tone: 'warning',
     text: 'همین ماشین پس از باز شدن فرم ویرایش، توسط کسی تغییر کرده بود؛ ویرایش شما ذخیره نشد. مشخصات فعلی را در فرم ببینید و اگر هنوز لازم است دوباره ویرایش کنید.',
+  },
+  activated: { tone: 'success', text: 'دارایی فعال شد و به ناوگان پیوست.' },
+  statusChanged: { tone: 'success', text: 'وضعیت دارایی تغییر کرد.' },
+  decommissioned: { tone: 'success', text: 'دارایی اسقاط شد. این وضعیت نهایی است.' },
+  lifecycleConflict: {
+    tone: 'warning',
+    text: 'این دارایی پس از باز شدن این صفحه تغییر کرده بود — شاید همین دستور پیش‌تر اعمال شده باشد. این بار چیزی نوشته نشد. وضعیت فعلی را در همین صفحه ببینید و اگر هنوز لازم است دوباره اقدام کنید.',
   },
 } as const;
 
@@ -143,7 +163,13 @@ function expiryWording(days: number): string {
   return `${toPersianDigits(String(Math.abs(days)))} روز از انقضا گذشته`;
 }
 
-export function DossierScreen({ result, assetId, editForm, notice }: DossierScreenProps) {
+export function DossierScreen({
+  result,
+  assetId,
+  editForm,
+  lifecycle,
+  notice,
+}: DossierScreenProps) {
   if (result.kind === 'FORBIDDEN') {
     return (
       <>
@@ -316,6 +342,19 @@ export function DossierScreen({ result, assetId, editForm, notice }: DossierScre
           </ol>
         )}
       </Section>
+
+      {asset.status === 'DECOMMISSIONED' ? (
+        <Alert tone="info" title="این دارایی اسقاط شده است">
+          اسقاط نهایی است: وضعیت و مشخصات این دارایی دیگر تغییر نمی‌کند و ردیف آن برای سوابق مالی و
+          حسابرسی می‌ماند.
+        </Alert>
+      ) : null}
+
+      {lifecycle ? (
+        <Section headingId="lifecycle" title="وضعیت و چرخهٔ حیات">
+          {lifecycle}
+        </Section>
+      ) : null}
 
       {editForm ? (
         <Section headingId="edit-asset" title="ویرایش مشخصات">

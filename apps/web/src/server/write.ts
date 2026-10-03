@@ -86,6 +86,13 @@ export interface FieldMapping<F extends string> {
    * arrived.
    */
   readonly byCode?: Readonly<Record<string, string>>;
+  /**
+   * What is said for a **detail** that carries its own closed `code`
+   * (`details[].code`), keyed by that code. Preferred over the sentence: a
+   * code is part of the API and a sentence is not, so the wording here cannot
+   * be broken by the service rewording its English (`OPEN_ASSIGNMENT`, …).
+   */
+  readonly byDetailCode?: Readonly<Record<string, string>>;
 }
 
 export function mapProblemToFields<F extends string>(
@@ -99,7 +106,9 @@ export function mapProblemToFields<F extends string>(
 
   for (const detail of problem.details ?? []) {
     const field = mapping.paths[detail.path];
-    const text = textOf(detail.message);
+    const text =
+      (detail.code !== undefined ? mapping.byDetailCode?.[detail.code] : undefined) ??
+      textOf(detail.message);
     if (field === undefined) {
       unplaced.push(text);
       continue;

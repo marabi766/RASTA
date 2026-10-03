@@ -14,9 +14,10 @@ import { IDLE_REGISTER_ASSET_FORM } from './form-state';
  * assertion, each refusal proves nothing was called, and a retry of one
  * rendered form is shown to carry the same reference.
  *
- * It does **not** claim a retry is one machine: asset-service does not store
- * the reference, so a duplicate is stopped only by its serial-number and
- * asset-tag uniqueness, which a registration with neither does not have.
+ * It does **not** assert that a retry is one machine: that is asset-service's
+ * decision (it stores the reference on the create path since #193) and is
+ * proven in its own specs; here a retry is only shown to carry the same
+ * reference.
  */
 
 const currentSession = jest.fn();

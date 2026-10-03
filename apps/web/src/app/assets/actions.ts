@@ -85,8 +85,9 @@ export async function submitRegisterAsset(
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was saved". In
-      // progress is the same unknown (asset-service stores no submission id, so
-      // it never says this; the gateway's answer is handled all the same).
+      // progress is the same unknown: the first request with this submission id
+      // is still being processed (409 + Retry-After, #193), and sending the same
+      // form again after the wait is answered with its result.
       return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
   }
 }

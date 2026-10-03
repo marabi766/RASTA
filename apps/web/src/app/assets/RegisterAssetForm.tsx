@@ -51,8 +51,10 @@ export function RegisterAssetForm({
   csrfToken: string;
   /**
    * Minted for this render and bound to this session. A retry of the same form
-   * carries the same reference; asset-service does not store it, so this form
-   * claims no more (see `server/submission.ts`).
+   * carries the same reference; asset-service stores it on the create path
+   * since issue 193 (the same key and body answer the original 201 while the key
+   * lives), and the unconfirmed state stays the honest answer when a send's
+   * outcome is unknown (see `server/submission.ts`).
    */
   submissionId: string;
 }) {

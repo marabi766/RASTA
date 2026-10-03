@@ -507,14 +507,15 @@ export class AssetRepository {
    *
    * `where` narrows the match further. A transfer, which runs unscoped, passes
    * the owning organization here so a concurrent transfer also counts as a
-   * conflict.
+   * conflict; a user's status command passes the version it was made against,
+   * so a replay of it counts as one too.
    */
   async compareAndSetStatus(
     tx: ExtendedPrismaClient,
     id: string,
     expected: string,
     data: Record<string, unknown>,
-    where: { organizationId?: string } = {},
+    where: { organizationId?: string; version?: number } = {},
   ): Promise<number> {
     const result = await tx.asset.updateMany({
       where: { id, status: expected as never, deletedAt: null, ...where },

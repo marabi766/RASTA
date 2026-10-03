@@ -14,7 +14,7 @@ import { defineConfig, devices } from '@playwright/test';
  * `/login` is the first real surface.
  */
 /** The specs that also run at a phone's viewport: read-only, see the project. */
-const MOBILE_SPECS = /(accessibility|tenant-isolation)\.spec\.ts$/;
+const MOBILE_SPECS = /(accessibility|tenant-isolation|asset-lifecycle)\.spec\.ts$/;
 
 export default defineConfig({
   testDir: './e2e',
@@ -39,10 +39,13 @@ export default defineConfig({
       // "supported mobile viewports". Nothing in the docs fixes a device list,
       // so the one profile is a stated choice, not a discovered requirement.
       //
-      // **Read-only scenarios only** (`MOBILE_SPECS`). The suite shares one
-      // live stack, and the write scenarios would run against it twice, at
-      // once; what a second viewport adds to a write is nothing the first did
-      // not prove. Accessibility and tenant isolation are exactly what a
+      // **Read-only scenarios, and the one that writes only to machines it
+      // registers itself** (`MOBILE_SPECS`). The suite shares one live stack,
+      // and a write scenario that shared a record would run against it twice,
+      // at once; what a second viewport adds to such a write is nothing the
+      // first did not prove. `asset-lifecycle.spec.ts` shares nothing: every
+      // test registers its own machine, so a phone is a second viewport and not
+      // a second writer. Accessibility and tenant isolation are exactly what a
       // second viewport can change — layout, reflow, what is reachable — so
       // those run on both.
       name: 'mobile',
