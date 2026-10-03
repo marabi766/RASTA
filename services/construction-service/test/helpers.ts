@@ -1355,6 +1355,29 @@ export async function evaluatingTender(
 }
 
 /**
+ * Runs statements on a standing check as the OWNER, with the check's guard lifted for the length of
+ * one transaction: how a suite lets a backoff or a lease lapse without waiting for the clock. The
+ * guard exists to refuse exactly this from the runtime role (D-045: the owner connection is the
+ * migrations', never the service's); every other suite goes through the runtime role.
+ */
+export async function ownerSql(statements: string[]): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_award_standing_check" DISABLE TRIGGER "tg_award_standing_check_guard"',
+      );
+      for (const statement of statements) await tx.$executeRawUnsafe(statement);
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_award_standing_check" ENABLE TRIGGER "tg_award_standing_check_guard"',
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+/**
  * A tender in EVALUATED (CON-002 PR 10): `evaluatingTender`, then every bid qualified and scored in
  * full by one evaluator, who also completes the evaluation. Bid `i` scores `9000 - 1000 × i` on
  * PRICE (and full marks on LICENCE), so the bids rank 1, 2, 3 … in the order returned — or, with

@@ -89,9 +89,10 @@ export class AwardStandingCheckRepository {
   }
 
   /**
-   * PENDING → DONE with its outcome, only for the holder of the fence, on the database's clock.
-   * Returns the instant it was settled at, or null when the claim is no longer this holder's (the
-   * lease ran out and another sweeper has it, or it is settled): nothing was changed.
+   * PENDING → DONE with its outcome, only for the holder of the fence **while its lease is live**,
+   * on the database's clock. Returns the instant it was settled at, or null when the claim is no
+   * longer this holder's (the lease ran out — reclaimed or not — or it is settled): nothing was
+   * changed. The database holds the same line: it settles only from a live claim.
    */
   async settle(
     tx: ExtendedPrismaClient,
@@ -104,13 +105,15 @@ export class AwardStandingCheckRepository {
              "next_attempt_at" = NULL
        WHERE "organization_id" = ${input.organizationId} AND "id" = ${input.id}
          AND "fence" = ${input.fence} AND "status" = 'PENDING'
+         AND "lease_until" > clock_timestamp()
    RETURNING "done_at"`;
     return rows[0]?.done_at ?? null;
   }
 
   /**
    * A failed attempt: counted, the claim given back, and the next try pushed out by
-   * `min(maxSeconds, baseSeconds × 2^attempts)`. Only the holder's fence matches.
+   * `min(maxSeconds, baseSeconds × 2^attempts)`. Only the holder of the fence **with a live lease**
+   * matches: a holder whose lease lapsed postpones nothing (the lapse is itself the retry).
    */
   async recordFailure(
     tx: ExtendedPrismaClient,
@@ -130,7 +133,8 @@ export class AwardStandingCheckRepository {
                          ${input.baseSeconds}::double precision * power(2, LEAST("attempts", 30))),
              "lease_until" = NULL, "fence" = NULL
        WHERE "organization_id" = ${input.organizationId} AND "id" = ${input.id}
-         AND "fence" = ${input.fence} AND "status" = 'PENDING'`;
+         AND "fence" = ${input.fence} AND "status" = 'PENDING'
+         AND "lease_until" > clock_timestamp()`;
   }
 
   /** Sampled for the gauges: what is pending, for how long, how many are past the alert age. */

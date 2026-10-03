@@ -50,6 +50,7 @@ DROP TABLE IF EXISTS "tender_award";
 
 DROP FUNCTION IF EXISTS "tender_award_consistent"();
 DROP FUNCTION IF EXISTS "award_standing_check_guard"();
+DROP FUNCTION IF EXISTS "award_standing_check_conflict_announced"();
 DROP FUNCTION IF EXISTS "tender_award_guard"();
 
 DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261003100000_tender_award';

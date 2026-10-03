@@ -20,6 +20,7 @@ import {
   newUserId,
   outboxFor,
   ownerDatabaseUrl,
+  ownerSql,
   testEnv,
   untilASessionWaitsOnALock,
   wire,
@@ -757,10 +758,9 @@ describe('awarding an evaluated tender', () => {
         // Not claimed again until the backoff has passed.
         expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);
         SUPPLIER.failure = undefined;
-        await sql(
-          'the suite lets the backoff pass',
+        await ownerSql([
           `UPDATE "tender_award_standing_check" SET "next_attempt_at" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        );
+        ]);
         expect(await w.awardCheckSweeper.runOnce(tenderId)).toMatchObject({ claimed: 1, clear: 1 });
         expect(await rowOf(tenderId)).toMatchObject({
           status: 'DONE',
@@ -794,10 +794,9 @@ describe('awarding an evaluated tender', () => {
         expect(line).not.toContain('the database went away');
 
         // And once the database is back, the conflict is found and written — once.
-        await sql(
-          'the suite lets the backoff pass',
+        await ownerSql([
           `UPDATE "tender_award_standing_check" SET "next_attempt_at" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        );
+        ]);
         expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
         expect(await conflicts(owner, tenderId)).toHaveLength(1);
       });
@@ -813,10 +812,9 @@ describe('awarding an evaluated tender', () => {
         expect(await w.awardChecks.claimDue(10, 60, 'FENCE_B', tenderId)).toHaveLength(0);
 
         // The lease lapses; another sweeper takes the check back and settles it.
-        await sql(
-          'the suite lets the lease lapse',
+        await ownerSql([
           `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
-        );
+        ]);
         expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
 
         // The first one, late, does nothing: the fence is not its any more.
@@ -1430,6 +1428,14 @@ describe('awarding an evaluated tender', () => {
     const attack = (statement: string) =>
       sql('the suite attacks the table as the runtime role', statement);
 
+    const rowOf = (tenderId: string) =>
+      runUnscoped('the suite reads the standing check', () =>
+        w.prisma.client.tenderAwardStandingCheck.findFirstOrThrow({ where: { tenderId } }),
+      );
+
+    const conflictEvents = (owner: string, tenderId: string) =>
+      eventsOf(owner, 'TENDER_AWARD_STANDING_CONFLICT_DETECTED', tenderId);
+
     const insertAward = (v: {
       owner: string;
       tenderId: string;
@@ -1632,17 +1638,17 @@ describe('awarding an evaluated tender', () => {
             `UPDATE "tender_award_standing_check" SET "window_start" = now() - interval '1 day' WHERE "tender_id" = '${tenderId}'`,
           ),
         ).rejects.toThrow(/ck_award_standing_check_immutable/);
-        // DONE names its outcome and when; a claim is a lease and its fence, or neither.
+        // DONE needs a live claim (and so a read and, for a conflict, its event); a fence is not set alone.
         await expect(
           attack(
             `UPDATE "tender_award_standing_check" SET "status" = 'DONE' WHERE "tender_id" = '${tenderId}'`,
           ),
-        ).rejects.toThrow(/ck_award_standing_check_shape/);
+        ).rejects.toThrow(/ck_award_standing_check_transition/);
         await expect(
           attack(
             `UPDATE "tender_award_standing_check" SET "fence" = 'F' WHERE "tender_id" = '${tenderId}'`,
           ),
-        ).rejects.toThrow(/ck_award_standing_check_shape/);
+        ).rejects.toThrow(/ck_award_standing_check_transition/);
 
         await w.awardCheckSweeper.runOnce(tenderId);
         for (const change of [
@@ -1660,6 +1666,154 @@ describe('awarding an evaluated tender', () => {
         await expect(
           attack(`DELETE FROM "tender_award_standing_check" WHERE "tender_id" = '${tenderId}'`),
         ).rejects.toThrow(/ck_bid_append_only/);
+      });
+
+      it('is bound to its award: the window starts at the standing read the award was made on, and the project is the tender’s', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        const project = (await tenderRow(tenderId)).projectId;
+        const award = insertAward({
+          owner,
+          tenderId,
+          bidId: bids[0]!.bidId,
+          bidder: bids[0]!.bidder,
+        });
+        const check = (over: { window?: string; project?: string; created?: string }) =>
+          `INSERT INTO "tender_award_standing_check" ("id", "organization_id", "tender_id", "project_id", "bid_id",
+             "winner_organization_id", "awarded_by", "awarded_at", "window_start", "created_at")
+           VALUES ('TSC_${newUserId()}', '${owner}', '${tenderId}', '${over.project ?? project}', '${bids[0]!.bidId}',
+             '${bids[0]!.bidder}', 'USR_X', now(), ${over.window ?? 'now()'}, ${over.created ?? 'now()'})`;
+        const inOneTransaction = (...statements: string[]) =>
+          runUnscoped('the suite writes an award and a check as the runtime role', () =>
+            w.prisma.client.$transaction(async (tx) => {
+              for (const statement of statements) await tx.$executeRawUnsafe(statement);
+            }),
+          );
+        // The award row above stands at now(); a window that starts later would let the sweeper miss a suspension.
+        await expect(
+          inOneTransaction(award, check({ window: `now() + interval '1 second'` })),
+        ).rejects.toThrow(/ck_award_standing_check_window/);
+        await expect(
+          inOneTransaction(award, check({ window: `now() - interval '1 second'` })),
+        ).rejects.toThrow(/ck_award_standing_check_window/);
+        await expect(inOneTransaction(award, check({ project: 'PRJ_ELSEWHERE' }))).rejects.toThrow(
+          /ck_award_standing_check_project/,
+        );
+        await expect(
+          inOneTransaction(award, check({ created: `now() + interval '1 second'` })),
+        ).rejects.toThrow(/ck_award_standing_check_new/);
+        expect(await awardRows(tenderId)).toHaveLength(0);
+      });
+
+      it('lets the runtime role make only the sweeper’s moves: no shortcut to DONE, none around the backoff or the lease', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        const row = (set: string) =>
+          `UPDATE "tender_award_standing_check" SET ${set} WHERE "tender_id" = '${tenderId}'`;
+        const transition = /ck_award_standing_check_transition/;
+
+        // Straight to DONE, or to a conflict, with no claim and so no read and no event.
+        for (const outcome of ['CLEAR', 'CONFLICT']) {
+          await expect(
+            attack(row(`"status" = 'DONE', "outcome" = '${outcome}', "done_at" = now()`)),
+          ).rejects.toThrow(transition);
+        }
+        // Around the backoff and the attempts, on a check nobody holds.
+        await expect(attack(row(`"next_attempt_at" = now() + interval '1 day'`))).rejects.toThrow(
+          transition,
+        );
+        await expect(attack(row(`"attempts" = 3`))).rejects.toThrow(transition);
+        // A lease that parks the check for good, and one claim over another's live lease.
+        await expect(
+          attack(row(`"lease_until" = now() + interval '2 hours', "fence" = 'F_LONG'`)),
+        ).rejects.toThrow(transition);
+        await attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_ONE'`));
+        await expect(
+          attack(row(`"lease_until" = now() + interval '1 minute', "fence" = 'F_TWO'`)),
+        ).rejects.toThrow(transition);
+        // From a live claim: a settlement dated in the future, or one that moves anything else.
+        await expect(
+          attack(
+            row(
+              `"status" = 'DONE', "outcome" = 'CLEAR', "done_at" = now() + interval '1 hour', "lease_until" = NULL, "fence" = NULL`,
+            ),
+          ),
+        ).rejects.toThrow(transition);
+        await expect(
+          attack(
+            row(
+              `"status" = 'DONE', "outcome" = 'CLEAR', "done_at" = now(), "attempts" = 9, "lease_until" = NULL, "fence" = NULL`,
+            ),
+          ),
+        ).rejects.toThrow(transition);
+        // A failed attempt counts once and backs off by a bounded time.
+        await expect(
+          attack(
+            row(
+              `"attempts" = 0, "next_attempt_at" = now() + interval '1 minute', "lease_until" = NULL, "fence" = NULL`,
+            ),
+          ),
+        ).rejects.toThrow(transition);
+        await expect(
+          attack(
+            row(
+              `"attempts" = 1, "next_attempt_at" = now() + interval '9 days', "lease_until" = NULL, "fence" = NULL`,
+            ),
+          ),
+        ).rejects.toThrow(transition);
+        expect(await rowOf(tenderId)).toMatchObject({
+          status: 'PENDING',
+          outcome: null,
+          attempts: 0,
+        });
+      });
+
+      it('does not commit a conflict without its event: the outbox must hold it by the end of the transaction', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        const claim = `UPDATE "tender_award_standing_check" SET "lease_until" = now() + interval '1 minute', "fence" = 'F_DML' WHERE "tender_id" = '${tenderId}'`;
+        const settle = (outcome: string) =>
+          `UPDATE "tender_award_standing_check" SET "status" = 'DONE', "outcome" = '${outcome}', "done_at" = now(), "lease_until" = NULL, "fence" = NULL WHERE "tender_id" = '${tenderId}'`;
+        await expect(
+          runUnscoped('the suite settles a conflict as the runtime role', () =>
+            w.prisma.client.$transaction(async (tx) => {
+              await tx.$executeRawUnsafe(claim);
+              await tx.$executeRawUnsafe(settle('CONFLICT'));
+            }),
+          ),
+        ).rejects.toThrow(/ck_award_standing_check_announced/);
+        expect(await rowOf(tenderId)).toMatchObject({ status: 'PENDING', outcome: null });
+        expect(await conflictEvents(owner, tenderId)).toHaveLength(0);
+      });
+
+      it('lets a holder whose lease lapsed settle nothing and postpone nothing, even before anyone reclaims it', async () => {
+        const { owner, tenderId, bids } = await evaluated({ count: 1 });
+        await award(owner, tenderId, bids[0]!.bidId);
+        SUPPLIER.suspend(bids[0]!.bidder, `SUS_${bids[0]!.bidder}`);
+        const [held] = await w.awardChecks.claimDue(10, 60, 'FENCE_LAPSED', tenderId);
+        await ownerSql([
+          `UPDATE "tender_award_standing_check" SET "lease_until" = now() - interval '1 second' WHERE "tender_id" = '${tenderId}'`,
+        ]);
+
+        // It cannot settle (and the conflict it found is not written by it).
+        expect(await w.awardCheckService.process(held!, { baseSeconds: 30, maxSeconds: 900 })).toBe(
+          'LOST',
+        );
+        expect(await rowOf(tenderId)).toMatchObject({
+          status: 'PENDING',
+          outcome: null,
+          attempts: 0,
+        });
+        expect(await conflictEvents(owner, tenderId)).toHaveLength(0);
+
+        // Nor postpone: its failure moves neither the attempts nor the backoff.
+        SUPPLIER.failure = RastaError.upstreamUnavailable('supplier-service');
+        await w.awardCheckService.process(held!, { baseSeconds: 30, maxSeconds: 900 });
+        expect(await rowOf(tenderId)).toMatchObject({ attempts: 0, nextAttemptAt: null });
+        SUPPLIER.failure = undefined;
+
+        // The lapse is itself the retry: the next sweep settles it, once.
+        expect((await w.awardCheckSweeper.runOnce(tenderId)).conflict).toBe(1);
+        expect(await conflictEvents(owner, tenderId)).toHaveLength(1);
       });
     });
 

@@ -1141,6 +1141,7 @@ export const EXPECTED = {
       'tg_award_standing_check_guard',
       'tg_award_standing_check_no_delete',
       'tg_award_standing_check_no_truncate',
+      'tg_award_standing_check_conflict_announced',
     ],
     functions: [
       'tender_criterion_freeze',
@@ -1161,6 +1162,7 @@ export const EXPECTED = {
       'bid_award_recorded',
       'tender_award_consistent',
       'award_standing_check_guard',
+      'award_standing_check_conflict_announced',
     ],
     constraints: [
       'ck_project_text_not_blank',
