@@ -773,6 +773,34 @@ describe('the payment reconciliation operator path (real database)', () => {
       });
     });
 
+    it('fails closed across an issuer change: a proposer recorded under another issuer cannot be told apart (#188)', async () => {
+      const organizationId = `${org.b}-ISSUER`;
+      const made = await escalatedUnknown(organizationId, 414n);
+      const operator = operatorWith();
+      // Proposed while the platform verified tokens of another issuer: same subject
+      // space, so one Keycloak user may now arrive under a new platform id.
+      const proposed = await asActor(
+        {
+          organizationId,
+          userId: 'USR-ALICE',
+          roles: ['SYSTEM_ADMIN'],
+          subject: 'sub-alice',
+          issuer: 'http://old-issuer.invalid/realms/rasta',
+        },
+        () => operator.propose(made.intentId, proposal('DECLINED')),
+      );
+      await expect(
+        as(organizationId, 'USR-BOB', () =>
+          operator.approve(made.intentId, proposed.id, 'Checked against the provider'),
+        ),
+      ).rejects.toMatchObject({ code: 'ACTOR_IDENTITY_UNKNOWN', status: 422 });
+      expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 414n });
+      // A rejection moves nothing and stays possible.
+      await as(organizationId, 'USR-BOB', () =>
+        operator.reject(made.intentId, proposed.id, 'Cannot be approved here'),
+      );
+    });
+
     it('fails closed when the intent records no creator identity (Codex round 2 on #175)', async () => {
       const organizationId = `${org.b}-LEGACY`;
       const made = await escalatedUnknown(organizationId, 413n);
@@ -791,7 +819,7 @@ describe('the payment reconciliation operator path (real database)', () => {
         as(organizationId, 'USR-BOB', () =>
           operator.approve(made.intentId, proposed.id, 'Checked against the provider'),
         ),
-      ).rejects.toMatchObject({ code: 'CREATOR_IDENTITY_UNKNOWN', status: 422 });
+      ).rejects.toMatchObject({ code: 'ACTOR_IDENTITY_UNKNOWN', status: 422 });
       expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 413n });
 
       // Rejecting moves nothing and stays possible; nor does four-eyes-off bypass it.
@@ -805,7 +833,7 @@ describe('the payment reconciliation operator path (real database)', () => {
             proposal('DECLINED'),
           ),
         ),
-      ).rejects.toMatchObject({ code: 'CREATOR_IDENTITY_UNKNOWN' });
+      ).rejects.toMatchObject({ code: 'ACTOR_IDENTITY_UNKNOWN' });
       expect(await readBalances(prisma, made.walletId)).toMatchObject({ pending: 413n });
     });
 

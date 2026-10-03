@@ -52,19 +52,14 @@ export const ERROR_CODES = {
    * Separation of duties cannot be proven: one of the two actors a rule keeps
    * apart has no recorded stable identity (issuer and subject), so nobody can
    * be shown not to be them. Refused, never assumed (ADR-060, stable actor
-   * identity addendum, #188).
+   * identity addendum, #188). It replaced economic's `CREATOR_IDENTITY_UNKNOWN`
+   * (ADR-064 § 6), which is no longer answered (#188, part C).
    */
   ACTOR_IDENTITY_UNKNOWN: 'ACTOR_IDENTITY_UNKNOWN',
 
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   LEDGER_UNBALANCED: 'LEDGER_UNBALANCED',
-  /**
-   * Separation of duties cannot be proven: the record names no stable
-   * identity (issuer and subject) for the person who created it, so nobody
-   * can be shown not to be them. Refused, never assumed (ADR-064 § 6).
-   */
-  CREATOR_IDENTITY_UNKNOWN: 'CREATOR_IDENTITY_UNKNOWN',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -126,7 +121,6 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   BUSINESS_RULE_VIOLATION: 422,
   INSUFFICIENT_BALANCE: 422,
   LEDGER_UNBALANCED: 422,
-  CREATOR_IDENTITY_UNKNOWN: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,

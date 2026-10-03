@@ -80,6 +80,8 @@ export interface ApiHarness {
 export interface TestClaims {
   sub: string;
   rastaUserId?: string;
+  /** The verified issuer; absent means the configured one (`OIDC_ISSUER_URL`). */
+  iss?: string;
   organizationId?: string;
   organizationIds?: string[];
   roles: string[];
@@ -277,6 +279,9 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
             return {
               sub: claims.sub,
               rastaUserId: claims.rastaUserId,
+              // As the real verifier: the one configured issuer, unless a suite
+              // models a token from before an issuer change (#188).
+              issuer: claims.iss ?? process.env.OIDC_ISSUER_URL,
               organizationId: claims.organizationId,
               ...projectedClaims(claims),
               roles: claims.roles,
