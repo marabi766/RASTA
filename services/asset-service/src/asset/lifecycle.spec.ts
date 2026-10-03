@@ -115,7 +115,7 @@ describe('asset lifecycle', () => {
       }
     });
 
-    it('refuses withdrawal while another service has open work (docs/24 Q-93)', () => {
+    it('refuses withdrawal while another service has open work (docs/24 Q-94)', () => {
       // Taking an ASSIGNED asset out of service directly would leave the
       // assignment open in fleet-service; IN_MAINTENANCE, the repair open in
       // maintenance-service. The owning service ends its work first, and its

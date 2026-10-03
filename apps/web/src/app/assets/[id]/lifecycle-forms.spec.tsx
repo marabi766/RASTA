@@ -307,7 +307,7 @@ describe('LifecycleControls', () => {
   describe.each([
     ['ASSIGNED', 'این دارایی تخصیص باز دارد', '/drivers'],
     ['IN_MAINTENANCE', 'این دارایی در تعمیر است', '/maintenance'],
-  ] as const)('an asset with open work (%s) — docs/24 Q-93', (status, title, href) => {
+  ] as const)('an asset with open work (%s) — docs/24 Q-94', (status, title, href) => {
     it('says whose work it is and where to end it, and draws no form', () => {
       const { container } = render(
         <LifecycleControls assetName={NAME} status={status} csrfToken={CSRF} tokens={{}} />,

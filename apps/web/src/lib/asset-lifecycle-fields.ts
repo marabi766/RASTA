@@ -38,7 +38,7 @@ export const USER_TRANSITIONS: Readonly<Record<string, readonly string[]>> = {
   REGISTERED: ['ACTIVE', 'OUT_OF_SERVICE', 'DECOMMISSIONED'],
   ACTIVE: ['IDLE', 'OUT_OF_SERVICE', 'DECOMMISSIONED'],
   IDLE: ['ACTIVE', 'OUT_OF_SERVICE', 'DECOMMISSIONED'],
-  // No row at all while another service has open work (docs/24 Q-93): the
+  // No row at all while another service has open work (docs/24 Q-94): the
   // assignment is ended in fleet-service and the repair in maintenance-service,
   // and their events move the status back to ACTIVE.
   ASSIGNED: [],
@@ -50,7 +50,7 @@ export const USER_TRANSITIONS: Readonly<Record<string, readonly string[]>> = {
 /**
  * The statuses in which another service has open work on the asset, and what a
  * person is told to do first. A person can change nothing about the status
- * while it lasts (docs/24 Q-93, temporary decision); the owning service's own
+ * while it lasts (docs/24 Q-94, temporary decision); the owning service's own
  * event ends it.
  */
 export const OPEN_WORK_NOTES: Readonly<

@@ -75,7 +75,7 @@ export const TRANSITIONS: readonly Transition[] = [
   // Reachable from every state **without open work**, including REGISTERED: a
   // machine can turn out to be unusable before it is ever commissioned.
   //
-  // Deliberately not from ASSIGNED or IN_MAINTENANCE (docs/24 Q-93, temporary
+  // Deliberately not from ASSIGNED or IN_MAINTENANCE (docs/24 Q-94, temporary
   // decision): taking the asset out of service directly would leave the
   // assignment in fleet-service or the repair in maintenance-service open on a
   // machine the platform now calls unavailable, the same stranding the transfer
@@ -149,7 +149,7 @@ export function allowedTransitions(from: AssetStatus, actor: TransitionActor): A
 
 /**
  * The closed reasons a person's command is refused while another service has
- * open work on the asset (docs/24 Q-93). The code is part of the API: it travels
+ * open work on the asset (docs/24 Q-94). The code is part of the API: it travels
  * in the error's `details[].code`, so a client can say what to do without
  * parsing the sentence.
  */

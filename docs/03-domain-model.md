@@ -251,11 +251,11 @@ Workflow مصوب. هیچ سرویس دیگری نرخ، Journal یا منطق �
 | `ACTIVE`                 | `ASSIGNED`       | راننده معتبر و بدون تخصیص فعال دیگر                                                          | `ASSET_ASSIGNED`              |
 | `ACTIVE`/`IDLE`          | `IN_MAINTENANCE` | `MaintenanceRequest` پذیرفته‌شده                                                             | `ASSET_MAINTENANCE_STARTED`   |
 | `IN_MAINTENANCE`         | `ACTIVE`         | `RepairOrder` تأییدشده توسط کاربر                                                            | `ASSET_MAINTENANCE_COMPLETED` |
-| هر وضعیت **بی‌کارِ باز** | `OUT_OF_SERVICE` | تصمیم `FLEET_MANAGER` با دلیل ثبت‌شده؛ از `ASSIGNED` و `IN_MAINTENANCE` **رد می‌شود** (Q-93) | `ASSET_OUT_OF_SERVICE`        |
+| هر وضعیت **بی‌کارِ باز** | `OUT_OF_SERVICE` | تصمیم `FLEET_MANAGER` با دلیل ثبت‌شده؛ از `ASSIGNED` و `IN_MAINTENANCE` **رد می‌شود** (Q-94) | `ASSET_OUT_OF_SERVICE`        |
 | `OUT_OF_SERVICE`         | `DECOMMISSIONED` | تصمیم `ORGANIZATION_ADMIN`؛ **بازگشت‌ناپذیر**                                                | `ASSET_DECOMMISSIONED`        |
 | هر وضعیت فعال            | (تغییر مالک)     | رویداد انتقال صریح؛ تاریخچه همراه دارایی می‌ماند                                             | `ASSET_TRANSFERRED`           |
 
-**CONSTRAINT (Q-93، تصمیم موقت).** تا وقتی سرویس دیگری روی دارایی کار باز دارد (`ASSIGNED`: تخصیص در
+**CONSTRAINT (Q-94، تصمیم موقت).** تا وقتی سرویس دیگری روی دارایی کار باز دارد (`ASSIGNED`: تخصیص در
 `fleet-service`؛ `IN_MAINTENANCE`: ارجاع تعمیر در `maintenance-service`)، **هیچ کاربری** وضعیت آن را مستقیم عوض
 نمی‌کند و آن را اسقاط نمی‌کند: `409 INVALID_STATE_TRANSITION` با کد بستهٔ `OPEN_ASSIGNMENT` یا `OPEN_MAINTENANCE`.
 سرویس صاحب کار نخست کارش را می‌بندد و رویداد پایان آن (`ASSIGNMENT_ENDED`، `MAINTENANCE_COMPLETED`) وضعیت را به

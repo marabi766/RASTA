@@ -78,7 +78,7 @@ describe('which commands a status leaves open', () => {
     ['ACTIVE', false, ['IDLE', 'OUT_OF_SERVICE'], true],
     ['IDLE', false, ['ACTIVE', 'OUT_OF_SERVICE'], true],
     ['OUT_OF_SERVICE', false, ['ACTIVE'], true],
-    // Open work in another service: nothing from here (docs/24 Q-93).
+    // Open work in another service: nothing from here (docs/24 Q-94).
     ['ASSIGNED', false, [], false],
     ['IN_MAINTENANCE', false, [], false],
     ['DECOMMISSIONED', false, [], false],
@@ -372,7 +372,7 @@ describe('writing', () => {
       ['OPEN_ASSIGNMENT', 'تخصیص باز دارد', 'fleet-service'],
       ['OPEN_MAINTENANCE', 'در تعمیر است', 'maintenance-service'],
     ] as const)(
-      'says the closed open-work code %s in Persian, whatever sentence carries it (docs/24 Q-93)',
+      'says the closed open-work code %s in Persian, whatever sentence carries it (docs/24 Q-94)',
       async (code, words, owner) => {
         for (const call of [
           (impl: typeof fetch) =>

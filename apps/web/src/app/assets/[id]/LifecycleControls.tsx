@@ -66,7 +66,7 @@ export function LifecycleControls({
   return (
     <div className="flex flex-col gap-8">
       {/* Work another service holds: the person is told whose it is and what to
-          do first, instead of a form that would be refused (docs/24 Q-93). */}
+          do first, instead of a form that would be refused (docs/24 Q-94). */}
       {openWork ? (
         <Alert
           tone="info"

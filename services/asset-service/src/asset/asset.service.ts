@@ -1083,7 +1083,7 @@ export class AssetService {
     const openWork = openWorkRefusal(from, actor);
     if (!openWork) throw RastaError.invalidStateTransition('Asset', from, to, message);
 
-    // Other work is open on the asset (docs/24 Q-93): the refusal carries a
+    // Other work is open on the asset (docs/24 Q-94): the refusal carries a
     // closed reason code a client can act on without reading the sentence.
     throw new RastaError('INVALID_STATE_TRANSITION', message, {
       details: [{ path: 'status', message, code: openWork.code }],

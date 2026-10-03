@@ -226,7 +226,7 @@ const LIFECYCLE_STATE_FALLBACKS: Readonly<Record<string, string>> = {
 
 /**
  * The closed reasons asset-service gives for refusing a command while another
- * service has open work on the asset (`details[].code`, docs/24 Q-93). Pinned to
+ * service has open work on the asset (`details[].code`, docs/24 Q-94). Pinned to
  * `lifecycle.ts` by the contract spec.
  */
 export const OPEN_WORK_CODES: Readonly<Record<string, string>> = {

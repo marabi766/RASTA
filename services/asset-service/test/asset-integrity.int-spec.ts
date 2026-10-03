@@ -1370,10 +1370,10 @@ describe('asset integrity', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Open work (docs/24 Q-93): no direct withdrawal while another service holds work
+  // Open work (docs/24 Q-94): no direct withdrawal while another service holds work
   // ---------------------------------------------------------------------------
 
-  describe('an asset with open work in another service (docs/24 Q-93)', () => {
+  describe('an asset with open work in another service (docs/24 Q-94)', () => {
     const CASES = [
       ['ASSIGNED', 'OPEN_ASSIGNMENT', 'ASSIGNMENT_ENDED'],
       ['IN_MAINTENANCE', 'OPEN_MAINTENANCE', 'MAINTENANCE_COMPLETED'],

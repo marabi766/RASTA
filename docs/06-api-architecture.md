@@ -421,7 +421,7 @@ status = ? AND version = ?` دوباره نگه داشته می‌شود؛ پس 
 بازنمی‌گرداند، رد می‌شود. گذارهایی که رویداد سرویس دیگر (تخصیص، تعمیر) انجام می‌دهد
 نسخه ندارند و فقط با وضعیت سنجیده می‌شوند.
 
-**کار باز در سرویس دیگر (Q-93، تصمیم موقت).** دارایی در `ASSIGNED` (تخصیص باز در `fleet-service`) یا
+**کار باز در سرویس دیگر (Q-94، تصمیم موقت).** دارایی در `ASSIGNED` (تخصیص باز در `fleet-service`) یا
 `IN_MAINTENANCE` (ارجاع تعمیر باز در `maintenance-service`) را هیچ کاربری با `…/status` به `OUT_OF_SERVICE`
 نمی‌برد و با `…/decommission` اسقاط نمی‌کند (و `…/activate` هم از آن‌ها ممکن نیست): پاسخ
 `409 INVALID_STATE_TRANSITION` است با `details: [{ "path": "status", "code": "OPEN_ASSIGNMENT" | "OPEN_MAINTENANCE",

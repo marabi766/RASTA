@@ -924,7 +924,7 @@ describe('AssetService', () => {
     describe.each([
       ['ASSIGNED', 'OPEN_ASSIGNMENT', 'fleet-service'],
       ['IN_MAINTENANCE', 'OPEN_MAINTENANCE', 'maintenance-service'],
-    ] as const)('an asset with open work (%s) — docs/24 Q-93', (status, code, owner) => {
+    ] as const)('an asset with open work (%s) — docs/24 Q-94', (status, code, owner) => {
       const refusedWith = async (command: (h: Harness) => Promise<unknown>) => {
         const h = at(2, status);
         const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;

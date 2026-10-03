@@ -257,7 +257,7 @@ describe('the transition table the forms are offered from', () => {
   });
 });
 
-describe('open work in another service (docs/24 Q-93)', () => {
+describe('open work in another service (docs/24 Q-94)', () => {
   const lifecycleText = read(...ASSET, 'lifecycle.ts');
   const lifecycle = parse(lifecycleText);
   const refusals = topLevelConst(lifecycle, 'OPEN_WORK_REFUSALS');
