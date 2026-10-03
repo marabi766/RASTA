@@ -60,6 +60,21 @@ overrides:
   # they still resolve an affected release of their range.
   '@grpc/grpc-js@>=1.14.0 <1.14.5': '1.14.5'
 
+# Advisories with NO patched release yet, accepted for a fixed time only. Each
+# entry names the advisory, why it cannot be fixed by an override, where it is
+# reached, and the date it must be re-checked; the CI "Dependency audit" step
+# fails again for it once removed. Remove the entry as soon as a patched
+# release exists (then pin it in overrides above instead).
+auditConfig:
+  ignoreGhsas:
+    # GHSA-vfj7-8cjw-p6xm (high) — braces <=3.0.3, stack exhaustion on crafted
+    # brace patterns. No patched release exists (3.0.3 is the newest on the
+    # registry, 2026-10-03). Reached ONLY through development tooling (Jest's
+    # micromatch, @types/jest -> expect, linters); pnpm audit --prod is clean,
+    # so no service image or runtime path loads it. Patterns are written by
+    # this repository, not by users. RE-CHECK BY 2026-10-17: if a patched
+    # braces is out, pin it under overrides and delete this entry.
+    - GHSA-vfj7-8cjw-p6xm
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.
