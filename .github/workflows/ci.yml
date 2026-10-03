@@ -748,11 +748,13 @@ jobs:
   integration:
     name: Integration and security tests
     runs-on: ubuntu-latest
-    # 40, not 30: on main this job already took 28m50s (run 36243143881, the
-    # migration reversibility step alone 14m34s), and construction-service's
-    # coverage gate and reversibility check add about a minute. A cancelled
-    # job proves nothing either way; the budget follows the work.
-    timeout-minutes: 40
+    # 60, not 40 (2026-10-03): main run 37083060427 was cancelled at exactly 40m —
+    # the D-045 role split, B3's rollback probes and the evaluation migrations grew
+    # the migration reversibility step from 14m34s to 18m03s, and the job reached the
+    # seed-guard step at 39m23s. A cancelled job proves nothing either way; the budget
+    # follows the work. Moving reversibility into its own parallel job is the real fix
+    # (tracked separately).
+    timeout-minutes: 60
     needs: quality
 
     services:
