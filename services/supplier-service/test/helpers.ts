@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -42,7 +43,7 @@ export function databaseUrl(): string {
         "service's migration to rasta_supplier first.",
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function newPrisma(): PrismaService {

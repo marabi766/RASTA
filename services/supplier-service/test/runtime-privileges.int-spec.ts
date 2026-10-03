@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { newPrisma } from './helpers';
 import { ownerPrisma, raw, seedDraft } from './performance-helpers';
@@ -322,7 +323,7 @@ describe('the runtime role cannot lift the performance tables’ guarantees', ()
     let elsewhere: PrismaService;
 
     beforeAll(() => {
-      const url = new URL(process.env.DATABASE_URL_SUPPLIER ?? '');
+      const url = new URL(withUtcSession(process.env.DATABASE_URL_SUPPLIER ?? ''));
       url.pathname = '/postgres';
       elsewhere = new PrismaService(url.toString());
     });

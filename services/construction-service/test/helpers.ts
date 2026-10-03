@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import {
   RastaError,
   getContext,
@@ -101,7 +102,7 @@ export function databaseUrl(): string {
         "PostGIS; start it with `pnpm infra:up` and apply this service's migration first.",
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 /**
@@ -127,7 +128,7 @@ export function ownerDatabaseUrl(): string {
         'through the owner connection, never the runtime one; see .env.migrator.example (docs/23 D-045).',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function testEnv(overrides: Record<string, string> = {}): ConstructionEnv {

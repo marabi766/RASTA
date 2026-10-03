@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -31,7 +32,7 @@ export function databaseUrl(): string {
         'start it with `pnpm infra:up` and copy .env.example to .env.',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 /**
@@ -49,7 +50,7 @@ export function ownerDatabaseUrl(): string {
         'as the owner, never the runtime role; see .env.migrator.example (docs/23 D-045).',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function newPrisma(): PrismaService {

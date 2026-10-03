@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EventEnvelope } from '@rasta/contracts';
@@ -220,7 +221,10 @@ describe('audit_event is append-only (real PostgreSQL)', () => {
     // CONNECT on another service's database, so the connection itself fails.
     const foreign = new PrismaService(
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      (process.env.DATABASE_URL_AUDIT ?? '').replace('/rasta_audit?', '/rasta_economic?'),
+      withUtcSession(process.env.DATABASE_URL_AUDIT ?? '').replace(
+        '/rasta_audit?',
+        '/rasta_economic?',
+      ),
     );
 
     await expect(foreign.client.$queryRawUnsafe('SELECT 1 FROM wallet LIMIT 1')).rejects.toThrow();
