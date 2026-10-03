@@ -221,6 +221,10 @@ ADR-024 است.
   ردیف متن آزاد، مبلغ و هویت Issuer/Subject ندارد؛ هویت پایدار هنوز فقط در economic است. رویدادی که قرارداد را نقض کند
   هیچ ردیفی نمی‌نویسد و به DLQ می‌رود. پس جداسازی وظایف از خود سابقهٔ `audit-service` پیداست. دلیل‌های متنی همچنان فقط در
   economic‌اند.
+  محموله نخست به‌طور کامل با رونوشت میخ‌شدهٔ قرارداد economic سنجیده می‌شود و سپس از فهرست سفید ساخته می‌شود. ردیف حسابرسی
+  این دو رویداد که ردیف شاهد ندارد با `rasta_audit_reconciliation_evidence_missing` و هشدار
+  `RastaAuditReconciliationEvidenceMissing` آشکار می‌شود. رویدادهایی که پیش از این نسخه پردازش شده‌اند فقط‌پاکت می‌مانند؛ در
+  Production چنین رویدادی نیست. Projector را پیش از تکیه بر نما روی همهٔ Replicaها مستقر کن (D-046).
 
 - **رویدادها:** تأیید `PAYMENT_RECONCILIATION_RESOLVED` است با `resolvedBy` = تأییدکننده و `proposedBy`، `approvedBy`،
   `evidenceReference`، `resolutionId`، `fourEyes`؛ بازگرداندن، پیشنهاد و رد رویداد تازهٔ `PAYMENT_RECONCILIATION_OPERATOR_ACTION`

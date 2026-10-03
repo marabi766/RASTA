@@ -328,6 +328,26 @@ Label هشدار فقط `source_service` است؛ هیچ مستأجر یا رو�
 Replica: شکست Scrape فقط یک Instance هم می‌سوزاند، چون شمارنده‌های آن Instance از هر جمع غایب‌اند. Volume را Reset، Offset یا
 گروه را جابه‌جا، یا ترافیک ساختگی منتشر نکن؛ پس از بازگشت، بازهٔ قطع را با گام‌های ۲ و ۶ برای شکاف واقعی بسنج.
 
+### ۹. `RastaAuditReconciliationEvidenceMissing` — ردیف حسابرسی آشتی پرداخت بی شاهد (D-046)
+
+`rasta_audit_reconciliation_evidence_missing` شمار ردیف‌های `audit_event` از `PAYMENT_RECONCILIATION_RESOLVED` یا
+`PAYMENT_RECONCILIATION_OPERATOR_ACTION` روی `rasta.economic.v1` است که در پنجرهٔ `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS`
+(پیش‌فرض ۱۶۸ ساعت) هستند ولی ردیف `payment_reconciliation_evidence` ندارند. Projector این دو ردیف را در یک تراکنش می‌نویسد، پس
+عدد بالای صفر یعنی ردیف حسابرسی را چیز دیگری نوشته است. دو علت شناخته‌شده دارد:
+
+- Replicaای از نسخهٔ پیش از این نما رویداد را ثبت کرده است، مثلاً در میانهٔ استقرار غلتان.
+- رویداد پیش از این نسخه `processed_event` گرفته بوده است. در این حالت نسخهٔ تازه `DUPLICATE` برمی‌گرداند و دیگر نمی‌نویسد.
+
+1. **ردیف‌ها را پیدا کن** (فقط‌خواندنی، با نقش خواندن):
+   `SELECT a.id, a.source_event_id, a.organization_id, a.resource_id, a.occurred_at FROM audit_event a WHERE a.source_topic = 'rasta.economic.v1' AND a.source_event_name IN ('PAYMENT_RECONCILIATION_RESOLVED', 'PAYMENT_RECONCILIATION_OPERATOR_ACTION') AND a.occurred_at >= now() - interval '168 hours' AND NOT EXISTS (SELECT 1 FROM payment_reconciliation_evidence e WHERE e.audit_event_id = a.id);`
+2. **استقرار را تمام کن.** اگر استقرار `audit-service` در جریان است یا Replica قدیمی هنوز بالاست، آن را تخلیه کن. شمار نباید
+   پس از آن بالا برود.
+3. **سابقهٔ کامل را از economic بخوان.** شاهد، پیشنهاددهنده، تأییدکننده، دلیل‌ها و هویت پایدار برای هر `resource_id` (همان
+   `paymentIntentId`) در `GET /v1/payment-intents/{id}/reconciliation` و جدول‌های فقط‌افزودنی economic هست. شمارهٔ ردیف‌ها و
+   این ارجاع را در تیکت حادثه ثبت کن.
+4. **هرگز ردیف شاهد را دستی نساز** و ردیف حسابرسی را تغییر نده یا حذف نکن. پرکردن پسینی (Backfill) خودکار وجود ندارد. شکاف
+   تا وقتی در پنجره است هشدار می‌دهد و پس از آن از شمار بیرون می‌رود؛ تیکت حادثه سابقهٔ آن می‌ماند.
+
 ---
 
 ## اقدام
