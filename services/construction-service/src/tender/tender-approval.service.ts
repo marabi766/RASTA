@@ -98,10 +98,28 @@ export class TenderApprovalService {
     };
 
     try {
+      // The approver as identity-service says they are NOW (fail closed: unreachable is 502/504 and nothing is
+      // decided): a member of the authority organization today, holding the step's role today. A token
+      // outlives a revocation; for an award it also outlives a role (CONTRACTOR …) added since it was issued.
+      const live = await this.identity.fetchMemberships(actor);
+      const mine = live.memberships.find(
+        (membership) => membership.organizationId === step.authorityOrganizationId,
+      );
+      if (!mine) {
+        throw RastaError.forbidden(
+          'The caller is not a member of the authority organization this approval names, as of now',
+        );
+      }
+      if (!mine.roles.includes(step.authorityRole)) {
+        throw RastaError.forbidden(
+          'The caller no longer holds the role this approval names in its authority organization, as of now',
+        );
+      }
       let memberOf: readonly string[] = [];
       if (workflowKey === 'tender.award') {
         this.access.assertMayDecideAward();
-        memberOf = await this.liveOrganizations(actor);
+        this.access.assertLiveRolesMayDecideAward(mine.roles);
+        memberOf = this.organizationsOf(live.memberships);
       }
 
       const decided = await this.prisma.transaction(async (tx): Promise<Decided> => {
@@ -283,19 +301,34 @@ export class TenderApprovalService {
     return found;
   }
 
-  /** An approver in conflict with the tender is not shown the bid an award approval names (403, audited). */
+  /**
+   * The detail of an award approval names the bid and the justification, so it is read under the rules of
+   * deciding it (CON-002 PR 11, review round 1): none of the roles the bid side excludes — on the token and on
+   * identity-service's word as of now —, not a member of an organization that bid, and, with
+   * AWARDER_NOT_EVALUATOR, none of the people who evaluated. A refusal is audited (`READ`, refused).
+   */
   async assertMayReadAward(step: Approval): Promise<void> {
     const context = getContext();
     const userId = context.userId;
     if (!userId || context.authType !== 'USER') return;
-    const memberOf = await this.liveOrganizations(userId);
-    const bidders = await this.requests.bidderOrganizationIds(
-      this.requests.client,
-      step.organizationId,
-      step.tenderId as string,
-    );
     try {
-      this.assertNoBidderMembership(memberOf, bidders);
+      const live = await this.identity.fetchMemberships(userId);
+      const mine = live.memberships.find(
+        (membership) => membership.organizationId === context.organizationId,
+      );
+      if (!mine) {
+        throw RastaError.forbidden(
+          'The caller is not a member of the organization they act for, as of now',
+        );
+      }
+      this.access.assertMayDecideAward();
+      this.access.assertLiveRolesMayDecideAward(mine.roles);
+      await this.assertApproverNotConflicted(
+        this.requests.client,
+        step.organizationId,
+        step.tenderId as string,
+        this.organizationsOf(live.memberships),
+      );
     } catch (error) {
       if (error instanceof RastaError) {
         await this.audit.recordRefusal({
@@ -304,7 +337,7 @@ export class TenderApprovalService {
           projectId: step.projectId,
           requestId: null,
           workflowKey: 'tender.award',
-          action: 'GRANT',
+          action: 'READ',
           refusalCode: refusalCodeOf(error),
           stepOrder: step.stepOrder,
           actorUserId: userId,
@@ -345,9 +378,8 @@ export class TenderApprovalService {
 
   // -- the award approver's conflicts ---------------------------------------------------------------------
 
-  /** Every organization the user belongs to as of now (identity-service, fail closed) and the token claims. */
-  private async liveOrganizations(userId: string): Promise<string[]> {
-    const { memberships } = await this.identity.fetchMemberships(userId);
+  /** Every organization the user belongs to as of now (identity-service) and the token claims. */
+  private organizationsOf(memberships: readonly { organizationId: string }[]): string[] {
     return [
       ...new Set([
         ...memberships.map((membership) => membership.organizationId),

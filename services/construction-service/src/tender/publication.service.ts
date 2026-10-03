@@ -101,8 +101,6 @@ export class PublicationService {
     const first = await this.tenders.findTender(tenderId);
     if (!first) throw RastaError.notFound('Tender', tenderId);
     assertOwnTender(first, organizationId);
-    if (first.version !== dto.expectedVersion) throw this.conflict(tenderId);
-    assertTenderTransition(tenderId, first.status, 'PUBLISHED');
 
     const own = { organizationId, id: tenderId, projectId: first.projectId };
     return this.gate.guarded(own, WORKFLOW, caller, () => this.publishGated(tenderId, dto, caller));
@@ -131,7 +129,22 @@ export class PublicationService {
       () =>
         this.prisma.transaction(async (tx): Promise<Gated<TenderView> | 'STALE'> => {
           const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
-          if (locked.version !== dto.expectedVersion) throw this.conflict(tenderId);
+          if (locked.version !== dto.expectedVersion) {
+            const stale = await this.gate.endIfBehind(
+              tx,
+              {
+                organizationId,
+                id: tenderId,
+                projectId: locked.projectId,
+                version: locked.version,
+              },
+              WORKFLOW,
+              caller,
+              await decisionInstant(tx),
+            );
+            if (stale) return 'STALE';
+            throw this.conflict(tenderId);
+          }
           assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
 
           // One instant, read **after** the lock: the deadline is judged on it, and the row, the key and the
@@ -239,7 +252,17 @@ export class PublicationService {
     const outcome = await this.prisma.transaction(
       async (tx): Promise<TenderApprovalRequestView | 'STALE'> => {
         const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
-        if (locked.version !== dto.expectedVersion) throw this.conflict(tenderId);
+        if (locked.version !== dto.expectedVersion) {
+          const stale = await this.gate.endIfBehind(
+            tx,
+            { organizationId, id: tenderId, projectId: locked.projectId, version: locked.version },
+            WORKFLOW,
+            caller,
+            await decisionInstant(tx),
+          );
+          if (stale) return 'STALE';
+          throw this.conflict(tenderId);
+        }
         assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
         const { refusals, at } = await this.judge(tx, tenderId, confirmedPolicyId !== null);
         if (refusals.length > 0 || confirmedPolicyId === null) {

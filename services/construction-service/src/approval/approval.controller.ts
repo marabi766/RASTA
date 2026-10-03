@@ -43,7 +43,12 @@ export class ApprovalController {
       'there may decide — SYSTEM_ADMIN included only if the policy named it. The last grant of a ' +
       'round approves the project (or completes it, for project.completion); a rejection ends the ' +
       'round and sends an execution request back to CHANGES_REQUESTED. A rejection states its ' +
-      'reason. Nothing is ever approved by a timeout or by default.',
+      'reason. Nothing is ever approved by a timeout or by default. A tender approval (tender.*) is decided by ' +
+      'someone identity-service shows NOW as a member of the authority organization holding the step’s role — ' +
+      '502/504 if it cannot say, and nothing is decided; for an award also with none of the bid side’s ' +
+      'excluded roles held now, not a member of a bidding organization and, with AWARDER_NOT_EVALUATOR, not ' +
+      'an evaluator. Never the person who made the request. Reading the detail of an award approval (which ' +
+      'names the bid and the justification) is held to the same rules, and a refused read is audited.',
   })
   async decide(@Param('id') id: string, @Body(zodPipe(decisionSchema)) dto: DecisionDto) {
     return this.approvals.decide(id, dto);

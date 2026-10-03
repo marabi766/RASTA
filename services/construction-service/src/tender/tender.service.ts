@@ -303,8 +303,6 @@ export class TenderService {
 
     const own = { organizationId, id: tenderId, projectId: first.projectId };
     return this.gate.guarded(own, WORKFLOW, caller, async () => {
-      this.assertVersion(first, dto.expectedVersion);
-      assertTenderTransition(tenderId, first.status, 'CANCELLED');
       // Asked before any transaction: no row lock is held across a network call.
       const confirmedPolicyId = await this.gate.confirmPolicy(organizationId, WORKFLOW);
       if (confirmedPolicyId === null) throw approvalPolicyRequired(WORKFLOW);
@@ -316,7 +314,22 @@ export class TenderService {
           this.prisma.transaction(async (tx): Promise<Gated<TenderView> | 'STALE'> => {
             const at = await transactionNow(tx);
             const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
-            this.assertVersion(locked, dto.expectedVersion);
+            if (locked.version !== dto.expectedVersion) {
+              const stale = await this.gate.endIfBehind(
+                tx,
+                {
+                  organizationId,
+                  id: tenderId,
+                  projectId: locked.projectId,
+                  version: locked.version,
+                },
+                WORKFLOW,
+                caller,
+                at,
+              );
+              if (stale) return 'STALE';
+              throw this.conflict(tenderId);
+            }
             assertTenderTransition(tenderId, locked.status, 'CANCELLED');
             if (dto.reasonCode === 'NO_QUALIFIED_BID') {
               const qualified = await tx.bid.count({ where: { tenderId, status: 'QUALIFIED' } });

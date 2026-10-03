@@ -15,7 +15,7 @@ export interface TenderApprovalAct {
   /** Null when the act named no request (a refusal before one was found). */
   requestId: string | null;
   workflowKey: TenderWorkflowKey;
-  action: 'REQUEST' | 'GRANT' | 'REJECT' | 'EXECUTE' | 'STALE';
+  action: 'REQUEST' | 'GRANT' | 'REJECT' | 'EXECUTE' | 'STALE' | 'READ';
   outcome: 'GRANTED' | 'REFUSED';
   /** Why it was refused: a closed code; absent when granted. */
   refusalCode?: string;

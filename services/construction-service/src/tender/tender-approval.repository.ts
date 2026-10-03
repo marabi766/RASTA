@@ -56,7 +56,7 @@ export interface LogInsert {
   tenderId: string;
   requestId: string | null;
   workflowKey: TenderWorkflowKey;
-  action: 'REQUEST' | 'GRANT' | 'REJECT' | 'EXECUTE' | 'STALE';
+  action: 'REQUEST' | 'GRANT' | 'REJECT' | 'EXECUTE' | 'STALE' | 'READ';
   outcome: 'GRANTED' | 'REFUSED';
   refusalCode: string | null;
   stepOrder: number | null;

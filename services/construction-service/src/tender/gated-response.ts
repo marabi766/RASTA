@@ -20,4 +20,5 @@ export const GATED_NOTE =
   '(`TenderApprovalRequestView`); the policy names who decides it, and never the person who made it ' +
   '(`POST /v1/approvals/{id}/decision`). Once every step is granted the **same command**, on the same ' +
   'tender version, executes and uses the approval up in the same transaction (200); what changed ' +
-  'since the approval is 409 naming APPROVAL_STALE and nothing is executed. An approval is used at most once.';
+  'since the approval is 409 naming APPROVAL_STALE and nothing is executed (a command sent with the version the approval was made on, after the tender moved, included). An approval is used at most once. ' +
+  'A policy step with an amount range has no amount to be judged on for these commands and does not apply; a policy whose steps are all of that kind has no step that applies and refuses (APPROVAL_POLICY_REQUIRED).';

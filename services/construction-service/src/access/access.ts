@@ -428,6 +428,14 @@ export class ProjectAccess {
     assertNoBidExcludedRole(getContext().roles);
   }
 
+  /**
+   * The same exclusions on the roles identity-service says the approver (or reader) of an award holds
+   * **now** in the organization they act for: a token outlives a role added since it was issued.
+   */
+  assertLiveRolesMayDecideAward(liveRoles: readonly string[]): void {
+    assertNoBidExcludedRole(liveRoles);
+  }
+
   /** `assertCanAward` on the live roles identity-service reports, as for opening. */
   assertLiveRolesMayAward(liveRoles: readonly string[]): void {
     this.assertLiveBidSide(this.awarders, liveRoles, 'awards a tender');

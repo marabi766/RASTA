@@ -826,7 +826,7 @@ export const tenderAwardedPayload = z
  * One act of a tender approval gate (CON-002 PR 11): a request opened (`REQUEST`), a step granted or
  * rejected (`GRANT`, `REJECT`), the approved command executed (`EXECUTE`; the command's own event
  * is published as well), a request the system ended because what it was asked on changed
- * (`STALE`) — or the refusal of any of them. Who and when, and the closed refusal code; never the
+ * (`STALE`), a refused read of an award approval (`READ`) — or the refusal of any of them. Who and when, and the closed refusal code; never the
  * reason, the justification, a bid or an amount: those are read through the API, under authorization.
  */
 export const tenderApprovalActionPayload = z
@@ -835,7 +835,7 @@ export const tenderApprovalActionPayload = z
     workflowKey: z.enum(TENDER_WORKFLOW_KEYS),
     /** Null when the act named no request (a refusal before one was found). */
     requestId: identifier.nullable(),
-    action: z.enum(['REQUEST', 'GRANT', 'REJECT', 'EXECUTE', 'STALE']),
+    action: z.enum(['REQUEST', 'GRANT', 'REJECT', 'EXECUTE', 'STALE', 'READ']),
     outcome: z.enum(['GRANTED', 'REFUSED']),
     refusalCode: z.string().min(1).max(64).nullable(),
     stepOrder: z.number().int().positive().nullable(),

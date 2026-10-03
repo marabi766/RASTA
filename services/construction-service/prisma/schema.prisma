@@ -1240,7 +1240,7 @@ model TenderApprovalLog {
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
   workflowKey         String   @map("workflow_key")
-  /// `REQUEST`, `GRANT`, `REJECT`, `EXECUTE` or `STALE` (the system ending a request it found stale).
+  /// `REQUEST`, `GRANT`, `REJECT`, `EXECUTE`, `STALE` (the system ending a request it found stale) or `READ` (a refused read of an award approval).
   action              String
   /// `GRANTED` or `REFUSED`.
   outcome             String

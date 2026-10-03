@@ -1,4 +1,4 @@
-import { runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import type { CriterionInput } from '../src/tender/criteria.dto';
 import type { TenderApprovalRequestView } from '../src/tender/tender-approval.dto';
@@ -1068,6 +1068,400 @@ describe('the approval gates of a tender', () => {
   });
 
   // -------------------------------------------------------------------------------------------
+
+  // -------------------------------------------------------------------------------------------
+  // Review round 1 (#208)
+
+  describe('the database boundary, as the runtime role (finding 1)', () => {
+    const ownTenderRow = (a: string, tenderId: string) =>
+      runUnscoped('the suite reads a tender', () =>
+        w.prisma.client.tender.findFirstOrThrow({ where: { organizationId: a, id: tenderId } }),
+      );
+
+    const insertTender = async (a: string, tenderId: string, status: string) => {
+      const row = await ownTenderRow(a, tenderId);
+      return runUnscoped('the suite inserts a tender as the runtime role', () =>
+        w.prisma.client.tender.create({
+          data: {
+            id: `TND_INS_${status}_${Math.random().toString(36).slice(2, 8)}`,
+            organizationId: a,
+            projectId: row.projectId,
+            title: 'Inserted',
+            scopeOfWork: 'Inserted',
+            status: status as 'DRAFT',
+            statusChangedAt: new Date(),
+            statusChangedBy: 'USR_X',
+            createdAt: new Date(),
+            createdBy: 'USR_X',
+            createdCorrelationId: 'c',
+            updatedAt: new Date(),
+            updatedBy: 'USR_X',
+          },
+        }),
+      );
+    };
+
+    it('a tender is inserted only as a DRAFT: PUBLISHED, AWARDED and CANCELLED are refused, DRAFT is accepted', async () => {
+      const { a, tenderId } = await draft();
+      for (const status of ['PUBLISHED', 'AWARDED', 'CANCELLED']) {
+        await expect(insertTender(a, tenderId, status)).rejects.toThrow(/ck_tender_insert_draft/);
+      }
+      await expect(insertTender(a, tenderId, 'DRAFT')).resolves.toMatchObject({ status: 'DRAFT' });
+    });
+
+    it('a request is not inserted already used or ended, so no approval is written ready-made', async () => {
+      const { a, tenderId, version } = await draft();
+      const project = (await tenderState(a, tenderId)).projectId;
+      const insert = (columns: string, values: string) =>
+        sql(
+          `INSERT INTO "tender_approval_request" ("id", "organization_id", "tender_id", "project_id", "workflow_key", "round", "tender_version", "reason", "reason_code", "requested_by", "requested_at", "requested_correlation_id", ${columns})
+           VALUES ('TAR_PRE_${Math.random().toString(36).slice(2, 8)}', '${a}', '${tenderId}', '${project}', 'tender.cancellation', 1, ${version}, 'r', 'OWNER_REQUEST', 'USR_X', now(), 'c', ${values})`,
+        );
+      await expect(
+        insert('"consumed_at", "consumed_by", "consumed_txid"', "now(), 'USR_X', 1"),
+      ).rejects.toThrow(/ck_tender_approval_request_new/);
+      await expect(insert('"ended_at", "ended_reason"', "now(), 'STALE'")).rejects.toThrow(
+        /ck_tender_approval_request_new/,
+      );
+    });
+
+    it('a step of a tender round is not inserted already decided, nor moved out of turn, nor by its requester, nor re-pointed', async () => {
+      const { a, tenderId, version } = await draft();
+      const first = org();
+      const second = org();
+      await activePolicy(
+        w,
+        a,
+        [{ authorityOrganizationId: first }, { authorityOrganizationId: second }],
+        'tender.publication',
+      );
+      const request = requested(await publish(a, tenderId, version, 'USR_REQUESTER'));
+      const [one, two] = await stepRows(tenderId, 'tender.publication');
+
+      // Inserted GRANTED: the step is written asked, never decided.
+      await expect(
+        runUnscoped('the suite inserts a decided step', () =>
+          w.prisma.client.approval.create({
+            data: {
+              id: 'APR_FAKE',
+              organizationId: a,
+              projectId: one!.projectId,
+              tenderId,
+              workflowKey: 'tender.publication',
+              round: 1,
+              stepOrder: 3,
+              policyId: one!.policyId,
+              policyVersion: one!.policyVersion,
+              approvalType: 'Fake',
+              authorityOrganizationId: first,
+              authorityRole: 'ORGANIZATION_ADMIN',
+              authorityLabel: 'Fake',
+              status: 'GRANTED',
+              requestedAt: new Date(),
+              decidedAt: new Date(),
+              decidedBy: 'USR_X',
+              createdAt: new Date(),
+              createdCorrelationId: 'c',
+            },
+          }),
+        ),
+      ).rejects.toThrow(/ck_approval_tender_new/);
+
+      // Out of turn: the second step is QUEUED and cannot jump to GRANTED.
+      await expect(
+        sql(
+          `UPDATE "approval" SET "status" = 'GRANTED', "decided_at" = now(), "decided_by" = 'USR_X' WHERE "id" = '${two!.id}'`,
+        ),
+      ).rejects.toThrow(/ck_approval_tender_transition/);
+      // By the person who made the request.
+      await expect(
+        sql(
+          `UPDATE "approval" SET "status" = 'GRANTED', "decided_at" = now(), "decided_by" = 'USR_REQUESTER' WHERE "id" = '${one!.id}'`,
+        ),
+      ).rejects.toThrow(/ck_approval_tender_grantor/);
+      // Re-pointed at an authority of one's own choosing.
+      await expect(
+        sql(
+          `UPDATE "approval" SET "authority_organization_id" = 'ORG_MINE' WHERE "id" = '${one!.id}'`,
+        ),
+      ).rejects.toThrow(/ck_approval_tender_immutable/);
+      expect((await stepRows(tenderId, 'tender.publication')).map((s) => s.status)).toEqual([
+        'PENDING',
+        'QUEUED',
+      ]);
+      expect(request.steps).toHaveLength(2);
+    });
+  });
+
+  describe('the approver as identity-service says they are NOW (finding 2)', () => {
+    const asked = async (key: 'publication' | 'award' = 'publication') => {
+      if (key === 'publication') {
+        const { a, tenderId, version } = await draft();
+        await ensureGatePolicy(w, a, 'tender.publication');
+        const request = requested(await publish(a, tenderId, version));
+        return { owner: a, tenderId, step: request.steps[0]! };
+      }
+      const t = await evaluatedTender(w, organizations, { count: 2 });
+      await ensureGatePolicy(w, t.owner, 'tender.award');
+      const request = requested(
+        await asAdmin(t.owner, () => w.award.award(t.tenderId, { bidId: t.bids[0]!.bidId })),
+      );
+      return { owner: t.owner, tenderId: t.tenderId, step: request.steps[0]! };
+    };
+
+    const grantAs = (owner: string, stepId: string, userId: string) =>
+      asApprover(
+        owner,
+        async () =>
+          w.approvals.decide(stepId, {
+            decision: 'GRANT',
+            expectedVersion: (await stepRowOf(stepId)).version,
+          }),
+        userId,
+      );
+
+    const stepRowOf = (id: string) =>
+      runUnscoped('the suite reads a step', () =>
+        w.prisma.client.approval.findFirstOrThrow({ where: { id } }),
+      );
+
+    const untouched = async (tenderId: string, key: GateKey) => {
+      expect((await stepRows(tenderId, key))[0]!.status).toBe('PENDING');
+    };
+
+    it('a role revoked after the token was issued no longer decides: 403, nothing granted', async () => {
+      const t = await asked();
+      const approver = newUserId();
+      w.memberships.rolesOf.set(approver, ['ORGANIZATION_USER']);
+      const error = await codeOf(grantAs(t.owner, t.step.approvalId, approver));
+      expect(error.code).toBe('FORBIDDEN');
+      expect(error.message).toContain('no longer holds the role');
+      await untouched(t.tenderId, 'tender.publication');
+      expect(await logOf(t.owner, t.tenderId)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ action: 'GRANT', outcome: 'REFUSED', actorUserId: approver }),
+        ]),
+      );
+    });
+
+    it('a membership revoked after the token was issued no longer decides: 403', async () => {
+      const t = await asked();
+      const approver = newUserId();
+      w.memberships.revoked.add(approver);
+      const error = await codeOf(grantAs(t.owner, t.step.approvalId, approver));
+      expect(error.code).toBe('FORBIDDEN');
+      expect(error.message).toContain('not a member');
+      await untouched(t.tenderId, 'tender.publication');
+    });
+
+    it('a CONTRACTOR role acquired after the token was issued is caught on an award: 403, nothing granted', async () => {
+      const t = await asked('award');
+      const approver = newUserId();
+      // The token says ORGANIZATION_ADMIN; identity-service now says CONTRACTOR as well.
+      w.memberships.rolesOf.set(approver, ['ORGANIZATION_ADMIN', 'CONTRACTOR']);
+      const error = await codeOf(grantAs(t.owner, t.step.approvalId, approver));
+      expect(error.code).toBe('FORBIDDEN');
+      expect(error.message).toContain('CONTRACTOR');
+      await untouched(t.tenderId, 'tender.award');
+    });
+
+    it('identity-service unreachable: 502/504, nothing decided, nothing granted or ended', async () => {
+      const t = await asked();
+      const approver = newUserId();
+      w.memberships.failure = RastaError.upstreamUnavailable('identity-service');
+      try {
+        const error = await codeOf(grantAs(t.owner, t.step.approvalId, approver));
+        expect(error.code).toBe('UPSTREAM_UNAVAILABLE');
+      } finally {
+        w.memberships.failure = undefined;
+      }
+      await untouched(t.tenderId, 'tender.publication');
+      expect(
+        (await logOf(t.owner, t.tenderId)).filter(
+          (r) => r.action === 'GRANT' && r.outcome === 'GRANTED',
+        ),
+      ).toHaveLength(0);
+      expect(
+        await runUnscoped('the suite reads the request', () =>
+          w.prisma.client.tenderApprovalRequest.count({
+            where: { tenderId: t.tenderId, endedAt: null },
+          }),
+        ),
+      ).toBe(1);
+    });
+  });
+
+  describe('the detail of an award approval is read under the rules of deciding it (finding 3)', () => {
+    const asked = async (on: Wiring = w) => {
+      const t = await evaluatedTender(on, organizations, { count: 2 });
+      await ensureGatePolicy(on, t.owner, 'tender.award');
+      const request = requested(
+        await asAdmin(t.owner, () => on.award.award(t.tenderId, { bidId: t.bids[0]!.bidId })),
+      );
+      return { ...t, stepId: request.steps[0]!.approvalId };
+    };
+    const readAs = (
+      on: Wiring,
+      owner: string,
+      stepId: string,
+      userId: string,
+      role = 'ORGANIZATION_ADMIN',
+    ) => asApprover(owner, () => on.approvals.get(stepId), userId, role);
+    const refusedReads = async (on: Wiring, owner: string, tenderId: string) =>
+      (await on.tenderApprovalRepository.log(on.prisma.client, owner, tenderId)).filter(
+        (r) => r.action === 'READ' && r.outcome === 'REFUSED',
+      );
+
+    it('a role the bid side excludes — on the token or acquired since — reads no bid: 403, audited', async () => {
+      const t = await asked();
+      const viaToken = await codeOf(readAs(w, t.owner, t.stepId, newUserId(), 'SYSTEM_ADMIN'));
+      expect(viaToken.code).toBe('FORBIDDEN');
+      const contractor = newUserId();
+      w.memberships.rolesOf.set(contractor, ['ORGANIZATION_ADMIN', 'CONTRACTOR']);
+      const viaLive = await codeOf(readAs(w, t.owner, t.stepId, contractor));
+      expect(viaLive.code).toBe('FORBIDDEN');
+      expect(await refusedReads(w, t.owner, t.tenderId)).toHaveLength(2);
+      // Somebody who may is shown it.
+      const seen = await readAs(w, t.owner, t.stepId, newUserId());
+      expect(seen.request?.bid).toMatchObject({ bidId: t.bids[0]!.bidId });
+    });
+
+    it('a membership revoked since the token was issued reads nothing', async () => {
+      const t = await asked();
+      const gone = newUserId();
+      w.memberships.revoked.add(gone);
+      expect((await codeOf(readAs(w, t.owner, t.stepId, gone))).code).toBe('FORBIDDEN');
+    });
+
+    it('with AWARDER_NOT_EVALUATOR on, an evaluator reads nothing (403) and a person the records cannot tell from them neither (422)', async () => {
+      const t = await asked(strict);
+      const evaluator = await codeOf(readAs(strict, t.owner, t.stepId, t.evaluator));
+      expect(evaluator.code).toBe('FORBIDDEN');
+      expect(evaluator.message).toContain('APPROVER_IS_EVALUATOR');
+      const unknown = await codeOf(
+        runWithContext(
+          context({
+            organizationId: t.owner,
+            organizationIds: [t.owner],
+            roles: ['ORGANIZATION_ADMIN'],
+            userId: 'USR_ELSEWHERE_R',
+            subject: 'sub-elsewhere-r',
+            issuer: 'http://elsewhere.invalid/realms/rasta',
+          }),
+          () => strict.approvals.get(t.stepId),
+        ),
+      );
+      expect(unknown.code).toBe('ACTOR_IDENTITY_UNKNOWN');
+      expect(await refusedReads(strict, t.owner, t.tenderId)).toHaveLength(2);
+      // Another organization learns nothing at all.
+      expect((await codeOf(asApprover(org(), () => strict.approvals.get(t.stepId)))).code).toBe(
+        'NOT_FOUND',
+      );
+    });
+  });
+
+  describe('a stale approval is resolved as stale, whichever version the command was sent with (finding 4)', () => {
+    const staleRefusal = async (a: string, tenderId: string) => {
+      expect(await logOf(a, tenderId)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ action: 'STALE', outcome: 'GRANTED' }),
+          expect.objectContaining({
+            action: 'REQUEST',
+            outcome: 'REFUSED',
+            refusalCode: 'APPROVAL_STALE',
+          }),
+        ]),
+      );
+      const events = await actionEvents(a, tenderId);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ action: 'STALE' }),
+          expect.objectContaining({
+            action: 'REQUEST',
+            outcome: 'REFUSED',
+            refusalCode: 'APPROVAL_STALE',
+          }),
+        ]),
+      );
+    };
+
+    it('publish, sent with the approved version after the tender was edited: 409 APPROVAL_STALE, the request ends, audited and evented', async () => {
+      const { a, tenderId, version } = await draft();
+      await asAdmin(a, () => approvePublication(w, tenderId, { expectedVersion: version }));
+      const approved = (
+        await asAdmin(a, () => w.tenderApprovals.listForTender(tenderId, { limit: 5 }))
+      ).items[0]!;
+      await asAdmin(a, () =>
+        w.tenders.update(tenderId, { expectedVersion: version, title: 'Edited' }),
+      );
+
+      const error = await codeOf(publish(a, tenderId, version));
+      expect(error.code).toBe('CONFLICT');
+      expect(error.message).toContain('APPROVAL_STALE');
+      expect(await requestRow(approved.id)).toMatchObject({ endedReason: 'STALE' });
+      expect((await tenderState(a, tenderId)).status).toBe('DRAFT');
+      await staleRefusal(a, tenderId);
+    });
+
+    it('a wrong version with no stale request behind it stays a plain optimistic-lock refusal', async () => {
+      const { a, tenderId, version } = await draft();
+      await ensureGatePolicy(w, a, 'tender.publication');
+      requested(await publish(a, tenderId, version));
+      const error = await codeOf(publish(a, tenderId, version + 7));
+      expect(error.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      // The request made on the current version is still alive.
+      expect(
+        (await asAdmin(a, () => w.tenderApprovals.listForTender(tenderId, { limit: 5 }))).items[0]!
+          .status,
+      ).toBe('PENDING');
+    });
+
+    it('cancel, sent with the approved version after the tender was edited: the same', async () => {
+      const { a, tenderId, version } = await draft();
+      const body = { expectedVersion: version, reason: 'Funding was withdrawn' };
+      await asAdmin(a, () => approveCancellation(w, tenderId, body));
+      await asAdmin(a, () =>
+        w.tenders.update(tenderId, { expectedVersion: version, title: 'Edited' }),
+      );
+
+      const error = await codeOf(
+        asAdmin(a, () => w.tenders.cancel(tenderId, { ...body, reasonCode: 'OWNER_REQUEST' })),
+      );
+      expect(error.code).toBe('CONFLICT');
+      expect(error.message).toContain('APPROVAL_STALE');
+      expect((await tenderState(a, tenderId)).status).toBe('DRAFT');
+      await staleRefusal(a, tenderId);
+    });
+
+    it('award, after the tender moved on from the approved version: the same', async () => {
+      const t = await evaluatedTender(w, organizations, { count: 2 });
+      await asAdmin(t.owner, () => approveAward(w, t.tenderId, { bidId: t.bids[0]!.bidId }));
+      await sql(`UPDATE "tender" SET "version" = "version" + 1 WHERE "id" = '${t.tenderId}'`);
+
+      const error = await codeOf(
+        asAdmin(t.owner, () => w.award.award(t.tenderId, { bidId: t.bids[0]!.bidId })),
+      );
+      expect(error.code).toBe('CONFLICT');
+      expect(error.message).toContain('APPROVAL_STALE');
+      expect(
+        await runUnscoped('the suite counts awards', () =>
+          w.prisma.client.tenderAward.count({ where: { tenderId: t.tenderId } }),
+        ),
+      ).toBe(0);
+      // The request ends and says so (log, event); the refusal itself is audited as every refusal of an award
+      // is (PR 10): a REFUSED row in the bid access log with its closed code, and BID_ACCESSED.
+      expect(await logOf(t.owner, t.tenderId)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ action: 'STALE', outcome: 'GRANTED' })]),
+      );
+      expect((await actionEvents(t.owner, t.tenderId)).map((e) => e.action)).toContain('STALE');
+      const access = await runUnscoped('the suite reads the access log', () =>
+        w.prisma.client.bidAccessLog.findMany({
+          where: { tenderId: t.tenderId, purpose: 'AWARD_TENDER', outcome: 'REFUSED' },
+        }),
+      );
+      expect(access.map((r) => r.refusalCode)).toEqual(['APPROVAL_STALE']);
+    });
+  });
 
   it('awards through the gate: asked, approved by others, executed, and the approval used', async () => {
     const t = await evaluatedTender(w, organizations, { count: 2 });

@@ -183,6 +183,26 @@ export class TenderApprovalGate {
     };
   }
 
+  /**
+   * The command was sent with a tender version the tender has left (the caller read it before an edit, or
+   * after the edit the approval did not see). If the request alive for the workflow was made on an OLDER
+   * version than the tender is on now, it is stale: it ends here — audited and announced, committed with the
+   * transaction — and the command answers 409 APPROVAL_STALE instead of a bare version conflict. With no such
+   * request the caller's version is simply wrong, which is the command's own 409. Returns whether one ended.
+   */
+  async endIfBehind(
+    tx: ExtendedPrismaClient,
+    tender: GateTender,
+    workflowKey: TenderWorkflowKey,
+    caller: GateCaller,
+    at: Date,
+  ): Promise<boolean> {
+    const live = await this.requests.findLive(tx, tender.organizationId, tender.id, workflowKey);
+    if (!live || live.tenderVersion === tender.version) return false;
+    await this.decisions.endStale(tx, live, tender, caller.userId, caller.organizationId, at);
+    return true;
+  }
+
   /** Uses the approved request up, in the transaction that executes what it approved. */
   async consume(
     tx: ExtendedPrismaClient,
