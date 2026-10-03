@@ -4,7 +4,7 @@ import type { Logger } from '@rasta/logging';
 import { AllExceptionsFilter, runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ConstructionEnv } from '../config/env';
-import { IdempotencyStore } from './idempotency';
+import { IdempotencyStore, hashRequestBody } from './idempotency';
 
 /**
  * The claim's race branches, which a real database hits only by timing: a
@@ -21,7 +21,13 @@ function fakeStore() {
     findUnique: jest.fn(),
     deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
   };
-  const prisma = { client: { idempotencyKey: delegate } } as unknown as PrismaService;
+  // A claim-side statement runs in a short transaction of its own, with its
+  // lock wait bounded (#194): the fake hands it the same delegate.
+  const tx = { idempotencyKey: delegate, $queryRaw: jest.fn().mockResolvedValue([]) };
+  const prisma = {
+    client: { idempotencyKey: delegate },
+    transaction: jest.fn((fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
+  } as unknown as PrismaService;
   const env = { CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 24 } as ConstructionEnv;
   return { store: new IdempotencyStore(prisma, env), delegate };
 }
@@ -224,4 +230,45 @@ describe('nothing of the Idempotency-Key in an error (S-09)', () => {
       }
     },
   );
+});
+
+describe('a lapsed claim whose holder keeps its lock (#194)', () => {
+  const LOCK_TIMEOUT = Object.assign(new Error('canceling statement due to lock timeout'), {
+    code: 'P2010',
+    meta: { code: '55P03' },
+  });
+
+  it('answers the retryable 409 when the removal cannot get the lock within the budget', async () => {
+    const { store, delegate } = fakeStore();
+    delegate.create.mockRejectedValueOnce(UNIQUE);
+    delegate.findUnique.mockResolvedValueOnce(
+      row({ claimToken: 'stale', expiresAt: new Date(Date.now() - 1000) }),
+    );
+    delegate.deleteMany.mockRejectedValueOnce(LOCK_TIMEOUT);
+
+    await expect(
+      inTenant(() => store.claim(ENDPOINT, 'k-12345678', { a: 1 })),
+    ).rejects.toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+    expect(delegate.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('hashRequestBody — every own key, whatever its name (#194)', () => {
+  // JSON.parse makes the name an own key, as the request body parser does.
+  const body = (name: string, x: number): unknown =>
+    JSON.parse(`{"note":"n","details":{"${name}":{"x":${x}}}}`);
+
+  it.each(['__proto__', 'constructor'])(
+    'tells bodies apart that differ only under a %s key',
+    (name) => {
+      expect(hashRequestBody(body(name, 1))).not.toBe(hashRequestBody(body(name, 2)));
+      expect(hashRequestBody(body(name, 1))).toBe(hashRequestBody(body(name, 1)));
+    },
+  );
+
+  it('tells a body with a __proto__ key from the same body without it', () => {
+    expect(hashRequestBody(JSON.parse('{"a":1,"__proto__":{"b":2}}'))).not.toBe(
+      hashRequestBody({ a: 1 }),
+    );
+  });
 });
