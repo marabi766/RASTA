@@ -45,6 +45,7 @@ import { TenderEvidenceController } from './audit/tender-evidence.controller';
 import { TenderEvidenceRepository } from './audit/tender-evidence.repository';
 import { TenderEvidenceService } from './audit/tender-evidence.service';
 import { TenderGapMonitor } from './audit/tender-gap-monitor';
+import { ReconciliationEvidenceMonitor } from './audit/reconciliation-evidence-monitor';
 import { CONSTRUCTION_TOPIC, TENDER_EVIDENCE_CONSUMER } from './audit/tender-evidence';
 import {
   AUDIT_DEAD_LETTER_TOPIC,
@@ -187,6 +188,8 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
     TenderEvidenceRepository,
     TenderEvidenceService,
     TenderGapMonitor,
+    // D-046: payment-reconciliation audit rows that have no evidence row.
+    ReconciliationEvidenceMonitor,
 
     // Registered as classes, not as factory providers, because the controller
     // reaches them as `@Query(AuditEventQueryPipe)`. Nest resolves a

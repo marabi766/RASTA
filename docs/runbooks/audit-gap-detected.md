@@ -180,16 +180,17 @@ Kafka در دسترس نبودن **عمداً** Readiness را شکست نمی�
 در Log، خط `Rejected …` فقط نام رویداد، `eventId` (اگر شکل شناسه داشته باشد)، Topic/Partition، دلیل Schema و **نام کلیدهای**
 Payload را دارد — نه مقدار. دلیل‌ها با برچسب‌های بستهٔ `rasta_audit_ingestion_failures_total{reason}` یکی‌اند:
 
-| `reason`                            | معنا                                                                       | مالک رفع              |
-| ----------------------------------- | -------------------------------------------------------------------------- | --------------------- |
-| `trail_invalid_envelope`            | Envelope مسیر B Parse نشد                                                  | Producer              |
-| `trail_unsupported_event`           | روی Topic مسیر B، رویدادی جز `AUDIT_EVENT_RECORDED` v1                     | Producer              |
-| `trail_invalid_payload`             | Payload با قرارداد v1 یا عرض ستون نمی‌خواند                                | Producer              |
-| `trail_tenant_mismatch`             | `payload.organizationId` ≠ `envelope.tenantId` — **سیگنال جداسازی مستأجر** | Producer + مالک امنیت |
-| `trail_unredacted_sensitive_change` | میدان `SENSITIVE_KEYS` با مقدار خام — **سیگنال نشت**                       | Producer + مالک امنیت |
-| `unmappable_envelope`               | Envelope مسیر A نگاشت نشد                                                  | Producer دامنه        |
-| `unmappable_organization_event`     | رویداد سازمان برای Projection سلسله‌مراتب نخواند                           | organization-service  |
-| `database_error`                    | پایگاه داده رد کرد یا در دسترس نبود (فقط کلاس و کد Prisma در Log)          | عملیات پایگاه داده    |
+| `reason`                            | معنا                                                                        | مالک رفع              |
+| ----------------------------------- | --------------------------------------------------------------------------- | --------------------- |
+| `trail_invalid_envelope`            | Envelope مسیر B Parse نشد                                                   | Producer              |
+| `trail_unsupported_event`           | روی Topic مسیر B، رویدادی جز `AUDIT_EVENT_RECORDED` v1                      | Producer              |
+| `trail_invalid_payload`             | Payload با قرارداد v1 یا عرض ستون نمی‌خواند                                 | Producer              |
+| `trail_tenant_mismatch`             | `payload.organizationId` ≠ `envelope.tenantId` — **سیگنال جداسازی مستأجر**  | Producer + مالک امنیت |
+| `trail_unredacted_sensitive_change` | میدان `SENSITIVE_KEYS` با مقدار خام — **سیگنال نشت**                        | Producer + مالک امنیت |
+| `unmappable_envelope`               | Envelope مسیر A نگاشت نشد                                                   | Producer دامنه        |
+| `unmappable_organization_event`     | رویداد سازمان برای Projection سلسله‌مراتب نخواند                            | organization-service  |
+| `unmappable_reconciliation_event`   | رویداد حل یا کنش اپراتور آشتی پرداخت با قرارداد نمای شاهد v1 نخواند (D-046) | economic-service      |
+| `database_error`                    | پایگاه داده رد کرد یا در دسترس نبود (فقط کلاس و کد Prisma در Log)           | عملیات پایگاه داده    |
 
 ### ۴. Kafka — Lag و DLQ (فقط‌خواندنی)
 
@@ -326,6 +327,30 @@ Label هشدار فقط `source_service` است؛ هیچ مستأجر یا رو�
 
 Replica: شکست Scrape فقط یک Instance هم می‌سوزاند، چون شمارنده‌های آن Instance از هر جمع غایب‌اند. Volume را Reset، Offset یا
 گروه را جابه‌جا، یا ترافیک ساختگی منتشر نکن؛ پس از بازگشت، بازهٔ قطع را با گام‌های ۲ و ۶ برای شکاف واقعی بسنج.
+
+### ۹. `RastaAuditReconciliationEvidenceMissing` — ردیف حسابرسی آشتی پرداخت بی شاهد (D-046)
+
+`rasta_audit_reconciliation_evidence_missing` شمار ردیف‌های `audit_event` از `PAYMENT_RECONCILIATION_RESOLVED` یا
+`PAYMENT_RECONCILIATION_OPERATOR_ACTION` روی `rasta.economic.v1` است که در پنجرهٔ `AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS`
+(پیش‌فرض ۱۶۸ ساعت) **نوشته شده‌اند** (`recorded_at`، ساعت خود پایگاه داده) ولی ردیف `payment_reconciliation_evidence` ندارند.
+پنجره روی زمان نوشتن است، نه `occurred_at`: رویداد قدیمی‌ای که دیر تحویل شده (Outbox عقب‌مانده، Replica قدیمی در میانهٔ استقرار)
+شکافش را همین حالا باز می‌کند و همین حالا شمرده می‌شود. این عدد یک شمار واحد در سطح پلتفرم برای همهٔ مستأجرهاست (بی برچسب؛
+`runUnscoped` در `AuditRepository.countMissingReconciliationEvidence`) و هیچ ردیف یا شناسهٔ مستأجری از آن بیرون نمی‌آید؛ خود
+ردیف‌ها را با گام ۱ پیدا کن. Projector این دو ردیف را در یک تراکنش می‌نویسد، پس
+عدد بالای صفر یعنی ردیف حسابرسی را چیز دیگری نوشته است. دو علت شناخته‌شده دارد:
+
+- Replicaای از نسخهٔ پیش از این نما رویداد را ثبت کرده است، مثلاً در میانهٔ استقرار غلتان.
+- رویداد پیش از این نسخه `processed_event` گرفته بوده است. در این حالت نسخهٔ تازه `DUPLICATE` برمی‌گرداند و دیگر نمی‌نویسد.
+
+1. **ردیف‌ها را پیدا کن** (فقط‌خواندنی، با نقش خواندن):
+   `SELECT a.id, a.source_event_id, a.organization_id, a.resource_id, a.occurred_at, a.recorded_at FROM audit_event a WHERE a.source_topic = 'rasta.economic.v1' AND a.source_event_name IN ('PAYMENT_RECONCILIATION_RESOLVED', 'PAYMENT_RECONCILIATION_OPERATOR_ACTION') AND a.recorded_at >= now() - interval '168 hours' AND NOT EXISTS (SELECT 1 FROM payment_reconciliation_evidence e WHERE e.audit_event_id = a.id);`
+2. **استقرار را تمام کن.** اگر استقرار `audit-service` در جریان است یا Replica قدیمی هنوز بالاست، آن را تخلیه کن. شمار نباید
+   پس از آن بالا برود.
+3. **سابقهٔ کامل را از economic بخوان.** شاهد، پیشنهاددهنده، تأییدکننده، دلیل‌ها و هویت پایدار برای هر `resource_id` (همان
+   `paymentIntentId`) در `GET /v1/payment-intents/{id}/reconciliation` و جدول‌های فقط‌افزودنی economic هست. شمارهٔ ردیف‌ها و
+   این ارجاع را در تیکت حادثه ثبت کن.
+4. **هرگز ردیف شاهد را دستی نساز** و ردیف حسابرسی را تغییر نده یا حذف نکن. پرکردن پسینی (Backfill) خودکار وجود ندارد. شکاف
+   تا وقتی در پنجره است هشدار می‌دهد و پس از آن از شمار بیرون می‌رود؛ تیکت حادثه سابقهٔ آن می‌ماند.
 
 ---
 

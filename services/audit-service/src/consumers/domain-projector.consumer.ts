@@ -1,6 +1,11 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import { originalDelivery, type EventConsumer, type EventDelivery } from '@rasta/nest-common';
+import {
+  originalDelivery,
+  UnprocessableEventError,
+  type EventConsumer,
+  type EventDelivery,
+} from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 // Type-only, like `Logger` above: this provider is built by an explicit
 // `useFactory` in `app.module.ts`, so Nest never reads `design:paramtypes` for
@@ -15,6 +20,10 @@ import {
   toOrganizationProjection,
   type OrganizationProjection,
 } from '../audit/organization-projection';
+import {
+  toPaymentReconciliationEvidence,
+  type PaymentReconciliationEvidence,
+} from '../audit/payment-reconciliation-projection';
 import { domainSourceServiceLabel } from '../audit/audit-producer-topology';
 import {
   auditIngestionFailuresTotal,
@@ -137,8 +146,45 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       throw error;
     }
 
+    // D-046. The two payment-reconciliation events that record a human
+    // decision also keep an allow-listed projection of who proposed, who
+    // approved or acted, and on which evidence. Same fail-closed choice as the
+    // hierarchy above, for the same reason: an audit row recorded without the
+    // second actor and the evidence is the gap this projection closes, so a
+    // known event that fails its contract writes nothing. The mapper throws
+    // `UnprocessableEventError`, which the shared consumer dead-letters at
+    // once — a malformed payload does not become well-formed on retry.
+    let reconciliation: PaymentReconciliationEvidence | null;
     try {
-      const outcome = await this.repository.ingest(record, DOMAIN_PROJECTOR_CONSUMER, projection);
+      reconciliation = toPaymentReconciliationEvidence(envelope, delivery);
+    } catch (error) {
+      auditIngestionFailuresTotal.inc({
+        reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_RECONCILIATION_EVENT,
+      });
+      // Nothing taken from the payload — not even its key names, which a
+      // producer can fill with text (S-09; Codex on #204). The event name is one
+      // of the two fixed names this mapper accepts, the topic is broker
+      // metadata, and the refusal's message is built from schema field names
+      // and zod issue codes only. The event id is logged, escaped, by the
+      // shared consumer that dead-letters the message.
+      const why =
+        error instanceof UnprocessableEventError
+          ? error.message
+          : 'the projection failed unexpectedly';
+      this.logger.error(
+        `Cannot project ${envelope.eventName} from ${delivery.topic} as payment-reconciliation ` +
+          `evidence: ${why}`,
+      );
+      throw error;
+    }
+
+    try {
+      const outcome = await this.repository.ingest(
+        record,
+        DOMAIN_PROJECTOR_CONSUMER,
+        projection,
+        reconciliation,
+      );
 
       if (outcome === 'DUPLICATE') {
         // Not a failure and not counted as one. At-least-once delivery plus

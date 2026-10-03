@@ -177,8 +177,11 @@ test('the audit entry names every object AUD-003 adds', () => {
     'audit_event_correction_idx',
     // The tender-evidence projection, added by 20261001110000_tender_evidence.
     'ix_bid_access_evidence_tender',
+    // D-046's evidence, added by 20261003120000_payment_reconciliation_evidence.
+    'ix_payment_reconciliation_evidence_intent',
     // The held receipts, added by 20261001130000_tender_receipt_pending.
     'ix_tender_receipt_pending_held',
+    'ux_payment_reconciliation_evidence_audit_event',
     'ux_tender_receipt_link_event',
     'ux_tender_receipt_link_previous',
     'ux_tender_receipt_link_receipt',
@@ -190,6 +193,7 @@ test('the audit entry names every object AUD-003 adds', () => {
   // append-only refusal and is dropped by the same chain reversal, so leaving
   // it unasserted would let a rollback orphan it unnoticed.
   assert.deepEqual([...functions].sort(), [
+    'payment_reconciliation_evidence_append_only',
     'refuse_chain_head_regression',
     'refuse_mutation',
     'tender_evidence_append_only',

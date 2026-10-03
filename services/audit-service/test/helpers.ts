@@ -179,6 +179,8 @@ export const PROTECTIVE_TRIGGERS = [
   'tg_tender_receipt_link_no_truncate',
   'tg_bid_access_evidence_append_only',
   'tg_bid_access_evidence_no_truncate',
+  'tg_payment_reconciliation_evidence_append_only',
+  'tg_payment_reconciliation_evidence_no_truncate',
 ] as const;
 
 /** One `(chain_scope, organization_id, chain_month)` a run wrote into. */
@@ -392,6 +394,19 @@ export async function cleanupRun(
       await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
     }
 
+    // D-046's evidence rows: append-only for everybody, lifted the same way.
+    await tx.$executeRawUnsafe(
+      'ALTER TABLE payment_reconciliation_evidence DISABLE TRIGGER tg_payment_reconciliation_evidence_append_only',
+    );
+    await tx.$executeRawUnsafe(
+      `DELETE FROM payment_reconciliation_evidence
+        WHERE source_event_id LIKE $1 OR organization_id LIKE $1`,
+      like,
+    );
+    await tx.$executeRawUnsafe(
+      'ALTER TABLE payment_reconciliation_evidence ENABLE TRIGGER tg_payment_reconciliation_evidence_append_only',
+    );
+
     await tx.$executeRawUnsafe(`DELETE FROM processed_event WHERE event_id LIKE $1`, like);
     await tx.$executeRawUnsafe(`DELETE FROM organization_ref WHERE organization_id LIKE $1`, like);
 
@@ -436,6 +451,15 @@ export async function assertRunRemoved(
     like,
   );
   if (refs > 0n) leftovers.push(`${refs} organization_ref row(s)`);
+
+  const [{ count: reconciliation }] = await migrator.client.$queryRawUnsafe<{ count: bigint }[]>(
+    `SELECT count(*) AS count FROM payment_reconciliation_evidence
+      WHERE source_event_id LIKE $1 OR organization_id LIKE $1`,
+    like,
+  );
+  if (reconciliation > 0n) {
+    leftovers.push(`${reconciliation} payment_reconciliation_evidence row(s)`);
+  }
 
   for (const chain of chains) {
     const [{ count: heads }] = await migrator.client.$queryRawUnsafe<{ count: bigint }[]>(
