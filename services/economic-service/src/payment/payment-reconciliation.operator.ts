@@ -1,7 +1,14 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
+import {
+  RastaError,
+  actorIdentityUnknown,
+  compareActors,
+  currentActor,
+  getContext,
+  getOrganizationId,
+  type ActorIdentity,
+} from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletRepository } from '../wallet/wallet.repository';
@@ -97,9 +104,8 @@ export interface ReconciliationView {
  * The auth guard sets `userId` from the `rasta_uid` claim and falls back to the
  * IdP subject when the claim is absent, so one person could otherwise carry
  * two user ids. A resolver must therefore carry `rasta_uid`, and separation of
- * duties compares the issuer and subject as well as the user id. The guard
- * verifies tokens against exactly one issuer (`OIDC_ISSUER_URL`), so that is
- * the issuer of every token it accepts.
+ * duties is `@rasta/nest-common`'s `compareActors` on the token's verified
+ * issuer and subject (#188, part C), never on user ids alone.
  */
 export interface OperatorActor {
   userId: string;
@@ -265,7 +271,8 @@ export class PaymentReconciliationOperator {
     const fourEyes = this.fourEyes;
     const { resolution, verdict } = await this.prisma.transaction(async (tx) => {
       const intent = await this.lockIntent(tx, paymentIntentId, organizationId);
-      if (isCreator(intent, actor)) throw separation('the payment’s creator may not resolve it');
+      // With four eyes, an approval proves the creator apart later; applied at once, now.
+      assertNotCreator(intent, actor, { mustProve: !fourEyes });
       const [wallet] = await this.walletRepository.lock(tx, [intent.walletId]);
       if (!wallet) throw RastaError.internal('Wallet vanished while locking it');
       const task = await this.tasks.lockOpenTask(tx, organizationId, paymentIntentId);
@@ -337,8 +344,8 @@ export class PaymentReconciliationOperator {
       });
       if (fourEyes) return { resolution: proposed, verdict: null };
       // Separation of duties configured off (development and test only): the
-      // proposer is the approver, and the record says so.
-      assertCreatorKnown(intent);
+      // proposer is the approver, and the record says so. The creator was
+      // proven apart above.
       return this.approveLocked(tx, task, proposed, actor, input.reason);
     });
     this.logAction(
@@ -470,18 +477,27 @@ export class PaymentReconciliationOperator {
       },
     });
     if (!proposed) throw RastaError.notFound('PaymentReconciliationResolution', resolutionId);
-    if (
-      proposed.fourEyes &&
-      (proposed.proposedBy === actor.userId ||
-        (proposed.proposedByIssuer === actor.issuer &&
-          proposed.proposedBySubject === actor.subject))
-    ) {
-      throw separation('a resolution is decided by someone other than its proposer');
+    // Approval moves money, so separation must be provable: a person who
+    // cannot be told apart (UNKNOWN) is refused. A rejection moves nothing and
+    // stays possible (to clear a proposal); only the same person is refused.
+    const mustProve = to === 'APPROVED';
+    if (proposed.fourEyes) {
+      const proposer = compareActors(
+        {
+          userId: proposed.proposedBy,
+          issuer: proposed.proposedByIssuer,
+          subject: proposed.proposedBySubject,
+        },
+        actor,
+      );
+      if (proposer === 'SAME') {
+        throw separation('a resolution is decided by someone other than its proposer');
+      }
+      if (proposer === 'UNKNOWN' && mustProve) {
+        throw actorIdentityUnknown('a resolution is decided by someone other than its proposer');
+      }
     }
-    if (isCreator(intent, actor)) throw separation('the payment’s creator may not resolve it');
-    // Approval moves money, so separation from the creator must be provable.
-    // A rejection moves nothing and stays possible (to clear a proposal).
-    if (to === 'APPROVED') assertCreatorKnown(intent);
+    assertNotCreator(intent, actor, { mustProve });
     if (proposed.status !== 'PENDING_APPROVAL') {
       throw RastaError.invalidStateTransition(
         'PaymentReconciliationResolution',
@@ -582,9 +598,11 @@ export class PaymentReconciliationOperator {
    *
    * Without `rasta_uid` the auth guard falls back to the IdP subject for
    * `userId`, which is how one person comes to hold two user ids (Codex on
-   * #175, HIGH 1). That fallback shows as `userId === subject`, or as no
-   * subject at all; either is refused here. Public so the controller can ask
-   * it before an idempotent replay is answered (MED 3).
+   * #175, HIGH 1). The guard says which it was (`platformUserId`, #188); a
+   * token without the claim, or a context with no verified issuer and subject,
+   * is refused here. Nothing is guessed from the values: a platform id that
+   * happens to equal the subject is a platform id. Public so the controller
+   * can ask it before an idempotent replay is answered (MED 3).
    */
   authorize(): OperatorActor {
     const context = getContext();
@@ -597,12 +615,13 @@ export class PaymentReconciliationOperator {
     ) {
       throw RastaError.forbidden('Only a payment reconciliation resolver may do this');
     }
-    if (!context.subject || context.userId === context.subject) {
+    const { userId, issuer, subject } = currentActor();
+    if (context.platformUserId !== true || issuer === null || subject === null) {
       throw RastaError.forbidden(
         'A payment reconciliation resolver must be signed in with a platform user id',
       );
     }
-    return { userId: context.userId, issuer: this.env.OIDC_ISSUER_URL, subject: context.subject };
+    return { userId, issuer, subject };
   }
 
   /** Ids and a fixed action code only: no reason, no evidence text (S-09). */
@@ -683,32 +702,30 @@ function separation(why: string): RastaError {
 }
 
 /**
- * Whether `actor` created the intent: by the creator's recorded issuer and
- * subject (the stable identity — Codex round 2 on #175), and by `created_by`,
- * which holds their user id, or their IdP subject when their token carried no
- * `rasta_uid`.
+ * The intent's creator is not `actor`, by `compareActors` (#188, part C) on
+ * the creator's recorded issuer and subject and on `created_by` — their user
+ * id, or their IdP subject when their token carried no `rasta_uid`.
+ *
+ * The same person is refused (`403`). One who cannot be told apart — an intent
+ * created before the identity was recorded, by a caller with no subject, or
+ * under another issuer — is refused where separation must be proven (an
+ * approval moves money): `422 ACTOR_IDENTITY_UNKNOWN`, never assumed. This
+ * replaces `CREATOR_IDENTITY_UNKNOWN` (runbook payment-refund-stuck § 4-2).
  */
-function isCreator(intent: PaymentIntent, actor: OperatorActor): boolean {
-  return (
-    (intent.createdByIssuer === actor.issuer && intent.createdBySubject === actor.subject) ||
-    intent.createdBy === actor.userId ||
-    intent.createdBy === actor.subject
-  );
-}
-
-/**
- * Fails closed when the intent records no creator identity — one created
- * before it was recorded, or by a caller with no subject. Without it nobody
- * can be shown not to be its creator, so an approval is refused, never
- * assumed (`CREATOR_IDENTITY_UNKNOWN`; runbook payment-refund-stuck § 4-2).
- */
-function assertCreatorKnown(intent: PaymentIntent): void {
-  if (!intent.createdByIssuer || !intent.createdBySubject) {
-    throw new RastaError(
-      ERROR_CODES.CREATOR_IDENTITY_UNKNOWN,
-      'This payment records no stable identity for its creator, so separation of duties ' +
-        'cannot be proven; it cannot be approved on the operator path',
-    );
+function assertNotCreator(
+  intent: PaymentIntent,
+  actor: OperatorActor,
+  options: { mustProve: boolean },
+): void {
+  const creator: ActorIdentity = {
+    userId: intent.createdBy,
+    issuer: intent.createdByIssuer,
+    subject: intent.createdBySubject,
+  };
+  const comparison = compareActors(creator, actor);
+  if (comparison === 'SAME') throw separation('the payment’s creator may not resolve it');
+  if (comparison === 'UNKNOWN' && options.mustProve) {
+    throw actorIdentityUnknown('the payment’s creator may not resolve it');
   }
 }
 
