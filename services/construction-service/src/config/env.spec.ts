@@ -124,6 +124,89 @@ describe('project roles (Q-69)', () => {
     });
   });
 
+  describe('who evaluates bids (ADR-067 § 4)', () => {
+    it('is empty by default, which means the owner role set', () => {
+      expect(load().CONSTRUCTION_TENDER_EVALUATE_ROLES).toEqual([]);
+    });
+
+    it('accepts a configured list, trimmed', () => {
+      expect(
+        load({ CONSTRUCTION_TENDER_EVALUATE_ROLES: 'ORGANIZATION_ADMIN, PROCUREMENT_USER' })
+          .CONSTRUCTION_TENDER_EVALUATE_ROLES,
+      ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+    });
+
+    it.each(['AUDITOR', 'SYSTEM_ADMIN', 'CONTRACTOR'])(
+      'refuses to start when it names %s',
+      (role) => {
+        expect(() =>
+          load({ CONSTRUCTION_TENDER_EVALUATE_ROLES: `ORGANIZATION_ADMIN,${role}` }),
+        ).toThrow(/CONSTRUCTION_TENDER_EVALUATE_ROLES/);
+      },
+    );
+
+    it('refuses an unknown role rather than ignoring it', () => {
+      expect(() => load({ CONSTRUCTION_TENDER_EVALUATE_ROLES: 'COMMITTEE_CHAIR' })).toThrow(
+        /Unknown role in CONSTRUCTION_TENDER_EVALUATE_ROLES/,
+      );
+    });
+  });
+
+  describe('how many evaluators (Q-88, Q-92: provisional)', () => {
+    it('defaults to ADR-067’s MVP: one evaluator per bid, one required', () => {
+      const env = load();
+      expect(env.CONSTRUCTION_EVALUATION_MIN_EVALUATORS).toBe(1);
+      expect(env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS).toBe(1);
+    });
+
+    it('accepts a committee', () => {
+      const env = load({
+        CONSTRUCTION_EVALUATION_MIN_EVALUATORS: '2',
+        CONSTRUCTION_EVALUATION_MAX_EVALUATORS: '3',
+      });
+      expect([
+        env.CONSTRUCTION_EVALUATION_MIN_EVALUATORS,
+        env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS,
+      ]).toEqual([2, 3]);
+    });
+
+    it('refuses a minimum above the maximum: no bid could ever be complete', () => {
+      expect(() =>
+        load({
+          CONSTRUCTION_EVALUATION_MIN_EVALUATORS: '2',
+          CONSTRUCTION_EVALUATION_MAX_EVALUATORS: '1',
+        }),
+      ).toThrow(/CONSTRUCTION_EVALUATION_MIN_EVALUATORS/);
+    });
+
+    it.each(['0', '10', '1.5', 'many'])('refuses %s', (value) => {
+      expect(() => load({ CONSTRUCTION_EVALUATION_MAX_EVALUATORS: value })).toThrow();
+      expect(() => load({ CONSTRUCTION_EVALUATION_MIN_EVALUATORS: value })).toThrow();
+    });
+  });
+
+  describe('the optional conflict-of-interest rules (Q-90, Q-92)', () => {
+    it('are all off by default', () => {
+      expect(load().CONSTRUCTION_COI_RULES).toEqual([]);
+    });
+
+    it('accepts rules from the closed set, trimmed', () => {
+      expect(
+        load({ CONSTRUCTION_COI_RULES: 'EVALUATOR_NOT_TENDER_AUTHOR, AWARDER_NOT_EVALUATOR' })
+          .CONSTRUCTION_COI_RULES,
+      ).toEqual(['EVALUATOR_NOT_TENDER_AUTHOR', 'AWARDER_NOT_EVALUATOR']);
+    });
+
+    it.each(['HIERARCHY', 'EVALUATOR_NOT_AUTHOR', 'ALL'])(
+      'refuses %s: a rule the code does not implement is not silently ignored',
+      (rule) => {
+        expect(() =>
+          load({ CONSTRUCTION_COI_RULES: `EVALUATOR_NOT_TENDER_AUTHOR,${rule}` }),
+        ).toThrow(/Unknown rule in CONSTRUCTION_COI_RULES/);
+      },
+    );
+  });
+
   describe('four-eyes for opening bids (Q-91)', () => {
     it('is on by default', () => {
       expect(load().CONSTRUCTION_TENDER_OPEN_FOUR_EYES).toBe(true);

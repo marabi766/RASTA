@@ -964,6 +964,7 @@ describe('bids', () => {
         accessedBy: expect.any(String),
         purpose: 'OWN_BID_RECEIPT',
         outcome: 'GRANTED',
+        refusalCode: null,
         accessedAt: rows[0]!.accessedAt.toISOString(),
       });
       expect(JSON.stringify(rows) + JSON.stringify(event!.payload)).not.toMatch(

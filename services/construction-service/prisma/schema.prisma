@@ -510,6 +510,10 @@ model Tender {
   openedAt DateTime? @map("opened_at") @db.Timestamptz(3)
   openedBy String?   @map("opened_by")
 
+  /// When and by whom the evaluation was completed (ADR-067 § 2); both or neither, present from EVALUATED on.
+  evaluatedAt DateTime? @map("evaluated_at") @db.Timestamptz(3)
+  evaluatedBy String?   @map("evaluated_by")
+
   /// Four-eyes for opening (Q-91, provisional): who proposed it and when; both or neither.
   /// Housekeeping, not state: proposing changes neither `status` nor `version`. The opener
   /// (`opened_by`) is a second person, checked by the service.
@@ -536,6 +540,10 @@ model Tender {
   bids        Bid[]
   bidReceipts BidReceipt[]
   bidAccesses BidAccessLog[]
+  qualifications BidQualification[]
+  evaluations    BidEvaluation[]
+  recusals       BidEvaluationRecusal[]
+  scores         BidEvaluationScore[]
 
   @@unique([organizationId, id], map: "ux_tender_org_id")
   @@index([organizationId, status, id], map: "ix_tender_org_status")
@@ -902,14 +910,120 @@ model BidAccessLog {
   bidId                  String?  @map("bid_id")
   accessorOrganizationId String   @map("accessor_organization_id")
   accessorUserId         String   @map("accessor_user_id")
-  /// A closed code (`OWN_BID_RECEIPT`); owner-side purposes arrive with PR 8.
+  /// A closed code (`OWN_BID_RECEIPT`, `OPEN_BIDS`, `SCORE_BID` …): see `BID_ACCESS_PURPOSES`.
   purpose                String
   /// `GRANTED` or `REFUSED`.
   outcome                String
+  /// Why it was refused, as a closed code (`CONFLICT_OF_INTEREST`, …); null when granted
+  /// and on the refusals that predate it.
+  refusalCode            String?  @map("refusal_code")
   accessedAt             DateTime @map("accessed_at")
 
   tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
   @@index([organizationId, tenderId, accessedAt], map: "ix_bid_access_org_tender_time")
   @@map("bid_access_log")
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation of opened bids (CON-002 PR 9, ADR-067 § 2, § 4)
+//
+// Every table here lives under the tender owner's organization, is append-only
+// (a trigger refuses UPDATE, DELETE and TRUNCATE) and accepts a row only while
+// the tender is EVALUATING: after `evaluate` the matrix cannot change.
+// ---------------------------------------------------------------------------
+
+enum QualificationDecision {
+  QUALIFIED
+  DISQUALIFIED
+}
+
+/// The decision on one opened bid, once: OPENED → QUALIFIED or DISQUALIFIED. A
+/// disqualification names a closed reason and says why in prose (which stays here,
+/// never on an event). `standingAsOf` is when supplier-service said the contractor
+/// was eligible, for a qualification (Q-85: a suspension after the bid is seen here).
+model BidQualification {
+  id String @id
+
+  organizationId String @map("organization_id")
+  tenderId       String @map("tender_id")
+  bidId          String @map("bid_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  decision      QualificationDecision
+  reasonCode    String?               @map("reason_code")
+  reasonText    String?               @map("reason_text")
+  standingAsOf  DateTime?             @map("standing_as_of") @db.Timestamptz(3)
+
+  decidedAt DateTime @map("decided_at") @db.Timestamptz(3)
+  decidedBy String   @map("decided_by")
+
+  @@unique([organizationId, tenderId, bidId], map: "ux_bid_qualification_bid")
+  @@map("bid_qualification")
+}
+
+/// One evaluator's evaluation of one qualified bid: the claim that makes the evaluator
+/// one of the bid's evaluators (their number is bounded, Q-92). The scores are its rows.
+model BidEvaluation {
+  id String @id
+
+  organizationId String @map("organization_id")
+  tenderId       String @map("tender_id")
+  bidId          String @map("bid_id")
+  evaluatorId    String @map("evaluator_id")
+
+  tender Tender                @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  scoreRows BidEvaluationScore[]
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, tenderId, bidId, evaluatorId], map: "ux_bid_evaluation_evaluator")
+  @@unique([organizationId, id], map: "ux_bid_evaluation_org_id")
+  @@map("bid_evaluation")
+}
+
+/// An evaluator stands down from one bid: their scores for it (if any) leave the matrix
+/// and they may not score or qualify it. Append-only and final.
+model BidEvaluationRecusal {
+  id String @id
+
+  organizationId String @map("organization_id")
+  tenderId       String @map("tender_id")
+  bidId          String @map("bid_id")
+  evaluatorId    String @map("evaluator_id")
+
+  tender Tender @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  /// A closed code; prose is not kept.
+  reasonCode String   @map("reason_code")
+  recusedAt  DateTime @map("recused_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, tenderId, bidId, evaluatorId], map: "ux_bid_recusal_evaluator")
+  @@map("bid_evaluation_recusal")
+}
+
+/// One cell of the matrix, revised by appending: the cell is the latest `revision` of
+/// (evaluation, criterion). `scoreScaled` is the score × 100, an integer in 0..maxScore × 100
+/// (ADR-067 § 2): no float, no division, no rounding.
+model BidEvaluationScore {
+  id String @id
+
+  organizationId String @map("organization_id")
+  tenderId       String @map("tender_id")
+  bidId          String @map("bid_id")
+  evaluationId   String @map("evaluation_id")
+  evaluatorId    String @map("evaluator_id")
+
+  tender     Tender        @relation(fields: [organizationId, tenderId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  evaluation BidEvaluation @relation(fields: [organizationId, evaluationId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  criterionCode String   @map("criterion_code")
+  revision      Int
+  scoreScaled   Int      @map("score_scaled")
+  scoredAt      DateTime @map("scored_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, evaluationId, criterionCode, revision], map: "ux_bid_score_cell_revision")
+  @@index([organizationId, tenderId, bidId], map: "ix_bid_score_org_tender_bid")
+  @@map("bid_evaluation_score")
 }

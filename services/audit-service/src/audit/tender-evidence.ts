@@ -44,16 +44,29 @@ export const receiptPayloadSchema = z
 
 export type ReceiptPayload = z.infer<typeof receiptPayloadSchema>;
 
-export const accessPayloadSchema = z.object({
-  bidId: identifier.nullable(),
-  tenderId: identifier,
-  organizationId: identifier,
-  accessorOrganizationId: identifier,
-  accessedBy: identifier,
-  purpose: z.string().min(1).max(64),
-  outcome: z.enum(['GRANTED', 'REFUSED']),
-  accessedAt: instant,
-});
+export const accessPayloadSchema = z
+  .object({
+    bidId: identifier.nullable(),
+    tenderId: identifier,
+    organizationId: identifier,
+    accessorOrganizationId: identifier,
+    accessedBy: identifier,
+    purpose: z.string().min(1).max(64),
+    outcome: z.enum(['GRANTED', 'REFUSED']),
+    /**
+     * Why a refused read was refused: a closed code (CONFLICT_OF_INTEREST, NOT_OPENED,
+     * NOT_FOUND …). Absent on events that predate it; only a refusal has one.
+     */
+    refusalCode: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]{0,63}$/)
+      .nullable()
+      .optional(),
+    accessedAt: instant,
+  })
+  .refine((access) => access.refusalCode == null || access.outcome === 'REFUSED', {
+    message: 'only a refused read has a refusal code',
+  });
 
 export type AccessPayload = z.infer<typeof accessPayloadSchema>;
 

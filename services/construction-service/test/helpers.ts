@@ -40,6 +40,11 @@ import { TenderClock } from '../src/tender/tender-clock';
 import { TenderOpenRepository } from '../src/tender/tender-open.repository';
 import { TenderOpenService } from '../src/tender/tender-open.service';
 import { BidAccessAudit } from '../src/tender/bid-access-audit';
+import { BidContentReader } from '../src/tender/bid-content-reader';
+import { OwnerIdentity } from '../src/tender/owner-identity';
+import { OwnBidService } from '../src/tender/own-bid.service';
+import { EvaluationRepository } from '../src/tender/evaluation.repository';
+import { EvaluationService } from '../src/tender/evaluation.service';
 import type { LiveAnswer, LiveMembership, MembershipSource } from '../src/tender/membership.client';
 import type { TenderChain, TenderEvidenceSource } from '../src/tender/tender-evidence.client';
 import { genesisReceipt } from '../src/tender/sealing/sealing';
@@ -193,6 +198,9 @@ export interface Wiring {
   memberships: FakeMemberships;
   tenderOpens: TenderOpenRepository;
   tenderOpen: TenderOpenService;
+  /** CON-002 PR 9: evaluating the opened bids, and a contractor reading its own opened bid. */
+  evaluation: EvaluationService;
+  ownBids: OwnBidService;
   close(): Promise<void>;
 }
 
@@ -280,6 +288,8 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const evidence = new FakeTenderEvidence(prisma);
   const memberships = new FakeMemberships();
   const tenderOpens = new TenderOpenRepository(prisma);
+  const reader = new BidContentReader(evidence, keys);
+  const identity = new OwnerIdentity(access, memberships);
   const tenderClose = new TenderCloseService(prisma, tenderCloses, events, clock);
   const tenderCloseSweeperWith = (overrides: Partial<TenderCloseSweeperOptions> = {}) =>
     new TenderCloseSweeper(tenderCloses, tenderClose, {
@@ -306,10 +316,23 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       access,
       env,
       clock,
-      evidence,
-      keys,
+      reader,
+      identity,
       memberships,
     ),
+    evaluation: new EvaluationService(
+      prisma,
+      new EvaluationRepository(),
+      tenderOpens,
+      bidAudit,
+      events,
+      access,
+      identity,
+      new StandingAuthority(SUPPLIER),
+      clock,
+      env,
+    ),
+    ownBids: new OwnBidService(prisma, bidRepository, reader, bidAudit, access),
     tenderCloses,
     tenderClose,
     tenderCloseSweeper: tenderCloseSweeperWith(),
@@ -675,22 +698,27 @@ export async function cleanup(_prisma: PrismaService, organizationIds: string[])
       await tx.$executeRawUnsafe('ALTER TABLE "tender_key" DISABLE TRIGGER "tg_tender_key_guard"');
       await tx.tenderKey.deleteMany({ where });
       await tx.$executeRawUnsafe('ALTER TABLE "tender_key" ENABLE TRIGGER "tg_tender_key_guard"');
-      // A bid is never deleted, and its receipts and access log are append-only.
-      for (const [table, trigger] of [
+      // A bid is never deleted, and its receipts, access log and evaluation are append-only.
+      const APPEND_ONLY = [
         ['bid', 'tg_bid_guard'],
         ['bid_receipt', 'tg_bid_receipt_append_only'],
         ['bid_access_log', 'tg_bid_access_log_append_only'],
-      ] as const) {
+        ['bid_qualification', 'tg_bid_qualification_append_only'],
+        ['bid_evaluation', 'tg_bid_evaluation_append_only'],
+        ['bid_evaluation_recusal', 'tg_bid_recusal_append_only'],
+        ['bid_evaluation_score', 'tg_bid_score_append_only'],
+      ] as const;
+      for (const [table, trigger] of APPEND_ONLY) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
       }
+      await tx.bidEvaluationScore.deleteMany({ where });
+      await tx.bidEvaluation.deleteMany({ where });
+      await tx.bidEvaluationRecusal.deleteMany({ where });
+      await tx.bidQualification.deleteMany({ where });
       await tx.bidAccessLog.deleteMany({ where });
       await tx.bidReceipt.deleteMany({ where });
       await tx.bid.deleteMany({ where });
-      for (const [table, trigger] of [
-        ['bid', 'tg_bid_guard'],
-        ['bid_receipt', 'tg_bid_receipt_append_only'],
-        ['bid_access_log', 'tg_bid_access_log_append_only'],
-      ] as const) {
+      for (const [table, trigger] of APPEND_ONLY) {
         await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
       }
     });
@@ -1213,4 +1241,44 @@ export async function approvedProject(
 /** The approvals of a project, read as its own administrator. */
 export async function approvalsOf(w: Wiring, organizationId: string, projectId: string) {
   return asAdmin(organizationId, () => w.approvals.listForProject(projectId, {}));
+}
+
+/**
+ * A tender in EVALUATING (CON-002 PR 9): published with the criteria PRICE (6000 bp, MANUAL_SCORE,
+ * 0..100) and LICENCE (4000 bp, PASS_FAIL), `count` qualified contractors each with one bid, the
+ * deadline passed, closed, and opened by its owner — which needs a wiring with four-eyes off
+ * (`CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false`, development and test only). The organizations are
+ * recorded in `organizations` for the suite's cleanup.
+ */
+export async function evaluatingTender(
+  w: Wiring,
+  organizations: string[],
+  count = 2,
+): Promise<{
+  owner: string;
+  tenderId: string;
+  bids: { bidder: string; bidId: string }[];
+}> {
+  const owner = newOrganizationId();
+  organizations.push(owner);
+  const { tenderId } = await publishedForBids(w, owner);
+  const bids: { bidder: string; bidId: string }[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const bidder = newOrganizationId();
+    organizations.push(bidder);
+    await qualify(w, bidder);
+    const view = await asBidder(bidder, () =>
+      w.bids.submit(tenderId, { content: bidContent(String(1_000 + i)) }),
+    );
+    bids.push({ bidder, bidId: view.bidId });
+  }
+  await runUnscoped('the suite lets the deadline pass', () =>
+    w.prisma.client.$executeRawUnsafe(
+      `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+         "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
+    ),
+  );
+  await w.tenderClose.close({ organizationId: owner, tenderId });
+  await asAdmin(owner, () => w.tenderOpen.open(tenderId));
+  return { owner, tenderId, bids };
 }

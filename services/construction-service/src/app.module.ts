@@ -78,6 +78,12 @@ import { BidService } from './tender/bid.service';
 import { BidController } from './tender/bid.controller';
 import { BidAccessAudit } from './tender/bid-access-audit';
 import { BidOpeningController } from './tender/bid-opening.controller';
+import { BidContentReader } from './tender/bid-content-reader';
+import { OwnerIdentity } from './tender/owner-identity';
+import { OwnBidService } from './tender/own-bid.service';
+import { EvaluationRepository } from './tender/evaluation.repository';
+import { EvaluationService } from './tender/evaluation.service';
+import { EvaluationController } from './tender/evaluation.controller';
 import { TenderOpenRepository } from './tender/tender-open.repository';
 import { TenderOpenService } from './tender/tender-open.service';
 import { DatabaseTenderClock, TenderClock } from './tender/tender-clock';
@@ -136,6 +142,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     PublicationController,
     BidController,
     BidOpeningController,
+    EvaluationController,
     HealthController,
     MetricsController,
   ],
@@ -198,7 +205,15 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     // ADR-066: opening the bids and the owner's audited reads of them (CON-002 PR 8).
     TenderOpenRepository,
     BidAccessAudit,
+    // The evidence, the key and the sealed content (ADR-066 § 2-3), and who the caller is now
+    // (ADR-066 § 4): shared by opening, the owner's reads, evaluation and a contractor's own read.
+    BidContentReader,
+    OwnerIdentity,
     TenderOpenService,
+    // ADR-067: evaluating the opened bids, and a contractor reading its own bid after the opening.
+    EvaluationRepository,
+    EvaluationService,
+    OwnBidService,
     // ADR-065 § 3: a bounded, leased, fenced sweep closes tenders past their deadline.
     // The bids are refused by the clock whether or not it runs.
     TenderCloseRepository,

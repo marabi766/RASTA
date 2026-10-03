@@ -151,6 +151,11 @@ export const ID_PREFIX = {
   /** CON-002 PR 6: a bid (the platform prefix) and a row of the bid access log. */
   bid: ID_PREFIXES.bid,
   bidAccess: 'BAL',
+  /** CON-002 PR 9: a decision on a bid, an evaluator's claim on it, their standing down, one revision of a score. */
+  qualification: 'BQL',
+  evaluation: 'BEV',
+  recusal: 'BRC',
+  score: 'BSC',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

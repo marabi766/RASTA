@@ -57,6 +57,23 @@ const OVERSIGHT_ROLE = 'AUDITOR';
  */
 const BID_EXCLUDED_ROLES: readonly string[] = [SUPER_ROLE, CONTRACTOR_ROLE, OVERSIGHT_ROLE];
 
+/**
+ * Roles that never act on the **bidder's** side, refused whenever present, whatever else the
+ * user holds (a token with `SYSTEM_ADMIN` and `CONTRACTOR` is not a contractor): the platform
+ * administrator has no access to a bid through the API (ADR-066 § 4), and the oversight role has
+ * aggregate access only. The one list next to the owner-side one; `CONTRACTOR` is the role the
+ * bidder side *requires*, so it is not here. Every bidder route goes through `assertCanBid`.
+ */
+const BIDDER_EXCLUDED_ROLES: readonly string[] = [SUPER_ROLE, OVERSIGHT_ROLE];
+
+function assertNoBidderExcludedRole(roles: readonly string[]): void {
+  for (const refused of BIDDER_EXCLUDED_ROLES) {
+    if (roles.includes(refused)) {
+      throw RastaError.forbidden(`The ${refused} role does not act for a bidder`);
+    }
+  }
+}
+
 function assertNoBidExcludedRole(roles: readonly string[]): void {
   for (const refused of BID_EXCLUDED_ROLES) {
     if (roles.includes(refused)) {
@@ -102,12 +119,18 @@ export class ProjectAccess {
   private readonly readers: readonly string[];
   private readonly policyReaders: readonly string[];
   private readonly bidOpeners: readonly string[];
+  private readonly evaluators: readonly string[];
 
   constructor(@Inject(ENV) env: ConstructionEnv) {
     this.writers = [SUPER_ROLE, ...env.CONSTRUCTION_PROJECT_ROLES];
     this.bidOpeners = (
       env.CONSTRUCTION_TENDER_OPEN_ROLES.length > 0
         ? env.CONSTRUCTION_TENDER_OPEN_ROLES
+        : env.CONSTRUCTION_PROJECT_ROLES
+    ).filter((role) => !BID_EXCLUDED_ROLES.includes(role));
+    this.evaluators = (
+      env.CONSTRUCTION_TENDER_EVALUATE_ROLES.length > 0
+        ? env.CONSTRUCTION_TENDER_EVALUATE_ROLES
         : env.CONSTRUCTION_PROJECT_ROLES
     ).filter((role) => !BID_EXCLUDED_ROLES.includes(role));
     this.readers = [...this.writers, ...env.CONSTRUCTION_PROJECT_READER_ROLES];
@@ -307,9 +330,11 @@ export class ProjectAccess {
    * one, and the database refuses a bid on one's own tender).
    */
   assertCanBid(): { organizationId: string; actor: string } {
-    assertNotAuditor();
     assertNotServiceCaller();
     const context = getContext();
+    // Refused whenever present, alongside CONTRACTOR as well: the platform administrator and the
+    // oversight role do not read or write a bidder's bid by also holding the bidder's role.
+    assertNoBidderExcludedRole(context.roles);
     if (!context.roles.includes(CONTRACTOR_ROLE)) {
       throw RastaError.insufficientRole([CONTRACTOR_ROLE], context.roles);
     }
@@ -339,16 +364,51 @@ export class ProjectAccess {
     actor: string;
     organizationIds: readonly string[];
   } {
+    return this.assertOwnerBidSide(this.bidOpeners, 'open its bids');
+  }
+
+  /**
+   * The same rule as `assertCanOpenBids`, on the roles identity-service says the caller holds
+   * **now** in the organization they act for, not the token's: a token outlives a revocation
+   * or a demotion, and a bid's content is not read on a stale claim. The token may only narrow.
+   */
+  assertLiveRolesMayOpenBids(liveRoles: readonly string[]): void {
+    this.assertLiveBidSide(this.bidOpeners, liveRoles, 'opens or reads bids');
+  }
+
+  /**
+   * May the caller evaluate a tender's opened bids and read the matrix, and as whom? The owner's
+   * side again (ADR-067 § 4): `CONSTRUCTION_TENDER_EVALUATE_ROLES`, by default the owner's own
+   * role set, and the **same** refusals as for opening — `SYSTEM_ADMIN`, `AUDITOR`, `CONTRACTOR`
+   * and a service token, each whenever present, from the one list `BID_EXCLUDED_ROLES`.
+   */
+  assertCanEvaluate(): {
+    organizationId: string;
+    actor: string;
+    organizationIds: readonly string[];
+  } {
+    return this.assertOwnerBidSide(this.evaluators, 'evaluate its bids');
+  }
+
+  /** `assertCanEvaluate` on the live roles identity-service reports, as for opening. */
+  assertLiveRolesMayEvaluate(liveRoles: readonly string[]): void {
+    this.assertLiveBidSide(this.evaluators, liveRoles, 'evaluates bids');
+  }
+
+  private assertOwnerBidSide(
+    roles: readonly string[],
+    what: string,
+  ): { organizationId: string; actor: string; organizationIds: readonly string[] } {
     assertNotServiceCaller();
     const context = getContext();
     // Refused whenever present, whatever else the user holds: a role that must never see
     // a bid is not made harmless by a second, granted one.
     assertNoBidExcludedRole(context.roles);
-    if (!this.bidOpeners.some((role) => context.roles.includes(role))) {
-      throw RastaError.insufficientRole(this.bidOpeners, context.roles);
+    if (!roles.some((role) => context.roles.includes(role))) {
+      throw RastaError.insufficientRole(roles, context.roles);
     }
     if (!context.organizationId) {
-      throw RastaError.forbidden('Select an organization with X-Organization-Id to open its bids');
+      throw RastaError.forbidden(`Select an organization with X-Organization-Id to ${what}`);
     }
     if (!context.userId) {
       throw RastaError.forbidden('This operation records an actor and the request names none');
@@ -360,16 +420,15 @@ export class ProjectAccess {
     };
   }
 
-  /**
-   * The same rule as `assertCanOpenBids`, on the roles identity-service says the caller holds
-   * **now** in the organization they act for, not the token's: a token outlives a revocation
-   * or a demotion, and a bid's content is not read on a stale claim. The token may only narrow.
-   */
-  assertLiveRolesMayOpenBids(liveRoles: readonly string[]): void {
+  private assertLiveBidSide(
+    roles: readonly string[],
+    liveRoles: readonly string[],
+    what: string,
+  ): void {
     assertNoBidExcludedRole(liveRoles);
-    if (!this.bidOpeners.some((role) => liveRoles.includes(role))) {
+    if (!roles.some((role) => liveRoles.includes(role))) {
       throw RastaError.forbidden(
-        'The caller no longer holds a role that opens or reads bids in this organization',
+        `The caller no longer holds a role that ${what} in this organization`,
       );
     }
   }

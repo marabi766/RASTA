@@ -30,6 +30,13 @@ export const DEFAULT_PORT = '3110';
  */
 const REFUSED_ROLE = 'AUDITOR';
 
+/**
+ * The conflict-of-interest rules the code implements, each off unless
+ * `CONSTRUCTION_COI_RULES` names it (ADR-067 § 4, Q-90). A new rule is code and an ADR.
+ */
+export const COI_RULES = ['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR'] as const;
+export type CoiRule = (typeof COI_RULES)[number];
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -90,6 +97,12 @@ function roleList(name: string, options: { min: number }) {
  *                                       a tender's bids is proposed by one user and
  *                                       approved by a second. Default `true`; `false`
  *                                       only in development and test.
+ *   CONSTRUCTION_TENDER_EVALUATE_ROLES  ADR-067 § 4. Who evaluates opened bids; default the
+ *                                       tender owner's role set.
+ *   CONSTRUCTION_EVALUATION_MIN_EVALUATORS / _MAX_EVALUATORS
+ *                                       Q-88, Q-92. Evaluators that must have scored each
+ *                                       qualified bid / may score one. Default 1 and 1.
+ *   CONSTRUCTION_COI_RULES              Q-90, Q-92. Optional conflict rules, off by default.
  *   IDENTITY_SERVICE_URL                Where the proposer's and the approver's current
  *                                       organizations are read at the approval of an
  *                                       opening (and CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS);
@@ -172,6 +185,53 @@ export const constructionEnvSchema = baseEnvSchema
      * opens) is accepted only where NODE_ENV is `development` or `test`.
      */
     CONSTRUCTION_TENDER_OPEN_FOUR_EYES: booleanEnv(true),
+
+    /**
+     * ADR-067 § 4: who may evaluate the opened bids of a tender (qualify, score, stand
+     * down, complete the evaluation) and read the matrix. Empty (the default) means the
+     * tender owner's own role set, `CONSTRUCTION_PROJECT_ROLES`. The same refusals as for
+     * opening bids: `SYSTEM_ADMIN` and `CONTRACTOR` are refused at startup.
+     */
+    CONSTRUCTION_TENDER_EVALUATE_ROLES: z
+      .string()
+      .default('')
+      .pipe(roleList('CONSTRUCTION_TENDER_EVALUATE_ROLES', { min: 0 }))
+      .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
+        message:
+          'CONSTRUCTION_TENDER_EVALUATE_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither evaluates bids (ADR-066 § 4, ADR-067 § 4)',
+      }),
+
+    /**
+     * Q-88 / Q-92, PROVISIONAL: how many evaluators must have scored every qualified bid
+     * before the evaluation may be completed (`MIN`), and how many may score one bid (`MAX`).
+     * The defaults are ADR-067's MVP — one evaluator per bid — and make the aggregation of
+     * several evaluators' scores unnecessary. `MAX` above 1 turns it on: a bid's score is the
+     * mean of its evaluators' totals, compared exactly (cross-multiplied, no rounding).
+     */
+    CONSTRUCTION_EVALUATION_MIN_EVALUATORS: z.coerce.number().int().min(1).max(9).default(1),
+    CONSTRUCTION_EVALUATION_MAX_EVALUATORS: z.coerce.number().int().min(1).max(9).default(1),
+
+    /**
+     * Q-90 / Q-92: the conflict-of-interest rules that are OFF unless named, from the closed
+     * set in code (`COI_RULES`). `EVALUATOR_NOT_TENDER_AUTHOR` applies to evaluation;
+     * `AWARDER_NOT_EVALUATOR` is recorded here and enforced by `award` (CON-002 PR 10).
+     * A name outside the set stops the service at startup: a rule that is not implemented is
+     * not silently ignored.
+     */
+    CONSTRUCTION_COI_RULES: z
+      .string()
+      .default('')
+      .pipe(
+        commaList().pipe(
+          z.array(
+            z.enum(COI_RULES, {
+              errorMap: () => ({
+                message: `Unknown rule in CONSTRUCTION_COI_RULES; the closed set is ${COI_RULES.join(', ')}`,
+              }),
+            }),
+          ),
+        ),
+      ),
 
     CONSTRUCTION_CANCELLABLE_STATES: z
       .string()
@@ -385,6 +445,14 @@ export const constructionEnvSchema = baseEnvSchema
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass
   // startup and fail only when a tender was first published. Judged together, here.
   .superRefine((env, ctx) => {
+    if (env.CONSTRUCTION_EVALUATION_MIN_EVALUATORS > env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CONSTRUCTION_EVALUATION_MIN_EVALUATORS'],
+        message:
+          'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
+      });
+    }
     if (
       !env.CONSTRUCTION_TENDER_OPEN_FOUR_EYES &&
       env.NODE_ENV !== 'development' &&

@@ -573,6 +573,20 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
   عضو پیشنهاددهنده یافت پاکش کرد: `tenderId`، `organizationId`، `proposedBy`، `withdrawnBy`، `reason`
   (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED`)، `withdrawnAt`.
 
+**پیاده‌شده در CON-002 PR 9 (ارزیابی؛ ADR-067).** پنج رویداد (`aggregateType = Tender`، کلید `tenderId`؛ فقط شناسه، کد بسته، شمار و Digest، `.strict()`؛ بی `projectId` جز `BIDS_EVALUATED`):
+
+- `BID_QUALIFIED` / `BID_DISQUALIFIED` — **نام‌ها را مدیر پروژه پذیرفت (2026-09-30).** `bidId`، `tenderId`، `organizationId`، `decidedBy`، `decidedAt`؛ `BID_DISQUALIFIED` فقط
+  `reasonCode` (`NOT_ELIGIBLE | NON_RESPONSIVE | INTEGRITY_VIOLATION | OTHER`، Q-92) را هم دارد — **متن دلیل هرگز نمی‌آید.** هر پیشنهاد یک تصمیم دارد.
+- `BIDS_EVALUATED` — **نام را مدیر پروژه پذیرفت (2026-09-30)؛ ستون `matrixDigest` افزوده شد.** `tenderId`، `projectId`، `organizationId`، `evaluatedBidCount` (پیشنهادهای `QUALIFIED`)، `matrixDigest`
+  (SHA-256 به‌صورت hex از خطوط مرتب‌شدهٔ همهٔ تصمیم‌ها، کناره‌گیری‌ها و هر بازبینی هر خانه؛ ماتریس منجمدشده را مهر می‌کند)، `evaluatedBy`، `evaluatedAt`. نه نمره، نه رتبه، نه برنده. هر مناقصه **یک** `BIDS_EVALUATED` دارد.
+- `BID_SCORED` — **افزودهٔ CON-002 برای S-06؛ مدیر پروژه پذیرفت (2026-10-02، دور اول بازبینی #190).** `bidId`، `tenderId`، `organizationId`، `evaluationId`، `evaluatorId`، `recordedCount` (خانه‌های نوشته‌شده؛ هر یک بازبینی تازه)، `scoresDigest`
+  (SHA-256 از خطوط `criterionCode|revision|scoreScaled`، مرتب و پیوسته با `\n`)، `scoredAt`. **خود نمره‌ها روی رویداد نیست.** نمرهٔ برابر با نمرهٔ ایستاده چیزی نمی‌نویسد و رویدادی ندارد.
+- `BID_EVALUATOR_RECUSED` — **افزودهٔ CON-002 برای S-06؛ مدیر پروژه پذیرفت (2026-10-02).** `bidId`، `tenderId`، `organizationId`، `evaluatorId`، `reasonCode` (`CONFLICT_OF_INTEREST | OTHER`)، `recusedAt`.
+
+`BID_ACCESSED`: فیلد تازهٔ `refusalCode` (کد بستهٔ دلیل رد: دلیل رد مثل `CONFLICT_OF_INTEREST`، `NOT_OPENED`، `RECUSED`، یا کد خطای پلتفرم مثل `NOT_FOUND`؛ در `GRANTED` برابر `null`) و هدف‌های تازهٔ
+`OWN_BID_CONTENT` (پیمانکار پیشنهاد بازشدهٔ خودش را می‌خواند)، `QUALIFY_BID`، `SCORE_BID`، `RECUSE`، `EVALUATE_BIDS` (فرمان ارزیابی؛ بی `bidId` برای `EVALUATE_BIDS`) و `READ_EVALUATION` (خواندن ماتریس، به‌ازای هر پیشنهاد).
+هر رد (از جمله تعارض منافع) ردیف `REFUSED` با کدش دارد. فیلد `refusalCode` و ستون `matrixDigest` را مدیر پروژه پذیرفت (2026-10-02). **`audit-service` کد را می‌خواند و در `bid_access_evidence.refusal_code` نگه می‌دارد** (ستون تهی‌پذیر، مهاجرت برگشت‌پذیر `20261002160000_bid_access_refusal_code`؛ الحاقی می‌ماند): فقط یک رد کد دارد و کد باید بسته باشد (الگوی `^[A-Z][A-Z0-9_]{0,63}$`)، وگرنه رویداد ناقرارداد است (DLQ). رویدادِ پیش از این فیلد همچنان ثبت می‌شود، بی کد. `down.sql` تا وقتی ردیفی کد دارد رد می‌کند.
+
 **مصرف در `audit-service` (برآمد Tender-Evidence، گروه `audit-service.tender-evidence`):** `BID_SUBMITTED`/`BID_REVISED` به
 `tender_receipt_link` (الحاقی) می‌روند و پیوستگی زنجیره هنگام درج وارسی می‌شود. رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود**
 (`tender_receipt_pending`) و در تراکنشِ الحاق پیشینش به ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_TENDER_GAP_ALERT_SECONDS` هشدار
