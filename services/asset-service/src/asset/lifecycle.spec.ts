@@ -2,7 +2,10 @@ import {
   allowedTransitions,
   canTransition,
   explainRefusal,
+  openWorkRefusal,
   DISPATCHABLE_STATUSES,
+  OPEN_ACTIVITY_STATUSES,
+  OPEN_WORK_REFUSALS,
   TERMINAL_STATUSES,
   TRANSITIONS,
   type AssetStatus,
@@ -104,12 +107,65 @@ describe('asset lifecycle', () => {
   });
 
   describe('withdrawal and end of life', () => {
-    it('allows withdrawal from every non-terminal state', () => {
+    it('allows withdrawal from every non-terminal state that has no open work', () => {
       for (const status of ALL_STATUSES) {
         if (status === 'OUT_OF_SERVICE' || TERMINAL_STATUSES.includes(status)) continue;
+        if (OPEN_ACTIVITY_STATUSES.includes(status)) continue;
         expect(canTransition(status, 'OUT_OF_SERVICE', 'USER')).toBe(true);
       }
     });
+
+    it('refuses withdrawal while another service has open work (docs/24 Q-93)', () => {
+      // Taking an ASSIGNED asset out of service directly would leave the
+      // assignment open in fleet-service; IN_MAINTENANCE, the repair open in
+      // maintenance-service. The owning service ends its work first, and its
+      // release event moves the status back to ACTIVE.
+      expect(canTransition('ASSIGNED', 'OUT_OF_SERVICE', 'USER')).toBe(false);
+      expect(canTransition('IN_MAINTENANCE', 'OUT_OF_SERVICE', 'USER')).toBe(false);
+    });
+
+    it('lets a person do nothing at all to the status while work is open', () => {
+      for (const status of OPEN_ACTIVITY_STATUSES) {
+        expect(allowedTransitions(status, 'USER')).toEqual([]);
+      }
+    });
+
+    it('leaves the owning services’ own events exactly as they were', () => {
+      // Only the person's route was closed. The events that start and end the
+      // work are what move the status out of these two states.
+      expect(allowedTransitions('ASSIGNED', 'EVENT').sort()).toEqual(['ACTIVE', 'IN_MAINTENANCE']);
+      expect(allowedTransitions('IN_MAINTENANCE', 'EVENT')).toEqual(['ACTIVE']);
+    });
+
+    it('gives each open-work status one closed code, naming the service that must act', () => {
+      expect(Object.keys(OPEN_WORK_REFUSALS).sort()).toEqual([...OPEN_ACTIVITY_STATUSES].sort());
+      expect(openWorkRefusal('ASSIGNED', 'USER')).toMatchObject({
+        code: 'OPEN_ASSIGNMENT',
+        message: expect.stringContaining('fleet-service'),
+      });
+      expect(openWorkRefusal('IN_MAINTENANCE', 'USER')).toMatchObject({
+        code: 'OPEN_MAINTENANCE',
+        message: expect.stringContaining('maintenance-service'),
+      });
+    });
+
+    it('is a refusal for a person only: an event is never told to end the work first', () => {
+      expect(openWorkRefusal('ASSIGNED', 'EVENT')).toBeNull();
+      expect(openWorkRefusal('ACTIVE', 'USER')).toBeNull();
+      expect(openWorkRefusal('OUT_OF_SERVICE', 'USER')).toBeNull();
+    });
+
+    it.each(['OUT_OF_SERVICE', 'DECOMMISSIONED', 'ACTIVE'] as const)(
+      'explains an open-work refusal the same way whatever is asked for (%s)',
+      (target) => {
+        expect(explainRefusal('ASSIGNED', target, 'USER')).toBe(
+          OPEN_WORK_REFUSALS.ASSIGNED!.message,
+        );
+        expect(explainRefusal('IN_MAINTENANCE', target, 'USER')).toBe(
+          OPEN_WORK_REFUSALS.IN_MAINTENANCE!.message,
+        );
+      },
+    );
 
     it('refuses to decommission an asset that is assigned or in the workshop', () => {
       // Retiring a machine somebody is currently driving, or that a workshop

@@ -921,6 +921,95 @@ describe('AssetService', () => {
       expect(h.enqueued.map((event) => event.eventName)).toEqual([ASSET_EVENTS.ASSET_ACTIVATED]);
     });
 
+    describe.each([
+      ['ASSIGNED', 'OPEN_ASSIGNMENT', 'fleet-service'],
+      ['IN_MAINTENANCE', 'OPEN_MAINTENANCE', 'maintenance-service'],
+    ] as const)('an asset with open work (%s) — docs/24 Q-93', (status, code, owner) => {
+      const refusedWith = async (command: (h: Harness) => Promise<unknown>) => {
+        const h = at(2, status);
+        const error = (await run(() => command(h).catch((e: RastaError) => e))) as RastaError;
+        expect(h.repository.transaction).not.toHaveBeenCalled();
+        expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+        return error;
+      };
+
+      it('cannot be taken out of service by a person: 409 INVALID_STATE_TRANSITION with a closed reason code', async () => {
+        const error = await refusedWith((h) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: 2,
+          }),
+        );
+
+        expect(error).toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          status: 409,
+          details: [{ path: 'status', code, message: expect.stringContaining(owner) }],
+        });
+        expect(error.message).toContain(owner);
+      });
+
+      it('cannot be decommissioned by a person either, with the same code', async () => {
+        const error = await refusedWith((h) =>
+          h.service.decommission(ASSET_ID, { reason: 'فرسودگی کامل ماشین', expectedVersion: 2 }),
+        );
+        expect(error).toMatchObject({
+          code: 'INVALID_STATE_TRANSITION',
+          details: [{ code }],
+        });
+      });
+
+      it('keeps the closed code out of the logged context as a reason, not a sentence, and carries no input', async () => {
+        const error = await refusedWith((h) =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'متن آزاد کاربر',
+            expectedVersion: 2,
+          }),
+        );
+        expect(error.internalContext).toEqual({
+          aggregate: 'Asset',
+          from: status,
+          to: 'OUT_OF_SERVICE',
+          reason: code,
+        });
+        expect(JSON.stringify(error.details)).not.toContain('متن آزاد کاربر');
+      });
+
+      it('is told the version is stale before it is told about the open work', async () => {
+        // A replay is a replay whatever state the machine is in now.
+        const h = at(3, status);
+        await expect(
+          run(() =>
+            h.service.changeStatus(ASSET_ID, {
+              status: 'OUT_OF_SERVICE',
+              reason: 'عیب فنی',
+              expectedVersion: 2,
+            }),
+          ),
+        ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
+      });
+    });
+
+    it('does not give the open-work code to a refusal that is about something else', async () => {
+      const h = at(2, 'ACTIVE');
+      const error = (await run(() =>
+        h.service
+          .changeStatus(ASSET_ID, {
+            // @ts-expect-error — the schema already excludes IN_MAINTENANCE; the service refuses it too.
+            status: 'IN_MAINTENANCE',
+            reason: 'دستی',
+            expectedVersion: 2,
+          })
+          .catch((e: RastaError) => e),
+      )) as RastaError;
+      expect(error.code).toBe('INVALID_STATE_TRANSITION');
+      expect(error.details).toBeUndefined();
+    });
+
     it('an event from another service is still judged on the status alone, with no version', async () => {
       const h = harness();
       await run(() => h.service.applyEventStatusChange(h.tx as never, ASSET_ID, 'ASSIGNED', 'x'));

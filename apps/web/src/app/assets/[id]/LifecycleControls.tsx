@@ -1,6 +1,11 @@
 import type { ReactNode } from 'react';
 
-import { statusTargetsFrom, type AssetLifecycleCommand } from '@/lib/asset-lifecycle-fields';
+import { Alert, ButtonLink } from '@/ui';
+import {
+  OPEN_WORK_NOTES,
+  statusTargetsFrom,
+  type AssetLifecycleCommand,
+} from '@/lib/asset-lifecycle-fields';
 
 import { ActivateAssetForm, ChangeStatusForm, DecommissionAssetForm } from './AssetLifecycleForms';
 
@@ -56,9 +61,26 @@ export function LifecycleControls({
   tokens,
 }: LifecycleControlsProps) {
   const targets = statusTargetsFrom(status);
+  const openWork = OPEN_WORK_NOTES[status];
 
   return (
     <div className="flex flex-col gap-8">
+      {/* Work another service holds: the person is told whose it is and what to
+          do first, instead of a form that would be refused (docs/24 Q-93). */}
+      {openWork ? (
+        <Alert
+          tone="info"
+          title={openWork.title}
+          actions={
+            <ButtonLink tone="secondary" href={openWork.href}>
+              رفتن به بخش مربوط
+            </ButtonLink>
+          }
+        >
+          {openWork.text}
+        </Alert>
+      ) : null}
+
       {tokens.activate ? (
         <Block headingId="lifecycle-activate" title="فعال‌سازی">
           <ActivateAssetForm csrfToken={csrfToken} {...tokens.activate} />

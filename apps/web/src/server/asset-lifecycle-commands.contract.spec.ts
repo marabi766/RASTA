@@ -18,6 +18,7 @@ import {
   ASSET_LIFECYCLE_CONFLICT_MESSAGE,
   CHANGE_STATUS_FIELD_MAPPING,
   CHANGE_STATUS_REASON_BOUNDS,
+  OPEN_WORK_CODES,
   DECOMMISSION_FIELD_MAPPING,
   DECOMMISSION_REASON_BOUNDS,
   canChangeAssetStatus,
@@ -253,6 +254,62 @@ describe('the transition table the forms are offered from', () => {
     for (const row of rows.filter((candidate) => candidate.actor === 'USER')) {
       expect(['ASSIGNED', 'IN_MAINTENANCE']).not.toContain(row.to);
     }
+  });
+});
+
+describe('open work in another service (docs/24 Q-93)', () => {
+  const lifecycleText = read(...ASSET, 'lifecycle.ts');
+  const lifecycle = parse(lifecycleText);
+  const refusals = topLevelConst(lifecycle, 'OPEN_WORK_REFUSALS');
+
+  /** `STATUS: { code: 'X', … }`, read literally. */
+  const byStatus = new Map(
+    collect(refusals, ts.isPropertyAssignment)
+      .filter((node) => ts.isObjectLiteralExpression(node.initializer))
+      .map((node) => {
+        const literal = node.initializer as ts.ObjectLiteralExpression;
+        const code = literal.properties.find(
+          (property): property is ts.PropertyAssignment =>
+            ts.isPropertyAssignment(property) && property.name.getText() === 'code',
+        );
+        if (!code || !ts.isStringLiteral(code.initializer)) {
+          throw new Error('an OPEN_WORK_REFUSALS row whose `code` is not a literal');
+        }
+        return [node.name.getText(), code.initializer.text] as const;
+      }),
+  );
+
+  it('is not vacuous: the reader found both statuses', () => {
+    expect([...byStatus.keys()].sort()).toEqual(['ASSIGNED', 'IN_MAINTENANCE']);
+  });
+
+  it('is the set of codes the portal says in Persian, and no other', () => {
+    expect([...byStatus.values()].sort()).toEqual(Object.keys(OPEN_WORK_CODES).sort());
+  });
+
+  it('is what the portal offers nothing from: no status change, no decommission, no activation', () => {
+    for (const status of byStatus.keys()) {
+      expect(USER_TRANSITIONS[status]).toEqual([]);
+      expect(statusTargetsFrom(status)).toEqual([]);
+      expect(canDecommissionFrom(status)).toBe(false);
+      expect(canActivateFrom(status)).toBe(false);
+    }
+  });
+
+  it('travels in the 409’s `details[].code` on the `status` path, for the portal to read', () => {
+    const service = squash(serviceSource);
+    expect(service).toContain("newRastaError('INVALID_STATE_TRANSITION',message,{");
+    expect(service).toContain("details:[{path:'status',message,code:openWork.code}]");
+  });
+
+  it('is told apart from a stale version: the version is still judged first', () => {
+    const body = (name: string) => {
+      const declaration = collect(parse(serviceSource), ts.isMethodDeclaration).find(
+        (node) => node.name.getText() === name,
+      );
+      return declaration?.body?.getText() ?? '';
+    };
+    expect(body('assertTransition')).toContain('openWorkRefusal(from, actor)');
   });
 });
 

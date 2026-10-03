@@ -304,6 +304,53 @@ describe('LifecycleControls', () => {
     expect(container.querySelector('form')).toBeNull();
   });
 
+  describe.each([
+    ['ASSIGNED', 'این دارایی تخصیص باز دارد', '/drivers'],
+    ['IN_MAINTENANCE', 'این دارایی در تعمیر است', '/maintenance'],
+  ] as const)('an asset with open work (%s) — docs/24 Q-93', (status, title, href) => {
+    it('says whose work it is and where to end it, and draws no form', () => {
+      const { container } = render(
+        <LifecycleControls assetName={NAME} status={status} csrfToken={CSRF} tokens={{}} />,
+      );
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.getByText(/وضعیت یا اسقاط آن از اینجا ممکن نیست/)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'رفتن به بخش مربوط' })).toHaveAttribute('href', href);
+      expect(container.querySelector('form')).toBeNull();
+      expect(container.querySelector('button')).toBeNull();
+    });
+
+    it('draws no status form even if it was handed a baseline for one', () => {
+      const { container } = render(
+        <LifecycleControls
+          assetName={NAME}
+          status={status}
+          csrfToken={CSRF}
+          tokens={{ status: token('A') }}
+        />,
+      );
+      expect(container.querySelector('form')).toBeNull();
+    });
+
+    it('has no accessibility violations', async () => {
+      const { container } = render(
+        <LifecycleControls assetName={NAME} status={status} csrfToken={CSRF} tokens={{}} />,
+      );
+      expect(await axe(container)).toHaveNoViolations();
+    });
+  });
+
+  it('says nothing about open work for an asset that has none', () => {
+    render(
+      <LifecycleControls
+        assetName={NAME}
+        status="ACTIVE"
+        csrfToken={CSRF}
+        tokens={{ status: token('A') }}
+      />,
+    );
+    expect(screen.queryByText(/تخصیص باز دارد|در تعمیر است/)).toBeNull();
+  });
+
   it('has no accessibility violations with every command drawn', async () => {
     const { container } = render(
       <LifecycleControls

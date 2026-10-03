@@ -11,6 +11,7 @@ import { transferClearanceTotal } from '../observability/metrics';
 import {
   canTransition,
   explainRefusal,
+  openWorkRefusal,
   DISPATCHABLE_STATUSES,
   OPEN_ACTIVITY_STATUSES,
   type AssetStatus,
@@ -1078,7 +1079,16 @@ export class AssetService {
   private assertTransition(from: AssetStatus, to: AssetStatus, actor: TransitionActor): void {
     if (canTransition(from, to, actor)) return;
 
-    throw RastaError.invalidStateTransition('Asset', from, to, explainRefusal(from, to, actor));
+    const message = explainRefusal(from, to, actor);
+    const openWork = openWorkRefusal(from, actor);
+    if (!openWork) throw RastaError.invalidStateTransition('Asset', from, to, message);
+
+    // Other work is open on the asset (docs/24 Q-93): the refusal carries a
+    // closed reason code a client can act on without reading the sentence.
+    throw new RastaError('INVALID_STATE_TRANSITION', message, {
+      details: [{ path: 'status', message, code: openWork.code }],
+      internalContext: { aggregate: 'Asset', from, to, reason: openWork.code },
+    });
   }
 
   /**

@@ -38,10 +38,34 @@ export const USER_TRANSITIONS: Readonly<Record<string, readonly string[]>> = {
   REGISTERED: ['ACTIVE', 'OUT_OF_SERVICE', 'DECOMMISSIONED'],
   ACTIVE: ['IDLE', 'OUT_OF_SERVICE', 'DECOMMISSIONED'],
   IDLE: ['ACTIVE', 'OUT_OF_SERVICE', 'DECOMMISSIONED'],
-  ASSIGNED: ['OUT_OF_SERVICE'],
-  IN_MAINTENANCE: ['OUT_OF_SERVICE'],
+  // No row at all while another service has open work (docs/24 Q-93): the
+  // assignment is ended in fleet-service and the repair in maintenance-service,
+  // and their events move the status back to ACTIVE.
+  ASSIGNED: [],
+  IN_MAINTENANCE: [],
   OUT_OF_SERVICE: ['ACTIVE', 'DECOMMISSIONED'],
   DECOMMISSIONED: [],
+};
+
+/**
+ * The statuses in which another service has open work on the asset, and what a
+ * person is told to do first. A person can change nothing about the status
+ * while it lasts (docs/24 Q-93, temporary decision); the owning service's own
+ * event ends it.
+ */
+export const OPEN_WORK_NOTES: Readonly<
+  Record<string, { readonly title: string; readonly text: string; readonly href: string }>
+> = {
+  ASSIGNED: {
+    title: 'این دارایی تخصیص باز دارد',
+    text: 'تا وقتی به راننده سپرده شده، وضعیت یا اسقاط آن از اینجا ممکن نیست. نخست تخصیص را در بخش راننده و تخصیص پایان دهید؛ با پایان آن، دارایی به «فعال» برمی‌گردد.',
+    href: '/drivers',
+  },
+  IN_MAINTENANCE: {
+    title: 'این دارایی در تعمیر است',
+    text: 'تا وقتی ارجاع تعمیر باز است، وضعیت یا اسقاط آن از اینجا ممکن نیست. نخست تعمیر را تکمیل کنید یا ارجاع را پس بگیرید؛ با آن، دارایی به «فعال» برمی‌گردد.',
+    href: '/maintenance',
+  },
 };
 
 /** Whether a person may activate an asset that is in `status`. */

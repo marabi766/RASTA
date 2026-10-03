@@ -78,8 +78,9 @@ describe('which commands a status leaves open', () => {
     ['ACTIVE', false, ['IDLE', 'OUT_OF_SERVICE'], true],
     ['IDLE', false, ['ACTIVE', 'OUT_OF_SERVICE'], true],
     ['OUT_OF_SERVICE', false, ['ACTIVE'], true],
-    ['ASSIGNED', false, ['OUT_OF_SERVICE'], false],
-    ['IN_MAINTENANCE', false, ['OUT_OF_SERVICE'], false],
+    // Open work in another service: nothing from here (docs/24 Q-93).
+    ['ASSIGNED', false, [], false],
+    ['IN_MAINTENANCE', false, [], false],
     ['DECOMMISSIONED', false, [], false],
     ['SOMETHING_NEW', false, [], false],
   ])('%s: activate %s, targets %j, decommission %s', (status, activate, targets, decommission) => {
@@ -366,6 +367,46 @@ describe('writing', () => {
         expect(result.kind === 'INVALID' && result.message).not.toMatch(/[A-Za-z]{4,}/);
       }
     });
+
+    it.each([
+      ['OPEN_ASSIGNMENT', 'تخصیص باز دارد', 'fleet-service'],
+      ['OPEN_MAINTENANCE', 'در تعمیر است', 'maintenance-service'],
+    ] as const)(
+      'says the closed open-work code %s in Persian, whatever sentence carries it (docs/24 Q-93)',
+      async (code, words, owner) => {
+        for (const call of [
+          (impl: typeof fetch) =>
+            changeAssetStatus(
+              SESSION,
+              ASSET,
+              { status: 'OUT_OF_SERVICE', reason: 'abc' },
+              1,
+              's',
+              impl,
+            ),
+          (impl: typeof fetch) =>
+            decommissionAsset(SESSION, ASSET, { reason: 'abcdefghij' }, 1, 's', impl),
+        ]) {
+          const result = await call(
+            recording(409, {
+              code: 'INVALID_STATE_TRANSITION',
+              // Reworded on purpose: the code decides the Persian, not the English.
+              message: `Some future wording naming ${owner}`,
+              details: [{ path: 'status', message: `Some future wording naming ${owner}`, code }],
+            }).impl,
+          );
+          expect(result).toMatchObject({ kind: 'INVALID' });
+          const said =
+            result.kind === 'INVALID'
+              ? ((result.fieldErrors as Record<string, string | undefined>).status ??
+                result.message ??
+                '')
+              : '';
+          expect(said).toContain(words);
+          expect(said).not.toMatch(/[A-Za-z]{4,}/);
+        }
+      },
+    );
 
     it('says a transition it does not know by its platform code, and an unknown code as it arrived', async () => {
       const call = (impl: typeof fetch) => activateAsset(SESSION, ASSET, 1, 's', impl);

@@ -10,6 +10,7 @@ import {
   sealAssetLifecycleBaseline,
 } from '@/server/asset-lifecycle-commands';
 import {
+  OPEN_WORK_NOTES,
   canActivateFrom,
   canDecommissionFrom,
   statusTargetsFrom,
@@ -117,8 +118,14 @@ export default async function AssetDossierPage({
   const tokens = lifecycleSource
     ? lifecycleTokens(session, lifecycleSource.roles, lifecycleSource.asset, id)
     : {};
+  // Offered to somebody who could use it: with forms, or — for an asset another
+  // service holds work on — with the note that says what to do first.
+  const holdsOpenWork =
+    lifecycleSource !== null &&
+    OPEN_WORK_NOTES[lifecycleSource.asset.status] !== undefined &&
+    (canChangeAssetStatus(lifecycleSource.roles) || canDecommissionAsset(lifecycleSource.roles));
   const lifecycle =
-    lifecycleSource && Object.keys(tokens).length > 0 ? (
+    lifecycleSource && (Object.keys(tokens).length > 0 || holdsOpenWork) ? (
       <LifecycleControls
         assetName={lifecycleSource.asset.name}
         status={lifecycleSource.asset.status}

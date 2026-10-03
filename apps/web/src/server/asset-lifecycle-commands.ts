@@ -224,8 +224,25 @@ const LIFECYCLE_STATE_FALLBACKS: Readonly<Record<string, string>> = {
   BUSINESS_RULE_VIOLATION: 'این کار با قواعد دارایی سازگار نیست. صفحه را تازه کنید.',
 };
 
+/**
+ * The closed reasons asset-service gives for refusing a command while another
+ * service has open work on the asset (`details[].code`, docs/24 Q-93). Pinned to
+ * `lifecycle.ts` by the contract spec.
+ */
+export const OPEN_WORK_CODES: Readonly<Record<string, string>> = {
+  OPEN_ASSIGNMENT:
+    'این دارایی تخصیص باز دارد. نخست تخصیص را در بخش راننده و تخصیص پایان دهید؛ با پایان آن، دارایی به «فعال» برمی‌گردد و سپس می‌توان این کار را انجام داد.',
+  OPEN_MAINTENANCE:
+    'این دارایی در تعمیر است و ارجاع تعمیر باز دارد. نخست تعمیر را تکمیل کنید یا ارجاع را پس بگیرید؛ با آن، دارایی به «فعال» برمی‌گردد و سپس می‌توان این کار را انجام داد.',
+};
+
 function mappingOf<F extends string>(paths: Record<string, F>): FieldMapping<F> {
-  return { paths, messages: LIFECYCLE_MESSAGES, byCode: LIFECYCLE_STATE_FALLBACKS };
+  return {
+    paths,
+    messages: LIFECYCLE_MESSAGES,
+    byCode: LIFECYCLE_STATE_FALLBACKS,
+    byDetailCode: OPEN_WORK_CODES,
+  };
 }
 
 export const ACTIVATE_FIELD_MAPPING = mappingOf<never>({});

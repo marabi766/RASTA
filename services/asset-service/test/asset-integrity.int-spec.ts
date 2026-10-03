@@ -1370,6 +1370,87 @@ describe('asset integrity', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Open work (docs/24 Q-93): no direct withdrawal while another service holds work
+  // ---------------------------------------------------------------------------
+
+  describe('an asset with open work in another service (docs/24 Q-93)', () => {
+    const CASES = [
+      ['ASSIGNED', 'OPEN_ASSIGNMENT', 'ASSIGNMENT_ENDED'],
+      ['IN_MAINTENANCE', 'OPEN_MAINTENANCE', 'MAINTENANCE_COMPLETED'],
+    ] as const;
+
+    it.each(CASES)(
+      '%s: a person cannot take it out of service or decommission it, and nothing is written (%s)',
+      async (status, code) => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, status);
+        const expectedVersion = await versionOf(assetId);
+        const eventsBefore = (await outboxFor(assetId)).length;
+
+        for (const attempt of [
+          () =>
+            asActor(manager(org.a), () =>
+              assets.changeStatus(assetId, {
+                status: 'OUT_OF_SERVICE',
+                reason: 'عیب فنی',
+                expectedVersion,
+              }),
+            ),
+          () =>
+            asActor(admin(org.a), () =>
+              assets.decommission(assetId, { reason: 'فرسودگی کامل ماشین', expectedVersion }),
+            ),
+        ]) {
+          await expect(attempt()).rejects.toMatchObject({
+            code: 'INVALID_STATE_TRANSITION',
+            status: 409,
+            details: [{ path: 'status', code }],
+          });
+        }
+
+        expect((await statusOf(assetId)).status).toBe(status);
+        expect(await versionOf(assetId)).toBe(expectedVersion);
+        expect(await outboxFor(assetId)).toHaveLength(eventsBefore);
+      },
+    );
+
+    it.each(CASES)(
+      '%s: once the owning service ends its work, its event frees the asset and the withdrawal goes through (%s, then %s)',
+      async (status, _code, release) => {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, status);
+
+        await asActor(manager(org.a), () => consumer.handle(envelope(release, assetId, org.a)));
+        expect((await statusOf(assetId)).status).toBe('ACTIVE');
+
+        await asActor(manager(org.a), async () =>
+          assets.changeStatus(assetId, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: await versionOf(assetId),
+          }),
+        );
+        expect((await statusOf(assetId)).status).toBe('OUT_OF_SERVICE');
+      },
+    );
+
+    it('still lets a person withdraw an idle or active asset directly', async () => {
+      for (const status of ['ACTIVE', 'IDLE'] as const) {
+        const assetId = await machine(org.a);
+        await setStatus(assetId, status);
+        await asActor(manager(org.a), async () =>
+          assets.changeStatus(assetId, {
+            status: 'OUT_OF_SERVICE',
+            reason: 'عیب فنی',
+            expectedVersion: await versionOf(assetId),
+          }),
+        );
+        expect((await statusOf(assetId)).status).toBe('OUT_OF_SERVICE');
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Tenant isolation of every changed write path
   // ---------------------------------------------------------------------------
 
