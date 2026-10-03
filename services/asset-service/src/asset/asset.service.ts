@@ -877,7 +877,25 @@ export class AssetService {
     // whose answer was lost may have committed its fence all the same.
     await this.releaseFences(assetId, organizationId, fenceId);
 
-    // Open work first: it is the refusal a person can act on.
+    // An owner that could not answer comes first, **before** any open work the
+    // other reported: the picture is incomplete, so the caller must be told to
+    // try again, not handed a definitive "blocked" that the unanswered owner
+    // might contradict or add to. The unavailable answer (503/504) is preferred
+    // to a fence conflict (409, retry), which is the milder of the two.
+    const failures = outcomes.flatMap((outcome) =>
+      outcome.status === 'rejected' ? [outcome.reason as unknown] : [],
+    );
+    if (failures.length > 0) {
+      const unavailable = failures.find(
+        (reason) =>
+          reason instanceof RastaError &&
+          (reason.code === 'UPSTREAM_UNAVAILABLE' || reason.code === 'UPSTREAM_TIMEOUT'),
+      );
+      throw unavailable ?? failures[0];
+    }
+
+    // Every owner answered, and at least one has open work: the refusal a
+    // person can act on.
     const open: OpenWorkCode[] = [];
     for (const [index, outcome] of outcomes.entries()) {
       if (outcome.status === 'fulfilled' && !outcome.value.clear) {
@@ -886,8 +904,7 @@ export class AssetService {
     }
     if (open.length > 0) throw openWorkError(from, to, open);
 
-    const failure = outcomes.find((outcome) => outcome.status === 'rejected');
-    throw failure?.reason ?? RastaError.internal('Withdrawal clearance returned no answer');
+    throw RastaError.internal('Withdrawal clearance returned no answer');
   }
 
   /** The ownership change itself, once every owner of the machine's work has cleared it. */
