@@ -72,8 +72,15 @@ export const TRANSITIONS: readonly Transition[] = [
   },
 
   // ---- Withdrawal ----------------------------------------------------------
-  // Reachable from every in-service state, including REGISTERED: a machine can
-  // turn out to be unusable before it is ever commissioned.
+  // Reachable from every state **without open work**, including REGISTERED: a
+  // machine can turn out to be unusable before it is ever commissioned.
+  //
+  // Deliberately not from ASSIGNED or IN_MAINTENANCE (docs/24 Q-94, temporary
+  // decision): taking the asset out of service directly would leave the
+  // assignment in fleet-service or the repair in maintenance-service open on a
+  // machine the platform now calls unavailable, the same stranding the transfer
+  // refuses (`OPEN_ACTIVITY_STATUSES`). The owning service ends its work first;
+  // its release event moves the status back to ACTIVE, and then this applies.
   {
     from: 'REGISTERED',
     to: 'OUT_OF_SERVICE',
@@ -82,18 +89,6 @@ export const TRANSITIONS: readonly Transition[] = [
   },
   { from: 'ACTIVE', to: 'OUT_OF_SERVICE', actor: 'USER', description: 'withdrawn from service' },
   { from: 'IDLE', to: 'OUT_OF_SERVICE', actor: 'USER', description: 'withdrawn from service' },
-  {
-    from: 'ASSIGNED',
-    to: 'OUT_OF_SERVICE',
-    actor: 'USER',
-    description: 'withdrawn from service',
-  },
-  {
-    from: 'IN_MAINTENANCE',
-    to: 'OUT_OF_SERVICE',
-    actor: 'USER',
-    description: 'withdrawn from service',
-  },
   {
     from: 'OUT_OF_SERVICE',
     to: 'ACTIVE',
@@ -153,6 +148,64 @@ export function allowedTransitions(from: AssetStatus, actor: TransitionActor): A
 }
 
 /**
+ * The closed reasons a person's command is refused while another service has
+ * open work on the asset (docs/24 Q-94). The code is part of the API: it travels
+ * in the error's `details[].code`, so a client can say what to do without
+ * parsing the sentence.
+ */
+export type OpenWorkCode = 'OPEN_ASSIGNMENT' | 'OPEN_MAINTENANCE';
+
+export interface OpenWorkRefusal {
+  readonly code: OpenWorkCode;
+  /** Which service holds the work, and what to do there — said to the caller. */
+  readonly message: string;
+}
+
+/**
+ * What each closed code says. One sentence per code, whichever way the work was
+ * found — the asset's own status (below) or the owning service's answer when
+ * asked (`AssetService.clearForWithdrawal`) — so the portal's Persian wording,
+ * keyed by the code, is true in both.
+ */
+export const OPEN_WORK_MESSAGES: Readonly<Record<OpenWorkCode, string>> = {
+  OPEN_ASSIGNMENT:
+    'This asset has an open assignment. End it in fleet-service first, and then this change can be made.',
+  OPEN_MAINTENANCE:
+    'This asset has open maintenance work, a request or a repair order. Complete or withdraw it in maintenance-service first, and then this change can be made.',
+};
+
+/**
+ * Statuses in which a person may change nothing about the asset's status
+ * directly, and why. A subset of {@link OPEN_ACTIVITY_STATUSES}, keyed so the
+ * refusal can name the one service that must act first.
+ *
+ * This is the cheap, readable check on what this service already knows. It is
+ * **not** the whole rule: a repair can be open on an OUT_OF_SERVICE asset, and
+ * an assignment can be committed in fleet-service before its event is
+ * projected here. Before any transition into OUT_OF_SERVICE or DECOMMISSIONED
+ * the owning services are asked as well (docs/24 Q-94).
+ */
+export const OPEN_WORK_REFUSALS: Readonly<Partial<Record<AssetStatus, OpenWorkRefusal>>> = {
+  ASSIGNED: { code: 'OPEN_ASSIGNMENT', message: OPEN_WORK_MESSAGES.OPEN_ASSIGNMENT },
+  IN_MAINTENANCE: { code: 'OPEN_MAINTENANCE', message: OPEN_WORK_MESSAGES.OPEN_MAINTENANCE },
+};
+
+/**
+ * The statuses a person's command may only reach once the owning services have
+ * said nothing is open (docs/24 Q-94): leaving service, and leaving for good.
+ */
+export const WITHDRAWAL_TARGETS: readonly AssetStatus[] = ['OUT_OF_SERVICE', 'DECOMMISSIONED'];
+
+/**
+ * The refusal a person's command gets because other work is open on the asset,
+ * or `null` when that is not why it is refused. Only a person is refused this
+ * way: the owning service's own events are what end the work.
+ */
+export function openWorkRefusal(from: AssetStatus, actor: TransitionActor): OpenWorkRefusal | null {
+  return actor === 'USER' ? (OPEN_WORK_REFUSALS[from] ?? null) : null;
+}
+
+/**
  * Explains a refusal in terms the caller can act on.
  *
  * A bare "invalid transition" leaves them guessing; naming what *is* possible
@@ -163,6 +216,9 @@ export function explainRefusal(from: AssetStatus, to: AssetStatus, actor: Transi
   if (TERMINAL_STATUSES.includes(from)) {
     return `A ${from} asset cannot change status. This state is final because financial and audit records still reference the asset.`;
   }
+
+  const openWork = openWorkRefusal(from, actor);
+  if (openWork) return openWork.message;
 
   if (actor === 'USER' && canTransition(from, to, 'EVENT')) {
     return `Moving an asset to ${to} is not done directly — it follows from assignment or maintenance in the owning service.`;

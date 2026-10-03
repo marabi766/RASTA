@@ -211,10 +211,48 @@ describe('the electronic dossier', () => {
     });
   });
 
+  describe('the lifecycle slot', () => {
+    const controls = <p>کنترل‌های نمونهٔ چرخهٔ حیات</p>;
+
+    it('puts the controls under their own heading when it is handed some', () => {
+      const { getByRole, getByText } = render(
+        <DossierScreen result={ok()} assetId="AST_1" lifecycle={controls} />,
+      );
+      expect(getByRole('heading', { name: 'وضعیت و چرخهٔ حیات' })).toBeInTheDocument();
+      expect(getByText('کنترل‌های نمونهٔ چرخهٔ حیات')).toBeInTheDocument();
+    });
+
+    it('shows nothing where it was not handed any — no empty section, no dead heading', () => {
+      const { queryByRole } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+      expect(queryByRole('heading', { name: 'وضعیت و چرخهٔ حیات' })).toBeNull();
+    });
+
+    it('says a decommissioned machine is final, to everybody who can read it', () => {
+      const gone = ok({ ...DOSSIER, asset: { ...ASSET, status: 'DECOMMISSIONED' } });
+      const { getByText } = render(<DossierScreen result={gone} assetId="AST_1" />);
+      expect(getByText('این دارایی اسقاط شده است')).toBeInTheDocument();
+    });
+
+    it('does not say so about a machine that is still in the fleet', () => {
+      const { queryByText } = render(<DossierScreen result={ok()} assetId="AST_1" />);
+      expect(queryByText('این دارایی اسقاط شده است')).toBeNull();
+    });
+
+    it('has no accessibility violations with the slot filled', async () => {
+      const { container } = render(
+        <DossierScreen result={ok()} assetId="AST_1" lifecycle={controls} notice="activated" />,
+      );
+      expect(await axe(container)).toHaveNoViolations();
+    });
+  });
+
   describe('the confirmation after a write', () => {
     it.each([
       ['created', 'ماشین ثبت شد.'],
       ['updated', 'مشخصات ماشین ذخیره شد.'],
+      ['activated', 'دارایی فعال شد و به ناوگان پیوست.'],
+      ['statusChanged', 'وضعیت دارایی تغییر کرد.'],
+      ['decommissioned', 'دارایی اسقاط شد. این وضعیت نهایی است.'],
     ] as const)('confirms %s', (notice, words) => {
       const { getByText } = render(<DossierScreen result={ok()} assetId="AST_1" notice={notice} />);
       // A confirmation is `status`, which waits for a pause in the screen
@@ -230,6 +268,15 @@ describe('the electronic dossier', () => {
       const words = getByText(/ویرایش شما ذخیره نشد/);
       expect(words).toBeInTheDocument();
       // A warning is not a success: it must not read as one to a screen reader.
+      expect(words.closest('[role="status"]')).toBeNull();
+      expect(words.closest('[role="alert"]')).not.toBeNull();
+    });
+
+    it('says a lifecycle command found the machine changed, as a warning that nothing was written this time', () => {
+      const { getByText } = render(
+        <DossierScreen result={ok()} assetId="AST_1" notice="lifecycleConflict" />,
+      );
+      const words = getByText(/این بار چیزی نوشته نشد/);
       expect(words.closest('[role="status"]')).toBeNull();
       expect(words.closest('[role="alert"]')).not.toBeNull();
     });

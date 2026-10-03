@@ -123,6 +123,25 @@ export const createAssetSchema = z
 
 export type CreateAssetDto = z.infer<typeof createAssetSchema>;
 
+/**
+ * The version of the asset the caller's command was made against — the
+ * `version` a read returned. **Required** on every command that changes an
+ * existing asset (edit, activate, change status, decommission): the command
+ * applies only to that version (`UPDATE … WHERE version = ?`) and is otherwise
+ * refused with `409 OPTIMISTIC_LOCK_FAILED`, and a request that does not say
+ * which version it was made against is refused with `400`. Optional, it left a
+ * direct API client free to overwrite whatever is current, which is the lost
+ * update this field exists to prevent (PR #158 review, twice): a caller that
+ * does not know the version cannot know what it is about to overwrite.
+ *
+ * For a status command it is also the guard against a replay. A form sent
+ * twice, or a stale tab, names the version it was drawn from; once the first
+ * request has committed that version is gone, so the second is a `409` and
+ * writes nothing — where a bare status check would let "ACTIVE → IDLE" apply
+ * again after somebody had returned the machine to ACTIVE in between.
+ */
+export const expectedVersion = z.number().int().min(1);
+
 export const updateAssetSchema = z
   .object({
     name: displayText(2, 200).optional(),
@@ -131,17 +150,7 @@ export const updateAssetSchema = z
     model: z.string().trim().min(1).max(120).nullable().optional(),
     manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
     specifications: z.record(z.unknown()).optional(),
-    /**
-     * The version of the asset the caller's edit was made against — the
-     * `version` a read returned. **Required**: the update applies only to that
-     * version (`UPDATE … WHERE version = ?`) and is otherwise refused with
-     * `409 OPTIMISTIC_LOCK_FAILED`, and a request that does not say which
-     * version it was made against is refused with `400`. Optional, it left a
-     * direct API client free to overwrite whatever is current, which is the lost
-     * update this field exists to prevent (PR #158 review, twice): a caller that
-     * does not know the version cannot know what it is about to overwrite.
-     */
-    expectedVersion: z.number().int().min(1),
+    expectedVersion,
   })
   .strict()
   .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {
@@ -171,6 +180,7 @@ export type ListAssetsQuery = z.infer<typeof listAssetsQuerySchema>;
 export const activateAssetSchema = z
   .object({
     commissionedAt: z.string().datetime().optional(),
+    expectedVersion,
   })
   .strict();
 
@@ -182,6 +192,7 @@ export const changeStatusSchema = z
     /** Recorded on the event and the timeline. Withdrawing a machine from
      *  service without a stated why is not reviewable later. */
     reason: z.string().trim().min(3).max(500),
+    expectedVersion,
   })
   .strict();
 
@@ -191,6 +202,7 @@ export const decommissionSchema = z
   .object({
     reason: z.string().trim().min(10).max(1000),
     decommissionedAt: z.string().datetime().optional(),
+    expectedVersion,
   })
   .strict();
 

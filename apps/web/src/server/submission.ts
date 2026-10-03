@@ -24,11 +24,14 @@ import type { WebSession } from './session';
  * labour or other cost), answering the same key and body with the original 201 while the key lives
  * (MAINTENANCE_IDEMPOTENCY_TTL_HOURS, 24 by default), or, while the first is
  * still being processed, with 409 CONFLICT and Retry-After (`IN_PROGRESS` in
- * `write.ts`); a service that ignores
- * it — asset-service's create path today — relies on its own rules (a unique
- * index on the serial number) and a retry can be refused or, for
- * some writes, applied twice. So nothing in the portal may say "a retry is not
- * a second record" of a write whose service is not known to store it;
+ * `write.ts`); asset-service's create path does the same since #193
+ * (`ASSET_IDEMPOTENCY_TTL_HOURS`, 24 by default) and requires the header.
+ * A service that ignores it relies on its own rules — asset-service's other
+ * writes (edit, activate, change status, decommission) store no key and are
+ * guarded by the version the page was drawn at instead (`expectedVersion`, a
+ * second send is a 409, not a replayed answer) — and a retry can be refused or,
+ * for some writes, applied twice. So nothing in the portal may say "a retry is
+ * not a second record" of a write whose service is not known to store it;
  * `lib/unconfirmed-write.ts` is the honest state for a write whose outcome is
  * unknown.
  *

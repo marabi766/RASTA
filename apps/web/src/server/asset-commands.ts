@@ -175,7 +175,7 @@ const responseSchema = z.object({ id: z.string().min(1) });
 
 export type WrittenAsset = z.infer<typeof responseSchema>;
 
-function firstIssuePerField<F extends string>(
+export function firstIssuePerField<F extends string>(
   error: z.ZodError,
   isField: (value: string) => value is F,
 ): Partial<Record<F, string>> {
@@ -189,7 +189,10 @@ function firstIssuePerField<F extends string>(
   return fieldErrors;
 }
 
-function readFields<F extends string>(form: FormData, fields: readonly F[]): Record<F, string> {
+export function readFields<F extends string>(
+  form: FormData,
+  fields: readonly F[],
+): Record<F, string> {
   const values = {} as Record<F, string>;
   for (const field of fields) {
     const raw = form.get(field);

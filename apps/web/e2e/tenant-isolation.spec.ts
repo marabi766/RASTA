@@ -223,7 +223,8 @@ test.describe('tenant isolation through the live stack', () => {
 
       const status = await request.post(gatewayUrl(`/v1/assets/${OTHER_TENANT_ASSET}/status`), {
         headers,
-        data: { status: 'OUT_OF_SERVICE', reason: 'تلاش از مستأجر دیگر' },
+        // Likewise since slice 5: every lifecycle command names its version.
+        data: { status: 'OUT_OF_SERVICE', reason: 'تلاش از مستأجر دیگر', expectedVersion: 1 },
       });
       expect(status.status()).toBe(404);
 

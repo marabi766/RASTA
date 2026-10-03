@@ -278,6 +278,57 @@ describe('mapProblemToFields — a fallback keyed by error code', () => {
   });
 });
 
+describe('mapProblemToFields — a closed code carried by a detail', () => {
+  const mapping = {
+    paths: { status: 'status' as const },
+    messages: { 'Known sentence': 'جملهٔ شناخته‌شده' },
+    byCode: { INVALID_STATE_TRANSITION: 'پیام جایگزین' },
+    byDetailCode: { OPEN_ASSIGNMENT: 'متن این کد' },
+  };
+  const problem = (detail: { path: string; message: string; code?: string }) => ({
+    code: 'INVALID_STATE_TRANSITION',
+    message: 'Request failed',
+    details: [detail],
+  });
+
+  it('is said by its code on the field the detail names, whatever the sentence is', () => {
+    const mapped = mapProblemToFields(
+      problem({ path: 'status', message: 'Reworded in the future', code: 'OPEN_ASSIGNMENT' }),
+      mapping,
+    );
+    expect(mapped).toEqual({ fieldErrors: { status: 'متن این کد' }, message: null });
+  });
+
+  it('wins over a sentence the mapping also knows: a code is API, a sentence is not', () => {
+    const mapped = mapProblemToFields(
+      problem({ path: 'status', message: 'Known sentence', code: 'OPEN_ASSIGNMENT' }),
+      mapping,
+    );
+    expect(mapped.fieldErrors.status).toBe('متن این کد');
+  });
+
+  it('applies to a detail the mapping does not place on a field, as the form’s message', () => {
+    const mapped = mapProblemToFields(
+      problem({ path: 'elsewhere', message: 'Anything', code: 'OPEN_ASSIGNMENT' }),
+      mapping,
+    );
+    expect(mapped).toEqual({ fieldErrors: {}, message: 'متن این کد' });
+  });
+
+  it('falls back to the sentence, then the platform code, for a code it does not know or none', () => {
+    expect(
+      mapProblemToFields(
+        problem({ path: 'status', message: 'Known sentence', code: 'SOMETHING_NEW' }),
+        mapping,
+      ).fieldErrors.status,
+    ).toBe('جملهٔ شناخته‌شده');
+    expect(
+      mapProblemToFields(problem({ path: 'status', message: 'Unknown sentence' }), mapping)
+        .fieldErrors.status,
+    ).toBe('پیام جایگزین');
+  });
+});
+
 describe('mapProblemToFields', () => {
   it('keeps the first problem per field', () => {
     const mapped = mapProblemToFields(
