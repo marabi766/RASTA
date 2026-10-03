@@ -123,6 +123,27 @@ describe('Idempotency-Key on the repair-order writes', () => {
   };
 
   describe.each(WRITES)('$verb', ({ verb, method, endpoint, status, body }) => {
+    it.each(['__proto__', 'constructor'])(
+      'refuses a body carrying a %s key, 400, before any claim: no hash ever sees it (#194)',
+      async (name) => {
+        // Raw JSON, so the key arrives as an own key, as a client would send it.
+        const raw = JSON.stringify(body).replace(
+          /^\{/,
+          `{"${name}":{"x":1}${Object.keys(body).length > 0 ? ',' : ''}`,
+        );
+        const response = await request(app.getHttpServer())
+          .post(`/v1/repair-orders/RPO-1/${verb}`)
+          .set('Idempotency-Key', KEY)
+          .set('content-type', 'application/json')
+          .send(raw);
+
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('VALIDATION_FAILED');
+        expect(store.execute).not.toHaveBeenCalled();
+        expect(service[method]).not.toHaveBeenCalled();
+      },
+    );
+
     it('refuses a post with no key, 400 with the code "required", before anything else, and writes nothing', async () => {
       const response = await post(verb, body);
 

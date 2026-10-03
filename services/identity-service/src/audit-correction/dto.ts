@@ -114,6 +114,11 @@ export type AuditCorrectionCommand = z.infer<typeof auditCorrectionCommandSchema
  * request differently are recognised as a retry (`docs/06` § 6.8). Array order
  * is kept: the declared changes are an ordered list, and a reordered list is a
  * different declaration. Only the digest is ever stored.
+ *
+ * Every own key is hashed, whatever its name: the sorted copies have no
+ * prototype (`Object.create(null)`), so a `"__proto__"` key is kept rather than
+ * setting the copy's prototype and vanishing from the JSON (#194). The strict
+ * schema refuses such a key today; the digest does not rely on that.
  */
 export function hashCorrectionCommand(command: AuditCorrectionCommand): string {
   return createHash('sha256')
@@ -125,7 +130,7 @@ function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === 'object') {
     const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(source).sort()) sorted[key] = sortKeys(source[key]);
     return sorted;
   }
