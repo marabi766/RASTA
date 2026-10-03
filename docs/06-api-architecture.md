@@ -217,20 +217,20 @@ Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`
 
 فهرست کامل کدها: [`packages/contracts/src/common/errors.ts`](../packages/contracts/src/common/errors.ts)
 
-| وضعیت | کدهای نمونه                                                                                                      |
-| ----- | ---------------------------------------------------------------------------------------------------------------- |
-| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                        |
-| 413   | `PAYLOAD_TOO_LARGE`                                                                                              |
-| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                         |
-| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                            |
-| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                        |
-| 404   | `NOT_FOUND`                                                                                                      |
-| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED` |
-| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `CREATOR_IDENTITY_UNKNOWN`            |
-| 429   | `RATE_LIMIT_EXCEEDED`                                                                                            |
-| 500   | `INTERNAL_ERROR`                                                                                                 |
-| 503   | `UPSTREAM_UNAVAILABLE`                                                                                           |
-| 504   | `UPSTREAM_TIMEOUT`                                                                                               |
+| وضعیت | کدهای نمونه                                                                                                                      |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 400   | `VALIDATION_FAILED` · `MALFORMED_REQUEST`                                                                                        |
+| 413   | `PAYLOAD_TOO_LARGE`                                                                                                              |
+| 415   | `UNSUPPORTED_MEDIA_TYPE`                                                                                                         |
+| 401   | `UNAUTHENTICATED` · `TOKEN_EXPIRED` · `TOKEN_INVALID`                                                                            |
+| 403   | `FORBIDDEN` · `INSUFFICIENT_ROLE` · **`TENANT_MISMATCH`**                                                                        |
+| 404   | `NOT_FOUND`                                                                                                                      |
+| 409   | `ALREADY_EXISTS` · `CONFLICT` · `IDEMPOTENCY_KEY_REUSED` · `INVALID_STATE_TRANSITION` · `OPTIMISTIC_LOCK_FAILED`                 |
+| 422   | `BUSINESS_RULE_VIOLATION` · `INSUFFICIENT_BALANCE` · `LEDGER_UNBALANCED` · `CREATOR_IDENTITY_UNKNOWN` · `ACTOR_IDENTITY_UNKNOWN` |
+| 429   | `RATE_LIMIT_EXCEEDED`                                                                                                            |
+| 500   | `INTERNAL_ERROR`                                                                                                                 |
+| 503   | `UPSTREAM_UNAVAILABLE`                                                                                                           |
+| 504   | `UPSTREAM_TIMEOUT`                                                                                                               |
 
 **CONSTRAINT.** پیام خطا هرگز شامل Stack Trace، نام جدول، بخشی از Query، یا داده مستأجر
 دیگر نیست. `404` و `403` برای منبع متعلق به مستأجر دیگر **هر دو `404` برمی‌گردانند** —

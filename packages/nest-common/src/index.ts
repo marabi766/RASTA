@@ -46,11 +46,22 @@ export {
   IDEMPOTENT_KEY,
   SKIP_TENANT_SCOPE_KEY,
   AUDITOR_SELF_SERVICE_KEY,
+  RequirePlatformUserId,
+  REQUIRE_PLATFORM_USER_ID_KEY,
 } from './decorators';
 
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
+export {
+  currentActor,
+  compareActors,
+  sameActor,
+  assertDistinctActors,
+  actorIdentityUnknown,
+  platformUserIdRequired,
+} from './auth/separation-of-duties';
+export type { ActorIdentity, ActorComparison } from './auth/separation-of-duties';
 export type { InternalGetOptions, InternalGetResult } from './auth/internal-get';
 export type {
   UserClaims,

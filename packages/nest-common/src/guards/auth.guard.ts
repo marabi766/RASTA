@@ -8,7 +8,8 @@ import {
   type ServiceClaims,
   type UserClaims,
 } from '../auth/token-verifier';
-import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
+import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY, REQUIRE_PLATFORM_USER_ID_KEY } from '../decorators';
+import { platformUserIdRequired } from '../auth/separation-of-duties';
 import { upgradeContext, type RequestContext } from '../context/request-context';
 import {
   parseOrganizationRoles,
@@ -195,8 +196,11 @@ export class AuthGuard implements CanActivate {
     const claims = await this.options.tokenVerifier.verifyUserToken(bearer);
 
     // Prefer the platform id. Falling back to the IdP subject keeps an
-    // account provisioned outside the platform usable rather than broken.
+    // account provisioned outside the platform usable rather than broken —
+    // and is why `userId` alone cannot say whether two tokens are one person
+    // (#188): `platformUserId` says which this is, `issuer` + `subject` who.
     const userId = claims.rastaUserId ?? claims.sub;
+    const platformUserId = claims.rastaUserId !== undefined;
 
     const organizationRoles = parseOrganizationRoles(claims.organizationRoles);
     if (organizationRoles.dropped > 0 && this.options.onMalformedOrganizationRoles) {
@@ -219,10 +223,24 @@ export class AuthGuard implements CanActivate {
       throw error;
     }
 
+    // A separation-of-duties route admits only a token that names the
+    // platform id, so that one person cannot be two actors there (#188).
+    const requiresPlatformUserId = this.reflector.getAllAndOverride<boolean | undefined>(
+      REQUIRE_PLATFORM_USER_ID_KEY,
+      [execution.getHandler(), execution.getClass()],
+    );
+    if (requiresPlatformUserId === true && !platformUserId) throw platformUserIdRequired();
+
     const state: AuthState = {
       authType: 'USER',
       userId,
+      platformUserId,
       subject: claims.sub,
+      // Absent only from a verifier that does not report one (a test stub):
+      // then the stable identity is unknown, never made up.
+      ...(typeof claims.issuer === 'string' && claims.issuer.length > 0
+        ? { issuer: claims.issuer }
+        : {}),
       organizationId,
       // The token's memberships and nothing else. The active organization is
       // no longer merged in: an active organization outside them is refused
@@ -236,7 +254,9 @@ export class AuthGuard implements CanActivate {
     upgradeContext({
       authType: 'USER',
       userId: state.userId,
+      platformUserId: state.platformUserId,
       subject: state.subject,
+      issuer: state.issuer,
       organizationId: state.organizationId,
       // The whole membership set, not only the tenant this request selected.
       // Discarding it here is what made the D-2 self-judgement bypass possible.
@@ -447,7 +467,11 @@ function memberships(claimed: readonly string[]): string[] {
 export interface AuthState {
   authType: RequestContext['authType'];
   userId?: string;
+  /** Whether `userId` is the platform id from `rasta_uid` (else the IdP subject). */
+  platformUserId?: boolean;
   subject?: string;
+  /** The verified token's issuer; with `subject`, the stable identity (#188). */
+  issuer?: string;
   organizationId?: string;
   /**
    * Every organization the verified token asserts membership of (D-2).
