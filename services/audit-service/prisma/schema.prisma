@@ -198,6 +198,9 @@ model AuditEvent {
   /// `correctedBy`: the later rows whose `correction_of` names a record
   /// (AUD-003 correction). Probed once per page, bounded below by the earliest target.
   @@index([correctionOf, occurredAt], map: "audit_event_correction_idx")
+  /// D-046's missing-evidence detector: payment-reconciliation rows by when
+  /// they were written, across tenants (an aggregate count, never rows).
+  @@index([sourceTopic, sourceEventName, recordedAt], map: "audit_event_topic_event_recorded_idx")
   @@map("audit_event")
 }
 
@@ -448,4 +451,43 @@ model BidAccessEvidence {
 
   @@index([tenderId, accessedAt], map: "ix_bid_access_evidence_tender")
   @@map("bid_access_evidence")
+}
+
+/// D-046 (ADR-064 § 6): an allow-listed, versioned projection of the two payment-reconciliation
+/// events that record a human decision — who proposed, who approved or acted, on which evidence
+/// reference, with which code, and whether four-eyes applied. Written in the same transaction as
+/// the event's `audit_event` row. Append-only for everybody (trigger); no free text, no amounts.
+model PaymentReconciliationEvidence {
+  sourceEventId     String   @id @map("source_event_id") @db.VarChar(128)
+  /// The `audit_event.id` written for the same event, in the same transaction.
+  auditEventId      String   @unique(map: "ux_payment_reconciliation_evidence_audit_event") @map("audit_event_id") @db.VarChar(64)
+  /// The shape this row was written under. 1 is the only one.
+  projectionVersion Int      @map("projection_version") @db.SmallInt
+  organizationId    String   @map("organization_id") @db.VarChar(128)
+  eventName         String   @map("event_name") @db.VarChar(64)
+  paymentIntentId   String   @map("payment_intent_id") @db.VarChar(128)
+  kind              String   @db.VarChar(32)
+  /// OPERATOR_ACTION only: REQUEUED | PROPOSED | REJECTED.
+  operatorAction    String?  @map("operator_action") @db.VarChar(16)
+  /// OPERATOR_ACTION only: who acted.
+  actor             String?  @db.VarChar(256)
+  /// RESOLVED only: the resolution code.
+  resolution        String?  @db.VarChar(32)
+  /// RESOLVED only: the approver, or the reconciler itself.
+  resolvedBy        String?  @map("resolved_by") @db.VarChar(256)
+  /// OPERATOR_ACTION (PROPOSED, REJECTED) only: the proposed provider outcome.
+  providerOutcome   String?  @map("provider_outcome") @db.VarChar(16)
+  resolutionId      String?  @map("resolution_id") @db.VarChar(128)
+  requeueId         String?  @map("requeue_id") @db.VarChar(128)
+  proposedBy        String?  @map("proposed_by") @db.VarChar(256)
+  approvedBy        String?  @map("approved_by") @db.VarChar(256)
+  /// Pattern-checked reference to a ticket or document, never free text.
+  evidenceReference String?  @map("evidence_reference") @db.VarChar(128)
+  /// Null only on the reconciler's own resolution, which had no operator.
+  fourEyes          Boolean? @map("four_eyes")
+  occurredAt        DateTime @map("occurred_at") @db.Timestamptz(3)
+  recordedAt        DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  @@index([organizationId, paymentIntentId, occurredAt], map: "ix_payment_reconciliation_evidence_intent")
+  @@map("payment_reconciliation_evidence")
 }

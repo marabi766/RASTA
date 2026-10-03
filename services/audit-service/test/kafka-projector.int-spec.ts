@@ -667,6 +667,134 @@ describeWithKafka('domain projector over Kafka', () => {
     300_000,
   );
 
+  it('records a real payment-reconciliation approval with its evidence, and dead-letters a malformed one with neither row (D-046)', async () => {
+    const economic = ownerOf('rasta.economic.v1');
+    const org = id('ORG');
+    const intent = id('PI');
+    const resolvedPayload = {
+      paymentIntentId: intent,
+      organizationId: org,
+      walletId: 'wal_1',
+      kind: 'REFUND',
+      marker: 'REFUND_UNKNOWN',
+      providerRefund: null,
+      resolution: 'REFUNDED',
+      resolvedBy: 'usr_approver',
+      attempts: 2,
+      amountMinor: '120000',
+      currency: 'IRR',
+      provider: 'mock',
+      simulated: true,
+      resolvedAt: '2026-12-01T09:00:00.000Z',
+      resolutionId: 'res_1',
+      proposedBy: 'usr_proposer',
+      approvedBy: 'usr_approver',
+      evidenceReference: 'TICKET-42',
+      fourEyes: true,
+    };
+    const reconciliationEnvelope = (payload: Record<string, unknown>) =>
+      envelope({
+        eventName: 'PAYMENT_RECONCILIATION_RESOLVED',
+        producer: economic,
+        aggregateType: 'PaymentIntent',
+        aggregateId: intent,
+        tenantId: org,
+        payload,
+      });
+
+    const dlqTopic = 'rasta.audit.v1.dlq';
+    const dlq = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'audit-itest-dlq-recon')),
+      logLevel: 1,
+    });
+    const dlqConsumer = dlq.consumer({
+      groupId: `itest-observer.audit-dlq-recon-${ulid().slice(-12)}`,
+    });
+    const dlqMessages: { reason?: string; error?: string; body: string }[] = [];
+    const admin = dlq.admin();
+    await admin.connect();
+    let startAt: ReadonlyMap<number, string>;
+    try {
+      startAt = new Map(
+        (await admin.fetchTopicOffsets(dlqTopic)).map(({ partition, offset }) => [
+          partition,
+          offset,
+        ]),
+      );
+    } finally {
+      await admin.disconnect();
+    }
+    const reader = pinToOffsets(dlqConsumer, dlqTopic, startAt);
+
+    try {
+      await dlqConsumer.connect();
+      await dlqConsumer.subscribe({ topic: dlqTopic, fromBeginning: false });
+      await dlqConsumer.run({
+        eachMessage: async ({ message }) => {
+          dlqMessages.push({
+            reason: message.headers?.[DLQ_HEADERS.reason]?.toString(),
+            error: message.headers?.[DLQ_HEADERS.error]?.toString(),
+            body: message.value?.toString('utf8') ?? '',
+          });
+        },
+      });
+      await reader.joined();
+
+      // A malformed approval first: prose where the evidence reference goes.
+      const secret = `SECRET evidence prose ${RUN_TAG}`;
+      const malformed = reconciliationEnvelope({ ...resolvedPayload, evidenceReference: secret });
+      await publish('rasta.economic.v1', malformed);
+
+      // Then a well-formed one, which must still land: one refusal does not
+      // stop the partition.
+      const good = reconciliationEnvelope({ ...resolvedPayload, reason: `SMUGGLED-${RUN_TAG}` });
+      await publish('rasta.economic.v1', good);
+
+      const dead = await waitFor(
+        'the malformed reconciliation event on the dlq',
+        async () => dlqMessages.find((message) => message.body.includes(malformed.eventId)),
+        DELIVERY_TIMEOUT_MS,
+      );
+      // Refused by the handler at once, not after the retries ran out.
+      expect(dead.reason).toBe('VALIDATION_FAILED');
+      expect(dead.error).toContain('evidenceReference');
+      expect(dead.error).not.toContain(secret);
+
+      const row = await waitFor('the approval row', rowFor(good.eventId), DELIVERY_TIMEOUT_MS);
+      const [evidence] = await prisma.client.$queryRawUnsafe<Record<string, unknown>[]>(
+        'SELECT * FROM payment_reconciliation_evidence WHERE source_event_id = $1',
+        good.eventId,
+      );
+      expect(evidence).toMatchObject({
+        audit_event_id: row.id,
+        organization_id: org,
+        payment_intent_id: intent,
+        projection_version: 1,
+        proposed_by: 'usr_proposer',
+        approved_by: 'usr_approver',
+        evidence_reference: 'TICKET-42',
+        four_eyes: true,
+      });
+      expect(JSON.stringify(evidence)).not.toContain('SMUGGLED');
+
+      // Neither row, and no marker, for the refused one.
+      expect(
+        await prisma.client.auditEvent.count({ where: { sourceEventId: malformed.eventId } }),
+      ).toBe(0);
+      expect(
+        await prisma.client.processedEvent.count({ where: { eventId: malformed.eventId } }),
+      ).toBe(0);
+      expect(
+        await prisma.client.paymentReconciliationEvidence.count({
+          where: { sourceEventId: malformed.eventId },
+        }),
+      ).toBe(0);
+    } finally {
+      reader.stop();
+      await dlqConsumer.disconnect();
+    }
+  }, 300_000);
+
   it('never marks an event processed when the write fails', async () => {
     // The invariant that matters most: an event marked processed without its
     // row is evidence lost with no trace it was lost. Forced by handing the
