@@ -103,6 +103,9 @@ export function newPrisma(): PrismaService {
   return new PrismaService(databaseUrl());
 }
 
+/** The one issuer the suites' tokens are verified against (`OIDC_ISSUER_URL` in `testEnv`). */
+export const ITEST_ISSUER = 'http://itest.invalid/realms/rasta';
+
 /**
  * The environment the services see.
  *
@@ -118,7 +121,7 @@ export function testEnv(): EconomicEnv {
     // verifies a token, because authorization is a pure function over the
     // request context and is covered in `src/access/access.spec.ts` and in
     // `tenant-isolation.int-spec.ts` against the real tenant guard.
-    OIDC_ISSUER_URL: 'http://itest.invalid/realms/rasta',
+    OIDC_ISSUER_URL: ITEST_ISSUER,
     OIDC_JWKS_URI: 'http://itest.invalid/realms/rasta/protocol/openid-connect/certs',
     OIDC_AUDIENCE: 'rasta-api',
     INTERNAL_TOKEN_SECRET: 'itest_internal_secret_at_least_32_characters',
@@ -247,6 +250,13 @@ export interface ActorOptions {
   authType?: 'USER' | 'SERVICE';
   /** The token's IdP subject; the operator path compares it (ADR-064 B3). */
   subject?: string;
+  /**
+   * Whether the token carried `rasta_uid` (#188). By default, as the guard
+   * decides it: a user with a subject other than their user id.
+   */
+  platformUserId?: boolean;
+  /** The token's verified issuer; by default `ITEST_ISSUER` for a user with a subject. */
+  issuer?: string;
 }
 
 /**
@@ -273,6 +283,12 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
     organizationIds: [],
     authType: options.authType ?? 'USER',
     ...(options.subject ? { subject: options.subject } : {}),
+    ...((options.authType ?? 'USER') === 'USER' && options.subject
+      ? {
+          issuer: options.issuer ?? ITEST_ISSUER,
+          platformUserId: options.platformUserId ?? (options.userId ?? '') !== options.subject,
+        }
+      : {}),
     startedAt: Date.now(),
   };
 
