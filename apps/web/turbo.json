@@ -2,34 +2,57 @@
   "$schema": "https://turbo.build/schema.json",
   "extends": ["//"],
   "tasks": {
-    // `src/lib/labels.contract.spec.ts` reads these two asset-service files as
-    // text to pin the portal's asset vocabulary to the service's (L5-02). They
-    // live outside this package, so without naming them here a change to the
-    // service would replay a cached green for the one test meant to catch it.
+    // Contract specs read other packages' **source as text** to pin the portal's
+    // copy of a rule to the original (`*.contract.spec.ts`: A-02 forbids
+    // importing `services/*/src`, so the portal keeps copies and a test compares
+    // them). Those files live outside this package, so without naming them here
+    // a change to one would replay a cached green for the very test meant to
+    // catch it. This list is not a convention to remember: `src/test/
+    // turbo-inputs-guard.ts` fails any spec that reads a file outside this
+    // package that is not named below, and `src/turbo-config.spec.ts` keeps the
+    // two lists equal and every entry real.
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
-        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts",
+        "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
+        "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
+        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.controller.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.repository.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/lifecycle.ts",
-        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
-        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts"
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/dto.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/lifecycle.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.controller.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.service.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.controller.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.service.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts"
       ]
     },
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
-        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts",
+        "$TURBO_ROOT$/packages/contracts/src/common/errors.ts",
+        "$TURBO_ROOT$/packages/contracts/src/common/money.ts",
+        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.controller.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/asset.repository.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/asset.service.ts",
+        "$TURBO_ROOT$/services/asset-service/src/asset/dto.ts",
         "$TURBO_ROOT$/services/asset-service/src/asset/lifecycle.ts",
-        "$TURBO_ROOT$/packages/nest-common/src/errors/rasta-error.ts",
         "$TURBO_ROOT$/services/fleet-service/src/fleet/transfer-clearance.ts",
-        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts"
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/dto.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/lifecycle.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.controller.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/repair-order.service.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.controller.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/request.service.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-clearance.ts",
+        "$TURBO_ROOT$/services/maintenance-service/src/maintenance/transfer-record.ts"
       ]
     }
   }
