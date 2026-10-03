@@ -1568,6 +1568,14 @@ jobs:
 
       - run: pnpm run db:generate
 
+      - name: Build the shared packages
+        # The B2 vacuum test loads packages/nest-common's dist, and the seed
+        # guard runs each seed against @rasta/config and @rasta/nest-common —
+        # which resolve to their dist. In the integration job the suites'
+        # `^build` produced those first; here nothing else does. Packages
+        # only: no service is built or started in this job.
+        run: pnpm exec turbo run build --filter='./packages/*'
+
       - name: Apply migrations
         # The integration job's step, unchanged, and why it is needed here: the
         # in-place outbox-claim verifier and the seed guard work on each
