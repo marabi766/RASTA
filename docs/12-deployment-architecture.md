@@ -59,6 +59,8 @@ docker compose --profile all up -d            # همه
 
 هر سرویس یک `Dockerfile` چندمرحله‌ای دارد: (طرح کلی؛ فایل واقعی هر سرویس مرجع است). تصویر پایه با **Digest** Pin است و همهٔ سرویس‌ها یک Digest
 دارند؛ روند به‌روزرسانی در [`runbooks/base-image-update.md`](runbooks/base-image-update.md).
+تصویرهای زیرساخت `docker-compose.yml` و CI هم با Digest Pin‌اند
+([`runbooks/infrastructure-image-update.md`](runbooks/infrastructure-image-update.md)).
 
 ```dockerfile
 # ---- deps: فقط وابستگی‌ها، برای Cache بهتر لایه ----
