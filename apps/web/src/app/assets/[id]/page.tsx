@@ -6,6 +6,7 @@ import {
   canRecordAssetCompliance,
   fetchInspections,
   fetchInsurancePolicies,
+  sealAssetRecordBaseline,
 } from '@/server/asset-records';
 import { RECORD_NOTICES } from '@/lib/asset-record-fields';
 import type { UpdateAssetFormValues } from '@/lib/asset-form-fields';
@@ -200,6 +201,7 @@ export default async function AssetDossierPage({
                   assetId={id}
                   csrfToken={session.csrfToken}
                   submissionId={mintSubmissionId(session)}
+                  baseline={sealAssetRecordBaseline(session, { assetId: id, record: 'policy' })}
                 />
               ) : undefined
             }
@@ -209,6 +211,7 @@ export default async function AssetDossierPage({
                   assetId={id}
                   csrfToken={session.csrfToken}
                   submissionId={mintSubmissionId(session)}
+                  baseline={sealAssetRecordBaseline(session, { assetId: id, record: 'inspection' })}
                 />
               ) : undefined
             }

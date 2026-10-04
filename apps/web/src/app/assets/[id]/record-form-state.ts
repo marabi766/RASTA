@@ -4,9 +4,9 @@ import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
  * What one of the two record forms — a policy, an inspection — knows after an
  * attempt.
  *
- * The same family as `LifecycleFormState`, without the baseline: a record is
- * not made against a version or a status, so there is nothing a person was
- * "shown" to refuse a post against. A module of its own because
+ * The same family as `LifecycleFormState`. Its baseline names only the asset
+ * and the form: a record is not made against a version or a status, so there is
+ * nothing a person was "shown" that could go stale. A module of its own because
  * `record-actions.ts` is a `'use server'` file and may export only async
  * functions.
  *
@@ -33,7 +33,7 @@ export type RecordFormState<V, F extends string> =
    */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
   /** The post could not be trusted as this person's own. */
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
+  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' | 'BASELINE' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
   | UnconfirmedWriteState;

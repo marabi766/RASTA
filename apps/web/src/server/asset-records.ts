@@ -23,6 +23,8 @@ import { MAX_AMOUNT_MINOR } from '@/lib/repair-order-fields';
 import { ASSET_DISPLAY_TEXT, firstIssuePerField, readFields } from './asset-commands';
 import { readFromGateway, type ReadResult } from './assets';
 import { BIDI_CONTROL, localDateToIso } from './drivers';
+import { webServerEnv } from './env';
+import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 
@@ -70,6 +72,68 @@ const RECORD_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 
 
 export const canRecordAssetCompliance = (effectiveRoles: readonly string[]): boolean =>
   effectiveRoles.some((role) => RECORD_ROLES.includes(role));
+
+// ---------------------------------------------------------------------------
+// Which asset a form is for
+// ---------------------------------------------------------------------------
+
+const RECORD_BASELINE_PURPOSE = 'asset-record-baseline';
+
+/** The two records a machine's page takes. */
+export const ASSET_RECORD_KINDS = ['policy', 'inspection'] as const;
+export type AssetRecordKind = (typeof ASSET_RECORD_KINDS)[number];
+
+const recordBaselineSchema = z.object({
+  assetId: z.string().min(1).max(200),
+  record: z.enum(ASSET_RECORD_KINDS),
+});
+
+export type AssetRecordBaseline = z.infer<typeof recordBaselineSchema>;
+
+/**
+ * The asset a record form was drawn for, and which of the two forms it is,
+ * signed for this session.
+ *
+ * The forms bind the action to the page's asset with `action.bind(null,
+ * assetId)` in a client component, and a value bound there is one the browser
+ * sends back: nothing about it is signed. This token is what makes "a post can
+ * only address the page's own asset" true — the runner refuses a bound id that
+ * is not the one signed here — the same binding the lifecycle baseline gives
+ * its commands. Unlike that one it carries no version or status: a record is
+ * not made against what the page showed of the machine, so nothing in it can go
+ * stale, and it lives as long as the session that could post it (the CSRF token
+ * it is keyed over ends with the login anyway). A form left open while a paper
+ * policy is copied out is not refused for being slow.
+ *
+ * asset-service still decides on every send, and answers another
+ * organization's machine as a missing one.
+ */
+export function sealAssetRecordBaseline(
+  session: WebSession,
+  baseline: AssetRecordBaseline,
+): string {
+  return signPayload(
+    session,
+    RECORD_BASELINE_PURPOSE,
+    { ...baseline },
+    webServerEnv().WEB_SESSION_MAX_AGE_SECONDS,
+  );
+}
+
+/**
+ * The baseline, if `token` is one this session was given for `record`;
+ * otherwise `null` — one answer for forged, somebody else's, expired, minted for
+ * the other form, and from an earlier login.
+ */
+export function openAssetRecordBaseline(
+  session: WebSession,
+  token: unknown,
+  record: AssetRecordKind,
+): AssetRecordBaseline | null {
+  const payload = verifyPayload(session, RECORD_BASELINE_PURPOSE, token, recordBaselineSchema);
+  if (!payload || payload.record !== record) return null;
+  return payload;
+}
 
 // ---------------------------------------------------------------------------
 // Reads

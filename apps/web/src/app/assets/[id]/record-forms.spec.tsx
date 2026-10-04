@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { POLICY_COVERAGES } from '@/lib/asset-record-fields';
 
 import { RecordInspectionForm, RecordPolicyForm } from './AssetRecordForms';
@@ -31,7 +31,9 @@ jest.mock('./record-actions', () => ({
 const CSRF = 'csrf-token-for-this-session';
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const ASSET = 'AST_01J00000000000000000000000';
-const IDENTITY = { assetId: ASSET, csrfToken: CSRF, submissionId: SUBMISSION };
+/** Opaque to the form: it renders the token the page signed and nothing else of it. */
+const BASELINE = 'eyJzaWduZWQiOiJieS10aGUtcGFnZSJ9.sig';
+const IDENTITY = { assetId: ASSET, csrfToken: CSRF, submissionId: SUBMISSION, baseline: BASELINE };
 
 /** Physical-direction utilities that would break the right-to-left layout. */
 const PHYSICAL_DIRECTION = /\b(?:m[lr]|p[lr]|left|right|text-left|text-right)-/;
@@ -64,13 +66,15 @@ const FORMS = [
 ] as const;
 
 describe.each(FORMS)('$name', (form) => {
-  it('carries the CSRF token and the submission id — and nothing that names an asset', () => {
+  it('carries the CSRF token, the submission id and the signed baseline — and no field that names an asset', () => {
     const { container } = form.render();
     expect(container.querySelector(`input[name="${CSRF_FIELD}"]`)).toHaveValue(CSRF);
     expect(container.querySelector(`input[name="${SUBMISSION_FIELD}"]`)).toHaveValue(SUBMISSION);
-    for (const name of ['assetId', 'id', 'asset', 'baseline', 'expectedVersion', 'documentId']) {
+    expect(container.querySelector(`input[name="${BASELINE_FIELD}"]`)).toHaveValue(BASELINE);
+    for (const name of ['assetId', 'id', 'asset', 'expectedVersion', 'documentId']) {
       expect(container.querySelector(`[name="${name}"]`)).toBeNull();
     }
+    expect(container.innerHTML).not.toContain(ASSET);
   });
 
   it('is a plain form post to a server action, so it works before any bundle loads', () => {

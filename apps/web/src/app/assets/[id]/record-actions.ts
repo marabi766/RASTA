@@ -23,7 +23,8 @@ import { runRecord } from './record-runner';
  * inspection. They run through `record-runner.ts`.
  *
  * Neither reads an asset id from the form: the asset is the page's own, bound to
- * the action by the form (`action.bind(null, assetId)`).
+ * the action by the form (`action.bind(null, assetId)`) and named by the signed
+ * baseline the page minted for that form.
  */
 
 type State<V, F extends string> = RecordFormState<V, F>;
@@ -35,6 +36,7 @@ export async function submitRecordPolicy(
 ): Promise<State<RecordPolicyFormValues, RecordPolicyField>> {
   return runRecord(
     {
+      record: 'policy',
       notice: 'policyRecorded',
       valuesOf: recordPolicyFormValues,
       parse: parseRecordPolicyForm,
@@ -52,6 +54,7 @@ export async function submitRecordInspection(
 ): Promise<State<RecordInspectionFormValues, RecordInspectionField>> {
   return runRecord(
     {
+      record: 'inspection',
       notice: 'inspectionRecorded',
       valuesOf: recordInspectionFormValues,
       parse: parseRecordInspectionForm,

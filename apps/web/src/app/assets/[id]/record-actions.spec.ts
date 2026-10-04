@@ -2,6 +2,8 @@
  * @jest-environment node
  */
 import type { RecordNotice } from '@/lib/asset-record-fields';
+import { BASELINE_FIELD } from '@/lib/form-fields';
+import { sealAssetRecordBaseline, type AssetRecordKind } from '@/server/asset-records';
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
@@ -13,7 +15,8 @@ import { IDLE_RECORD_FORM } from './record-form-state';
  * The two record forms' write path (EXP-002 slice 6). Mirrors
  * `lifecycle-actions.spec.ts`: the order is the assertion, each refusal proves
  * nothing was sent, and the asset a record goes to is the page's own — bound by
- * the form — and never a field of it.
+ * the form, named by the baseline the page signed for that form — and never a
+ * field of it.
  */
 
 const currentSession = jest.fn();
@@ -61,6 +64,7 @@ const OTHER_ASSET_ID = 'AST_01J00000000000000000000099';
 
 interface Case {
   readonly name: string;
+  readonly record: AssetRecordKind;
   readonly submit: (assetId: string, form: FormData) => Promise<unknown>;
   readonly send: jest.Mock;
   /** What a valid post of this form carries. */
@@ -73,6 +77,7 @@ interface Case {
 const CASES: readonly Case[] = [
   {
     name: 'record a policy',
+    record: 'policy',
     submit: (assetId, form) => actions.submitRecordPolicy(assetId, IDLE_RECORD_FORM, form),
     send: recordInsurancePolicy,
     valid: {
@@ -96,6 +101,7 @@ const CASES: readonly Case[] = [
   },
   {
     name: 'record an inspection',
+    record: 'inspection',
     submit: (assetId, form) => actions.submitRecordInspection(assetId, IDLE_RECORD_FORM, form),
     send: recordInspection,
     valid: {
@@ -117,10 +123,14 @@ const CASES: readonly Case[] = [
   },
 ];
 
+/** What the page signs beside a form: this session, `assetId` (the page's by default), this form. */
+const baselineFor = (testCase: Case, assetId: string = ASSET_ID): string =>
+  sealAssetRecordBaseline(SESSION, { assetId, record: testCase.record });
+
 function formData(
   testCase: Case,
   fields: Record<string, string> = testCase.valid,
-  options: { csrf?: string | null; submission?: string | null } = {},
+  options: { csrf?: string | null; submission?: string | null; baseline?: string | null } = {},
 ): FormData {
   const form = new FormData();
   for (const [key, value] of Object.entries(fields)) form.set(key, value);
@@ -129,6 +139,8 @@ function formData(
   const submission =
     options.submission === undefined ? mintSubmissionId(SESSION) : options.submission;
   if (submission !== null) form.set(SUBMISSION_FIELD, submission);
+  const baseline = options.baseline === undefined ? baselineFor(testCase) : options.baseline;
+  if (baseline !== null) form.set(BASELINE_FIELD, baseline);
   return form;
 }
 
@@ -215,6 +227,55 @@ describe.each(CASES)('$name', (testCase) => {
         },
       );
       expect(await submit(badSubmission)).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
+      const badBaseline = formData(
+        testCase,
+        { policyNumber: '', certificateNo: '' },
+        { baseline: 'wrong' },
+      );
+      // The baseline before the form: an invalid form with a bad baseline is refused, not parsed.
+      expect(await submit(badBaseline)).toEqual({ kind: 'REFUSED', reason: 'BASELINE' });
+      expect(sent()).toHaveLength(0);
+    });
+
+    it('refuses a baseline that is missing, forged, somebody else’s, from an earlier login or minted for the other form', async () => {
+      const other = CASES.find((candidate) => candidate.record !== testCase.record)!;
+      const genuine = baselineFor(testCase);
+      for (const baseline of [
+        null,
+        'chosen-by-the-client',
+        `${genuine.slice(0, -2)}AA`,
+        sealAssetRecordBaseline(
+          { ...SESSION, subject: 'someone-else' },
+          { assetId: ASSET_ID, record: testCase.record },
+        ),
+        sealAssetRecordBaseline(
+          { ...SESSION, csrfToken: 'the-token-before-re-login' },
+          { assetId: ASSET_ID, record: testCase.record },
+        ),
+        baselineFor(other),
+      ]) {
+        expect(await submit(formData(testCase, undefined, { baseline }))).toEqual({
+          kind: 'REFUSED',
+          reason: 'BASELINE',
+        });
+      }
+      expect(sent()).toHaveLength(0);
+    });
+
+    it('refuses another asset’s genuine baseline, and an action bound to another asset than the baseline names', async () => {
+      // The other machine's page gave this person a real baseline; posted in this
+      // page's form it does not act here.
+      expect(
+        await submit(
+          formData(testCase, undefined, { baseline: baselineFor(testCase, OTHER_ASSET_ID) }),
+        ),
+      ).toEqual({ kind: 'REFUSED', reason: 'BASELINE' });
+      // The bound id is sent by the browser: rewritten to another asset, it no
+      // longer matches what the page signed.
+      expect(await testCase.submit(OTHER_ASSET_ID, formData(testCase))).toEqual({
+        kind: 'REFUSED',
+        reason: 'BASELINE',
+      });
       expect(sent()).toHaveLength(0);
     });
   });
@@ -238,7 +299,12 @@ describe.each(CASES)('$name', (testCase) => {
 
     it('binds each page’s action to its own asset: two assets of one session each get their own record', async () => {
       await redirectedTo(testCase.submit(ASSET_ID, formData(testCase)));
-      await redirectedTo(testCase.submit(OTHER_ASSET_ID, formData(testCase)));
+      await redirectedTo(
+        testCase.submit(
+          OTHER_ASSET_ID,
+          formData(testCase, undefined, { baseline: baselineFor(testCase, OTHER_ASSET_ID) }),
+        ),
+      );
       expect(testCase.send.mock.calls.map((call) => call[1])).toEqual([ASSET_ID, OTHER_ASSET_ID]);
     });
 
@@ -343,7 +409,11 @@ describe.each(CASES)('$name', (testCase) => {
       testCase.send.mockResolvedValue({ kind: 'NOT_FOUND', correlationId: 'same-shape' });
       const ofAnotherTenant = await testCase.submit(ASSET_ID, formData(testCase));
       testCase.send.mockResolvedValue({ kind: 'NOT_FOUND', correlationId: 'same-shape' });
-      const ofNothing = await testCase.submit('AST_01J00000000000000000000123', formData(testCase));
+      const missing = 'AST_01J00000000000000000000123';
+      const ofNothing = await testCase.submit(
+        missing,
+        formData(testCase, undefined, { baseline: baselineFor(testCase, missing) }),
+      );
       expect(ofAnotherTenant).toEqual(ofNothing);
       expect(ofNothing).toMatchObject({ kind: 'NOT_FOUND' });
     });

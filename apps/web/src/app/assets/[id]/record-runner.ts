@@ -1,8 +1,12 @@
 import { redirect } from 'next/navigation';
 
-import { FLASH_PARAM } from '@/lib/form-fields';
+import { BASELINE_FIELD, FLASH_PARAM } from '@/lib/form-fields';
 import type { RecordNotice } from '@/lib/asset-record-fields';
-import type { ParsedRecordForm } from '@/server/asset-records';
+import {
+  openAssetRecordBaseline,
+  type AssetRecordKind,
+  type ParsedRecordForm,
+} from '@/server/asset-records';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
@@ -16,19 +20,22 @@ import type { RecordFormState } from './record-form-state';
  * The one path both record commands on `/assets/[id]` take.
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
- * the submission id, the form, and only then the gateway. Each refusal is
- * decided before the next step runs, so a refused post never reaches it — which
- * `record-actions.spec.ts` asserts for each command.
+ * the submission id, which asset and form the post was drawn for, the form, and
+ * only then the gateway. Each refusal is decided before the next step runs, so a
+ * refused post never reaches it — which `record-actions.spec.ts` asserts for
+ * each command.
  *
  * Not a `'use server'` module: that directive turns every export into a
  * network-callable action, and this is a helper the two actions share.
  *
  * ## Which asset
  *
- * The page's own, bound to the action by the form (`action.bind(null, assetId)`,
- * the Next.js way to carry a value a form does not collect — its encrypted
- * payload cannot be rewritten by the browser). No field of the form names an
- * asset, so a post cannot be pointed at another one.
+ * The page's own. The form binds it to the action (`action.bind(null,
+ * assetId)`), but that happens in a client component, so the bound id is a value
+ * the browser sends back and could be changed on the way. The signed baseline
+ * the page minted for this form (`sealAssetRecordBaseline`) names the asset and
+ * the form, and the bound id must be the asset it names, or nothing is sent. No
+ * field of the form names an asset.
  *
  * ## Why a second press is not a second record
  *
@@ -41,6 +48,8 @@ import type { RecordFormState } from './record-form-state';
  */
 
 export interface RecordCommand<V, B, F extends string> {
+  /** Which of the two forms this is: a baseline minted for the other is refused. */
+  readonly record: AssetRecordKind;
   readonly notice: RecordNotice;
   readonly valuesOf: (form: FormData) => V;
   readonly parse: (values: V) => ParsedRecordForm<B, F>;
@@ -57,7 +66,10 @@ const assetPath = (assetId: string, flash: string): string =>
 
 export async function runRecord<V, B, F extends string>(
   command: RecordCommand<V, B, F>,
-  /** The asset of the page this form was drawn on — bound by the form, never a field of it. */
+  /**
+   * The asset of the page this form was drawn on — bound by the form, never a
+   * field of it, and acted on only when the signed baseline names it too.
+   */
   assetId: string,
   form: FormData,
 ): Promise<RecordFormState<V, F>> {
@@ -74,6 +86,13 @@ export async function runRecord<V, B, F extends string>(
     return { kind: 'REFUSED', reason: 'SUBMISSION' };
   }
 
+  // Not issued to this session for this form, or for another asset than the one
+  // the action is bound to: the post cannot be shown to be the page's own.
+  // Another asset's genuine baseline is refused with the same answer as a forged
+  // one, before anything is parsed or sent.
+  const baseline = openAssetRecordBaseline(session, form.get(BASELINE_FIELD), command.record);
+  if (!baseline || baseline.assetId !== assetId) return { kind: 'REFUSED', reason: 'BASELINE' };
+
   const values = command.valuesOf(form);
   const parsed = command.parse(values);
   if (!parsed.ok) {
@@ -86,12 +105,12 @@ export async function runRecord<V, B, F extends string>(
     };
   }
 
-  const result = await command.send(session, assetId, parsed.body, submissionId);
+  const result = await command.send(session, baseline.assetId, parsed.body, submissionId);
 
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the lists again, so it shows what was recorded.
-    redirect(assetPath(assetId, mintFlash(session, assetId, command.notice)));
+    redirect(assetPath(baseline.assetId, mintFlash(session, baseline.assetId, command.notice)));
   }
 
   switch (result.kind) {

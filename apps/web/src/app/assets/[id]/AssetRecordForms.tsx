@@ -4,7 +4,7 @@ import { useActionState, type ReactNode } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
-import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
+import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
   EMPTY_RECORD_INSPECTION_FORM,
   EMPTY_RECORD_POLICY_FORM,
@@ -25,7 +25,8 @@ import { submitRecordInspection, submitRecordPolicy } from './record-actions';
  * actions so each works before any bundle has loaded (docs/16 § ۱۶٫۲).
  *
  * Neither names its asset in a field: the action is bound to the page's asset
- * (`action.bind(null, assetId)`), and what a person types is only the record.
+ * (`action.bind(null, assetId)`), the signed baseline beside it names the same
+ * asset and form, and what a person types is only the record.
  *
  * Each carries the submission id minted for it and keeps it across an attempt
  * that came back with something to read. asset-service stores the answer under
@@ -39,13 +40,16 @@ export interface RecordIdentity {
   readonly csrfToken: string;
   /** Minted for this render and bound to this session. */
   readonly submissionId: string;
+  /** The asset and the form, signed for this session (`sealAssetRecordBaseline`). */
+  readonly baseline: string;
 }
 
-function Hidden({ csrfToken, submissionId }: Omit<RecordIdentity, 'assetId'>): ReactNode {
+function Hidden({ csrfToken, submissionId, baseline }: Omit<RecordIdentity, 'assetId'>): ReactNode {
   return (
     <>
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
       <input type="hidden" name={SUBMISSION_FIELD} value={submissionId} />
+      <input type="hidden" name={BASELINE_FIELD} value={baseline} />
     </>
   );
 }
@@ -141,6 +145,7 @@ export function RecordPolicyForm(identity: RecordIdentity) {
         <Hidden
           csrfToken={identity.csrfToken}
           submissionId={submissionOf(state, identity.submissionId)}
+          baseline={identity.baseline}
         />
         <Banner state={state} forbidden="اجازهٔ ثبت بیمه‌نامه به شما داده نشده است." />
 
@@ -276,6 +281,7 @@ export function RecordInspectionForm(identity: RecordIdentity) {
         <Hidden
           csrfToken={identity.csrfToken}
           submissionId={submissionOf(state, identity.submissionId)}
+          baseline={identity.baseline}
         />
         <Banner state={state} forbidden="اجازهٔ ثبت معاینهٔ فنی به شما داده نشده است." />
 
