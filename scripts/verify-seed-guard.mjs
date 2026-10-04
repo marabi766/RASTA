@@ -100,7 +100,11 @@ function psql(url, sql, extraOptions = '') {
   const { target, env } = libpqInvocation(parsed.toString());
   return spawnSync('psql', [target, '-X', '-v', 'ON_ERROR_STOP=1', '-tA', '-c', sql], {
     encoding: 'utf8',
-    env: { ...process.env, ...env, PGOPTIONS: `-c search_path=${schema} ${extraOptions}`.trim() },
+    env: {
+      ...process.env,
+      ...env,
+      PGOPTIONS: `-c search_path=${schema} -c TimeZone=UTC ${extraOptions}`.trim(),
+    },
   });
 }
 

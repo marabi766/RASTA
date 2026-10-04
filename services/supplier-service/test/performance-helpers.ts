@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { runUnscoped, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
@@ -50,7 +51,7 @@ export function ownerPrisma(): PrismaService {
         'the schema owner, rasta_supplier_migrator; see .env.example.',
     );
   }
-  return new PrismaService(url);
+  return new PrismaService(withUtcSession(url));
 }
 
 export function raw<T>(fn: () => Promise<T>): Promise<T> {

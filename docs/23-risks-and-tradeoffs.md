@@ -1159,6 +1159,33 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-02 (#191)
 
+### D-048 · ۳۲۲ ستونِ لحظه هنوز `timestamp(3)` بی منطقهٔ زمانی است
+
+- **چه چیزی:** بیشتر ستون‌های لحظه در Schemaها `DateTime` بی `@db.Timestamptz` اند، یعنی `timestamp(3) without time zone`:
+  ۳۲۲ ستون در ۱۲ سرویس (construction ۵۷، economic ۵۵، asset ۳۲، maintenance ۳۲، identity ۳۰، marketplace ۲۸، supplier ۲۵،
+  fleet ۲۳، organization ۱۸، document ۱۷، notification ۴، audit ۱) در برابر ۸۶ ستونِ `timestamptz`. Prisma این ستون‌ها را
+  به‌صورت ساعت دیواریِ UTC می‌نویسد و می‌خواند و درست است؛ اما SQL خام — `now()`، `CURRENT_TIMESTAMP`، پیش‌فرضِ ستون،
+  Trigger یا Backfill در Migration — ساعت دیواریِ **نشست** را ذخیره می‌کند (L7-37).
+- **کاهش ریسک (#214):** هر نشست پایگاه داده با `options=-c TimeZone=UTC` باز می‌شود — نشانی زمان اجرای سرویس‌ها
+  (`databaseEnvSchema` در `@rasta/config`)، `scripts/prisma.mjs` و Seedها — و `scripts/db-session-utc.pg.test.mjs` هر سه
+  را زیر Roleی با پیش‌فرض `Asia/Tehran` می‌آزماید (docs/05 § ۵٫۲). پس تا وقتی همهٔ اتصال‌ها از این دو راه بگذرند، ساعت
+  دیواری نشست همان UTC است.
+  و (بازبینی #214) سمت پایگاه داده نیز: پایگاه دادهٔ هر سرویس، Role زمان اجرا و Migratorش `TimeZone = 'UTC'` دارند
+  (`lib/session-timezone.bash`؛ Bootstrap، Split و `db:rotate-role-passwords`)، که اتصالِ بی Option — پشت PgBouncer یا از
+  `psql` اپراتور — را هم در UTC آغاز می‌کند؛ `check:db-runtime-privileges` آن را در CI می‌سنجد و همان آزمون، زیر پیش‌فرض
+  **سرورِ** `Asia/Tehran` و بی هیچ Option، نشان می‌دهد که می‌گیرد (docs/11 § ۱۱٫۲). Clientهای مستقیم اسکریپت‌ها و
+  آزمون‌ها (`scripts/verify-*`، `test/helpers.ts` هر سرویس) هم از `withUtcSession` می‌گذرند.
+- **ریسک باقی‌مانده:** فقط اتصالی که خودش منطقهٔ زمانی دیگری بخواهد (`PGTZ`، `options` یا `SET TimeZone`)، یا Roleی
+  بیرون از این مجموعه که پیش‌فرض TimeZone خودش را دارد (مثلاً ابزار BI؛ پیش‌فرض Role بر پیش‌فرض پایگاه داده مقدم است)،
+  لحظهٔ خام را جابه‌جا می‌نویسد یا می‌خواند (با تهران ۳٫۵ ساعت) و هیچ خطایی نمی‌دهد. مقایسهٔ این ستون‌ها با `now()` در همان نشست هم به همین دلیل وابسته به منطقهٔ زمانی نشست است.
+- **کنترل (تا رفع):** اتصالِ تازه فقط از `withUtcSession` (`@rasta/config` یا `scripts/prisma-lib.mjs`)؛ پیش‌فرض
+  `timezone` سرور و Roleها UTC؛ ستونِ لحظهٔ تازه `TIMESTAMPTZ` (`@db.Timestamptz`).
+- **رفع:** انتقال این ستون‌ها به `timestamptz` با Migrationهای قابل بازگشت به‌ازای هر سرویس
+  (`ALTER COLUMN … TYPE timestamptz USING col AT TIME ZONE 'UTC'`، که جدول را بازنویسی و قفل می‌کند، پس در پنجرهٔ
+  نگه‌داری و جدول به جدول)، همراه `@db.Timestamptz(3)` در Schema.
+- **اولویت:** متوسط
+- **ثبت‌شده:** 2026-10-03 (#214)
+
 ## ۲۳٫۶ ثبت بدهی معماری
 
 بدهی جدید در همین فایل، در همین قالب، با شناسه ثبت می‌شود:

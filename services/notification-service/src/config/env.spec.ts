@@ -8,6 +8,7 @@ import {
   NOTIFICATION_DLQ_TOPIC,
   SERVICE_NAME,
 } from './env';
+import { withUtcSession } from '@rasta/config';
 
 /** The minimum a running service needs; every test builds on it. */
 const REQUIRED = {
@@ -42,10 +43,12 @@ describe('notification-service configuration', () => {
     // comment said it would be.
     const { DATABASE_URL_NOTIFICATION: _omitted, ...withoutDatabase } = REQUIRED;
     expect(() => loadNotificationEnv(withoutDatabase)).toThrow(/DATABASE_URL/);
-    expect(loadNotificationEnv(REQUIRED).DATABASE_URL).toBe(REQUIRED.DATABASE_URL_NOTIFICATION);
+    expect(loadNotificationEnv(REQUIRED).DATABASE_URL).toBe(
+      withUtcSession(REQUIRED.DATABASE_URL_NOTIFICATION),
+    );
     expect(
       loadNotificationEnv({ ...REQUIRED, DATABASE_URL: 'postgresql://x:y@h:1/d' }).DATABASE_URL,
-    ).toBe('postgresql://x:y@h:1/d');
+    ).toBe(withUtcSession('postgresql://x:y@h:1/d'));
   });
 
   it('requires the broker list, the identity url and the internal token secret', () => {

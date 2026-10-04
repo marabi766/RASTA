@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
-import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
+import { assertDemoSeedAllowed, assertDemoSeedDatabase, withUtcSession } from '@rasta/config';
 import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
 
 /**
@@ -126,7 +126,9 @@ export function resolveDatabaseUrl(env: DatabaseUrlEnv = process.env): string {
     );
   }
 
-  return url;
+  // Its sessions run in UTC like the service's own (L7-37): the seed writes
+  // instants too.
+  return withUtcSession(url);
 }
 
 /** `host:port/database`, with the credentials left out of the log. */

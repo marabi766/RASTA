@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -47,7 +48,8 @@ function prismaCli(argv: string[], options: { url: string; stdin?: string }): vo
 const silent = { info: () => undefined, warn: () => undefined, debug: () => undefined };
 
 describe(`${MIGRATION}: rollback with data, then re-apply and replay`, () => {
-  const ownerUrl = process.env.DATABASE_URL_SUPPLIER_MIGRATOR;
+  const envOwnerUrl = process.env.DATABASE_URL_SUPPLIER_MIGRATOR;
+  const ownerUrl = envOwnerUrl && withUtcSession(envOwnerUrl);
   const schema = `rollback_${ulid().toLowerCase()}`;
   let scratchUrl: string;
   let owner: PrismaService;

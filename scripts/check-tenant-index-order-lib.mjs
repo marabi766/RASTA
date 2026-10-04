@@ -43,7 +43,14 @@ import { join } from 'node:path';
 export const TENANT_COLUMN = 'organization_id';
 
 /** Services whose schemas this check owns. Others opt in as their owners adopt it. */
-export const SERVICES = ['supplier', 'notification', 'document', 'audit', 'construction'];
+export const SERVICES = [
+  'supplier',
+  'notification',
+  'document',
+  'audit',
+  'construction',
+  'organization',
+];
 
 /**
  * Tables that carry `organization_id` but are platform plumbing, not tenant

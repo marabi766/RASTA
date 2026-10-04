@@ -1,8 +1,10 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
 # Re-applies every role's password from the current environment to an existing
-# cluster. Non-destructive: ALTER ROLE ... PASSWORD and nothing else — no data,
-# no database, no grant is touched.
+# cluster, and the UTC session default every service database and role carries
+# (lib/session-timezone.bash, L7-37). Non-destructive: ALTER ROLE ... PASSWORD
+# and ALTER ROLE/DATABASE ... SET TimeZone, nothing else — no data, no grant is
+# touched.
 #
 #   pnpm db:rotate-role-passwords
 #
@@ -27,6 +29,8 @@ set -euo pipefail
 # shellcheck source=role-passwords.bash
 source "$(dirname "${BASH_SOURCE[0]}")/role-passwords.bash"
 resolve_role_passwords || exit 1
+# shellcheck source=session-timezone.bash
+source "$(dirname "${BASH_SOURCE[0]}")/session-timezone.bash"
 
 : "${POSTGRES_USER:?POSTGRES_USER must name the superuser}"
 
@@ -60,6 +64,21 @@ while IFS= read -r role; do
   rotated=$((rotated + 1))
 done < <(rasta_roles)
 
+# A volume bootstrapped before the database-side UTC default (review of #214)
+# gets it here: the init scripts never run again on it. Each service database
+# that exists, with whichever of its two roles exist.
+utc_databases=0
+for svc in "${RASTA_SERVICES[@]}"; do
+  db="rasta_${svc}"
+  [[ "$(superuser_sql "SELECT 1 FROM pg_database WHERE datname = '${db}'")" == "1" ]] || continue
+  present=()
+  for role in "rasta_${svc}" "rasta_${svc}_migrator"; do
+    [[ " ${missing[*]} " == *" ${role} "* ]] || present+=("${role}")
+  done
+  ensure_utc_session_defaults "${db}" "${present[@]}"
+  utc_databases=$((utc_databases + 1))
+done
+
 failed=()
 while IFS= read -r role; do
   [[ " ${missing[*]} " == *" ${role} "* ]] && continue
@@ -70,6 +89,7 @@ while IFS= read -r role; do
 done < <(rasta_roles)
 
 echo "==> ${rotated} role password(s) re-applied from the environment"
+echo "==> ${utc_databases} service database(s) and their roles default to UTC sessions"
 if ((${#missing[@]} > 0)); then
   echo "    not present in this cluster, left alone: ${missing[*]}" >&2
   echo "    (the bootstrap creates them: 00-init-databases.sh is idempotent)" >&2

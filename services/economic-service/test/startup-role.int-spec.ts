@@ -1,4 +1,4 @@
-import { migratorCredentialsIn } from '@rasta/config';
+import { migratorCredentialsIn, withUtcSession } from '@rasta/config';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl } from './helpers';
 
@@ -20,7 +20,7 @@ function migratorUrl(): string {
       'DATABASE_URL_ECONOMIC_MIGRATOR is not set; see .env.migrator.example (docs/23 D-045).',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 describe('economic-service starts only as its runtime role (D-045)', () => {

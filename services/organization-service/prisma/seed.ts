@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
-import { assertDemoSeedAllowed, assertDemoSeedDatabase } from '@rasta/config';
+import { assertDemoSeedAllowed, assertDemoSeedDatabase, withUtcSession } from '@rasta/config';
 import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
 import { toLabel } from '../src/organization/organization.repository';
 
@@ -38,7 +38,9 @@ function resolveDatabaseUrl(): string {
         'Run via `pnpm db:seed`, which loads the repo-root .env.',
     );
   }
-  return url;
+  // Its sessions run in UTC like the service's own (L7-37): the seed writes
+  // instants too.
+  return withUtcSession(url);
 }
 
 const prisma = new PrismaClient({ datasources: { db: { url: resolveDatabaseUrl() } } });

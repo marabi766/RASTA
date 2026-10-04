@@ -138,3 +138,56 @@ export function verdict({ service }, findings) {
       .join('\n')}`,
   };
 }
+
+/**
+ * One row per way a session on this database could start in a zone other than
+ * UTC without the client asking (L7-37, review of #214): the database's own
+ * default, the runtime role's and the migrator's — each must be `UTC` — and
+ * any per-database override for either role here that is not. These are what
+ * lib/session-timezone.bash sets; they are the guarantee a pooled connection
+ * that drops the client's startup option still has. The server's
+ * postgresql.conf is deliberately not consulted: these outrank it. Feed to
+ * `psql -v runtime=<role> -v migrator=<role>` on stdin.
+ */
+export const TIMEZONE_FINDINGS_SQL = String.raw`
+WITH roles AS (
+  SELECT r.name, pr.oid FROM unnest(ARRAY[:'runtime', :'migrator']) AS r(name)
+    LEFT JOIN pg_roles pr ON pr.rolname = r.name
+),
+here AS (SELECT oid FROM pg_database WHERE datname = current_database()),
+zones AS (
+  SELECT s.setdatabase, s.setrole, substr(cfg, strpos(cfg, '=') + 1) AS zone
+    FROM pg_db_role_setting s, unnest(s.setconfig) cfg
+   WHERE lower(split_part(cfg, '=', 1)) = 'timezone'
+)
+SELECT finding FROM (
+  SELECT 'database ' || current_database() || ' default TimeZone is '
+         || coalesce((SELECT z.zone FROM zones z, here
+                       WHERE z.setdatabase = here.oid AND z.setrole = 0), 'unset') AS finding
+   WHERE coalesce((SELECT z.zone FROM zones z, here
+                    WHERE z.setdatabase = here.oid AND z.setrole = 0), '') <> 'UTC'
+  UNION ALL
+  SELECT 'role ' || r.name || ' does not exist' FROM roles r WHERE r.oid IS NULL
+  UNION ALL
+  SELECT 'role ' || r.name || ' default TimeZone is ' || coalesce(z.zone, 'unset')
+    FROM roles r LEFT JOIN zones z ON z.setrole = r.oid AND z.setdatabase = 0
+   WHERE r.oid IS NOT NULL AND coalesce(z.zone, '') <> 'UTC'
+  UNION ALL
+  SELECT 'role ' || r.name || ' in database ' || current_database()
+         || ' overrides TimeZone to ' || z.zone
+    FROM roles r JOIN zones z ON z.setrole = r.oid JOIN here ON z.setdatabase = here.oid
+   WHERE z.zone <> 'UTC'
+) f
+ORDER BY finding;
+`;
+
+/** The verdict on one service's UTC session defaults, from TIMEZONE_FINDINGS_SQL's rows. */
+export function timezoneVerdict({ service }, findings) {
+  if (findings.length === 0) {
+    return { ok: true, line: `${service}: database, runtime role and migrator default to UTC` };
+  }
+  return {
+    ok: false,
+    line: `${service}: sessions may not start in UTC:\n${findings.map((f) => `    - ${f}`).join('\n')}`,
+  };
+}

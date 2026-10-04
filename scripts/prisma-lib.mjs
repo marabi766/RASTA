@@ -36,3 +36,49 @@ export function ledgerRevoke({ migratorUrl, runtimeUrl }) {
     'END $$;\n'
   );
 }
+
+/** The startup option every migration session is opened with (L7-37). */
+export const UTC_SESSION_OPTION = '-c TimeZone=UTC';
+
+/**
+ * `url` with `options=-c TimeZone=UTC`, so the migration session runs in UTC
+ * whatever the server's or the migrator role's default: a migration that
+ * backfills a `timestamp(3)` column with `now()` or `CURRENT_TIMESTAMP` writes
+ * the session's wall time, which Prisma later reads as UTC.
+ *
+ * A mirror of `withUtcSession` in `packages/config/src/database-session.ts`,
+ * the services' copy — not an import of it, because migrations run before any
+ * build (`db:migrate` has no `^build` dependency and CI migrates straight after
+ * `pnpm install`), so that package's dist may not exist yet. The two are held
+ * to the same output by `scripts/db-session-utc.pg.test.mjs`. Everything but
+ * the `options` parameter is kept byte for byte; an earlier `-c TimeZone=…`
+ * loses to this one; a URL already ending with it is returned unchanged.
+ */
+export function withUtcSession(url) {
+  const hashAt = url.indexOf('#');
+  const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
+  const hash = hashAt === -1 ? '' : url.slice(hashAt);
+  const queryAt = beforeHash.indexOf('?');
+  const base = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
+  const pairs =
+    queryAt === -1
+      ? []
+      : beforeHash
+          .slice(queryAt + 1)
+          .split('&')
+          .filter(Boolean);
+
+  const decode = (value) => decodeURIComponent(value.replace(/\+/g, ' '));
+  const isOptions = (pair) => decode(pair.split('=')[0] ?? '') === 'options';
+  const existing = pairs
+    .filter(isOptions)
+    .map((pair) => decode(pair.slice(pair.indexOf('=') + 1 || pair.length)))
+    .join(' ')
+    .trim();
+
+  if (existing === UTC_SESSION_OPTION || existing.endsWith(` ${UTC_SESSION_OPTION}`)) return url;
+
+  const options = existing ? `${existing} ${UTC_SESSION_OPTION}` : UTC_SESSION_OPTION;
+  const kept = pairs.filter((pair) => !isOptions(pair));
+  return `${base}?${[...kept, `options=${encodeURIComponent(options)}`].join('&')}${hash}`;
+}

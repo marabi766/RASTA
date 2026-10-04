@@ -4,6 +4,7 @@ import {
   resolveDatabaseUrl,
   seedSearchText,
 } from '../../prisma/seed';
+import { withUtcSession } from '@rasta/config';
 import { searchTextFor } from './catalogue.service';
 
 /**
@@ -86,17 +87,19 @@ describe('marketplace demo seed — database target', () => {
   const IDENTITY = `postgresql://${credentials}@db.invalid:5432/rasta_identity`;
 
   it('uses the service-specific variable when it is the only one set', () => {
-    expect(resolveDatabaseUrl({ DATABASE_URL_MARKETPLACE: MARKETPLACE })).toBe(MARKETPLACE);
+    expect(resolveDatabaseUrl({ DATABASE_URL_MARKETPLACE: MARKETPLACE })).toBe(
+      withUtcSession(MARKETPLACE),
+    );
   });
 
   it('accepts the generic variable alone, for a single-database setup', () => {
-    expect(resolveDatabaseUrl({ DATABASE_URL: MARKETPLACE })).toBe(MARKETPLACE);
+    expect(resolveDatabaseUrl({ DATABASE_URL: MARKETPLACE })).toBe(withUtcSession(MARKETPLACE));
   });
 
   it('is content when both are set and agree', () => {
     expect(
       resolveDatabaseUrl({ DATABASE_URL: MARKETPLACE, DATABASE_URL_MARKETPLACE: MARKETPLACE }),
-    ).toBe(MARKETPLACE);
+    ).toBe(withUtcSession(MARKETPLACE));
   });
 
   it('refuses to seed when the two disagree, rather than choosing one', () => {

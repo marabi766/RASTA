@@ -40,6 +40,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const SERVICE_DIR = join(REPO_ROOT, 'services', 'identity-service');
@@ -137,7 +138,8 @@ const baseUrl =
   process.env.DATABASE_URL_IDENTITY ??
   process.env.DATABASE_URL;
 if (!baseUrl) fail('DATABASE_URL_IDENTITY is not set.');
-const url = new URL(baseUrl);
+// In UTC whatever the server's or the role's default (L7-37).
+const url = new URL(withUtcSession(baseUrl));
 url.searchParams.set('schema', scratchSchema);
 const scratchUrl = url.toString();
 

@@ -2182,11 +2182,26 @@ const PRISMA_ONLY_PARAMETERS = [
   'statement_cache_size',
 ];
 
+/**
+ * `target` with `params` as its query, each name and value percent-encoded.
+ *
+ * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
+ * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
+ * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
+ */
+function withLibpqQuery(target, params) {
+  const query = params
+    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+    .join('&');
+  target.search = '';
+  return query ? `${target.toString()}?${query}` : target.toString();
+}
+
 /** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
 export function libpqUrl(url) {
   const target = new URL(url);
-  for (const name of PRISMA_ONLY_PARAMETERS) target.searchParams.delete(name);
-  return target.toString();
+  const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
+  return withLibpqQuery(target, kept);
 }
 
 /**
@@ -2204,8 +2219,8 @@ export function libpqInvocation(url) {
     ? decodeURIComponent(target.password)
     : target.searchParams.get('password');
   target.password = '';
-  target.searchParams.delete('password');
-  return { target: target.toString(), env: password ? { PGPASSWORD: password } : {} };
+  const kept = [...target.searchParams].filter(([name]) => name !== 'password');
+  return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
 }
 
 /**
