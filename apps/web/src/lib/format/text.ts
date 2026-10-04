@@ -24,7 +24,8 @@ import {
  * a plate number, an order code, an email — is laid out by the bidirectional
  * algorithm, and without an isolating boundary its trailing punctuation jumps
  * to the wrong end of the run. docs/16 § 16.3 makes `dir="auto"` the rule for
- * exactly this, and `Identifier` in `src/ui/text` is where it is applied.
+ * exactly this, and `IsolatedText` / `Identifier` in `src/ui/text` is where it
+ * is applied — together with {@link withoutBidiControls}.
  */
 
 export { ZWNJ };
@@ -84,6 +85,28 @@ export function normalizePersianText(value: string): string {
  */
 export function containsLatin(value: string): boolean {
   return /[A-Za-z0-9]/.test(value);
+}
+
+/**
+ * The Unicode `Bidi_Control` set: ALM, LRM and RLM, the embeddings and
+ * overrides, the isolates. The property rather than a list, so it cannot fall
+ * behind the Unicode Character Database (Codex post-merge review of #106).
+ * The forms refuse it on the way in (`server/drivers.ts` re-exports this one
+ * constant); {@link withoutBidiControls} drops it on the way out.
+ */
+export const BIDI_CONTROL = /\p{Bidi_Control}/u;
+
+/**
+ * Stored text without its bidi controls, for display (L5-06, #220).
+ *
+ * `<bdi>` isolates a run from the text around it, but an override inside the
+ * run still reorders the run itself — `12‮34` still reads `1243`. The services
+ * refuse these characters now, but a value stored before that, or written by
+ * another client, still holds them; dropped here, it shows the characters in
+ * the order they were typed. ZWNJ is not a bidi control and is kept.
+ */
+export function withoutBidiControls(value: string): string {
+  return value.replace(new RegExp(BIDI_CONTROL.source, 'gu'), '');
 }
 
 /**

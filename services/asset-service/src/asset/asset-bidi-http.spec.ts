@@ -23,7 +23,13 @@ import { IdempotencyStore } from './idempotency';
  */
 describe('an asset write carrying a bidi control (HTTP)', () => {
   const QUIET_LOGGER = { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() };
-  const assets = { create: jest.fn(), update: jest.fn(), attachDocument: jest.fn() };
+  const assets = {
+    create: jest.fn(),
+    update: jest.fn(),
+    attachDocument: jest.fn(),
+    changeStatus: jest.fn(),
+    decommission: jest.fn(),
+  };
   const insurance = { recordPolicy: jest.fn(), recordInspection: jest.fn() };
   const idempotency = { execute: jest.fn() };
   let app: INestApplication;
@@ -174,6 +180,108 @@ describe('an asset write carrying a bidi control (HTTP)', () => {
           expect.objectContaining({ documentId: 'DOC_01J9ZK7Q' }),
           ...(path.endsWith('/documents') ? [] : [expect.anything()]),
         );
+      });
+    });
+  });
+
+  /**
+   * The six asset fields #209 left to the portal's contract specs (#209,
+   * "Follow-up after #206"): `model`, the two lifecycle reasons, and the
+   * inspection's certificate number and notes. Each is `plainText()` now.
+   */
+  describe('the fields the portal pinned until now', () => {
+    const DAY = '2026-01-01T00:00:00.000Z';
+    const YEAR_LATER = '2027-01-01T00:00:00.000Z';
+    const INSPECTION = {
+      certificateNo: 'INS-1234',
+      inspectedAt: DAY,
+      validTo: YEAR_LATER,
+      result: 'PASSED',
+    };
+    const CASES = [
+      {
+        label: 'POST /v1/assets model',
+        send: (value: string) =>
+          request(app.getHttpServer())
+            .post('/v1/assets')
+            .set('Idempotency-Key', 'create-asset-0001')
+            .send({ name: 'گریدر شماره یک', type: 'GRADER', model: value }),
+        field: 'model',
+        handler: assets.create,
+      },
+      {
+        label: 'PATCH /v1/assets/:id model',
+        send: (value: string) =>
+          request(app.getHttpServer())
+            .patch('/v1/assets/AST_1')
+            .send({ model: value, expectedVersion: 1 }),
+        field: 'model',
+        handler: assets.update,
+      },
+      {
+        label: 'POST /v1/assets/:id/status reason',
+        send: (value: string) =>
+          request(app.getHttpServer())
+            .post('/v1/assets/AST_1/status')
+            .send({ status: 'IDLE', reason: value, expectedVersion: 1 }),
+        field: 'reason',
+        handler: assets.changeStatus,
+      },
+      {
+        label: 'POST /v1/assets/:id/decommission reason',
+        send: (value: string) =>
+          request(app.getHttpServer())
+            .post('/v1/assets/AST_1/decommission')
+            .send({ reason: value, expectedVersion: 1 }),
+        field: 'reason',
+        handler: assets.decommission,
+      },
+      {
+        label: 'POST /v1/assets/:id/inspections certificateNo',
+        send: (value: string) =>
+          request(app.getHttpServer())
+            .post('/v1/assets/AST_1/inspections')
+            .set('Idempotency-Key', 'record-key-0001')
+            .send({ ...INSPECTION, certificateNo: value }),
+        field: 'certificateNo',
+        handler: insurance.recordInspection,
+      },
+      {
+        label: 'POST /v1/assets/:id/inspections notes',
+        send: (value: string) =>
+          request(app.getHttpServer())
+            .post('/v1/assets/AST_1/inspections')
+            .set('Idempotency-Key', 'record-key-0001')
+            .send({ ...INSPECTION, notes: value }),
+        field: 'notes',
+        handler: insurance.recordInspection,
+      },
+    ];
+    // Long enough for every bound (the decommission reason needs ten), short
+    // enough for the certificate number's sixty-four.
+    const CLEAN = `${MARKER} و تعمیر‌نشدنی`;
+
+    describe.each(CASES)('$label', ({ send, field, handler }) => {
+      it.each([
+        ['U+202E', '\u202E'],
+        ['U+061C', '\u061C'],
+        ['U+2066', '\u2066'],
+      ])('refuses %s with 400, naming the field and repeating nothing', async (_label, control) => {
+        const response = await send(`${MARKER}${control} و تعمیر‌نشدنی`);
+
+        expectRefused(response, handler);
+        expect(response.body.details).toEqual(
+          expect.arrayContaining([expect.objectContaining({ path: field })]),
+        );
+      });
+
+      it('still accepts Persian with ZWNJ', async () => {
+        const response = await send(CLEAN);
+
+        expect(response.status).toBeLessThan(300);
+        expect(handler).toHaveBeenCalledTimes(1);
+        // The body is the first argument on register and the second elsewhere.
+        expect(handler.mock.calls[0]).toContainEqual(expect.objectContaining({ [field]: CLEAN }));
       });
     });
   });

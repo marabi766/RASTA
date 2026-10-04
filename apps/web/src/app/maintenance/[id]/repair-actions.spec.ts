@@ -434,6 +434,30 @@ describe.each(COMMANDS)('$name — what reaches the service', (command) => {
   });
 });
 
+describe('part — the two references are identifiers', () => {
+  const part = COMMANDS.find((command) => command.name === 'part')!;
+  const post = (fields: Record<string, string>) =>
+    part.submit(formData({ ...validFor(part), ...fields }));
+
+  describe.each(['partReference', 'sourceReference'])('%s', (field) => {
+    it.each([
+      ['U+202E', 0x202e, 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد'],
+      ['U+061C', 0x061c, 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد'],
+      ['ZWNJ', 0x200c, 'شناسه نویسهٔ نامرئی، نیم‌فاصله یا شکست خط نمی‌پذیرد'],
+      ['a byte-order mark', 0xfeff, 'شناسه نویسهٔ نامرئی، نیم‌فاصله یا شکست خط نمی‌پذیرد'],
+    ])('is not sent carrying %s', async (_label, codePoint, message) => {
+      const state = await post({ [field]: `ORD-${String.fromCodePoint(codePoint)}0042` });
+      expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { [field]: message } });
+      expect(part.service).not.toHaveBeenCalled();
+    });
+
+    it('is sent in Persian or Latin letters and digits', async () => {
+      await expect(post({ [field]: 'حواله-۱۴۰۳-ORD01' })).rejects.toThrow(/NEXT_REDIRECT/);
+      expect(part.service.mock.calls[0][2]).toMatchObject({ [field]: 'حواله-۱۴۰۳-ORD01' });
+    });
+  });
+});
+
 describe('complete — the total the person was shown', () => {
   const complete = COMMANDS[1];
 

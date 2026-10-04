@@ -1,3 +1,4 @@
+import { WITHOUT_CONTROL_CHARACTER } from '@rasta/contracts';
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
 import {
@@ -45,6 +46,18 @@ describe('zod to JSON Schema', () => {
         .expectedTotalCostMinor;
       expect(total.type).toBe('string');
       expect(total.pattern).toContain('\\d');
+    });
+
+    it("publishes a part's two references with the platform's referenceId() rule (#220)", () => {
+      const s = toJsonSchema(recordPartSchema);
+      const properties = s.properties as Record<string, Record<string, unknown>>;
+      for (const field of ['partReference', 'sourceReference']) {
+        expect([field, properties[field]?.pattern]).toEqual([
+          field,
+          WITHOUT_CONTROL_CHARACTER.source,
+        ]);
+        expect(properties[field]).toMatchObject({ type: 'string', minLength: 1, maxLength: 128 });
+      }
     });
 
     it('publishes the total an approval must state as required', () => {

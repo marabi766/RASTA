@@ -1,4 +1,5 @@
 import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
+import { PLAIN_TEXT_PATTERN } from './update-asset-body';
 
 /**
  * The request bodies of the three lifecycle commands — `POST
@@ -40,7 +41,7 @@ export const CHANGE_STATUS_BODY_SCHEMA: SchemaObject = {
   properties: {
     expectedVersion: EXPECTED_VERSION,
     status: { type: 'string', enum: ['ACTIVE', 'IDLE', 'OUT_OF_SERVICE'] },
-    reason: { type: 'string', minLength: 3, maxLength: 500 },
+    reason: { type: 'string', minLength: 3, maxLength: 500, ...PLAIN_TEXT_PATTERN },
   },
 };
 
@@ -50,7 +51,7 @@ export const DECOMMISSION_BODY_SCHEMA: SchemaObject = {
   required: ['reason', 'expectedVersion'],
   properties: {
     expectedVersion: EXPECTED_VERSION,
-    reason: { type: 'string', minLength: 10, maxLength: 1000 },
+    reason: { type: 'string', minLength: 10, maxLength: 1000, ...PLAIN_TEXT_PATTERN },
     decommissionedAt: { type: 'string', format: 'date-time' },
   },
 };

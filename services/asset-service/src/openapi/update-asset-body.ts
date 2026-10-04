@@ -1,4 +1,17 @@
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
+
+/**
+ * What `plainText()` refuses, published from the constant it validates with
+ * (#220): the pattern admits any text without a Unicode `Bidi_Control`
+ * character. `document.spec.ts` holds it to the Zod field's own regex.
+ */
+export const PLAIN_TEXT_PATTERN: Pick<SchemaObject, 'pattern' | 'description'> = {
+  pattern: WITHOUT_BIDI_CONTROL.source,
+  description:
+    'Trimmed. Any text without a Unicode bidirectional control character (`\\p{Bidi_Control}`); ' +
+    'one is refused with 400 VALIDATION_FAILED.',
+};
 
 /**
  * The request body of `PATCH /v1/assets/{id}`, as the published document
@@ -29,7 +42,7 @@ export const UPDATE_ASSET_BODY_SCHEMA: SchemaObject = {
     name: { type: 'string', minLength: 2, maxLength: 200 },
     assetTag: { type: 'string', minLength: 1, maxLength: 64, nullable: true },
     manufacturer: { type: 'string', minLength: 1, maxLength: 120, nullable: true },
-    model: { type: 'string', minLength: 1, maxLength: 120, nullable: true },
+    model: { type: 'string', minLength: 1, maxLength: 120, nullable: true, ...PLAIN_TEXT_PATTERN },
     manufactureYear: { type: 'integer', minimum: 1300, maximum: 2100, nullable: true },
     specifications: { type: 'object', additionalProperties: true },
   },

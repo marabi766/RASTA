@@ -3,6 +3,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { referenceId } from '@rasta/contracts';
 import ts from 'typescript';
 
 import {
@@ -13,9 +14,16 @@ import {
   RECORD_PART_FIELD_MAPPING,
   REPAIR_TOTAL_CHANGED_MESSAGE,
   START_REPAIR_FIELD_MAPPING,
+  recordPartFormSchema,
 } from './repair-order-commands';
 import { canManageMaintenance, REQUEST_STATE_MESSAGES } from './maintenance-commands';
 import { DIRECT_COST_CATEGORIES, MAX_AMOUNT_MINOR, PART_SOURCES } from '@/lib/repair-order-fields';
+import {
+  BIDI_CONTROL_CODE_POINTS,
+  OTHER_INVISIBLE_CODE_POINTS,
+  formField,
+  probesFrom,
+} from '@/test/text-rules';
 
 /**
  * What the six repair-order commands depend on, pinned to maintenance-service's
@@ -204,12 +212,12 @@ describe('the request bodies', () => {
     ['completeRepairSchema', 'workPerformed', 'displayText(2, 2000)'],
     ['cancelRepairSchema', 'reason', 'displayText(3, 500)'],
     ['recordPartSchema', 'partName', 'displayText(2, 200)'],
-    ['recordPartSchema', 'partReference', 'z.string().trim().min(1).max(128).optional()'],
+    ['recordPartSchema', 'partReference', 'referenceId().min(1).max(128).optional()'],
     ['recordPartSchema', 'quantity', 'partQuantity'],
     ['recordPartSchema', 'unit', 'displayText(1, 32)'],
     ['recordPartSchema', 'unitCostMinor', 'boundedAmountMinorSchema'],
     ['recordPartSchema', 'source', "partSourceSchema.default('WORKSHOP_SUPPLIED')"],
-    ['recordPartSchema', 'sourceReference', 'z.string().trim().min(1).max(128).optional()'],
+    ['recordPartSchema', 'sourceReference', 'referenceId().min(1).max(128).optional()'],
     ['recordLabourSchema', 'description', 'displayText(2, 500)'],
     ['recordLabourSchema', 'technician', 'displayText(2, 120).optional()'],
     ['recordLabourSchema', 'hours', 'quantity(6)'],
@@ -221,6 +229,29 @@ describe('the request bodies', () => {
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
     expect(squash(schemaProperties(schema).get(key))).toBe(expected);
   });
+
+  // `referenceId()` is the platform's, from `@rasta/contracts`, so the part
+  // form's two references are checked against the rule itself: every bidi
+  // control and every other invisible character — ZWNJ, a byte-order mark, a
+  // tab — refused by both; Persian and Latin letters and digits admitted.
+  it.each(['partReference', 'sourceReference'])(
+    'the part form refuses in %s exactly what the service refuses',
+    (key) => {
+      const service = referenceId().min(1).max(128);
+      const portal = formField(recordPartFormSchema, key);
+      const probes = probesFrom('حواله-۱۴۰۳-ORD01', [
+        ...BIDI_CONTROL_CODE_POINTS,
+        ...OTHER_INVISIBLE_CODE_POINTS,
+      ]);
+      for (const probe of probes) {
+        expect([probe, portal.safeParse(probe).success]).toEqual([
+          probe,
+          service.safeParse(probe).success,
+        ]);
+      }
+      expect(probes.filter((probe) => service.safeParse(probe).success)).toEqual([probes[0]]);
+    },
+  );
 
   it('still takes the completion’s total as an optional amount, and publishes it as optional for API clients and always sent by the portal', () => {
     const initializer = squash(

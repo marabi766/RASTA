@@ -3,6 +3,7 @@ import {
   ButtonLink,
   EmptyState,
   ErrorState,
+  IsolatedText,
   NoAccessState,
   PageHeader,
   Section,
@@ -106,7 +107,9 @@ function EntryRows({
               {entry.amountMinor ? ` · ${formatMoney(entry.amountMinor)}` : ''}
             </p>
             {entry.description ? (
-              <p className="text-sm text-content-muted">{entry.description}</p>
+              <p className="text-sm text-content-muted">
+                <IsolatedText>{entry.description}</IsolatedText>
+              </p>
             ) : null}
           </li>
         ))}

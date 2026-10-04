@@ -468,12 +468,29 @@ describe('record an inspection: what the form itself catches', () => {
     ['no inspection date', { inspectedAt: '' }, 'inspectedAt'],
     ['an end before the inspection', { validTo: '2026-01-01' }, 'validTo'],
     ['notes over 1000 characters', { notes: 'ن'.repeat(1001) }, 'notes'],
+    [
+      'a certificate number carrying U+202E',
+      { certificateNo: `INS-${String.fromCodePoint(0x202e)}1234` },
+      'certificateNo',
+    ],
+    [
+      'notes carrying U+061C',
+      { notes: `لاستیک${String.fromCodePoint(0x061c)}ها فرسوده‌اند` },
+      'notes',
+    ],
+    ['notes carrying U+2068', { notes: `یادداشت ${String.fromCodePoint(0x2068)}کوتاه` }, 'notes'],
   ])('does not call the service for %s', async (_name, change, field) => {
     expect(await submit(formData(inspection, { ...inspection.valid, ...change }))).toMatchObject({
       kind: 'INVALID',
       fieldErrors: { [field]: expect.any(String) },
     });
     expect(inspection.send).not.toHaveBeenCalled();
+  });
+
+  it('still sends notes written in Persian with ZWNJ', async () => {
+    const notes = 'لاستیک\u200cها باید تا ماه بعد عوض شوند';
+    await redirectedTo(submit(formData(inspection, { ...inspection.valid, notes })));
+    expect(inspection.send.mock.calls[0]![2]).toMatchObject({ notes });
   });
 
   it('leaves a blank centre and blank notes out of the body', async () => {

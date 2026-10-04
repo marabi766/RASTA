@@ -30,9 +30,11 @@ export { IRR, MoneyInputError, formatMoney, parseMoneyInput } from './money';
 export type { CurrencyFormat, FormatMoneyOptions } from './money';
 
 export {
+  BIDI_CONTROL,
   collapseWhitespace,
   containsLatin,
   joinWithZwnj,
   normalizePersianLetters,
   normalizePersianText,
+  withoutBidiControls,
 } from './text';

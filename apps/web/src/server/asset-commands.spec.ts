@@ -172,10 +172,11 @@ describe('registering a machine', () => {
     }
   });
 
-  it('holds the model to the service’s own rule — trimmed, 1 to 120 — and no character rule', () => {
-    // asset-service's `model` is `z.string().trim().min(1).max(120)`: unlike
-    // `name` and `manufacturer` it has no display-text class, so a model the
-    // service stores happily is one this form must not refuse.
+  it('holds the model to the service’s own rule — trimmed, 1 to 120 — and no character class', () => {
+    // asset-service's `model` is `plainText().min(1).max(120)`: unlike `name`
+    // and `manufacturer` it has no display-text class, so a model the service
+    // stores happily is one this form must not refuse. Its one character rule,
+    // the bidi controls, is the next test.
     for (const model of ['WA320-3', 'مدل «ویژه» #۱', 'a<b>', 'X_1 & Y=2', '日本語']) {
       expect(parseRegisterAssetForm(values({ model }))).toMatchObject({
         ok: true,
@@ -189,6 +190,21 @@ describe('registering a machine', () => {
     expect(parseRegisterAssetForm(values({ model: 'م'.repeat(121) }))).toMatchObject({
       ok: false,
       fieldErrors: { model: 'مدل حداکثر ۱۲۰ نویسه است' },
+    });
+  });
+
+  it('refuses a model carrying an invisible direction control, as the service does', () => {
+    for (const codePoint of [0x202e, 0x061c, 0x200f, 0x2069]) {
+      expect(
+        parseRegisterAssetForm(values({ model: `WA${String.fromCodePoint(codePoint)}320` })),
+      ).toMatchObject({
+        ok: false,
+        fieldErrors: { model: 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد' },
+      });
+    }
+    expect(parseRegisterAssetForm(values({ model: 'چرخ\u200cدار' }))).toMatchObject({
+      ok: true,
+      request: { model: 'چرخ\u200cدار' },
     });
   });
 
