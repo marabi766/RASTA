@@ -171,7 +171,15 @@ export class RegistrationController {
   @Post(':id/approve')
   @HttpCode(200)
   @Roles('UNION_ADMIN')
-  @ApiOperation({ summary: 'Approve a registration and provision the account' })
+  @ApiOperation({
+    summary: 'Approve a registration and provision the account',
+    description:
+      'Refused with 409 ALREADY_EXISTS, the registration staying PENDING and nothing approved, ' +
+      'when its `details[0].code` is MEMBERSHIP_ALREADY_LIVE (the applicant was given a live ' +
+      'membership in the requested organization meanwhile) or ACCOUNT_NOT_FROM_THIS_REGISTRATION ' +
+      '(the identity provider holds an account under the username that this registration did not ' +
+      'create). A retry after any other failure adopts the account an earlier attempt created.',
+  })
   approve(
     @Param('id') id: string,
     @Body(zodPipe(approveRegistrationSchema)) dto: ApproveRegistrationDto,

@@ -58,6 +58,7 @@ async function main(): Promise<number> {
     const report = await runProjectionCommand(mode as ProjectionCommandMode, {
       repository,
       projector,
+      keycloak,
     });
     // User ids only — never names, emails or roles in an operations log (S-09).
     logger.info({ report }, `Keycloak ${mode}: ${report.accounts} accounts`);

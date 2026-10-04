@@ -133,3 +133,82 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
     expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(1);
   });
 });
+
+/**
+ * The lookup an approval makes after `createUser` answered 409, and reconcile
+ * makes for each user without an account: by exact username, reading only
+ * what a decision needs — the id, whether it is enabled, its platform
+ * attributes.
+ */
+describe('KeycloakAdminClient.findAccountByUsername', () => {
+  const urls: string[] = [];
+  let answer: Response;
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    urls.length = 0;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.endsWith('/token')) {
+        return new Response(JSON.stringify({ access_token: 'admin-token', expires_in: 300 }));
+      }
+      urls.push(url);
+      return answer;
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const client = (enabled = true) =>
+    new KeycloakAdminClient({
+      baseUrl: 'http://keycloak.test',
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled,
+    });
+
+  it('asks for the exact username and returns only the account it names', async () => {
+    answer = new Response(
+      JSON.stringify([
+        { id: 'kc-long', username: 'applicant-two', enabled: true, attributes: {} },
+        {
+          id: 'kc-1',
+          username: 'applicant',
+          enabled: false,
+          attributes: { rasta_user_id: ['USR_1'], organization_roles: ['ORG_A:DRIVER'] },
+        },
+      ]),
+    );
+    await expect(client().findAccountByUsername('Applicant')).resolves.toEqual({
+      id: 'kc-1',
+      enabled: false,
+      attributes: {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: ['ORG_A:DRIVER'],
+        active_organization_id: [],
+      },
+    });
+    expect(urls).toEqual([
+      'http://keycloak.test/admin/realms/rasta/users?username=Applicant&exact=true',
+    ]);
+  });
+
+  it('answers null when there is none', async () => {
+    answer = new Response(JSON.stringify([]));
+    await expect(client().findAccountByUsername('nobody')).resolves.toBeNull();
+  });
+
+  it('reports an unreachable Keycloak as upstream unavailable', async () => {
+    answer = new Response(null, { status: 503 });
+    await expect(client().findAccountByUsername('applicant')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  it('calls nothing when Keycloak sync is off', async () => {
+    await expect(client(false).findAccountByUsername('applicant')).resolves.toBeNull();
+    expect(urls).toEqual([]);
+  });
+});

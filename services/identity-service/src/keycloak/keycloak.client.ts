@@ -30,6 +30,8 @@ export interface CreateKeycloakUserInput {
 /** What the admin API returns for a user — only the fields this client reads. */
 interface KeycloakUserRepresentation {
   id: string;
+  username?: string;
+  enabled?: boolean;
   email?: string;
   firstName?: string;
   lastName?: string;
@@ -53,6 +55,13 @@ function platformAttributesWrite(
     lastName: current.lastName,
     attributes,
   };
+}
+
+/** One account as `findAccountByUsername` reads it: no profile data, only what decisions need. */
+export interface KeycloakAccount {
+  id: string;
+  enabled: boolean;
+  attributes: PlatformAttributes;
 }
 
 export interface KeycloakClientOptions {
@@ -228,6 +237,36 @@ export class KeycloakAdminClient {
         operation: 'replacePlatformAttributes',
       });
     }
+  }
+
+  /**
+   * The account Keycloak holds under one username, or null — what an approval
+   * reads after `createUser` answered 409, and what reconcile reads to find an
+   * account no user row points at (`approveRegistration`). Usernames are
+   * case-insensitive in Keycloak, which stores them lower-cased; `exact=true`
+   * stops `foo` from matching `foobar`, and the comparison below stops
+   * anything else.
+   */
+  async findAccountByUsername(username: string): Promise<KeycloakAccount | null> {
+    if (!this.options.enabled) return null;
+
+    const query = new URLSearchParams({ username, exact: 'true' });
+    const response = await this.admin(`/users?${query.toString()}`);
+    if (!response.ok) {
+      throw RastaError.upstreamUnavailable('keycloak', {
+        status: response.status,
+        operation: 'findAccountByUsername',
+      });
+    }
+    const found = ((await response.json()) as KeycloakUserRepresentation[]).find(
+      (account) => account.username?.toLowerCase() === username.toLowerCase(),
+    );
+    if (!found) return null;
+    return {
+      id: found.id,
+      enabled: found.enabled === true,
+      attributes: readPlatformAttributes(found.attributes),
+    };
   }
 
   /** The platform attributes Keycloak currently holds for one user, for reconcile. */

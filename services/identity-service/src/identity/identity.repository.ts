@@ -359,6 +359,29 @@ export class IdentityRepository {
     return rows.map((row) => row.id);
   }
 
+  /**
+   * Users with no Keycloak account, a page at a time — the orphan sweep's
+   * input (`projection.command.ts`). The username is read only to look the
+   * account up and is never logged.
+   */
+  async listUsersWithoutAccount(
+    after: string | null,
+    take: number,
+  ): Promise<{ id: string; username: string }[]> {
+    return runUnscoped('the Keycloak orphan sweep covers every user without an account', () =>
+      this.client.user.findMany({
+        where: {
+          deletedAt: null,
+          keycloakId: null,
+          ...(after ? { id: { gt: after } } : {}),
+        },
+        orderBy: { id: 'asc' },
+        take,
+        select: { id: true, username: true },
+      }),
+    );
+  }
+
   async listMembershipsForUser(userId: string, tx?: ExtendedPrismaClient) {
     const db = tx ?? this.client;
     return runUnscoped('a user must be able to see every organization they belong to', () =>
@@ -430,5 +453,15 @@ export function isUniqueViolation(error: unknown): boolean {
     error !== null &&
     'code' in error &&
     (error as { code: unknown }).code === 'P2002'
+  );
+}
+
+/** Prisma's "no record matched the `where` of an update", without importing its error classes. */
+export function isRecordNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code: unknown }).code === 'P2025'
   );
 }
