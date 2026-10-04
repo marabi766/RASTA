@@ -50,6 +50,10 @@ export const SERVICES = [
   'audit',
   'construction',
   'organization',
+  'fleet',
+  'identity',
+  'maintenance',
+  'marketplace',
 ];
 
 /**
@@ -65,6 +69,10 @@ export const EXEMPT_TABLES = {
 const PARENT_LOAD =
   'parent-child path: Prisma loads the relation by the parent id with no organization ' +
   'predicate, and the ON DELETE RESTRICT check probes it the same way';
+
+/** fleet and maintenance keep the same release tombstone for an asset transfer (ADR-062). */
+const RELEASE_TOMBSTONE =
+  "one tombstone per transfer (asset_id, fence_id): fence_id is asset-service's transfer id (TRF_…), unique across tenants, and this key is the ON CONFLICT target of the release write; the lookup (asset_id, organization_id, fence_id) is served by it";
 
 /**
  * Why a per-parent unique must not gain a leading organization_id: the child
@@ -138,6 +146,35 @@ export const EXEMPTIONS = {
       'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
     ix_bid_access_evidence_tender:
       "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
+  },
+  fleet: {
+    asset_transfer_release_pkey: `${RELEASE_TOMBSTONE} (FleetRepository.releaseTransferFence, isTransferReleased)`,
+  },
+  identity: {
+    ix_security_event_outbox_claimable:
+      'the refusal-audit relay reads the oldest unpublished row across every tenant for its age gauge (SecurityEventOutboxStore.oldestPendingAgeSeconds); a partial index on published_at IS NULL',
+    ix_security_event_outbox_closed_windows:
+      'the refusal-audit relay claims closed windows for every tenant at once, oldest first (SecurityEventOutboxStore.claimPending, FOR UPDATE SKIP LOCKED); a partial index on published_at IS NULL',
+    membership_user_id_organization_id_deleted_at_key:
+      'one live membership per (user, organization): a user is platform-wide, and the lookups name the user first across tenants (IdentityRepository.findMembership, runUnscoped during provisioning)',
+    membership_user_id_status_idx:
+      "a user's memberships in every organization (IdentityRepository.listMembershipsForUser and findLiveMemberships, runUnscoped); the tenant's own listing has membership_organization_id_status_idx",
+  },
+  maintenance: {
+    asset_transfer_release_pkey: `${RELEASE_TOMBSTONE} (MaintenanceRepository.releaseTransferFence, isTransferReleased)`,
+    ux_request_open_per_asset:
+      'one open request per (asset, type) — an invariant of one machine (docs/05 § 5.5): asset ids are global, so leading with organization_id would let a transferred asset hold an open request in two tenants',
+  },
+  marketplace: {
+    ix_offer_product_status:
+      "the catalogue joins a product's PUBLISHED offers from every supplier (CatalogueService.searchProducts, runUnscoped); a supplier's own offers have ix_offer_org_status",
+    ix_offer_status_price:
+      'the catalogue orders PUBLISHED offers from every supplier by price (CatalogueService.searchProducts, orderingFor PRICE_ASC/PRICE_DESC, runUnscoped)',
+    ix_order_history_order: `${PARENT_LOAD} (order_status_history_order_id_fkey, ON DELETE CASCADE); a tenant's history has ix_order_history_org`,
+    ix_order_supplier_status:
+      'a counterparty read: the supplier lists orders where it is supplier_organization_id, not the buyer that owns the row (OrderRepository.listForCaller with role SUPPLIER, runUnscoped)',
+    uq_offer_price_version: `one row per (offer, version) — an invariant of one offer's price history; ${perParentUnique('offer_id')}`,
+    uq_order_line_offer: `one line per (order, offer) — an invariant of one order; ${perParentUnique('order_id')}; ${PARENT_LOAD}`,
   },
 };
 

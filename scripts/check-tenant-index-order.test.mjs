@@ -205,3 +205,48 @@ test('reads unquoted identifiers, schema-qualified names and expression keys', (
   assert.deepEqual(indexes.get('audit_x_org_idx').columns, ['organization_id', 'occurred_at']);
   assert.equal(indexes.get('ix_expr').columns[0], '((lower(id)))');
 });
+
+// L7-44, the four services opted in by this change: every report classified as
+// a legitimate exemption (none needed a fix migration). Without the exemptions
+// the check reports exactly these thirteen, so each one is load-bearing.
+const OPTED_IN = {
+  fleet: ['asset_transfer_release_pkey'],
+  identity: [
+    'ix_security_event_outbox_claimable',
+    'ix_security_event_outbox_closed_windows',
+    'membership_user_id_organization_id_deleted_at_key',
+    'membership_user_id_status_idx',
+  ],
+  maintenance: ['asset_transfer_release_pkey', 'ux_request_open_per_asset'],
+  marketplace: [
+    'ix_offer_product_status',
+    'ix_offer_status_price',
+    'ix_order_history_order',
+    'ix_order_supplier_status',
+    'uq_offer_price_version',
+    'uq_order_line_offer',
+  ],
+};
+
+test('fleet, identity, maintenance and marketplace: without their exemptions exactly the classified indexes are reported', () => {
+  for (const [service, names] of Object.entries(OPTED_IN)) {
+    const { errors } = checkTenantIndexOrder(replayMigrations(migrationsOf(service)), {});
+    assert.deepEqual(errors.map((error) => error.split(':')[0]).sort(), [...names].sort(), service);
+    assert.deepEqual(Object.keys(EXEMPTIONS[service]).sort(), [...names].sort(), service);
+  }
+});
+
+test('every exemption in those four services says which query or invariant it serves', () => {
+  for (const [service, names] of Object.entries(OPTED_IN)) {
+    for (const name of names) {
+      const reason = EXEMPTIONS[service][name];
+      assert.ok(typeof reason === 'string' && reason.length > 60, `${service}.${name}`);
+      // A named query (Class.method) or the invariant the index enforces.
+      assert.match(
+        reason,
+        /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+|invariant|ON CONFLICT|foreign key|_fkey/,
+        `${service}.${name}`,
+      );
+    }
+  }
+});
