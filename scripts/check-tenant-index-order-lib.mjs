@@ -50,6 +50,7 @@ export const SERVICES = [
   'audit',
   'construction',
   'organization',
+  'economic',
 ];
 
 /**
@@ -138,6 +139,33 @@ export const EXEMPTIONS = {
       'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
     ix_bid_access_evidence_tender:
       "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
+  },
+  // economic: the rule tables keep organization_id nullable on purpose (a NULL
+  // row is a platform-wide rule every tenant is matched against), so their
+  // lookups name the rule's key, not a tenant (TENANT_SCOPE_EXEMPTIONS in
+  // services/economic-service/src/prisma/prisma.service.ts).
+  economic: {
+    commission_rule_transaction_type_status_valid_from_idx:
+      'platform-wide (organization_id NULL) and tenant rules matched together by transaction type (CommissionService.candidateRules and listRules, runUnscoped with an explicit OR on organization_id)',
+    reward_rule_trigger_event_status_valid_from_idx:
+      'platform-wide (organization_id NULL) and tenant rules matched together by trigger event (RewardService.applicableRuleIds, runUnscoped with an explicit OR on organization_id)',
+    reward_level_status_min_points_idx:
+      'platform-wide (organization_id NULL) and tenant levels read together by status (RewardService.applyLevel, runUnscoped with an explicit OR on organization_id)',
+    ix_payment_intent_unfinished_refund:
+      "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
+    ix_payment_reconciliation_open_window:
+      'the same heal pass reads open reconciliation tasks across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial on status <> DONE',
+    ledger_entry_account_id_posted_at_idx:
+      "one account's statement by its globally unique id (LedgerRepository.listEntries, docs/05 § 5.5); fk_ledger_entry_account_identity binds an entry's organization_id to its account's, so a leading organization_id would not narrow it",
+    uq_ledger_account_identity:
+      'the target of the composite identity foreign keys (fk_ledger_entry_account_identity, fk_wallet_account_identity): unique already on id, the primary key, and only binds organization_id and currency to it for those keys',
+    reward_rule_id_source_reference_key: `one grant per (rule, source fact) — the reward consumer's idempotency and the docs/10 § 10.9 anti-fraud control (RewardService.grantOne catches its unique violation); rules may be platform-wide, so the invariant is the rule's, not one tenant's; ${perParentUnique('rule_id')}`,
+    settlement_payee_organization_id_settled_at_idx:
+      'a counterparty read: the payee lists settlements it receives, owned by the payer (SettlementController.list with incoming=true, runUnscoped narrowed to its own id on payee_organization_id)',
+    transaction_counterparty_organization_id_status_idx:
+      "a counterparty read: the counterparty branch of the caller's transactions, owned by the other party (TransactionRepository.list, OR on counterparty_organization_id)",
+    transaction_leg_transaction_id_role_key: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
+    uq_wallet_hold_active_reference: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
   },
 };
 

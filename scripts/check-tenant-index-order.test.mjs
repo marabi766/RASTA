@@ -205,3 +205,36 @@ test('reads unquoted identifiers, schema-qualified names and expression keys', (
   assert.deepEqual(indexes.get('audit_x_org_idx').columns, ['organization_id', 'occurred_at']);
   assert.equal(indexes.get('ix_expr').columns[0], '((lower(id)))');
 });
+
+// L7-44, economic-service: every report classified as a legitimate exemption
+// (none needed a fix migration). Without the exemptions the check reports
+// exactly these twelve, so each one is load-bearing.
+const ECONOMIC_EXEMPT = [
+  'commission_rule_transaction_type_status_valid_from_idx',
+  'ix_payment_intent_unfinished_refund',
+  'ix_payment_reconciliation_open_window',
+  'ledger_entry_account_id_posted_at_idx',
+  'reward_level_status_min_points_idx',
+  'reward_rule_id_source_reference_key',
+  'reward_rule_trigger_event_status_valid_from_idx',
+  'settlement_payee_organization_id_settled_at_idx',
+  'transaction_counterparty_organization_id_status_idx',
+  'transaction_leg_transaction_id_role_key',
+  'uq_ledger_account_identity',
+  'uq_wallet_hold_active_reference',
+];
+
+test('economic-service: without its exemptions exactly the classified indexes are reported', () => {
+  const { errors } = checkTenantIndexOrder(replayMigrations(migrationsOf('economic')), {});
+  assert.deepEqual(errors.map((error) => error.split(':')[0]).sort(), [...ECONOMIC_EXEMPT].sort());
+  assert.deepEqual(Object.keys(EXEMPTIONS.economic).sort(), [...ECONOMIC_EXEMPT].sort());
+});
+
+test('every economic exemption says which query or invariant it serves', () => {
+  for (const name of ECONOMIC_EXEMPT) {
+    const reason = EXEMPTIONS.economic[name];
+    assert.ok(typeof reason === 'string' && reason.length > 60, name);
+    // A named query (Class.method) or the invariant or foreign key it enforces.
+    assert.match(reason, /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+|invariant|foreign key|_fkey/, name);
+  }
+});
