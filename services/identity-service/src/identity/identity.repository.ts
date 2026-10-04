@@ -96,6 +96,26 @@ export class IdentityRepository {
     return row ? { status: row.status, userId: row.user_id } : null;
   }
 
+  /**
+   * The approved registration request of one user, or null (#219 r3).
+   *
+   * What a first activation needs: the projector enables a registration
+   * approval's account only while its request is APPROVED, and marks the
+   * account with this id (`KeycloakAdminClient.activateAccount`). A user's id
+   * is minted with their request (`submitRegistration`), so there is at most
+   * one.
+   */
+  async findApprovedRegistrationId(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<string | null> {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM registration_request
+       WHERE user_id = ${userId} AND status = 'APPROVED'
+       ORDER BY id LIMIT 1`;
+    return rows[0]?.id ?? null;
+  }
+
   /** The same lock, on every registration request of one user; their statuses. */
   async lockRegistrationRequestsOfUser(
     tx: ExtendedPrismaClient,

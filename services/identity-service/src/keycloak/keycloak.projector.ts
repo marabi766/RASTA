@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { KeycloakAdminClient } from './keycloak.client';
 import {
   divergentAttributes,
@@ -17,8 +18,12 @@ import {
   type KeycloakProjectionTrigger,
 } from '../observability/keycloak-projection.metrics';
 
-/** Above the Keycloak client's worst case: three calls, each bounded at 10 s. */
-const PROJECTION_TRANSACTION_TIMEOUT_MS = 35_000;
+/**
+ * Above the Keycloak client's worst case: six calls — token, the attribute
+ * GET and PUT, and on a first activation the account read and the activation
+ * GET and PUT — each bounded at 10 s.
+ */
+const PROJECTION_TRANSACTION_TIMEOUT_MS = 65_000;
 
 export interface ReconcileFinding {
   userId: string;
@@ -189,9 +194,9 @@ export class KeycloakProjector {
    * this transaction, so it serialises across replicas and dies with the
    * connection.
    *
-   * The transaction outlives the Keycloak calls (three at most — token, GET,
-   * PUT — each bounded at 10 s by the client), so its timeout is set above
-   * that. A projection that cannot get the lock in time fails and is retried
+   * The transaction outlives the Keycloak calls (three, or six on a first
+   * activation, each bounded at 10 s by the client), so its timeout is set
+   * above that. A projection that cannot get the lock in time fails and is retried
    * by its event, as any other failed projection is.
    */
   private async write(userId: string): Promise<KeycloakProjectionOutcome> {
@@ -199,36 +204,83 @@ export class KeycloakProjector {
     return this.repository.transaction(
       async (tx) => {
         await this.repository.lockUserProjection(tx, userId);
-        const user = await this.repository.findUserById(userId, tx);
+        let user = await this.repository.findUserById(userId, tx);
         if (!user) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
         // A registration not yet approved has no account: nothing to project into.
         if (!user.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
-        const memberships = await this.repository.listMembershipsForUser(userId, tx);
-        await this.keycloak.replacePlatformAttributes(
-          user.keycloakId,
-          platformAttributesFor(user, memberships, new Date()),
-        );
+        const keycloakId = user.keycloakId;
         if (user.accountActivationPending) {
-          // A registration approval committed: its account was created
-          // disabled and granting nothing, and is enabled here — after the
-          // grants above, so its first token is already right — and only
-          // here, once. The flag is cleared in this same transaction, after
-          // Keycloak answered; a failure leaves it set, and the event, the
-          // next projection or `keycloak:backfill` tries again. Cleared, it
-          // never fires again, so a replayed event does not re-enable an
-          // account an administrator has since disabled (#219 r2). A user no
-          // longer ACTIVE by now keeps a disabled account.
-          if (user.status === 'ACTIVE') await this.keycloak.setEnabled(user.keycloakId, true);
-          await runUnscoped('the activation flag is the user row, not tenant data', () =>
-            tx.user.update({
-              where: { id: userId },
-              data: { accountActivationPending: false },
-            }),
-          );
+          // A first activation is decided on memberships no revocation can
+          // end while it runs: the user row lock is the serialisation point
+          // every membership change takes first (`lockUserMemberships`), so a
+          // revocation either committed before this read — and there is no
+          // live membership to enable for — or waits until this commits, and
+          // its own projection then clears the grants (#219 r3).
+          await this.repository.lockUserMemberships(tx, userId);
+          user = (await this.repository.findUserById(userId, tx)) ?? user;
+        }
+        const memberships = await this.repository.listMembershipsForUser(userId, tx);
+        const attributes = platformAttributesFor(user, memberships, new Date());
+        await this.keycloak.replacePlatformAttributes(keycloakId, attributes);
+        if (user.accountActivationPending) {
+          await this.activateOnce(tx, user, keycloakId, attributes);
         }
         return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
       },
       { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
+    );
+  }
+
+  /**
+   * Enables a registration approval's account — once, provably (#219 r3).
+   *
+   * Runs in the projection's transaction, after the grants are written, so the
+   * account's first token is already right. Three outcomes:
+   *
+   * - **Already activated.** The account carries `rasta_activation`: an
+   *   earlier attempt's enable landed, whatever became of its answer or of the
+   *   transaction that would have cleared the flag. It is never enabled again
+   *   — an account an administrator has disabled since stays disabled — and
+   *   only the flag is cleared.
+   * - **Activated now.** The request is APPROVED, the user ACTIVE and holding
+   *   a live membership (read under the user row lock): `enabled: true` and
+   *   the marker are written in one representation update, then the flag is
+   *   cleared. A lost answer leaves the flag set, and the next attempt finds
+   *   the marker.
+   * - **Withheld.** Any of those conditions does not hold: nothing is enabled
+   *   and nothing cleared, so reconcile keeps reporting the user
+   *   (`activationPending`) for an operator to decide. Logged by ids only.
+   */
+  private async activateOnce(
+    tx: ExtendedPrismaClient,
+    user: { id: string; status: string },
+    keycloakId: string,
+    attributes: PlatformAttributes,
+  ): Promise<void> {
+    const account = await this.keycloak.getAccount(keycloakId);
+    if (account.activation === null) {
+      const registrationId = await this.repository.findApprovedRegistrationId(tx, user.id);
+      const withheld = !registrationId
+        ? 'no_approved_registration'
+        : user.status !== 'ACTIVE'
+          ? 'user_not_active'
+          : attributes.organization_ids.length === 0
+            ? 'no_live_membership'
+            : null;
+      if (!registrationId || withheld !== null) {
+        this.logger.warn(
+          { userId: user.id, keycloakId, reason: withheld },
+          'Account activation withheld; the account stays disabled and reconcile reports it',
+        );
+        return;
+      }
+      await this.keycloak.activateAccount(keycloakId, registrationId);
+    }
+    await runUnscoped('the activation flag is the user row, not tenant data', () =>
+      tx.user.update({
+        where: { id: user.id },
+        data: { accountActivationPending: false },
+      }),
     );
   }
 }

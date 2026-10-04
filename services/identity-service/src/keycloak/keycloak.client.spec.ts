@@ -1,4 +1,9 @@
-import { KeycloakAdminClient } from './keycloak.client';
+import {
+  ACTIVATION_ATTRIBUTE,
+  KeycloakAdminClient,
+  KeycloakCreateUnconfirmedError,
+} from './keycloak.client';
+import { provenanceOnly } from './platform-attributes';
 
 /**
  * The one Keycloak write the platform attributes go through.
@@ -189,6 +194,7 @@ describe('KeycloakAdminClient.findAccountByUsername', () => {
         organization_roles: ['ORG_A:DRIVER'],
         active_organization_id: [],
       },
+      activation: null,
     });
     expect(urls).toEqual([
       'http://keycloak.test/admin/realms/rasta/users?username=Applicant&exact=true',
@@ -210,5 +216,131 @@ describe('KeycloakAdminClient.findAccountByUsername', () => {
   it('calls nothing when Keycloak sync is off', async () => {
     await expect(client(false).findAccountByUsername('applicant')).resolves.toBeNull();
     expect(urls).toEqual([]);
+  });
+});
+
+/**
+ * The two answers #219 r3 made provable: a create Keycloak did not confirm,
+ * and an activation written as one update with its marker.
+ */
+describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 r3)', () => {
+  const calls: Array<{ method: string; url: string; body: unknown }> = [];
+  let answers: Response[] = [];
+  const originalFetch = globalThis.fetch;
+  beforeEach(() => {
+    calls.length = 0;
+    answers = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/token')) {
+        return new Response(JSON.stringify({ access_token: 'admin-token', expires_in: 300 }));
+      }
+      calls.push({
+        method: init?.method ?? 'GET',
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      const next = answers.shift();
+      if (!next) throw new Error('unexpected Keycloak call');
+      return next;
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const client = () =>
+    new KeycloakAdminClient({
+      baseUrl: 'http://keycloak.test',
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled: true,
+    });
+
+  const input = {
+    username: 'applicant',
+    email: 'applicant@example.test',
+    firstName: 'A',
+    lastName: 'B',
+    attributes: provenanceOnly('USR_1'),
+    enabled: false,
+  };
+
+  it("returns the id a create's Location names", async () => {
+    answers = [
+      new Response(null, {
+        status: 201,
+        headers: { location: 'http://keycloak.test/admin/realms/rasta/users/0b5c-11ef' },
+      }),
+    ];
+    await expect(client().createUser(input)).resolves.toBe('0b5c-11ef');
+  });
+
+  it.each([
+    ['no Location', {}],
+    ['a Location naming no user', { location: 'http://keycloak.test/admin/realms/rasta/users/' }],
+    ['a Location with another path', { location: 'http://keycloak.test/elsewhere' }],
+    ['an id that is not one', { location: 'http://keycloak.test/admin/realms/rasta/users/a%2Fb' }],
+  ])('reports a success with %s as unconfirmed, never as no account', async (_case, headers) => {
+    answers = [new Response(null, { status: 201, headers })];
+    await expect(client().createUser(input)).rejects.toBeInstanceOf(KeycloakCreateUnconfirmedError);
+  });
+
+  it('enables and marks in one update, keeping every attribute it read', async () => {
+    answers = [
+      new Response(
+        JSON.stringify({
+          id: 'kc-1',
+          email: 'applicant@example.test',
+          firstName: 'A',
+          lastName: 'B',
+          enabled: false,
+          attributes: { rasta_user_id: ['USR_1'], organization_ids: ['ORG_A'], locale: ['fa'] },
+        }),
+      ),
+      new Response(null, { status: 204 }),
+    ];
+    await client().activateAccount('kc-1', 'REG_1');
+    expect(calls.map((call) => call.method)).toEqual(['GET', 'PUT']);
+    expect(calls[1]?.body).toEqual({
+      email: 'applicant@example.test',
+      firstName: 'A',
+      lastName: 'B',
+      enabled: true,
+      attributes: {
+        rasta_user_id: ['USR_1'],
+        organization_ids: ['ORG_A'],
+        locale: ['fa'],
+        [ACTIVATION_ATTRIBUTE]: ['REG_1'],
+      },
+    });
+  });
+
+  it('reports a failed activation as upstream unavailable', async () => {
+    answers = [
+      new Response(JSON.stringify({ id: 'kc-1', attributes: {} })),
+      new Response(null, { status: 500 }),
+    ];
+    await expect(client().activateAccount('kc-1', 'REG_1')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  it('reads the activation marker back with the account', async () => {
+    answers = [
+      new Response(
+        JSON.stringify({
+          id: 'kc-1',
+          enabled: false,
+          attributes: { rasta_user_id: ['USR_1'], [ACTIVATION_ATTRIBUTE]: ['REG_1'] },
+        }),
+      ),
+    ];
+    await expect(client().getAccount('kc-1')).resolves.toMatchObject({
+      id: 'kc-1',
+      enabled: false,
+      activation: 'REG_1',
+    });
   });
 });

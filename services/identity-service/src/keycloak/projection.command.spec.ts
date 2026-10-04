@@ -88,6 +88,7 @@ describe('runProjectionCommand', () => {
       id,
       enabled,
       attributes: { ...grants(organizations), rasta_user_id: [userId] },
+      activation: null,
     });
 
     it('reconcile reports an enabled one with grants, by ids only, writes nothing, and is not clean', async () => {
@@ -192,7 +193,7 @@ describe('runProjectionCommand', () => {
         findAccountByUsername: jest.fn(async (username: string) =>
           username === 'pending-one'
             ? account('kc-x', 'USR_SOMEONE_ELSE', true, ['ORG_A'])
-            : { id: 'kc-y', enabled: true, attributes: grants(['ORG_A']) },
+            : { id: 'kc-y', enabled: true, attributes: grants(['ORG_A']), activation: null },
         ),
       };
       const report = await runProjectionCommand('reconcile', {

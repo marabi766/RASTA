@@ -4,7 +4,10 @@ import { ulid } from 'ulid';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService, REGISTRATION_APPROVAL_CODES } from '../src/identity/identity.service';
 import { IDENTITY_EVENTS } from '../src/identity/events';
-import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
+import {
+  KeycloakCreateUnconfirmedError,
+  type KeycloakAdminClient,
+} from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import {
   readPlatformAttributes,
@@ -37,9 +40,11 @@ interface FakeAccount {
   username: string;
   enabled: boolean;
   attributes: PlatformAttributes;
+  /** `rasta_activation`: the registration whose approval enabled it (#219 r3). */
+  activation?: string | null;
 }
 
-type Step = 'create' | 'lookup' | 'write';
+type Step = 'create' | 'lookup' | 'write' | 'activate';
 
 class FakeKeycloak {
   readonly enabled = true;
@@ -48,6 +53,15 @@ class FakeKeycloak {
   afterCreate: (() => Promise<void>) | null = null;
   /** Keycloak commits the create, and its answer never arrives. */
   dropCreateResponse = false;
+  /**
+   * Keycloak answers the create with success but no usable id (#219 r3):
+   * `'made'` when it did make the account, `'not_made'` when it did not.
+   */
+  createWithoutId: 'made' | 'not_made' | null = null;
+  /** Keycloak applies the activation, and its answer never arrives (#219 r3). */
+  dropActivateResponse = false;
+  /** Runs when the projector reads the account before activating it. */
+  beforeActivate: (() => Promise<void>) | null = null;
   /** Steps that fail as an unreachable Keycloak would. */
   readonly unreachable = new Set<Step>();
   /** Every write after a create, in order: what the service asked of Keycloak. */
@@ -60,6 +74,10 @@ class FakeKeycloak {
   }): Promise<string> {
     this.fail('create');
     await new Promise((resolve) => setImmediate(resolve));
+    if (this.createWithoutId === 'not_made') {
+      this.createWithoutId = null;
+      throw new KeycloakCreateUnconfirmedError();
+    }
     if ([...this.accounts.values()].some((account) => account.username === input.username)) {
       throw RastaError.alreadyExists('User');
     }
@@ -69,7 +87,12 @@ class FakeKeycloak {
       username: input.username,
       enabled: input.enabled,
       attributes: input.attributes,
+      activation: null,
     });
+    if (this.createWithoutId === 'made') {
+      this.createWithoutId = null;
+      throw new KeycloakCreateUnconfirmedError();
+    }
     if (this.dropCreateResponse) {
       this.dropCreateResponse = false;
       throw RastaError.upstreamUnavailable('keycloak', { operation: 'createUser' });
@@ -81,7 +104,38 @@ class FakeKeycloak {
   async findAccountByUsername(username: string) {
     this.fail('lookup');
     const found = [...this.accounts.values()].find((account) => account.username === username);
-    return found ? { id: found.id, enabled: found.enabled, attributes: found.attributes } : null;
+    return found ? this.view(found) : null;
+  }
+
+  async getAccount(accountId: string) {
+    this.fail('lookup');
+    const found = this.accounts.get(accountId);
+    if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.beforeActivate?.();
+    return this.view(found);
+  }
+
+  /** `enabled: true` and the marker, applied together as one representation update. */
+  async activateAccount(accountId: string, registrationId: string) {
+    this.fail('activate');
+    const found = this.accounts.get(accountId);
+    if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    found.enabled = true;
+    found.activation = registrationId;
+    this.writes.push(`activate:${accountId}`);
+    if (this.dropActivateResponse) {
+      this.dropActivateResponse = false;
+      throw RastaError.upstreamUnavailable('keycloak', { operation: 'activateAccount' });
+    }
+  }
+
+  private view(found: FakeAccount) {
+    return {
+      id: found.id,
+      enabled: found.enabled,
+      attributes: readPlatformAttributes(found.attributes),
+      activation: found.activation ?? null,
+    };
   }
 
   async getPlatformAttributes(accountId: string): Promise<PlatformAttributes> {
@@ -268,7 +322,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
       });
       const [account] = accountsOf(username);
       // The grants first, then enabled: the first token is already right.
-      expect(keycloak.writes).toEqual([`attributes:${account!.id}`, `enable:${account!.id}`]);
+      expect(keycloak.writes).toEqual([`attributes:${account!.id}`, `activate:${account!.id}`]);
       expectActivated(username, userId);
       expect(await state(registrationId, userId)).toEqual(APPROVED_STATE(account!.id));
     });
@@ -634,6 +688,194 @@ describe('registration decisions and the Keycloak account an approval creates', 
       });
       expect(backfilled.failed).toContain(userId);
       expect(accountsOf(username)[0]).toMatchObject({ enabled: true });
+    });
+  });
+
+  describe('round 3: one-shot activation, harmless adoption, and an unconfirmed create', () => {
+    const reconcile = () => runProjectionCommand('reconcile', { repository, projector, keycloak });
+    const backfill = () => runProjectionCommand('backfill', { repository, projector, keycloak });
+
+    it('HIGH 1: an activation whose answer was lost is never repeated — an account an administrator disabled since stays disabled', async () => {
+      const { registrationId, userId, username } = await submit();
+      // The enable lands in Keycloak; its answer does not reach the projector,
+      // so the flag stays set.
+      keycloak.dropActivateResponse = true;
+
+      await approve(registrationId);
+      const [account] = accountsOf(username);
+      expect(account).toMatchObject({ enabled: true, activation: registrationId });
+      expect(await state(registrationId, userId)).toMatchObject({
+        user: { accountActivationPending: true },
+      });
+
+      account!.enabled = false; // an administrator, in the Keycloak console
+
+      // Every retry path: an event, then the backfill.
+      await projector.project(userId, 'event');
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false });
+      await backfill();
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false });
+      expect(keycloak.writes.filter((write) => write.startsWith('activate'))).toHaveLength(1);
+      // The marker proved the activation: the flag is cleared, reconcile is clean.
+      expect(await state(registrationId, userId)).toMatchObject({
+        user: { accountActivationPending: false },
+      });
+      expect((await reconcile()).activationPending).not.toContain(userId);
+    });
+
+    it('HIGH 2: an enabled, granted account of this request is repaired before it is adopted — and stays harmless when the approval then loses', async () => {
+      const { registrationId, userId, username } = await submit();
+      // What a failed compensation of an earlier version left behind.
+      keycloak.accounts.set(`kc-legacy-${userId}`, {
+        id: `kc-legacy-${userId}`,
+        username,
+        enabled: true,
+        attributes: {
+          rasta_user_id: [userId],
+          organization_ids: [org.a],
+          organization_roles: [`${org.a}:FLEET_MANAGER`],
+          active_organization_id: [org.a],
+        },
+      });
+      // The approval then loses to a membership conflict.
+      await grantMembership(userId);
+
+      await expect(approve(registrationId)).rejects.toMatchObject({
+        details: [
+          expect.objectContaining({ code: REGISTRATION_APPROVAL_CODES.MEMBERSHIP_ALREADY_LIVE }),
+        ],
+      });
+      expect(keycloak.writes).toEqual([
+        `disable:kc-legacy-${userId}`,
+        `attributes:kc-legacy-${userId}`,
+      ]);
+      expectHarmless(username, userId);
+      expect(await state(registrationId, userId)).toMatchObject({
+        request: 'PENDING',
+        user: { status: 'PENDING', keycloakId: null },
+      });
+    });
+
+    it('HIGH 2: when that repair does not land, the approval fails closed and nothing commits', async () => {
+      const { registrationId, userId, username } = await submit();
+      keycloak.accounts.set(`kc-legacy-${userId}`, {
+        id: `kc-legacy-${userId}`,
+        username,
+        enabled: true,
+        attributes: { rasta_user_id: [userId], ...NO_GRANTS },
+      });
+      keycloak.unreachable.add('write');
+
+      await expect(approve(registrationId)).rejects.toMatchObject({
+        code: ERROR_CODES.UPSTREAM_UNAVAILABLE,
+      });
+      expect(await state(registrationId, userId)).toMatchObject({
+        request: 'PENDING',
+        user: { status: 'PENDING', keycloakId: null, accountActivationPending: false },
+        approved: 0,
+        activated: 0,
+      });
+
+      keycloak.unreachable.clear();
+      await approve(registrationId);
+      expectActivated(username, userId);
+    });
+
+    it('MED 3: a membership revoked before the projection recovers withholds the first enable, clears nothing, and is reported', async () => {
+      const { registrationId, userId, username } = await submit();
+      keycloak.afterCreate = async () => {
+        keycloak.unreachable.add('write');
+      };
+      await approve(registrationId);
+      keycloak.unreachable.clear();
+
+      const membership = await runUnscoped('the suite finds the approval membership', () =>
+        prisma.client.membership.findFirstOrThrow({ where: { userId, deletedAt: null } }),
+      );
+      await runUnscoped('the membership is revoked before the projection recovers', () =>
+        prisma.client.membership.update({
+          where: { id: membership.id },
+          data: { deletedAt: new Date(), status: 'REVOKED' },
+        }),
+      );
+
+      await backfill();
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false, activation: null });
+      expect(await state(registrationId, userId)).toMatchObject({
+        user: { accountActivationPending: true },
+      });
+      expect((await reconcile()).activationPending).toContain(userId);
+    });
+
+    it('MED 3: a revocation that starts during the first enable waits for it, and its own projection then clears the grants', async () => {
+      const { registrationId, userId, username } = await submit();
+      keycloak.afterCreate = async () => {
+        keycloak.unreachable.add('write');
+      };
+      await approve(registrationId);
+      keycloak.unreachable.clear();
+      const membership = await runUnscoped('the suite finds the approval membership', () =>
+        prisma.client.membership.findFirstOrThrow({ where: { userId, deletedAt: null } }),
+      );
+
+      let revocation: Promise<void> | undefined;
+      let revoked = false;
+      keycloak.beforeActivate = async () => {
+        keycloak.beforeActivate = null;
+        revocation = reviewer(() =>
+          service.revokeMembership(membership.id, { reason: 'left the organization' }),
+        ).then(() => {
+          revoked = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        // Still waiting on the user row the activation holds: not committed.
+        expect(revoked).toBe(false);
+        const live = await runUnscoped('the suite reads the membership from outside', () =>
+          prisma.client.membership.findUniqueOrThrow({ where: { id: membership.id } }),
+        );
+        expect(live.deletedAt).toBeNull();
+      };
+
+      await projector.project(userId, 'command');
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: true, activation: registrationId });
+      await revocation;
+      expect(revoked).toBe(true);
+      // The revocation's own projection ran after it committed.
+      expect(accountsOf(username)[0]!.attributes).toEqual({
+        rasta_user_id: [userId],
+        ...NO_GRANTS,
+      });
+    });
+
+    it('MED 4: a create answered without an id, whose account exists, is resolved by lookup before the approval commits', async () => {
+      const { registrationId, userId, username } = await submit();
+      keycloak.createWithoutId = 'made';
+
+      await approve(registrationId);
+      const [account] = accountsOf(username);
+      expectActivated(username, userId);
+      expect(await state(registrationId, userId)).toEqual(APPROVED_STATE(account!.id));
+    });
+
+    it('MED 4: a create answered without an id, whose account cannot be found, commits nothing; the retry approves', async () => {
+      const { registrationId, userId, username } = await submit();
+      keycloak.createWithoutId = 'not_made';
+
+      await expect(approve(registrationId)).rejects.toMatchObject({
+        code: ERROR_CODES.UPSTREAM_UNAVAILABLE,
+        details: [
+          expect.objectContaining({ code: REGISTRATION_APPROVAL_CODES.ACCOUNT_NOT_CONFIRMED }),
+        ],
+      });
+      expect(await state(registrationId, userId)).toMatchObject({
+        request: 'PENDING',
+        user: { status: 'PENDING', keycloakId: null, accountActivationPending: false },
+        approved: 0,
+      });
+      expect(accountsOf(username)).toEqual([]);
+
+      await approve(registrationId);
+      expectActivated(username, userId);
     });
   });
 });

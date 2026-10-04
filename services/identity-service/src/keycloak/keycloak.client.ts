@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import {
   PLATFORM_ATTRIBUTE_NAMES,
@@ -63,11 +64,50 @@ function platformAttributesWrite(
   };
 }
 
-/** One account as `findAccountByUsername` reads it: no profile data, only what decisions need. */
+/**
+ * The admin-only attribute that records a registration approval's account was
+ * enabled, carrying the registration request id (#219 r3). Written together
+ * with `enabled: true` in one representation update (`activateAccount`), so
+ * its presence proves the enable was applied even when Keycloak's answer to it
+ * was lost — and an account that carries it is never enabled again by the
+ * platform. Declared admin-only in the realm's user profile, and mapped to no
+ * token claim. Not a platform attribute: the projection never rewrites it.
+ */
+export const ACTIVATION_ATTRIBUTE = 'rasta_activation';
+
+/** One account as the client reads it: no profile data, only what decisions need. */
 export interface KeycloakAccount {
   id: string;
   enabled: boolean;
   attributes: PlatformAttributes;
+  /** `rasta_activation`: the registration request whose approval enabled it, or null. */
+  activation: string | null;
+}
+
+/**
+ * Keycloak answered a create with success but no usable id (#219 r3): the
+ * account may exist, and nothing here can say which it is. The caller resolves
+ * it by looking the account up, or does not commit.
+ */
+export class KeycloakCreateUnconfirmedError extends RastaError {
+  constructor() {
+    super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'The identity provider did not confirm the account', {
+      internalContext: { service: 'keycloak', operation: 'createUser', reason: 'no-id' },
+    });
+    this.name = 'KeycloakCreateUnconfirmedError';
+  }
+}
+
+/** A Keycloak user id as the Location header carries it: one path segment, nothing else. */
+const KEYCLOAK_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+function toAccount(found: KeycloakUserRepresentation): KeycloakAccount {
+  return {
+    id: found.id,
+    enabled: found.enabled === true,
+    attributes: readPlatformAttributes(found.attributes),
+    activation: found.attributes?.[ACTIVATION_ATTRIBUTE]?.[0] ?? null,
+  };
 }
 
 export interface KeycloakClientOptions {
@@ -185,9 +225,13 @@ export class KeycloakAdminClient {
       });
     }
 
-    // Keycloak returns the new id only in the Location header.
-    const location = response.headers.get('location');
-    const keycloakId = location?.split('/').pop() ?? null;
+    // Keycloak returns the new id only in the Location header. A success
+    // without a usable one is not "no account": the account may well exist,
+    // so it is reported as unconfirmed rather than as null, which a caller
+    // would store as "no account" with nothing left to repair it (#219 r3).
+    const location = response.headers.get('location') ?? '';
+    const keycloakId = /\/users\/([^/?#]+)$/.exec(location)?.[1] ?? '';
+    if (!KEYCLOAK_ID.test(keycloakId)) throw new KeycloakCreateUnconfirmedError();
 
     // No realm roles. A role is granted in one organization and travels in
     // `organization_roles`; the guard ignores every realm role but
@@ -267,12 +311,46 @@ export class KeycloakAdminClient {
     const found = ((await response.json()) as KeycloakUserRepresentation[]).find(
       (account) => account.username?.toLowerCase() === username.toLowerCase(),
     );
-    if (!found) return null;
-    return {
-      id: found.id,
-      enabled: found.enabled === true,
-      attributes: readPlatformAttributes(found.attributes),
-    };
+    return found ? toAccount(found) : null;
+  }
+
+  /** One account by its id, as a decision needs it (`KeycloakAccount`). */
+  async getAccount(keycloakId: string): Promise<KeycloakAccount> {
+    return toAccount(await this.getUser(keycloakId, 'getAccount'));
+  }
+
+  /**
+   * Enables a registration approval's account and marks it activated, in
+   * **one** representation update: `enabled: true` and `rasta_activation`
+   * travel together, so either both landed or neither did. A caller that did
+   * not hear the answer reads the account back (`getAccount`) and finds the
+   * marker, and never enables it again (#219 r3).
+   *
+   * The body is the same allowlist as `replacePlatformAttributes` — the three
+   * profile fields Keycloak would otherwise erase, every attribute as read,
+   * and the marker — plus `enabled`. Nothing else in the representation is
+   * sent.
+   */
+  async activateAccount(keycloakId: string, registrationId: string): Promise<void> {
+    if (!this.options.enabled) return;
+
+    const current = await this.getUser(keycloakId, 'activateAccount');
+    const response = await this.admin(`/users/${keycloakId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...platformAttributesWrite(current, {
+          ...(current.attributes ?? {}),
+          [ACTIVATION_ATTRIBUTE]: [registrationId],
+        }),
+        enabled: true,
+      }),
+    });
+    if (!response.ok) {
+      throw RastaError.upstreamUnavailable('keycloak', {
+        status: response.status,
+        operation: 'activateAccount',
+      });
+    }
   }
 
   /** The platform attributes Keycloak currently holds for one user, for reconcile. */
