@@ -5,6 +5,7 @@ import {
   currencySchema,
   seedIdSchema,
   ID_PREFIXES,
+  referenceId,
 } from '@rasta/contracts';
 
 /**
@@ -446,8 +447,13 @@ export type CancelRepairDto = z.infer<typeof cancelRepairSchema>;
 export const recordPartSchema = z
   .object({
     partName: displayText(2, 200),
-    /** The part's identifier in whichever system supplied it. */
-    partReference: z.string().trim().min(1).max(128).optional(),
+    /**
+     * The part's identifier in whichever system supplied it. An identifier, not
+     * prose — the portal takes it left-to-right — so no control or format
+     * character, ZWNJ included: one would make two references look alike that
+     * are not.
+     */
+    partReference: referenceId().min(1).max(128).optional(),
     quantity: partQuantity,
     /** The workshop's own unit — عدد, لیتر, متر. */
     unit: displayText(1, 32),
@@ -457,8 +463,10 @@ export const recordPartSchema = z
      * The order or stock movement this came from, when it came from another
      * service. A reference only: inventory-service owns stock and
      * marketplace-service owns orders, and neither is touched from here.
+     * Another system's identifier, so held to `referenceId()` like
+     * `partReference`.
      */
-    sourceReference: z.string().trim().min(1).max(128).optional(),
+    sourceReference: referenceId().min(1).max(128).optional(),
     recordedAt: z.string().datetime().optional(),
   })
   .strict();

@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import {
   attachDocumentSchema,
+  changeStatusSchema,
   createAssetSchema,
   createInspectionSchema,
   createPolicySchema,
   decideClaimSchema,
+  decommissionSchema,
   recordClaimSettlementSchema,
   recordLocationSchema,
   reviewClaimSchema,
@@ -88,3 +90,41 @@ describe.each(FIELDS)('%#: field %s', (schema, path) => {
     expect(JSON.stringify(result.error?.issues)).not.toContain(sample.slice(2));
   });
 });
+
+/**
+ * The eight fields #209 left as bare trimmed strings because the portal's
+ * contract specs pinned them, six of them here: they are `plainText()` now, and
+ * the portal forms refuse the same characters first. Each sample carries ZWNJ,
+ * so "Persian is still accepted" means Persian as it is actually written.
+ */
+const PORTAL_PINNED: [z.ZodTypeAny, string, string][] = [
+  [createAssetSchema, 'model', 'لودر چرخ‌دار WA320'],
+  [updateAssetSchema, 'model', 'لودر چرخ‌دار WA320'],
+  [changeStatusSchema, 'reason', 'دستگاه برای تعمیر خارج می‌شود'],
+  [decommissionSchema, 'reason', 'موتور از کار افتاده و تعمیرش به‌صرفه نیست'],
+  [createInspectionSchema, 'certificateNo', 'گواهی‌۱۴۰۳-۱۲'],
+  [createInspectionSchema, 'notes', 'لاستیک‌ها باید تا ماه بعد عوض شوند'],
+];
+
+describe.each(PORTAL_PINNED)(
+  '%#: field %s, pinned by the portal until now',
+  (schema, path, sample) => {
+    const field = fieldOf(schema, path);
+
+    it('accepts Persian with ZWNJ, trimmed', () => {
+      expect(sample).toContain('\u200c');
+      expect(field.parse(`  ${sample} `)).toBe(sample);
+    });
+
+    it.each(BIDI_CONTROLS)('refuses U+%s, repeating nothing of the input', (_hex, cp) => {
+      const value = `${sample.slice(0, 2)}${String.fromCodePoint(cp)}${sample.slice(2)}`;
+      const result = field.safeParse(value);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toContainEqual(
+        expect.objectContaining({ message: 'Contains unsupported characters' }),
+      );
+      expect(JSON.stringify(result.error?.issues)).not.toContain(sample.slice(2));
+    });
+  },
+);
