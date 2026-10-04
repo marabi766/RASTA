@@ -250,13 +250,12 @@ test('every economic exemption says which query or invariant it serves', () => {
 
 // L7-44, the four services opted in by this change: every report classified as
 // a legitimate exemption (none needed a fix migration). Without the exemptions
-// the check reports exactly these thirteen, so each one is load-bearing.
+// the check reports exactly these twelve, so each one is load-bearing.
 const OPTED_IN = {
   fleet: ['asset_transfer_release_pkey'],
   identity: [
     'ix_security_event_outbox_claimable',
     'ix_security_event_outbox_closed_windows',
-    'membership_user_id_organization_id_deleted_at_key',
     'membership_user_id_status_idx',
   ],
   maintenance: ['asset_transfer_release_pkey', 'ux_request_open_per_asset'],

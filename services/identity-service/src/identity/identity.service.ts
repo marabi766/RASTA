@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import {
   RastaError,
   createSystemContext,
@@ -8,7 +8,7 @@ import {
   runUnscoped,
   runWithContext,
 } from '@rasta/nest-common';
-import { IdentityRepository, isUniqueViolation } from './identity.repository';
+import { IdentityRepository, isRecordNotFound, isUniqueViolation } from './identity.repository';
 import { IDENTITY_EVENTS, validateIdentityPayload } from './events';
 import { isMembershipLive, liveMembershipWhere } from './membership-window';
 import {
@@ -28,9 +28,13 @@ import {
   type ProvisioningScopePolicy,
 } from './provisioning-scope';
 import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
-import { KeycloakAdminClient } from '../keycloak/keycloak.client';
+import { KeycloakAdminClient, KeycloakCreateUnconfirmedError } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
-import { platformAttributesFor } from '../keycloak/platform-attributes';
+import {
+  grantsAnything,
+  platformAttributesFor,
+  provenanceOnly,
+} from '../keycloak/platform-attributes';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { markRefusal } from '../security-events/refusal-sites';
 import type {
@@ -267,6 +271,9 @@ export class IdentityService {
         ],
         grantedAt,
       ),
+      // Unchanged by #219 r2: the operator path still creates the account
+      // enabled, before its transaction (a known follow-up).
+      enabled: true,
     });
 
     const user = await this.repository.transaction(async (tx) => {
@@ -763,34 +770,40 @@ export class IdentityService {
 
     const reviewer = getContext().userId ?? 'SYSTEM';
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
-    const grantedAt = new Date();
 
-    const keycloakId = await this.keycloak.createUser({
-      username: request.user.username,
-      email: request.user.email,
-      firstName: request.user.firstName,
-      lastName: request.user.lastName,
-      attributes: platformAttributesFor(
-        { id: request.userId, activeOrganizationId: request.requestedOrganizationId },
-        [
-          {
-            organizationId: request.requestedOrganizationId,
-            roles: grantedRoles,
-            status: 'ACTIVE',
-            validFrom: grantedAt,
-            validUntil: null,
-          },
-        ],
-        grantedAt,
-      ),
-    });
+    // Disabled, and carrying nothing but its provenance: until the database
+    // has committed this approval the account must be harmless whatever
+    // happens next — a lost response, a crash, a transaction that rolls back
+    // (#219 r2). The projector writes its grants and enables it after commit.
+    // An account that already exists, or a create Keycloak did not confirm,
+    // is resolved below, under the request lock (#219 r3).
+    const created = await this.createApprovalAccount(request);
 
     const updated = await this.repository.transaction(async (tx) => {
-      const result = await tx.registrationRequest.update({
-        where: { id: registrationId },
-        data: { status: 'APPROVED', reviewedBy: reviewer, reviewedAt: new Date() },
-        include: { user: true },
-      });
+      // Decided under the request's row lock, on the status read under it:
+      // a rejection or a second approval of this request waits here, and
+      // whichever comes second sees the first one's decision and is refused
+      // — never an overwrite, never a second event. The update stays
+      // conditional on PENDING as well, so it can never be the one that
+      // decides; Prisma answers a `where` that matches nothing with P2025.
+      const locked = await this.repository.lockRegistrationRequest(tx, registrationId);
+      if (locked?.status !== 'PENDING') {
+        throw registrationAlreadyDecided('APPROVED', locked?.status);
+      }
+      const keycloakId =
+        created.outcome === 'created'
+          ? created.keycloakId
+          : await this.adoptApprovalAccount(registrationId, request, created.outcome);
+      const result = await tx.registrationRequest
+        .update({
+          where: { id: registrationId, status: 'PENDING' },
+          data: { status: 'APPROVED', reviewedBy: reviewer, reviewedAt: new Date() },
+          include: { user: true },
+        })
+        .catch((error: unknown) => {
+          if (isRecordNotFound(error)) throw registrationAlreadyDecided('APPROVED', 'DECIDED');
+          throw error;
+        });
 
       await runUnscoped('activating a user is a platform-level operation', () =>
         tx.user.update({
@@ -798,6 +811,8 @@ export class IdentityService {
           data: {
             status: 'ACTIVE',
             keycloakId,
+            // The projector enables the account and clears this, once.
+            accountActivationPending: keycloakId !== null,
             activeOrganizationId: request.requestedOrganizationId,
             updatedBy: reviewer,
             version: { increment: 1 },
@@ -805,13 +820,23 @@ export class IdentityService {
         }),
       );
 
-      await this.createMembershipRow(tx, {
-        membershipId,
-        userId: request.userId,
-        organizationId: request.requestedOrganizationId,
-        roles: grantedRoles,
-        actor: reviewer,
-      });
+      try {
+        await this.createMembershipRow(tx, {
+          membershipId,
+          userId: request.userId,
+          organizationId: request.requestedOrganizationId,
+          roles: grantedRoles,
+          actor: reviewer,
+        });
+      } catch (error) {
+        // Somebody gave this person a membership in the organization while
+        // the request waited. Which of the two grants should stand is the
+        // reviewer's call, so the request stays pending and says why.
+        if (error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS) {
+          throw registrationMembershipConflict(registrationId);
+        }
+        throw error;
+      }
 
       for (const event of [
         {
@@ -860,9 +885,102 @@ export class IdentityService {
       }
 
       return result;
-    });
+      // Above the default: resolving an existing account holds the lock across
+      // up to five Keycloak calls, each bounded at 10 s by the client.
+    }, APPROVAL_TRANSACTION_OPTIONS);
+
+    // The grants, then the account enabled — only now that the approval has
+    // committed. Never throws: a failure is logged and counted, and the
+    // USER_ACTIVATED and MEMBERSHIP_CREATED events committed above bring the
+    // projection back round, as for every membership change (ADR-060 § 5).
+    // Until it lands the account stays disabled, and reconcile reports it.
+    await this.projector.projectAfterCommit(request.userId);
 
     return toRegistrationView(updated);
+  }
+
+  /**
+   * Creates the account an approval links — disabled, carrying only
+   * `rasta_user_id` — or says why it could not tell (#219 r2, r3).
+   *
+   * Runs before the request lock: a new account grants nothing and cannot
+   * sign in, so whatever becomes of this approval it is harmless. Two answers
+   * leave an account that may exist and need resolving under the lock
+   * (`adoptApprovalAccount`): Keycloak's 409 — an earlier attempt's account,
+   * whether that attempt's transaction failed or Keycloak's answer to it was
+   * lost — and a success without a usable id, which says nothing about which
+   * account, if any, was made.
+   */
+  private async createApprovalAccount(request: {
+    userId: string;
+    user: { username: string; email: string; firstName: string; lastName: string };
+  }): Promise<
+    { outcome: 'created'; keycloakId: string | null } | { outcome: 'exists' | 'unconfirmed' }
+  > {
+    try {
+      const keycloakId = await this.keycloak.createUser({
+        username: request.user.username,
+        email: request.user.email,
+        firstName: request.user.firstName,
+        lastName: request.user.lastName,
+        attributes: provenanceOnly(request.userId),
+        enabled: false,
+      });
+      return { outcome: 'created', keycloakId };
+    } catch (error) {
+      if (error instanceof KeycloakCreateUnconfirmedError) return { outcome: 'unconfirmed' };
+      if (error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS) {
+        return { outcome: 'exists' };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Resolves the account under the applicant's username, inside the
+   * approval's transaction and under its request lock (#219 r3).
+   *
+   * Adopted only when it provably came from this request: its `rasta_user_id`,
+   * an admin-only attribute a user cannot write (`rasta-realm.json`), names
+   * exactly this request's pending user, an id minted by `submitRegistration`
+   * with the request and belonging to no other. Any other account under the
+   * username is somebody else's and is refused with a closed code.
+   *
+   * And adopted only harmless: disabled and granting nothing. An account of
+   * this request that is enabled or carries a grant — what the compensation
+   * of earlier versions left when it failed — is first disabled and its
+   * grants cleared, under the same lock, so that whatever becomes of this
+   * approval it cannot leave a usable account behind. When that repair does
+   * not land the approval fails and nothing commits.
+   *
+   * An unconfirmed create that finds no account cannot be resolved: nothing
+   * commits, the request stays pending with a closed code, and the next
+   * attempt creates or finds it.
+   */
+  private async adoptApprovalAccount(
+    registrationId: string,
+    request: { userId: string; user: { username: string } },
+    outcome: 'exists' | 'unconfirmed',
+  ): Promise<string> {
+    const existing = await this.keycloak.findAccountByUsername(request.user.username);
+    if (!existing) throw registrationAccountUnconfirmed(registrationId);
+    const provenance = existing.attributes.rasta_user_id;
+    if (provenance.length !== 1 || provenance[0] !== request.userId) {
+      throw registrationAccountTaken(registrationId);
+    }
+    if (existing.enabled || grantsAnything(existing.attributes)) {
+      await this.keycloak.setEnabled(existing.id, false);
+      await this.keycloak.replacePlatformAttributes(existing.id, provenanceOnly(request.userId));
+      this.logger.warn(
+        { registrationId, userId: request.userId, keycloakId: existing.id },
+        "Approval disabled and cleared an earlier attempt's account before adopting it",
+      );
+    }
+    this.logger.warn(
+      { registrationId, userId: request.userId, keycloakId: existing.id, outcome },
+      'Approval adopted the Keycloak account an earlier attempt at it created',
+    );
+    return existing.id;
   }
 
   async rejectRegistration(
@@ -897,8 +1015,16 @@ export class IdentityService {
     const reviewer = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
+      // The same lock and the same rule as approval: decided on the status
+      // read under it, so a rejection that read PENDING before an approval
+      // committed is refused here, rather than marking an approved request
+      // REJECTED and emitting a second, contradicting event (#219 r2).
+      const locked = await this.repository.lockRegistrationRequest(tx, registrationId);
+      if (locked?.status !== 'PENDING') {
+        throw registrationAlreadyDecided('REJECTED', locked?.status);
+      }
       const result = await tx.registrationRequest.update({
-        where: { id: registrationId },
+        where: { id: registrationId, status: 'PENDING' },
         data: {
           status: 'REJECTED',
           reviewedBy: reviewer,
@@ -1174,4 +1300,91 @@ function toRegistrationView(request: RegistrationRow): RegistrationRequestView {
     rejectionReason: request.rejectionReason,
     createdAt: request.createdAt.toISOString(),
   };
+}
+
+/** The approval transaction's bounds: it may wait on Keycloak under the request lock. */
+const APPROVAL_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 65_000 } as const;
+
+/** The closed codes an approval answers with when it cannot proceed (`approveRegistration`). */
+export const REGISTRATION_APPROVAL_CODES = {
+  /** The person already holds a live membership in the requested organization. */
+  MEMBERSHIP_ALREADY_LIVE: 'MEMBERSHIP_ALREADY_LIVE',
+  /** Keycloak holds an account under the username that this request did not create. */
+  ACCOUNT_NOT_FROM_THIS_REGISTRATION: 'ACCOUNT_NOT_FROM_THIS_REGISTRATION',
+  /** Keycloak did not confirm the account it was asked to create, and none could be found. */
+  ACCOUNT_NOT_CONFIRMED: 'ACCOUNT_NOT_CONFIRMED',
+} as const;
+
+/**
+ * 409: the person was given a membership in the requested organization while
+ * the request waited. Nothing was approved, the request is still pending, and
+ * nothing a client sent is repeated (S-09).
+ */
+function registrationMembershipConflict(registrationId: string): RastaError {
+  const message =
+    'The applicant already holds a live membership in the requested organization; the registration stays pending';
+  return new RastaError(ERROR_CODES.ALREADY_EXISTS, message, {
+    details: [
+      {
+        path: 'registration',
+        code: REGISTRATION_APPROVAL_CODES.MEMBERSHIP_ALREADY_LIVE,
+        message,
+      },
+    ],
+    internalContext: { resourceType: 'Membership', registrationId },
+  });
+}
+
+/**
+ * 409: Keycloak already holds an account under the applicant's username that
+ * this request did not create. It is not adopted, and nothing is written.
+ */
+function registrationAccountTaken(registrationId: string): RastaError {
+  const message =
+    'An identity-provider account already exists under this username and was not created by this registration';
+  return new RastaError(ERROR_CODES.ALREADY_EXISTS, message, {
+    details: [
+      {
+        path: 'registration',
+        code: REGISTRATION_APPROVAL_CODES.ACCOUNT_NOT_FROM_THIS_REGISTRATION,
+        message,
+      },
+    ],
+    internalContext: { resourceType: 'KeycloakUser', registrationId },
+  });
+}
+
+/**
+ * 503: Keycloak answered the account's creation without saying which account
+ * it made, and none is found under the username. Nothing was approved, the
+ * request stays pending, and a retry resolves it (#219 r3).
+ */
+function registrationAccountUnconfirmed(registrationId: string): RastaError {
+  const message =
+    'The identity provider did not confirm the account; the registration stays pending and can be approved again';
+  return new RastaError(ERROR_CODES.UPSTREAM_UNAVAILABLE, message, {
+    details: [
+      {
+        path: 'registration',
+        code: REGISTRATION_APPROVAL_CODES.ACCOUNT_NOT_CONFIRMED,
+        message,
+      },
+    ],
+    internalContext: { resourceType: 'KeycloakUser', registrationId },
+  });
+}
+
+/**
+ * 409: another decision on this registration committed first. Nothing was
+ * written and no event emitted; the message names neither decision's author.
+ */
+function registrationAlreadyDecided(to: 'APPROVED' | 'REJECTED', from = 'DECIDED'): RastaError {
+  return RastaError.invalidStateTransition(
+    'RegistrationRequest',
+    from,
+    to,
+    to === 'APPROVED'
+      ? 'Only a pending registration can be approved'
+      : 'Only a pending registration can be rejected',
+  );
 }

@@ -262,11 +262,6 @@ export const EXEMPTIONS = {
       reason:
         'the refusal-audit relay claims closed windows for every tenant at once, oldest first (SecurityEventOutboxStore.claimPending, FOR UPDATE SKIP LOCKED); a partial index on published_at IS NULL',
     },
-    membership_user_id_organization_id_deleted_at_key: {
-      index: 'membership (user_id, organization_id, deleted_at)',
-      reason:
-        'a user is platform-wide, and the provisioning lookup names the user first across tenants (IdentityRepository.findMembership, runUnscoped). Not a one-live-membership invariant: NULL deleted_at values are distinct, so this index does not enforce one — fix/identity-one-live-membership adds the partial unique index that does',
-    },
     membership_user_id_status_idx: {
       index: 'membership (user_id, status)',
       reason:

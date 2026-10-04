@@ -65,6 +65,14 @@ export class IdentityRepository {
    * membership cannot commit around a revocation of that same membership: one
    * of them waits for the other, then reads what it committed. `null` when no
    * such user exists.
+   *
+   * It is also the serialisation point for a user's **status** (#219 r4): the
+   * first activation of a registration approval's account
+   * (`KeycloakProjector.activateOnce`) holds it from its read of the status to
+   * its write to Keycloak. Any path that changes a user's status — a suspend
+   * or deactivate, none of which exists yet (D-049) — must take it first, so a
+   * disable that commits first is seen and wins, and one that commits after is
+   * carried to Keycloak by the projection it triggers.
    */
   async lockUserMemberships(
     tx: ExtendedPrismaClient,
@@ -74,6 +82,57 @@ export class IdentityRepository {
       SELECT active_organization_id, now() AS now FROM "user" WHERE id = ${userId} FOR UPDATE`;
     const row = rows[0];
     return row ? { activeOrganizationId: row.active_organization_id, now: row.now } : null;
+  }
+
+  /**
+   * The per-request serialisation point for a registration decision (#219 r2).
+   *
+   * Approve, reject and the orphan repair (`KeycloakProjector.repairOrphan`)
+   * each take it **first** in their transaction and decide on the status it
+   * returns, never on one read before it: two decisions on one request then
+   * run one after the other, and the second sees what the first committed.
+   * `null` when no such request exists.
+   */
+  async lockRegistrationRequest(
+    tx: ExtendedPrismaClient,
+    registrationId: string,
+  ): Promise<{ status: string; userId: string } | null> {
+    const rows = await tx.$queryRaw<Array<{ status: string; user_id: string }>>`
+      SELECT status::text AS status, user_id FROM registration_request
+       WHERE id = ${registrationId} FOR UPDATE`;
+    const row = rows[0];
+    return row ? { status: row.status, userId: row.user_id } : null;
+  }
+
+  /**
+   * The approved registration request of one user, or null (#219 r3).
+   *
+   * What a first activation needs: the projector enables a registration
+   * approval's account only while its request is APPROVED, and marks the
+   * account with this id (`KeycloakAdminClient.activateAccount`). A user's id
+   * is minted with their request (`submitRegistration`), so there is at most
+   * one.
+   */
+  async findApprovedRegistrationId(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<string | null> {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM registration_request
+       WHERE user_id = ${userId} AND status = 'APPROVED'
+       ORDER BY id LIMIT 1`;
+    return rows[0]?.id ?? null;
+  }
+
+  /** The same lock, on every registration request of one user; their statuses. */
+  async lockRegistrationRequestsOfUser(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<string[]> {
+    const rows = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT status::text AS status FROM registration_request
+       WHERE user_id = ${userId} ORDER BY id FOR UPDATE`;
+    return rows.map((row) => row.status);
   }
 
   /**
@@ -359,6 +418,29 @@ export class IdentityRepository {
     return rows.map((row) => row.id);
   }
 
+  /**
+   * Users with no Keycloak account, a page at a time — the orphan sweep's
+   * input (`projection.command.ts`). The username is read only to look the
+   * account up and is never logged.
+   */
+  async listUsersWithoutAccount(
+    after: string | null,
+    take: number,
+  ): Promise<{ id: string; username: string }[]> {
+    return runUnscoped('the Keycloak orphan sweep covers every user without an account', () =>
+      this.client.user.findMany({
+        where: {
+          deletedAt: null,
+          keycloakId: null,
+          ...(after ? { id: { gt: after } } : {}),
+        },
+        orderBy: { id: 'asc' },
+        take,
+        select: { id: true, username: true },
+      }),
+    );
+  }
+
   async listMembershipsForUser(userId: string, tx?: ExtendedPrismaClient) {
     const db = tx ?? this.client;
     return runUnscoped('a user must be able to see every organization they belong to', () =>
@@ -430,5 +512,15 @@ export function isUniqueViolation(error: unknown): boolean {
     error !== null &&
     'code' in error &&
     (error as { code: unknown }).code === 'P2002'
+  );
+}
+
+/** Prisma's "no record matched the `where` of an update", without importing its error classes. */
+export function isRecordNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code: unknown }).code === 'P2025'
   );
 }

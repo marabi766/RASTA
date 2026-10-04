@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import {
   PLATFORM_ATTRIBUTE_NAMES,
@@ -25,11 +26,19 @@ export interface CreateKeycloakUserInput {
   lastName: string;
   /** The whole platform attribute set, from the first write (ADR-060 § 5). */
   attributes: PlatformAttributes;
+  /**
+   * Whether the account can sign in from the start. A registration approval
+   * creates it disabled, with no grants, and the projector enables it once the
+   * database has committed the approval (#219 r2).
+   */
+  enabled: boolean;
 }
 
 /** What the admin API returns for a user — only the fields this client reads. */
 interface KeycloakUserRepresentation {
   id: string;
+  username?: string;
+  enabled?: boolean;
   email?: string;
   firstName?: string;
   lastName?: string;
@@ -55,6 +64,52 @@ function platformAttributesWrite(
   };
 }
 
+/**
+ * The admin-only attribute that records a registration approval's account was
+ * enabled, carrying the registration request id (#219 r3). Written together
+ * with `enabled: true` in one representation update (`activateAccount`), so
+ * its presence proves the enable was applied even when Keycloak's answer to it
+ * was lost — and an account that carries it is never enabled again by the
+ * platform. Declared admin-only in the realm's user profile, and mapped to no
+ * token claim. Not a platform attribute: the projection never rewrites it.
+ */
+export const ACTIVATION_ATTRIBUTE = 'rasta_activation';
+
+/** One account as the client reads it: no profile data, only what decisions need. */
+export interface KeycloakAccount {
+  id: string;
+  enabled: boolean;
+  attributes: PlatformAttributes;
+  /** `rasta_activation`: the registration request whose approval enabled it, or null. */
+  activation: string | null;
+}
+
+/**
+ * Keycloak answered a create with success but no usable id (#219 r3): the
+ * account may exist, and nothing here can say which it is. The caller resolves
+ * it by looking the account up, or does not commit.
+ */
+export class KeycloakCreateUnconfirmedError extends RastaError {
+  constructor() {
+    super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'The identity provider did not confirm the account', {
+      internalContext: { service: 'keycloak', operation: 'createUser', reason: 'no-id' },
+    });
+    this.name = 'KeycloakCreateUnconfirmedError';
+  }
+}
+
+/** A Keycloak user id as the Location header carries it: one path segment, nothing else. */
+const KEYCLOAK_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+function toAccount(found: KeycloakUserRepresentation): KeycloakAccount {
+  return {
+    id: found.id,
+    enabled: found.enabled === true,
+    attributes: readPlatformAttributes(found.attributes),
+    activation: found.attributes?.[ACTIVATION_ATTRIBUTE]?.[0] ?? null,
+  };
+}
+
 export interface KeycloakClientOptions {
   baseUrl: string;
   realm: string;
@@ -62,6 +117,35 @@ export interface KeycloakClientOptions {
   clientSecret: string;
   /** When false every call is a no-op. Used by tests and offline development. */
   enabled: boolean;
+  /**
+   * The deadline of every call to Keycloak — the token request included —
+   * covering the connection, the response and its body. Several are made
+   * while a database lock is held (an approval, a projection), so none may
+   * wait without one (#219 r4). Defaults to {@link KEYCLOAK_REQUEST_TIMEOUT_MS}.
+   */
+  requestTimeoutMs?: number;
+}
+
+/** The default deadline of one Keycloak call: connection, response and body. */
+export const KEYCLOAK_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * A Keycloak call that did not answer — its deadline passed, or the
+ * connection failed — as the upstream error every caller already handles,
+ * rather than a bare `TimeoutError` or `TypeError` from `fetch`. Nothing of
+ * the request is carried, so neither a token nor a secret can reach a log.
+ */
+async function unreachableAsUpstream<T>(operation: string, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof RastaError) throw error;
+    const reason =
+      error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+        ? 'deadline'
+        : 'unreachable';
+    throw RastaError.upstreamUnavailable('keycloak', { operation, reason });
+  }
 }
 
 @Injectable()
@@ -79,15 +163,24 @@ export class KeycloakAdminClient {
   // Token handling
   // -------------------------------------------------------------------------
 
+  /** A fresh deadline for one call (`requestTimeoutMs`). */
+  private deadline(): AbortSignal {
+    return AbortSignal.timeout(this.options.requestTimeoutMs ?? KEYCLOAK_REQUEST_TIMEOUT_MS);
+  }
+
   private async accessToken(): Promise<string> {
     // Refresh 30s early so a token does not expire mid-request.
     if (this.token && this.token.expiresAt > Date.now() + 30_000) {
       return this.token.value;
     }
 
-    const response = await fetch(
-      `${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`,
-      {
+    // The same deadline as every admin call: a token endpoint that accepts
+    // the connection and never answers would otherwise hold the caller — and
+    // the database lock an approval or a projection holds around it —
+    // without bound (#219 r4). The signal also bounds reading the body below.
+    const deadline = this.deadline();
+    const response = await unreachableAsUpstream('client_credentials', () =>
+      fetch(`${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -95,7 +188,8 @@ export class KeycloakAdminClient {
           client_id: this.options.clientId,
           client_secret: this.options.clientSecret,
         }),
-      },
+        signal: deadline,
+      }),
     );
 
     if (!response.ok) {
@@ -106,7 +200,10 @@ export class KeycloakAdminClient {
       });
     }
 
-    const body = (await response.json()) as { access_token: string; expires_in: number };
+    const body = await unreachableAsUpstream(
+      'client_credentials',
+      () => response.json() as Promise<{ access_token: string; expires_in: number }>,
+    );
     this.token = {
       value: body.access_token,
       expiresAt: Date.now() + body.expires_in * 1000,
@@ -116,15 +213,17 @@ export class KeycloakAdminClient {
 
   private async admin(path: string, init: RequestInit = {}): Promise<Response> {
     const token = await this.accessToken();
-    return fetch(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
-      ...init,
-      headers: {
-        ...init.headers,
-        authorization: `Bearer ${token}`,
-        'content-type': 'application/json',
-      },
-      signal: AbortSignal.timeout(10_000),
-    });
+    return unreachableAsUpstream('admin', () =>
+      fetch(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
+        ...init,
+        headers: {
+          ...init.headers,
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        signal: this.deadline(),
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -151,7 +250,7 @@ export class KeycloakAdminClient {
         email: input.email,
         firstName: input.firstName,
         lastName: input.lastName,
-        enabled: true,
+        enabled: input.enabled,
         emailVerified: false,
         requiredActions: ['UPDATE_PASSWORD'],
         // All four, including `rasta_user_id` — which was never written before,
@@ -170,9 +269,13 @@ export class KeycloakAdminClient {
       });
     }
 
-    // Keycloak returns the new id only in the Location header.
-    const location = response.headers.get('location');
-    const keycloakId = location?.split('/').pop() ?? null;
+    // Keycloak returns the new id only in the Location header. A success
+    // without a usable one is not "no account": the account may well exist,
+    // so it is reported as unconfirmed rather than as null, which a caller
+    // would store as "no account" with nothing left to repair it (#219 r3).
+    const location = response.headers.get('location') ?? '';
+    const keycloakId = /\/users\/([^/?#]+)$/.exec(location)?.[1] ?? '';
+    if (!KEYCLOAK_ID.test(keycloakId)) throw new KeycloakCreateUnconfirmedError();
 
     // No realm roles. A role is granted in one organization and travels in
     // `organization_roles`; the guard ignores every realm role but
@@ -226,6 +329,70 @@ export class KeycloakAdminClient {
       throw RastaError.upstreamUnavailable('keycloak', {
         status: response.status,
         operation: 'replacePlatformAttributes',
+      });
+    }
+  }
+
+  /**
+   * The account Keycloak holds under one username, or null — what an approval
+   * reads after `createUser` answered 409, and what reconcile reads to find an
+   * account no user row points at (`approveRegistration`). Usernames are
+   * case-insensitive in Keycloak, which stores them lower-cased; `exact=true`
+   * stops `foo` from matching `foobar`, and the comparison below stops
+   * anything else.
+   */
+  async findAccountByUsername(username: string): Promise<KeycloakAccount | null> {
+    if (!this.options.enabled) return null;
+
+    const query = new URLSearchParams({ username, exact: 'true' });
+    const response = await this.admin(`/users?${query.toString()}`);
+    if (!response.ok) {
+      throw RastaError.upstreamUnavailable('keycloak', {
+        status: response.status,
+        operation: 'findAccountByUsername',
+      });
+    }
+    const found = ((await response.json()) as KeycloakUserRepresentation[]).find(
+      (account) => account.username?.toLowerCase() === username.toLowerCase(),
+    );
+    return found ? toAccount(found) : null;
+  }
+
+  /** One account by its id, as a decision needs it (`KeycloakAccount`). */
+  async getAccount(keycloakId: string): Promise<KeycloakAccount> {
+    return toAccount(await this.getUser(keycloakId, 'getAccount'));
+  }
+
+  /**
+   * Enables a registration approval's account and marks it activated, in
+   * **one** representation update: `enabled: true` and `rasta_activation`
+   * travel together, so either both landed or neither did. A caller that did
+   * not hear the answer reads the account back (`getAccount`) and finds the
+   * marker, and never enables it again (#219 r3).
+   *
+   * The body is the same allowlist as `replacePlatformAttributes` — the three
+   * profile fields Keycloak would otherwise erase, every attribute as read,
+   * and the marker — plus `enabled`. Nothing else in the representation is
+   * sent.
+   */
+  async activateAccount(keycloakId: string, registrationId: string): Promise<void> {
+    if (!this.options.enabled) return;
+
+    const current = await this.getUser(keycloakId, 'activateAccount');
+    const response = await this.admin(`/users/${keycloakId}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ...platformAttributesWrite(current, {
+          ...(current.attributes ?? {}),
+          [ACTIVATION_ATTRIBUTE]: [registrationId],
+        }),
+        enabled: true,
+      }),
+    });
+    if (!response.ok) {
+      throw RastaError.upstreamUnavailable('keycloak', {
+        status: response.status,
+        operation: 'activateAccount',
       });
     }
   }
