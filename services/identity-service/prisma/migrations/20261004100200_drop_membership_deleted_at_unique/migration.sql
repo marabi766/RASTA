@@ -5,8 +5,8 @@
 -- with deleted_at set it only refused two revocations of one pair at the same
 -- millisecond. Its readers are served by the replacement: the provisioning
 -- lookup (IdentityRepository.findMembership: user_id, organization_id,
--- deleted_at IS NULL) matches the partial index's columns and predicate
--- exactly; a user's memberships across organizations use
+-- deleted_at IS NULL) names both of the partial index's columns and its
+-- predicate; a user's memberships across organizations use
 -- membership_user_id_status_idx. No code names the old key.
 --
 -- CONCURRENTLY and alone in its file, for the same reason as that build: no

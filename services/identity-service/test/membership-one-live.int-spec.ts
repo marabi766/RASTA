@@ -15,7 +15,7 @@ import { asActor, id, newPrisma, tenants } from './helpers';
  * concurrent calls both passed the check, and the only unique index —
  * (user_id, organization_id, deleted_at) — accepted both rows, because NULL
  * deleted_at values are distinct: two live memberships, two MEMBERSHIP_CREATED
- * events. `ux_membership_live_user_org` (UNIQUE (user_id, organization_id)
+ * events. `ux_membership_live_user_org` (UNIQUE (organization_id, user_id)
  * WHERE deleted_at IS NULL) now refuses the second, and the caller that loses
  * the race gets the answer an existing membership always got: ALREADY_EXISTS.
  */

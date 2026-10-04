@@ -111,7 +111,7 @@ model Membership {
   user User @relation(fields: [userId], references: [id])
 
   // SQL-only: `ux_membership_live_user_org` — one live membership per (user,
-  // organization), UNIQUE (user_id, organization_id) WHERE deleted_at IS NULL
+  // organization), UNIQUE (organization_id, user_id) WHERE deleted_at IS NULL
   // (migration 20261004100100). Partial, so a revoked membership does not block
   // the person being re-added later; Prisma cannot express a partial unique.
   @@index([organizationId, status])

@@ -13,6 +13,10 @@
 -- written between that check and this build makes the build fail and leaves
 -- an INVALID index — DROP INDEX it, resolve the duplicate as that migration's
 -- HINT says, and deploy again.
+--
+-- Tenant column first (docs/05, L7-44): uniqueness does not depend on column
+-- order, and findMembership names both columns, so organization_id leading
+-- costs no reader and needs no exemption from the tenant index order check.
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "ux_membership_live_user_org"
-    ON "membership" ("user_id", "organization_id")
+    ON "membership" ("organization_id", "user_id")
  WHERE "deleted_at" IS NULL;

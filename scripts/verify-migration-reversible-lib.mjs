@@ -324,7 +324,7 @@ export const IDENTITY_DATA_ROLLBACK = {
       label: 'up again: a second live membership for the pair is refused',
       sql: LIVE_MEMBERSHIP('MBR_MIGCHECK_3'),
       // `prisma db execute` reports the violation by its columns, not its name.
-      mustFail: 'Unique constraint failed on the fields: (`user_id`,`organization_id`)',
+      mustFail: 'Unique constraint failed on the fields: (`organization_id`,`user_id`)',
     },
     {
       label: 'clean up the probe rows',
