@@ -378,6 +378,40 @@ export const EXEMPTIONS = {
   },
 };
 
+/**
+ * `service` → tenant table → why it has **no** index leading with
+ * organization_id at all. The composite check above judges the indexes a table
+ * has; this one judges a table that has none the tenant guard's predicate can
+ * use — only its primary key, single-column keys on something else, or
+ * nothing — so every tenant-scoped read of it is a scan of every tenant's rows
+ * (#218 r1, Codex: `payment_reconciliation_resolution`). An exemption for a
+ * table that is not a tenant table, or that has such an index, is an error.
+ */
+export const TABLE_EXEMPTIONS = {};
+
+/**
+ * Tables the table-level check found in services other than economic when it
+ * was added (#218 r1), not yet classified by their owners: each still needs an
+ * index leading with organization_id or a `TABLE_EXEMPTIONS` reason. Reported
+ * on every run, never failing it, so the check holds every other tenant table
+ * from the day it lands. An entry that stops firing — fixed, or exempted with
+ * its reason — is an error until it is removed from here: the list only
+ * shrinks.
+ */
+export const TABLE_FINDINGS_PENDING = {
+  supplier: ['qualification_evidence', 'supplier_capability', 'suspension'],
+  notification: ['delivery_attempt'],
+  audit: [
+    'audit_chain_head',
+    'bid_access_evidence',
+    'tender_receipt_link',
+    'tender_receipt_pending',
+  ],
+  construction: ['policy_reconciliation_task'],
+  fleet: ['asset_transfer_fence', 'asset_transfer_release'],
+  maintenance: ['asset_transfer_fence', 'asset_transfer_release'],
+};
+
 /** Every `migration.sql` under a Prisma migrations directory, in apply order. */
 export function readMigrationTexts(dir) {
   return readdirSync(dir, { withFileTypes: true })
@@ -746,4 +780,81 @@ export function checkTenantIndexOrder(state, exemptions = {}, exemptTables = EXE
   }
 
   return { errors, checked };
+}
+
+/**
+ * Tenant tables with no index whose first column is organization_id —
+ * single-column indexes included, since `(organization_id)` alone serves the
+ * guard's predicate — unless exempted with a reason in `tableExemptions`.
+ *
+ * @param {{ tables: Map<string, Set<string>>, indexes: Map<string, object> }} state
+ * @param {Record<string, string>} tableExemptions  table → reason
+ * @param {Record<string, string>} exemptTables  platform plumbing, not tenant data
+ * @param {string[]} pending  known findings not yet classified (`TABLE_FINDINGS_PENDING`)
+ * @returns {{ errors: string[], notes: string[], checked: number }}
+ */
+export function checkTenantLeadingIndex(
+  state,
+  tableExemptions = {},
+  exemptTables = EXEMPT_TABLES,
+  pending = [],
+) {
+  const errors = [];
+  const notes = [];
+  let checked = 0;
+  const leading = new Set();
+  for (const index of state.indexes.values()) {
+    if (index.columns[0] === TENANT_COLUMN) leading.add(index.table);
+  }
+
+  for (const [table, columns] of [...state.tables].sort(([a], [b]) => a.localeCompare(b))) {
+    if (!columns.has(TENANT_COLUMN) || table in exemptTables) continue;
+    checked += 1;
+    const has = leading.has(table);
+    if (Object.hasOwn(tableExemptions, table)) {
+      const reason = tableExemptions[table];
+      if (typeof reason !== 'string' || reason.trim() === '') {
+        errors.push(`${table}: its table exemption must be a reason`);
+      } else if (has) {
+        errors.push(
+          `${table}: has an index leading with ${TENANT_COLUMN}; remove its table exemption`,
+        );
+      }
+      continue;
+    }
+    if (!has && pending.includes(table)) {
+      notes.push(`${table}: pending — no index leading with ${TENANT_COLUMN} yet (#218 r1 list)`);
+    } else if (!has) {
+      errors.push(
+        `${table}: tenant table with no index leading with ${TENANT_COLUMN}; ` +
+          'add one, or exempt the table with its reason',
+      );
+    } else if (pending.includes(table)) {
+      errors.push(
+        `${table}: has an index leading with ${TENANT_COLUMN} now; remove it from TABLE_FINDINGS_PENDING`,
+      );
+    }
+  }
+
+  for (const table of pending) {
+    const columns = state.tables.get(table);
+    if (!columns || !columns.has(TENANT_COLUMN) || table in exemptTables)
+      errors.push(
+        `${table}: pending, but not a tenant table here; remove it from TABLE_FINDINGS_PENDING`,
+      );
+    else if (Object.hasOwn(tableExemptions, table))
+      errors.push(
+        `${table}: both pending and table-exempted; remove it from TABLE_FINDINGS_PENDING`,
+      );
+  }
+
+  for (const table of Object.keys(tableExemptions)) {
+    const columns = state.tables.get(table);
+    if (!columns)
+      errors.push(`${table}: table-exempted, but no such table exists; remove the exemption`);
+    else if (!columns.has(TENANT_COLUMN) || table in exemptTables)
+      errors.push(`${table}: table-exempted, but it is not a tenant table; remove the exemption`);
+  }
+
+  return { errors, notes, checked };
 }
