@@ -37,6 +37,24 @@ describe('the asset timeline', () => {
     expect(getByText(new RegExp(formatMoney(ENTRY.amountMinor)))).toBeInTheDocument();
   });
 
+  it('shows a stored reason that carries a bidi override isolated, and without the override', () => {
+    // A status reason written before #220, copied into the line by asset-service.
+    const RLO = String.fromCodePoint(0x202e);
+    const { container } = render(
+      <TimelineScreen
+        result={page({ items: [{ ...ENTRY, description: `فصل ${RLO}غیرکاری ۱۲۳۴` }] })}
+        assetId="AST_1"
+        query={{}}
+      />,
+    );
+    const shown = [...container.querySelectorAll('bdi')].find((bdi) =>
+      bdi.textContent?.includes('غیرکاری'),
+    );
+    expect(shown).toHaveAttribute('dir', 'auto');
+    expect(shown?.textContent).toBe('فصل غیرکاری ۱۲۳۴');
+    expect(container.textContent).not.toContain(RLO);
+  });
+
   it('translates the category without translating the data', () => {
     // CLAUDE.md: the label is presentation; the value stays Latin in the filter.
     const { getByRole } = render(<TimelineScreen result={page()} assetId="AST_1" query={{}} />);

@@ -258,3 +258,21 @@ it('uses no physical-direction utility, and has no accessibility violations', as
   );
   expect(await axe(failed.container)).toHaveNoViolations();
 });
+
+describe('stored inspection text with a bidi override (#220)', () => {
+  it('shows the certificate number and the notes isolated, and without the override', () => {
+    const RLO = String.fromCodePoint(0x202e);
+    const { container } = render(
+      <AssetRecords
+        policies={ok([])}
+        inspections={ok([
+          inspection({ certificateNo: `INSP-${RLO}4471`, notes: `لاستیک${RLO}ها فرسوده‌اند` }),
+        ])}
+        now={NOW}
+      />,
+    );
+    expect(container.textContent).not.toContain(RLO);
+    const isolated = [...container.querySelectorAll('bdi')].map((bdi) => bdi.textContent);
+    expect(isolated).toEqual(expect.arrayContaining(['INSP-4471', 'لاستیکها فرسوده‌اند']));
+  });
+});

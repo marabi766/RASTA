@@ -2,7 +2,7 @@ import { axe } from 'jest-axe';
 
 import { itSnapshotsInBothDirections, renderInDirection } from '@/test/directions';
 
-import { Identifier } from './Identifier';
+import { Identifier, IsolatedText } from './Identifier';
 
 describe('Identifier', () => {
   it('isolates the run with a bdi element', () => {
@@ -40,4 +40,31 @@ describe('Identifier', () => {
       شمارهٔ سفارش <Identifier>ORD-2026-0148</Identifier> ثبت شد.
     </p>
   ));
+});
+
+describe('IsolatedText (L5-06, #220)', () => {
+  const RLO = String.fromCodePoint(0x202e);
+
+  it('isolates stored text with dir="auto", in the surrounding face', () => {
+    const { container } = renderInDirection(<IsolatedText>دلیل تغییر</IsolatedText>, 'rtl');
+    const bdi = container.querySelector('bdi');
+    expect(bdi).toHaveAttribute('dir', 'auto');
+    expect(bdi).not.toHaveClass('font-mono');
+  });
+
+  it('drops an override stored in the text, so it reads in the order it was typed', () => {
+    const { container } = renderInDirection(<IsolatedText>{`12${RLO}34`}</IsolatedText>, 'rtl');
+    expect(container.querySelector('bdi')?.textContent).toBe('1234');
+  });
+
+  it('does the same inside Identifier, and leaves element children alone', () => {
+    const { container } = renderInDirection(
+      <Identifier>
+        {`WA${RLO}320`}
+        <span>{'x'}</span>
+      </Identifier>,
+      'rtl',
+    );
+    expect(container.querySelector('bdi')?.textContent).toBe('WA320x');
+  });
 });

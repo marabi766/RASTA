@@ -8,11 +8,13 @@ import {
   ZWNJ,
 } from './codepoints';
 import {
+  BIDI_CONTROL,
   collapseWhitespace,
   containsLatin,
   joinWithZwnj,
   normalizePersianLetters,
   normalizePersianText,
+  withoutBidiControls,
 } from './text';
 
 /** U+00A0 NO-BREAK SPACE — a space that survives `trim()`. */
@@ -92,5 +94,27 @@ describe('joinWithZwnj', () => {
 
   it('skips empty parts rather than leaving a stray mark', () => {
     expect(joinWithZwnj('به', '', 'روزرسانی')).toBe(`به${ZWNJ}روزرسانی`);
+  });
+});
+
+describe('withoutBidiControls (L5-06, #220)', () => {
+  // Every Bidi_Control code point, by number: invisible, so never a literal.
+  const ALL = [
+    0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+  ];
+
+  it('drops every bidi control, wherever it sits', () => {
+    const spoofed = ALL.map((codePoint) => `۱۲${String.fromCodePoint(codePoint)}۳۴`).join(' ');
+    const shown = withoutBidiControls(spoofed);
+    expect(BIDI_CONTROL.test(shown)).toBe(false);
+    expect(shown).toBe(ALL.map(() => '۱۲۳۴').join(' '));
+  });
+
+  it('keeps ZWNJ, which Persian needs and which is not a bidi control', () => {
+    expect(withoutBidiControls('می\u200cشود')).toBe('می\u200cشود');
+  });
+
+  it('leaves clean text exactly as it was', () => {
+    expect(withoutBidiControls('لودر چرخ\u200cدار WA320')).toBe('لودر چرخ\u200cدار WA320');
   });
 });

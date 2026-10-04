@@ -1,6 +1,14 @@
 import type { ReactNode } from 'react';
 
-import { Alert, EmptyState, ErrorState, Identifier, Section, StatusBadge } from '@/ui';
+import {
+  Alert,
+  EmptyState,
+  ErrorState,
+  Identifier,
+  IsolatedText,
+  Section,
+  StatusBadge,
+} from '@/ui';
 import type { ValidityWindow } from '@/lib/asset-record-fields';
 import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import { inspectionResultLabel, policyCoverageLabel } from '@/lib/labels';
@@ -204,7 +212,11 @@ function InspectionList({
               {inspection.centerName ? (
                 <Pair term="مرکز معاینه">{inspection.centerName}</Pair>
               ) : null}
-              {inspection.notes ? <Pair term="یادداشت">{inspection.notes}</Pair> : null}
+              {inspection.notes ? (
+                <Pair term="یادداشت">
+                  <IsolatedText>{inspection.notes}</IsolatedText>
+                </Pair>
+              ) : null}
             </dl>
           </li>
         );
