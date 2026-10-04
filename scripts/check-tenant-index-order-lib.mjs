@@ -50,6 +50,10 @@ export const SERVICES = [
   'audit',
   'construction',
   'organization',
+  'fleet',
+  'identity',
+  'maintenance',
+  'marketplace',
   'economic',
 ];
 
@@ -67,6 +71,10 @@ const PARENT_LOAD =
   'parent-child path: Prisma loads the relation by the parent id with no organization ' +
   'predicate, and the ON DELETE RESTRICT check probes it the same way';
 
+/** fleet and maintenance keep the same release tombstone for an asset transfer (ADR-062). */
+const RELEASE_TOMBSTONE =
+  "one tombstone per transfer (asset_id, fence_id): fence_id is asset-service's transfer id (TRF_…), unique across tenants, and this key is the ON CONFLICT target of the release write; the lookup (asset_id, organization_id, fence_id) is served by it";
+
 /**
  * Why a per-parent unique must not gain a leading organization_id: the child
  * table references its parent by id alone, so nothing in the database makes a
@@ -78,94 +86,295 @@ const perParentUnique = (fk) =>
   `leading with organization_id would weaken it: the foreign key is on ${fk} alone, so two rows ` +
   `for one parent with different organization_id would both be accepted`;
 
-/** `service` → index or constraint name → why it does not lead with organization_id. */
+/**
+ * `service` → index or constraint name → the index it names (`table (columns)`)
+ * and why it does not lead with organization_id. The definition is part of the
+ * exemption: an index of the same name with other columns is refused.
+ */
 export const EXEMPTIONS = {
   supplier: {
-    ux_supplier_capability: `one row per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}; ${PARENT_LOAD}`,
-    ux_qualification_open: `at most one open submission per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}`,
-    ux_qualification_approved: `at most one approval per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}`,
-    ix_qualification_supplier_state: PARENT_LOAD,
-    ix_qualification_review_queue:
-      'the platform review queue (SupplierRepository.listForReview) is cross-tenant under runUnscoped',
-    ux_qualification_evidence_document: `one row per (qualification, document) — an invariant of one qualification; ${perParentUnique('qualification_id')}; ${PARENT_LOAD}`,
-    ix_suspension_supplier: `${PARENT_LOAD}; also the open-episode lookup, which names the supplier`,
+    ux_supplier_capability: {
+      index: 'supplier_capability (supplier_id, capability)',
+      reason: `one row per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}; ${PARENT_LOAD}`,
+    },
+    ux_qualification_open: {
+      index: 'qualification (supplier_id, capability)',
+      reason: `at most one open submission per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}`,
+    },
+    ux_qualification_approved: {
+      index: 'qualification (supplier_id, capability)',
+      reason: `at most one approval per (supplier, capability) — an invariant of one supplier; ${perParentUnique('supplier_id')}`,
+    },
+    ix_qualification_supplier_state: {
+      index: 'qualification (supplier_id, state)',
+      reason: PARENT_LOAD,
+    },
+    ix_qualification_review_queue: {
+      index: 'qualification (state, capability)',
+      reason:
+        'the platform review queue (SupplierRepository.listForReview) is cross-tenant under runUnscoped',
+    },
+    ux_qualification_evidence_document: {
+      index: 'qualification_evidence (qualification_id, document_id)',
+      reason: `one row per (qualification, document) — an invariant of one qualification; ${perParentUnique('qualification_id')}; ${PARENT_LOAD}`,
+    },
+    ix_suspension_supplier: {
+      index: 'suspension (supplier_id, suspended_at)',
+      reason: `${PARENT_LOAD}; also the open-episode lookup, which names the supplier`,
+    },
   },
   notification: {
-    ux_resolution_intent_user: `one resolution per (intent, user) — an invariant of one intent; the mail worker joins on it across tenants; ${perParentUnique('intent_id')}`,
-    ux_delivery_intent_user_channel: `one delivery per (intent, user, channel) — an invariant of one intent; ${perParentUnique('intent_id')}`,
-    ix_delivery_channel_status_next: 'the delivery workers claim due rows for every tenant at once',
-    ix_delivery_sendable: 'the mail worker claims sendable rows for every tenant at once',
-    ux_attempt_delivery_no: `one row per (delivery, attempt number) — an invariant of one delivery; ${perParentUnique('delivery_id')}`,
+    ux_resolution_intent_user: {
+      index: 'recipient_resolution (intent_id, user_id)',
+      reason: `one resolution per (intent, user) — an invariant of one intent; the mail worker joins on it across tenants; ${perParentUnique('intent_id')}`,
+    },
+    ux_delivery_intent_user_channel: {
+      index: 'notification_delivery (intent_id, user_id, channel)',
+      reason: `one delivery per (intent, user, channel) — an invariant of one intent; ${perParentUnique('intent_id')}`,
+    },
+    ix_delivery_channel_status_next: {
+      index: 'notification_delivery (channel, status, next_attempt_at)',
+      reason: 'the delivery workers claim due rows for every tenant at once',
+    },
+    ix_delivery_sendable: {
+      index: 'notification_delivery (channel, next_attempt_at)',
+      reason: 'the mail worker claims sendable rows for every tenant at once',
+    },
+    ux_attempt_delivery_no: {
+      index: 'delivery_attempt (delivery_id, attempt_no)',
+      reason: `one row per (delivery, attempt number) — an invariant of one delivery; ${perParentUnique('delivery_id')}`,
+    },
   },
   document: {
-    uq_grant_document_subject: `one grant per (document, subject) — an invariant of one document; ${perParentUnique('document_id')}`,
-    ix_document_scan_queue: 'the scan worker claims queued documents for every tenant at once',
+    uq_grant_document_subject: {
+      index: 'access_grant (document_id, subject_type, subject_id)',
+      reason: `one grant per (document, subject) — an invariant of one document; ${perParentUnique('document_id')}`,
+    },
+    ix_document_scan_queue: {
+      index: 'document (scan_state, scan_next_attempt_at)',
+      reason: 'the scan worker claims queued documents for every tenant at once',
+    },
   },
   // construction: every child references its parent by (organization_id,
   // parent_id), so per-parent indexes lead with the tenant column without
   // weakening anything. Three exemptions:
   construction: {
-    ix_tender_close_due:
-      'the close sweeper claims overdue PUBLISHED tenders for every tenant at once, oldest deadline first (TenderCloseRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, so it is small, and each tender is then closed under its own organization_id',
-    ix_award_standing_check_due:
-      'the standing-check sweeper claims the PENDING checks after awards for every tenant at once, oldest first (AwardStandingCheckRepository.claimDue, runUnscoped); a partial index on status = PENDING, so it is small, and each check is then settled under its own organization_id',
-    ix_approval_authority_inbox:
-      "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
+    ix_tender_close_due: {
+      index: 'tender (bid_closing_at, id)',
+      reason:
+        'the close sweeper claims overdue PUBLISHED tenders for every tenant at once, oldest deadline first (TenderCloseRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, so it is small, and each tender is then closed under its own organization_id',
+    },
+    ix_award_standing_check_due: {
+      index: 'tender_award_standing_check (created_at, id)',
+      reason:
+        'the standing-check sweeper claims the PENDING checks after awards for every tenant at once, oldest first (AwardStandingCheckRepository.claimDue, runUnscoped); a partial index on status = PENDING, so it is small, and each check is then settled under its own organization_id',
+    },
+    ix_approval_authority_inbox: {
+      index: 'approval (authority_organization_id, status, id)',
+      reason:
+        "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
+    },
   },
   audit: {
-    audit_event_pkey:
-      'audit_event is partitioned by occurred_at, and PostgreSQL requires the partition key in every unique index',
-    audit_event_source_identity_key:
-      'consumer idempotency on a partitioned table: the partition key must lead the unique index',
-    audit_event_resource_idx:
-      'serves platform-scope search (ADR-053 § 10) as well as tenant search; tenant search has audit_event_org_time_idx',
-    audit_event_topic_time_idx: 'operational replay by source topic, across tenants',
-    audit_event_topic_event_recorded_idx:
-      "D-046's missing-evidence detector (AuditRepository.countMissingReconciliationEvidence, runUnscoped): one platform-level count across tenants, never rows or tenant ids, by when the row was written",
-    audit_event_correction_idx:
-      'the correctedBy probe is keyed by the corrected record id, whose scope was checked when that record was read',
-    audit_chain_head_pkey:
-      'chain_scope separates the platform chain (organization_id = empty string) from tenant chains; lookups name all three columns',
-    audit_chain_head_month_idx: 'which chains a month holds — asked across tenants by verification',
-    tender_receipt_link_pkey:
-      "one link per (tender, seq) — an invariant of one tender's chain; the chain is read by tender id alone through the tenant-less service token (ADR-066 § 2), and leading with organization_id would let two organizations each hold a chain for one tender",
-    ux_tender_receipt_link_receipt:
-      'a receipt is one link of its tender, whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
-    ux_tender_receipt_link_previous:
-      'a link has one successor per tender (no fork), whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
-    ux_tender_receipt_pending_previous:
-      'one held successor per predecessor within a tender: the fork check must not be weakened by a differing organization_id',
-    ux_tender_receipt_pending_receipt:
-      'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
-    ix_bid_access_evidence_tender:
-      "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
+    audit_event_pkey: {
+      index: 'audit_event (occurred_at, id)',
+      reason:
+        'audit_event is partitioned by occurred_at, and PostgreSQL requires the partition key in every unique index',
+    },
+    audit_event_source_identity_key: {
+      index: 'audit_event (occurred_at, source_event_id, source_topic)',
+      reason:
+        'consumer idempotency on a partitioned table: the partition key must lead the unique index',
+    },
+    audit_event_resource_idx: {
+      index: 'audit_event (resource_type, resource_id, occurred_at)',
+      reason:
+        'serves platform-scope search (ADR-053 § 10) as well as tenant search; tenant search has audit_event_org_time_idx',
+    },
+    audit_event_topic_time_idx: {
+      index: 'audit_event (source_topic, occurred_at)',
+      reason: 'operational replay by source topic, across tenants',
+    },
+    audit_event_topic_event_recorded_idx: {
+      index: 'audit_event (source_topic, source_event_name, recorded_at)',
+      reason:
+        "D-046's missing-evidence detector (AuditRepository.countMissingReconciliationEvidence, runUnscoped): one platform-level count across tenants, never rows or tenant ids, by when the row was written",
+    },
+    audit_event_correction_idx: {
+      index: 'audit_event (correction_of, occurred_at)',
+      reason:
+        'the correctedBy probe is keyed by the corrected record id, whose scope was checked when that record was read',
+    },
+    audit_chain_head_pkey: {
+      index: 'audit_chain_head (chain_scope, organization_id, chain_month)',
+      reason:
+        'chain_scope separates the platform chain (organization_id = empty string) from tenant chains; lookups name all three columns',
+    },
+    audit_chain_head_month_idx: {
+      index: 'audit_chain_head (chain_month, chain_scope)',
+      reason: 'which chains a month holds — asked across tenants by verification',
+    },
+    tender_receipt_link_pkey: {
+      index: 'tender_receipt_link (tender_id, seq)',
+      reason:
+        "one link per (tender, seq) — an invariant of one tender's chain; the chain is read by tender id alone through the tenant-less service token (ADR-066 § 2), and leading with organization_id would let two organizations each hold a chain for one tender",
+    },
+    ux_tender_receipt_link_receipt: {
+      index: 'tender_receipt_link (tender_id, receipt)',
+      reason:
+        'a receipt is one link of its tender, whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    },
+    ux_tender_receipt_link_previous: {
+      index: 'tender_receipt_link (tender_id, previous_receipt)',
+      reason:
+        'a link has one successor per tender (no fork), whoever the organization on the event says it is — the fork check must not be weakened by a differing organization_id',
+    },
+    ux_tender_receipt_pending_previous: {
+      index: 'tender_receipt_pending (tender_id, previous_receipt)',
+      reason:
+        'one held successor per predecessor within a tender: the fork check must not be weakened by a differing organization_id',
+    },
+    ux_tender_receipt_pending_receipt: {
+      index: 'tender_receipt_pending (tender_id, receipt)',
+      reason:
+        'one held row per receipt within a tender: the fork check must not be weakened by a differing organization_id',
+    },
+    ix_bid_access_evidence_tender: {
+      index: 'bid_access_evidence (tender_id, accessed_at)',
+      reason:
+        "the evidence of one tender's bid reads, asked by tender id from the tenant-less service path",
+    },
+  },
+  fleet: {
+    asset_transfer_release_pkey: {
+      index: 'asset_transfer_release (asset_id, fence_id)',
+      reason: `${RELEASE_TOMBSTONE} (FleetRepository.releaseTransferFence, isTransferReleased)`,
+    },
+  },
+  identity: {
+    ix_security_event_outbox_claimable: {
+      index: 'security_event_outbox (created_at, id)',
+      reason:
+        'the refusal-audit relay reads the oldest unpublished row across every tenant for its age gauge (SecurityEventOutboxStore.oldestPendingAgeSeconds); a partial index on published_at IS NULL',
+    },
+    ix_security_event_outbox_closed_windows: {
+      index: 'security_event_outbox (window_ends_at, id)',
+      reason:
+        'the refusal-audit relay claims closed windows for every tenant at once, oldest first (SecurityEventOutboxStore.claimPending, FOR UPDATE SKIP LOCKED); a partial index on published_at IS NULL',
+    },
+    membership_user_id_organization_id_deleted_at_key: {
+      index: 'membership (user_id, organization_id, deleted_at)',
+      reason:
+        'a user is platform-wide, and the provisioning lookup names the user first across tenants (IdentityRepository.findMembership, runUnscoped). Not a one-live-membership invariant: NULL deleted_at values are distinct, so this index does not enforce one — fix/identity-one-live-membership adds the partial unique index that does',
+    },
+    membership_user_id_status_idx: {
+      index: 'membership (user_id, status)',
+      reason:
+        "a user's memberships in every organization (IdentityRepository.listMembershipsForUser and findLiveMemberships, runUnscoped); the tenant's own listing has membership_organization_id_status_idx",
+    },
+  },
+  maintenance: {
+    asset_transfer_release_pkey: {
+      index: 'asset_transfer_release (asset_id, fence_id)',
+      reason: `${RELEASE_TOMBSTONE} (MaintenanceRepository.releaseTransferFence, isTransferReleased)`,
+    },
+    ux_request_open_per_asset: {
+      index: 'maintenance_request (asset_id, type)',
+      reason:
+        'one open request per (asset, type) — an invariant of one machine (docs/05 § 5.5): asset ids are global, so leading with organization_id would let a transferred asset hold an open request in two tenants',
+    },
+  },
+  marketplace: {
+    ix_offer_product_status: {
+      index: 'offer (product_id, status)',
+      reason:
+        "the catalogue joins a product's PUBLISHED offers from every supplier (CatalogueService.searchProducts, runUnscoped); a supplier's own offers have ix_offer_org_status",
+    },
+    ix_offer_status_price: {
+      index: 'offer (status, unit_price_minor)',
+      reason:
+        'the catalogue orders PUBLISHED offers from every supplier by price (CatalogueService.searchProducts, orderingFor PRICE_ASC/PRICE_DESC, runUnscoped)',
+    },
+    ix_order_history_order: {
+      index: 'order_status_history (order_id, occurred_at)',
+      reason: `${PARENT_LOAD} (order_status_history_order_id_fkey, ON DELETE CASCADE); a tenant's history has ix_order_history_org`,
+    },
+    ix_order_supplier_status: {
+      index: 'order (supplier_organization_id, status)',
+      reason:
+        'a counterparty read: the supplier lists orders where it is supplier_organization_id, not the buyer that owns the row (OrderRepository.listForCaller with role SUPPLIER, runUnscoped)',
+    },
+    uq_offer_price_version: {
+      index: 'offer_price_history (offer_id, version)',
+      reason: `one row per (offer, version) — an invariant of one offer's price history; ${perParentUnique('offer_id')}`,
+    },
+    uq_order_line_offer: {
+      index: 'order_line (order_id, offer_id)',
+      reason: `one line per (order, offer) — an invariant of one order; ${perParentUnique('order_id')}; ${PARENT_LOAD}`,
+    },
   },
   // economic: the rule tables keep organization_id nullable on purpose (a NULL
   // row is a platform-wide rule every tenant is matched against), so their
   // lookups name the rule's key, not a tenant (TENANT_SCOPE_EXEMPTIONS in
   // services/economic-service/src/prisma/prisma.service.ts).
   economic: {
-    commission_rule_transaction_type_status_valid_from_idx:
-      'platform-wide (organization_id NULL) and tenant rules matched together by transaction type (CommissionService.candidateRules and listRules, runUnscoped with an explicit OR on organization_id)',
-    reward_rule_trigger_event_status_valid_from_idx:
-      'platform-wide (organization_id NULL) and tenant rules matched together by trigger event (RewardService.applicableRuleIds, runUnscoped with an explicit OR on organization_id)',
-    reward_level_status_min_points_idx:
-      'platform-wide (organization_id NULL) and tenant levels read together by status (RewardService.applyLevel, runUnscoped with an explicit OR on organization_id)',
-    ix_payment_intent_unfinished_refund:
-      "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
-    ix_payment_reconciliation_open_window:
-      'the same heal pass reads open reconciliation tasks across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial on status <> DONE',
-    ledger_entry_account_id_posted_at_idx:
-      "one account's statement by its globally unique id (LedgerRepository.listEntries, docs/05 § 5.5); fk_ledger_entry_account_identity binds an entry's organization_id to its account's, so a leading organization_id would not narrow it",
-    uq_ledger_account_identity:
-      'the target of the composite identity foreign keys (fk_ledger_entry_account_identity, fk_wallet_account_identity): unique already on id, the primary key, and only binds organization_id and currency to it for those keys',
-    reward_rule_id_source_reference_key: `one grant per (rule, source fact) — the reward consumer's idempotency and the docs/10 § 10.9 anti-fraud control (RewardService.grantOne catches its unique violation); rules may be platform-wide, so the invariant is the rule's, not one tenant's; ${perParentUnique('rule_id')}`,
-    settlement_payee_organization_id_settled_at_idx:
-      'a counterparty read: the payee lists settlements it receives, owned by the payer (SettlementController.list with incoming=true, runUnscoped narrowed to its own id on payee_organization_id)',
-    transaction_counterparty_organization_id_status_idx:
-      "a counterparty read: the counterparty branch of the caller's transactions, owned by the other party (TransactionRepository.list, OR on counterparty_organization_id)",
-    transaction_leg_transaction_id_role_key: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
-    uq_wallet_hold_active_reference: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
+    commission_rule_transaction_type_status_valid_from_idx: {
+      index: 'commission_rule (transaction_type, status, valid_from)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant rules matched together by transaction type (CommissionService.candidateRules and listRules, runUnscoped with an explicit OR on organization_id)',
+    },
+    reward_rule_trigger_event_status_valid_from_idx: {
+      index: 'reward_rule (trigger_event, status, valid_from)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant rules matched together by trigger event (RewardService.applicableRuleIds, runUnscoped with an explicit OR on organization_id)',
+    },
+    reward_level_status_min_points_idx: {
+      index: 'reward_level (status, min_points)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant levels read together by status (RewardService.applyLevel, runUnscoped with an explicit OR on organization_id)',
+    },
+    ix_payment_intent_unfinished_refund: {
+      index: 'payment_intent (created_at, id)',
+      reason:
+        "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
+    },
+    ix_payment_reconciliation_open_window: {
+      index: 'payment_reconciliation_task (created_at, id)',
+      reason:
+        'the same heal pass reads open reconciliation tasks across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial on status <> DONE',
+    },
+    ledger_entry_account_id_posted_at_idx: {
+      index: 'ledger_entry (account_id, posted_at)',
+      reason:
+        "one account's statement by its globally unique id (LedgerRepository.listEntries, docs/05 § 5.5); fk_ledger_entry_account_identity binds an entry's organization_id to its account's, so a leading organization_id would not narrow it",
+    },
+    uq_ledger_account_identity: {
+      index: 'ledger_account (id, organization_id, currency)',
+      reason:
+        'the target of the composite identity foreign keys (fk_ledger_entry_account_identity, fk_wallet_account_identity): unique already on id, the primary key, and only binds organization_id and currency to it for those keys',
+    },
+    reward_rule_id_source_reference_key: {
+      index: 'reward (rule_id, source_reference)',
+      reason: `one grant per (rule, source fact) — the reward consumer's idempotency and the docs/10 § 10.9 anti-fraud control (RewardService.grantOne catches its unique violation); rules may be platform-wide, so the invariant is the rule's, not one tenant's; ${perParentUnique('rule_id')}`,
+    },
+    settlement_payee_organization_id_settled_at_idx: {
+      index: 'settlement (payee_organization_id, settled_at)',
+      reason:
+        'a counterparty read: the payee lists settlements it receives, owned by the payer (SettlementController.list with incoming=true, runUnscoped narrowed to its own id on payee_organization_id)',
+    },
+    transaction_counterparty_organization_id_status_idx: {
+      index: 'transaction (counterparty_organization_id, status)',
+      reason:
+        "a counterparty read: the counterparty branch of the caller's transactions, owned by the other party (TransactionRepository.list, OR on counterparty_organization_id)",
+    },
+    transaction_leg_transaction_id_role_key: {
+      index: 'transaction_leg (transaction_id, role)',
+      reason: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
+    },
+    uq_wallet_hold_active_reference: {
+      index: 'wallet_hold (wallet_id, reference)',
+      reason: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
+    },
   },
 };
 
@@ -478,7 +687,7 @@ export function replayMigrations(sqlTexts) {
 
 /**
  * @param {{ tables: Map<string, Set<string>>, indexes: Map<string, object> }} state
- * @param {Record<string, string>} exemptions  index name → reason
+ * @param {Record<string, { index: string, reason: string }>} exemptions  index name → its definition and reason
  * @returns {{ errors: string[], checked: number }}
  */
 export function checkTenantIndexOrder(state, exemptions = {}, exemptTables = EXEMPT_TABLES) {
@@ -494,9 +703,26 @@ export function checkTenantIndexOrder(state, exemptions = {}, exemptTables = EXE
     checked += 1;
 
     const leads = index.columns[0] === TENANT_COLUMN;
-    if (name in exemptions) {
+    // Own properties only: `name in exemptions` would exempt an index named
+    // `constructor` or `toString` through Object.prototype (Codex on #217).
+    if (Object.hasOwn(exemptions, name)) {
       used.add(name);
-      if (leads) errors.push(`${name}: already leads with ${TENANT_COLUMN}; remove its exemption`);
+      const exemption = exemptions[name];
+      const definition = `${index.table} (${index.columns.join(', ')})`;
+      if (
+        typeof exemption !== 'object' ||
+        exemption === null ||
+        typeof exemption.reason !== 'string' ||
+        exemption.reason.trim() === ''
+      ) {
+        errors.push(`${name}: its exemption must be { index, reason } with a reason`);
+      } else if (exemption.index !== definition) {
+        errors.push(
+          `${name}: exempted as ${exemption.index}, but the index is ${definition}; review the exemption`,
+        );
+      } else if (leads) {
+        errors.push(`${name}: already leads with ${TENANT_COLUMN}; remove its exemption`);
+      }
       continue;
     }
     if (!leads) {

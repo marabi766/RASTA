@@ -52,7 +52,22 @@ describe('an asset write carrying a bidi control (HTTP)', () => {
     for (const mock of [...Object.values(assets), ...Object.values(insurance)]) {
       mock.mockReset().mockResolvedValue({ id: 'AST_1' });
     }
-    idempotency.execute.mockReset().mockResolvedValue({ result: { id: 'AST_1' } });
+    // Runs the work the controller hands it, as the real store does for a new
+    // key: the policy and inspection routes record under an Idempotency-Key
+    // (EXP-002 slice 6), so what reaches the service is what they send it.
+    idempotency.execute
+      .mockReset()
+      .mockImplementation(
+        async (
+          _endpoint: string,
+          _key: string,
+          _body: unknown,
+          _status: number,
+          work: (f: object) => Promise<unknown>,
+        ) => ({
+          result: await work({}),
+        }),
+      );
   });
 
   const MARKER = 'ساعت‌کارکرد';
@@ -141,6 +156,7 @@ describe('an asset write carrying a bidi control (HTTP)', () => {
       it.each(SPOOFED_IDS)('refuses a documentId carrying %s', async (_label, documentId) => {
         const response = await request(app.getHttpServer())
           .post(path)
+          .set('Idempotency-Key', 'record-key-0001')
           .send({ ...body, documentId });
         expectRefused(response, handler);
       });
@@ -148,12 +164,15 @@ describe('an asset write carrying a bidi control (HTTP)', () => {
       it('still accepts a clean documentId', async () => {
         const response = await request(app.getHttpServer())
           .post(path)
+          .set('Idempotency-Key', 'record-key-0001')
           .send({ ...body, documentId: 'DOC_01J9ZK7Q' });
 
         expect(response.status).toBeLessThan(300);
+        // The record routes pass the claim fence as a third argument.
         expect(handler).toHaveBeenCalledWith(
           'AST_1',
           expect.objectContaining({ documentId: 'DOC_01J9ZK7Q' }),
+          ...(path.endsWith('/documents') ? [] : [expect.anything()]),
         );
       });
     });

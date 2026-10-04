@@ -2,6 +2,13 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchDossier, type AssetSummary } from '@/server/assets';
+import {
+  canRecordAssetCompliance,
+  fetchInspections,
+  fetchInsurancePolicies,
+  sealAssetRecordBaseline,
+} from '@/server/asset-records';
+import { RECORD_NOTICES } from '@/lib/asset-record-fields';
 import type { UpdateAssetFormValues } from '@/lib/asset-form-fields';
 import { canManageAssets, sealAssetBaseline } from '@/server/asset-commands';
 import {
@@ -25,6 +32,8 @@ import { PORTAL_NAV } from '@/app/nav';
 import { DossierScreen } from './DossierScreen';
 import { UpdateAssetForm } from './UpdateAssetForm';
 import { LifecycleControls, type LifecycleToken } from './LifecycleControls';
+import { AssetRecords } from './AssetRecords';
+import { RecordInspectionForm, RecordPolicyForm } from './AssetRecordForms';
 
 /**
  * The `/assets/[id]` route.
@@ -98,9 +107,15 @@ export default async function AssetDossierPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}`)}`);
 
-  const [result, currentUser] = await Promise.all([
+  // The server's clock, taken once: every record's "in force" on this page is
+  // judged against this instant, here and not in the browser.
+  const now = new Date();
+
+  const [result, currentUser, policies, inspections] = await Promise.all([
     fetchDossier(session, id),
     fetchCurrentUser(session),
+    fetchInsurancePolicies(session, id),
+    fetchInspections(session, id),
   ]);
 
   // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
@@ -135,6 +150,14 @@ export default async function AssetDossierPage({
       />
     ) : undefined;
 
+  // The record forms: a role asset-service admits for both POSTs, on a machine
+  // that is still a live record. UX as everywhere — the service decides again.
+  const recordForms =
+    currentUser.kind === 'USER' &&
+    canRecordAssetCompliance(currentUser.user.effectiveRoles) &&
+    result.kind === 'OK' &&
+    result.data.asset.status !== 'DECOMMISSIONED';
+
   return (
     <AppShell
       topBar={
@@ -164,8 +187,36 @@ export default async function AssetDossierPage({
             'statusChanged',
             'decommissioned',
             'lifecycleConflict',
+            ...RECORD_NOTICES,
           ],
         )}
+        records={
+          <AssetRecords
+            policies={policies}
+            inspections={inspections}
+            now={now}
+            policyForm={
+              recordForms ? (
+                <RecordPolicyForm
+                  assetId={id}
+                  csrfToken={session.csrfToken}
+                  submissionId={mintSubmissionId(session)}
+                  baseline={sealAssetRecordBaseline(session, { assetId: id, record: 'policy' })}
+                />
+              ) : undefined
+            }
+            inspectionForm={
+              recordForms ? (
+                <RecordInspectionForm
+                  assetId={id}
+                  csrfToken={session.csrfToken}
+                  submissionId={mintSubmissionId(session)}
+                  baseline={sealAssetRecordBaseline(session, { assetId: id, record: 'inspection' })}
+                />
+              ) : undefined
+            }
+          />
+        }
         lifecycle={lifecycle}
         editForm={
           // A decommissioned machine is a historical record: asset-service

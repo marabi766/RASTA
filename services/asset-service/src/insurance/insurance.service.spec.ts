@@ -102,6 +102,58 @@ const INSPECTION: CreateInspectionDto = {
 };
 
 describe('InsuranceService', () => {
+  describe('recording under an idempotency fence (EXP-002 slice 6)', () => {
+    /** A fence that notes the order of its calls relative to the writes. */
+    function fence(order: string[]) {
+      return {
+        hold: jest.fn(async () => {
+          order.push('hold');
+        }),
+        complete: jest.fn(async (_tx: unknown, result: unknown) => {
+          order.push('complete');
+          return result;
+        }),
+      } as never;
+    }
+
+    it.each<[string, (h: Harness, f: never) => Promise<unknown>]>([
+      ['a policy', (h: Harness, f: never) => h.service.recordPolicy(ASSET_ID, POLICY, f)],
+      [
+        'an inspection',
+        (h: Harness, f: never) => h.service.recordInspection(ASSET_ID, INSPECTION, f),
+      ],
+    ])('holds the claim before writing %s and completes it last', async (_what, record) => {
+      const order: string[] = [];
+      const h = harness({
+        lockAsset: jest.fn(async () => {
+          order.push('lock');
+          return { status: 'ACTIVE' };
+        }),
+      });
+      const original = h.enqueued.push.bind(h.enqueued);
+      h.enqueued.push = (...items) => {
+        order.push('event');
+        return original(...items);
+      };
+
+      const view = await run(() => record(h, fence(order)));
+
+      expect(order[0]).toBe('hold');
+      expect(order[order.length - 1]).toBe('complete');
+      expect(order).toContain('event');
+      expect(view).toMatchObject({ id: expect.any(String) });
+    });
+
+    it.each<[string, (h: Harness) => Promise<unknown>]>([
+      ['a policy', (h: Harness) => h.service.recordPolicy(ASSET_ID, POLICY)],
+      ['an inspection', (h: Harness) => h.service.recordInspection(ASSET_ID, INSPECTION)],
+    ])('still records %s without a fence (internal callers)', async (_what, record) => {
+      const h = harness();
+      await expect(run(() => record(h))).resolves.toMatchObject({ id: expect.any(String) });
+      expect(h.enqueued).toHaveLength(1);
+    });
+  });
+
   describe('recording a policy', () => {
     it('publishes INSURANCE_RECORDED and adds a dossier line', async () => {
       const h = harness();
