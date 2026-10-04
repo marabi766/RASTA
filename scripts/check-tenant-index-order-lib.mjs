@@ -89,6 +89,16 @@ const ASSET_MOVES =
   'by-asset read an organization-leading index could not serve';
 
 /**
+ * fleet and maintenance keep the same per-machine transfer fence (ADR-062).
+ * Asset ids are global, and an assignment or work order from any organization
+ * must see a fence another organization placed, so every read is by asset_id.
+ */
+const TRANSFER_FENCE =
+  'one fence per machine, the primary key asset_id, whichever organization placed it: an assignment or work order from any organization must see it, so every read and write names the asset and an organization-leading index would hide the fence that has to refuse it';
+const TRANSFER_RELEASE =
+  'one tombstone per transfer, the primary key (asset_id, fence_id): every lookup names both and the releasing organization_id rides along as a filter, and the purge removes expired tombstones of every tenant by expires_at (asset_transfer_release_expires_at_idx)';
+
+/**
  * Why a per-parent unique must not gain a leading organization_id: the child
  * table references its parent by id alone, so nothing in the database makes a
  * child's organization_id equal its parent's. Keyed on (organization_id,
@@ -448,29 +458,49 @@ export const EXEMPTIONS = {
  * (#218 r1, Codex: `payment_reconciliation_resolution`). An exemption for a
  * table that is not a tenant table, or that has such an index, is an error.
  */
-export const TABLE_EXEMPTIONS = {};
+export const TABLE_EXEMPTIONS = {
+  supplier: {
+    supplier_capability: `a child of one supplier, and a supplier is one organization (supplier.organization_id is unique): read only by its supplier id, as the capabilities relation of SUPPLIER_INCLUDE and as the directory's capability filter (SupplierRepository.searchDirectory, runUnscoped), both served by ux_supplier_capability; ${PARENT_LOAD}`,
+    qualification_evidence: `a child of one qualification, read only by its qualification id as the evidence relation (SUPPLIER_INCLUDE, SupplierRepository.findQualification and listForReview), served by ux_qualification_evidence_document; ${PARENT_LOAD}`,
+    suspension: `a child of one supplier, read only by its supplier id: the suspensions relation (SUPPLIER_INCLUDE, SupplierRepository.findStandingOf and listStandingSnapshot) and the open-episode lookup of SupplierRepository.closeSuspension (runUnscoped — the operator lifting it is another organization), served by ix_suspension_supplier and ux_suspension_open; ${PARENT_LOAD}`,
+  },
+  notification: {
+    delivery_attempt:
+      'an append-only log of send attempts, written one row per attempt by NotificationRepository.dispatch and settleAttempt; nothing in the service reads it back — the delivery row carries attempt_count and last_error_class — and ux_attempt_delivery_no is the per-delivery numbering it needs',
+  },
+  audit: {
+    audit_chain_head:
+      'every read and write names the whole primary key (chain_scope, organization_id, chain_month): AuditRepository.ingest opens, locks and advances one chain by it, AuditRepository.chainHead reads one; chain_scope has two values, so the key reaches one tenant in its second column',
+    bid_access_evidence:
+      'append-only evidence of bid reads, written once per event by TenderEvidenceRepository.recordAccess under its primary key source_event_id; nothing reads it by organization — a reader by tender is what ix_bid_access_evidence_tender is for, and a tender belongs to one organization',
+    tender_receipt_link:
+      "one tender's receipt chain: every read names the tender (TenderEvidenceRepository.appendLink and drain by tender_id, TenderEvidenceRepository.chainOf by organization_id and tender_id), served by the primary key (tender_id, seq); a tender's chain belongs to one organization (appendLink refuses a link under another), so a leading organization_id would not narrow it",
+    tender_receipt_pending:
+      "receipts held until their predecessor arrives: read by tender (TenderEvidenceRepository.appendLink's owner probe, drain by (tender_id, previous_receipt)) and removed by source_event_id, all served by its keys; the gap monitor counts every held row across tenants by held_at (TenderEvidenceRepository.pendingSummary, ix_tender_receipt_pending_held)",
+  },
+  fleet: {
+    asset_transfer_fence: `${TRANSFER_FENCE} (FleetRepository.hasTransferFence, findTransferFence, placeTransferFence)`,
+    asset_transfer_release: `${TRANSFER_RELEASE} (FleetRepository.isTransferReleased, releaseTransferFence, purgeExpiredReleases)`,
+  },
+  maintenance: {
+    asset_transfer_fence: `${TRANSFER_FENCE} (MaintenanceRepository.hasTransferFence, findTransferFence, placeTransferFence)`,
+    asset_transfer_release: `${TRANSFER_RELEASE} (MaintenanceRepository.isTransferReleased, releaseTransferFence, purgeExpiredReleases)`,
+  },
+};
 
 /**
  * Tables the table-level check found in services other than economic when it
  * was added (#218 r1), not yet classified by their owners: each still needs an
- * index leading with organization_id or a `TABLE_EXEMPTIONS` reason. Reported
+ * index leading with organization_id or a `TABLE_EXEMPTIONS` reason. Twelve of
+ * the thirteen were classified in `TABLE_EXEMPTIONS` (L7-44, the rest). Reported
  * on every run, never failing it, so the check holds every other tenant table
  * from the day it lands. An entry that stops firing — fixed, or exempted with
  * its reason — is an error until it is removed from here: the list only
  * shrinks.
  */
 export const TABLE_FINDINGS_PENDING = {
-  supplier: ['qualification_evidence', 'supplier_capability', 'suspension'],
-  notification: ['delivery_attempt'],
-  audit: [
-    'audit_chain_head',
-    'bid_access_evidence',
-    'tender_receipt_link',
-    'tender_receipt_pending',
-  ],
+  // construction-service is under review elsewhere (#208); classified there.
   construction: ['policy_reconciliation_task'],
-  fleet: ['asset_transfer_fence', 'asset_transfer_release'],
-  maintenance: ['asset_transfer_fence', 'asset_transfer_release'],
 };
 
 /** Every `migration.sql` under a Prisma migrations directory, in apply order. */
