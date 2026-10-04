@@ -878,4 +878,120 @@ describe('registration decisions and the Keycloak account an approval creates', 
       expectActivated(username, userId);
     });
   });
+
+  describe('round 4: the platform status is the authority on enabling (HIGH 1, D-049)', () => {
+    const reconcile = () => runProjectionCommand('reconcile', { repository, projector, keycloak });
+    const backfill = () => runProjectionCommand('backfill', { repository, projector, keycloak });
+
+    /**
+     * A platform disable as any suspend or deactivate path must make one —
+     * none exists yet (D-049): the user row lock first, the status write, the
+     * commit, then the projection that carries it to Keycloak.
+     */
+    const suspend = async (userId: string) => {
+      await repository.transaction(async (tx) => {
+        await repository.lockUserMemberships(tx, userId);
+        await runUnscoped('the platform suspends the user', () =>
+          tx.user.update({ where: { id: userId }, data: { status: 'SUSPENDED' } }),
+        );
+      });
+      await projector.projectAfterCommit(userId);
+    };
+
+    const statusOf = (userId: string) =>
+      runUnscoped(
+        'the suite reads the status from outside',
+        async () => (await prisma.client.user.findUniqueOrThrow({ where: { id: userId } })).status,
+      );
+
+    /** Approved, with its first activation still to come (Keycloak was down after the commit). */
+    const approvedPendingActivation = async () => {
+      const submitted = await submit();
+      keycloak.afterCreate = async () => {
+        keycloak.unreachable.add('write');
+      };
+      await approve(submitted.registrationId);
+      keycloak.unreachable.clear();
+      keycloak.afterCreate = null;
+      expect(await state(submitted.registrationId, submitted.userId)).toMatchObject({
+        user: { status: 'ACTIVE', accountActivationPending: true },
+      });
+      return submitted;
+    };
+
+    it('a platform disable that commits before the first activation wins: the account is never enabled', async () => {
+      const { registrationId, userId, username } = await approvedPendingActivation();
+
+      await suspend(userId);
+      await backfill();
+      await projector.project(userId, 'event');
+
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false, activation: null });
+      expect(keycloak.writes.filter((write) => write.startsWith('activate'))).toEqual([]);
+      expect(await state(registrationId, userId)).toMatchObject({
+        user: { status: 'SUSPENDED', accountActivationPending: true },
+      });
+      // Withheld and reported, never cleared silently.
+      expect((await reconcile()).activationPending).toContain(userId);
+    });
+
+    it('a platform disable that starts during the first activation waits for it, then is carried to Keycloak', async () => {
+      const { userId, username } = await approvedPendingActivation();
+
+      let suspension: Promise<void> | undefined;
+      keycloak.beforeActivate = async () => {
+        keycloak.beforeActivate = null;
+        suspension = suspend(userId);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        // Waiting on the user row the activation holds: not committed.
+        expect(await statusOf(userId)).toBe('ACTIVE');
+      };
+
+      await projector.project(userId, 'command');
+      expect(keycloak.writes.filter((write) => write.startsWith('activate'))).toHaveLength(1);
+      await suspension;
+
+      expect(await statusOf(userId)).toBe('SUSPENDED');
+      // The suspension's own projection disabled what the activation enabled.
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false });
+      expect((await reconcile()).enabledDivergent.map((found) => found.userId)).not.toContain(
+        userId,
+      );
+    });
+
+    it('a projection never leaves a user who is not ACTIVE with an enabled account', async () => {
+      const { registrationId, userId, username } = await submit();
+      await approve(registrationId);
+      expectActivated(username, userId);
+
+      await runUnscoped('the status changes without its projection (a lost request)', () =>
+        prisma.client.user.update({ where: { id: userId }, data: { status: 'SUSPENDED' } }),
+      );
+      expect((await reconcile()).enabledDivergent).toContainEqual({
+        userId,
+        keycloakEnabled: true,
+        platformStatus: 'SUSPENDED',
+      });
+
+      await backfill();
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false });
+      expect((await reconcile()).enabledDivergent.map((found) => found.userId)).not.toContain(
+        userId,
+      );
+    });
+
+    it('a disable made in the Keycloak console is reported, and never undone', async () => {
+      const { registrationId, userId, username } = await submit();
+      await approve(registrationId);
+      accountsOf(username)[0]!.enabled = false; // the console, not the platform
+
+      expect((await reconcile()).enabledDivergent).toContainEqual({
+        userId,
+        keycloakEnabled: false,
+        platformStatus: 'ACTIVE',
+      });
+      await backfill();
+      expect(accountsOf(username)[0]).toMatchObject({ enabled: false });
+    });
+  });
 });

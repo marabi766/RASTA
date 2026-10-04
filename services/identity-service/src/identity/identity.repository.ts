@@ -65,6 +65,14 @@ export class IdentityRepository {
    * membership cannot commit around a revocation of that same membership: one
    * of them waits for the other, then reads what it committed. `null` when no
    * such user exists.
+   *
+   * It is also the serialisation point for a user's **status** (#219 r4): the
+   * first activation of a registration approval's account
+   * (`KeycloakProjector.activateOnce`) holds it from its read of the status to
+   * its write to Keycloak. Any path that changes a user's status — a suspend
+   * or deactivate, none of which exists yet (D-049) — must take it first, so a
+   * disable that commits first is seen and wins, and one that commits after is
+   * carried to Keycloak by the projection it triggers.
    */
   async lockUserMemberships(
     tx: ExtendedPrismaClient,

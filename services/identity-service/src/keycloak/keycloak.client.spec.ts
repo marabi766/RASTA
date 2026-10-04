@@ -1,3 +1,5 @@
+import { createServer, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import {
   ACTIVATION_ATTRIBUTE,
   KeycloakAdminClient,
@@ -342,5 +344,88 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
       enabled: false,
       activation: 'REG_1',
     });
+  });
+});
+
+/**
+ * Every call to Keycloak has a deadline — the token request included — over
+ * the connection, the response and its body (#219 r4). Several run while a
+ * database lock is held, so a token endpoint that accepts and never answers
+ * must not hold that lock without bound. A real socket, not a stubbed fetch:
+ * what is proven is that `fetch` itself is cut off.
+ */
+describe('KeycloakAdminClient: a deadline on every call, the token request included (#219 r4)', () => {
+  let server: Server;
+  let baseUrl = '';
+  let behaviour: 'silent' | 'stalled-body' | 'answers' = 'silent';
+  const held: ServerResponse[] = [];
+
+  beforeAll(async () => {
+    server = createServer((request, response) => {
+      if (request.url?.endsWith('/token') && behaviour !== 'answers') {
+        if (behaviour === 'stalled-body') {
+          // Headers and half a body, then nothing.
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.write('{"access_token":"admin-tok');
+        }
+        held.push(response);
+        return;
+      }
+      if (request.url?.endsWith('/token')) {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ access_token: 'admin-token', expires_in: 300 }));
+        return;
+      }
+      // An admin call that never answers.
+      held.push(response);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    for (const response of held) response.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  const client = () =>
+    new KeycloakAdminClient({
+      baseUrl,
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled: true,
+      requestTimeoutMs: 300,
+    });
+
+  it.each(['silent', 'stalled-body'] as const)(
+    'a token endpoint that is %s fails within the deadline, as upstream unavailable',
+    async (mode) => {
+      behaviour = mode;
+      const started = Date.now();
+      await expect(client().getAccount('kc-1')).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect(Date.now() - started).toBeLessThan(3_000);
+    },
+  );
+
+  it('an admin call that never answers fails within the deadline, as upstream unavailable', async () => {
+    behaviour = 'answers';
+    const started = Date.now();
+    await expect(client().getAccount('kc-1')).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it('the secret never reaches the error', async () => {
+    behaviour = 'silent';
+    const error = await client()
+      .getAccount('kc-1')
+      .catch((caught: unknown) => caught);
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(
+      'client-secret-for-tests',
+    );
   });
 });

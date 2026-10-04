@@ -229,12 +229,34 @@ describe('runProjectionCommand', () => {
         userId,
         divergent: [] as never[],
         activationPending: userId === 'USR_3',
+        enabledDivergent: null,
       })),
       repairOrphan: jest.fn(),
     };
     const keycloak = { findAccountByUsername: jest.fn(async () => null) };
     const report = await runProjectionCommand('reconcile', { repository, projector, keycloak });
     expect(report.activationPending).toEqual(['USR_3']);
+    expect(report.divergent).toEqual([]);
+    expect(isClean(report)).toBe(false);
+  });
+
+  it('reconcile reports an account whose enabled state disagrees with the platform status, by id, and is not clean (#219 r4)', async () => {
+    const projector = {
+      project: jest.fn(),
+      reconcile: jest.fn(async (userId: string) => ({
+        userId,
+        divergent: [] as never[],
+        activationPending: false,
+        enabledDivergent:
+          userId === 'USR_2' ? { keycloakEnabled: false, platformStatus: 'ACTIVE' } : null,
+      })),
+      repairOrphan: jest.fn(),
+    };
+    const keycloak = { findAccountByUsername: jest.fn(async () => null) };
+    const report = await runProjectionCommand('reconcile', { repository, projector, keycloak });
+    expect(report.enabledDivergent).toEqual([
+      { userId: 'USR_2', keycloakEnabled: false, platformStatus: 'ACTIVE' },
+    ]);
     expect(report.divergent).toEqual([]);
     expect(isClean(report)).toBe(false);
   });

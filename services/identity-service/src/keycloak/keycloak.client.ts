@@ -117,6 +117,35 @@ export interface KeycloakClientOptions {
   clientSecret: string;
   /** When false every call is a no-op. Used by tests and offline development. */
   enabled: boolean;
+  /**
+   * The deadline of every call to Keycloak — the token request included —
+   * covering the connection, the response and its body. Several are made
+   * while a database lock is held (an approval, a projection), so none may
+   * wait without one (#219 r4). Defaults to {@link KEYCLOAK_REQUEST_TIMEOUT_MS}.
+   */
+  requestTimeoutMs?: number;
+}
+
+/** The default deadline of one Keycloak call: connection, response and body. */
+export const KEYCLOAK_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * A Keycloak call that did not answer — its deadline passed, or the
+ * connection failed — as the upstream error every caller already handles,
+ * rather than a bare `TimeoutError` or `TypeError` from `fetch`. Nothing of
+ * the request is carried, so neither a token nor a secret can reach a log.
+ */
+async function unreachableAsUpstream<T>(operation: string, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof RastaError) throw error;
+    const reason =
+      error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+        ? 'deadline'
+        : 'unreachable';
+    throw RastaError.upstreamUnavailable('keycloak', { operation, reason });
+  }
 }
 
 @Injectable()
@@ -134,15 +163,24 @@ export class KeycloakAdminClient {
   // Token handling
   // -------------------------------------------------------------------------
 
+  /** A fresh deadline for one call (`requestTimeoutMs`). */
+  private deadline(): AbortSignal {
+    return AbortSignal.timeout(this.options.requestTimeoutMs ?? KEYCLOAK_REQUEST_TIMEOUT_MS);
+  }
+
   private async accessToken(): Promise<string> {
     // Refresh 30s early so a token does not expire mid-request.
     if (this.token && this.token.expiresAt > Date.now() + 30_000) {
       return this.token.value;
     }
 
-    const response = await fetch(
-      `${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`,
-      {
+    // The same deadline as every admin call: a token endpoint that accepts
+    // the connection and never answers would otherwise hold the caller — and
+    // the database lock an approval or a projection holds around it —
+    // without bound (#219 r4). The signal also bounds reading the body below.
+    const deadline = this.deadline();
+    const response = await unreachableAsUpstream('client_credentials', () =>
+      fetch(`${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -150,7 +188,8 @@ export class KeycloakAdminClient {
           client_id: this.options.clientId,
           client_secret: this.options.clientSecret,
         }),
-      },
+        signal: deadline,
+      }),
     );
 
     if (!response.ok) {
@@ -161,7 +200,10 @@ export class KeycloakAdminClient {
       });
     }
 
-    const body = (await response.json()) as { access_token: string; expires_in: number };
+    const body = await unreachableAsUpstream(
+      'client_credentials',
+      () => response.json() as Promise<{ access_token: string; expires_in: number }>,
+    );
     this.token = {
       value: body.access_token,
       expiresAt: Date.now() + body.expires_in * 1000,
@@ -171,15 +213,17 @@ export class KeycloakAdminClient {
 
   private async admin(path: string, init: RequestInit = {}): Promise<Response> {
     const token = await this.accessToken();
-    return fetch(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
-      ...init,
-      headers: {
-        ...init.headers,
-        authorization: `Bearer ${token}`,
-        'content-type': 'application/json',
-      },
-      signal: AbortSignal.timeout(10_000),
-    });
+    return unreachableAsUpstream('admin', () =>
+      fetch(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
+        ...init,
+        headers: {
+          ...init.headers,
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        signal: this.deadline(),
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------

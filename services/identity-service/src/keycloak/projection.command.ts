@@ -29,6 +29,12 @@ import { grantsAnything, type PlatformAttributeName } from './platform-attribute
  * that enables its account has not landed yet. Reconcile reports them as
  * unclean; backfill's projection enables them.
  *
+ * And for **enabled-state divergence** (#219 r4, D-049): the platform's user
+ * status is the authority on whether an account may sign in. Reconcile
+ * reports an account enabled for a user who is not ACTIVE, or disabled for an
+ * ACTIVE one (a disable made in the Keycloak console, not the platform), as
+ * unclean. Backfill disables the first; the second is left to an operator.
+ *
  * Separated from the CLI entry point so the sweep itself is tested without a
  * database or a Keycloak.
  */
@@ -56,6 +62,14 @@ export interface ProjectionCommandReport {
   }[];
   /** reconcile: users whose approved account has not been enabled yet. */
   activationPending: string[];
+  /**
+   * reconcile: accounts whose Keycloak `enabled` disagrees with the platform's
+   * user status (#219 r4, D-049) — enabled for a user who is not ACTIVE, or
+   * disabled for an ACTIVE user, typically from the Keycloak console. By id.
+   * Backfill disables the first kind; the second is an operator's decision:
+   * nothing here enables an account but its one activation.
+   */
+  enabledDivergent: { userId: string; keycloakEnabled: boolean; platformStatus: string }[];
 }
 
 const PAGE = 200;
@@ -76,6 +90,7 @@ export async function runProjectionCommand(
     failed: [],
     orphans: [],
     activationPending: [],
+    enabledDivergent: [],
   };
 
   let after: string | null = null;
@@ -96,6 +111,9 @@ export async function runProjectionCommand(
             report.divergent.push({ userId, attributes: finding.divergent });
           }
           if (finding?.activationPending) report.activationPending.push(userId);
+          if (finding?.enabledDivergent) {
+            report.enabledDivergent.push({ userId, ...finding.enabledDivergent });
+          }
         }
       } catch {
         // One unreachable account must not hide the state of every other. It
@@ -160,6 +178,7 @@ export function isClean(report: ProjectionCommandReport): boolean {
     report.divergent.length === 0 &&
     report.failed.length === 0 &&
     report.activationPending.length === 0 &&
+    report.enabledDivergent.length === 0 &&
     report.orphans.every((orphan) => orphan.repaired || (!orphan.enabled && !orphan.grants))
   );
 }

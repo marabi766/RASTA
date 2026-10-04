@@ -30,6 +30,13 @@ export interface ReconcileFinding {
   divergent: PlatformAttributeName[];
   /** An approval committed, but its account has not been enabled yet (#219 r2). */
   activationPending: boolean;
+  /**
+   * Keycloak's `enabled` disagrees with the platform's user status (#219 r4,
+   * D-049): enabled while the user is not ACTIVE, or disabled while the user
+   * is ACTIVE and no activation is pending — an account disabled in the
+   * Keycloak console rather than through the platform. Null when they agree.
+   */
+  enabledDivergent: { keycloakEnabled: boolean; platformStatus: string } | null;
 }
 
 /** What the orphan repair did with one account (`repairOrphan`). */
@@ -79,6 +86,7 @@ export class KeycloakProjector {
     keycloakId: string | null;
     attributes: PlatformAttributes;
     activationPending: boolean;
+    status: string;
   } | null> {
     const user = await this.repository.findUserById(userId);
     if (!user) return null;
@@ -87,6 +95,7 @@ export class KeycloakProjector {
       keycloakId: user.keycloakId,
       attributes: platformAttributesFor(user, memberships, new Date()),
       activationPending: user.accountActivationPending,
+      status: user.status,
     };
   }
 
@@ -132,11 +141,19 @@ export class KeycloakProjector {
   async reconcile(userId: string): Promise<ReconcileFinding | null> {
     const expected = await this.expectedAttributes(userId);
     if (!expected || !expected.keycloakId || !this.keycloak.enabled) return null;
-    const actual = await this.keycloak.getPlatformAttributes(expected.keycloakId);
+    const account = await this.keycloak.getAccount(expected.keycloakId);
+    // The platform's user status is the authority (ADR-060: Keycloak is a
+    // projection): an account may be enabled only for an ACTIVE user whose
+    // activation has landed.
+    const shouldBeEnabled = expected.status === 'ACTIVE' && !expected.activationPending;
     return {
       userId,
-      divergent: divergentAttributes(actual, expected.attributes),
+      divergent: divergentAttributes(account.attributes, expected.attributes),
       activationPending: expected.activationPending,
+      enabledDivergent:
+        account.enabled === shouldBeEnabled
+          ? null
+          : { keycloakEnabled: account.enabled, platformStatus: expected.status },
     };
   }
 
@@ -225,6 +242,7 @@ export class KeycloakProjector {
         if (user.accountActivationPending) {
           await this.activateOnce(tx, user, keycloakId, attributes);
         }
+        if (user.status !== 'ACTIVE') await this.disableIfEnabled(user.id, keycloakId);
         return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
       },
       { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
@@ -281,6 +299,25 @@ export class KeycloakProjector {
         where: { id: user.id },
         data: { accountActivationPending: false },
       }),
+    );
+  }
+
+  /**
+   * The platform's user status is the authority on whether an account may be
+   * enabled (#219 r4, ADR-060: Keycloak is a projection). A user who is not
+   * ACTIVE never keeps an enabled account: every projection of them disables
+   * it. Only ever in that direction — a projection never enables an account
+   * but once, on activation (`activateOnce`) — so an administrator's disable
+   * is never undone, and a status change that commits after an activation is
+   * carried to Keycloak by the projection that change triggers.
+   */
+  private async disableIfEnabled(userId: string, keycloakId: string): Promise<void> {
+    const account = await this.keycloak.getAccount(keycloakId);
+    if (!account.enabled) return;
+    await this.keycloak.setEnabled(keycloakId, false);
+    this.logger.warn(
+      { userId, keycloakId },
+      'Account disabled: the platform user is not ACTIVE, and its status is the authority',
     );
   }
 }
