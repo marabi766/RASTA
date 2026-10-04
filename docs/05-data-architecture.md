@@ -69,11 +69,16 @@ deleted_at        TIMESTAMPTZ                 -- حذف نرم؛ NULL = فعال
 و `reward_rule` (سراسری، با امکان Override سازمانی)، `audit_event` (دارد اما فقط برای فیلتر).
 
 **اجرای قاعدهٔ Index مرکب (L7-44):** `pnpm check:tenant-index-order` زنجیرهٔ Migrationهای
-supplier، notification، document، audit، construction، organization، fleet، identity، maintenance و marketplace را بازپخش می‌کند (Index جزئیِ فقط-SQL هم دیده می‌شود)
+supplier، notification، document، audit، construction، organization، fleet، identity، maintenance، marketplace و economic را بازپخش می‌کند (Index جزئیِ فقط-SQL هم دیده می‌شود)
 و هر Index مرکبی را که روی جدول مستأجرمحور با `organization_id` شروع نشود رد می‌کند، مگر به نام
 و با تعریفش (جدول و ستون‌ها) و دلیل در `scripts/check-tenant-index-order-lib.mjs` معاف شده باشد؛ Index هم‌نام با ستون‌های دیگر معاف نیست. معافیت فقط برای این دسته‌هاست:
 مسیر عمداً میان‌مستأجری (Worker یا `runUnscoped`)، مسیر والد-فرزند (بارگذاری Relation و بررسی
 کلید خارجی)، قید یکتایی درون یک ردیف والد، و جدول Partition‌شده. معافیتِ کهنه خودش خطاست.
+همان بررسی **جدول** مستأجرمحوری را هم رد می‌کند که هیچ Indexی — تک‌ستونی هم — با `organization_id` شروع نمی‌شود
+(فقط کلید اصلی، کلیدهای تک‌ستونی دیگر، یا هیچ)، چون هر خواندن مستأجرمحورش همهٔ ردیف‌های همهٔ مستأجرها را می‌پیماید؛ مگر جدول
+با دلیل در `TABLE_EXEMPTIONS` معاف شده باشد (#218). یافته‌های سرویس‌های دیگر در روز افزوده‌شدن این بررسی در
+`TABLE_FINDINGS_PENDING` فهرست شده‌اند: گزارش می‌شوند و شکست نمی‌دهند تا مالکشان طبقه‌بندی کند، و هر ورودی‌ای که دیگر
+رخ ندهد خطاست — فهرست فقط کوچک می‌شود. یافتهٔ تازه در هر سرویس خطاست.
 سرویس‌های دیگر با افزوده‌شدن به `SERVICES` در همان فایل وارد می‌شوند.
 
 **هر نشست پایگاه داده در UTC است (L7-37).** ستون‌های `timestamp(3)` (بی منطقهٔ زمانی) مقدارِ `now()` خامِ SQL را به ساعت

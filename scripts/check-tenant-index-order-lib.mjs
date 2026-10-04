@@ -54,6 +54,7 @@ export const SERVICES = [
   'identity',
   'maintenance',
   'marketplace',
+  'economic',
 ];
 
 /**
@@ -312,6 +313,103 @@ export const EXEMPTIONS = {
       reason: `one line per (order, offer) — an invariant of one order; ${perParentUnique('order_id')}; ${PARENT_LOAD}`,
     },
   },
+  // economic: the rule tables keep organization_id nullable on purpose (a NULL
+  // row is a platform-wide rule every tenant is matched against), so their
+  // lookups name the rule's key, not a tenant (TENANT_SCOPE_EXEMPTIONS in
+  // services/economic-service/src/prisma/prisma.service.ts).
+  economic: {
+    commission_rule_transaction_type_status_valid_from_idx: {
+      index: 'commission_rule (transaction_type, status, valid_from)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant rules matched together by transaction type (CommissionService.candidateRules and listRules, runUnscoped with an explicit OR on organization_id)',
+    },
+    reward_rule_trigger_event_status_valid_from_idx: {
+      index: 'reward_rule (trigger_event, status, valid_from)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant rules matched together by trigger event (RewardService.applicableRuleIds, runUnscoped with an explicit OR on organization_id)',
+    },
+    reward_level_status_min_points_idx: {
+      index: 'reward_level (status, min_points)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant levels read together by status (RewardService.applyLevel, runUnscoped with an explicit OR on organization_id)',
+    },
+    ix_payment_intent_unfinished_refund: {
+      index: 'payment_intent (created_at, id)',
+      reason:
+        "the payment reconciler's heal pass reads the intents a refund left unfinished across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial, empty in the normal case",
+    },
+    ix_payment_reconciliation_open_window: {
+      index: 'payment_reconciliation_task (created_at, id)',
+      reason:
+        'the same heal pass reads open reconciliation tasks across every tenant, in (created_at, id) windows (PaymentReconciliationRepository.heal); partial on status <> DONE',
+    },
+    ledger_entry_account_id_posted_at_idx: {
+      index: 'ledger_entry (account_id, posted_at)',
+      reason:
+        "one account's statement by its globally unique id (LedgerRepository.listEntries, docs/05 § 5.5); fk_ledger_entry_account_identity binds an entry's organization_id to its account's, so a leading organization_id would not narrow it",
+    },
+    uq_ledger_account_identity: {
+      index: 'ledger_account (id, organization_id, currency)',
+      reason:
+        'the target of the composite identity foreign keys (fk_ledger_entry_account_identity, fk_wallet_account_identity): unique already on id, the primary key, and only binds organization_id and currency to it for those keys',
+    },
+    reward_rule_id_source_reference_key: {
+      index: 'reward (rule_id, source_reference)',
+      reason: `one grant per (rule, source fact) — the reward consumer's idempotency and the docs/10 § 10.9 anti-fraud control (RewardService.grantOne catches its unique violation); rules may be platform-wide, so the invariant is the rule's, not one tenant's; ${perParentUnique('rule_id')}`,
+    },
+    settlement_payee_organization_id_settled_at_idx: {
+      index: 'settlement (payee_organization_id, settled_at)',
+      reason:
+        'a counterparty read: the payee lists settlements it receives, owned by the payer (SettlementController.list with incoming=true, runUnscoped narrowed to its own id on payee_organization_id)',
+    },
+    transaction_counterparty_organization_id_status_idx: {
+      index: 'transaction (counterparty_organization_id, status)',
+      reason:
+        "a counterparty read: the counterparty branch of the caller's transactions, owned by the other party (TransactionRepository.list, OR on counterparty_organization_id)",
+    },
+    transaction_leg_transaction_id_role_key: {
+      index: 'transaction_leg (transaction_id, role)',
+      reason: `one leg per (transaction, role) — an invariant of one transaction; ${perParentUnique('transaction_id')}; ${PARENT_LOAD}`,
+    },
+    uq_wallet_hold_active_reference: {
+      index: 'wallet_hold (wallet_id, reference)',
+      reason: `one live hold per (wallet, reference) — an invariant of one wallet that two concurrent retries cannot both pass (WalletService.placeHold); ${perParentUnique('wallet_id')}`,
+    },
+  },
+};
+
+/**
+ * `service` → tenant table → why it has **no** index leading with
+ * organization_id at all. The composite check above judges the indexes a table
+ * has; this one judges a table that has none the tenant guard's predicate can
+ * use — only its primary key, single-column keys on something else, or
+ * nothing — so every tenant-scoped read of it is a scan of every tenant's rows
+ * (#218 r1, Codex: `payment_reconciliation_resolution`). An exemption for a
+ * table that is not a tenant table, or that has such an index, is an error.
+ */
+export const TABLE_EXEMPTIONS = {};
+
+/**
+ * Tables the table-level check found in services other than economic when it
+ * was added (#218 r1), not yet classified by their owners: each still needs an
+ * index leading with organization_id or a `TABLE_EXEMPTIONS` reason. Reported
+ * on every run, never failing it, so the check holds every other tenant table
+ * from the day it lands. An entry that stops firing — fixed, or exempted with
+ * its reason — is an error until it is removed from here: the list only
+ * shrinks.
+ */
+export const TABLE_FINDINGS_PENDING = {
+  supplier: ['qualification_evidence', 'supplier_capability', 'suspension'],
+  notification: ['delivery_attempt'],
+  audit: [
+    'audit_chain_head',
+    'bid_access_evidence',
+    'tender_receipt_link',
+    'tender_receipt_pending',
+  ],
+  construction: ['policy_reconciliation_task'],
+  fleet: ['asset_transfer_fence', 'asset_transfer_release'],
+  maintenance: ['asset_transfer_fence', 'asset_transfer_release'],
 };
 
 /** Every `migration.sql` under a Prisma migrations directory, in apply order. */
@@ -682,4 +780,81 @@ export function checkTenantIndexOrder(state, exemptions = {}, exemptTables = EXE
   }
 
   return { errors, checked };
+}
+
+/**
+ * Tenant tables with no index whose first column is organization_id —
+ * single-column indexes included, since `(organization_id)` alone serves the
+ * guard's predicate — unless exempted with a reason in `tableExemptions`.
+ *
+ * @param {{ tables: Map<string, Set<string>>, indexes: Map<string, object> }} state
+ * @param {Record<string, string>} tableExemptions  table → reason
+ * @param {Record<string, string>} exemptTables  platform plumbing, not tenant data
+ * @param {string[]} pending  known findings not yet classified (`TABLE_FINDINGS_PENDING`)
+ * @returns {{ errors: string[], notes: string[], checked: number }}
+ */
+export function checkTenantLeadingIndex(
+  state,
+  tableExemptions = {},
+  exemptTables = EXEMPT_TABLES,
+  pending = [],
+) {
+  const errors = [];
+  const notes = [];
+  let checked = 0;
+  const leading = new Set();
+  for (const index of state.indexes.values()) {
+    if (index.columns[0] === TENANT_COLUMN) leading.add(index.table);
+  }
+
+  for (const [table, columns] of [...state.tables].sort(([a], [b]) => a.localeCompare(b))) {
+    if (!columns.has(TENANT_COLUMN) || table in exemptTables) continue;
+    checked += 1;
+    const has = leading.has(table);
+    if (Object.hasOwn(tableExemptions, table)) {
+      const reason = tableExemptions[table];
+      if (typeof reason !== 'string' || reason.trim() === '') {
+        errors.push(`${table}: its table exemption must be a reason`);
+      } else if (has) {
+        errors.push(
+          `${table}: has an index leading with ${TENANT_COLUMN}; remove its table exemption`,
+        );
+      }
+      continue;
+    }
+    if (!has && pending.includes(table)) {
+      notes.push(`${table}: pending — no index leading with ${TENANT_COLUMN} yet (#218 r1 list)`);
+    } else if (!has) {
+      errors.push(
+        `${table}: tenant table with no index leading with ${TENANT_COLUMN}; ` +
+          'add one, or exempt the table with its reason',
+      );
+    } else if (pending.includes(table)) {
+      errors.push(
+        `${table}: has an index leading with ${TENANT_COLUMN} now; remove it from TABLE_FINDINGS_PENDING`,
+      );
+    }
+  }
+
+  for (const table of pending) {
+    const columns = state.tables.get(table);
+    if (!columns || !columns.has(TENANT_COLUMN) || table in exemptTables)
+      errors.push(
+        `${table}: pending, but not a tenant table here; remove it from TABLE_FINDINGS_PENDING`,
+      );
+    else if (Object.hasOwn(tableExemptions, table))
+      errors.push(
+        `${table}: both pending and table-exempted; remove it from TABLE_FINDINGS_PENDING`,
+      );
+  }
+
+  for (const table of Object.keys(tableExemptions)) {
+    const columns = state.tables.get(table);
+    if (!columns)
+      errors.push(`${table}: table-exempted, but no such table exists; remove the exemption`);
+    else if (!columns.has(TENANT_COLUMN) || table in exemptTables)
+      errors.push(`${table}: table-exempted, but it is not a tenant table; remove the exemption`);
+  }
+
+  return { errors, notes, checked };
 }

@@ -1,0 +1,27 @@
+-- The operator's reconciliation view reads every resolution of one payment
+-- intent: `GET /v1/payment-intents/:id/reconciliation`
+-- (PaymentReconciliationOperator.view), `WHERE organization_id = $1 AND
+-- payment_intent_id = $2`. The table had its primary key and a partial unique
+-- index on task_id only, so that read scanned every tenant's resolution
+-- history (#218 r1, Codex). Leads with organization_id, the tenant guard's
+-- predicate, like every index on a tenant table (ADR-011, L7-44).
+--
+-- Additive only: no column, no data change.
+--
+-- Built CONCURRENTLY, so resolutions can still be proposed and decided during
+-- the build. One statement, alone in its file: CONCURRENTLY cannot run inside a
+-- transaction block, and PostgreSQL runs a multi-statement script as one
+-- implicit transaction.
+--
+-- IF IT FAILS (P3018 — a cancellation, a timeout; a non-unique build has no
+-- other way to fail), it leaves an INVALID index, and every deploy is refused
+-- with P3009. In order:
+--   1. DROP INDEX CONCURRENTLY IF EXISTS "ix_payment_resolution_org_intent";
+--      — alone, outside any transaction;
+--   2. prisma migrate resolve --rolled-back 20261004120000_payment_resolution_intent_index
+--   3. deploy.
+-- No IF NOT EXISTS, on purpose, so a leftover INVALID index is never taken for
+-- the real one. Exact commands:
+-- docs/runbooks/database-bootstrap.md#economic-resolution-intent-index
+CREATE INDEX CONCURRENTLY "ix_payment_resolution_org_intent"
+    ON "payment_reconciliation_resolution" ("organization_id", "payment_intent_id");

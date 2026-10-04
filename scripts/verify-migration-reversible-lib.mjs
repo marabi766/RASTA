@@ -779,6 +779,8 @@ export const EXPECTED = {
       'ux_transaction_source_fact',
       'ux_payment_reconciliation_open',
       'ux_payment_resolution_pending',
+      // The operator view's tenant-leading access path (#218 r1).
+      'ix_payment_resolution_org_intent',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },

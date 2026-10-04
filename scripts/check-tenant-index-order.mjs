@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Fails if a composite index on a tenant-owned table does not lead with
- * `organization_id` and is not exempted with its reason (ADR-011, L7-44).
+ * `organization_id`, or a tenant-owned table has no index that does, and
+ * neither is exempted with its reason (ADR-011, L7-44).
  *
  *   node scripts/check-tenant-index-order.mjs
  *
@@ -14,7 +15,10 @@ import { fileURLToPath } from 'node:url';
 import {
   EXEMPTIONS,
   SERVICES,
+  TABLE_EXEMPTIONS,
+  TABLE_FINDINGS_PENDING,
   checkTenantIndexOrder,
+  checkTenantLeadingIndex,
   readMigrationTexts,
   replayMigrations,
 } from './check-tenant-index-order-lib.mjs';
@@ -30,7 +34,16 @@ for (const service of SERVICES) {
     continue;
   }
   const state = replayMigrations(readMigrationTexts(dir));
-  const { errors, checked } = checkTenantIndexOrder(state, EXEMPTIONS[service] ?? {});
+  const order = checkTenantIndexOrder(state, EXEMPTIONS[service] ?? {});
+  const leading = checkTenantLeadingIndex(
+    state,
+    TABLE_EXEMPTIONS[service] ?? {},
+    undefined,
+    TABLE_FINDINGS_PENDING[service] ?? [],
+  );
+  for (const note of leading.notes) console.log(`tenant index order: ${service}: ${note}`);
+  const errors = [...order.errors, ...leading.errors];
+  const { checked } = order;
   if (checked === 0) {
     console.error(
       `tenant index order: ${service}: found no composite tenant index — refusing to pass an empty check`,
@@ -42,7 +55,10 @@ for (const service of SERVICES) {
     for (const error of errors) console.error(`  ${error}`);
     failed = true;
   } else {
-    console.log(`tenant index order: ${service}: ${checked} composite tenant index(es) checked`);
+    console.log(
+      `tenant index order: ${service}: ${checked} composite tenant index(es) and ` +
+        `${leading.checked} tenant table(s) checked`,
+    );
   }
 }
 
