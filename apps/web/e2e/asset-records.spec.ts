@@ -30,12 +30,16 @@ import { installLiveSession } from './live-session';
  * ## Whose machines, and the gateway's rate limit
  *
  * Every request of these scenarios — the API setup and checks, and each page
- * load's own reads through the portal — is one signed-in user's, and the gateway
- * allows one user 300 requests a minute (`GATEWAY_RATE_LIMIT_MAX`). The other
- * browser specs all act as `dehyari.admin`, so this one acts as the other
- * tenant's administrator (`dehyari.admin.b`, ORG-DEH-0002) and draws on a
- * different allowance; it signs in as `dehyari.admin` only where the scenario
+ * load's own reads through the portal — is one signed-in person's, and the
+ * gateway counts them per person and route prefix (`GATEWAY_RATE_LIMIT_MAX`).
+ * The other asset specs act as `dehyari.admin`, so this one acts as the other
+ * tenant's administrator (`dehyari.admin.b`, ORG-DEH-0002) and is not that
+ * person's traffic too; it signs in as `dehyari.admin` only where the scenario
  * needs a machine of ORG-DEH-0001 (the operator's, and the foreign tenant's).
+ * The "Portal in a browser" job sizes the per-person allowance for a suite in
+ * which three people stand in for every scenario at both viewports
+ * (`.github/workflows/ci.yml`); no scenario is skipped at the phone's size to
+ * stay under it.
  *
  * ## Cleanup
  *
@@ -49,16 +53,6 @@ test.skip(
   process.env.WEB_LIVE_STACK_E2E !== 'true',
   'needs the live stack the Portal in a browser job starts',
 );
-
-/**
- * Why only the two recording scenarios run at the phone's size: a second
- * viewport repeating every scenario multiplies the requests of one user, and the
- * suite shares one stack (see "Whose machines" above). What a phone can change
- * is layout and reachability, which the two recording scenarios open the forms
- * and check; the rest is identical logic at any size.
- */
-const MOBILE_BUDGET =
-  'identical at the phone’s size; keeps the shared user inside the gateway limit';
 
 const NAME_PREFIX = 'آزمون مرورگر - ثبت سوابق';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -356,9 +350,7 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('judges each record against the server’s clock: expired, current and not yet begun, whatever the browser’s clock says', async ({
     page,
     request,
-    isMobile,
   }) => {
-    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const suffix = randomUUID().slice(0, 8);
 
@@ -421,9 +413,7 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('a form sent twice records once: a double click, and the same key through the gateway', async ({
     page,
     request,
-    isMobile,
   }) => {
-    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const number = `E2E-DBL-${randomUUID().slice(0, 10)}`;
 
@@ -483,9 +473,7 @@ test.describe('a machine’s insurance and inspections, through the portal and t
     context,
     page,
     request,
-    isMobile,
   }) => {
-    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     const number = `E2E-SAME-${randomUUID().slice(0, 10)}`;
     const second = await context.newPage();
@@ -515,9 +503,7 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('says what is wrong at the field, in Persian, without sending anything', async ({
     page,
     request,
-    isMobile,
   }) => {
-    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     await page.goto(`/assets/${asset.id}`);
     await openAndFillPolicy(page, { number: 'ab', from: ymd(10), to: ymd(5) });
@@ -536,9 +522,7 @@ test.describe('a machine’s insurance and inspections, through the portal and t
   test('a policy that has already expired is refused in words, and nothing is recorded', async ({
     page,
     request,
-    isMobile,
   }) => {
-    test.skip(isMobile, MOBILE_BUDGET);
     const asset = await registerMachine(request, token);
     await page.goto(`/assets/${asset.id}`);
     await openAndFillPolicy(page, {
@@ -559,9 +543,7 @@ test.describe('a machine’s insurance and inspections, through the portal and t
     context,
     page,
     request,
-    isMobile,
   }) => {
-    test.skip(isMobile, MOBILE_BUDGET);
     // The operator belongs to ORG-DEH-0001, so the machine must too: its owner
     // here is that organization's administrator, not this spec's usual one.
     const token = (await installLiveSession(context, 'orgAdmin')).accessToken;

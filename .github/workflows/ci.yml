@@ -595,8 +595,21 @@ jobs:
             DATABASE_URL=postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/maintenance.log 2>&1 & )
 
+          # The per-person allowance (GATEWAY_RATE_LIMIT_MAX, 300 a minute per
+          # user and route prefix by default) is sized for one human. Here three
+          # seeded people stand in for every scenario of both Playwright
+          # projects at once — `dehyari.admin` alone drives the lifecycle,
+          # tenant-isolation and accessibility specs at desktop and phone size
+          # through `/v1/assets` — and every dossier load is three reads of that
+          # prefix since EXP-002 slice 6. Over 300 the gateway answers 429 and
+          # whichever spec runs last fails for a reason it does not test (#206).
+          # The limit is set to the organization ceiling
+          # (GATEWAY_TENANT_RATE_LIMIT_MAX, default 3000), which still applies:
+          # nothing here tests the limiter itself — its own specs do, in
+          # services/api-gateway — and production keeps its default.
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
+            GATEWAY_RATE_LIMIT_MAX=3000 \
             node dist/main.js > /tmp/rasta-web-e2e-logs/gateway.log 2>&1 & )
 
           for attempt in $(seq 1 60); do
