@@ -151,6 +151,13 @@ async function read<S extends z.ZodTypeAny>(
   }
 }
 
+/**
+ * The one reader of a gateway path into a schema, for modules that read other
+ * resources of an asset (`asset-records.ts`) and want the same outcomes as the
+ * dossier — an outcome to render, never a rule to re-implement.
+ */
+export { read as readFromGateway };
+
 export interface AssetListQuery {
   readonly status?: string;
   readonly type?: string;

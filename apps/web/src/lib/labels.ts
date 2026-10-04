@@ -21,6 +21,7 @@ import {
   type InspectionResult,
   type TimelineCategory,
 } from './asset-fields';
+import type { PolicyCoverage } from './asset-record-fields';
 
 /** `ASSET_TYPES`, `./asset-fields.ts` — typed, so a type added there without a label does not compile. */
 const ASSET_TYPE_LABELS: Readonly<Record<AssetType, string>> = {
@@ -55,6 +56,14 @@ const INSPECTION_RESULT_LABELS: Readonly<Record<InspectionResult, string>> = {
   PASSED: 'قبول',
   CONDITIONAL: 'مشروط',
   FAILED: 'مردود',
+};
+
+/** `POLICY_COVERAGES`, `./asset-record-fields.ts` — typed, so a coverage added there without a label does not compile. */
+const POLICY_COVERAGE_LABELS: Readonly<Record<PolicyCoverage, string>> = {
+  THIRD_PARTY: 'شخص ثالث',
+  COMPREHENSIVE: 'جامع (بدنه)',
+  PASSENGER_ACCIDENT: 'حوادث سرنشین',
+  LIABILITY: 'مسئولیت',
 };
 
 /**
@@ -223,6 +232,7 @@ export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPE_LABEL
 export const assetStatusLabel = (value: string): string => lookup(ASSET_STATUS_LABELS, value);
 export const inspectionResultLabel = (value: string): string =>
   lookup(INSPECTION_RESULT_LABELS, value);
+export const policyCoverageLabel = (value: string): string => lookup(POLICY_COVERAGE_LABELS, value);
 export const timelineCategoryLabel = (value: string): string =>
   lookup(TIMELINE_CATEGORY_LABELS, value);
 
