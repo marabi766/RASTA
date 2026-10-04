@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
 
@@ -20,7 +21,7 @@ export function runtimeUrl(): string {
         'start it with `pnpm infra:up` and copy .env.example to .env.',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 /**
@@ -38,7 +39,7 @@ export function migratorUrl(): string {
         'connection to disable a control and to clean up rows the runtime role cannot delete.',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function brokers(): string[] | null {

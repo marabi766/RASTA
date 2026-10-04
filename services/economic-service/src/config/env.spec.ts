@@ -1,5 +1,6 @@
 import { EnvValidationError } from '@rasta/config';
 import { corsOrigins, loadEconomicEnv } from './env';
+import { withUtcSession } from '@rasta/config';
 
 /**
  * The configuration this service refuses to start without — and the values it
@@ -43,7 +44,7 @@ describe('loadEconomicEnv', () => {
       PORT_ECONOMIC: '4112',
     } as NodeJS.ProcessEnv);
 
-    expect(env.DATABASE_URL).toBe('postgresql://u:p@localhost:5432/rasta_economic');
+    expect(env.DATABASE_URL).toBe(withUtcSession('postgresql://u:p@localhost:5432/rasta_economic'));
     expect(env.PORT).toBe(4112);
   });
 

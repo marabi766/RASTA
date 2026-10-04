@@ -316,6 +316,10 @@ const dockerPg = (extra, command) => [
   '--network',
   network,
   ...PG_LIBPQ_ENV.flatMap((name) => ['-e', name]),
+  // Every psql and pgbench session in UTC whatever the server's or the role's
+  // default (L7-37); libpq reads PGOPTIONS as the startup `options`.
+  '-e',
+  'PGOPTIONS=-c TimeZone=UTC',
   ...extra,
   image,
   ...command,

@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import {
   createSystemContext,
   runUnscoped,
@@ -48,7 +49,7 @@ export function databaseUrl(): string {
         "service's migration to rasta_notification first.",
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function newPrisma(): PrismaService {

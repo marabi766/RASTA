@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ledgerRevoke } from './prisma-lib.mjs';
+import { UTC_SESSION_OPTION, ledgerRevoke, withUtcSession } from './prisma-lib.mjs';
+import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
 
 const pg = (user, db, schema) =>
   `postgresql://${user}:secret_value_here@127.0.0.1:5433/${db}${schema ? `?schema=${schema}` : ''}`;
@@ -57,4 +58,39 @@ test('refuses an identifier it would have to interpolate unquoted-unsafe', () =>
       }),
     /not a plain identifier/,
   );
+});
+
+// --- withUtcSession (L7-37) ---------------------------------------------------
+// The migration runner's copy. The services' copy (packages/config) is held to
+// the same output over UTC_SESSION_CORPUS by scripts/db-session-utc.pg.test.mjs.
+
+const ENCODED = 'options=-c%20TimeZone%3DUTC';
+
+test('a migration URL gets the UTC startup option, everything else kept byte for byte', () => {
+  assert.equal(
+    withUtcSession('postgresql://db:5432/rasta'),
+    `postgresql://db:5432/rasta?${ENCODED}`,
+  );
+  const url = UTC_SESSION_CORPUS[3];
+  assert.equal(withUtcSession(url), `${url}&${ENCODED}`);
+});
+
+test('an earlier TimeZone in the URL loses to UTC, and a + reads as a space', () => {
+  assert.equal(
+    new URL(withUtcSession(UTC_SESSION_CORPUS[4])).searchParams.get('options'),
+    `-c TimeZone=Asia/Tehran ${UTC_SESSION_OPTION}`,
+  );
+  assert.equal(
+    new URL(withUtcSession(UTC_SESSION_CORPUS[5])).searchParams.get('options'),
+    `-c statement_timeout=5000 ${UTC_SESSION_OPTION}`,
+  );
+});
+
+test('withUtcSession is idempotent, and re-applies after a later TimeZone', () => {
+  for (const url of UTC_SESSION_CORPUS) {
+    const once = withUtcSession(url);
+    assert.equal(withUtcSession(once), once);
+    assert.ok(new URL(once).searchParams.get('options').endsWith(UTC_SESSION_OPTION));
+  }
+  assert.equal(withUtcSession(UTC_SESSION_CORPUS[6]), UTC_SESSION_CORPUS[6]);
 });

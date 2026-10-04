@@ -978,6 +978,21 @@ test('psql gets libpq’s own URL parameters, and none of Prisma’s', () => {
   }
 });
 
+test('a startup option reaches libpq percent-encoded, never with `+` for its space (L7-37)', () => {
+  // libpq decodes %XX in a URI and nothing else: `-c+TimeZone=UTC` is refused
+  // by the server as an unknown parameter `+TimeZone`.
+  const given = 'postgresql://u@db.example/rasta_x?schema=public&options=-c%20TimeZone%3DUTC';
+  assert.equal(libpqUrl(given), 'postgresql://u@db.example/rasta_x?options=-c%20TimeZone%3DUTC');
+  // …including after a `URLSearchParams` edit upstream has already written `+`.
+  const edited = new URL(given);
+  edited.searchParams.set('schema', 'scratch');
+  assert.match(edited.toString(), /options=-c\+TimeZone/);
+  assert.equal(
+    libpqInvocation(edited.toString()).target,
+    'postgresql://u@db.example/rasta_x?options=-c%20TimeZone%3DUTC',
+  );
+});
+
 test('psql gets the password in its environment, never in its argv', () => {
   // Built, not written: a fixture password, set through URL so it is encoded
   // as a real one would be (and no credentialed URI sits in the source).
