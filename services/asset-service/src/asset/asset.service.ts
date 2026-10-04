@@ -88,6 +88,16 @@ export class AssetService {
     return toView(asset);
   }
 
+  /**
+   * The caller's organization may see this asset now — the rule {@link get}
+   * applies — or `404`, exactly as for one that does not exist. An
+   * idempotent replay passes this before it answers (`ReplayGuard`): a stored
+   * 201 must not outlive the asset leaving the caller's tenant.
+   */
+  async assertVisible(id: string): Promise<void> {
+    if (!(await this.repository.findById(id))) throw RastaError.notFound('Asset', id);
+  }
+
   async list(query: ListAssetsQuery) {
     const result = await this.repository.list(query);
     return {

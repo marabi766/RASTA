@@ -18,6 +18,7 @@ import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, newPrisma, tenants } from './helpers';
+import { clearingOwners } from './transfer-clearance.fake';
 
 /**
  * Idempotency-Key on the two records an asset takes — an insurance policy and a
@@ -100,6 +101,8 @@ const ROUTES: readonly Route[] = [
 describe('recording an insurance policy or an inspection under an Idempotency-Key', () => {
   let prisma: PrismaService;
   let assets: AssetService;
+  /** The same repository, with owners that clear a transfer (ADR-062). */
+  let transferring: AssetService;
   let http: INestApplication;
 
   const org = tenants();
@@ -109,6 +112,16 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
     prisma = newPrisma();
     const repository = new AssetRepository(prisma);
     assets = new AssetService(repository);
+    transferring = new AssetService(repository, undefined, clearingOwners());
+    for (const organizationId of [org.a, org.b]) {
+      await repository.upsertOrganizationRef({
+        id: organizationId,
+        name: 'سازمان آزمون',
+        type: 'DEHYARI',
+        status: 'ACTIVE',
+        sourceEvent: 'itest',
+      });
+    }
     const insurance = new InsuranceService(repository, assets, 30);
     const store = new IdempotencyStore(prisma, {
       ASSET_IDEMPOTENCY_TTL_HOURS: 24,
@@ -172,6 +185,7 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
       'asset_timeline_entry',
       'insurance_policy',
       'technical_inspection',
+      'asset_transfer',
       'asset_location',
       'asset',
     ]) {
@@ -180,6 +194,10 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
         orgs,
       );
     }
+    await prisma.client.$executeRawUnsafe(
+      `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
+      orgs,
+    );
     await prisma.onModuleDestroy();
   });
 
@@ -240,6 +258,33 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
   };
 
   const key = () => `itest-${ulid()}`;
+
+  const transferAway = (assetId: string) =>
+    asActor(
+      { organizationId: org.a, userId: 'USR-ITEST-ADMIN', roles: ['ORGANIZATION_ADMIN'] },
+      () => transferring.transfer(assetId, { toOrganizationId: org.b, reason: 'واگذاری آزمون' }),
+    );
+
+  /** Every row either tenant has in the tables a recording or its replay could write. */
+  const footprint = (route: Route) =>
+    prisma.client.$queryRawUnsafe<{ tbl: string; n: number }[]>(
+      `SELECT 'records' AS tbl, count(*)::int AS n FROM ${route.table} WHERE organization_id = ANY($1::text[])
+       UNION ALL SELECT 'outbox', count(*)::int FROM outbox_message WHERE organization_id = ANY($1::text[])
+       UNION ALL SELECT 'timeline', count(*)::int FROM asset_timeline_entry WHERE organization_id = ANY($1::text[])
+       UNION ALL SELECT 'keys', count(*)::int FROM idempotency_key WHERE organization_id = ANY($1::text[])
+       UNION ALL SELECT 'completed', count(*)::int FROM idempotency_key
+         WHERE organization_id = ANY($1::text[]) AND state = 'COMPLETED'
+       ORDER BY 1`,
+      [org.a, org.b],
+    );
+
+  /** A 404 as the client sees it, without what differs per request. */
+  const shape = (body: Record<string, unknown>) => ({
+    code: body.code,
+    message: body.message,
+    details: body.details,
+    fields: Object.keys(body).sort(),
+  });
 
   describe.each(ROUTES)('$name', (route) => {
     describe('a retry', () => {
@@ -379,6 +424,39 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
         expect(foreignRead.body.message).toBe(missingRead.body.message);
         expect(await rows(route, assetId)).toEqual([]);
         expect(await events(route, assetId)).toEqual({});
+      });
+
+      it('answers the original caller’s replay 404 exactly as a missing asset once the asset is transferred: no stored body, nothing written', async () => {
+        const assetId = await machine(org.a);
+        const body = route.body();
+        const k = key();
+        const first = await post(route.path(assetId), body, k);
+        expect(first.status).toBe(201);
+        // While the asset is still the caller's, the replay is the stored 201.
+        const inTenant = await post(route.path(assetId), body, k);
+        expect(inTenant.status).toBe(201);
+        expect(inTenant.body).toEqual(first.body);
+
+        await transferAway(assetId);
+        const before = await footprint(route);
+        const eventsBefore = await events(route, assetId);
+
+        const replay = await post(route.path(assetId), body, k);
+        const missing = await post(route.path(`AST_${ulid()}`), route.body(), key());
+        const freshRead = await get(route.path(assetId));
+
+        expect(replay.status).toBe(404);
+        expect(missing.status).toBe(404);
+        expect(freshRead.status).toBe(404);
+        expect(shape(replay.body)).toEqual(shape(missing.body));
+        expect(shape(replay.body)).toEqual(shape(freshRead.body));
+        expect(JSON.stringify(replay.body)).not.toContain(first.body.id);
+
+        // Nothing written, nothing published: the record is still the one row.
+        expect(await footprint(route)).toEqual(before);
+        expect(await events(route, assetId)).toEqual(eventsBefore);
+        expect(eventsBefore[route.recordedEvent]).toBe(1);
+        expect(await rows(route, assetId)).toEqual([first.body.id]);
       });
 
       it('keeps keys per organization: tenant B cannot replay tenant A’s key, it records on its own asset', async () => {

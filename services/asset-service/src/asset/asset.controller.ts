@@ -85,7 +85,8 @@ const IDEMPOTENT_RECORD_DESCRIPTION =
   'with a different body, for another asset or from another user answers 409 ' +
   'IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being ' +
   'processed waits for its answer, and past a few seconds answers 409 CONFLICT with ' +
-  'Retry-After. Returns 404 for an asset in another organization — never 403.';
+  'Retry-After. Returns 404 for an asset in another organization — never 403 — and a ' +
+  'replay answers the same 404 once the asset has been transferred to another organization.';
 
 /**
  * HTTP surface for assets.
@@ -181,7 +182,9 @@ export class AssetController {
       'registering or publishing anything again, for 24 hours by default; the same key with a ' +
       'different body or from another user answers 409 IDEMPOTENCY_KEY_REUSED; a duplicate ' +
       'that arrives while the first is still being processed waits for its answer, and past ' +
-      'a few seconds answers 409 CONFLICT with Retry-After.',
+      'a few seconds answers 409 CONFLICT with Retry-After. A replay of a registration whose ' +
+      'asset has since been transferred to another organization answers 404, as for an asset ' +
+      'that does not exist.',
   })
   @ApiHeader({
     name: 'Idempotency-Key',
@@ -201,6 +204,8 @@ export class AssetController {
       dto,
       201,
       (fence) => this.assets.create(dto, fence),
+      // The machine registered may have been transferred away since.
+      (stored) => this.assets.assertVisible(stored.id),
     );
     return result;
   }
@@ -331,6 +336,8 @@ export class AssetController {
       { assetId: id, ...dto },
       201,
       (fence) => this.insurance.recordPolicy(id, dto, fence),
+      // The asset may have been transferred to another organization since.
+      () => this.assets.assertVisible(id),
     );
     return result;
   }
@@ -354,6 +361,8 @@ export class AssetController {
       { assetId: id, ...dto },
       201,
       (fence) => this.insurance.recordInspection(id, dto, fence),
+      // The asset may have been transferred to another organization since.
+      () => this.assets.assertVisible(id),
     );
     return result;
   }
