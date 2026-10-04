@@ -9,14 +9,25 @@
 -- Built CONCURRENTLY, so membership writes continue during the build. One
 -- statement, alone in its file: CONCURRENTLY cannot run inside a transaction
 -- block, and PostgreSQL runs a multi-statement script as one implicit
--- transaction. The previous migration refused if duplicates existed; one
--- written between that check and this build makes the build fail and leaves
--- an INVALID index — DROP INDEX it, resolve the duplicate as that migration's
--- HINT says, and deploy again.
+-- transaction. The previous migration refused if duplicates existed.
+--
+-- IF IT FAILS (P3018 — a duplicate written between that check and this build,
+-- a cancellation, a timeout), it leaves an INVALID index that enforces nothing,
+-- and every deploy is refused with P3009 until it is resolved. Recovery, in
+-- order (exact commands: docs/runbooks/database-bootstrap.md#identity-one-live-membership):
+--   1. resolve the duplicate as the previous migration's HINT says;
+--   2. run 20261004100000_membership_live_duplicates_guard/down.sql (its
+--      ledger row only), so the next deploy runs that migration again — it
+--      drops the INVALID leftover and checks for duplicates again;
+--   3. prisma migrate resolve --rolled-back 20261004100100_membership_one_live_index
+--   4. deploy.
+-- No IF NOT EXISTS, on purpose: a leftover INVALID index must fail this build
+-- with "already exists", never be taken for the real one — the next migration
+-- drops the old key on the strength of this one.
 --
 -- Tenant column first (docs/05, L7-44): uniqueness does not depend on column
 -- order, and findMembership names both columns, so organization_id leading
 -- costs no reader and needs no exemption from the tenant index order check.
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "ux_membership_live_user_org"
+CREATE UNIQUE INDEX CONCURRENTLY "ux_membership_live_user_org"
     ON "membership" ("organization_id", "user_id")
  WHERE "deleted_at" IS NULL;

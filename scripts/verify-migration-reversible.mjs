@@ -477,6 +477,24 @@ if (expected.dataRollback) {
       console.log(`  ✓ ${step.label}`);
     } else if (step.reapply) {
       deploy(step.label);
+    } else if (step.deployMustFail) {
+      // A deploy that must be refused — a failed migration, or Prisma refusing
+      // to go on past one — matched on its output like any refusal.
+      const result = prisma(['migrate', 'deploy'], { env: { DATABASE_URL: scratchUrl() } });
+      if (result.ok) fail(`${step.label}: the deploy succeeded, but it must fail`);
+      if (!result.output.includes(step.deployMustFail)) {
+        fail(
+          `${step.label}: the deploy failed, but not with "${step.deployMustFail}":\n${result.output}`,
+        );
+      }
+      console.log(`  ✓ ${step.label}`);
+    } else if (step.resolveRolledBack) {
+      // The operator's step after a failed migration: what the runbook says to run.
+      const result = prisma(['migrate', 'resolve', '--rolled-back', step.resolveRolledBack], {
+        env: { DATABASE_URL: scratchUrl() },
+      });
+      if (!result.ok) fail(`${step.label} failed:\n${result.output}`);
+      console.log(`  ✓ ${step.label}`);
     } else if (step.mustFail) {
       mustFail(step.label, step.sql, step.mustFail);
     } else {
