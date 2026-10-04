@@ -110,9 +110,10 @@ model Membership {
 
   user User @relation(fields: [userId], references: [id])
 
-  /// One live membership per (user, organization). Partial on deletedAt so a
-  /// revoked membership does not block the person being re-added later.
-  @@unique([userId, organizationId, deletedAt], name: "unique_active_membership")
+  // SQL-only: `ux_membership_live_user_org` — one live membership per (user,
+  // organization), UNIQUE (user_id, organization_id) WHERE deleted_at IS NULL
+  // (migration 20261004100100). Partial, so a revoked membership does not block
+  // the person being re-added later; Prisma cannot express a partial unique.
   @@index([organizationId, status])
   @@index([userId, status])
   @@map("membership")
@@ -158,7 +159,7 @@ enum ScopeLevel {
 
 /// A single `resource:action` capability, e.g. `asset:update`.
 model Permission {
-  id          String  @id
+  id          String @id
   resource    String
   action      String
   description String
@@ -201,10 +202,10 @@ model RegistrationRequest {
 
   status RegistrationStatus @default(PENDING)
 
-  reviewedBy       String?   @map("reviewed_by")
-  reviewedAt       DateTime? @map("reviewed_at")
+  reviewedBy      String?   @map("reviewed_by")
+  reviewedAt      DateTime? @map("reviewed_at")
   /// Required when rejecting. A refusal without a reason is not reviewable.
-  rejectionReason  String?   @map("rejection_reason")
+  rejectionReason String?   @map("rejection_reason")
 
   /// Document ids held by document-service. Never the files themselves.
   documentRefs String[] @map("document_refs")
@@ -300,8 +301,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   /// Partial index: the relay only ever reads unpublished rows, so the hot
   /// index stays small no matter how much history accumulates.
@@ -425,8 +426,8 @@ model IdempotencyKey {
   /// client bug and must be refused, not silently served the old response.
   requestHash String @map("request_hash")
 
-  responseStatus Int?  @map("response_status")
-  responseBody   Json? @map("response_body")
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
   state          String
 
   createdAt DateTime @default(now()) @map("created_at")

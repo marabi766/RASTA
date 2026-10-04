@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -267,6 +268,72 @@ INSERT INTO "payment_intent" (
  * decided one included, since those rows are the only record of the evidence
  * (Codex on #175, HIGH 2) — and the table refusing to delete one.
  */
+const MEMBERSHIP_GUARD = '20261004100000_membership_live_duplicates_guard';
+const MEMBERSHIP_GUARD_SQL = readFileSync(
+  new URL(
+    `../services/identity-service/prisma/migrations/${MEMBERSHIP_GUARD}/migration.sql`,
+    import.meta.url,
+  ),
+  'utf8',
+);
+const LIVE_MEMBERSHIP = (id) => `
+  INSERT INTO "membership" (id, user_id, organization_id, roles, updated_at, created_by, updated_by)
+  VALUES ('${id}', 'USR_MIGCHECK', 'ORG-MIGCHECK', ARRAY['FLEET_MANAGER'], now(), 'MIGCHECK', 'MIGCHECK');`;
+
+/**
+ * One live membership per (user, organization): fix/identity-one-live-membership.
+ *
+ * The schema before it accepts two live memberships for one user and
+ * organization (NULL deleted_at values are distinct in the old unique index).
+ * Over such a pair the guard migration must refuse, naming the index it will
+ * not add — never deleting or merging an access grant. Once one is revoked,
+ * as its HINT says, the forward migrations apply and the index refuses a new
+ * duplicate.
+ */
+export const IDENTITY_DATA_ROLLBACK = {
+  migration: MEMBERSHIP_GUARD,
+  label: 'two live memberships for one user and organization',
+  steps: [
+    {
+      label: 'down: the one-live-membership migrations roll back, newest first',
+      runDownScript: [
+        '20261004100200_drop_membership_deleted_at_unique',
+        '20261004100100_membership_one_live_index',
+        MEMBERSHIP_GUARD,
+      ],
+    },
+    {
+      label: 'down: the schema before them accepts two live memberships for one pair',
+      sql: `
+        INSERT INTO "user" (id, username, email, first_name, last_name, updated_at, created_by, updated_by)
+        VALUES ('USR_MIGCHECK', 'migcheck', 'migcheck@example.test', 'M', 'C', now(), 'MIGCHECK', 'MIGCHECK');
+        ${LIVE_MEMBERSHIP('MBR_MIGCHECK_1')}
+        ${LIVE_MEMBERSHIP('MBR_MIGCHECK_2')}`,
+    },
+    {
+      label: 'up again: the guard refuses over them rather than choosing one',
+      sql: MEMBERSHIP_GUARD_SQL,
+      mustFail: 'refusing to add ux_membership_live_user_org',
+    },
+    {
+      label: 'resolve the pair as the HINT says: revoke one',
+      sql: `UPDATE "membership" SET deleted_at = now(), status = 'REVOKED' WHERE id = 'MBR_MIGCHECK_2';`,
+    },
+    { label: 'up again: the forward migrations apply', reapply: true },
+    {
+      label: 'up again: a second live membership for the pair is refused',
+      sql: LIVE_MEMBERSHIP('MBR_MIGCHECK_3'),
+      // `prisma db execute` reports the violation by its columns, not its name.
+      mustFail: 'Unique constraint failed on the fields: (`user_id`,`organization_id`)',
+    },
+    {
+      label: 'clean up the probe rows',
+      sql: `DELETE FROM "membership" WHERE user_id = 'USR_MIGCHECK';
+            DELETE FROM "user" WHERE id = 'USR_MIGCHECK';`,
+    },
+  ],
+};
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label: 'intents B0 left marked, and the open tasks they get',
@@ -1356,6 +1423,11 @@ export const EXPECTED = {
     ],
     triggers: ['tg_security_event_outbox_guard'],
     functions: ['security_event_outbox_guard'],
+    // One live membership per (user, organization): a down script that dropped
+    // it without the forward migration restoring it would bring back the
+    // concurrent double membership it closes, silently.
+    indexes: ['ux_membership_live_user_org'],
+    dataRollback: IDENTITY_DATA_ROLLBACK,
     constraints: [
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',

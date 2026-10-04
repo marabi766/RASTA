@@ -1,0 +1,14 @@
+-- Drops membership_user_id_organization_id_deleted_at_key, now that
+-- ux_membership_live_user_org (previous migration) enforces what it never did.
+--
+-- It enforced nothing useful: with deleted_at NULL it allowed duplicates, and
+-- with deleted_at set it only refused two revocations of one pair at the same
+-- millisecond. Its readers are served by the replacement: the provisioning
+-- lookup (IdentityRepository.findMembership: user_id, organization_id,
+-- deleted_at IS NULL) matches the partial index's columns and predicate
+-- exactly; a user's memberships across organizations use
+-- membership_user_id_status_idx. No code names the old key.
+--
+-- CONCURRENTLY and alone in its file, for the same reason as that build: no
+-- lock that blocks reads or writes while it waits.
+DROP INDEX CONCURRENTLY IF EXISTS "membership_user_id_organization_id_deleted_at_key";
