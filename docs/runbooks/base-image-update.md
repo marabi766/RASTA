@@ -71,6 +71,6 @@ Build شل نشود.
 
 ## آنچه این Runbook پوشش نمی‌دهد
 
-- تصاویر `docker-compose.yml` (Postgres، Kafka و …) با برچسب نسخه Pin شده‌اند، نه Digest؛ محیط توسعه‌اند و در تصویر تولیدی
-  نمی‌نشینند.
+- تصاویر `docker-compose.yml` و CI (Postgres، Kafka، Keycloak و …) — آن‌ها هم با Digest Pin‌اند و همین Check آن‌ها را
+  می‌سنجد؛ روند به‌روزرسانی‌شان در [infrastructure-image-update](infrastructure-image-update.md).
 - `pnpm@11.22.0` در مرحلهٔ `deps` با نسخهٔ دقیق Pin است و Lockfile بقیهٔ وابستگی‌ها را قفل می‌کند.
