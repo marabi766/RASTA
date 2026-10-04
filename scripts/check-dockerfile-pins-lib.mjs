@@ -216,21 +216,6 @@ const IMAGELESS_VERBS = new Set([
   'unpause',
 ]);
 const RUN_VERBS = new Set(['run', 'create', 'pull']);
-const SHELL_KEYWORDS = new Set([
-  '!',
-  '{',
-  '}',
-  'if',
-  'then',
-  'else',
-  'elif',
-  'fi',
-  'do',
-  'done',
-  'while',
-  'until',
-  'time',
-]);
 const SHELLS = new Set(['bash', 'sh']);
 const EXEMPT = /#\s*image-pin-exempt:(.*)$/;
 
@@ -569,16 +554,13 @@ const isObject = (value) => typeof value === 'object' && value !== null && !Arra
 /** Compose's interpolation of one value: `$$`, `${VAR:-default}` / `${VAR-default}`; anything else fails closed. */
 function interpolateCompose(value) {
   let problem;
-  const out = value.replace(
-    /\$\$|\$\{([^{}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-    (match, braced, bare) => {
-      if (match === '$$') return '$';
-      const parts = braced?.match(/^([A-Za-z_][A-Za-z0-9_]*)(:?-)(.*)$/s);
-      if (parts) return parts[3];
-      problem ??= `${match} has no default this check can resolve`;
-      return match;
-    },
-  );
+  const out = value.replace(/\$\$|\$\{([^{}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (match, braced) => {
+    if (match === '$$') return '$';
+    const parts = braced?.match(/^([A-Za-z_][A-Za-z0-9_]*)(:?-)(.*)$/s);
+    if (parts) return parts[3];
+    problem ??= `${match} has no default this check can resolve`;
+    return match;
+  });
   if (!problem && /\$\{/.test(out)) problem = `cannot interpolate ${value}`;
   return problem ? { problem } : { value: out };
 }
