@@ -448,3 +448,40 @@ test('the pending list names only opted-in services', () => {
     assert.ok(SERVICES.includes(service), service);
   }
 });
+
+// L7-44, asset-service: every report classified as a legitimate exemption
+// (none needed a fix migration). Without the exemptions the check reports
+// exactly these ten, so each one is load-bearing.
+const ASSET_EXEMPT = [
+  'asset_document_ref_asset_id_kind_idx',
+  'asset_location_asset_id_recorded_at_idx',
+  'asset_timeline_entry_asset_id_occurred_at_idx',
+  'asset_timeline_entry_source_event_id_asset_id_key',
+  'asset_transfer_asset_id_transferred_at_idx',
+  'insurance_claim_asset_id_incident_at_idx',
+  'insurance_policy_asset_id_status_idx',
+  'insurance_policy_valid_to_status_idx',
+  'technical_inspection_asset_id_inspected_at_idx',
+  'ux_insurance_policy_number_active',
+];
+
+test('asset-service: without its exemptions exactly the classified indexes are reported', () => {
+  const { errors } = checkTenantIndexOrder(replayMigrations(migrationsOf('asset')), {});
+  assert.deepEqual(errors.map((error) => error.split(':')[0]).sort(), [...ASSET_EXEMPT].sort());
+  assert.deepEqual(Object.keys(EXEMPTIONS.asset).sort(), [...ASSET_EXEMPT].sort());
+});
+
+test('every asset exemption says which query or invariant it serves', () => {
+  for (const name of ASSET_EXEMPT) {
+    const { reason } = EXEMPTIONS.asset[name];
+    assert.ok(typeof reason === 'string' && reason.length > 60, name);
+    assert.match(reason, /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+/, name);
+  }
+});
+
+test('asset-service: every tenant table already has an index leading with organization_id', () => {
+  const { errors, checked } = checkTenantLeadingIndex(replayMigrations(migrationsOf('asset')), {});
+  assert.deepEqual(errors, []);
+  assert.ok(checked > 0);
+  assert.equal(TABLE_EXEMPTIONS.asset, undefined);
+});

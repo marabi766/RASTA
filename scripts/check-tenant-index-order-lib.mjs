@@ -55,6 +55,7 @@ export const SERVICES = [
   'maintenance',
   'marketplace',
   'economic',
+  'asset',
 ];
 
 /**
@@ -74,6 +75,18 @@ const PARENT_LOAD =
 /** fleet and maintenance keep the same release tombstone for an asset transfer (ADR-062). */
 const RELEASE_TOMBSTONE =
   "one tombstone per transfer (asset_id, fence_id): fence_id is asset-service's transfer id (TRF_…), unique across tenants, and this key is the ON CONFLICT target of the release write; the lookup (asset_id, organization_id, fence_id) is served by it";
+
+/**
+ * asset-service: why an index on an asset's history may lead with asset_id.
+ * Asset ids are global, and AssetService.transfer moves every asset-owned row
+ * to the new owner under the asset's row lock, so the organization_id of a row
+ * follows from its asset_id.
+ */
+const ASSET_MOVES =
+  "every row of one asset carries its current owner's organization_id (AssetService.transfer " +
+  'moves them all under the asset row lock), so a leading organization_id would not narrow a ' +
+  'read that names the asset — and that move (updateMany by asset_id, runUnscoped) is a ' +
+  'by-asset read an organization-leading index could not serve';
 
 /**
  * Why a per-parent unique must not gain a leading organization_id: the child
@@ -311,6 +324,54 @@ export const EXEMPTIONS = {
     uq_order_line_offer: {
       index: 'order_line (order_id, offer_id)',
       reason: `one line per (order, offer) — an invariant of one order; ${perParentUnique('order_id')}; ${PARENT_LOAD}`,
+    },
+  },
+  // asset: asset ids are global, and every row hanging off an asset belongs to
+  // the asset's current owner — the transfer moves them all together. So an
+  // index that names the asset already names its organization, and the
+  // transfer's own by-asset move cannot use one that leads with the tenant.
+  asset: {
+    asset_document_ref_asset_id_kind_idx: {
+      index: 'asset_document_ref (asset_id, kind)',
+      reason: `one asset's documents by its id (AssetService.dossier; AssetService.activate looks for an ownership document by kind); ${ASSET_MOVES}`,
+    },
+    asset_location_asset_id_recorded_at_idx: {
+      index: 'asset_location (asset_id, recorded_at)',
+      reason: `one asset's location history by its id (the current row is ux_asset_location_current's); ${ASSET_MOVES}`,
+    },
+    asset_timeline_entry_asset_id_occurred_at_idx: {
+      index: 'asset_timeline_entry (asset_id, occurred_at)',
+      reason: `one asset's dossier, newest first (AssetRepository.listTimeline, AssetRepository.costSummary, ClaimService.getClaim); a tenant's own feed has asset_timeline_entry_organization_id_occurred_at_idx; ${ASSET_MOVES}`,
+    },
+    asset_timeline_entry_source_event_id_asset_id_key: {
+      index: 'asset_timeline_entry (source_event_id, asset_id)',
+      reason: `one dossier line per (source event, asset) — an invariant of one asset, and the replay safety of AssetService.appendTimeline, which takes its unique violation as "already written"; ${perParentUnique('asset_id')}`,
+    },
+    asset_transfer_asset_id_transferred_at_idx: {
+      index: 'asset_transfer (asset_id, transferred_at)',
+      reason: `one asset's transfers by its id (AssetRepository.countTransfers); the previous owner's checks read a transfer the receiving organization owns, by asset id under runUnscoped (AssetRepository.transferRecordedFrom, the asset snapshot's previous-owner probe); ${ASSET_MOVES}`,
+    },
+    insurance_claim_asset_id_incident_at_idx: {
+      index: 'insurance_claim (asset_id, incident_at)',
+      reason: `one asset's claims, newest first (ClaimService.listClaims, ClaimService.findClaim); the transfer's open-claim check (AssetRepository.hasOpenClaims) reads it by asset id inside the same runUnscoped transaction; ${ASSET_MOVES}`,
+    },
+    insurance_policy_asset_id_status_idx: {
+      index: 'insurance_policy (asset_id, status)',
+      reason: `one asset's policies (AssetRepository.findActivePolicy, InsuranceService.listPolicies, and the expiring-compliance filter of AssetRepository.list, a relation filter that carries no organization predicate); ${ASSET_MOVES}`,
+    },
+    insurance_policy_valid_to_status_idx: {
+      index: 'insurance_policy (valid_to, status)',
+      reason:
+        'the expiry sweep reads lapsing and claims lapsed policies for every tenant at once, by due date (InsuranceService.runExpirySweep: AssetRepository.findPoliciesExpiringWithin under runUnscoped, AssetRepository.claimLapsedPolicies FOR UPDATE SKIP LOCKED); each event then carries its own organization_id',
+    },
+    technical_inspection_asset_id_inspected_at_idx: {
+      index: 'technical_inspection (asset_id, inspected_at)',
+      reason: `one asset's inspections, newest first (AssetRepository.findLatestInspection, InsuranceService.listInspections, and the expiring-compliance filter of AssetRepository.list); ${ASSET_MOVES}`,
+    },
+    ux_insurance_policy_number_active: {
+      index: 'insurance_policy (policy_number, insurer_name)',
+      reason:
+        'one live policy number per insurer across the platform (audit L3-10, migration 20260925120000) — an invariant InsuranceService.recordPolicy answers with ALREADY_EXISTS; the policy follows its vehicle between owners, and leading with organization_id would let a second tenant record the same policy again',
     },
   },
   // economic: the rule tables keep organization_id nullable on purpose (a NULL
