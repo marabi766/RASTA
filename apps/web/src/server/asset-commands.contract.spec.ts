@@ -3,13 +3,24 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { plainText } from '@rasta/contracts';
 import ts from 'typescript';
+
+import type { UpdateAssetFormValues } from '@/lib/asset-form-fields';
+import {
+  BIDI_CONTROL_CODE_POINTS,
+  OTHER_INVISIBLE_CODE_POINTS,
+  formField,
+  probesFrom,
+} from '@/test/text-rules';
 
 import {
   ASSET_DISPLAY_TEXT,
   ASSET_EDIT_CONFLICT_MESSAGE,
   REGISTER_ASSET_FIELD_MAPPING,
   UPDATE_ASSET_FIELD_MAPPING,
+  parseUpdateAssetForm,
+  registerAssetFormSchema,
 } from './asset-commands';
 
 /**
@@ -187,16 +198,43 @@ describe("the service's rule for `model`", () => {
   };
 
   // The portal sends a model under exactly this rule and no character class
-  // (`modelText`). If the service tightens it — a display-text class, a
-  // shorter bound — these fail, and the form's copy has to follow.
+  // (`modelText`). If the service changes it — a display-text class, a
+  // shorter bound, a looser text rule — these fail, and the form's copy has to
+  // follow.
   it.each(['createAssetSchema', 'updateAssetSchema'])(
-    'is still trimmed text of 1 to 120 characters in %s, with no character class',
+    "is still the platform's `plainText()` of 1 to 120 characters in %s, with no character class",
     (name) => {
       expect(text(name, 'model')).toMatch(
-        /^z\s*\.string\(\)\s*\.trim\(\)\s*\.min\(1\)\s*\.max\(120\)(\s*\.nullable\(\))?\s*\.optional\(\)$/,
+        /^plainText\(\)\s*\.min\(1\)\s*\.max\(120\)(\s*\.nullable\(\))?\s*\.optional\(\)$/,
       );
     },
   );
+
+  // `plainText()` comes from `@rasta/contracts`, which the portal may import:
+  // so the form's field is checked against the rule itself, not a copy of it.
+  // Every bidi control is refused by both, and ZWNJ and the other invisible
+  // characters `plainText()` admits are admitted by both.
+  const service = plainText().min(1).max(120);
+  const probes = probesFrom('لودر چرخ‌دار WA320', [
+    ...BIDI_CONTROL_CODE_POINTS,
+    ...OTHER_INVISIBLE_CODE_POINTS,
+  ]);
+  const register = formField(registerAssetFormSchema, 'model');
+  it.each([
+    ['register', (probe: string) => register.safeParse(probe).success],
+    [
+      'edit',
+      (probe: string) =>
+        parseUpdateAssetForm({ model: probe } as UpdateAssetFormValues, ['model']).ok,
+    ],
+  ] as const)('the %s form refuses exactly what the service refuses', (_form, accepts) => {
+    for (const probe of probes) {
+      expect([probe, accepts(probe)]).toEqual([probe, service.safeParse(probe).success]);
+    }
+    expect(probes.filter((probe) => !service.safeParse(probe).success)).toHaveLength(
+      BIDI_CONTROL_CODE_POINTS.length,
+    );
+  });
 
   it('is still the rule `name` and `manufacturer` do not share', () => {
     // If `model` ever moved to `displayText`, the portal's looser rule would be

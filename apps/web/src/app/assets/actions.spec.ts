@@ -183,6 +183,34 @@ describe('what the form itself catches', () => {
     expect(registerAsset).not.toHaveBeenCalled();
   });
 
+  it.each([0x202e, 0x061c, 0x2067])(
+    'does not call the service for a model carrying U+%s, an invisible direction control',
+    async (codePoint) => {
+      const model = `WA${String.fromCodePoint(codePoint)}320`;
+      const state = await submitRegisterAsset(
+        IDLE_REGISTER_ASSET_FORM,
+        formData({ ...VALID, model }),
+      );
+      expect(state).toMatchObject({
+        kind: 'INVALID',
+        fieldErrors: { model: 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد' },
+      });
+      expect(registerAsset).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still sends a model written in Persian with ZWNJ', async () => {
+    const model = 'لودر چرخ\u200cدار';
+    await expect(
+      submitRegisterAsset(IDLE_REGISTER_ASSET_FORM, formData({ ...VALID, model })),
+    ).rejects.toThrow('NEXT_REDIRECT');
+    expect(registerAsset).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ model }),
+      expect.anything(),
+    );
+  });
+
   it('keeps what the person typed, and the submission id it came with', async () => {
     const submission = mintSubmissionId(SESSION);
     const state = await submitRegisterAsset(

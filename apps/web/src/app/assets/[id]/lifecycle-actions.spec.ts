@@ -482,6 +482,25 @@ describe('change status: what the form itself catches', () => {
     expect(status.send).toHaveBeenCalledTimes(1);
   });
 
+  it.each([0x202e, 0x061c, 0x2066])(
+    'does not call the service for a reason carrying U+%s, an invisible direction control',
+    async (codePoint) => {
+      const reason = `عیب ${String.fromCodePoint(codePoint)}فنی`;
+      const state = await status.submit(formData(status, { status: 'IDLE', reason }));
+      expect(state).toMatchObject({
+        kind: 'INVALID',
+        fieldErrors: { reason: 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد' },
+      });
+      expect(status.send).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still sends a reason written in Persian with ZWNJ', async () => {
+    const reason = 'دستگاه برای تعمیر خارج می\u200cشود';
+    await redirectedTo(status.submit(formData(status, { status: 'IDLE', reason })));
+    expect(status.send.mock.calls[0]![2]).toEqual({ status: 'IDLE', reason });
+  });
+
   it('sends the status and the trimmed reason, and nothing else, as the body', async () => {
     await redirectedTo(
       status.submit(formData(status, { status: 'OUT_OF_SERVICE', reason: '  عیب فنی  ' })),
@@ -512,6 +531,16 @@ describe('decommission: the confirmation', () => {
       formData(decommission, { reason: 'کوتاه', confirm: 'yes' }),
     );
     expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { reason: expect.any(String) } });
+    expect(decommission.send).not.toHaveBeenCalled();
+  });
+
+  it('does not decommission with a reason carrying an invisible direction control', async () => {
+    const reason = `فرسودگی ${String.fromCodePoint(0x2067)}کامل و هزینهٔ تعمیر بیش از ارزش`;
+    const state = await decommission.submit(formData(decommission, { reason, confirm: 'yes' }));
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { reason: 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد' },
+    });
     expect(decommission.send).not.toHaveBeenCalled();
   });
 

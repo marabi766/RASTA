@@ -14,6 +14,7 @@ import { CHANGE_STATUS_FIELDS, DECOMMISSION_FIELDS } from '@/lib/asset-lifecycle
 import { toPersianDigits } from '@/lib/format';
 
 import { firstIssuePerField, readFields } from './asset-commands';
+import { BIDI_CONTROL } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
@@ -71,11 +72,16 @@ export const canDecommissionAsset = (effectiveRoles: readonly string[]): boolean
 
 const fa = (value: number): string => toPersianDigits(String(value));
 
+const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+
 /**
  * A reason, as asset-service takes it: trimmed text of `min` to `max`
  * characters with **no** character class (`changeStatusSchema` and
- * `decommissionSchema`, `dto.ts`), so none is added here — a reason is the
- * person's own words and is stored as typed. The contract spec pins both bounds.
+ * `decommissionSchema`, `dto.ts`: `plainText()`), so none is added here — a
+ * reason is the person's own words and is stored as typed. Like the service it
+ * refuses the Unicode `Bidi_Control` set, which would let a reason read on the
+ * timeline as other words than the ones written. The contract spec pins both
+ * bounds and the rule.
  */
 function reasonText(label: string, min: number, max: number) {
   return z
@@ -86,7 +92,8 @@ function reasonText(label: string, min: number, max: number) {
         .string()
         .min(1, `${label} را بنویسید`)
         .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-        .max(max, `${label} حداکثر ${fa(max)} نویسه است`),
+        .max(max, `${label} حداکثر ${fa(max)} نویسه است`)
+        .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
     );
 }
 
@@ -204,6 +211,9 @@ export const ASSET_LIFECYCLE_CONFLICT_MESSAGE =
   'این دارایی پس از باز شدن این صفحه تغییر کرده است — شاید همین دستور پیش‌تر اعمال شده باشد. این بار چیزی نوشته نشد؛ وضعیت فعلی را در صفحه ببینید.';
 
 const LIFECYCLE_MESSAGES: Readonly<Record<string, string>> = {
+  // The reason's only character rule is the bidi refusal (`plainText()`), so
+  // the service's closed sentence for it means exactly that here.
+  'Contains unsupported characters': BIDI_CONTROL_MESSAGE,
   'Asset was modified by another request; reload and retry': ASSET_LIFECYCLE_CONFLICT_MESSAGE,
   'A DECOMMISSIONED asset cannot change status. This state is final because financial and audit records still reference the asset.':
     'این دارایی اسقاط شده و نهایی است؛ وضعیت آن دیگر تغییر نمی‌کند.',
