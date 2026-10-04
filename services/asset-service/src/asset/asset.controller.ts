@@ -44,6 +44,8 @@ import {
   type AttachDocumentDto,
   type ChangeStatusDto,
   type AssetView,
+  type InspectionView,
+  type InsurancePolicyView,
   type CreateAssetDto,
   type CreateInspectionDto,
   type CreatePolicyDto,
@@ -62,6 +64,29 @@ import {
 
 /** The route template an Idempotency-Key is stored under (#169). */
 export const CREATE_ASSET_ENDPOINT = 'POST /v1/assets';
+/** Likewise for the two records an asset takes (EXP-002 slice 6); the asset id is part of what is hashed. */
+export const RECORD_POLICY_ENDPOINT = 'POST /v1/assets/{id}/insurance-policies';
+export const RECORD_INSPECTION_ENDPOINT = 'POST /v1/assets/{id}/inspections';
+
+const IDEMPOTENCY_KEY_HEADER = {
+  name: 'Idempotency-Key',
+  required: true,
+  description:
+    '8 to 255 characters. Scoped to the organization: the same key in two organizations ' +
+    'is two requests. The asset in the path is part of the request, so the same key on ' +
+    'another asset is refused, not replayed.',
+} as const;
+
+const IDEMPOTENT_RECORD_DESCRIPTION =
+  'Requires an `Idempotency-Key` (#169): without one, or with one outside 8 to 255 ' +
+  'characters, 400 VALIDATION_FAILED and nothing is recorded. The same key with the same ' +
+  'body for the same asset from the same user answers the original 201 — the same record id ' +
+  '— without recording or publishing anything again, for 24 hours by default; the same key ' +
+  'with a different body, for another asset or from another user answers 409 ' +
+  'IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being ' +
+  'processed waits for its answer, and past a few seconds answers 409 CONFLICT with ' +
+  'Retry-After. Returns 404 for an asset in another organization — never 403 — and a ' +
+  'replay answers the same 404 once the asset has been transferred to another organization.';
 
 /**
  * HTTP surface for assets.
@@ -157,7 +182,9 @@ export class AssetController {
       'registering or publishing anything again, for 24 hours by default; the same key with a ' +
       'different body or from another user answers 409 IDEMPOTENCY_KEY_REUSED; a duplicate ' +
       'that arrives while the first is still being processed waits for its answer, and past ' +
-      'a few seconds answers 409 CONFLICT with Retry-After.',
+      'a few seconds answers 409 CONFLICT with Retry-After. A replay of a registration whose ' +
+      'asset has since been transferred to another organization answers 404, as for an asset ' +
+      'that does not exist.',
   })
   @ApiHeader({
     name: 'Idempotency-Key',
@@ -177,6 +204,8 @@ export class AssetController {
       dto,
       201,
       (fence) => this.assets.create(dto, fence),
+      // The machine registered may have been transferred away since.
+      (stored) => this.assets.assertVisible(stored.id),
     );
     return result;
   }
@@ -288,19 +317,54 @@ export class AssetController {
 
   @Post(':id/insurance-policies')
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Record an insurance policy' })
-  recordPolicy(@Param('id') id: string, @Body(zodPipe(createPolicySchema)) dto: CreatePolicyDto) {
-    return this.insurance.recordPolicy(id, dto);
+  @ApiOperation({
+    summary: 'Record an insurance policy',
+    description: IDEMPOTENT_RECORD_DESCRIPTION,
+  })
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  async recordPolicy(
+    @Param('id') id: string,
+    @Body(zodPipe(createPolicySchema)) dto: CreatePolicyDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<InsurancePolicyView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<InsurancePolicyView>(
+      RECORD_POLICY_ENDPOINT,
+      key,
+      // The asset is part of the request: the same key and body on another
+      // asset must be refused, not answered with the first asset's policy.
+      { assetId: id, ...dto },
+      201,
+      (fence) => this.insurance.recordPolicy(id, dto, fence),
+      // The asset may have been transferred to another organization since.
+      () => this.assets.assertVisible(id),
+    );
+    return result;
   }
 
   @Post(':id/inspections')
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Record a technical inspection' })
-  recordInspection(
+  @ApiOperation({
+    summary: 'Record a technical inspection',
+    description: IDEMPOTENT_RECORD_DESCRIPTION,
+  })
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  async recordInspection(
     @Param('id') id: string,
     @Body(zodPipe(createInspectionSchema)) dto: CreateInspectionDto,
-  ) {
-    return this.insurance.recordInspection(id, dto);
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<InspectionView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<InspectionView>(
+      RECORD_INSPECTION_ENDPOINT,
+      key,
+      { assetId: id, ...dto },
+      201,
+      (fence) => this.insurance.recordInspection(id, dto, fence),
+      // The asset may have been transferred to another organization since.
+      () => this.assets.assertVisible(id),
+    );
+    return result;
   }
 
   // ---- Claims -------------------------------------------------------------
