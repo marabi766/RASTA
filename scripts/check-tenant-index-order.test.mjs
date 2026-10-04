@@ -159,8 +159,14 @@ test('an exemption silences exactly its index; a stale or needless one is an err
     CREATE INDEX "ix_a" ON "t"("user_id", "id");
     CREATE INDEX "ix_ok" ON "t"("organization_id", "id");
     CREATE INDEX "ix_single" ON "t"("user_id");`;
-  assert.deepEqual(check(sql, { ix_a: 'reason' }).errors, []);
-  const stale = check(sql, { ix_a: 'r', ix_missing: 'r', ix_ok: 'r', ix_single: 'r' }).errors;
+  const ex = (index) => ({ index, reason: 'r' });
+  assert.deepEqual(check(sql, { ix_a: ex('t (user_id, id)') }).errors, []);
+  const stale = check(sql, {
+    ix_a: ex('t (user_id, id)'),
+    ix_missing: ex('t (x)'),
+    ix_ok: ex('t (organization_id, id)'),
+    ix_single: ex('t (user_id)'),
+  }).errors;
   assert.equal(stale.length, 3);
   assert.match(
     stale.find((e) => e.startsWith('ix_missing')),
@@ -239,7 +245,7 @@ test('fleet, identity, maintenance and marketplace: without their exemptions exa
 test('every exemption in those four services says which query or invariant it serves', () => {
   for (const [service, names] of Object.entries(OPTED_IN)) {
     for (const name of names) {
-      const reason = EXEMPTIONS[service][name];
+      const { reason } = EXEMPTIONS[service][name];
       assert.ok(typeof reason === 'string' && reason.length > 60, `${service}.${name}`);
       // A named query (Class.method) or the invariant the index enforces.
       assert.match(
@@ -247,6 +253,48 @@ test('every exemption in those four services says which query or invariant it se
         /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+|invariant|ON CONFLICT|foreign key|_fkey/,
         `${service}.${name}`,
       );
+    }
+  }
+});
+
+test('an inherited property is never an exemption (Codex on #217)', () => {
+  for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf']) {
+    const sql = `${TENANT_TABLE}\n    CREATE INDEX "${name}" ON "t"("user_id", "id");`;
+    const { errors } = check(sql, {});
+    assert.equal(errors.length, 1, name);
+    assert.match(errors[0], /must lead with organization_id/, name);
+  }
+});
+
+test('an exemption is bound to its definition: the same name on other columns is refused', () => {
+  const sql = `${TENANT_TABLE}\n    CREATE INDEX "ix_a" ON "t"("user_id", "parent_id");`;
+  const { errors } = check(sql, {
+    ix_a: { index: 't (user_id, id)', reason: 'was on (user_id, id)' },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(
+    errors[0],
+    /exempted as t \(user_id, id\), but the index is t \(user_id, parent_id\)/,
+  );
+});
+
+test('an exemption without { index, reason } fails closed', () => {
+  const sql = `${TENANT_TABLE}\n    CREATE INDEX "ix_a" ON "t"("user_id", "id");`;
+  for (const exemption of [
+    'a bare reason',
+    { index: 't (user_id, id)' },
+    { index: 't (user_id, id)', reason: ' ' },
+    null,
+  ]) {
+    assert.match(check(sql, { ix_a: exemption }).errors[0], /must be \{ index, reason \}/);
+  }
+});
+
+test('every committed exemption names the definition of the index it exempts', () => {
+  for (const service of SERVICES) {
+    for (const [name, exemption] of Object.entries(EXEMPTIONS[service] ?? {})) {
+      assert.match(exemption.index, /^[a-z_]+ \([a-z_]+(, [a-z_]+)+\)$/, `${service}.${name}`);
+      assert.ok(exemption.reason.length > 20, `${service}.${name}`);
     }
   }
 });
