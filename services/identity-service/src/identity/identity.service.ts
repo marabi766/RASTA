@@ -30,7 +30,7 @@ import {
 import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
-import { platformAttributesFor, type PlatformAttributes } from '../keycloak/platform-attributes';
+import { platformAttributesFor, provenanceOnly } from '../keycloak/platform-attributes';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { markRefusal } from '../security-events/refusal-sites';
 import type {
@@ -267,6 +267,9 @@ export class IdentityService {
         ],
         grantedAt,
       ),
+      // Unchanged by #219 r2: the operator path still creates the account
+      // enabled, before its transaction (a known follow-up).
+      enabled: true,
     });
 
     const user = await this.repository.transaction(async (tx) => {
@@ -763,154 +766,142 @@ export class IdentityService {
 
     const reviewer = getContext().userId ?? 'SYSTEM';
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
-    const grantedAt = new Date();
 
-    const attributes = platformAttributesFor(
-      { id: request.userId, activeOrganizationId: request.requestedOrganizationId },
-      [
-        {
+    // Disabled, and carrying nothing but its provenance: until the database
+    // has committed this approval the account must be harmless whatever
+    // happens next — a lost response, a crash, a transaction that rolls back
+    // (#219 r2). The projector writes its grants and enables it after commit.
+    const keycloakId = await this.approvalAccount(registrationId, request);
+
+    const updated = await this.repository.transaction(async (tx) => {
+      // Decided under the request's row lock, on the status read under it:
+      // a rejection or a second approval of this request waits here, and
+      // whichever comes second sees the first one's decision and is refused
+      // — never an overwrite, never a second event. The update stays
+      // conditional on PENDING as well, so it can never be the one that
+      // decides; Prisma answers a `where` that matches nothing with P2025.
+      const locked = await this.repository.lockRegistrationRequest(tx, registrationId);
+      if (locked?.status !== 'PENDING') {
+        throw registrationAlreadyDecided('APPROVED', locked?.status);
+      }
+      const result = await tx.registrationRequest
+        .update({
+          where: { id: registrationId, status: 'PENDING' },
+          data: { status: 'APPROVED', reviewedBy: reviewer, reviewedAt: new Date() },
+          include: { user: true },
+        })
+        .catch((error: unknown) => {
+          if (isRecordNotFound(error)) throw registrationAlreadyDecided('APPROVED', 'DECIDED');
+          throw error;
+        });
+
+      await runUnscoped('activating a user is a platform-level operation', () =>
+        tx.user.update({
+          where: { id: request.userId },
+          data: {
+            status: 'ACTIVE',
+            keycloakId,
+            // The projector enables the account and clears this, once.
+            accountActivationPending: keycloakId !== null,
+            activeOrganizationId: request.requestedOrganizationId,
+            updatedBy: reviewer,
+            version: { increment: 1 },
+          },
+        }),
+      );
+
+      try {
+        await this.createMembershipRow(tx, {
+          membershipId,
+          userId: request.userId,
           organizationId: request.requestedOrganizationId,
           roles: grantedRoles,
-          status: 'ACTIVE',
-          validFrom: grantedAt,
-          validUntil: null,
+          actor: reviewer,
+        });
+      } catch (error) {
+        // Somebody gave this person a membership in the organization while
+        // the request waited. Which of the two grants should stand is the
+        // reviewer's call, so the request stays pending and says why.
+        if (error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS) {
+          throw registrationMembershipConflict(registrationId);
+        }
+        throw error;
+      }
+
+      for (const event of [
+        {
+          name: IDENTITY_EVENTS.REGISTRATION_APPROVED,
+          aggregateType: 'RegistrationRequest',
+          aggregateId: registrationId,
+          payload: {
+            registrationId,
+            userId: request.userId,
+            requestedOrganizationId: request.requestedOrganizationId,
+            outcome: 'APPROVED' as const,
+            reviewedBy: reviewer,
+            grantedRoles,
+          },
         },
-      ],
-      grantedAt,
-    );
-    const keycloakId = await this.approvalAccount(registrationId, request, attributes);
-
-    const updated = await this.repository
-      .transaction(async (tx) => {
-        // Conditional on PENDING, in the write itself: a second approval of
-        // the same request that read PENDING before the first committed
-        // updates nothing here and is refused, rather than activating the user
-        // twice — and its compensation then finds the account owned and leaves
-        // it alone (`compensateApprovalAccount`). Prisma answers a `where`
-        // that matches nothing with P2025.
-        const result = await tx.registrationRequest
-          .update({
-            where: { id: registrationId, status: 'PENDING' },
-            data: { status: 'APPROVED', reviewedBy: reviewer, reviewedAt: new Date() },
-            include: { user: true },
-          })
-          .catch((error: unknown) => {
-            if (isRecordNotFound(error)) {
-              throw RastaError.invalidStateTransition(
-                'RegistrationRequest',
-                'DECIDED',
-                'APPROVED',
-                'Only a pending registration can be approved',
-              );
-            }
-            throw error;
-          });
-
-        await runUnscoped('activating a user is a platform-level operation', () =>
-          tx.user.update({
-            where: { id: request.userId },
-            data: {
-              status: 'ACTIVE',
-              keycloakId,
-              activeOrganizationId: request.requestedOrganizationId,
-              updatedBy: reviewer,
-              version: { increment: 1 },
-            },
-          }),
-        );
-
-        try {
-          await this.createMembershipRow(tx, {
+        {
+          name: IDENTITY_EVENTS.USER_ACTIVATED,
+          aggregateType: 'User',
+          aggregateId: request.userId,
+          payload: {
+            userId: request.userId,
+            organizationId: request.requestedOrganizationId,
+            roles: grantedRoles,
+          },
+        },
+        {
+          name: IDENTITY_EVENTS.MEMBERSHIP_CREATED,
+          aggregateType: 'Membership',
+          aggregateId: membershipId,
+          payload: {
             membershipId,
             userId: request.userId,
             organizationId: request.requestedOrganizationId,
             roles: grantedRoles,
-            actor: reviewer,
-          });
-        } catch (error) {
-          // Somebody gave this person a membership in the organization while
-          // the request waited. Which of the two grants should stand is the
-          // reviewer's call, so the request stays pending and says why.
-          if (error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS) {
-            throw registrationMembershipConflict(registrationId);
-          }
-          throw error;
-        }
+          },
+        },
+      ]) {
+        await this.repository.enqueueEvent(tx, {
+          aggregateType: event.aggregateType,
+          aggregateId: event.aggregateId,
+          eventName: event.name,
+          topic: IDENTITY_TOPIC,
+          organizationId: request.requestedOrganizationId,
+          payload: validateIdentityPayload(event.name, event.payload),
+        });
+      }
 
-        for (const event of [
-          {
-            name: IDENTITY_EVENTS.REGISTRATION_APPROVED,
-            aggregateType: 'RegistrationRequest',
-            aggregateId: registrationId,
-            payload: {
-              registrationId,
-              userId: request.userId,
-              requestedOrganizationId: request.requestedOrganizationId,
-              outcome: 'APPROVED' as const,
-              reviewedBy: reviewer,
-              grantedRoles,
-            },
-          },
-          {
-            name: IDENTITY_EVENTS.USER_ACTIVATED,
-            aggregateType: 'User',
-            aggregateId: request.userId,
-            payload: {
-              userId: request.userId,
-              organizationId: request.requestedOrganizationId,
-              roles: grantedRoles,
-            },
-          },
-          {
-            name: IDENTITY_EVENTS.MEMBERSHIP_CREATED,
-            aggregateType: 'Membership',
-            aggregateId: membershipId,
-            payload: {
-              membershipId,
-              userId: request.userId,
-              organizationId: request.requestedOrganizationId,
-              roles: grantedRoles,
-            },
-          },
-        ]) {
-          await this.repository.enqueueEvent(tx, {
-            aggregateType: event.aggregateType,
-            aggregateId: event.aggregateId,
-            eventName: event.name,
-            topic: IDENTITY_TOPIC,
-            organizationId: request.requestedOrganizationId,
-            payload: validateIdentityPayload(event.name, event.payload),
-          });
-        }
+      return result;
+    });
 
-        return result;
-      })
-      .catch(async (error: unknown) => {
-        await this.compensateApprovalAccount(keycloakId, registrationId, request.userId);
-        throw error;
-      });
+    // The grants, then the account enabled — only now that the approval has
+    // committed. Never throws: a failure is logged and counted, and the
+    // USER_ACTIVATED and MEMBERSHIP_CREATED events committed above bring the
+    // projection back round, as for every membership change (ADR-060 § 5).
+    // Until it lands the account stays disabled, and reconcile reports it.
+    await this.projector.projectAfterCommit(request.userId);
 
     return toRegistrationView(updated);
   }
 
   /**
-   * The Keycloak account an approval activates: a new one, or the one an
-   * earlier attempt at **this** approval created before its database write
-   * failed.
+   * The Keycloak account an approval links: a new one, or the one an earlier
+   * attempt at **this** approval created — created disabled and granting
+   * nothing, so whatever became of that attempt left it harmless.
    *
-   * The account is created before the transaction (it has to exist for the
-   * user row to name it), so a transaction that fails leaves it behind and a
-   * retry's `createUser` answers 409. It is adopted only when it provably came
-   * from this request: its `rasta_user_id` — an admin-only attribute a user
-   * cannot write (`rasta-realm.json`) — names this request's pending user. That
-   * user id is minted by `submitRegistration` together with the request and
-   * belongs to no other request, and no other path writes it to an account
-   * whose user row does not point back at it. Any other account under the
-   * username is somebody else's and is never touched: the approval is refused
-   * with a closed code, and an operator looks.
-   *
-   * An adopted account gets this approval's attributes and is enabled again —
-   * the compensation of the failed attempt disabled it.
+   * A new account carries only `rasta_user_id`, enabled `false`. When
+   * `createUser` answers 409 — an earlier attempt's account, whether that
+   * attempt's transaction failed or Keycloak's answer to it was lost — the
+   * account is looked up and adopted only when it provably came from this
+   * request: its `rasta_user_id`, an admin-only attribute a user cannot write
+   * (`rasta-realm.json`), names exactly this request's pending user. That user
+   * id is minted by `submitRegistration` with the request and belongs to no
+   * other. Any other account under the username is somebody else's and is
+   * refused with a closed code. Adoption writes nothing to Keycloak: the
+   * projector does, after commit.
    */
   private async approvalAccount(
     registrationId: string,
@@ -918,7 +909,6 @@ export class IdentityService {
       userId: string;
       user: { username: string; email: string; firstName: string; lastName: string };
     },
-    attributes: PlatformAttributes,
   ): Promise<string | null> {
     try {
       return await this.keycloak.createUser({
@@ -926,7 +916,8 @@ export class IdentityService {
         email: request.user.email,
         firstName: request.user.firstName,
         lastName: request.user.lastName,
-        attributes,
+        attributes: provenanceOnly(request.userId),
+        enabled: false,
       });
     } catch (error) {
       if (!(error instanceof RastaError && error.code === ERROR_CODES.ALREADY_EXISTS)) throw error;
@@ -937,67 +928,11 @@ export class IdentityService {
     if (!existing || provenance.length !== 1 || provenance[0] !== request.userId) {
       throw registrationAccountTaken(registrationId);
     }
-
-    await this.keycloak.replacePlatformAttributes(existing.id, attributes);
-    await this.keycloak.setEnabled(existing.id, true);
     this.logger.warn(
       { registrationId, userId: request.userId, keycloakId: existing.id },
       'Approval adopted the Keycloak account an earlier attempt at it created',
     );
     return existing.id;
-  }
-
-  /**
-   * Undoes, as far as Keycloak allows, the account an approval created or
-   * adopted when its database write then failed: the account is disabled and
-   * its grants — organizations, roles, active organization — cleared, so no
-   * enabled account with roles outlives a request that is still pending.
-   * `rasta_user_id` stays: it grants nothing, and it is how the next attempt
-   * proves the account is this request's own (`approvalAccount`).
-   *
-   * Not when a user row already names the account: that is a concurrent
-   * approval of the same request that committed first, and the account is now
-   * that user's. Reading the row is a check-then-act, but a safe one: this
-   * write failed on a lock the other transaction held until it committed, so
-   * the row is visible here. If the database cannot be read the account is
-   * disabled anyway — closed, not open.
-   *
-   * Best effort. A Keycloak that cannot be reached leaves the account as it
-   * was; that is logged by id only, and reconcile reports the account
-   * (`projection.command.ts`, orphans) until an approval adopts it or an
-   * operator disables it. The approval's own error is what the caller hears.
-   */
-  private async compensateApprovalAccount(
-    keycloakId: string | null,
-    registrationId: string,
-    userId: string,
-  ): Promise<void> {
-    if (!keycloakId) return;
-    const context = { registrationId, userId, keycloakId };
-
-    const owner = await runUnscoped('an account is owned by at most one user, in any tenant', () =>
-      this.repository.client.user.findFirst({ where: { keycloakId }, select: { id: true } }),
-    ).catch(() => null);
-    if (owner) return;
-
-    try {
-      await this.keycloak.setEnabled(keycloakId, false);
-      await this.keycloak.replacePlatformAttributes(keycloakId, {
-        rasta_user_id: [userId],
-        organization_ids: [],
-        organization_roles: [],
-        active_organization_id: [],
-      });
-      this.logger.warn(
-        context,
-        'Approval rolled back; its Keycloak account was disabled and its grants cleared',
-      );
-    } catch {
-      this.logger.error(
-        context,
-        'Approval rolled back but its Keycloak account could not be disabled; reconcile reports it',
-      );
-    }
   }
 
   async rejectRegistration(
@@ -1032,8 +967,16 @@ export class IdentityService {
     const reviewer = getContext().userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
+      // The same lock and the same rule as approval: decided on the status
+      // read under it, so a rejection that read PENDING before an approval
+      // committed is refused here, rather than marking an approved request
+      // REJECTED and emitting a second, contradicting event (#219 r2).
+      const locked = await this.repository.lockRegistrationRequest(tx, registrationId);
+      if (locked?.status !== 'PENDING') {
+        throw registrationAlreadyDecided('REJECTED', locked?.status);
+      }
       const result = await tx.registrationRequest.update({
-        where: { id: registrationId },
+        where: { id: registrationId, status: 'PENDING' },
         data: {
           status: 'REJECTED',
           reviewedBy: reviewer,
@@ -1356,4 +1299,19 @@ function registrationAccountTaken(registrationId: string): RastaError {
     ],
     internalContext: { resourceType: 'KeycloakUser', registrationId },
   });
+}
+
+/**
+ * 409: another decision on this registration committed first. Nothing was
+ * written and no event emitted; the message names neither decision's author.
+ */
+function registrationAlreadyDecided(to: 'APPROVED' | 'REJECTED', from = 'DECIDED'): RastaError {
+  return RastaError.invalidStateTransition(
+    'RegistrationRequest',
+    from,
+    to,
+    to === 'APPROVED'
+      ? 'Only a pending registration can be approved'
+      : 'Only a pending registration can be rejected',
+  );
 }

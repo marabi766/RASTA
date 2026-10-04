@@ -178,7 +178,9 @@ export class RegistrationController {
       'when its `details[0].code` is MEMBERSHIP_ALREADY_LIVE (the applicant was given a live ' +
       'membership in the requested organization meanwhile) or ACCOUNT_NOT_FROM_THIS_REGISTRATION ' +
       '(the identity provider holds an account under the username that this registration did not ' +
-      'create). A retry after any other failure adopts the account an earlier attempt created.',
+      'create), and with 409 INVALID_STATE_TRANSITION when another decision on it committed first. ' +
+      'The account is enabled only after the approval commits; a retry after any failure adopts ' +
+      'the disabled account an earlier attempt created.',
   })
   approve(
     @Param('id') id: string,
@@ -190,7 +192,13 @@ export class RegistrationController {
   @Post(':id/reject')
   @HttpCode(200)
   @Roles('UNION_ADMIN')
-  @ApiOperation({ summary: 'Reject a registration, with a required reason' })
+  @ApiOperation({
+    summary: 'Reject a registration, with a required reason',
+    description:
+      'Decided under the registration request lock, as approval is: when another decision on ' +
+      'the same registration committed first, refused with 409 INVALID_STATE_TRANSITION and ' +
+      'nothing written or emitted.',
+  })
   reject(
     @Param('id') id: string,
     @Body(zodPipe(rejectRegistrationSchema)) dto: RejectRegistrationDto,

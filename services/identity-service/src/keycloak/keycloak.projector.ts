@@ -1,9 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import {
   divergentAttributes,
+  grantsAnything,
   platformAttributesFor,
+  provenanceOnly,
   type PlatformAttributeName,
   type PlatformAttributes,
 } from './platform-attributes';
@@ -20,7 +23,20 @@ const PROJECTION_TRANSACTION_TIMEOUT_MS = 35_000;
 export interface ReconcileFinding {
   userId: string;
   divergent: PlatformAttributeName[];
+  /** An approval committed, but its account has not been enabled yet (#219 r2). */
+  activationPending: boolean;
 }
+
+/** What the orphan repair did with one account (`repairOrphan`). */
+export type OrphanRepairOutcome =
+  /** Disabled and its grants cleared. */
+  | 'repaired'
+  /** Already disabled and granting nothing: kept as it is. */
+  | 'harmless'
+  /** A user row names it now, or a request of the user is approved: not an orphan any more. */
+  | 'owned'
+  /** Its `rasta_user_id` does not name the user, or it is gone. Not touched. */
+  | 'not_ours';
 
 /**
  * Projects a user's memberships into their Keycloak attributes (ADR-060 § 5).
@@ -54,15 +70,18 @@ export class KeycloakProjector {
   ) {}
 
   /** What the user's Keycloak attributes should be, or null when there is no such user. */
-  async expectedAttributes(
-    userId: string,
-  ): Promise<{ keycloakId: string | null; attributes: PlatformAttributes } | null> {
+  async expectedAttributes(userId: string): Promise<{
+    keycloakId: string | null;
+    attributes: PlatformAttributes;
+    activationPending: boolean;
+  } | null> {
     const user = await this.repository.findUserById(userId);
     if (!user) return null;
     const memberships = await this.repository.listMembershipsForUser(userId);
     return {
       keycloakId: user.keycloakId,
       attributes: platformAttributesFor(user, memberships, new Date()),
+      activationPending: user.accountActivationPending,
     };
   }
 
@@ -109,7 +128,52 @@ export class KeycloakProjector {
     const expected = await this.expectedAttributes(userId);
     if (!expected || !expected.keycloakId || !this.keycloak.enabled) return null;
     const actual = await this.keycloak.getPlatformAttributes(expected.keycloakId);
-    return { userId, divergent: divergentAttributes(actual, expected.attributes) };
+    return {
+      userId,
+      divergent: divergentAttributes(actual, expected.attributes),
+      activationPending: expected.activationPending,
+    };
+  }
+
+  /**
+   * Makes an orphan harmless: an account under the username of a user who has
+   * none, whose `rasta_user_id` names that user — what a registration approval
+   * leaves when its transaction does not commit (#219 r2). Such an account is
+   * created disabled and granting nothing, so normally there is nothing to do;
+   * one that is enabled or carries a grant is disabled and its grants cleared.
+   * It is **kept, never deleted**: a pending request's next approval adopts
+   * it, and deleting a person's identity-provider account is a retention
+   * decision nothing here makes.
+   *
+   * Decided under the row lock of every registration request of the user —
+   * the lock approval takes — and only while none of them is APPROVED and the
+   * user row still names no account; the Keycloak writes happen while the lock
+   * is held. So an approval that adopts the account either committed first
+   * (and this finds it owned) or waits for this to finish, and its projection
+   * then enables the account. Throws when Keycloak cannot be reached.
+   */
+  async repairOrphan(userId: string, username: string): Promise<OrphanRepairOutcome> {
+    return this.repository.transaction(
+      async (tx) => {
+        const statuses = await this.repository.lockRegistrationRequestsOfUser(tx, userId);
+        const user = await this.repository.findUserById(userId, tx);
+        if (!user || user.keycloakId || statuses.includes('APPROVED')) return 'owned';
+
+        const account = await this.keycloak.findAccountByUsername(username);
+        const provenance = account?.attributes.rasta_user_id ?? [];
+        if (!account || provenance.length !== 1 || provenance[0] !== userId) return 'not_ours';
+        if (!account.enabled && !grantsAnything(account.attributes)) return 'harmless';
+
+        await this.keycloak.setEnabled(account.id, false);
+        await this.keycloak.replacePlatformAttributes(account.id, provenanceOnly(userId));
+        this.logger.warn(
+          { userId, keycloakId: account.id },
+          'Orphan Keycloak account disabled and its grants cleared',
+        );
+        return 'repaired';
+      },
+      { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
+    );
   }
 
   /**
@@ -144,6 +208,24 @@ export class KeycloakProjector {
           user.keycloakId,
           platformAttributesFor(user, memberships, new Date()),
         );
+        if (user.accountActivationPending) {
+          // A registration approval committed: its account was created
+          // disabled and granting nothing, and is enabled here — after the
+          // grants above, so its first token is already right — and only
+          // here, once. The flag is cleared in this same transaction, after
+          // Keycloak answered; a failure leaves it set, and the event, the
+          // next projection or `keycloak:backfill` tries again. Cleared, it
+          // never fires again, so a replayed event does not re-enable an
+          // account an administrator has since disabled (#219 r2). A user no
+          // longer ACTIVE by now keeps a disabled account.
+          if (user.status === 'ACTIVE') await this.keycloak.setEnabled(user.keycloakId, true);
+          await runUnscoped('the activation flag is the user row, not tenant data', () =>
+            tx.user.update({
+              where: { id: userId },
+              data: { accountActivationPending: false },
+            }),
+          );
+        }
         return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
       },
       { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },

@@ -50,6 +50,10 @@ model User {
   /// Mirrored to Keycloak as the `org_id` token claim.
   activeOrganizationId String? @map("active_organization_id")
 
+  /// Set by a registration approval; the Keycloak projector enables the
+  /// account, writes its grants and clears it, once (#219 r2).
+  accountActivationPending Boolean @default(false) @map("account_activation_pending")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   createdBy String    @map("created_by")

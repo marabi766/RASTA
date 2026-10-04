@@ -93,6 +93,30 @@ export function platformAttributesFor(
   };
 }
 
+/**
+ * The attributes of an account no decision has granted anything yet: its
+ * provenance alone. What a registration approval creates its account with,
+ * and what the orphan repair leaves one with (#219 r2).
+ */
+export function provenanceOnly(userId: string): PlatformAttributes {
+  return {
+    rasta_user_id: [userId],
+    organization_ids: [],
+    organization_roles: [],
+    active_organization_id: [],
+  };
+}
+
+/** Whether an account's attributes grant anything: an organization, a role or an active organization. */
+export function grantsAnything(attributes: PlatformAttributes): boolean {
+  return (
+    attributes.organization_ids.length +
+      attributes.organization_roles.length +
+      attributes.active_organization_id.length >
+    0
+  );
+}
+
 /** The platform attributes as Keycloak holds them, missing ones read as empty. */
 export function readPlatformAttributes(
   attributes: Record<string, string[] | undefined> | undefined,

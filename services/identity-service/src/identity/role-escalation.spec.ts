@@ -266,6 +266,9 @@ const repository = {
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
   lockUserMemberships: async () => ({ activeOrganizationId: ORG_A, now: new Date() }),
+  // The request row lock a registration decision takes (#219 r2), on the status set per test.
+  lockRegistrationRequest: async () =>
+    registrationExists ? { status: registrationStatus, userId: TARGET_USER } : null,
   // The revocation's own write, stamped with the database's clock in SQL.
   revokeMembership: async () => {
     writes.push({ model: 'membership', status: 'REVOKED' });

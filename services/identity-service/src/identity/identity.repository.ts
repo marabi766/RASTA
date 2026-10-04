@@ -77,6 +77,37 @@ export class IdentityRepository {
   }
 
   /**
+   * The per-request serialisation point for a registration decision (#219 r2).
+   *
+   * Approve, reject and the orphan repair (`KeycloakProjector.repairOrphan`)
+   * each take it **first** in their transaction and decide on the status it
+   * returns, never on one read before it: two decisions on one request then
+   * run one after the other, and the second sees what the first committed.
+   * `null` when no such request exists.
+   */
+  async lockRegistrationRequest(
+    tx: ExtendedPrismaClient,
+    registrationId: string,
+  ): Promise<{ status: string; userId: string } | null> {
+    const rows = await tx.$queryRaw<Array<{ status: string; user_id: string }>>`
+      SELECT status::text AS status, user_id FROM registration_request
+       WHERE id = ${registrationId} FOR UPDATE`;
+    const row = rows[0];
+    return row ? { status: row.status, userId: row.user_id } : null;
+  }
+
+  /** The same lock, on every registration request of one user; their statuses. */
+  async lockRegistrationRequestsOfUser(
+    tx: ExtendedPrismaClient,
+    userId: string,
+  ): Promise<string[]> {
+    const rows = await tx.$queryRaw<Array<{ status: string }>>`
+      SELECT status::text AS status FROM registration_request
+       WHERE user_id = ${userId} ORDER BY id FOR UPDATE`;
+    return rows.map((row) => row.status);
+  }
+
+  /**
    * Writes an event to the outbox.
    *
    * Takes the transaction client explicitly rather than reaching for the

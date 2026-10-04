@@ -98,6 +98,8 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
     lockUserProjection: jest.fn(async () => undefined),
+    // The request row lock a registration decision takes (#219 r2): PENDING here.
+    lockRegistrationRequest: jest.fn(async () => ({ status: 'PENDING', userId: 'USR_ANY' })),
     revokeMembership: jest.fn(async () => undefined),
     lockUserMemberships: jest.fn(async () => ({
       activeOrganizationId: TEST_ORG_A,

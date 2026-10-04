@@ -25,6 +25,12 @@ export interface CreateKeycloakUserInput {
   lastName: string;
   /** The whole platform attribute set, from the first write (ADR-060 § 5). */
   attributes: PlatformAttributes;
+  /**
+   * Whether the account can sign in from the start. A registration approval
+   * creates it disabled, with no grants, and the projector enables it once the
+   * database has committed the approval (#219 r2).
+   */
+  enabled: boolean;
 }
 
 /** What the admin API returns for a user — only the fields this client reads. */
@@ -160,7 +166,7 @@ export class KeycloakAdminClient {
         email: input.email,
         firstName: input.firstName,
         lastName: input.lastName,
-        enabled: true,
+        enabled: input.enabled,
         emailVerified: false,
         requiredActions: ['UPDATE_PASSWORD'],
         // All four, including `rasta_user_id` — which was never written before,
