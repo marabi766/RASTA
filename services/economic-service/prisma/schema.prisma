@@ -772,6 +772,8 @@ model PaymentReconciliationResolution {
 
   // SQL-only: `ux_payment_resolution_pending` — at most one pending per task;
   // `trg_payment_resolution_append_only` — never deleted, decided once.
+  // The operator view reads one intent's resolutions (migration 20261004120000).
+  @@index([organizationId, paymentIntentId], map: "ix_payment_resolution_org_intent")
   @@map("payment_reconciliation_resolution")
 }
 

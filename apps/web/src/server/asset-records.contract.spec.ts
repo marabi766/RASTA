@@ -3,10 +3,17 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { plainText } from '@rasta/contracts';
 import ts from 'typescript';
 
 import { INSPECTION_RESULTS } from '@/lib/asset-fields';
 import { POLICY_COVERAGES } from '@/lib/asset-record-fields';
+import {
+  BIDI_CONTROL_CODE_POINTS,
+  OTHER_INVISIBLE_CODE_POINTS,
+  formField,
+  probesFrom,
+} from '@/test/text-rules';
 
 import {
   POLICY_ALREADY_RECORDED_MESSAGE,
@@ -18,6 +25,7 @@ import {
   canRecordAssetCompliance,
   parseRecordInspectionForm,
   parseRecordPolicyForm,
+  recordInspectionFormSchema,
 } from './asset-records';
 
 /**
@@ -230,7 +238,7 @@ describe('the request bodies', () => {
       `identifierText(${RECORD_BOUNDS.policyNumber.min},${RECORD_BOUNDS.policyNumber.max})`,
     );
     expect(squash(inspection.get('certificateNo'))).toBe(
-      `z.string().trim().min(${RECORD_BOUNDS.certificateNo.min}).max(${RECORD_BOUNDS.certificateNo.max})`,
+      `plainText().min(${RECORD_BOUNDS.certificateNo.min}).max(${RECORD_BOUNDS.certificateNo.max})`,
     );
   });
 
@@ -245,9 +253,40 @@ describe('the request bodies', () => {
 
   it('bounds the notes as the form does', () => {
     expect(squash(schemaProperties('createInspectionSchema').get('notes'))).toBe(
-      `z.string().trim().max(${RECORD_BOUNDS.notes.max}).optional()`,
+      `plainText().max(${RECORD_BOUNDS.notes.max}).optional()`,
     );
   });
+
+  // `plainText()` is the platform's, from `@rasta/contracts`, so the inspection
+  // form's two free-text fields are checked against the rule itself: every bidi
+  // control refused by both, ZWNJ and the other invisible characters it admits
+  // admitted by both.
+  it.each([
+    [
+      'certificateNo',
+      'گواهی‌۱۴۰۳-۱۲',
+      plainText().min(RECORD_BOUNDS.certificateNo.min).max(RECORD_BOUNDS.certificateNo.max),
+    ],
+    ['notes', 'لاستیک‌ها باید تا ماه بعد عوض شوند', plainText().max(RECORD_BOUNDS.notes.max)],
+  ] as const)(
+    'the inspection form refuses in %s exactly what the service refuses',
+    (key, sample, service) => {
+      const portal = formField(recordInspectionFormSchema, key);
+      const probes = probesFrom(sample, [
+        ...BIDI_CONTROL_CODE_POINTS,
+        ...OTHER_INVISIBLE_CODE_POINTS,
+      ]);
+      for (const probe of probes) {
+        expect([probe, portal.safeParse(probe).success]).toEqual([
+          probe,
+          service.safeParse(probe).success,
+        ]);
+      }
+      expect(probes.filter((probe) => !service.safeParse(probe).success)).toHaveLength(
+        BIDI_CONTROL_CODE_POINTS.length,
+      );
+    },
+  );
 
   it('takes the dates as ISO datetimes, and refuses an end that is not after the start', () => {
     for (const [name, start] of [

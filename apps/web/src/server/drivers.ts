@@ -2,7 +2,7 @@ import { TZDate } from '@date-fns/tz';
 import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
-import { DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } from '@/lib/format';
+import { BIDI_CONTROL, DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } from '@/lib/format';
 import {
   CHANGE_STATUS_FIELDS,
   CREATE_DRIVER_FIELDS,
@@ -246,8 +246,12 @@ const nullableLocalDate = z.string().transform((raw, ctx) => {
  * paper record must not be exposed to. The portal is one of several clients
  * that can write these fields, so refusing here narrows the surface rather
  * than closing it — the service-side check is a separate fix.
+ *
+ * Defined once in `lib/format/text.ts`, which also drops the same set from
+ * stored text on display (`withoutBidiControls`, #220); re-exported here for
+ * the forms that take it from this module.
  */
-export const BIDI_CONTROL = /\p{Bidi_Control}/u;
+export { BIDI_CONTROL };
 const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
 
 const nullableShortText = (max: number, message: string) =>

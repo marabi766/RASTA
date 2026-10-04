@@ -424,3 +424,22 @@ describe('the electronic dossier', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+describe('stored dossier text with a bidi override (#220)', () => {
+  it('shows the model and an activity line isolated, and without the override', () => {
+    const RLO = String.fromCodePoint(0x202e);
+    const dossier: AssetDossier = {
+      ...DOSSIER,
+      asset: { ...DOSSIER.asset, model: `WA${RLO}320` },
+      recentActivity: [{ ...DOSSIER.recentActivity[0]!, description: `خارج از ${RLO}سرویس` }],
+    };
+    const { container } = render(
+      <DossierScreen result={{ kind: 'OK', data: dossier }} assetId="AST_1" />,
+    );
+    expect(container.textContent).not.toContain(RLO);
+    const isolated = [...container.querySelectorAll('bdi')].map((bdi) => bdi.textContent);
+    expect(isolated).toEqual(
+      expect.arrayContaining([expect.stringContaining('WA320'), 'خارج از سرویس']),
+    );
+  });
+});

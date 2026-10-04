@@ -390,13 +390,16 @@ export const recordInspectionFormSchema = z
     result: z.enum(INSPECTION_RESULTS, {
       errorMap: () => ({ message: 'نتیجهٔ معاینه را از فهرست انتخاب کنید' }),
     }),
+    // The service's `plainText()`: the person's own words, as typed, less the
+    // invisible direction controls.
     notes: z
       .string()
       .transform((raw) => raw.trim())
       .pipe(
         z
           .string()
-          .max(RECORD_BOUNDS.notes.max, `یادداشت حداکثر ${fa(RECORD_BOUNDS.notes.max)} نویسه است`),
+          .max(RECORD_BOUNDS.notes.max, `یادداشت حداکثر ${fa(RECORD_BOUNDS.notes.max)} نویسه است`)
+          .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
       )
       .transform((value) => (value === '' ? undefined : value)),
   })

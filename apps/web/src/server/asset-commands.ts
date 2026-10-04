@@ -86,12 +86,13 @@ const requiredDisplayText = (label: string, min: number, max: number) =>
 
 /**
  * `model`, exactly as asset-service takes it: trimmed text of 1 to 120
- * characters, with **no** character rule (`dto.ts`: `z.string().trim().min(1)
- * .max(120)`, where `manufacturer` and `name` use `displayText`). Holding it to
- * the display-text class refused models the service stores happily, and
- * normalising its letters rewrote a value the person did not ask to change.
- * `asset-commands.contract.spec.ts` pins the service's rule, so the day it
- * tightens this copy fails a test rather than a person.
+ * characters that refuses the Unicode `Bidi_Control` set and nothing else
+ * (`dto.ts`: `plainText().min(1).max(120)`, where `manufacturer` and `name`
+ * use `displayText`). Holding it to the display-text class refused models the
+ * service stores happily, and normalising its letters rewrote a value the
+ * person did not ask to change. `asset-commands.contract.spec.ts` pins the
+ * service's rule, so the day it changes this copy fails a test rather than a
+ * person.
  *
  * Blank is blank: absent on register, `null` on edit.
  */
@@ -99,7 +100,12 @@ const MODEL_MAX = 120;
 const modelText = z
   .string()
   .transform((raw) => raw.trim())
-  .pipe(z.string().max(MODEL_MAX, `مدل حداکثر ${fa(MODEL_MAX)} نویسه است`));
+  .pipe(
+    z
+      .string()
+      .max(MODEL_MAX, `مدل حداکثر ${fa(MODEL_MAX)} نویسه است`)
+      .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE),
+  );
 
 /** An optional name-like field: blank is absent on register, `null` on edit. */
 const optionalDisplayText = (label: string, max: number) =>

@@ -1,4 +1,6 @@
-import type { ReactNode } from 'react';
+import { Children, type ReactNode } from 'react';
+
+import { withoutBidiControls } from '@/lib/format';
 
 /**
  * A Latin identifier inside Persian text.
@@ -22,9 +24,26 @@ import type { ReactNode } from 'react';
  * face makes `1`, `l` and `I` harder to tell apart than they need to be.
  */
 export function Identifier({ children }: { children: ReactNode }) {
+  return <IsolatedText className="font-mono">{children}</IsolatedText>;
+}
+
+/**
+ * Stored text shown inside Persian text, safely: isolated in its own `<bdi
+ * dir="auto">`, and with its bidi controls dropped (L5-06; PR 220).
+ *
+ * Isolation keeps the run from reordering the text around it; it does not
+ * stop an override **inside** the run from reordering the run itself, so a
+ * reason or a model stored with U+202E would still read as other words or
+ * another number. Every string child goes through `withoutBidiControls`.
+ * `Identifier` is this, in the monospace face; free text — a reason, a note,
+ * a timeline line — uses it as it is.
+ */
+export function IsolatedText({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <bdi dir="auto" className="font-mono">
-      {children}
+    <bdi dir="auto" className={className}>
+      {Children.map(children, (child) =>
+        typeof child === 'string' ? withoutBidiControls(child) : child,
+      )}
     </bdi>
   );
 }

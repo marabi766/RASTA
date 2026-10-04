@@ -206,6 +206,52 @@ Index معتبر و بدون از دست رفتن هیچ سفارشی.
 
 ---
 
+<a id="economic-resolution-intent-index"></a>
+
+### economic: شاخص پیشنهادهای حل یک Payment Intent (#218)
+
+`20261004120000_payment_resolution_intent_index` شاخص `ix_payment_resolution_org_intent` روی
+`payment_reconciliation_resolution (organization_id, payment_intent_id)` را با `CONCURRENTLY` می‌سازد؛ مسیر
+`GET /v1/payment-intents/:id/reconciliation` پیش از آن تاریخچهٔ پیشنهادهای همهٔ مستأجرها را می‌پیمود. فقط افزودنی است: نه
+ستونی، نه تغییر داده‌ای.
+
+```bash
+PRISMA="pnpm --filter @rasta/economic-service exec node ../../scripts/prisma.mjs"
+```
+
+#### ساخت شکست خورد
+
+نشانه: `P3018` روی همین Migration (لغو یا Timeout؛ شاخص غیریکتا راه شکست دیگری ندارد)، و پس از آن هر Deploy با
+`P3009`. یک Index **INVALID** می‌ماند.
+
+۱. Index نامعتبر را حذف کن — تنها، بیرون از تراکنش:
+
+```bash
+echo 'DROP INDEX CONCURRENTLY IF EXISTS "ix_payment_resolution_org_intent";' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
+۲. Resolve و Deploy:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20261004120000_payment_resolution_intent_index
+pnpm --filter @rasta/economic-service db:migrate
+```
+
+اگر گام ۱ جا بیفتد، Deploy با `already exists` شکست می‌خورد: Migration عمداً `IF NOT EXISTS` ندارد.
+
+#### بازگرداندن
+
+`down.sql` یک تراکنش است (ردیف دفتر خودش را هم حذف می‌کند و `CONCURRENTLY` با دستور دیگری در یک اسکریپت نمی‌نشیند)، پس
+`DROP INDEX` قفل انحصاری جدول را می‌گیرد: میلی‌ثانیه‌ها نگه داشته می‌شود، ولی پشت هر تراکنش بلند روی جدول صف می‌کند و
+همه پشت آن؛ `lock_timeout = 5s` این انتظار را محدود می‌کند. برای اینکه هیچ قفلی گرفته نشود، پیش از `down.sql` این را تنها
+اجرا کن؛ `IF EXISTS` در `down.sql` سپس چیزی نمی‌یابد و فقط ردیف دفتر را حذف می‌کند:
+
+```bash
+echo 'DROP INDEX CONCURRENTLY IF EXISTS "ix_payment_resolution_org_intent";' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
 <a id="marketplace-idempotency-claim-token"></a>
 
 ### marketplace: توکن Claim کلید Idempotency (#147)

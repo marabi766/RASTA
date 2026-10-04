@@ -86,3 +86,42 @@ describe.each(FIELDS)('%#: field %s', (schema, path) => {
     expect(JSON.stringify(result.error?.issues)).not.toContain(sample.slice(2));
   });
 });
+
+/**
+ * The part's two references, which #209 left as bare trimmed strings because
+ * the portal's contract spec pinned them. They are identifiers — the portal
+ * takes both left-to-right — so they are `referenceId()`: every bidi control
+ * and also every other control or format character, ZWNJ included, is refused
+ * with the same closed message. Persian letters and digits are still accepted.
+ */
+describe.each(['partReference', 'sourceReference'])('recordPartSchema.%s', (path) => {
+  const field = fieldOf(recordPartSchema, path);
+  const SAMPLE_REFERENCE = 'حواله-۱۴۰۳-ORD01';
+  const OTHER_CONTROLS = [
+    ['ZWNJ', 0x200c],
+    ['ZWJ', 0x200d],
+    ['a byte-order mark', 0xfeff],
+    ['a soft hyphen', 0x00ad],
+    ['a tab', 0x09],
+    ['a line separator', 0x2028],
+  ] as const;
+
+  it('accepts a reference in Persian or Latin letters and digits, trimmed', () => {
+    expect(field.parse(` ${SAMPLE_REFERENCE}  `)).toBe(SAMPLE_REFERENCE);
+    expect(field.parse('PO-2026-0042')).toBe('PO-2026-0042');
+  });
+
+  it.each([...BIDI_CONTROLS.map(([hex, cp]) => [`U+${hex}`, cp] as const), ...OTHER_CONTROLS])(
+    'refuses %s, repeating nothing of the input',
+    (_label, cp) => {
+      const value = `${SAMPLE_REFERENCE.slice(0, 2)}${String.fromCodePoint(cp)}${SAMPLE_REFERENCE.slice(2)}`;
+      const result = field.safeParse(value);
+
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toContainEqual(
+        expect.objectContaining({ message: 'Contains unsupported characters' }),
+      );
+      expect(JSON.stringify(result.error?.issues)).not.toContain(SAMPLE_REFERENCE.slice(2));
+    },
+  );
+});
