@@ -23,7 +23,7 @@ import type {
   SubmitClaimDto,
 } from '../asset/dto';
 import { assertClaimTransition } from './claim-lifecycle';
-import { negativeAmountRefusal } from './negative-amount';
+import { negativeAmountRefusal, storedAmountRefusal } from './negative-amount';
 import {
   assertMayDecideClaim,
   assertWithinApprovalCeiling,
@@ -403,8 +403,11 @@ export class ClaimService {
         data: { ...data, status: to },
       });
     } catch (error) {
-      // A negative approved amount (L7-36): the API's 400, not a 500.
-      throw negativeAmountRefusal(error) ?? error;
+      // A negative amount (L7-36). The approved amount this update writes gets
+      // the API's 400; one the claim already held — the database checks the
+      // whole row on every UPDATE — gets a closed 422 that names no amount the
+      // caller did not send (#222 r1). Never a 500.
+      throw storedAmountRefusal(error, data, { type: 'InsuranceClaim', id: claimId }) ?? error;
     }
 
     if (result.count !== 1) {

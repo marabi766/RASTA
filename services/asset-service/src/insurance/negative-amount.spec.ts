@@ -1,5 +1,11 @@
 import { RastaError } from '@rasta/nest-common';
-import { NON_NEGATIVE_AMOUNT_CONSTRAINTS, negativeAmountRefusal } from './negative-amount';
+import {
+  NON_NEGATIVE_AMOUNT_CONSTRAINTS,
+  STORED_AMOUNT_INVALID,
+  STORED_AMOUNT_INVALID_MESSAGE,
+  negativeAmountRefusal,
+  storedAmountRefusal,
+} from './negative-amount';
 
 /**
  * The two shapes Prisma 6 gives a CHECK violation, as measured against
@@ -81,5 +87,56 @@ describe('negativeAmountRefusal', () => {
     ]) {
       expect(negativeAmountRefusal(error)).toBeUndefined();
     }
+  });
+});
+
+describe('storedAmountRefusal (an UPDATE of a stored row, #222 r1)', () => {
+  const CLAIM = { type: 'InsuranceClaim', id: 'CLM_1' } as const;
+
+  it('is the API’s 400 when the update itself wrote the negative amount', () => {
+    for (const written of [-1n, -1, '-1']) {
+      expect(
+        storedAmountRefusal(
+          fromCreate('ck_claim_approved_amount_non_negative'),
+          { approvedAmountMinor: written },
+          CLAIM,
+        ),
+      ).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        status: 400,
+        details: [expect.objectContaining({ path: 'approvedAmountMinor' })],
+      });
+    }
+  });
+
+  it('is a closed 422 when the amount was the row’s, not the request’s', () => {
+    for (const [constraint, written] of [
+      // The request wrote none of the guarded field.
+      ['ck_claim_claimed_amount_non_negative', { approvedAmountMinor: 80n }],
+      // The same constraint a decision trips, but nothing negative written.
+      ['ck_claim_approved_amount_non_negative', { settledAt: new Date() }],
+      ['ck_claim_approved_amount_non_negative', { approvedAmountMinor: 80n }],
+      ['ck_policy_premium_non_negative', { organizationId: 'ORG-B' }],
+    ] as const) {
+      const refusal = storedAmountRefusal(fromCreate(constraint), written, CLAIM);
+      expect(refusal).toBeInstanceOf(RastaError);
+      expect(refusal).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        status: 422,
+        message: STORED_AMOUNT_INVALID_MESSAGE,
+        internalContext: { rule: STORED_AMOUNT_INVALID, constraint, id: 'CLM_1' },
+      });
+      expect(refusal?.details).toBeUndefined();
+      // Nothing of the row or the field reaches the caller (S-09).
+      expect(refusal?.message).not.toMatch(/987654321|Failing row|_minor|Minor|ck_/);
+      expect(JSON.stringify(refusal?.internalContext)).not.toMatch(/987654321|Failing row/);
+    }
+  });
+
+  it('leaves every other error to the caller', () => {
+    expect(
+      storedAmountRefusal(fromRaw('ck_claim_rejected_has_no_approved_amount'), {}, CLAIM),
+    ).toBeUndefined();
+    expect(storedAmountRefusal(new Error('connection terminated'), {}, CLAIM)).toBeUndefined();
   });
 });
