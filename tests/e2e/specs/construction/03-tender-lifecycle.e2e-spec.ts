@@ -209,19 +209,16 @@ async function until<T>(
 }
 
 /**
- * The closed reason of a construction-service refusal. The service sends it in
- * one place only: first after the fixed prefix of `message` (`Award refused:
- * AWARDER_IS_EVALUATOR. …`, `Bids are not opened: NOT_CLOSED`, `Bid refused:
- * BID_WINDOW_CLOSED`, `Tender <id> cannot be published: APPROVAL_POLICY_REQUIRED`)
- * — the body has no field of its own for it. So it is read at that anchored
- * position, never searched for anywhere in the body.
+ * The closed reason of a construction-service refusal: the first `details[].code` of the error
+ * body (docs/06 § 6.7). The service names each closed reason there — the area in `path`, the
+ * reason in `code` — and leaves `message` as it was, for people; so the reason is never parsed
+ * out of the prose. `undefined` when the body carries no `details`.
  */
-const REASON_PATTERN =
-  /^(?:(?:Approval|Award|Evaluation|Bid|Cancel) refused|Bids are not opened|Tender [A-Z0-9_]+ cannot be published): ([A-Z][A-Z_]*)\b/;
-
 function reasonOf(body: unknown): string | undefined {
-  const message = (body as { message?: unknown } | null)?.message;
-  return typeof message === 'string' ? REASON_PATTERN.exec(message)?.[1] : undefined;
+  const details = (body as { details?: unknown } | null)?.details;
+  if (!Array.isArray(details)) return undefined;
+  const code = (details[0] as { code?: unknown } | undefined)?.code;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /**
@@ -986,11 +983,14 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       type: 'bidding window',
       description: `${elapsed} ms of ${BIDDING_WINDOW_MS} ms used before the early-opening refusal`,
     });
+    const early = await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids/proposal`, {});
     expectRefusal(
-      await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids/proposal`, {}),
+      early,
       { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'NOT_CLOSED' },
       'an opening proposed before the deadline',
     );
+    // Compatibility: the reason moved into `details`, and `message` is what it always was.
+    expect((early.body as { message?: unknown }).message).toBe('Bids are not opened: NOT_CLOSED');
 
     // Publication was executed once — shown here, after the window's last
     // step: the approved version is a stale one now, and the new version is a
