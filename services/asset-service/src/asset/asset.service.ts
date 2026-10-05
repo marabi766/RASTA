@@ -22,6 +22,7 @@ import {
 } from './lifecycle';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ClaimFence } from './idempotency';
+import { storedAmountRefusal } from '../insurance/negative-amount';
 import {
   DEFAULT_TRANSFER_INSURANCE_POLICY,
   TRANSFER_INSURANCE_POLICY,
@@ -1006,8 +1007,12 @@ export class AssetService {
           await tx.assetTimelineEntry.updateMany(moved);
           await tx.assetLocation.updateMany(moved);
           await tx.assetDocumentRef.updateMany(moved);
-          await tx.insurancePolicy.updateMany(moved);
-          await tx.insuranceClaim.updateMany(moved);
+          // A policy or claim holding a negative amount from before the
+          // constraints (NOT VALID, L7-36) is refused by the database on any
+          // UPDATE of its row: the transfer is refused as a closed 422, not a
+          // 500, until an operator corrects it (#222 r1).
+          await movingInsurance(id, 'InsurancePolicy', () => tx.insurancePolicy.updateMany(moved));
+          await movingInsurance(id, 'InsuranceClaim', () => tx.insuranceClaim.updateMany(moved));
           await tx.technicalInspection.updateMany(moved);
           await tx.assetTransfer.updateMany(moved);
 
@@ -1473,6 +1478,24 @@ export class AssetService {
  * work, on the `status` path. Nothing a client typed goes in it, in the
  * response or in the logged context (S-09).
  */
+/**
+ * Moves an asset's policies or claims to the new owner, refusing with a closed
+ * 422 when one of them holds a negative amount the database will not keep. The
+ * move writes only `organizationId`, so a refused amount is always a stored
+ * one, never the caller's.
+ */
+async function movingInsurance(
+  assetId: string,
+  type: 'InsurancePolicy' | 'InsuranceClaim',
+  move: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await move();
+  } catch (error) {
+    throw storedAmountRefusal(error, {}, { type, assetId }) ?? error;
+  }
+}
+
 function openWorkError(from: string, to: string, codes: readonly OpenWorkCode[]): RastaError {
   const message = codes.map((code) => OPEN_WORK_MESSAGES[code]).join(' ');
   return new RastaError('INVALID_STATE_TRANSITION', message, {

@@ -2020,6 +2020,7 @@ jobs:
           pnpm --filter @rasta/audit-service run db:migrate
           pnpm --filter @rasta/construction-service run db:migrate
           pnpm --filter @rasta/organization-service run db:migrate
+          pnpm --filter @rasta/supplier-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -2236,7 +2237,7 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Start identity, organization, economic, marketplace, document, audit and construction services and api-gateway
+      - name: Start identity, organization, supplier, economic, marketplace, document, audit and construction services and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because several processes have to come up in order and
@@ -2392,14 +2393,39 @@ jobs:
             DATABASE_URL=postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public \
             node dist/main.js > /tmp/rasta-logs/organization.log 2>&1 & )
 
+          # CON-002 PR 12: the contractor side of a tender. A contractor may bid
+          # only while supplier-service says, at that moment, that it is
+          # qualified and not suspended (BIDDER_NOT_ELIGIBLE otherwise), and an
+          # award asks it again for the winner's standing — so the tender
+          # scenario needs the real service, migrated above by its owner role and
+          # run here as its runtime role. Started before construction-service,
+          # which loads its standing read model from supplier-service's snapshot
+          # (and retries until it can).
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service supplier-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/supplier-service && \
+            PORT=3108 SERVICE_NAME=supplier-service \
+            DATABASE_URL=postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public \
+            node dist/main.js > /tmp/rasta-logs/supplier.log 2>&1 & )
+
           # CON-001: its project scenarios, and the audit record they produce.
           # No widened roles: the union writes, the platform approves (Q-70 (7)).
+          # CON-002: a tender is published only with a key-encryption key to wrap
+          # its private key (ADR-066 § 2); without one publishing is 503 and
+          # nothing is published. Minted for this run, masked, and handed to this
+          # one process alone — no other service holds it, as in a deployment,
+          # where it comes from the secret store.
+          tender_kek="$(openssl rand -base64 32)"
+          echo "::add-mask::${tender_kek}"
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service construction-service)" && \
             eval "${kafka_credentials}" && \
             cd services/construction-service && \
             PORT=3110 SERVICE_NAME=construction-service \
             DATABASE_URL=postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public \
+            CONSTRUCTION_TENDER_KEKS="e2e-run:${tender_kek}" \
+            CONSTRUCTION_TENDER_KEK_CURRENT=e2e-run \
             node dist/main.js > /tmp/rasta-logs/construction.log 2>&1 & )
+          unset tender_kek
 
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
@@ -2424,19 +2450,21 @@ jobs:
               http://localhost:3110/health/ready || true)"
             organization="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3102/health/ready || true)"
+            supplier="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3108/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
             if [ "$identity" = "200" ] && [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
                && [ "$document" = "200" ] && [ "$audit" = "200" ] \
                && [ "$construction" = "200" ] && [ "$organization" = "200" ] \
-               && [ "$gateway" = "401" ]; then
+               && [ "$supplier" = "200" ] && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, organization=${organization}, gateway=${gateway})"
+          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, organization=${organization}, supplier=${supplier}, gateway=${gateway})"
           cat /tmp/rasta-logs/identity.log
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
@@ -2444,6 +2472,7 @@ jobs:
           cat /tmp/rasta-logs/audit.log
           cat /tmp/rasta-logs/construction.log
           cat /tmp/rasta-logs/organization.log
+          cat /tmp/rasta-logs/supplier.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -2489,6 +2518,7 @@ jobs:
           E2E_IDENTITY_URL: http://localhost:3101
           E2E_CONSTRUCTION_URL: http://localhost:3110
           E2E_ORGANIZATION_URL: http://localhost:3102
+          E2E_SUPPLIER_URL: http://localhost:3108
           SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
@@ -2513,6 +2543,8 @@ jobs:
           tail -n 200 /tmp/rasta-logs/construction.log || true
           echo '--- organization-service ---'
           tail -n 200 /tmp/rasta-logs/organization.log || true
+          echo '--- supplier-service ---'
+          tail -n 200 /tmp/rasta-logs/supplier.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'

@@ -3,6 +3,8 @@ import { InsuranceService } from './insurance.service';
 import type { AssetRepository } from '../asset/asset.repository';
 import type { AssetService } from '../asset/asset.service';
 import { INSURANCE_EVENTS } from '../asset/events';
+import { policiesExpiryHeldGauge } from '../observability/metrics';
+import { STORED_AMOUNT_INVALID } from './negative-amount';
 import type { CreateInspectionDto, CreatePolicyDto } from '../asset/dto';
 
 /**
@@ -71,6 +73,7 @@ function harness(overrides: Record<string, unknown> = {}): Harness {
     findPoliciesExpiringWithin: jest.fn(async () => []),
     findInspectionsExpiringWithin: jest.fn(async () => []),
     claimLapsedPolicies: jest.fn(async () => []),
+    findLapsedPoliciesWithInvalidAmount: jest.fn(async () => ({ total: 0, sample: [] })),
     lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
     ...overrides,
   } as unknown as AssetRepository;
@@ -288,6 +291,37 @@ describe('InsuranceService', () => {
       expect(expired?.payload).toMatchObject({ policyId: 'INS_2', coverage: 'THIRD_PARTY' });
     });
 
+    it('reports the lapsed policies it cannot update, ids only, and still expires the rest (#222 r1)', async () => {
+      const h = harness({
+        claimLapsedPolicies: jest.fn(async () => [lapsedPolicy('INS_4')]),
+        findLapsedPoliciesWithInvalidAmount: jest.fn(async () => ({
+          total: 2,
+          sample: [
+            { id: 'INS_H1', organizationId: DEH1 },
+            { id: 'INS_H2', organizationId: DEH1 },
+          ],
+        })),
+      });
+      const errors = jest.spyOn(h.service['logger'], 'error').mockImplementation(() => undefined);
+
+      const result = await h.service.runExpirySweep();
+
+      expect(result).toMatchObject({ expired: 1, held: 2 });
+      expect((await policiesExpiryHeldGauge.get()).values[0]?.value).toBe(2);
+      expect(errors).toHaveBeenCalledTimes(1);
+      const logged = String(errors.mock.calls[0]![0]);
+      expect(logged).toContain('INS_H1');
+      expect(logged).toContain('INS_H2');
+      expect(logged).toContain(STORED_AMOUNT_INVALID);
+
+      // Corrected: the gauge falls back to zero and nothing is logged.
+      errors.mockClear();
+      const clean = harness();
+      jest.spyOn(clean.service['logger'], 'error').mockImplementation(() => undefined);
+      await clean.service.runExpirySweep();
+      expect((await policiesExpiryHeldGauge.get()).values[0]?.value).toBe(0);
+    });
+
     it('expires and announces in the same transaction (audit L3-04)', async () => {
       // Before, the status change committed on its own and the events were
       // written later; a crash between the two lost the INSURANCE_EXPIRED.
@@ -349,7 +383,7 @@ describe('InsuranceService', () => {
       const h = harness();
       const result = await h.service.runExpirySweep();
 
-      expect(result).toEqual({ warned: 0, expired: 0 });
+      expect(result).toEqual({ warned: 0, expired: 0, held: 0 });
       expect(h.enqueued).toHaveLength(0);
     });
   });
