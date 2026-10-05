@@ -6,10 +6,13 @@
 -- blocks neither reads nor writes; no new negative amount can arrive meanwhile,
 -- because the constraints already refuse new writes.
 --
--- The same refusal as the previous migration runs first. That one ran before
--- its constraints existed, so a negative amount committed between its check
--- and its ALTERs would reach this scan; refused here, it is named as the stored
--- amount it is rather than as a raw check violation, and nothing is rewritten.
+-- The same refusal as the previous migration runs first. Through the shipped
+-- chain it cannot fire: that migration checked and added the constraints under
+-- one lock, so no row it did not see sits under them (#222 r1). It is there
+-- for a database that reached NOT VALID another way — the constraints dropped
+-- and re-added by hand, say — so that a negative amount is refused in words,
+-- as the stored amount it is, rather than as a raw check violation, and
+-- nothing is rewritten.
 -- Recovery: docs/runbooks/database-bootstrap.md#asset-insurance-money-non-negative
 -- =============================================================================
 DO $$

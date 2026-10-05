@@ -389,13 +389,19 @@ echo 'DROP INDEX CONCURRENTLY "membership_user_id_organization_id_deleted_at_key
 چهار Nullable می‌مانند («اعلام‌نشده»). `asset_timeline_entry.amount_minor` عمداً بیرون است: اینکه Producer
 خط زمانی هزینهٔ منفی بفرستد یا نه، تصمیم باز مالک است.
 
-| Migration                                              | کار                                                                                                                                 |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `20261005120000_insurance_money_non_negative`          | اگر مبلغ منفی ذخیره‌شده باشد رد می‌کند؛ وگرنه چهار CHECK را `NOT VALID` می‌افزاید — قفل انحصاری چند میلی‌ثانیه، `lock_timeout = 3s` |
-| `20261005120100_insurance_money_non_negative_validate` | همان رد را دوباره می‌سنجد، سپس `VALIDATE CONSTRAINT` — پویش زیر `SHARE UPDATE EXCLUSIVE`: خواندن و نوشتن ادامه دارد                 |
+| Migration                                              | کار                                                                                                                                              |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `20261005120000_insurance_money_non_negative`          | زیر `SHARE ROW EXCLUSIVE` بر هر دو جدول: اگر مبلغ منفی ذخیره‌شده باشد رد می‌کند؛ وگرنه چهار CHECK را `NOT VALID` می‌افزاید — `lock_timeout = 3s` |
+| `20261005120100_insurance_money_non_negative_validate` | همان رد را دوباره می‌سنجد، سپس `VALIDATE CONSTRAINT` — پویش زیر `SHARE UPDATE EXCLUSIVE`: خواندن و نوشتن ادامه دارد                              |
 
-دو فایل‌اند چون PostgreSQL اسکریپت چنددستوری را یک تراکنش ضمنی اجرا می‌کند؛ در یک فایل، قفل انحصاری
-افزودن تا پایان پویش نگه داشته می‌شد. **هیچ‌کدام دادهای را بازنویسی نمی‌کند:** اینکه مبلغ منفی در اصل چه
+بررسی و افزودن زیر یک قفل‌اند (#222 r1): `LOCK TABLE … IN SHARE ROW EXCLUSIVE MODE` خواندن را آزاد می‌گذارد و هر
+نوشتن را تا Commit همین Migration نگه می‌دارد، پس هیچ ردیف منفی‌ای میان بررسی و افزودن Commit نمی‌شود. بدون آن، چنین
+ردیفی زیر Constraint `NOT VALID` می‌ماند و PostgreSQL آن را در **هر** UPDATE همان ردیف — هر ستونی که عوض شود —
+می‌سنجد: انتقال دارایی، گذار خسارت و Sweep انقضا روی آن می‌شکستند. نوشتن‌ها فقط برای دو شمارش و تغییر کاتالوگ صبر
+می‌کنند؛ جدول‌ها کوچک‌اند (یک ردیف به‌ازای هر بیمه‌نامه یا خسارتی که کسی از راه API ثبت کرده)، و روی PostgreSQL 16 با
+۱۰۰٬۰۰۰ ردیف در هر جدول (۳۳ و ۲۸ مگابایت) هر دو شمارش زیر این قفل ۲۵ تا ۳۱ میلی‌ثانیه طول کشید. دو فایل‌اند چون
+PostgreSQL اسکریپت چنددستوری را یک تراکنش ضمنی اجرا می‌کند؛ در یک فایل، قفل `ACCESS EXCLUSIVE` افزودن تا پایان پویش
+اعتبارسنجی نگه داشته می‌شد. **هیچ‌کدام دادهای را بازنویسی نمی‌کند:** اینکه مبلغ منفی در اصل چه
 بوده (علامت جاافتاده، ردیف آزمایشی، …) تصمیم اپراتور است، نه Migration. پیام خطا فقط شمارش هر ستون را
 می‌دهد، نه شناسه و نه مبلغ.
 
@@ -431,9 +437,11 @@ pnpm --filter @rasta/asset-service db:migrate
 #### ب) اعتبارسنجی رد کرد
 
 نشانه: `P3018` روی `20261005120100_insurance_money_non_negative_validate` با همان پیام و
-`… refusing to validate the non-negative CHECK constraints`. یعنی ردیف منفی‌ای میان بررسی Migration اول و
-افزودن Constraintهایش Commit شده است. Constraintها `NOT VALID` می‌مانند: **هر نوشتن منفی تازه از همین حالا
-رد می‌شود**؛ فقط ردیف‌های قدیمی هنوز سنجیده نشده‌اند. گام‌های ۱ و ۲ از «الف»، سپس:
+`… refusing to validate the non-negative CHECK constraints`. زنجیرهٔ Migrationها به این حالت نمی‌رسد (بررسی و افزودن
+زیر یک قفل‌اند)؛ فقط Constraintهایی که دستی حذف و دوباره `NOT VALID` افزوده شده باشند. Constraintها `NOT VALID`
+می‌مانند: **هر نوشتن منفی تازه رد می‌شود**، و هر UPDATE ردیفِ منفی هم — سرویس آن را با `422` بسته
+(`STORED_INSURANCE_AMOUNT_INVALID` فقط در Log) پاسخ می‌دهد و Sweep انقضا آن بیمه‌نامه را رد می‌شود و گزارش می‌کند
+(`rasta_asset_policies_expiry_held`). گام‌های ۱ و ۲ از «الف»، سپس:
 
 ```bash
 $PRISMA migrate resolve --rolled-back 20261005120100_insurance_money_non_negative_validate
@@ -454,7 +462,9 @@ SELECT conname, convalidated FROM pg_constraint WHERE conname LIKE 'ck\_%\_non\_
 مبلغ منفی را می‌پذیرد و فقط API آن را رد می‌کند.
 
 هر دو رد، پیام‌ها، دست‌نخوردن داده، و بازیابی تا Constraint معتبر در `pnpm test:migration` اجرا می‌شوند
-(`ASSET_DATA_ROLLBACK`، `scripts/verify-migration-reversible-lib.mjs`).
+(`ASSET_DATA_ROLLBACK`، `scripts/verify-migration-reversible-lib.mjs`)؛ نوشتنِ هم‌زمان با بررسی — با قفل رد می‌شود، بی
+قفل زیر `NOT VALID` می‌ماند — و پاسخ هر سه مسیر به ردیف منفیِ ذخیره‌شده در
+`services/asset-service/test/insurance-money-stored.int-spec.ts`.
 
 ---
 

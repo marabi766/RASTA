@@ -492,12 +492,14 @@ const NEGATIVE_REFUSED_BY = (constraint, statement) => `
  * The migrations exist to refuse what an empty schema cannot hold: a negative
  * amount already stored. So: both migrations rolled back, negative rows
  * written, and the add migration must refuse — naming counts, changing nothing
- * — until an operator corrects the rows. Then the race the second migration's
- * check is there for: a negative row committed between the first migration's
- * check and its ALTERs sits under a NOT VALID constraint, and the validation
- * must refuse in words, not as a raw check violation, and leave the
- * constraints NOT VALID. Last, the runtime shape: NULL and zero accepted, each
- * negative refused by its own constraint.
+ * — until an operator corrects the rows. Then the state the second migration's
+ * check is there for: a NOT VALID constraint over a negative row. The shipped
+ * chain cannot reach it — the first migration checks and adds under one lock
+ * (#222 r1; the race itself is run in asset-service's
+ * insurance-money-stored.int-spec.ts) — but constraints re-added by hand can,
+ * and the validation must refuse in words, not as a raw check violation, and
+ * leave the constraints NOT VALID. Last, the runtime shape: NULL and zero
+ * accepted, each negative refused by its own constraint.
  */
 export const ASSET_DATA_ROLLBACK = {
   migration: MONEY_ADD,
@@ -558,10 +560,9 @@ export const ASSET_DATA_ROLLBACK = {
     },
     { label: '(and they are NOT VALID)', sql: MONEY_CONSTRAINTS_ARE(false) },
     {
-      // The state the race leaves: a NOT VALID constraint over a row it never
-      // checked. Reproduced by re-adding the constraints NOT VALID over the rows.
-      label:
-        'the race: negative rows committed between the first check and its ALTERs, under NOT VALID constraints',
+      // A NOT VALID constraint over a row it never checked — reached by hand,
+      // since the first migration's lock closes the race (#222 r1).
+      label: 'by hand: negative rows under constraints re-added NOT VALID',
       sql: `
         ALTER TABLE "insurance_policy" DROP CONSTRAINT "ck_policy_premium_non_negative",
                                        DROP CONSTRAINT "ck_policy_insured_value_non_negative";

@@ -14,17 +14,28 @@
 -- amount from its producers, and whether a producer may report a negative cost
 -- is an open owner decision, not this migration's.
 --
--- Two steps, so no lock that blocks writes is held for a full table scan:
+-- The check and the ALTERs run under one lock, so nothing can slip between
+-- them (#222 r1). LOCK TABLE … IN SHARE ROW EXCLUSIVE MODE — both tables in one
+-- statement, always in this order — lets reads continue and makes every
+-- INSERT, UPDATE and DELETE on them wait until this migration commits. Without
+-- it, a negative amount committed between the check and the ALTERs would sit
+-- under NOT VALID constraints the validation then refuses, and PostgreSQL
+-- checks a NOT VALID constraint on every later UPDATE of that row, whichever
+-- column the UPDATE sets: the transfer, the claim review and the expiry sweep
+-- would each fail on it.
 --
---   1. this migration adds each constraint NOT VALID — a catalogue change that
---      takes the table's exclusive lock for milliseconds (lock_timeout bounds
---      the wait) and from then on refuses every new negative write;
---   2. 20261005120100_insurance_money_non_negative_validate validates them,
---      which scans under SHARE UPDATE EXCLUSIVE: reads and writes continue.
+-- Writes wait only for the check's two counts and the catalogue changes. The
+-- tables are small: one row per policy or claim a person recorded through the
+-- API, nothing generated. Measured on PostgreSQL 16 with 100 000 rows in each
+-- (33 MB and 28 MB, far beyond any deployment's), both counts took 25–31 ms
+-- warm under this lock. The ALTERs then take ACCESS EXCLUSIVE for
+-- milliseconds, blocking reads too. lock_timeout bounds the wait for either
+-- lock; a run that times out changes nothing and is simply deployed again.
 --
--- Separate files because PostgreSQL runs a multi-statement script as one
--- implicit transaction: in one file, the exclusive lock taken here would be
--- held through the scan.
+-- The validation is a second file because PostgreSQL runs a multi-statement
+-- script as one implicit transaction: here, the ACCESS EXCLUSIVE lock the ALTERs
+-- take would be held through its scan. There it scans under SHARE UPDATE
+-- EXCLUSIVE, which blocks neither reads nor writes.
 --
 -- A negative amount already stored is refused here, before anything changes,
 -- and never rewritten: which amount was meant — the sign dropped, a credit
@@ -34,6 +45,8 @@
 -- docs/runbooks/database-bootstrap.md#asset-insurance-money-non-negative
 -- =============================================================================
 SET LOCAL lock_timeout = '3s';
+
+LOCK TABLE "insurance_policy", "insurance_claim" IN SHARE ROW EXCLUSIVE MODE;
 
 DO $$
 DECLARE
