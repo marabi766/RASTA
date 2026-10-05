@@ -305,6 +305,8 @@ export function RecordPartForm(identity: RepairIdentity) {
           <Field label="منبع قطعه" required error={errors.source}>
             {(control) => (
               <select
+                // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+                key={values.source}
                 {...control}
                 name="source"
                 defaultValue={values.source}
@@ -470,6 +472,8 @@ export function RecordCostForm(identity: RepairIdentity) {
           <Field label="نوع هزینه" required error={errors.category}>
             {(control) => (
               <select
+                // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+                key={values.category}
                 {...control}
                 name="category"
                 defaultValue={values.category}
