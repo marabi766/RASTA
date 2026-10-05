@@ -156,6 +156,21 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- supplier-service -----------------------------------------------------
+    // The tender scenario's contractors are qualified (and one suspended) there,
+    // and construction-service asks it, live and failing closed, whether a
+    // contractor may bid and whether the winner may be awarded (CON-002).
+    await waitFor(
+      `supplier-service to be ready at ${config.supplierUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.supplierUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,
