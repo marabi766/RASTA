@@ -397,6 +397,280 @@ describe('declaring availability under an Idempotency-Key', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Review #225 round 1, findings 3 and 4
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Holds the asset's lock, as every writer takes it, until released — the
+   * deterministic race of the other fleet specs: the contenders queue behind it,
+   * the test waits until PostgreSQL reports them blocked, and only then lets go.
+   */
+  async function holdAssetLock(assetId: string) {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => (locked = resolve));
+
+    const done = prisma.client.$transaction(
+      async (tx) => {
+        await repository.lockAssetRef(tx as never, assetId);
+        locked();
+        await released;
+      },
+      { timeout: 30_000 },
+    );
+
+    await isLocked;
+    return async () => {
+      release();
+      await done;
+    };
+  }
+
+  async function waitForBlocked(n: number) {
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const found = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+      );
+      if (found[0]!.n >= n) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`fewer than ${n} sessions ever blocked`);
+  }
+
+  const liveRows = async (assetId: string, organizationId?: string) =>
+    (
+      await prisma.client.$queryRawUnsafe<{ id: string; organization_id: string }[]>(
+        `SELECT id, organization_id FROM availability_window
+         WHERE asset_id = $1 AND revoked_at IS NULL ${organizationId ? 'AND organization_id = $2' : ''}
+         ORDER BY id`,
+        ...(organizationId ? [assetId, organizationId] : [assetId]),
+      )
+    ).map((row) => row.id);
+
+  describe('two managers declaring on one machine at once', () => {
+    it('are serialised on the machine: both queue on its lock before either runs, then exactly one window is live', async () => {
+      const assetId = await machine();
+
+      const release = await holdAssetLock(assetId);
+      // Started before the lock is let go, so what is observed below is two
+      // declarations stuck behind it — without the lock they would not be.
+      const unavailable = declare(body(assetId, { available: false }), key()).then(
+        (answer) => answer,
+      );
+      const available = declare(
+        body(assetId, { available: true, reason: 'آزاد برای پروژه' }),
+        key(),
+      ).then((answer) => answer);
+      // Released even when the observation fails, so a missing lock fails this
+      // test instead of leaving the holder open.
+      try {
+        await waitForBlocked(2);
+        expect(await rows(assetId)).toEqual([]);
+      } finally {
+        await release();
+      }
+
+      const answers = await Promise.all([unavailable, available]);
+
+      expect(answers.map((answer) => answer.status)).toEqual([201, 201]);
+      const all = await rows(assetId);
+      expect(all).toHaveLength(2);
+      // The later of the two superseded the earlier; the composed answer does not
+      // depend on row order.
+      expect(all.filter((row) => !row.revoked)).toHaveLength(1);
+      expect(await liveRows(assetId)).toHaveLength(1);
+    });
+
+    it('cannot be bypassed by a writer that skips the service: the database refuses a second live window', async () => {
+      const assetId = await machine();
+      const first = await declare(body(assetId), key());
+      expect(first.status).toBe(201);
+
+      await expect(
+        prisma.client.$executeRawUnsafe(
+          `INSERT INTO availability_window
+             (id, organization_id, asset_id, available, from_at, reason, created_by)
+           VALUES ($1, $2, $3, true, now(), 'ITEST', 'ITEST')`,
+          id('AVW'),
+          org.a,
+          assetId,
+        ),
+      ).rejects.toThrow(/23505/);
+
+      // A revoked window does not count, so a person's later declaration still works.
+      await revoke(first.body.id);
+      expect((await declare(body(assetId), key())).status).toBe(201);
+      expect(await liveRows(assetId)).toHaveLength(1);
+    });
+  });
+
+  describe('a declaration while the machine changes hands', () => {
+    const consumer = () => new AssetSyncConsumer(null, repository);
+
+    const transferEnvelope = (assetId: string, transferredAt: Date, to = org.b): EventEnvelope => ({
+      eventId: id('EVT'),
+      eventName: 'ASSET_TRANSFERRED',
+      eventVersion: 1,
+      occurredAt: new Date().toISOString(),
+      producer: 'asset-service',
+      producerVersion: '0.1.0',
+      aggregateType: 'Asset',
+      aggregateId: assetId,
+      tenantId: to,
+      correlationId: id('COR'),
+      payload: {
+        assetId,
+        fromOrganizationId: org.a,
+        toOrganizationId: to,
+        reason: 'واگذاری',
+        referenceNo: null,
+        transferredAt: transferredAt.toISOString(),
+      },
+    });
+
+    const windowRow = async (windowId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<
+          {
+            organization_id: string;
+            revoked_at: Date | null;
+            revoked_by: string | null;
+            revoke_reason: string | null;
+          }[]
+        >(
+          `SELECT organization_id, revoked_at, revoked_by, revoke_reason
+           FROM availability_window WHERE id = $1`,
+          windowId,
+        )
+      )[0]!;
+
+    const withdrawals = (windowId: string) =>
+      prisma.client.outboxMessage.findMany({
+        where: { aggregateId: windowId, eventName: 'AVAILABILITY_CHANGED' },
+        orderBy: { createdAt: 'asc' },
+      });
+
+    it('revokes what the previous owner declared in the lag, as the system, with its reason, and says so', async () => {
+      const assetId = await machine(org.a);
+      // The transfer took effect a moment ago; fleet has not heard yet, so the
+      // replica still names the previous owner and the declaration is accepted.
+      const effective = new Date(Date.now() - 2_000);
+      const lagged = await declare(body(assetId), key());
+      expect(lagged.status).toBe(201);
+      const event = transferEnvelope(assetId, effective);
+
+      await consumer().handle(event);
+
+      const row = await windowRow(lagged.body.id);
+      expect(row.revoked_at).not.toBeNull();
+      expect(row.revoked_by).toBe('SYSTEM');
+      expect(row.revoke_reason).toBe('ASSET_TRANSFERRED');
+      expect(await liveRows(assetId)).toEqual([]);
+      // Published under the tenant that declared it, caused by the transfer —
+      // never under the new owner's, who must not learn the old owner's windows.
+      const published = await withdrawals(lagged.body.id);
+      expect(published).toHaveLength(2);
+      const withdrawn = published[1]!;
+      expect(withdrawn.organizationId).toBe(org.a);
+      expect(withdrawn.payload).toMatchObject({
+        tenantId: org.a,
+        causationId: event.eventId,
+        correlationId: event.correlationId,
+        actor: { type: 'SERVICE', id: 'fleet-service' },
+        payload: { assetId, organizationId: org.a, available: true },
+      });
+    });
+
+    it('leaves a window declared before the transfer took effect: it was true when made and is the previous owner’s history', async () => {
+      const assetId = await machine(org.a);
+      const earlier = await declare(body(assetId), key());
+
+      await consumer().handle(transferEnvelope(assetId, new Date(Date.now() + 60_000)));
+
+      expect((await windowRow(earlier.body.id)).revoked_at).toBeNull();
+      // The new owner never sees it: every read is its own tenant's.
+      const asNewOwner = await windows(assetId, '', { org: org.b });
+      expect(asNewOwner.status).toBe(200);
+      expect(asNewOwner.body.items).toEqual([]);
+    });
+
+    it('refuses the previous owner from the moment the transfer is applied — a new declaration and a replay alike, 404 exactly as a missing machine', async () => {
+      const assetId = await machine(org.a);
+      const k = key();
+      const stored = await declare(body(assetId), k);
+      expect(stored.status).toBe(201);
+
+      await consumer().handle(transferEnvelope(assetId, new Date(Date.now() - 2_000)));
+      const eventsBefore = await eventCount(assetId);
+
+      const fresh = await declare(body(assetId), key());
+      const replay = await declare(body(assetId), k);
+      const missing = await declare(body(`AST_${ulid()}`), key());
+
+      for (const answer of [fresh, replay, missing]) {
+        expect(answer.status).toBe(404);
+        expect(answer.body.code).toBe('NOT_FOUND');
+      }
+      expect(shape(replay).fields).toEqual(shape(missing).fields);
+      expect(JSON.stringify(replay.body)).not.toContain(stored.body.id);
+      expect(await eventCount(assetId)).toBe(eventsBefore);
+
+      // And the new owner declares on its machine, with a window of its own.
+      const own = await declare(body(assetId), key(), { org: org.b });
+      expect(own.status).toBe(201);
+      expect(await liveRows(assetId, org.b)).toEqual([own.body.id]);
+      expect(await liveRows(assetId, org.a)).toEqual([]);
+    });
+
+    it.each([
+      ['the declaration queues first', 'declaration'],
+      ['the transfer queues first', 'transfer'],
+    ])(
+      'leaves the previous owner no live window whichever the lock grants first: %s',
+      async (_label, first) => {
+        const assetId = await machine(org.a);
+        const effective = new Date(Date.now() - 2_000);
+
+        const release = await holdAssetLock(assetId);
+        const declaration = () => declare(body(assetId), key()).then((answer) => answer);
+        const transfer = () => consumer().handle(transferEnvelope(assetId, effective));
+
+        let declared: ReturnType<typeof declaration>;
+        let applied: ReturnType<typeof transfer>;
+        try {
+          if (first === 'declaration') {
+            declared = declaration();
+            await waitForBlocked(1);
+            applied = transfer();
+          } else {
+            applied = transfer();
+            await waitForBlocked(1);
+            declared = declaration();
+          }
+          await waitForBlocked(2);
+        } finally {
+          await release();
+        }
+
+        const [answer] = await Promise.all([declared, applied]);
+
+        // Declaration first: it committed against the old owner and the transfer
+        // then revoked it. Transfer first: the declaration found the machine
+        // another organization's and was refused. Never a live window left behind.
+        expect(answer.status).toBe(first === 'declaration' ? 201 : 404);
+        expect(await liveRows(assetId, org.a)).toEqual([]);
+        if (first === 'declaration') {
+          expect((await windowRow(answer.body.id)).revoke_reason).toBe('ASSET_TRANSFERRED');
+        } else {
+          expect(await rows(assetId)).toEqual([]);
+        }
+      },
+    );
+  });
+
   it('checks the role before any replay: a caller who may not declare gets 403, never the stored window', async () => {
     const assetId = await machine();
     const k = key();

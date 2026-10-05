@@ -649,6 +649,59 @@ export class FleetRepository {
     });
   }
 
+  /**
+   * Revokes the live windows an organization declared on a machine that has
+   * since left it (review #225 round 1, finding 4), and returns what it
+   * revoked so the caller can publish each withdrawal.
+   *
+   * `since` is the transfer's effective time: only windows declared at or after
+   * it are revoked, which are the ones declared in the lag between asset-service
+   * committing the transfer and this service learning of it. `null` revokes
+   * every live window of that organization on the machine, for a transfer
+   * discovered from the owner's snapshot with no event time to compare.
+   *
+   * Unscoped, keyed by asset and the previous owner: the consumer's context
+   * carries the new owner's tenant, and the rows belong to the old one. Guarded
+   * on `revoked_at IS NULL` so a person's concurrent revoke is left alone and
+   * not returned. Must be called after {@link lockAssetRef} in the same
+   * transaction.
+   */
+  async revokeWindowsAfterTransfer(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    previousOrganizationId: string,
+    since: Date | null,
+    revokedAt: Date,
+    revokedBy: string,
+    reason: 'ASSET_TRANSFERRED',
+  ) {
+    return runUnscoped(
+      "windows declared by the previous owner after a transfer are revoked whoever's context runs the consumer",
+      async () => {
+        const live = await tx.availabilityWindow.findMany({
+          where: {
+            assetId,
+            organizationId: previousOrganizationId,
+            revokedAt: null,
+            ...(since ? { createdAt: { gte: since } } : {}),
+          },
+          orderBy: { id: 'asc' },
+        });
+
+        const revoked: typeof live = [];
+        for (const window of live) {
+          const result = await tx.availabilityWindow.updateMany({
+            where: { id: window.id, revokedAt: null },
+            data: { revokedAt, revokedBy, revokeReason: reason },
+          });
+          if (result.count === 1)
+            revoked.push({ ...window, revokedAt, revokedBy, revokeReason: reason });
+        }
+        return revoked;
+      },
+    );
+  }
+
   async listAssetRefs(organizationId: string, query: AvailabilityQuery) {
     // AssetRef is platform-wide replica data: it has no request context when
     // written by the consumer, and it is not in TENANT_SCOPED_MODELS. The

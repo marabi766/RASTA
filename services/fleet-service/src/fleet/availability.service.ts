@@ -144,11 +144,25 @@ export class AvailabilityService {
       // whose claim lapsed and was re-taken by a retry commits nothing.
       if (fence) await fence.hold(tx);
 
+      // One declaration at a time per machine, and the machine's owner read
+      // under the same lock. The lock is the one the asset-sync consumer takes
+      // to apply a transfer, so a declaration either commits before the
+      // transfer is applied (and is then revoked by it) or finds the machine
+      // already another organization's and is refused like any foreign machine.
+      // Without it, two declarations with different keys each saw no live
+      // window to supersede and each created one (review #225 round 1).
+      await this.repository.lockAssetRef(tx, dto.assetId);
+      const asset = await this.repository.findAssetRef(dto.assetId, tx);
+      if (!asset || asset.organizationId !== organizationId) {
+        throw RastaError.notFound('Asset', dto.assetId);
+      }
+
       // A new declaration supersedes the previous one for the same machine
       // rather than stacking with it: two open-ended windows saying opposite
-      // things would make the composed answer depend on row order.
+      // things would make the composed answer depend on row order. The partial
+      // unique index `ux_availability_window_live` holds this at the database.
       await tx.availabilityWindow.updateMany({
-        where: { assetId: dto.assetId, revokedAt: null },
+        where: { organizationId, assetId: dto.assetId, revokedAt: null },
         data: { revokedAt: new Date(), revokedBy: actor },
       });
 

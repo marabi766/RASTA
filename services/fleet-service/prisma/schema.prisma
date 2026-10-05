@@ -325,6 +325,14 @@ model AvailabilityWindow {
   /// March?" is a question the fleet manager will be asked.
   revokedAt DateTime? @map("revoked_at")
   revokedBy String?   @map("revoked_by")
+  /// Why the system revoked a window nobody revoked by hand (`ASSET_TRANSFERRED`:
+  /// the machine left this organization). NULL for a person's revoke or supersession.
+  revokeReason String? @map("revoke_reason")
+
+  // One LIVE window (`revoked_at IS NULL`) per machine and organization is a
+  // partial unique index, `ux_availability_window_live`, which Prisma cannot
+  // express: it lives in migration 20261005130000_availability_window_one_live.
+  // A `migrate dev` diff may propose dropping it — delete that statement.
 
   @@index([organizationId, assetId, fromAt])
   @@index([organizationId, revokedAt, toAt])

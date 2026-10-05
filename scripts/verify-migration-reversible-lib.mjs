@@ -1974,6 +1974,9 @@ export const EXPECTED = {
       'ck_outbox_next_attempt_requires_failure',
       'ck_outbox_published_is_clean',
     ],
+    // Added by 20261005130000_availability_window_one_live (review #225 r1):
+    // one live window per machine, a partial index only the migration holds.
+    indexes: ['ux_availability_window_live'],
   },
   maintenance: {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
