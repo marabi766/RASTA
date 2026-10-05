@@ -13,9 +13,10 @@ import { openSession, sessionSecondsLeft } from './session';
  *      is refused 401;
  *   2. a declared `Content-Length` above `WEB_REQUEST_MAX_BYTES` (1 MiB by
  *      default) is refused 413 for every path **except** the asset page, the
- *      one page whose action takes a document. A body with no declared length
- *      (chunked) on any other path is refused 411: otherwise the ceiling would
- *      be a header an attacker leaves out.
+ *      one page whose action takes a document. A `POST`/`PUT`/`PATCH` with no
+ *      declared length — chunked, or (HTTP/2) neither header at all — on any
+ *      other path is refused 411: otherwise the ceiling would be a header an
+ *      attacker leaves out.
  *
  * Not a defence against an authenticated person sending a large body to the
  * asset page, nor a rate limit — both stay open and ADR-069 says so.
@@ -71,6 +72,13 @@ export interface GateInput {
 export type GateRefusal = { status: 401 | 411 | 413; code: string };
 
 const BODYLESS = new Set(['GET', 'HEAD', 'OPTIONS']);
+/**
+ * Methods whose body is read, and so whose length must be declared. Over
+ * HTTP/2 a body is a run of DATA frames and `Content-Length` is optional, so a
+ * client can send a large one with neither `Content-Length` nor
+ * `Transfer-Encoding` — a request the 413 and the chunked 411 below never see.
+ */
+const LENGTH_REQUIRED = new Set(['POST', 'PUT', 'PATCH']);
 
 export function refuseBeforeBody(input: GateInput): GateRefusal | null {
   const method = input.method.toUpperCase();
@@ -82,7 +90,7 @@ export function refuseBeforeBody(input: GateInput): GateRefusal | null {
       if (!Number.isFinite(length) || length > requestMaxBytes(input.maxBytesRaw)) {
         return { status: 413, code: 'BODY_TOO_LARGE' };
       }
-    } else if (input.headers.get('transfer-encoding') !== null) {
+    } else if (LENGTH_REQUIRED.has(method) || input.headers.get('transfer-encoding') !== null) {
       return { status: 411, code: 'LENGTH_REQUIRED' };
     }
   }

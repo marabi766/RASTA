@@ -109,6 +109,19 @@ describe('the body ceiling, for every path but the document page', () => {
     });
   });
 
+  it('refuses a POST, PUT or PATCH with neither Content-Length nor Transfer-Encoding: 411 (HTTP/2 DATA frames)', () => {
+    for (const method of ['POST', 'PUT', 'PATCH']) {
+      expect(gate({ method, headers: {} })).toEqual({ status: 411, code: 'LENGTH_REQUIRED' });
+      // The action POST too: a missing length is refused before the session is looked at.
+      expect(gate({ method, headers: { 'next-action': 'x' } })?.status).toBe(411);
+    }
+    // A declared zero is a length; a bodyless method needs none; the asset page is exempt.
+    expect(gate({ headers: { 'content-length': '0' } })).toBeNull();
+    expect(gate({ method: 'GET', headers: {} })).toBeNull();
+    expect(gate({ method: 'DELETE', headers: {} })).toBeNull();
+    expect(gate({ pathname: '/assets/9f1c', headers: {} })).toBeNull();
+  });
+
   it('applies to an action POST as well, ahead of the session check', () => {
     expect(
       gate({
