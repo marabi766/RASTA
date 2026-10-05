@@ -1,0 +1,160 @@
+// contract-service — the contract boundary (CON-003, ADR-068, docs/04 § 4.13).
+// This first change holds the draft contract a tender award creates; amendments,
+// milestones, statements, the separate technical and financial approvals and the
+// settlement boundary are later changes (ADR-068 § 9).
+//
+// Everything here is owned by this service alone (AGENTS.md A-01). There is no
+// foreign key into another service's database: `organizationId` (the employer),
+// `tenderId`, `projectId`, `winningBidId` and `contractorOrganizationId` are plain
+// external identifiers whose authority is the owner of each.
+//
+// ## Money never lives here as a number of anything but minor units
+//
+// `amount_minor` is a bigint of rial minor units (AGENTS.md § 3), read from the
+// owner of the award — never from an event (`TENDER_AWARDED` carries no amount).
+// This service holds no wallet, no ledger entry and no balance (ADR-068 § 6).
+//
+// ## Tenant isolation is in the keys, not only in the guard
+//
+// `organization_id` — the employer's, the tenant of the contract — leads every
+// index but one. The exception is the contractor's own view (`ix_contract_contractor`):
+// the winning contractor reads its contract across the tenant boundary, with its own
+// organization in the predicate (ADR-068 § 7), so that index leads with it.
+//
+// Every instant is `timestamptz(3)` from the first migration (D-048): raw SQL
+// (`now()`, a default, a trigger) can never store a session's wall clock here.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Contract
+// ---------------------------------------------------------------------------
+
+/// The contract lifecycle (`src/contract/contract.state-machine.ts`, ADR-068 § 2).
+/// The whole lifecycle is declared now (adding a value to a PostgreSQL enum cannot
+/// be reversed); this change reaches DRAFT only.
+enum ContractStatus {
+  DRAFT
+  SIGNED
+  COMPLETED
+  SETTLED
+  CANCELLED
+}
+
+/// A contract — the aggregate root of this service (docs/03 § 3.3). One per awarded
+/// tender, made from `TENDER_AWARDED` by the consumer (ADR-068 § 3) and by nothing
+/// else: no user creates a contract (Q-95 (3)).
+model Contract {
+  id String @id
+
+  /// The employer: the tender's owner, the tenant of the contract.
+  organizationId String @map("organization_id")
+
+  tenderId                 String @map("tender_id")
+  projectId                String @map("project_id")
+  winningBidId             String @map("winning_bid_id")
+  /// The winning contractor. Read across the tenant boundary with its own
+  /// organization in the predicate, and nowhere else.
+  contractorOrganizationId String @map("contractor_organization_id")
+
+  /// The winner's price in rial minor units, as the owner of the award states it
+  /// (Q-95 (5): the award's amount, with no adjustment).
+  amountMinor BigInt @map("amount_minor")
+
+  /// SHA-256 (hex) of the frozen evaluation matrix the award was made against, as the
+  /// owner of the award states it: ties the draft to the decision it came from.
+  matrixDigest String @map("matrix_digest")
+
+  /// Who awarded and when, as the owner of the award states it.
+  awardedBy String   @map("awarded_by")
+  awardedAt DateTime @map("awarded_at") @db.Timestamptz(3)
+
+  status          ContractStatus @default(DRAFT)
+  statusChangedAt DateTime       @map("status_changed_at") @db.Timestamptz(3)
+  statusChangedBy String         @map("status_changed_by")
+
+  /// The `TENDER_AWARDED` event this draft was made from (causation).
+  sourceEventId String @map("source_event_id")
+
+  createdAt            DateTime @map("created_at") @db.Timestamptz(3)
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+  updatedAt            DateTime @map("updated_at") @db.Timestamptz(3)
+
+  /// The compare-and-set token. Every change matches on it and increments it.
+  version Int @default(1)
+
+  // The idempotency key of the consumer: one contract per awarded tender.
+  @@unique([organizationId, tenderId], map: "ux_contract_org_tender")
+  // The composite target of every later child's tenant-bound foreign key, and the
+  // index every tenant-scoped id lookup uses.
+  @@unique([organizationId, id], map: "ux_contract_org_id")
+  @@index([organizationId, status, id], map: "ix_contract_org_status")
+  // The contractor's own contracts (ADR-068 § 7): not led by organization_id, on purpose.
+  @@index([contractorOrganizationId, id], map: "ix_contract_contractor")
+  @@map("contract")
+}
+
+// ---------------------------------------------------------------------------
+// Platform plumbing — identical in shape to every other service's
+// ---------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  /// `contractId` for every event this service publishes (docs/07 § 7.7).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  publishedAt DateTime? @map("published_at") @db.Timestamptz(3)
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  /// ADR-050 durable claim. `claimToken` is the only fence.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz(3)
+  claimCount     Int       @default(0) @map("claim_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at") @db.Timestamptz(3)
+
+  /// ADR-051 B3: allocated by `EventPublisher.enqueue` inside the caller's
+  /// transaction. `isStreamHead` stays false: head maintenance is B4.
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// ADR-051 — one row per ordered stream (`topic + partitionKey`).
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  nextSeq      BigInt @default(1) @map("next_seq")
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
+}

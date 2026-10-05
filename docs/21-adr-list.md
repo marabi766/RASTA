@@ -73,11 +73,13 @@
 | [059](adr/ADR-059-web-session-and-token-custody.md)                         | نگهداشت توکن در پورتال — نشست سمت سرور              | **Accepted**                          | توکن هرگز در مرورگر نیست؛ انحراف ثبت‌شده از `docs/16 § ۱۶٫۱` |
 | [060](adr/ADR-060-tenant-bound-roles.md)                                    | نقش به سازمان گره می‌خورد، نه به کاربر              | **Accepted** — implementation pending | بستن نقش‌های سراسری Realm؛ Q-63                              |
 | [061](adr/ADR-061-event-provenance.md)                                      | منشأ رویداد: ادعای ناشر، نه واقعیت                  | **Accepted**                          | مالک Topic، SASL/ACL؛ L2-03، L3-01، L4-01                    |
+| [062](adr/ADR-062-asset-transfer-clearance.md)                              | انتقال دارایی با تأیید مالکان کار باز؛ حصار انتقال  | **Proposed**                          | D-033؛ Q-74؛ #127                                            |
 | [063](adr/ADR-063-construction-lifecycles-and-approval-policy-ownership.md) | چرخهٔ CON-001 بی Temporal، مالکیت `approval_policy` | **Proposed**                          | CON-001؛ رابطه با `organization_policy`؛ Q-68 تا Q-73        |
 | [064](adr/ADR-064-payment-reconciliation.md)                                | آشتی پایدار پرداخت؛ اصلاح `getStatus` در ADR-024    | **Proposed**                          | D-035؛ R2 و U6 (گام B0، #143)؛ Q-81، Q-82                    |
 | [065](adr/ADR-065-tender-lifecycle-and-deadline-authority.md)               | چرخهٔ مناقصه/پیشنهاد و مرجع مهلت                    | **Proposed**                          | CON-002؛ Q-84، Q-85؛ D-044                                   |
 | [066](adr/ADR-066-bid-confidentiality.md)                                   | محرمانگی پیشنهاد: برنامه‌ای و افشاگر دستکاری        | **Proposed**                          | CON-002؛ Q-87؛ D-043                                         |
 | [067](adr/ADR-067-tender-evaluation-and-conflict-of-interest.md)            | ارزیابی از پیکربندی، برنده، تعارض منافع             | **Proposed**                          | CON-002؛ Q-88 تا Q-90                                        |
+| [068](adr/ADR-068-contract-lifecycle-and-boundary.md)                       | چرخهٔ قرارداد و مرز `contract-service`              | **Proposed**                          | CON-003؛ Q-95 تا Q-97                                        |
 | [069](adr/ADR-069-portal-relays-document-uploads.md)                        | بارگذاری مدرک از سرور پورتال؛ نه مرورگر             | **Proposed**                          | EXP-002 برش ۷؛ ADR-014؛ Q-98                                 |
 
 ---

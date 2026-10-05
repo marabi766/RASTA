@@ -1824,6 +1824,45 @@ export const EXPECTED = {
       'ck_outbox_published_is_clean',
     ],
   },
+  /**
+   * contract-service (CON-003 PR 1, ADR-068). One initial migration that folds the
+   * domain schema and the outbox together, as supplier's and construction's do, so its
+   * outbox objects are verified here rather than by the by-name outbox verifiers
+   * (`verify-outbox-claim-migration.mjs` lists it as folded).
+   *
+   * The domain objects listed are the ones carrying a claim a reader would otherwise
+   * take on trust: the price is positive, the parties are two organizations, and what a
+   * contract was made from never changes and the contract is never erased.
+   */
+  contract: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is
+    // created — and migrated — as the migrator, which owns rasta_contract.
+    connectAs: 'migrator',
+    tables: ['contract', 'outbox_message', 'outbox_stream_sequence'],
+    types: ['ContractStatus'],
+    triggers: ['tg_contract_guard', 'tg_contract_no_truncate'],
+    functions: ['contract_guard'],
+    indexes: [
+      'ux_contract_org_tender',
+      'ux_contract_org_id',
+      'ix_contract_org_status',
+      'ix_contract_contractor',
+    ],
+    constraints: [
+      'ck_contract_text_not_blank',
+      'ck_contract_amount_positive',
+      'ck_contract_parties_distinct',
+      'ck_contract_matrix_digest',
+      'ck_contract_actor_recorded',
+      'ck_contract_version_positive',
+      'ck_contract_timestamps_ordered',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
   /*
    * The five services whose initial migration had no down.sql until the
    * platform-safety pass (lane 6), so the whole-chain check could not reach

@@ -368,6 +368,7 @@ export class AwardService {
               kind: 'AWARDED',
               view: {
                 tenderId,
+                projectId: tender.projectId,
                 status: 'AWARDED',
                 bidId: winner.id,
                 bidderOrganizationId: winner.bidderOrganizationId,
@@ -444,7 +445,7 @@ export class AwardService {
             outcome: 'GRANTED',
             at,
           });
-          return awardView(row, true);
+          return awardView(row, tender.projectId, true);
         });
       },
       'READ_AWARD',
@@ -510,7 +511,7 @@ export class AwardService {
           internalContext: { resourceType: 'TenderAward', refusals: ['ALREADY_AWARDED'] },
         });
       }
-      return { replay: awardView(recorded, true) };
+      return { replay: awardView(recorded, tender.projectId, true) };
     }
 
     if (tender.status !== 'EVALUATED' || tender.evaluatedAt === null) {
@@ -732,9 +733,10 @@ export class AwardService {
   }
 }
 
-function awardView(row: TenderAward, alreadyAwarded: boolean): TenderAwardView {
+function awardView(row: TenderAward, projectId: string, alreadyAwarded: boolean): TenderAwardView {
   return {
     tenderId: row.tenderId,
+    projectId,
     status: 'AWARDED',
     bidId: row.bidId,
     bidderOrganizationId: row.bidderOrganizationId,

@@ -339,7 +339,7 @@ test('kafka-credentials.sh hands out exactly each scope, each from its own direc
       'ops-replay',
       'admin',
       'kafka-ui',
-      'contract-service',
+      'unregistered-service',
     ]) {
       const result = run(both, 'service', refused);
       assert.notEqual(result.status, 0, refused);

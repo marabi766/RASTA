@@ -275,10 +275,16 @@ describe('award API', () => {
 
     await asAdmin(owner, () => awardApproved(w, tenderId, { bidId: bids[0]!.bidId }));
 
+    const storedProjectId = (
+      await runUnscoped('the suite reads the tender', () =>
+        w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
+      )
+    ).projectId;
     const read = await get(orgAdmin(owner));
     expect(read.status).toBe(200);
     expect(read.body).toMatchObject({
       tenderId,
+      projectId: storedProjectId,
       status: 'AWARDED',
       bidId: bids[0]!.bidId,
       amountMinor: '1000',
@@ -289,7 +295,11 @@ describe('award API', () => {
     // contract-service, with a token signed for the owner's organization.
     const viaService = await service('contract-service', owner);
     expect(viaService.status).toBe(200);
-    expect(viaService.body).toMatchObject({ bidId: bids[0]!.bidId, amountMinor: '1000' });
+    expect(viaService.body).toMatchObject({
+      projectId: storedProjectId,
+      bidId: bids[0]!.bidId,
+      amountMinor: '1000',
+    });
 
     // Nobody else: no token, no other service, a token for another organization, a token for none.
     expect((await get()).status).toBe(401);

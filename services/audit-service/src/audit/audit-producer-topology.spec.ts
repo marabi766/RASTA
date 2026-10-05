@@ -22,7 +22,7 @@ import { DOMAIN_TOPICS } from './audit.mapper';
  * wrong makes the silence alert watch the wrong service.
  */
 describe('audit producer topology', () => {
-  it('maps each of the twelve path-A topics to exactly its owning service', () => {
+  it('maps each of the thirteen path-A topics to exactly its owning service', () => {
     expect(AUDIT_DOMAIN_TOPIC_OWNERS.map(({ topic, owner }) => [topic, owner])).toEqual([
       ['rasta.identity.v1', 'identity-service'],
       ['rasta.organization.v1', 'organization-service'],
@@ -39,12 +39,14 @@ describe('audit producer topology', () => {
       ['rasta.notification.v1', 'notification-service'],
       // Added with CON-001: construction-service's project and need events.
       ['rasta.construction.v1', 'construction-service'],
+      // Added with CON-003 (ADR-068): contract-service's draft contract, and later the rest of its life.
+      ['rasta.contract.v1', 'contract-service'],
     ]);
   });
 
   it('is the source the subscription list is derived from, not a copy of it', () => {
     expect([...DOMAIN_TOPICS]).toEqual(AUDIT_DOMAIN_TOPIC_OWNERS.map((entry) => entry.topic));
-    expect(new Set(DOMAIN_TOPICS).size).toBe(12);
+    expect(new Set(DOMAIN_TOPICS).size).toBe(13);
     expect(DOMAIN_TOPICS).not.toContain(AUDIT_TRAIL_TOPIC);
   });
 
@@ -74,7 +76,7 @@ describe('audit producer topology', () => {
     }
   });
 
-  it('deduplicates the known producers into eleven services and the replay tool', () => {
+  it('deduplicates the known producers into twelve services and the replay tool', () => {
     expect([...AUDIT_SOURCE_SERVICES]).toEqual([
       'identity-service',
       'organization-service',
@@ -87,15 +89,16 @@ describe('audit producer topology', () => {
       'supplier-service',
       'notification-service',
       'construction-service',
+      'contract-service',
       'ops-replay',
     ]);
-    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(12);
+    expect(new Set(AUDIT_SOURCE_SERVICES).size).toBe(13);
   });
 
-  it('pins the complete metric label set: eleven services, the replay tool and one fallback', () => {
+  it('pins the complete metric label set: twelve services, the replay tool and one fallback', () => {
     expect(AUDIT_UNKNOWN_SOURCE_SERVICE).toBe('unknown');
     expect([...AUDIT_SOURCE_SERVICE_LABELS]).toEqual([...AUDIT_SOURCE_SERVICES, 'unknown']);
-    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(13);
+    expect(AUDIT_SOURCE_SERVICE_LABELS).toHaveLength(14);
     expect(isAuditSourceService(AUDIT_UNKNOWN_SOURCE_SERVICE)).toBe(false);
   });
 
@@ -121,6 +124,7 @@ describe('audit producer topology', () => {
       ['rasta.asset.v1', 'identity-service'],
       ['rasta.identity.v1', 'asset-service'],
       ['rasta.insurance.v1', 'fleet-service'],
+      ['rasta.contract.v1', 'asset-service'],
       // A trail producer claiming a domain topic it does not own.
       ['rasta.supplier.v1', 'identity-service'],
       // Arbitrary, near-miss and overlong producers.
@@ -131,7 +135,7 @@ describe('audit producer topology', () => {
       ['rasta.asset.v1', 'x'.repeat(128)],
       ['rasta.asset.v1', `asset-service${'x'.repeat(4096)}`],
       // A topic outside the topology, even with a known name.
-      ['rasta.contract.v1', 'asset-service'],
+      ['rasta.procurement.v1', 'asset-service'],
       [AUDIT_TRAIL_TOPIC, 'identity-service'],
     ])('uses the fallback for topic %s and producer %s', (topic, producer) => {
       expect(domainSourceServiceLabel(topic, producer)).toBe('unknown');
@@ -163,8 +167,9 @@ describe('audit producer topology', () => {
     expect(sourceTopicsOf('supplier-service')).toEqual(['rasta.supplier.v1']);
     expect(sourceTopicsOf('notification-service')).toEqual(['rasta.notification.v1']);
     expect(sourceTopicsOf('construction-service')).toEqual(['rasta.construction.v1']);
+    expect(sourceTopicsOf('contract-service')).toEqual(['rasta.contract.v1']);
     expect(sourceTopicsOf('ops-replay')).toEqual([OPS_REPLAY_TOPIC]);
-    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(14);
+    expect(AUDIT_SOURCE_SERVICES.flatMap((service) => sourceTopicsOf(service))).toHaveLength(15);
     expect(Object.isFrozen(sourceTopicsOf('asset-service'))).toBe(true);
   });
 });

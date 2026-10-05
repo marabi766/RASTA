@@ -270,8 +270,8 @@ describe('EventConsumer and TOPIC_CONSUMERS', () => {
 
   it('refuses, even unauthenticated, a service’s consumer that is not declared at all', () => {
     expect(() =>
-      build({ ...fleet, groupId: 'contract-service.statements', topics: ['rasta.fleet.v1'] }),
-    ).toThrow(/contract-service is not declared/);
+      build({ ...fleet, groupId: 'procurement-service.demand', topics: ['rasta.fleet.v1'] }),
+    ).toThrow(/procurement-service is not declared/);
   });
 
   it('leaves an unauthenticated group outside every declared namespace to the topic check alone', () => {

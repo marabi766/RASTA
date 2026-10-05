@@ -271,6 +271,7 @@ describe('awarding an evaluated tender', () => {
 
       expect(view).toEqual({
         tenderId,
+        projectId: after.projectId,
         status: 'AWARDED',
         bidId: bids[0]!.bidId,
         bidderOrganizationId: bids[0]!.bidder,
@@ -937,6 +938,12 @@ describe('awarding an evaluated tender', () => {
   // ---------------------------------------------------------------------------------------------
 
   describe('reading the award (the price is behind the door, not on the topic)', () => {
+    const projectOf = async (tenderId: string) =>
+      (
+        await runUnscoped('the suite reads the tender', () =>
+          w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
+        )
+      ).projectId;
     const asService = <T>(owner: string, fn: () => T, service = 'contract-service') =>
       runWithContext(
         context({
@@ -955,6 +962,7 @@ describe('awarding an evaluated tender', () => {
       const view = await as(owner, () => w.award.getAward(tenderId), reader);
       expect(view).toEqual({ ...made, alreadyAwarded: true });
       expect(view.amountMinor).toBe('1000');
+      expect(view.projectId).toBe(await projectOf(tenderId));
       expect((await logOf(tenderId)).filter((r) => r.purpose === 'READ_AWARD')).toEqual([
         expect.objectContaining({
           bidId: bids[0]!.bidId,
@@ -974,6 +982,7 @@ describe('awarding an evaluated tender', () => {
       const made = await award(owner, tenderId, bids[0]!.bidId);
       const view = await asService(owner, () => w.award.getAward(tenderId));
       expect(view).toEqual({ ...made, alreadyAwarded: true });
+      expect(view.projectId).toBe(await projectOf(tenderId));
       expect((await logOf(tenderId)).filter((r) => r.purpose === 'READ_AWARD')).toEqual([
         expect.objectContaining({
           accessorOrganizationId: owner,
