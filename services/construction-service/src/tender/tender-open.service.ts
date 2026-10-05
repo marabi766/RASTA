@@ -5,6 +5,7 @@ import {
   actorIdentityUnknown,
   compareActors,
   currentActor,
+  getContext,
   type ActorIdentity,
 } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
@@ -26,7 +27,11 @@ import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import { ENV, MEMBERSHIP_SOURCE } from '../tokens';
 import { BidAccessAudit, refusalCodeOf } from './bid-access-audit';
 import { TenderClock } from './tender-clock';
-import { TenderOpenRepository, type TenderForOpening } from './tender-open.repository';
+import {
+  TenderOpenRepository,
+  type TenderForOpening,
+  type TenderOwnership,
+} from './tender-open.repository';
 import { compareChains } from './chain-agreement';
 import type { LiveAnswer, MembershipSource } from './membership.client';
 import { BidContentReader, integrityRefusal, type Evidence } from './bid-content-reader';
@@ -222,8 +227,7 @@ export class TenderOpenService {
   // -- open ---------------------------------------------------------------------
 
   async open(tenderId: string): Promise<BidsOpenedView> {
-    const caller = this.access.assertCanOpenBids();
-    const { view, opening } = await this.guarded(caller, tenderId, 'OPEN_BIDS', async (found) => {
+    const { view, opening } = await this.guarded(tenderId, 'OPEN_BIDS', async (caller, found) => {
       // The caller as they are now (identity-service, fail closed), on a repeat open too.
       const principal = await this.livePrincipal(caller);
       // First: a conflicted user is told nothing of the tender's state, not even that it is not closed.
@@ -413,8 +417,7 @@ export class TenderOpenService {
    * and may then approve it by calling `open`. Reads and opens nothing.
    */
   async proposeOpening(tenderId: string): Promise<BidOpeningProposalView> {
-    const caller = this.access.assertCanOpenBids();
-    return this.guarded(caller, tenderId, 'PROPOSE_OPENING', async (found) => {
+    return this.guarded(tenderId, 'PROPOSE_OPENING', async (caller, found) => {
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
       if (found.status !== 'CLOSED') throw this.refused('NOT_CLOSED');
@@ -456,8 +459,7 @@ export class TenderOpenService {
    * anyone eligible may then propose afresh. Audited like the proposal itself, with its event.
    */
   async withdrawProposal(tenderId: string): Promise<BidOpeningProposalWithdrawnView> {
-    const caller = this.access.assertCanOpenBids();
-    return this.guarded(caller, tenderId, 'WITHDRAW_PROPOSAL', async () => {
+    return this.guarded(tenderId, 'WITHDRAW_PROPOSAL', async (caller) => {
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
       return this.prisma.transaction(async (tx) => {
@@ -507,8 +509,7 @@ export class TenderOpenService {
    * touched. **After**: every opened bid with its content, each read audited.
    */
   async listBids(tenderId: string): Promise<TenderBidsView> {
-    const caller = this.access.assertCanOpenBids();
-    return this.guarded(caller, tenderId, 'LIST_BIDS', async (found) => {
+    return this.guarded(tenderId, 'LIST_BIDS', async (caller, found) => {
       // Before anything is read or asked of audit-service: who the reader belongs to NOW.
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
@@ -526,8 +527,7 @@ export class TenderOpenService {
 
   /** One opened bid, with its content. Before the opening there is nothing to read: 422. */
   async getBid(tenderId: string, bidId: string): Promise<OpenedBidView> {
-    const caller = this.access.assertCanOpenBids();
-    return this.guarded(caller, tenderId, 'READ_BID', async (found) => {
+    return this.guarded(tenderId, 'READ_BID', async (caller, found) => {
       const principal = await this.livePrincipal(caller);
       await this.assertNotConflicted(principal, tenderId);
       if (found.openedAt === null) throw this.refused('NOT_OPENED');
@@ -549,12 +549,10 @@ export class TenderOpenService {
     tenderId: string,
     query: ListBidAccessLogQuery,
   ): Promise<CursorPage<BidAccessLogEntry>> {
+    // Another organization's tender is a 404 before the roles are looked at, or anyone is asked
+    // who the caller is (#223 F3). Reading the log is not logged, refused or not.
+    await this.ownedByCaller(tenderId);
     const caller = this.access.assertCanOpenBids();
-    // Another organization's tender is a 404 before anyone is asked who the caller is.
-    await this.prisma.transaction(async (tx) => {
-      if (!(await this.opens.ownsTender(tx, tenderId)))
-        throw RastaError.notFound('Tender', tenderId);
-    });
     // Who the caller belongs to NOW (identity-service, fail closed), as on every owner read.
     const principal = await this.livePrincipal(caller);
     const rows = await this.prisma.transaction(async (tx) => {
@@ -676,44 +674,71 @@ export class TenderOpenService {
   // -- the audited envelope -----------------------------------------------------------
 
   /**
-   * Finds the tender, tells another organization's from a missing one without telling the
-   * caller, runs `work`, and — when it refuses — commits a REFUSED row for the attempt
-   * before the error is answered (ADR-066 § 5).
+   * The owner's side of a tender's bids, in the order ADR-066 § 4 needs (#223 F3), each refusal
+   * committed as a REFUSED row before it is answered (ADR-066 § 5):
+   *
+   *  1. **Ownership first** (`ownedByCaller`). A tender that does not exist, or that is another
+   *     organization's, answers 404 — exactly what a missing one answers — whatever roles the caller
+   *     holds: a contractor of another organization learns no more than a stranger does. Another
+   *     organization's attempt is told to the owner (a REFUSED row), as before.
+   *  2. **Then the roles** (`assertCanOpenBids`): 403 only for a member of the owning organization
+   *     without an opening role (or with an excluded one), recorded on the owner's log.
+   *  3. Then `work`, whose refusals are recorded the same way.
    */
   private async guarded<T>(
-    principal: Principal,
     tenderId: string,
     purpose: BidAccessPurpose,
-    work: (found: {
-      status: string;
-      openedAt: Date | null;
-      openingProposedBy: string | null;
-      openingProposedAt: Date | null;
-    }) => Promise<T>,
+    work: (caller: Principal, found: TenderOwnership) => Promise<T>,
   ): Promise<T> {
-    const found = await this.opens.findOwnership(tenderId);
-    if (!found) throw RastaError.notFound('Tender', tenderId);
-    if (found.organizationId !== principal.organizationId) {
-      // Not theirs: they are told what a missing tender is told, and the owner is told who asked.
-      await this.recordRefusal(
-        found.organizationId,
-        tenderId,
-        null,
-        principal,
-        purpose,
-        RastaError.notFound('Tender', tenderId),
-      );
-      throw RastaError.notFound('Tender', tenderId);
-    }
+    const found = await this.ownedByCaller(tenderId, purpose);
+    let caller: Principal;
     try {
-      return await work(found);
+      caller = this.access.assertCanOpenBids();
     } catch (error) {
-      // No bid id: what the caller named is not stored unless it is a bid (it is not looked up here).
-      if (error instanceof RastaError) {
-        await this.recordRefusal(found.organizationId, tenderId, null, principal, purpose, error);
+      const attempt = attemptOf();
+      if (error instanceof RastaError && attempt) {
+        await this.recordRefusal(found.organizationId, tenderId, null, attempt, purpose, error);
       }
       throw error;
     }
+    try {
+      return await work(caller, found);
+    } catch (error) {
+      // No bid id: what the caller named is not stored unless it is a bid (it is not looked up here).
+      if (error instanceof RastaError) {
+        await this.recordRefusal(found.organizationId, tenderId, null, caller, purpose, error);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The tender, if it is the caller's organization's; otherwise the 404 a missing one gets, before
+   * any role is looked at. With a `purpose`, another organization's attempt is recorded under the
+   * owner, unless the request names no user or no organization to record.
+   */
+  private async ownedByCaller(
+    tenderId: string,
+    purpose?: BidAccessPurpose,
+  ): Promise<TenderOwnership> {
+    const found = await this.opens.findOwnership(tenderId);
+    if (!found) throw RastaError.notFound('Tender', tenderId);
+    if (found.organizationId !== getContext().organizationId) {
+      // Not theirs: they are told what a missing tender is told, and the owner is told who asked.
+      const attempt = attemptOf();
+      if (purpose && attempt) {
+        await this.recordRefusal(
+          found.organizationId,
+          tenderId,
+          null,
+          attempt,
+          purpose,
+          RastaError.notFound('Tender', tenderId),
+        );
+      }
+      throw RastaError.notFound('Tender', tenderId);
+    }
+    return found;
   }
 
   /** The refusal, in a transaction of its own (the one that refused has rolled back). Best effort: it never replaces the answer. */
@@ -1174,5 +1199,20 @@ function openedView(
     openedBy: opening.by,
     bidCount,
     alreadyOpened,
+  };
+}
+
+/**
+ * Who attempted a refused access, as the request names them — before any role is granted, so it
+ * is not yet a `Principal` the service acts as. None for a service token, or for a request with
+ * no user or no organization: no row can name someone the request does not.
+ */
+function attemptOf(): Principal | undefined {
+  const context = getContext();
+  if (context.authType !== 'USER' || !context.userId || !context.organizationId) return undefined;
+  return {
+    organizationId: context.organizationId,
+    actor: context.userId,
+    organizationIds: context.organizationIds ?? [],
   };
 }
