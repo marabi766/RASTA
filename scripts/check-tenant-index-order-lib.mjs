@@ -454,6 +454,10 @@ export const EXEMPTIONS = {
  * table that is not a tenant table, or that has such an index, is an error.
  */
 export const TABLE_EXEMPTIONS = {
+  construction: {
+    policy_reconciliation_task:
+      'a work queue the reconciliation sweeper drains across tenants (D-041): claimed by next_attempt_at for every tenant at once (PolicyReconciliationRepository.claimDue, runUnscoped, ix_policy_reconciliation_due), counted across tenants for its gauge (backlog), coalesced by policy_id, whose ids are unique (enqueue, ux_policy_reconciliation_open); every write to one task names its primary key id with organization_id beside it (complete, release, retryLater), so a leading organization_id would narrow nothing',
+  },
   supplier: {
     supplier_capability: `a child of one supplier, and a supplier is one organization (supplier.organization_id is unique): read only by its supplier id, as the capabilities relation of SUPPLIER_INCLUDE and as the directory's capability filter (SupplierRepository.searchDirectory, runUnscoped), both served by ux_supplier_capability; ${PARENT_LOAD}`,
     qualification_evidence: `a child of one qualification, read only by its qualification id as the evidence relation (SUPPLIER_INCLUDE, SupplierRepository.findQualification and listForReview), served by ux_qualification_evidence_document; ${PARENT_LOAD}`,
@@ -493,10 +497,7 @@ export const TABLE_EXEMPTIONS = {
  * its reason — is an error until it is removed from here: the list only
  * shrinks.
  */
-export const TABLE_FINDINGS_PENDING = {
-  // construction-service is under review elsewhere (#208); classified there.
-  construction: ['policy_reconciliation_task'],
-};
+export const TABLE_FINDINGS_PENDING = {};
 
 /** Every `migration.sql` under a Prisma migrations directory, in apply order. */
 export function readMigrationTexts(dir) {
