@@ -104,6 +104,13 @@ export interface E2eConfig {
    * confirms a union's approval policy against its hierarchy (Q-70 (7)).
    */
   organizationUrl: string;
+  /**
+   * supplier-service directly — health gating only. A contractor bids only
+   * while supplier-service says it is qualified for CONTRACTING and not
+   * suspended, and an award asks it again for the winner (CON-002); the tender
+   * scenario qualifies and suspends its contractors through the gateway.
+   */
+  supplierUrl: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -151,6 +158,10 @@ export function e2eConfig(): E2eConfig {
     organizationUrl: required(
       'E2E_ORGANIZATION_URL',
       `http://localhost:${process.env.PORT_ORGANIZATION?.trim() || '3102'}`,
+    ).replace(/\/+$/, ''),
+    supplierUrl: required(
+      'E2E_SUPPLIER_URL',
+      `http://localhost:${process.env.PORT_SUPPLIER?.trim() || '3108'}`,
     ).replace(/\/+$/, ''),
     identityAggregationWindowSeconds: windowSeconds(
       required('SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS', '60'),
