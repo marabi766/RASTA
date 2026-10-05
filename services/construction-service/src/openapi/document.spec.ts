@@ -2,10 +2,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
 import {
+  REFUSAL_REASONS,
   RESPONSE_BODIES,
   buildConstructionOpenApiDocument,
   buildDocumentationApp,
   formatDocument,
+  refusalStatusOf,
 } from './document';
 
 /**
@@ -116,6 +118,79 @@ describe('the committed OpenAPI document', () => {
     }
     expect(conflictOf('/v1/projects/{id}/cancel')).toBeDefined();
     expect(conflictOf('/v1/projects/{id}/cancel')?.headers).toBeUndefined();
+  });
+
+  describe('closed refusal reasons in details[].code', () => {
+    type Detail = {
+      anyOf?: Detail[];
+      properties?: { path: { const: string }; code: { enum: string[] } };
+    };
+    const detailsOf = (key: string, status: string): Detail | undefined => {
+      const [method, path] = key.split(' ') as [string, string];
+      const document = buildConstructionOpenApiDocument(app);
+      const operation = (document.paths?.[path] as Record<string, unknown> | undefined)?.[
+        method.toLowerCase()
+      ] as { responses: Record<string, unknown> } | undefined;
+      const response = operation?.responses[status] as
+        | { content: { 'application/json': { schema: { properties?: Record<string, unknown> } } } }
+        | undefined;
+      const details = response?.content['application/json'].schema.properties?.details as
+        { items: Detail } | undefined;
+      return details?.items;
+    };
+    const enumsOf = (detail: Detail | undefined): Record<string, string[]> =>
+      Object.fromEntries(
+        (detail?.anyOf ?? (detail ? [detail] : [])).map((entry) => [
+          entry.properties!.path.const,
+          entry.properties!.code.enum,
+        ]),
+      );
+
+    it('every listed route is a route of the document, and every reason is documented under its status', () => {
+      for (const [key, byArea] of Object.entries(REFUSAL_REASONS)) {
+        expect(Object.keys(RESPONSE_BODIES)).toContain(key);
+        for (const [area, reasons] of Object.entries(byArea)) {
+          for (const reason of reasons as readonly string[]) {
+            expect({
+              key,
+              area,
+              reason,
+              listed: enumsOf(detailsOf(key, refusalStatusOf(reason)))[area],
+            }).toEqual({
+              key,
+              area,
+              reason,
+              listed: expect.arrayContaining([reason]),
+            });
+          }
+        }
+      }
+    });
+
+    it('splits a route’s reasons by status: 403 names who may not act, 409 a state that moved, 422 a rule', () => {
+      expect(enumsOf(detailsOf('POST /v1/tenders/{id}/award', '403'))).toEqual({
+        award: ['CONFLICT_OF_INTEREST', 'AWARDER_IS_EVALUATOR'],
+      });
+      expect(enumsOf(detailsOf('POST /v1/tenders/{id}/award', '409'))).toEqual({
+        award: ['ALREADY_AWARDED'],
+        approval: ['APPROVAL_STALE'],
+      });
+      expect(enumsOf(detailsOf('POST /v1/tenders/{id}/open-bids/proposal', '422'))).toEqual({
+        opening: ['NOT_CLOSED'],
+      });
+    });
+
+    it('a route without a closed reason keeps the plain error body', () => {
+      const document = buildConstructionOpenApiDocument(app);
+      const response = (
+        document.paths?.['/v1/projects/{id}/cancel']?.post as {
+          responses: Record<string, { content: unknown }>;
+        }
+      ).responses['422'];
+      expect(response?.content).toEqual({
+        'application/json': { schema: { $ref: '#/components/schemas/ApiError' } },
+      });
+    });
   });
 
   it('keeps the health probes out of the contract', () => {

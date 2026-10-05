@@ -9,6 +9,13 @@ import {
 } from '../tender/tender-approval.dto';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema } from './zod-schema';
+import type { RefusalArea } from '../shared/refusal';
+import { PUBLICATION_REFUSALS, type PublicationRefusal } from '../tender/publication';
+import type { BidRefusal } from '../tender/bid.service';
+import type { OpeningRefusal } from '../tender/tender-open.service';
+import type { EvaluationRefusal } from '../tender/evaluation.service';
+import { AWARD_REFUSALS, type AwardRefusal } from '../tender/award.service';
+import type { TenderApprovalRefusal } from '../tender/tender-approval.errors';
 import { ProjectController } from '../project/project.controller';
 import { ProjectService } from '../project/project.service';
 import { NeedService } from '../project/need.service';
@@ -143,12 +150,16 @@ import {
 /** Pinned so the committed document is deterministic. */
 export const CONTRACT_VERSION = '0.1.0';
 
+const errorDetailSchema = z
+  .object({ path: z.string(), message: z.string(), code: z.string().optional() })
+  .strict();
+
 const apiErrorSchema = z
   .object({
     code: z.string(),
     message: z.string(),
     correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
+    details: z.array(errorDetailSchema).optional(),
   })
   .strict();
 
@@ -452,6 +463,186 @@ const UPSTREAM_CHECKED = new Set([
 /** Publishing needs the tender key provider; without a key-encryption key it answers 503. */
 const KEY_PROVIDER_CHECKED = new Set(['POST /v1/tenders/{id}/publish']);
 
+/** The closed reasons a route's refusals can carry, by area (`details[].path`). */
+type RouteRefusals = {
+  publication?: readonly PublicationRefusal[];
+  invitation?: readonly ['INVITED_ORGANIZATION_NOT_FOUND'];
+  bid?: readonly BidRefusal[];
+  opening?: readonly OpeningRefusal[];
+  evaluation?: readonly EvaluationRefusal[];
+  award?: readonly AwardRefusal[];
+  approval?: readonly TenderApprovalRefusal[];
+  cancellation?: readonly ['REASON_CODE_NOT_APPLICABLE'];
+};
+
+/** The gate's own refusals on a command it guards (CON-002 PR 11). */
+const GATED: readonly TenderApprovalRefusal[] = ['APPROVAL_POLICY_REQUIRED', 'APPROVAL_STALE'];
+
+/**
+ * Every route whose refusals carry a closed reason in `details[].code` (docs/06 § 6.7), and
+ * which reasons. A refusal without a closed reason carries no `details`. Each list is typed by
+ * its area's own closed list, so a code that does not exist does not compile.
+ */
+export const REFUSAL_REASONS: Record<string, RouteRefusals> = {
+  'POST /v1/tenders/{id}/publish': { publication: PUBLICATION_REFUSALS, approval: GATED },
+  'POST /v1/tenders/{id}/invitations': { invitation: ['INVITED_ORGANIZATION_NOT_FOUND'] },
+  'POST /v1/tenders/{id}/cancel': {
+    cancellation: ['REASON_CODE_NOT_APPLICABLE'],
+    approval: GATED,
+  },
+  'POST /v1/tenders/{id}/bids': {
+    bid: [
+      'OWN_TENDER',
+      'BID_WINDOW_NOT_OPEN',
+      'BID_WINDOW_CLOSED',
+      'BIDDER_NOT_ELIGIBLE',
+      'UNKNOWN_CRITERION',
+      'BID_TOO_LARGE',
+    ],
+  },
+  'PUT /v1/tenders/{id}/bids/{bidId}': {
+    bid: [
+      'OWN_TENDER',
+      'BID_WINDOW_NOT_OPEN',
+      'BID_WINDOW_CLOSED',
+      'BIDDER_NOT_ELIGIBLE',
+      'BID_NOT_SUBMITTED',
+      'UNKNOWN_CRITERION',
+      'BID_TOO_LARGE',
+    ],
+  },
+  'POST /v1/tenders/{id}/bids/{bidId}/withdraw': {
+    bid: ['OWN_TENDER', 'BID_WINDOW_NOT_OPEN', 'BID_WINDOW_CLOSED', 'BID_NOT_SUBMITTED'],
+  },
+  'POST /v1/tenders/{id}/open-bids': {
+    opening: [
+      'CONFLICT_OF_INTEREST',
+      'NOT_CLOSED',
+      'PROPOSAL_REQUIRED',
+      'SECOND_PERSON_REQUIRED',
+      'INTEGRITY',
+    ],
+  },
+  'POST /v1/tenders/{id}/open-bids/proposal': { opening: ['CONFLICT_OF_INTEREST', 'NOT_CLOSED'] },
+  'POST /v1/tenders/{id}/open-bids/proposal/withdraw': {
+    opening: ['CONFLICT_OF_INTEREST', 'NOT_CLOSED', 'NO_PROPOSAL'],
+  },
+  'GET /v1/tenders/{id}/bids': { opening: ['CONFLICT_OF_INTEREST', 'INTEGRITY'] },
+  'GET /v1/tenders/{id}/bids/{bidId}': {
+    opening: ['CONFLICT_OF_INTEREST', 'NOT_OPENED', 'INTEGRITY'],
+  },
+  'GET /v1/tenders/{id}/bid-access-log': { opening: ['CONFLICT_OF_INTEREST'] },
+  'GET /v1/tenders/{id}/bids/mine/opened': { opening: ['NOT_OPENED', 'INTEGRITY'] },
+  'POST /v1/tenders/{id}/bids/{bidId}/qualification': {
+    evaluation: [
+      'CONFLICT_OF_INTEREST',
+      'EVALUATOR_IS_TENDER_AUTHOR',
+      'RECUSED',
+      'SAME_PERSON_AS_EVALUATOR',
+      'NOT_EVALUATING',
+      'BID_NOT_OPENED',
+      'BID_ALREADY_DECIDED',
+      'BIDDER_NOT_ELIGIBLE',
+    ],
+  },
+  'POST /v1/tenders/{id}/bids/{bidId}/recusal': {
+    evaluation: [
+      'CONFLICT_OF_INTEREST',
+      'EVALUATOR_IS_TENDER_AUTHOR',
+      'RECUSED',
+      'SAME_PERSON_AS_EVALUATOR',
+      'NOT_EVALUATING',
+      'BID_NOT_EVALUABLE',
+    ],
+  },
+  'POST /v1/tenders/{id}/bids/{bidId}/scores': {
+    evaluation: [
+      'CONFLICT_OF_INTEREST',
+      'EVALUATOR_IS_TENDER_AUTHOR',
+      'RECUSED',
+      'SAME_PERSON_AS_EVALUATOR',
+      'NOT_EVALUATING',
+      'BID_NOT_QUALIFIED',
+      'UNKNOWN_CRITERION',
+      'SCORE_OUT_OF_RANGE',
+      'EVALUATOR_LIMIT',
+    ],
+  },
+  'POST /v1/tenders/{id}/evaluate': {
+    evaluation: [
+      'CONFLICT_OF_INTEREST',
+      'EVALUATOR_IS_TENDER_AUTHOR',
+      'SAME_PERSON_AS_EVALUATOR',
+      'NOT_EVALUATING',
+      'NO_QUALIFIED_BID',
+      'EVALUATION_INCOMPLETE',
+    ],
+  },
+  'GET /v1/tenders/{id}/evaluation': {
+    evaluation: ['CONFLICT_OF_INTEREST', 'EVALUATOR_IS_TENDER_AUTHOR', 'NOT_OPENED'],
+  },
+  'POST /v1/tenders/{id}/award': { award: AWARD_REFUSALS, approval: GATED },
+  'GET /v1/tenders/{id}/award': { award: ['CONFLICT_OF_INTEREST'] },
+  'POST /v1/approvals/{id}/decision': {
+    approval: ['CONFLICT_OF_INTEREST', 'APPROVER_IS_EVALUATOR', 'APPROVAL_STALE'],
+  },
+  'GET /v1/approvals/{id}': {
+    approval: ['READ_ROLE_NOT_HELD', 'CONFLICT_OF_INTEREST', 'APPROVER_IS_EVALUATOR'],
+  },
+};
+
+/** Reasons answered 403 (the person may not act) and 409 (state moved under the command); the rest are 422. */
+const FORBIDDEN_REASONS: ReadonlySet<string> = new Set([
+  'CONFLICT_OF_INTEREST',
+  'EVALUATOR_IS_TENDER_AUTHOR',
+  'RECUSED',
+  'SAME_PERSON_AS_EVALUATOR',
+  'AWARDER_IS_EVALUATOR',
+  'APPROVER_IS_EVALUATOR',
+  'READ_ROLE_NOT_HELD',
+]);
+const CONFLICT_REASONS: ReadonlySet<string> = new Set(['APPROVAL_STALE', 'ALREADY_AWARDED']);
+
+export function refusalStatusOf(reason: string): '403' | '409' | '422' {
+  if (FORBIDDEN_REASONS.has(reason)) return '403';
+  if (CONFLICT_REASONS.has(reason)) return '409';
+  return '422';
+}
+
+/** A route's refusal reasons answered with `status`, by area; empty areas left out. */
+export function refusalReasonsFor(key: string, status: string): Map<RefusalArea, string[]> {
+  const byArea = new Map<RefusalArea, string[]>();
+  for (const [area, reasons] of Object.entries(REFUSAL_REASONS[key] ?? {})) {
+    const answered = (reasons as readonly string[]).filter(
+      (reason) => refusalStatusOf(reason) === status,
+    );
+    if (answered.length > 0) byArea.set(area as RefusalArea, answered);
+  }
+  return byArea;
+}
+
+/** The error body of one status of one route: `details[]` typed by area, with its closed codes. */
+function refusalErrorSchema(byArea: Map<RefusalArea, string[]>): z.ZodTypeAny {
+  const entries = [...byArea].map(([area, reasons]) =>
+    z
+      .object({
+        path: z.literal(area),
+        code: z.enum(reasons as [string, ...string[]]),
+        message: z.string(),
+      })
+      .strict(),
+  );
+  const [only, ...more] = entries;
+  const item = only !== undefined && more.length === 0 ? only : z.union(entries as never);
+  return apiErrorSchema.extend({ details: z.array(item).optional() });
+}
+
+const REFUSAL_DETAILS_NOTE =
+  ' When refused for a closed reason, `details` names it: one entry per reason, `path` the area ' +
+  '(publication, invitation, bid, opening, evaluation, award, approval, cancellation) and `code` ' +
+  'the reason, one of those listed here. Branch on `code` and `details[].code`, never on ' +
+  '`message` (unchanged, for people). A refusal without a closed reason carries no `details`.';
+
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
  * the in-flight `CONFLICT` carries it, never `IDEMPOTENCY_KEY_REUSED`, a stale
@@ -645,6 +836,23 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
           content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
+        };
+      }
+
+      // The closed reasons, as an enum per status — and the status itself where a reason is
+      // answered with one the rules above leave out (a proposal refused 422 NOT_CLOSED).
+      for (const status of ['403', '409', '422']) {
+        const byArea = refusalReasonsFor(key, status);
+        if (byArea.size === 0) continue;
+        const description = ERROR_DESCRIPTIONS[Number(status)] ?? '';
+        const existing = operation.responses[status] as { description?: string } | undefined;
+        const listed = [...byArea]
+          .map(([area, reasons]) => `${area}: ${reasons.join(', ')}`)
+          .join('; ');
+        operation.responses[status] = {
+          ...(existing ?? {}),
+          description: `${existing?.description ?? description}${REFUSAL_DETAILS_NOTE} (${listed})`,
+          content: { 'application/json': { schema: toJsonSchema(refusalErrorSchema(byArea)) } },
         };
       }
     }
