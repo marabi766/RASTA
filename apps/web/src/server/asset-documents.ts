@@ -25,7 +25,7 @@ import type { WebSession } from './session';
 
 /**
  * A machine's documents, through the gateway (EXP-002, slice 7; ADR-058 § 3,
- * ADR-059 § 3; the upload relay below is a decision still to be recorded — asked on #225).
+ * ADR-059 § 3; the upload relay below is ADR-069; the routing and ceiling it relies on are Q-98).
  *
  * A document on a machine is two things held by two services: the **file**,
  * which document-service keeps (metadata) and object storage holds (bytes), and
@@ -53,8 +53,8 @@ import type { WebSession } from './session';
  * browser says the file is (`File.type`, `File.size`) and renders document-
  * service's refusal in Persian; the service's answer carries no numbers (its
  * context is internal), so the sentence says "not accepted", never "at most N".
- * The only portal number is the Server Action's transport ceiling in
- * `next.config.mjs`, which is not policy.
+ * The only portal number is the Server Action's transport ceiling
+ * (`WEB_UPLOAD_MAX_BYTES`, `upload-limit.cjs`; Q-98), which is not policy.
  *
  * ## A resend is not a second upload
  *
@@ -186,7 +186,7 @@ export function documentValidityAt(
  * class decides only what a file may *technically* be (formats and ceiling).
  *
  * Which class an asset-document kind is filed under is a routing choice, not a
- * legal rule, and it decides the limits (an open question, asked on #225). The default
+ * legal rule, and it decides the limits (Q-98). The default
  * is conservative: a kind that names a class exactly goes to it; a kind that
  * says nothing about the file's form goes to `OTHER`, the narrowest class (PDF,
  * JPEG, PNG, smallest ceiling) — so a wrong guess refuses a file rather than

@@ -1,3 +1,7 @@
+import { createRequire } from 'node:module';
+
+const { uploadMaxBytes } = createRequire(import.meta.url)('./upload-limit.cjs');
+
 /**
  * @type {import('next').NextConfig}
  *
@@ -16,13 +20,13 @@ const nextConfig = {
       /**
        * The Server Actions request-body ceiling. A document upload (EXP-002,
        * slice 7) reaches the portal as the action's multipart body, and the
-       * default is 1 MB. This is a **transport** number, not a policy: it sits
-       * just above document-service's own default ceiling (`DOCUMENT_MAX_BYTES`,
-       * 25 MiB) so that service, not this setting, is what refuses an
-       * oversize file with a sentence. A deployment that raises that ceiling
-       * raises this with it (an open question, asked on #225).
+       * default is 1 MB. A **transport** number, not a policy (ADR-069, Q-98):
+       * 26 MiB by default, just above document-service's own ceiling so that
+       * service refuses an oversize file with a sentence, and configurable with
+       * `WEB_UPLOAD_MAX_BYTES` when the portal is built (`upload-limit.cjs`).
+       * Global to the portal, which ADR-069 says and does not hide.
        */
-      bodySizeLimit: '26mb',
+      bodySizeLimit: uploadMaxBytes(process.env.WEB_UPLOAD_MAX_BYTES),
     },
   },
   eslint: {
