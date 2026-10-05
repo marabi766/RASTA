@@ -4,6 +4,7 @@ import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { AssetRepository, isUniqueViolation } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
 import type { ClaimFence } from '../asset/idempotency';
+import { negativeAmountRefusal } from './negative-amount';
 import { INSURANCE_EVENTS, validateInsurancePayload } from '../asset/events';
 import { INSURANCE_TOPIC } from '../config/env';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -120,7 +121,8 @@ export class InsuranceService {
       } catch (error) {
         // Same policy number from the same insurer, twice.
         if (isUniqueViolation(error)) throw RastaError.alreadyExists('InsurancePolicy');
-        throw error;
+        // A negative premium or insured value (L7-36): the API's 400, not a 500.
+        throw negativeAmountRefusal(error) ?? error;
       }
 
       await this.repository.enqueueEvent(tx, {
