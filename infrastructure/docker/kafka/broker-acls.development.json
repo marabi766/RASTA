@@ -5,6 +5,7 @@
     "asset-service",
     "audit-service",
     "construction-service",
+    "contract-service",
     "document-service",
     "economic-service",
     "fleet-service",
@@ -157,6 +158,20 @@
       "principal": "audit-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -362,6 +377,41 @@
       "resourceName": "rasta.supplier.v1",
       "patternType": "LITERAL",
       "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "GROUP",
+      "resourceName": "contract-service.",
+      "patternType": "PREFIXED",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "contract-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
     },
     {
       "principal": "document-service",
@@ -597,6 +647,27 @@
     {
       "principal": "itest-observer",
       "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
       "resourceName": "rasta.document.v1.retry",
       "patternType": "LITERAL",
       "operation": "READ"
@@ -821,6 +892,13 @@
     {
       "principal": "kafka-exporter",
       "resourceType": "GROUP",
+      "resourceName": "contract-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-exporter",
+      "resourceType": "GROUP",
       "resourceName": "economic-service.",
       "patternType": "PREFIXED",
       "operation": "DESCRIBE"
@@ -906,6 +984,13 @@
       "principal": "kafka-ui",
       "resourceType": "GROUP",
       "resourceName": "construction-service.",
+      "patternType": "PREFIXED",
+      "operation": "DESCRIBE"
+    },
+    {
+      "principal": "kafka-ui",
+      "resourceType": "GROUP",
+      "resourceName": "contract-service.",
       "patternType": "PREFIXED",
       "operation": "DESCRIBE"
     },
@@ -1172,6 +1257,34 @@
       "principal": "ops-replay",
       "resourceType": "TOPIC",
       "resourceName": "rasta.construction.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.dlq",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.contract.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },

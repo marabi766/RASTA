@@ -681,15 +681,29 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Contract — `rasta.contract.v1`
 
-| رویداد                | مصرف‌کنندگان                           | Payload کلیدی                                                                      |
-| --------------------- | -------------------------------------- | ---------------------------------------------------------------------------------- |
-| `CONTRACT_CREATED`    | construction · notification            | `contractId`, `tenderId`, `parties[]`, `amount`                                    |
-| `CONTRACT_SIGNED`     | construction · economic · notification | `contractId`, `signedAt`, `signatories[]`                                          |
-| `CONTRACT_AMENDED`    | audit · analytics                      | `contractId`, `amendmentId`, `deltaAmount`                                         |
-| `STATEMENT_SUBMITTED` | notification · analytics               | `statementId`, `contractId`, `grossAmount`                                         |
-| `STATEMENT_APPROVED`  | **economic (پرداخت)** · analytics      | `statementId`, `netAmount`, `deductions`, `technicalApprover`, `financialApprover` |
-| `STATEMENT_REJECTED`  | notification                           | `statementId`, `reason`                                                            |
-| `CONTRACT_COMPLETED`  | supplier (امتیاز) · analytics          | `contractId`, `finalAmount`                                                        |
+| رویداد                 | مصرف‌کنندگان                           | Payload کلیدی                                                                                                                                            |
+| ---------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTRACT_DRAFTED`     | audit                                  | `contractId`, `tenderId`, `projectId`, `organizationId`, `contractorOrganizationId`, `winningBidId`, `draftedAt` — **پیاده‌شده (CON-003 PR 1)؛ بی مبلغ** |
+| ~~`CONTRACT_CREATED`~~ | ~~construction · notification~~        | ~~`contractId`, `tenderId`, `parties[]`, `amount`~~ — **جایش را `CONTRACT_DRAFTED` گرفت** (پایین)                                                        |
+| `CONTRACT_SIGNED`      | construction · economic · notification | `contractId`, `signedAt`, `signatories[]`                                                                                                                |
+| `CONTRACT_AMENDED`     | audit · analytics                      | `contractId`, `amendmentId`, `deltaAmount`                                                                                                               |
+| `STATEMENT_SUBMITTED`  | notification · analytics               | `statementId`, `contractId`, `grossAmount`                                                                                                               |
+| `STATEMENT_APPROVED`   | **economic (پرداخت)** · analytics      | `statementId`, `netAmount`, `deductions`, `technicalApprover`, `financialApprover`                                                                       |
+| `STATEMENT_REJECTED`   | notification                           | `statementId`, `reason`                                                                                                                                  |
+| `CONTRACT_COMPLETED`   | supplier (امتیاز) · analytics          | `contractId`, `finalAmount`                                                                                                                              |
+
+**پیاده‌شده در CON-003 PR 1 (ADR-068 § ۳ و § ۴).** یک رویداد؛ سایر ردیف‌های بالا **طرح**‌اند (PR 2..6) و هنوز تولید نمی‌شوند.
+
+- `CONTRACT_DRAFTED` — **نام از دستور مدیر پروژه (2026-10-05)؛ حذف `amount`/`parties[]` نسبت به `CONTRACT_CREATED` را مدیر پروژه باید بپذیرد** (جایگزین آن).
+  `aggregateType = Contract`، کلید پارتیشن `contractId`، `.strict()`: `contractId`، `tenderId`، `projectId`، `organizationId` (کارفرما، مستأجر قرارداد)،
+  `contractorOrganizationId`، `winningBidId`، `draftedAt`. **هرگز مبلغ:** مبلغ برنده محتوای یک پیشنهاد است و Topic را `audit-service` در کل
+  می‌خواند؛ مصرف‌کننده‌ای که مبلغ لازم دارد از API می‌پرسد (همان دلیل `TENDER_AWARDED`، #199). در **همان** تراکنشی نوشته می‌شود که ردیف `contract` را
+  می‌سازد (Outbox)، و `causationId` = شناسهٔ `TENDER_AWARDED` است. هر مناقصه حداکثر یک `CONTRACT_DRAFTED` دارد (یکتایی `(organization_id, tender_id)`).
+- **مصرف:** گروه `contract-service.tender-awarded` روی `rasta.construction.v1` (+ `.retry`)، DLQ ‏`rasta.contract.v1.dlq`. کلید Idempotency = `tenderId`
+  (در مستأجر). پیش از نوشتن، award از مالکش پرسیده و با رویداد سنجیده می‌شود: عدم تأیید ⇒ `SOURCE_UNCONFIRMED`؛ منبع در دسترس نیست ⇒ تلاش دوباره و
+  سپس `UPSTREAM_UNAVAILABLE`؛ پاکت و Payload یک مستأجر نیستند ⇒ `SOURCE_UNCONFIRMED` پیش از هر پرسش؛ تکرار متناقض ⇒ `VALIDATION_FAILED`؛ تکرار همان ⇒ `SKIPPED`.
+- Topic، تولیدکننده/مصرف‌کننده و ACLهای کافکا از `packages/contracts` (`TOPIC_PRODUCERS`، `TOPIC_CONSUMERS`) با `pnpm kafka:acl:generate` تولید می‌شوند؛
+  `audit-service` برچسب منبع `rasta.contract.v1` را هم می‌خواند.
 
 ## Economic — `rasta.economic.v1`
 

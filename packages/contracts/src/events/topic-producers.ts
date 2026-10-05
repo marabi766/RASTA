@@ -24,7 +24,7 @@ import { OPS_REPLAY_PRODUCER, OPS_REPLAY_TOPIC } from './ops-replay';
  * Every topic a consumer on `main` subscribes to, with the services that
  * publish on it — each domain topic has exactly one owner, the explicit audit
  * trail its known producers. A topic with no producer yet (procurement,
- * inventory, contract) is absent on purpose: `EventConsumer` refuses to
+ * inventory) is absent on purpose: `EventConsumer` refuses to
  * subscribe to a topic nobody is declared to own, so adding a consumer for one
  * means declaring its producer here first.
  *
@@ -46,6 +46,8 @@ export const TOPIC_PRODUCERS = Object.freeze({
   'rasta.supplier.v1': Object.freeze(['supplier-service'] as const),
   'rasta.notification.v1': Object.freeze(['notification-service'] as const),
   'rasta.construction.v1': Object.freeze(['construction-service'] as const),
+  // CON-003 (ADR-068): the draft contract an awarded tender creates, and later the rest of the contract's life.
+  'rasta.contract.v1': Object.freeze(['contract-service'] as const),
   [AUDIT_TRAIL_TOPIC]: Object.freeze(['identity-service'] as const),
   [OPS_REPLAY_TOPIC]: Object.freeze([OPS_REPLAY_PRODUCER] as const),
 });

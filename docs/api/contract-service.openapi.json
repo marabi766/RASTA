@@ -1,0 +1,356 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/contracts": {
+      "get": {
+        "description": "As the employer: the contracts of the organization the request acts for. As the winning contractor: the contracts awarded to it. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that writes one (ADR-068).",
+        "operationId": "ContractController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The employer: the tender’s owner and the contract’s tenant."
+                          },
+                          "tenderId": {
+                            "type": "string"
+                          },
+                          "projectId": {
+                            "type": "string"
+                          },
+                          "winningBidId": {
+                            "type": "string"
+                          },
+                          "contractorOrganizationId": {
+                            "type": "string",
+                            "description": "The winning contractor."
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
+                          },
+                          "awardedAt": {
+                            "type": "string",
+                            "description": "When the tender was awarded (ISO 8601, UTC)."
+                          },
+                          "statusChangedAt": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "tenderId",
+                          "projectId",
+                          "winningBidId",
+                          "contractorOrganizationId",
+                          "amountMinor",
+                          "status",
+                          "awardedAt",
+                          "statusChangedAt",
+                          "createdAt",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query does not match the published schema. Unknown parameters are refused rather than ignored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the contracts the caller is a party to, newest first",
+        "tags": ["contracts"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/contracts/{id}": {
+      "get": {
+        "description": "The contract, with its amount in minor units as a decimal string. The amount is the winning bid’s price as construction-service states it; it is never on an event. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that writes one (ADR-068).",
+        "operationId": "ContractController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "tenderId": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "winningBidId": {
+                      "type": "string"
+                    },
+                    "contractorOrganizationId": {
+                      "type": "string",
+                      "description": "The winning contractor."
+                    },
+                    "amountMinor": {
+                      "type": "string",
+                      "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
+                    },
+                    "awardedAt": {
+                      "type": "string",
+                      "description": "When the tender was awarded (ISO 8601, UTC)."
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "tenderId",
+                    "projectId",
+                    "winningBidId",
+                    "contractorOrganizationId",
+                    "amountMinor",
+                    "status",
+                    "awardedAt",
+                    "statusChangedAt",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one contract",
+        "tags": ["contracts"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Rasta — Contract Service",
+    "description": "The contract boundary (CON-003, ADR-068). This release offers reading the draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Amounts are decimal strings of minor units (rials). Amendments, milestones, statements with their separate technical and financial approvals, and the settlement boundary with economic-service follow (ADR-068 § 9); no money is ever held here.",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "correlationId": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": ["code", "message"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@
 asset-service
 audit-service
 construction-service
+contract-service
 document-service
 economic-service
 fleet-service

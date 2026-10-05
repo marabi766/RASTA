@@ -65,6 +65,7 @@ describe('applyBasisPoints', () => {
 | `economic-service` (منطق مالی)       | **۹۰٪**         |
 | `identity-service` (مجوزدهی)         | **۹۰٪**         |
 | `construction-service` (گذار مناقصه) | **۸۵٪**         |
+| `contract-service` (مرز قرارداد)     | **۸۵٪**         |
 | بقیه سرویس‌ها                        | ۷۵٪             |
 | `packages/*`                         | ۸۵٪             |
 

@@ -87,6 +87,13 @@ export const TOPIC_CONSUMERS = Object.freeze({
     subscribes: Object.freeze(['rasta.organization.v1', 'rasta.supplier.v1'] as const),
     deadLetterTopic: 'rasta.construction.v1.dlq',
   }),
+  // CON-003 (ADR-068 § 3): drafts the contract an awarded tender calls for. Reads only
+  // TENDER_AWARDED, as a claim: the award — and its amount, which is on no event — is
+  // asked of construction-service before anything is written (ADR-061 § 4, A-13).
+  'contract-service': Object.freeze({
+    subscribes: Object.freeze(['rasta.construction.v1'] as const),
+    deadLetterTopic: 'rasta.contract.v1.dlq',
+  }),
   'supplier-service': Object.freeze({
     subscribes: Object.freeze(['rasta.marketplace.v1'] as const),
     deadLetterTopic: 'rasta.supplier.v1.dlq',

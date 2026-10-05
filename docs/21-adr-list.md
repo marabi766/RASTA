@@ -78,6 +78,7 @@
 | [065](adr/ADR-065-tender-lifecycle-and-deadline-authority.md)               | چرخهٔ مناقصه/پیشنهاد و مرجع مهلت                    | **Proposed**                          | CON-002؛ Q-84، Q-85؛ D-044                                   |
 | [066](adr/ADR-066-bid-confidentiality.md)                                   | محرمانگی پیشنهاد: برنامه‌ای و افشاگر دستکاری        | **Proposed**                          | CON-002؛ Q-87؛ D-043                                         |
 | [067](adr/ADR-067-tender-evaluation-and-conflict-of-interest.md)            | ارزیابی از پیکربندی، برنده، تعارض منافع             | **Proposed**                          | CON-002؛ Q-88 تا Q-90                                        |
+| [068](adr/ADR-068-contract-lifecycle-and-boundary.md)                       | چرخهٔ قرارداد و مرز `contract-service`              | **Proposed**                          | CON-003؛ Q-95 تا Q-97                                        |
 
 ---
 

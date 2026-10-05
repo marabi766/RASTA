@@ -35,6 +35,7 @@ x-kafka-credentials: &kafka-credentials
   KAFKA_SASL_PASSWORD_MARKETPLACE: ${KAFKA_SASL_PASSWORD_MARKETPLACE:-rasta_marketplace_kafka_dev_password}
   KAFKA_SASL_PASSWORD_SUPPLIER: ${KAFKA_SASL_PASSWORD_SUPPLIER:-rasta_supplier_kafka_dev_password}
   KAFKA_SASL_PASSWORD_CONSTRUCTION: ${KAFKA_SASL_PASSWORD_CONSTRUCTION:-rasta_construction_kafka_dev_password}
+  KAFKA_SASL_PASSWORD_CONTRACT: ${KAFKA_SASL_PASSWORD_CONTRACT:-rasta_contract_kafka_dev_password}
   KAFKA_SASL_PASSWORD_ECONOMIC: ${KAFKA_SASL_PASSWORD_ECONOMIC:-rasta_economic_kafka_dev_password}
   KAFKA_SASL_PASSWORD_NOTIFICATION: ${KAFKA_SASL_PASSWORD_NOTIFICATION:-rasta_notification_kafka_dev_password}
   KAFKA_SASL_PASSWORD_DOCUMENT: ${KAFKA_SASL_PASSWORD_DOCUMENT:-rasta_document_kafka_dev_password}
