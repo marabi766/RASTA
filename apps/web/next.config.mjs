@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 
 const { uploadMaxBytes } = createRequire(import.meta.url)('./upload-limit.cjs');
+const uploadCeiling = uploadMaxBytes(process.env.WEB_UPLOAD_MAX_BYTES);
 
 /**
  * @type {import('next').NextConfig}
@@ -26,8 +27,15 @@ const nextConfig = {
        * `WEB_UPLOAD_MAX_BYTES` when the portal is built (`upload-limit.cjs`).
        * Global to the portal, which ADR-069 says and does not hide.
        */
-      bodySizeLimit: uploadMaxBytes(process.env.WEB_UPLOAD_MAX_BYTES),
+      bodySizeLimit: uploadCeiling,
     },
+    /**
+     * What Next copies of a request body so middleware can see it (default
+     * 10 MiB; beyond that the copy is cut and a warning logged). `middleware.ts`
+     * never reads a body, but the two ceilings must not disagree, so it follows
+     * the one above.
+     */
+    middlewareClientMaxBodySize: uploadCeiling,
   },
   eslint: {
     // The quality chain runs ESLint as its own task, over `src`, with the

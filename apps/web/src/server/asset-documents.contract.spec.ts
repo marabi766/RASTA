@@ -19,6 +19,7 @@ import {
 } from '@/test/service-source';
 
 import {
+  ATTACH_KEY_REUSED_MESSAGE,
   ATTACH_MAPPING,
   DOCUMENT_BOUNDS,
   DOCUMENT_CLASS_BY_KIND,
@@ -28,7 +29,6 @@ import {
   canAttachAssetDocuments,
   parseAttachDocumentForm,
 } from './asset-documents';
-import { RECORD_KEY_REUSED_MESSAGE } from './asset-records';
 
 /**
  * What the attach-document chain depends on, pinned to the services' source —
@@ -265,7 +265,12 @@ describe('the dossier lists the reference as the portal reads it', () => {
 });
 
 describe('the reused-key sentence', () => {
-  it('is the records’ sentence: the attach step says a reused key in the very same words', () => {
-    expect(RECORD_KEY_REUSED_MESSAGE).toBe(Object.values(ATTACH_MAPPING.messages ?? {})[0]);
+  it('is asset-service’s own sentence, said in the attach step’s words', () => {
+    // The service's English is the key; what the person reads is the attach's.
+    expect(Object.keys(ATTACH_MAPPING.messages ?? {})).toEqual([
+      'This Idempotency-Key was already used with a different request body',
+    ]);
+    expect(Object.values(ATTACH_MAPPING.messages ?? {})).toEqual([ATTACH_KEY_REUSED_MESSAGE]);
+    expect(ATTACH_MAPPING.byCode).toEqual({ IDEMPOTENCY_KEY_REUSED: ATTACH_KEY_REUSED_MESSAGE });
   });
 });

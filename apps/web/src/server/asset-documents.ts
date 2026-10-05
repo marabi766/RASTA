@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { z } from 'zod';
 
 import {
@@ -10,12 +12,7 @@ import {
 } from '@/lib/asset-document-fields';
 import { BIDI_CONTROL } from '@/lib/format';
 
-import {
-  BIDI_CONTROL_MESSAGE,
-  DATE_MESSAGE,
-  RECORD_KEY_REUSED_MESSAGE,
-  displayText,
-} from './asset-records';
+import { BIDI_CONTROL_MESSAGE, DATE_MESSAGE, displayText } from './asset-records';
 import { firstIssuePerField, readFields } from './asset-commands';
 import { localDateToIso } from './drivers';
 import { webServerEnv } from './env';
@@ -124,15 +121,37 @@ const uploadedSchema = z.object({
   assetId: z.string().min(1).max(200),
   submissionId: z.string().min(1).max(200),
   documentId: z.string().min(1).max(200),
+  /**
+   * What the registered document **is**: the kind it was uploaded as (which
+   * decided the class it was stored under, Q-98), its size and the SHA-256 of its
+   * bytes. A resend that names another kind, or brings another file, is not a
+   * resend of this document (`attachmentMatches`).
+   */
+  kind: z.enum(DOCUMENT_KINDS),
+  sizeBytes: z.number().int().min(1),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type UploadedDocument = z.infer<typeof uploadedSchema>;
+
+/** The size and SHA-256 of a file's bytes — what the resume token vouches for. */
+export interface FileFingerprint {
+  readonly sizeBytes: number;
+  readonly sha256: string;
+}
+
+export async function fingerprintOf(file: File): Promise<FileFingerprint> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return { sizeBytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
+}
 
 /**
  * The document this server registered for this submission, signed — so a resend
  * attaches the same `documentId` under the same `Idempotency-Key` instead of
- * uploading again. It does not name the kind: the kind is a label asset-service
- * keeps on the reference, the class the file was stored under was decided at
- * upload, and a resend that corrected the kind attaches the same document.
+ * uploading again. It names the **kind**, the size and the digest of what was
+ * uploaded: the token vouches for one document of one kind, and a resend that
+ * changed the kind (which would attach the old file under a new label) or
+ * brought a different file is refused and asked for a fresh submission
+ * (Codex r1 on #225). A fresh submission is a new submission id and a new upload.
  */
 export function sealUploadedDocument(session: WebSession, uploaded: UploadedDocument): string {
   return signPayload(session, UPLOADED_PURPOSE, { ...uploaded }, UPLOADED_TOKEN_TTL_SECONDS);
@@ -153,6 +172,30 @@ export function openUploadedDocument(
     return null;
   }
   return payload;
+}
+
+/** Why a resend is not a resend of the document its token names, or `null` when it is. */
+export type ResumeMismatch = 'KIND' | 'FILE';
+
+/**
+ * Whether a resend is still the submission its token vouches for: the same
+ * kind and — when the post carries a file at all (the form hides the input once
+ * a document is registered, so only a hand-built post does) — the same size and
+ * digest. A file in the post is otherwise ignored, and the person would believe
+ * the new one was attached while the old one was.
+ */
+export function resumeMismatch(
+  uploaded: UploadedDocument,
+  attempt: { readonly kind: DocumentKind; readonly file: FileFingerprint | null },
+): ResumeMismatch | null {
+  if (attempt.kind !== uploaded.kind) return 'KIND';
+  if (
+    attempt.file !== null &&
+    (attempt.file.sizeBytes !== uploaded.sizeBytes || attempt.file.sha256 !== uploaded.sha256)
+  ) {
+    return 'FILE';
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,14 +398,33 @@ export const DOCUMENT_SERVICE_MAPPING: FieldMapping<'file'> = {
 export const DOCUMENT_REFERENCE_REFUSED_MESSAGE =
   'فایل بارگذاری شد اما پیوست آن به دارایی پذیرفته نشد. اطلاعات را بررسی کنید و دوباره بفرستید؛ فایل دوباره بارگذاری نمی‌شود.';
 
+/**
+ * Said when asset-service answers `409 IDEMPOTENCY_KEY_REUSED` to the attach: the
+ * key this form carries was already used for **another document** — a first send
+ * whose answer never came back attached one, and this resend uploaded a second.
+ * It is not a dead end (the runner gives the form a fresh submission id) and not
+ * a second attach (the service refused it); the person is asked to look at the
+ * list first, because the first send may be there.
+ */
+export const ATTACH_KEY_REUSED_MESSAGE =
+  'این فرم پیش‌تر فرستاده شده بود و ممکن است مدرک پیوست شده باشد. فهرست مدارک این دارایی را ببینید؛ اگر مدرک آن‌جا نیست، فایل را دوباره انتخاب کنید و بفرستید — این بار فرم تازه‌ای فرستاده می‌شود.';
+
+/** A resend that names another kind than the file was uploaded as. */
+export const RESUME_KIND_CHANGED_MESSAGE =
+  'فایل با نوع مدرک پیشین بارگذاری شده است و نوع آن پس از بارگذاری عوض نمی‌شود. برای نوع تازه، فایل را دوباره انتخاب کنید و بفرستید — این بار فرم تازه‌ای فرستاده می‌شود.';
+
+/** A resend that brings another file than the one registered for this submission. */
+export const RESUME_FILE_CHANGED_MESSAGE =
+  'فایل فرستاده‌شده با فایلی که پیش‌تر برای این فرم بارگذاری شده یکی نیست. فایل مورد نظر را انتخاب کنید و بفرستید — این بار فرم تازه‌ای فرستاده می‌شود.';
+
 const ATTACH_MESSAGES: Readonly<Record<string, string>> = {
-  'This Idempotency-Key was already used with a different request body': RECORD_KEY_REUSED_MESSAGE,
+  'This Idempotency-Key was already used with a different request body': ATTACH_KEY_REUSED_MESSAGE,
 };
 
 export const ATTACH_MAPPING: FieldMapping<AttachDocumentTextField> = {
   paths: { kind: 'kind', title: 'title', issuedAt: 'issuedAt', expiresAt: 'expiresAt' },
   messages: ATTACH_MESSAGES,
-  byCode: { IDEMPOTENCY_KEY_REUSED: RECORD_KEY_REUSED_MESSAGE },
+  byCode: { IDEMPOTENCY_KEY_REUSED: ATTACH_KEY_REUSED_MESSAGE },
 };
 
 // ---------------------------------------------------------------------------
@@ -395,7 +457,11 @@ function isHttpUrl(value: string): boolean {
 
 export type UploadOutcome =
   /** The file is registered with document-service; step 4 can run. */
-  | { readonly kind: 'REGISTERED'; readonly documentId: string }
+  | {
+      readonly kind: 'REGISTERED';
+      readonly documentId: string;
+      readonly fingerprint: FileFingerprint;
+    }
   /** document-service refused the file; `message` is what the person reads. */
   | { readonly kind: 'REFUSED'; readonly message: string }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
@@ -474,12 +540,18 @@ export async function uploadDocument(
   if (!isHttpUrl(url)) {
     return { kind: 'FAILED', status: 502, correlationId: intent.correlationId };
   }
+  // Read once: what is stored, and what the resume token will vouch for.
+  const bytes = new Uint8Array(await call.file.arrayBuffer());
+  const fingerprint: FileFingerprint = {
+    sizeBytes: bytes.byteLength,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
   try {
     const stored = await (call.storageFetchImpl ?? fetch)(url, {
       method: 'PUT',
       // The type is bound into the signature, so it is sent exactly as declared.
       headers: { 'content-type': contentType === '' ? 'application/octet-stream' : contentType },
-      body: new Uint8Array(await call.file.arrayBuffer()),
+      body: bytes,
       // A redirect would carry the signed request to a host nobody chose.
       redirect: 'error',
       cache: 'no-store',
@@ -507,7 +579,7 @@ export async function uploadDocument(
   });
   switch (registered.kind) {
     case 'CREATED':
-      return { kind: 'REGISTERED', documentId: registered.data.id };
+      return { kind: 'REGISTERED', documentId: registered.data.id, fingerprint };
     case 'INVALID':
       return { kind: 'REFUSED', message: refusalText(registered) };
     case 'FORBIDDEN':

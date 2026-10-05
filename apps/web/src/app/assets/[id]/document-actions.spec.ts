@@ -1,9 +1,14 @@
 /**
  * @jest-environment node
  */
+import { createHash } from 'node:crypto';
+
 import { BASELINE_FIELD } from '@/lib/form-fields';
 import { FILE_FIELD, UPLOAD_TOKEN_FIELD } from '@/lib/asset-document-fields';
 import {
+  ATTACH_KEY_REUSED_MESSAGE,
+  RESUME_FILE_CHANGED_MESSAGE,
+  RESUME_KIND_CHANGED_MESSAGE,
   FILE_EMPTY_MESSAGE,
   FILE_MISSING_MESSAGE,
   FILE_TOO_LARGE_MESSAGE,
@@ -13,7 +18,7 @@ import {
 } from '@/server/asset-documents';
 import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
-import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_DOCUMENT_FORM } from './document-form-state';
@@ -73,6 +78,15 @@ const OTHER_ASSET_ID = 'AST_01J00000000000000000000099';
 
 const pdf = () => new File(['%PDF-1.7 bytes'], 'title.pdf', { type: 'application/pdf' });
 
+/** What the resume token vouches for about `pdf()`: its size and the SHA-256 of its bytes. */
+const PDF_FINGERPRINT = {
+  sizeBytes: Buffer.byteLength('%PDF-1.7 bytes'),
+  sha256: createHash('sha256').update('%PDF-1.7 bytes').digest('hex'),
+};
+
+/** The rest of what a token for `pdf()` registered as `VALID` names. */
+const REGISTERED_AS = { kind: 'OWNERSHIP_TITLE' as const, ...PDF_FINGERPRINT };
+
 const VALID = { kind: 'OWNERSHIP_TITLE', title: 'سند مالکیت لودر', issuedAt: '', expiresAt: '' };
 
 interface Options {
@@ -120,7 +134,11 @@ const redirectedTo = async (promise: Promise<unknown>): Promise<URL> => {
 beforeEach(() => {
   currentSession.mockResolvedValue(SESSION);
   uploadDocument.mockReset();
-  uploadDocument.mockResolvedValue({ kind: 'REGISTERED', documentId: 'DOC_1' });
+  uploadDocument.mockResolvedValue({
+    kind: 'REGISTERED',
+    documentId: 'DOC_1',
+    fingerprint: PDF_FINGERPRINT,
+  });
   attachAssetDocument.mockReset();
   attachAssetDocument.mockResolvedValue({
     kind: 'CREATED',
@@ -228,6 +246,7 @@ describe('what is refused before anything is uploaded or sent', () => {
       assetId: ASSET_ID,
       submissionId: submission,
       documentId: 'DOC_1',
+      ...REGISTERED_AS,
     });
     for (const uploaded of [
       'chosen-by-the-client',
@@ -237,16 +256,18 @@ describe('what is refused before anything is uploaded or sent', () => {
         assetId: ASSET_ID,
         submissionId: mintSubmissionId(SESSION),
         documentId: 'DOC_1',
+        ...REGISTERED_AS,
       }),
       // Genuine, but for another machine.
       sealUploadedDocument(SESSION, {
         assetId: OTHER_ASSET_ID,
         submissionId: submission,
         documentId: 'DOC_1',
+        ...REGISTERED_AS,
       }),
       sealUploadedDocument(
         { ...SESSION, subject: 'someone-else' },
-        { assetId: ASSET_ID, submissionId: submission, documentId: 'DOC_1' },
+        { assetId: ASSET_ID, submissionId: submission, documentId: 'DOC_1', ...REGISTERED_AS },
       ),
     ]) {
       expect(await submit(formData(VALID, { submission, uploaded }))).toEqual({
@@ -371,7 +392,12 @@ describe('what is uploaded and attached, and to which asset', () => {
 describe('a resend is not a second upload', () => {
   const submission = mintSubmissionId(SESSION);
   const resumeFor = (documentId = 'DOC_1') =>
-    sealUploadedDocument(SESSION, { assetId: ASSET_ID, submissionId: submission, documentId });
+    sealUploadedDocument(SESSION, {
+      assetId: ASSET_ID,
+      submissionId: submission,
+      documentId,
+      ...REGISTERED_AS,
+    });
 
   it('gives back a token for the registered document whenever the attach does not succeed', async () => {
     const outcomes = [
@@ -429,6 +455,188 @@ describe('a resend is not a second upload', () => {
     );
     expect(state).toMatchObject({ kind: 'INVALID', resume: token });
     nothingSent();
+  });
+});
+
+describe('a resend must still be the submission its token vouches for (Codex r1 on #225)', () => {
+  const submission = mintSubmissionId(SESSION);
+  const token = () =>
+    sealUploadedDocument(SESSION, {
+      assetId: ASSET_ID,
+      submissionId: submission,
+      documentId: 'DOC_1',
+      ...REGISTERED_AS,
+    });
+
+  const startedAfresh = (state: unknown, message: string) => {
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      message,
+      resume: null,
+      fieldErrors: {},
+      values: expect.objectContaining({ title: VALID.title }),
+    });
+    // A new submission id, bound to this session: the next send is not the refused one.
+    const fresh = (state as { submissionId: string }).submissionId;
+    expect(fresh).not.toBe(submission);
+    expect(isBoundSubmissionId(fresh, SESSION)).toBe(true);
+  };
+
+  it('puts the kind and the size and digest of the registered file into the token it gives back', async () => {
+    attachAssetDocument.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'c' });
+    const state = (await submit(formData(VALID, { submission }))) as { resume: string };
+    expect(
+      openUploadedDocument(SESSION, state.resume, { assetId: ASSET_ID, submissionId: submission }),
+    ).toEqual({
+      assetId: ASSET_ID,
+      submissionId: submission,
+      documentId: 'DOC_1',
+      ...REGISTERED_AS,
+    });
+  });
+
+  it('refuses a changed kind, attaches nothing, and starts afresh — the old file is not attached under the new label', async () => {
+    const state = await submit(
+      formData({ ...VALID, kind: 'PHOTO' }, { submission, uploaded: token(), file: null }),
+    );
+
+    startedAfresh(state, RESUME_KIND_CHANGED_MESSAGE);
+    expect(attachAssetDocument).not.toHaveBeenCalled();
+    expect(uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it('refuses a different file in the post — it would be ignored while the person believes it was attached', async () => {
+    const other = new File(['%PDF-1.7 other bytes!'], 'other.pdf', { type: 'application/pdf' });
+    const state = await submit(formData(VALID, { submission, uploaded: token(), file: other }));
+
+    startedAfresh(state, RESUME_FILE_CHANGED_MESSAGE);
+    expect(attachAssetDocument).not.toHaveBeenCalled();
+    expect(uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it('refuses a file of the same size and another digest', async () => {
+    const sameSize = new File(['%PDF-1.7 bytez'], 'same-size.pdf', { type: 'application/pdf' });
+    expect(sameSize.size).toBe(PDF_FINGERPRINT.sizeBytes);
+
+    startedAfresh(
+      await submit(formData(VALID, { submission, uploaded: token(), file: sameSize })),
+      RESUME_FILE_CHANGED_MESSAGE,
+    );
+    expect(attachAssetDocument).not.toHaveBeenCalled();
+  });
+
+  it('accepts the very same file in the post: the digest matches, nothing is uploaded again', async () => {
+    await redirectedTo(submit(formData(VALID, { submission, uploaded: token(), file: pdf() })));
+
+    expect(uploadDocument).not.toHaveBeenCalled();
+    expect(attachAssetDocument.mock.calls[0]![2]).toBe('DOC_1');
+  });
+
+  it('still lets the title and the dates be corrected: the kind is what the file was stored under, the text is not', async () => {
+    await redirectedTo(
+      submit(
+        formData(
+          { ...VALID, title: 'عنوان اصلاح‌شده' },
+          { submission, uploaded: token(), file: null },
+        ),
+      ),
+    );
+    expect(attachAssetDocument.mock.calls[0]![3]).toMatchObject({ title: 'عنوان اصلاح‌شده' });
+  });
+
+  it('judges the text first: a bad title is the title’s error, not a kind mismatch', async () => {
+    const state = await submit(
+      formData(
+        { ...VALID, kind: 'PHOTO', title: '' },
+        { submission, uploaded: token(), file: null },
+      ),
+    );
+    expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { title: expect.any(String) } });
+  });
+});
+
+describe('a lost answer is not a dead end, and never a second reference (Codex r1 on #225)', () => {
+  it('answers the key conflict a resend meets with a plain sentence and a fresh submission id', async () => {
+    // The first send attached DOC_1 and its answer never arrived: the browser has
+    // no token. The resend uploads and registers DOC_2, and the key is taken.
+    const submission = mintSubmissionId(SESSION);
+    uploadDocument.mockResolvedValueOnce({
+      kind: 'REGISTERED',
+      documentId: 'DOC_2',
+      fingerprint: PDF_FINGERPRINT,
+    });
+    attachAssetDocument.mockResolvedValueOnce({
+      kind: 'INVALID',
+      fieldErrors: {},
+      message: ATTACH_KEY_REUSED_MESSAGE,
+      correlationId: 'c-409',
+    });
+
+    const state = (await submit(formData(VALID, { submission }))) as {
+      kind: string;
+      submissionId: string;
+      message: string;
+      resume: string | null;
+    };
+
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      message: ATTACH_KEY_REUSED_MESSAGE,
+      resume: null,
+      values: expect.objectContaining({ title: VALID.title }),
+    });
+    expect(state.submissionId).not.toBe(submission);
+    expect(isBoundSubmissionId(state.submissionId, SESSION)).toBe(true);
+    // The message tells the person to look at the list first, in words.
+    expect(ATTACH_KEY_REUSED_MESSAGE).toMatch(/فهرست مدارک/);
+    expect(ATTACH_KEY_REUSED_MESSAGE).toMatch(/فرم تازه/);
+    // Exactly one attach was tried; the service refused it, so there is one reference at most.
+    expect(attachAssetDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the next send, with the fresh id and the file chosen again, go through under that new key', async () => {
+    const first = mintSubmissionId(SESSION);
+    uploadDocument.mockResolvedValueOnce({
+      kind: 'REGISTERED',
+      documentId: 'DOC_2',
+      fingerprint: PDF_FINGERPRINT,
+    });
+    attachAssetDocument.mockResolvedValueOnce({
+      kind: 'INVALID',
+      fieldErrors: {},
+      message: ATTACH_KEY_REUSED_MESSAGE,
+      correlationId: 'c-409',
+    });
+    const refused = (await submit(formData(VALID, { submission: first }))) as {
+      submissionId: string;
+    };
+
+    uploadDocument.mockResolvedValueOnce({
+      kind: 'REGISTERED',
+      documentId: 'DOC_3',
+      fingerprint: PDF_FINGERPRINT,
+    });
+    await redirectedTo(submit(formData(VALID, { submission: refused.submissionId })));
+
+    const [, , documentId, , key] = attachAssetDocument.mock.calls.at(-1)!;
+    expect([documentId, key]).toEqual(['DOC_3', refused.submissionId]);
+    expect(key).not.toBe(first);
+  });
+
+  it('does not treat any other refusal of the attach as a conflict: the same submission id stays', async () => {
+    const submission = mintSubmissionId(SESSION);
+    attachAssetDocument.mockResolvedValueOnce({
+      kind: 'INVALID',
+      fieldErrors: { title: 'خطا' },
+      message: null,
+      correlationId: 'c',
+    });
+    const state = (await submit(formData(VALID, { submission }))) as {
+      submissionId: string;
+      resume: string;
+    };
+    expect(state.submissionId).toBe(submission);
+    expect(state.resume).toEqual(expect.any(String));
   });
 });
 

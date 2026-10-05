@@ -3,20 +3,26 @@ import { redirect } from 'next/navigation';
 import { BASELINE_FIELD, FLASH_PARAM } from '@/lib/form-fields';
 import { FILE_FIELD, UPLOAD_TOKEN_FIELD } from '@/lib/asset-document-fields';
 import {
+  ATTACH_KEY_REUSED_MESSAGE,
   DOCUMENT_REFERENCE_REFUSED_MESSAGE,
+  RESUME_FILE_CHANGED_MESSAGE,
+  RESUME_KIND_CHANGED_MESSAGE,
   attachAssetDocument,
   attachDocumentFormValues,
   chosenFile,
+  fingerprintOf,
   openAssetDocumentBaseline,
   openUploadedDocument,
   parseAttachDocumentForm,
+  resumeMismatch,
   sealUploadedDocument,
   uploadDocument,
+  type FileFingerprint,
 } from '@/server/asset-documents';
 import { verifyCsrf } from '@/server/csrf';
 import { currentSession } from '@/server/current-session';
 import { mintFlash } from '@/server/flash';
-import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
+import { isBoundSubmissionId, mintSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import type { DocumentFormState } from './document-form-state';
 
@@ -37,16 +43,53 @@ import type { DocumentFormState } from './document-form-state';
  * title must not leave a registered document behind, so nothing is uploaded
  * until what will be attached to it is known to be well-formed.
  *
- * ## A resend is not a second upload
+ * ## A resend is not a second upload — while the answer to the first came back
  *
  * Once the file is registered, every outcome that is not a success carries
  * `resume`: a token, signed for this session, this machine and this submission,
- * that names the registered document. A resend of the same submission brings it
- * back, the file is not uploaded again, and the attach goes to asset-service
- * with the same `documentId` under the same `Idempotency-Key` — which is the
- * replay asset-service recognises. A token that does not open for exactly this
- * session, machine and submission is refused like a forged one.
+ * that names the registered document **and the kind, size and digest it was
+ * uploaded as**. A resend of the same submission brings it back, the file is not
+ * uploaded again, and the attach goes to asset-service with the same
+ * `documentId` under the same `Idempotency-Key` — which is the replay
+ * asset-service recognises. A token that does not open for exactly this
+ * session, machine and submission is refused like a forged one; a resend that
+ * names another kind, or brings another file, is not a resend of that document and
+ * is told to start afresh (below).
+ *
+ * ## What is NOT guaranteed, and what happens instead (Codex r1 on #225)
+ *
+ * If the attach succeeded and the **answer was lost** — the connection dropped,
+ * the tab closed — the browser has no `resume`, and a resend uploads and
+ * registers a **second** document (document-service has no key to recognise the
+ * first by; its intent ids are its own). The attach then carries the same
+ * `Idempotency-Key` with another `documentId`, which asset-service refuses with
+ * `409 IDEMPOTENCY_KEY_REUSED`. So the guarantee is: **never two references**; a
+ * lost answer may leave **one orphan document**. The refusal is not a dead end:
+ * the person is told plainly to look at the list and, if the document is not
+ * there, to send again — and the form is given a **fresh submission id**, so the
+ * next send is a new submission rather than the same refused one.
  */
+/**
+ * The form as it was typed, with a message and a **new** submission id and no
+ * resume token: the next send is a fresh submission (a new upload, a new key),
+ * not the one that was refused. The file is not kept — a browser cannot be given
+ * it back — so the person chooses it again.
+ */
+function startAfresh(
+  session: Parameters<typeof mintSubmissionId>[0],
+  values: ReturnType<typeof attachDocumentFormValues>,
+  message: string,
+): DocumentFormState {
+  return {
+    kind: 'INVALID',
+    submissionId: mintSubmissionId(session),
+    values,
+    fieldErrors: {},
+    message,
+    resume: null,
+  };
+}
+
 export async function runAttachDocument(
   /** The machine of the page this form was drawn on — bound by the form, never a field of it. */
   assetId: string,
@@ -97,7 +140,28 @@ export async function runAttachDocument(
     };
   }
 
+  if (uploaded) {
+    // The token vouches for one document of one kind. A different kind would
+    // attach the old file under a new label; a different file in the post would
+    // be ignored while the person believes it was attached.
+    const posted = chosenFile(form, FILE_FIELD);
+    const mismatch = resumeMismatch(uploaded, {
+      kind: parsed.body.kind,
+      file: posted.ok ? await fingerprintOf(posted.file) : null,
+    });
+    if (mismatch !== null) {
+      return startAfresh(
+        session,
+        values,
+        mismatch === 'KIND' ? RESUME_KIND_CHANGED_MESSAGE : RESUME_FILE_CHANGED_MESSAGE,
+      );
+    }
+  }
+
   let documentId = uploaded?.documentId ?? null;
+  let fingerprint: FileFingerprint | null = uploaded
+    ? { sizeBytes: uploaded.sizeBytes, sha256: uploaded.sha256 }
+    : null;
   if (documentId === null) {
     if (file === null || !file.ok) throw new Error('unreachable: no file and no uploaded document');
     const outcome = await uploadDocument(session, {
@@ -109,6 +173,7 @@ export async function runAttachDocument(
     switch (outcome.kind) {
       case 'REGISTERED':
         documentId = outcome.documentId;
+        fingerprint = outcome.fingerprint;
         break;
       case 'REFUSED':
         return {
@@ -134,9 +199,16 @@ export async function runAttachDocument(
   }
 
   // Whatever follows, a resend must not upload this file again.
+  if (fingerprint === null) throw new Error('unreachable: a registered document has a fingerprint');
   const resume =
     resumeToken ??
-    sealUploadedDocument(session, { assetId: baseline.assetId, submissionId, documentId });
+    sealUploadedDocument(session, {
+      assetId: baseline.assetId,
+      submissionId,
+      documentId,
+      kind: parsed.body.kind,
+      ...fingerprint,
+    });
 
   const result = await attachAssetDocument(
     session,
@@ -156,6 +228,12 @@ export async function runAttachDocument(
 
   switch (result.kind) {
     case 'INVALID':
+      // The key was already used for another document: a first send whose answer
+      // was lost attached one. Never a second reference, and never a dead end —
+      // a fresh submission, after a look at the list.
+      if (result.message === ATTACH_KEY_REUSED_MESSAGE) {
+        return startAfresh(session, values, ATTACH_KEY_REUSED_MESSAGE);
+      }
       return {
         kind: 'INVALID',
         submissionId,

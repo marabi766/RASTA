@@ -10,6 +10,7 @@ import {
 import {
   DOCUMENT_CLASS_BY_KIND,
   FILE_CONTENT_MISMATCH_MESSAGE,
+  ATTACH_KEY_REUSED_MESSAGE,
   FILE_EMPTY_MESSAGE,
   FILE_MISSING_MESSAGE,
   FILE_TOO_LARGE_MESSAGE,
@@ -19,6 +20,8 @@ import {
   attachDocumentFormValues,
   canAttachAssetDocuments,
   chosenFile,
+  fingerprintOf,
+  resumeMismatch,
   documentValidityAt,
   openAssetDocumentBaseline,
   openUploadedDocument,
@@ -27,7 +30,6 @@ import {
   sealUploadedDocument,
   uploadDocument,
 } from './asset-documents';
-import { RECORD_KEY_REUSED_MESSAGE } from './asset-records';
 import type { WebSession } from './session';
 
 /**
@@ -63,6 +65,14 @@ beforeEach(() => {
 
 const ASSET = 'AST_01J00000000000000000000000';
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const UPLOADED = {
+  assetId: ASSET,
+  submissionId: SUBMISSION,
+  documentId: 'DOC_1',
+  kind: 'OWNERSHIP_TITLE' as const,
+  sizeBytes: 8,
+  sha256: 'a'.repeat(64),
+};
 const SIGNED_URL =
   'http://storage.test:9000/rasta-documents/org/obj?X-Amz-Signature=secret-signature';
 
@@ -228,11 +238,7 @@ describe('the tokens a form carries', () => {
   });
 
   it('opens an uploaded-document token only for exactly this machine and this submission', () => {
-    const token = sealUploadedDocument(SESSION, {
-      assetId: ASSET,
-      submissionId: SUBMISSION,
-      documentId: 'DOC_1',
-    });
+    const token = sealUploadedDocument(SESSION, UPLOADED);
     const expected = { assetId: ASSET, submissionId: SUBMISSION };
     expect(openUploadedDocument(SESSION, token, expected)).toEqual(
       expect.objectContaining({ documentId: 'DOC_1' }),
@@ -249,11 +255,7 @@ describe('the tokens a form carries', () => {
 
   it('cannot be passed off as a baseline, or the other way round', () => {
     const baseline = sealAssetDocumentBaseline(SESSION, { assetId: ASSET });
-    const uploaded = sealUploadedDocument(SESSION, {
-      assetId: ASSET,
-      submissionId: SUBMISSION,
-      documentId: 'DOC_1',
-    });
+    const uploaded = sealUploadedDocument(SESSION, UPLOADED);
     expect(
       openUploadedDocument(SESSION, baseline, { assetId: ASSET, submissionId: SUBMISSION }),
     ).toBeNull();
@@ -365,7 +367,11 @@ describe('the chain a file travels', () => {
 
     const outcome = await upload(g, s);
 
-    expect(outcome).toEqual({ kind: 'REGISTERED', documentId: 'DOC_1' });
+    expect(outcome).toEqual({
+      kind: 'REGISTERED',
+      documentId: 'DOC_1',
+      fingerprint: await fingerprintOf(FILE),
+    });
     expect(g.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`)).toEqual([
       'POST /v1/documents/upload-url',
       'POST /v1/documents',
@@ -590,7 +596,7 @@ describe('the reference on the machine', () => {
       SUBMISSION,
       g.fetchImpl,
     );
-    expect(result).toMatchObject({ kind: 'INVALID', message: RECORD_KEY_REUSED_MESSAGE });
+    expect(result).toMatchObject({ kind: 'INVALID', message: ATTACH_KEY_REUSED_MESSAGE });
   });
 
   it('answers another organization’s machine as a missing one', async () => {
@@ -604,5 +610,60 @@ describe('the reference on the machine', () => {
       g.fetchImpl,
     );
     expect(result.kind).toBe('NOT_FOUND');
+  });
+});
+
+describe('what the resume token vouches for (Codex r1 on #225)', () => {
+  it('names the kind, the size and the digest of the registered file, and refuses a token that lacks any', () => {
+    const token = sealUploadedDocument(SESSION, UPLOADED);
+    expect(
+      openUploadedDocument(SESSION, token, { assetId: ASSET, submissionId: SUBMISSION }),
+    ).toEqual(UPLOADED);
+
+    // A token minted without them — the shape before this round — does not open.
+    const { signPayload } = jest.requireActual(
+      './signed-payload',
+    ) as typeof import('./signed-payload');
+    const old = signPayload(
+      SESSION,
+      'asset-document-uploaded',
+      { assetId: ASSET, submissionId: SUBMISSION, documentId: 'DOC_1' },
+      3600,
+    );
+    expect(
+      openUploadedDocument(SESSION, old, { assetId: ASSET, submissionId: SUBMISSION }),
+    ).toBeNull();
+  });
+
+  it('fingerprints the bytes: the size and the SHA-256, whatever the file is called', async () => {
+    const a = await fingerprintOf(new File(['abc'], 'one.pdf'));
+    const b = await fingerprintOf(new File(['abc'], 'two.pdf', { type: 'application/pdf' }));
+    expect(a).toEqual({
+      sizeBytes: 3,
+      sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    });
+    expect(b).toEqual(a);
+    expect(await fingerprintOf(new File(['abd'], 'one.pdf'))).not.toEqual(a);
+  });
+
+  const fp = { sizeBytes: UPLOADED.sizeBytes, sha256: UPLOADED.sha256 };
+
+  it.each([
+    ['the same kind and no file in the post', { kind: 'OWNERSHIP_TITLE', file: null }, null],
+    ['the same kind and the same file', { kind: 'OWNERSHIP_TITLE', file: fp }, null],
+    ['another kind', { kind: 'PHOTO', file: null }, 'KIND'],
+    ['another kind, whatever the file', { kind: 'PHOTO', file: fp }, 'KIND'],
+    [
+      'the same kind and a file of another size',
+      { kind: 'OWNERSHIP_TITLE', file: { ...fp, sizeBytes: 9 } },
+      'FILE',
+    ],
+    [
+      'the same kind and a file of another digest',
+      { kind: 'OWNERSHIP_TITLE', file: { ...fp, sha256: 'b'.repeat(64) } },
+      'FILE',
+    ],
+  ] as const)('is a resend of the same document for %s: %s', (_what, attempt, expected) => {
+    expect(resumeMismatch(UPLOADED, attempt)).toBe(expected);
   });
 });
