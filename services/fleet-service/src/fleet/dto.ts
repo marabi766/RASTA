@@ -271,6 +271,18 @@ export const availabilityQuerySchema = cursorPaginationSchema
 
 export type AvailabilityQuery = z.infer<typeof availabilityQuerySchema>;
 
+/**
+ * One machine's declarations, newest first, revoked ones included (EXP-002
+ * slice 7). `assetId` is required: the list is a machine's history, and a
+ * machine that is not the caller's organization's is `404`, exactly as one that
+ * does not exist.
+ */
+export const listAvailabilityWindowsQuerySchema = cursorPaginationSchema
+  .extend({ assetId })
+  .strict();
+
+export type ListAvailabilityWindowsQuery = z.infer<typeof listAvailabilityWindowsQuerySchema>;
+
 export const utilizationQuerySchema = z
   .object({
     assetId: assetId.optional(),
@@ -380,6 +392,13 @@ export interface AvailabilityBlocker {
   /** Which service owns the fact behind this blocker. */
   owner: string;
   detail: string;
+  /**
+   * For `DISPATCH_BLOCKED` only: which of the two safety causes this is, so a
+   * client need not parse `detail` (EXP-002 slice 7). Additive; `detail` stays.
+   */
+  cause?: 'INSPECTION' | 'INSURANCE';
+  /** For an `INSURANCE` cause: the lapsed coverages, sorted (`UNKNOWN` when a producer did not say). */
+  coverages?: string[];
 }
 
 export interface UtilizationView {

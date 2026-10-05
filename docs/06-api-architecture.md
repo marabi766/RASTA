@@ -99,6 +99,16 @@ Claim رهاشده را با توکن تازه برمی‌دارد و تکمیل
 منتقل شده، برای بازپخش همان کاربر `404 NOT_FOUND` است، دقیقاً مثل دارایی ناموجود، بی هیچ چیز از بدنهٔ ذخیره‌شده و بی هیچ
 نوشتن یا رویداد؛ بازپخش درون همان مستأجر همان `201` ذخیره‌شده است.
 
+**`Idempotency-Key` روی `POST /v1/fleet/availability`** (EXP-002، برش ۷): **اجباری، در خودِ fleet-service**، با نسخهٔ محلیِ همان
+سازوکار (`IdempotencyStore`؛ جدول `idempotency_key` با Migration قابل بازگشت `20261005120000_fleet_availability_idempotency`؛
+`FLEET_IDEMPOTENCY_TTL_HOURS` پیش‌فرض ۲۴ و `FLEET_IDEMPOTENCY_CLAIM_LEASE_SECONDS` پیش‌فرض ۱۲۰). دلیل: هر اعلام، اعلامِ پیشینِ
+همان دارایی را **جایگزین** می‌کند، پس ارسال دوبارهٔ یک درخواست قدیمی (پاسخ گمشده، تلاش مجدد مرورگر) می‌توانست اعلامِ تازه‌تر را
+بی‌صدا باطل کند. Hash درخواست بدنه (شامل `assetId`) و کاربر را می‌بندد؛ بازپخش همان `201` اول است (همان شناسهٔ پنجره، بی رویداد
+`AVAILABILITY_CHANGED` تازه) و **اعلام تازه‌تر را جایگزین نمی‌کند**؛ بدنه/کاربر دیگر `409 IDEMPOTENCY_KEY_REUSED`؛ نبودن یا
+نامعتبر بودن کلید `400`. بازپخش پیش از پاسخ دوباره مجوز می‌گیرد (`ReplayGuard`: دارایی هنوز مال سازمان فراخوان است، وگرنه
+`404` مثل دارایی ناموجود). **ابطال کلید ندارد**: وضعیت‌محور است و بازپخش آن `409 INVALID_STATE_TRANSITION` («پیش‌تر باطل شده») است نه
+اثر دوم. دارایی/پنجرهٔ مستأجر دیگر برای هر چهار مسیر (اعلام، فهرست، ابطال، بازپخش) `404` یکسان با ناموجود است.
+
 **CONSTRAINT.** `X-Organization-Id` **هرگز** بدون بررسی پذیرفته نمی‌شود، و این
 روی هر دو مسیر صادق است:
 
@@ -504,9 +514,10 @@ POST   /v1/usage-records                 ثبت کارکرد
 GET    /v1/usage-records                 تاریخچه کارکرد (assetId، driverId، source، from/to)
 GET    /v1/usage-records/{id}            دریافت
 
-GET    /v1/fleet/availability            دارایی‌های آزاد، با مانع‌های نام‌دار
-POST   /v1/fleet/availability            اعلام در دسترس/غیرقابل‌دسترس بودن
-POST   /v1/fleet/availability/{id}/revoke  ابطال اعلام
+GET    /v1/fleet/availability            دارایی‌های آزاد، با مانع‌های نام‌دار (assetId، availableOnly، at)؛ مانع `DISPATCH_BLOCKED` علاوه بر `detail` میدان ساخت‌یافتهٔ `cause` (`INSPECTION`/`INSURANCE`) و برای بیمه `coverages` دارد (EXP-002 برش ۷)
+GET    /v1/fleet/availability/windows    اعلام‌های یک دارایی، تازه‌ترین نخست، ابطال‌شده‌ها هم (assetId اجباری؛ cursor/limit) — EXP-002 برش ۷
+POST   /v1/fleet/availability            اعلام در دسترس/غیرقابل‌دسترس بودن [Idempotency-Key اجباری در سرویس، EXP-002 برش ۷]
+POST   /v1/fleet/availability/{id}/revoke  ابطال اعلام (فقط اعلامِ ثبت‌شده؛ مانعی که پلتفرم می‌گذارد پنجره نیست و ابطال‌پذیر نیست)
 GET    /v1/fleet/utilization             نرخ بهره‌برداری
 ```
 

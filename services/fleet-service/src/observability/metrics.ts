@@ -90,3 +90,15 @@ export const transferFenceResolutionsTotal = new Counter({
   labelNames: ['service', 'outcome'] as const,
   registers: [registry],
 });
+
+/**
+ * Requests answered from a stored response under their Idempotency-Key
+ * (EXP-002 slice 7): a retry that declared nothing a second time. `endpoint` is
+ * the route template, a closed set.
+ */
+export const idempotentReplaysTotal = new Counter({
+  name: 'rasta_fleet_idempotent_replays_total',
+  help: 'Requests answered from a stored response under their Idempotency-Key',
+  labelNames: ['service', 'endpoint'] as const,
+  registers: [registry],
+});

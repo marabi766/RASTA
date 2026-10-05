@@ -13,6 +13,7 @@ import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
+  ListAvailabilityWindowsQuery,
   ListDriversQuery,
   ListUsageQuery,
   UtilizationQuery,
@@ -611,6 +612,22 @@ export class FleetRepository {
 
   async findAvailabilityWindowById(id: string) {
     return this.client.availabilityWindow.findFirst({ where: { id } });
+  }
+
+  /**
+   * A machine's windows, newest first. Ids are `AVW_<ULID>`: they sort by
+   * creation, so the id is the cursor and no second sort key is needed.
+   */
+  async listAvailabilityWindows(query: ListAvailabilityWindowsQuery) {
+    const rows = await this.client.availabilityWindow.findMany({
+      where: {
+        assetId: query.assetId,
+        ...(query.cursor ? { id: { lt: query.cursor } } : {}),
+      },
+      orderBy: { id: 'desc' },
+      take: query.limit + 1,
+    });
+    return page(rows, query.limit, (row) => row.id);
   }
 
   /**

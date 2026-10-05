@@ -533,3 +533,32 @@ model ProcessedEvent {
   @@index([processedAt])
   @@map("processed_event")
 }
+
+/// One row per (organization, endpoint, key): the claim an `Idempotency-Key` takes on
+/// `POST /v1/fleet/availability` and, once the work commits, the response it replays
+/// (EXP-002 slice 7, docs/06 § 6.8). Same shape as asset-service's and maintenance-service's.
+model IdempotencyKey {
+  key            String @map("key")
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 over the canonical body and the caller.
+  requestHash String @map("request_hash")
+  /// Minted per claim; the work's transaction locks and completes the row by it.
+  claimToken  String @map("claim_token")
+
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
+  /// IN_PROGRESS | COMPLETED (CHECK ck_idempotency_state).
+  state          String
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// While IN_PROGRESS: the claim's lease (FLEET_IDEMPOTENCY_CLAIM_LEASE_SECONDS, 120 by
+  /// default), after which a retry may take the key over under a new token.
+  /// Once COMPLETED: FLEET_IDEMPOTENCY_TTL_HOURS after the response (24 by default).
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}
