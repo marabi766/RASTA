@@ -4,8 +4,10 @@ import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { AssetRepository, isUniqueViolation } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
 import type { ClaimFence } from '../asset/idempotency';
+import { STORED_AMOUNT_INVALID, negativeAmountRefusal } from './negative-amount';
 import { INSURANCE_EVENTS, validateInsurancePayload } from '../asset/events';
-import { INSURANCE_TOPIC } from '../config/env';
+import { INSURANCE_TOPIC, SERVICE_NAME } from '../config/env';
+import { policiesExpiryHeldGauge } from '../observability/metrics';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import type {
   CreateInspectionDto,
@@ -32,6 +34,8 @@ import type {
  * outage does not hold thousands of row locks in one transaction.
  */
 const EXPIRY_BATCH_SIZE = 200;
+/** How many held policies the sweep's error names; the gauge has the full count. */
+const HELD_POLICIES_LOGGED = 20;
 
 @Injectable()
 export class InsuranceService {
@@ -120,7 +124,8 @@ export class InsuranceService {
       } catch (error) {
         // Same policy number from the same insurer, twice.
         if (isUniqueViolation(error)) throw RastaError.alreadyExists('InsurancePolicy');
-        throw error;
+        // A negative premium or insured value (L7-36): the API's 400, not a 500.
+        throw negativeAmountRefusal(error) ?? error;
       }
 
       await this.repository.enqueueEvent(tx, {
@@ -285,7 +290,7 @@ export class InsuranceService {
    * L3-04), so a policy is never expired without its INSURANCE_EXPIRED event,
    * and an event is never sent for a policy whose expiry rolled back.
    */
-  async runExpirySweep(): Promise<{ warned: number; expired: number }> {
+  async runExpirySweep(): Promise<{ warned: number; expired: number; held: number }> {
     const [expiringPolicies, expiringInspections] = await Promise.all([
       runUnscoped('scheduled platform-wide expiry sweep', () =>
         this.repository.findPoliciesExpiringWithin(this.expiryWarningDays),
@@ -369,7 +374,25 @@ export class InsuranceService {
       this.logger.log(`Expiry sweep: ${warned} warnings, ${expired} policies expired`);
     }
 
-    return { warned, expired };
+    // What the batches above skipped, and why: a lapsed policy whose stored
+    // amount the database refuses to keep cannot be updated at all (#222 r1).
+    // Skipped rather than failing its batch, so every other policy still
+    // expires; reported on every run until an operator corrects it. Ids
+    // only, never amounts (S-09).
+    const held = await runUnscoped('scheduled platform-wide expiry sweep', () =>
+      this.repository.findLapsedPoliciesWithInvalidAmount(HELD_POLICIES_LOGGED),
+    );
+    policiesExpiryHeldGauge.set({ service: SERVICE_NAME }, held.total);
+    if (held.total > 0) {
+      this.logger.error(
+        `Expiry sweep: ${held.total} lapsed policies left ACTIVE, a stored amount is invalid ` +
+          `(rule ${STORED_AMOUNT_INVALID}); correct them per ` +
+          `docs/runbooks/database-bootstrap.md#asset-insurance-money-non-negative. ` +
+          `First ${held.sample.length}: ${held.sample.map((p) => `${p.id} (${p.organizationId})`).join(', ')}`,
+      );
+    }
+
+    return { warned, expired, held: held.total };
   }
 
   // =========================================================================

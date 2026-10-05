@@ -1,4 +1,4 @@
-import { runUnscoped } from '@rasta/nest-common';
+import { RastaError, runUnscoped } from '@rasta/nest-common';
 import {
   asActor,
   cleanup,
@@ -10,7 +10,7 @@ import {
   wire,
   type Wiring,
 } from './helpers';
-import { IdempotencyStore } from '../src/shared/idempotency';
+import { IdempotencyStore, TerminalRefusalError } from '../src/shared/idempotency';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -167,6 +167,100 @@ describe('idempotency (real database)', () => {
           idempotency.run('POST /itest', 'key-failed-01', {}, 201, async () => ({ ok: true })),
         ),
       ).resolves.toEqual({ ok: true });
+    });
+
+    describe('terminal refusals (opt-in)', () => {
+      const refusals = {
+        DECLINED: { code: 'BUSINESS_RULE_VIOLATION', message: 'Declined, and final' },
+      } as const;
+      const declined = () => new TerminalRefusalError('DECLINED', refusals.DECLINED, { n: 1 });
+      const run = (key: string, body: unknown, work: () => Promise<unknown>, opt = true) =>
+        asActor({ organizationId: org.a }, () =>
+          idempotency.run(
+            'POST /itest/terminal',
+            key,
+            body,
+            200,
+            work,
+            opt ? { terminalRefusals: refusals } : undefined,
+          ),
+        );
+      const stored = (key: string) =>
+        runUnscoped('the suite reads the idempotency record', () =>
+          prisma.client.idempotencyKey.findFirst({
+            where: { organizationId: org.a, endpoint: 'POST /itest/terminal', key },
+          }),
+        );
+
+      it('records a declared refusal and replays it, without running the work again', async () => {
+        let runs = 0;
+        const work = async () => {
+          runs += 1;
+          throw declined();
+        };
+
+        await expect(run('key-term-01', { a: 1 }, work)).rejects.toThrow(
+          expect.objectContaining({
+            code: 'BUSINESS_RULE_VIOLATION',
+            message: 'Declined, and final',
+          }),
+        );
+        await expect(run('key-term-01', { a: 1 }, work)).rejects.toThrow(
+          expect.objectContaining({
+            code: 'BUSINESS_RULE_VIOLATION',
+            message: 'Declined, and final',
+          }),
+        );
+        expect(runs).toBe(1);
+
+        // Codes only: the status and the closed name, nothing the error carried.
+        const row = await stored('key-term-01');
+        expect(row).toMatchObject({
+          state: 'COMPLETED',
+          responseStatus: 422,
+          responseBody: { refusal: 'DECLINED' },
+        });
+      });
+
+      it('still refuses the same key with a different body', async () => {
+        await expect(
+          run('key-term-02', { a: 1 }, async () => Promise.reject(declined())),
+        ).rejects.toThrow();
+        await expect(run('key-term-02', { a: 2 }, async () => ({ ok: true }))).rejects.toThrow(
+          expect.objectContaining({ code: 'IDEMPOTENCY_KEY_REUSED' }),
+        );
+      });
+
+      it('releases the key for a refusal the endpoint did not declare', async () => {
+        const undeclared = () =>
+          new TerminalRefusalError('OTHER', { code: 'BUSINESS_RULE_VIOLATION', message: 'x' });
+        await expect(
+          run('key-term-03', {}, async () => Promise.reject(undeclared())),
+        ).rejects.toThrow();
+        expect(await stored('key-term-03')).toBeNull();
+        await expect(run('key-term-03', {}, async () => ({ ok: true }))).resolves.toEqual({
+          ok: true,
+        });
+      });
+
+      it('releases the key for any other error, even on an opted-in endpoint', async () => {
+        await expect(
+          run('key-term-04', {}, async () => {
+            throw RastaError.insufficientBalance('WAL-1', '10', '1');
+          }),
+        ).rejects.toThrow(expect.objectContaining({ code: 'INSUFFICIENT_BALANCE' }));
+        expect(await stored('key-term-04')).toBeNull();
+        await expect(run('key-term-04', {}, async () => ({ ok: true }))).resolves.toEqual({
+          ok: true,
+        });
+      });
+
+      it('releases the key when the endpoint did not opt in at all', async () => {
+        await expect(
+          run('key-term-05', {}, async () => Promise.reject(declined()), false),
+        ).rejects.toThrow();
+        expect(await stored('key-term-05')).toBeNull();
+      });
     });
 
     it('keeps one organization key from colliding with another', async () => {

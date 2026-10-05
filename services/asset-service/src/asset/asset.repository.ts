@@ -8,10 +8,20 @@ import {
 import { canonicalIdentifier } from './identifier';
 import { resolvePartitionKey } from './routing';
 import type { AssetEventName, InsuranceEventName } from './events';
+import { Prisma } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import type { ListAssetsQuery, NearbyQuery, TimelineQuery } from './dto';
 import { TERMINAL_CLAIM_STATUSES } from '../insurance/claim-lifecycle';
+
+/**
+ * The policy amounts an UPDATE of the row can keep: exactly what
+ * `ck_policy_premium_non_negative` and `ck_policy_insured_value_non_negative`
+ * accept (NULL passes, as it does a CHECK). The expiry sweep claims only rows
+ * that satisfy it, so one row the database would refuse cannot abort a whole
+ * batch (#222 r1).
+ */
+const KEEPABLE_AMOUNTS = Prisma.sql`(COALESCE(premium_minor, 0) >= 0 AND COALESCE(insured_value_minor, 0) >= 0)`;
 
 /**
  * Data access for assets.
@@ -259,6 +269,33 @@ export class AssetRepository {
    * Prisma cannot express; it is outside the tenant extension, which this
    * platform-wide sweep would lift anyway.
    */
+  /**
+   * Lapsed ACTIVE policies the sweep leaves alone because the database would
+   * refuse to update them: a negative premium or insured value stored before
+   * the constraints (NOT VALID, audit L7-36), which PostgreSQL checks on every
+   * UPDATE of the row (#222 r1). Up to `limit` of them, oldest first, and how
+   * many there are; ids only, never amounts (S-09).
+   */
+  async findLapsedPoliciesWithInvalidAmount(
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<{ total: number; sample: { id: string; organizationId: string }[] }> {
+    const rows = await this.client.$queryRaw<
+      { id: string; organization_id: string; total: number }[]
+    >`
+      SELECT id, organization_id, count(*) OVER ()::int AS total
+        FROM insurance_policy
+       WHERE status = 'ACTIVE' AND valid_to < ${now} AND deleted_at IS NULL
+         AND NOT ${KEEPABLE_AMOUNTS}
+       ORDER BY valid_to, id
+       LIMIT ${limit}
+    `;
+    return {
+      total: rows[0]?.total ?? 0,
+      sample: rows.map((row) => ({ id: row.id, organizationId: row.organization_id })),
+    };
+  }
+
   async claimLapsedPolicies(
     tx: ExtendedPrismaClient,
     limit: number,
@@ -280,6 +317,7 @@ export class AssetRepository {
        WHERE id IN (
          SELECT id FROM insurance_policy
           WHERE status = 'ACTIVE' AND valid_to < ${now} AND deleted_at IS NULL
+            AND ${KEEPABLE_AMOUNTS}
           ORDER BY valid_to, id
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED

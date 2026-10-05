@@ -1,4 +1,4 @@
-import { Counter, registry } from '@rasta/observability';
+import { Counter, Gauge, registry } from '@rasta/observability';
 
 /**
  * Metrics owned by asset-service.
@@ -57,5 +57,21 @@ export const idempotentReplaysTotal = new Counter({
   name: 'rasta_asset_idempotent_replays_total',
   help: 'Requests answered from a stored response under their Idempotency-Key',
   labelNames: ['service', 'endpoint'] as const,
+  registers: [registry],
+});
+
+/**
+ * Lapsed policies the expiry sweep could not mark EXPIRED, as of its last run
+ * (#222 r1): each holds a negative premium or insured value stored before the
+ * non-negative constraints (NOT VALID, audit L7-36), and the database refuses
+ * any UPDATE of such a row. The policy stays ACTIVE past its end date and no
+ * INSURANCE_EXPIRED is sent for it until an operator corrects the amount
+ * (docs/runbooks/database-bootstrap.md#asset-insurance-money-non-negative).
+ * Worth an alert whenever it is above zero.
+ */
+export const policiesExpiryHeldGauge = new Gauge({
+  name: 'rasta_asset_policies_expiry_held',
+  help: 'Lapsed policies the expiry sweep could not expire because a stored amount is invalid',
+  labelNames: ['service'] as const,
   registers: [registry],
 });

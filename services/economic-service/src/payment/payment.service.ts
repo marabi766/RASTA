@@ -24,7 +24,11 @@ import { ENV, PAYMENT_PROVIDER } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import type { PaymentProvider, RefundResult } from './provider';
 import type { TopUpDto } from './dto';
-import { hashRequestBody } from '../shared/idempotency';
+import {
+  hashRequestBody,
+  TerminalRefusalError,
+  type TerminalRefusals,
+} from '../shared/idempotency';
 import { PaymentReconciliationRepository } from './payment-reconciliation.repository';
 import type { PaymentIntent } from '../generated/prisma';
 
@@ -913,9 +917,9 @@ export class PaymentService {
     });
 
     if (requested.next === 'RELEASED') {
-      throw RastaError.businessRule(
-        'The payment provider declined the earlier refund of this payment; its held amount ' +
-          'has now been returned to the wallet',
+      throw new TerminalRefusalError(
+        'REFUND_DECLINED_EARLIER',
+        REFUND_REFUSALS.REFUND_DECLINED_EARLIER,
         { paymentIntentId: intentId, outcome: 'REFUND_DECLINED' },
       );
     }
@@ -941,7 +945,9 @@ export class PaymentService {
         // The decline is known. Should returning the hold fail, that fact is
         // recorded rather than lost: without it the intent would sit in
         // REFUND_REQUESTED, every later refund refused, and nothing announced.
+        let released = true;
         await this.releaseDeclinedRefund(requested.row, actor).catch(async (error: unknown) => {
+          released = false;
           this.logger.error(
             `Payment intent ${intentId}: the provider declined the refund and returning the ` +
               'held amount failed',
@@ -953,10 +959,17 @@ export class PaymentService {
             'PROVIDER_DECLINED_RELEASE_PENDING',
           );
         });
-        throw RastaError.businessRule('The payment provider refused the refund', {
+        const context = {
           intentId,
           code: failureCodeFrom(providerResult.failureCode, 'REFUND_DECLINED'),
-        });
+        };
+        // Terminal only once the held amount is back: while the release is
+        // pending, a same-key retry is what returns it, so that refusal is
+        // released with its key like any other.
+        if (!released) {
+          throw RastaError.businessRule(REFUND_REFUSALS.REFUND_DECLINED.message, context);
+        }
+        throw new TerminalRefusalError('REFUND_DECLINED', REFUND_REFUSALS.REFUND_DECLINED, context);
       }
     }
 
@@ -1422,6 +1435,29 @@ const UNRESOLVED_REFUND_LOG: Record<string, (intentId: string, reason: string) =
     `Payment intent ${id}: the provider declined the refund and the held amount could not be ` +
     'returned; a retry of the refund returns it without asking the provider',
 };
+
+/**
+ * The refusals of `POST /v1/payment-intents/:id/refund` the idempotency store
+ * records and replays (docs/06 § 6.8): the provider declined, and the held
+ * amount is back in the wallet. Both are final for that payment — the provider
+ * answers the one fixed refund attempt key with its decline — so the same key
+ * and body are answered with the recorded refusal instead of holding the amount
+ * again. Every other refusal of this endpoint (an unfinished refund, a frozen
+ * wallet, insufficient balance, a provider outcome unknown, a decline whose
+ * release is still pending) can change, and releases its key.
+ */
+export const REFUND_REFUSALS = {
+  REFUND_DECLINED: {
+    code: 'BUSINESS_RULE_VIOLATION',
+    message: 'The payment provider refused the refund',
+  },
+  REFUND_DECLINED_EARLIER: {
+    code: 'BUSINESS_RULE_VIOLATION',
+    message:
+      'The payment provider declined the earlier refund of this payment; its held amount ' +
+      'has now been returned to the wallet',
+  },
+} as const satisfies TerminalRefusals;
 
 /** `wallet_hold.reference_type` of the hold an operator refund places. */
 export const REFUND_HOLD_REFERENCE_TYPE = 'PAYMENT_REFUND';
