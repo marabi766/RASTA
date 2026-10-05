@@ -1,6 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  DOCUMENT_LOOKUP,
+  UNCONFIGURED_DOCUMENT_LOOKUP,
+  type DocumentLookup,
+} from './document-lookup';
 import { ulid } from 'ulid';
 import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
@@ -78,6 +83,11 @@ export class AssetService {
     @Optional()
     @Inject(TRANSFER_CLEARANCE)
     private readonly clearance: TransferClearance = UNCONFIGURED_TRANSFER_CLEARANCE,
+    // Optional for the same reason. Without one no document is attached: who
+    // owns it cannot be asked, and an unverified document is never attached.
+    @Optional()
+    @Inject(DOCUMENT_LOOKUP)
+    private readonly documentLookup: DocumentLookup = UNCONFIGURED_DOCUMENT_LOOKUP,
   ) {}
 
   // =========================================================================
@@ -1109,6 +1119,36 @@ export class AssetService {
   }
 
   /**
+   * The document must be one this organization may see, still registered, and —
+   * when document-service records an asset as its owner — this asset's.
+   * Everything else, including a document of another organization and one that
+   * does not exist, is the same `404` a missing document gets: the answer never
+   * says which, so it is no oracle for another tenant's ids. An outage is not a
+   * `404` and not a pass: it is the upstream error, and nothing is attached.
+   *
+   * Another organization's document never reaches the owner-reference check:
+   * document-service answers `404` to a token scoped to a different owner. A
+   * document registered for **another asset** of this organization is refused too,
+   * because the reference says "this machine's document" — reuse of one file
+   * across machines is a decision nobody has made (a document holds one owner
+   * reference), so it is not made here.
+   */
+  private async assertDocumentIsTheirs(
+    organizationId: string,
+    assetId: string,
+    documentId: string,
+  ): Promise<void> {
+    const found = await this.documentLookup.find(documentId, organizationId);
+    const theirs =
+      found !== null &&
+      found.id === documentId &&
+      found.organizationId === organizationId &&
+      found.status === 'REGISTERED' &&
+      (found.ownerResourceType !== 'Asset' || found.ownerResourceId === assetId);
+    if (!theirs) throw RastaError.notFound('Document', documentId);
+  }
+
+  /**
    * Attaches a reference to a document document-service holds. Under an
    * Idempotency-Key, `fence` is the caller's claim on it (#169, as for the two
    * records of `insurance.service.ts`): locked as the transaction's first
@@ -1125,6 +1165,12 @@ export class AssetService {
   ): Promise<AttachedDocumentView> {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
+
+    // Who owns the document is document-service's to say, asked before anything
+    // is written and outside the transaction (a network call holds no lock). A
+    // refusal or an outage here releases the idempotency claim, so a corrected
+    // retry under the same key runs.
+    await this.assertDocumentIsTheirs(asset.organizationId, id, dto.documentId);
 
     const refId = `ADR_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';

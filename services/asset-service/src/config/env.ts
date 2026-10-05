@@ -93,6 +93,14 @@ export const assetEnvSchema = baseEnvSchema
      */
     FLEET_SERVICE_URL: z.string().url(),
     MAINTENANCE_SERVICE_URL: z.string().url(),
+    /**
+     * document-service, asked who owns a document before a reference to it is
+     * stored (EXP-002 slice 7). Required: without it nothing can be verified,
+     * and an unverified document is never attached.
+     */
+    DOCUMENT_SERVICE_URL: z.string().url(),
+    /** One document lookup, body included. A timeout refuses the attach (503-class). */
+    ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
 
     /** One clearance exchange, body included. A timeout refuses the transfer. */
     ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),

@@ -17,7 +17,7 @@ import { IdempotencyStore } from '../src/asset/idempotency';
 import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, newPrisma, tenants } from './helpers';
+import { FakeDocuments, asActor, newPrisma, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
 
 /**
@@ -135,6 +135,9 @@ const ROUTES: readonly Route[] = [
   },
 ];
 
+/** document-service, as asset-service asks it who owns a document. */
+const documents = new FakeDocuments();
+
 describe('recording an insurance policy, an inspection or a document reference under an Idempotency-Key', () => {
   let prisma: PrismaService;
   let assets: AssetService;
@@ -148,8 +151,8 @@ describe('recording an insurance policy, an inspection or a document reference u
   beforeAll(async () => {
     prisma = newPrisma();
     const repository = new AssetRepository(prisma);
-    assets = new AssetService(repository);
-    transferring = new AssetService(repository, undefined, clearingOwners());
+    assets = new AssetService(repository, undefined, undefined, documents);
+    transferring = new AssetService(repository, undefined, clearingOwners(), documents);
     for (const organizationId of [org.a, org.b]) {
       await repository.upsertOrganizationRef({
         id: organizationId,
@@ -582,5 +585,255 @@ describe('recording an insurance policy, an inspection or a document reference u
     expect(second.status).toBe(409);
     expect(second.body.code).toBe('ALREADY_EXISTS');
     expect(await rows(route, assetId)).toEqual([first.body.id]);
+  });
+});
+
+/**
+ * A reference may only name a document this organization owns (EXP-002 slice 7,
+ * Codex r1 on #225). document-service is asked, with a token scoped to the
+ * machine's organization, before anything is written; what it cannot place is a
+ * `404` that says nothing about which case it was, and an outage is neither a
+ * `404` nor a pass.
+ */
+describe('attaching a document: whose it is is asked of document-service first', () => {
+  let prisma: PrismaService;
+  let assets: AssetService;
+  let http: INestApplication;
+  const org = tenants();
+  const manager = { organizationId: org.a, userId: 'USR-ITEST-DOCS' };
+  const key = () => `itest-doc-${ulid()}`;
+
+  beforeAll(async () => {
+    prisma = newPrisma();
+    const repository = new AssetRepository(prisma);
+    assets = new AssetService(repository, undefined, undefined, documents);
+    for (const organizationId of [org.a, org.b]) {
+      await repository.upsertOrganizationRef({
+        id: organizationId,
+        name: 'سازمان آزمون',
+        type: 'DEHYARI',
+        status: 'ACTIVE',
+        sourceEvent: 'itest',
+      });
+    }
+    const store = new IdempotencyStore(prisma, {
+      ASSET_IDEMPOTENCY_TTL_HOURS: 24,
+      ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 120,
+    });
+    const withCaller = (
+      req: { headers: Record<string, string | undefined> },
+      _res: unknown,
+      next: () => void,
+    ) => {
+      runWithContext(
+        {
+          correlationId: `itest-${ulid()}`,
+          requestId: `itest-${ulid()}`,
+          organizationId: req.headers['x-test-org'] ?? org.a,
+          userId: manager.userId,
+          roles: ['FLEET_MANAGER'],
+          organizationIds: [],
+          authType: 'USER',
+          startedAt: Date.now(),
+        },
+        () => next(),
+      );
+    };
+    @Module({
+      controllers: [AssetController],
+      providers: [
+        { provide: AssetService, useValue: assets },
+        { provide: InsuranceService, useValue: {} },
+        { provide: ClaimService, useValue: {} },
+        { provide: IdempotencyStore, useValue: store },
+        { provide: APP_GUARD, useClass: RolesGuard },
+      ],
+    })
+    class HttpModule implements NestModule {
+      configure(consumer: MiddlewareConsumer): void {
+        consumer.apply(withCaller).forRoutes('*');
+      }
+    }
+    const moduleRef = await Test.createTestingModule({ imports: [HttpModule] }).compile();
+    http = moduleRef.createNestApplication();
+    http.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+    http.useGlobalFilters(
+      new AllExceptionsFilter({
+        error: jest.fn(),
+        warn: jest.fn(),
+        info: jest.fn(),
+        debug: jest.fn(),
+      } as never),
+    );
+    await http.init();
+  });
+
+  afterEach(() => {
+    documents.unavailable(false);
+  });
+
+  afterAll(async () => {
+    await http?.close();
+    for (const table of [
+      'outbox_message',
+      'idempotency_key',
+      'asset_timeline_entry',
+      'asset_document_ref',
+      'asset',
+    ]) {
+      await prisma.client.$executeRawUnsafe(
+        `DELETE FROM ${table} WHERE organization_id = ANY($1::text[])`,
+        [org.a, org.b],
+      );
+    }
+    await prisma.client.$executeRawUnsafe(
+      `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
+      [org.a, org.b],
+    );
+    await prisma.onModuleDestroy();
+  });
+
+  const machine = async (): Promise<string> =>
+    (
+      await asActor(manager, () =>
+        assets.create({ name: `لودر ${ulid().slice(-6)}`, type: 'LOADER', specifications: {} }),
+      )
+    ).id;
+
+  const attach = (assetId: string, documentId: string, k: string) =>
+    request(http.getHttpServer())
+      .post(`/v1/assets/${assetId}/documents`)
+      .set('Idempotency-Key', k)
+      .send({ documentId, kind: 'OWNERSHIP_TITLE', title: 'سند مالکیت' });
+
+  const refs = async (assetId: string) =>
+    (
+      await prisma.client.$queryRawUnsafe<{ document_id: string }[]>(
+        `SELECT document_id FROM asset_document_ref WHERE asset_id = $1`,
+        assetId,
+      )
+    ).map((row) => row.document_id);
+
+  const attachedEvents = async (assetId: string): Promise<number> =>
+    (
+      await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM outbox_message
+         WHERE aggregate_id = $1 AND event_name = 'ASSET_DOCUMENT_ATTACHED'`,
+        assetId,
+      )
+    )[0]!.n;
+
+  it('attaches a document of its own organization: 201, one reference, one event', async () => {
+    const assetId = await machine();
+    const documentId = `DOC_${ulid()}`;
+    documents.ownedBy(documentId, org.a);
+
+    const response = await attach(assetId, documentId, key());
+
+    expect(response.status).toBe(201);
+    expect(await refs(assetId)).toEqual([documentId]);
+    expect(await attachedEvents(assetId)).toBe(1);
+    // Asked of document-service as this machine's organization — never another.
+    expect(documents.asked.at(-1)).toEqual({ documentId, organizationId: org.a });
+  });
+
+  it('answers another organization’s document exactly as a document that does not exist, and writes nothing', async () => {
+    const assetId = await machine();
+    const foreign = `DOC_${ulid()}`;
+    const absent = `DOC_${ulid()}`;
+    documents.ownedBy(foreign, org.b);
+    documents.missing(absent);
+
+    const ofAnother = await attach(assetId, foreign, key());
+    const ofNothing = await attach(assetId, absent, key());
+
+    expect(ofAnother.status).toBe(404);
+    expect(ofAnother.body.code).toBe('NOT_FOUND');
+    // The shape is the same; only the correlation id and the id the caller sent differ.
+    const shape = (body: Record<string, unknown>, id: string) =>
+      JSON.stringify({ ...body, correlationId: undefined, timestamp: undefined })
+        .split(id)
+        .join('<id>');
+    expect(shape(ofAnother.body, foreign)).toEqual(shape(ofNothing.body, absent));
+    expect(await refs(assetId)).toEqual([]);
+    expect(await attachedEvents(assetId)).toBe(0);
+  });
+
+  it('releases the key when the document is refused, so the same key with a document of its own runs', async () => {
+    const assetId = await machine();
+    const foreign = `DOC_${ulid()}`;
+    const own = `DOC_${ulid()}`;
+    documents.ownedBy(foreign, org.b);
+    documents.ownedBy(own, org.a);
+    const k = key();
+
+    expect((await attach(assetId, foreign, k)).status).toBe(404);
+    const corrected = await attach(assetId, own, k);
+
+    expect(corrected.status).toBe(201);
+    expect(await refs(assetId)).toEqual([own]);
+  });
+
+  it.each([
+    ['deleted', { status: 'DELETED' as const }],
+    ['registered for another asset', { ownerResourceType: 'Asset', ownerResourceId: 'AST_OTHER' }],
+  ])('refuses a document that is %s with the same 404', async (_what, over) => {
+    const assetId = await machine();
+    const documentId = `DOC_${ulid()}`;
+    documents.ownedBy(documentId, org.a, over);
+
+    const response = await attach(assetId, documentId, key());
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe('NOT_FOUND');
+    expect(await refs(assetId)).toEqual([]);
+  });
+
+  it('accepts a document registered for this very asset, and one with no owner reference', async () => {
+    const assetId = await machine();
+    const forThis = `DOC_${ulid()}`;
+    const unowned = `DOC_${ulid()}`;
+    documents.ownedBy(forThis, org.a, { ownerResourceType: 'Asset', ownerResourceId: assetId });
+    documents.ownedBy(unowned, org.a);
+
+    expect((await attach(assetId, forThis, key())).status).toBe(201);
+    expect((await attach(assetId, unowned, key())).status).toBe(201);
+  });
+
+  it('fails closed when document-service cannot be asked: 503, nothing attached, the key released', async () => {
+    const assetId = await machine();
+    const documentId = `DOC_${ulid()}`;
+    documents.ownedBy(documentId, org.a);
+    const k = key();
+
+    documents.unavailable();
+    const down = await attach(assetId, documentId, k);
+
+    expect(down.status).toBe(503);
+    expect(await refs(assetId)).toEqual([]);
+    expect(await attachedEvents(assetId)).toBe(0);
+
+    // The outage over, the very same submission runs: it was released, not stored.
+    documents.unavailable(false);
+    const retried = await attach(assetId, documentId, k);
+    expect(retried.status).toBe(201);
+    expect(await refs(assetId)).toEqual([documentId]);
+  });
+
+  it('does not ask again to replay: the stored answer is the original one, nothing more is attached', async () => {
+    const assetId = await machine();
+    const documentId = `DOC_${ulid()}`;
+    documents.ownedBy(documentId, org.a);
+    const k = key();
+
+    const first = await attach(assetId, documentId, k);
+    const askedBefore = documents.asked.length;
+    documents.unavailable(); // even with the service down, a replay is the stored 201
+    const second = await attach(assetId, documentId, k);
+
+    expect(second.status).toBe(201);
+    expect(second.body).toEqual(first.body);
+    expect(documents.asked.length).toBe(askedBefore);
+    expect(await refs(assetId)).toEqual([documentId]);
   });
 });

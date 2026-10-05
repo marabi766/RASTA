@@ -14,7 +14,7 @@ import { InsuranceService } from '../src/insurance/insurance.service';
 import { ClaimService } from '../src/insurance/claim.service';
 import { TimelineConsumer } from '../src/consumers/timeline.consumer';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, id, newPrisma, tenants } from './helpers';
+import { acceptingDocuments, asActor, databaseUrl, id, newPrisma, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
 
 /**
@@ -153,7 +153,7 @@ describe('asset integrity', () => {
     await prisma.onModuleInit();
 
     repository = new AssetRepository(prisma);
-    assets = new AssetService(repository, undefined, clearingOwners());
+    assets = new AssetService(repository, undefined, clearingOwners(), acceptingDocuments());
     insurance = new InsuranceService(repository, assets, 30);
     claims = new ClaimService(repository, assets, {
       decisionRoles: ['ORGANIZATION_ADMIN'],

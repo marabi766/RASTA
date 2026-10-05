@@ -1,6 +1,8 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
+import { RastaError } from '@rasta/nest-common';
+import type { DocumentLookup, ResolvedDocument } from '../src/asset/document-lookup';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -95,3 +97,51 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
 
   return runWithContext(context, async () => fn());
 }
+
+/**
+ * document-service as asset-service asks it about a document (EXP-002 slice 7).
+ *
+ * By default an id nobody registered is **the asker's own**, registered and with
+ * no owner reference, so a test that only needs an attachable document does not
+ * have to set one up. A test about ownership says so: `ownedBy` for a document
+ * of another organization (the service answers `404` to anyone else, exactly as
+ * for a missing one), `missing` for none, `unavailable` for an outage.
+ */
+export class FakeDocuments implements DocumentLookup {
+  private readonly owners = new Map<string, string | null>();
+  private readonly details = new Map<string, Partial<ResolvedDocument>>();
+  private down = false;
+  /** Every id asked about, with the organization that asked. */
+  readonly asked: Array<{ documentId: string; organizationId: string }> = [];
+
+  ownedBy(documentId: string, organizationId: string, over: Partial<ResolvedDocument> = {}): void {
+    this.owners.set(documentId, organizationId);
+    this.details.set(documentId, over);
+  }
+
+  missing(documentId: string): void {
+    this.owners.set(documentId, null);
+  }
+
+  unavailable(isDown = true): void {
+    this.down = isDown;
+  }
+
+  async find(documentId: string, organizationId: string): Promise<ResolvedDocument | null> {
+    this.asked.push({ documentId, organizationId });
+    if (this.down) throw RastaError.upstreamUnavailable('document-service');
+    const owner = this.owners.has(documentId) ? this.owners.get(documentId) : organizationId;
+    // A document of another organization is not visible to this one.
+    if (owner === null || owner !== organizationId) return null;
+    return {
+      id: documentId,
+      organizationId,
+      status: 'REGISTERED',
+      ownerResourceType: null,
+      ownerResourceId: null,
+      ...this.details.get(documentId),
+    };
+  }
+}
+
+export const acceptingDocuments = (): FakeDocuments => new FakeDocuments();
