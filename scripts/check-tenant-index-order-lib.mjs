@@ -49,6 +49,7 @@ export const SERVICES = [
   'document',
   'audit',
   'construction',
+  'contract',
   'organization',
   'fleet',
   'identity',
@@ -196,6 +197,13 @@ export const EXEMPTIONS = {
       index: 'approval (authority_organization_id, status, id)',
       reason:
         "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
+    },
+  },
+  contract: {
+    ix_contract_contractor: {
+      index: 'contract (contractor_organization_id, id)',
+      reason:
+        "the winning contractor's own contracts (GET /v1/contracts, GET /v1/contracts/{id}; ADR-068 § 7): a contract belongs to the employer's organization, but the contractor asking is another tenant, whose organization is contractor_organization_id — the column this index leads with, and the predicate of that read (ContractRepository, runUnscoped)",
     },
   },
   audit: {

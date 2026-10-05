@@ -2694,6 +2694,37 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 
 ---
 
+## ۷-و. contract-service — ورودی کامل حافظه
+
+> **وضعیت (2026-10-05):** **SKELETON + DRAFT ONLY** — CON-003 PR 1 (شاخهٔ `feat/contract-service-con003-pr1`، پیش‌نویس). پورت **۳۱۱۱**،
+> پایگاه داده `rasta_contract`، Topic ‏`rasta.contract.v1`. تصمیم معماری: [ADR-068](docs/adr/ADR-068-contract-lifecycle-and-boundary.md)
+> (`Proposed`). پرسش‌های باز: **Q-95..Q-97** (`docs/24`)، همه با پاسخ موقت پیکربندی‌پذیر یا بستهٔ محدودکننده و همه **باز**.
+
+**آنچه ساخته شد (فقط این):** جدول `contract` (مستأجر-محور؛ `organization_id` رهبر هر شاخص جز دید پیمانکار، پول `bigint` واحد فرعی،
+همهٔ لحظه‌ها `timestamptz(3)`) به‌علاوهٔ Outbox؛ Migration برگشت‌پذیر؛ تقسیم نقش مالک/زمان‌اجرا (D-045)؛ Consumer
+`TENDER_AWARDED` که **یک** پیش‌نویس `DRAFT` به‌ازای هر مناقصه می‌سازد؛ رویداد `CONTRACT_DRAFTED` (بی مبلغ)؛ `GET /v1/contracts` و
+`GET /v1/contracts/{id}`؛ OpenAPI؛ Compose، `.env.example`، ACL کافکا (`pnpm kafka:acl:generate`) و CI (دروازهٔ پوشش ۸۵٪).
+
+**مرز و مبلغ:** `TENDER_AWARDED` مبلغ **ندارد** (دور اول #199). Consumer پیش از نوشتن، award را از `construction-service`
+(`GET /v1/tenders/{id}/award`، توکن `SERVICE` امضاشده برای سازمان مالک، ADR-035) می‌پرسد و هر میدانی را که رویداد هم می‌گوید با
+پاسخ می‌سنجد؛ مبلغ فقط از پاسخ می‌آید. منبع تأیید نکند ⇒ `SOURCE_UNCONFIRMED` (DLQ)؛ منبع در دسترس نباشد ⇒ تلاش دوباره و سپس
+`UPSTREAM_UNAVAILABLE` (DLQ). **هرگز قرارداد با مبلغ حدسی.** تکرار همان رویداد ⇒ `SKIPPED` بی رفت‌وبرگشت؛ تکرار متناقض ⇒
+`VALIDATION_FAILED`؛ دو تحویل هم‌زمان ⇒ شاخص یکتای `(organization_id, tender_id)` تصمیم می‌گیرد.
+
+**دسترسی:** پیش‌فرض بسته؛ فقط کارفرما (نقش‌های `CONTRACT_READER_ROLES`، پیش‌فرض `ORGANIZATION_ADMIN`) و پیمانکار برنده (`CONTRACTOR` در
+سازمان خودش) می‌خوانند؛ هر سازمان دیگر `404`، `AUDITOR` و توکن سرویس رد می‌شوند. هیچ مسیر نوشتنی برای کاربر نیست.
+
+**شواهد محلی (نه CI):** ۲۹۷ تست (۲۱۷ واحد + ۸۰ یکپارچگی؛ شامل جداسازی مستأجر روی فهرست و خواندن، تکرار و رقابت، «خواندن ناموفق = بی قرارداد»)،
+پوشش ترکیبی ۹۴٫۳٪ گزاره / ۸۷٫۸٪ شاخه / ۸۸٫۷٪ تابع / ۹۶٫۰٪ خط (دروازهٔ ۸۵٪)، Migration بالا → پایین → بالا سبز
+(`node scripts/verify-migration-reversible.mjs contract`). `pnpm verify` تا مرحلهٔ تست‌های `apps/web` سبز است؛ هشت تست دسترس‌پذیری وب زیر بار موازی Timeout شد (کد وب دست‌نخورده).
+
+**ساخته نشده (صادقانه):** مسیر Gateway (`CONTRACT_SERVICE_URL` هست ولی مسیر باز نشده)؛ امضا، لغو، الحاقیه، Milestone، صورت‌وضعیت،
+کسورات، دو زنجیرهٔ تأیید **جدا** (فنی و مالی)، مرز تسویه با economic و `SETTLED` — همه طراحی‌شده در ADR-068 § ۵ و § ۶ و برش‌خورده به PR 2..7
+(§ ۹)؛ E2E. ADR-068 عمداً از `docs/04` و `docs/08` فاصله می‌گیرد (بی Temporal؛ economic می‌کشد، contract `createPayment` را صدا نمی‌زند؛
+`CONTRACT_DRAFTED` به‌جای `CONTRACT_CREATED`) و پذیرفتنش با مدیر پروژه است.
+
+---
+
 ## ۸. Domain Ownership
 
 | دامنه                                   | سرویس مالک             | یادداشت                                                 |
