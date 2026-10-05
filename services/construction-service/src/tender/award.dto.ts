@@ -32,6 +32,11 @@ export type AwardTenderDto = z.infer<typeof awardTenderSchema>;
 export const tenderAwardViewSchema = z
   .object({
     tenderId: z.string(),
+    projectId: z
+      .string()
+      .describe(
+        'The project the tender belongs to, from the stored tender (never from a request).',
+      ),
     status: z.string().describe('AWARDED.'),
     bidId: z.string().describe('The winning bid.'),
     bidderOrganizationId: z.string().describe('The winning contractor.'),

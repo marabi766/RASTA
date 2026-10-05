@@ -66,6 +66,7 @@ describe('awarding a tender', () => {
 describe('the award as it is shown', () => {
   const view = {
     tenderId: 'TND_1',
+    projectId: 'PRJ_1',
     status: 'AWARDED',
     bidId: 'BID_1',
     bidderOrganizationId: 'ORG_B',
@@ -88,6 +89,11 @@ describe('the award as it is shown', () => {
     expect(tenderAwardViewSchema.safeParse({ ...view, amountMinor: 1250000000 }).success).toBe(
       false,
     );
+  });
+
+  it('requires the project', () => {
+    const { projectId: _omitted, ...without } = view;
+    expect(tenderAwardViewSchema.safeParse(without).success).toBe(false);
   });
 
   it('refuses a field it does not document', () => {

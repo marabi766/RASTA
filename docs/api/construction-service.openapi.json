@@ -14224,6 +14224,10 @@
                     "tenderId": {
                       "type": "string"
                     },
+                    "projectId": {
+                      "type": "string",
+                      "description": "The project the tender belongs to, from the stored tender (never from a request)."
+                    },
                     "status": {
                       "type": "string",
                       "description": "AWARDED."
@@ -14273,6 +14277,7 @@
                   },
                   "required": [
                     "tenderId",
+                    "projectId",
                     "status",
                     "bidId",
                     "bidderOrganizationId",
@@ -14557,6 +14562,10 @@
                     "tenderId": {
                       "type": "string"
                     },
+                    "projectId": {
+                      "type": "string",
+                      "description": "The project the tender belongs to, from the stored tender (never from a request)."
+                    },
                     "status": {
                       "type": "string",
                       "description": "AWARDED."
@@ -14606,6 +14615,7 @@
                   },
                   "required": [
                     "tenderId",
+                    "projectId",
                     "status",
                     "bidId",
                     "bidderOrganizationId",
