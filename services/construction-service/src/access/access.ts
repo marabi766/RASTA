@@ -307,6 +307,23 @@ export class ProjectAccess {
     return authority || this.canReadProjectsOf(approval.organizationId);
   }
 
+  /**
+   * Whether the roles identity-service reports the caller holds **now**, in the organization they act for,
+   * still grant reading this approval (CON-002 PR 11, review round 2). `assertCanSeeApproval` answers on the
+   * token, which outlives a revoked role: the read is re-checked on the grant that admits it — the step's
+   * authority role for its authority organization, or a project-reader role for the owner's organization.
+   */
+  liveRolesMaySeeApproval(approval: ApprovalAuthority, liveRoles: readonly string[]): boolean {
+    const context = getContext();
+    const authority =
+      context.organizationId === approval.authorityOrganizationId &&
+      liveRoles.includes(approval.authorityRole);
+    const reader =
+      context.organizationId === approval.organizationId &&
+      this.readers.some((role) => liveRoles.includes(role));
+    return authority || reader;
+  }
+
   /** The caller's organization and roles, for the authority inbox. */
   inboxScope(): { organizationId: string; roles: readonly string[] } {
     assertNotAuditor();

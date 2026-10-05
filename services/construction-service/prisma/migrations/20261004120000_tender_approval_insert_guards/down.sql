@@ -3,8 +3,12 @@
 -- wrote them.
 --
 -- Not refused when tender approvals exist: it only relaxes guards (an insert as another status, the order and
--- the shape of a step's moves) and forgets no record. A log row that says READ is refused instead, since the
--- older constraint does not know the word: the preflight names it. Locks the tables first; atomic.
+-- the shape of a step's moves) and forgets no record. A refused read of an award approval is logged with the
+-- action READ, which the older log constraint does not know (review round 2): the older constraint comes back
+-- NOT VALID, so the READ rows already written are kept as they are — an audit row is never deleted or
+-- rewritten — while every row written from now on is checked against it, as the code of that version writes
+-- no READ. The log is append-only, so no surviving row can be updated into anything else. Locks the tables
+-- first; atomic.
 --
 -- The `_prisma_migrations` row is removed last so the forward migration can be re-applied.
 -- =============================================================================
@@ -15,18 +19,6 @@ SET LOCAL lock_timeout = '3s';
 
 LOCK TABLE "tender", "approval", "tender_approval_log" IN ACCESS EXCLUSIVE MODE;
 
-DO $preflight_insert_guards$
-DECLARE
-  reads bigint;
-BEGIN
-  SELECT count(*) INTO reads FROM "tender_approval_log" WHERE "action" = 'READ';
-  IF reads > 0 THEN
-    RAISE EXCEPTION 'down refused: % refused read(s) of an award approval are logged; the older log constraint cannot hold them. Keep this migration.', reads
-      USING ERRCODE = 'restrict_violation';
-  END IF;
-END
-$preflight_insert_guards$;
-
 ALTER TABLE "tender_approval_log" DROP CONSTRAINT "ck_tender_approval_log_shape";
 ALTER TABLE "tender_approval_log" ADD CONSTRAINT "ck_tender_approval_log_shape"
   CHECK ("workflow_key" IN ('tender.publication', 'tender.award', 'tender.cancellation')
@@ -34,7 +26,7 @@ ALTER TABLE "tender_approval_log" ADD CONSTRAINT "ck_tender_approval_log_shape"
          AND "outcome" IN ('GRANTED', 'REFUSED')
          AND (("outcome" = 'REFUSED') = ("refusal_code" IS NOT NULL))
          AND btrim("actor_user_id") <> '' AND btrim("actor_organization_id") <> ''
-         AND ("step_order" IS NULL OR "step_order" >= 1));
+         AND ("step_order" IS NULL OR "step_order" >= 1)) NOT VALID;
 
 CREATE OR REPLACE FUNCTION "approval_tender_guard"() RETURNS trigger AS $$
 DECLARE

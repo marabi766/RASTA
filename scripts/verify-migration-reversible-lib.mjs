@@ -416,6 +416,118 @@ export const ECONOMIC_DATA_ROLLBACK = {
   ],
 };
 
+/** One refused read of an award approval: the log row `20261004120000` let the log hold. */
+const TENDER_READ_LOG_ROW = (id) => `
+INSERT INTO "tender_approval_log" ("id", "organization_id", "tender_id", "request_id", "workflow_key",
+  "action", "outcome", "refusal_code", "step_order", "actor_user_id", "actor_organization_id",
+  "occurred_at")
+VALUES ('${id}', 'ORG-MIGCHECK-CON', 'TND_MIGCHECK_READ', NULL, 'tender.award', 'READ', 'REFUSED',
+  'READ_ROLE_NOT_HELD', 1, 'USR_MIGCHECK', 'ORG-MIGCHECK-CON', now());`;
+
+/** A project, a DRAFT tender and a refused award-approval READ, as the schema with the insert guards holds them. */
+const TENDER_READ_LOG_MIGCHECK = `
+INSERT INTO "project" ("id", "organization_id", "title", "operation_type", "scope_of_work",
+  "location_description", "status", "status_changed_at", "status_changed_by", "created_at",
+  "created_by", "created_correlation_id", "updated_at", "updated_by")
+VALUES ('PRJ_MIGCHECK_READ', 'ORG-MIGCHECK-CON', 'Road', 'road', 'Resurface', 'North', 'APPROVED',
+  now(), 'USR_MIGCHECK', now(), 'USR_MIGCHECK', 'COR-MIGCHECK', now(), 'USR_MIGCHECK');
+INSERT INTO "tender" ("id", "organization_id", "project_id", "title", "scope_of_work", "status",
+  "status_changed_at", "status_changed_by", "created_at", "created_by", "created_correlation_id",
+  "updated_at", "updated_by")
+VALUES ('TND_MIGCHECK_READ', 'ORG-MIGCHECK-CON', 'PRJ_MIGCHECK_READ', 'Road resurfacing',
+  'Two kilometres', 'DRAFT', now(), 'USR_MIGCHECK', now(), 'USR_MIGCHECK', 'COR-MIGCHECK', now(),
+  'USR_MIGCHECK');
+${TENDER_READ_LOG_ROW('TAL_MIGCHECK_READ')}`;
+
+/**
+ * The rollback of `20261004120000_tender_approval_insert_guards` with a refused award-approval READ logged
+ * (CON-002 PR 11, review round 2). The log is append-only audit evidence, so the down neither deletes nor
+ * rewrites that row and is not refused by it: the older log constraint comes back `NOT VALID` (as marketplace's
+ * `cancel_before_hold` does), keeping the READ row while checking every new one, and the insert guards go.
+ * Up again validates the forward constraint over the same row.
+ */
+export const CONSTRUCTION_DATA_ROLLBACK = {
+  migration: '20261004120000_tender_approval_insert_guards',
+  label: 'a refused read of an award approval in the append-only log',
+  steps: [
+    {
+      label: 'seed: a DRAFT tender and one refused READ of its award approval',
+      sql: TENDER_READ_LOG_MIGCHECK,
+    },
+    { label: 'down: the rollback succeeds with the READ row in the log', runDownScript: true },
+    {
+      label: 'down: the READ row is still there, unaltered',
+      sql: `
+        DO $$
+        DECLARE row_count INT;
+        BEGIN
+          SELECT count(*) INTO row_count FROM "tender_approval_log"
+           WHERE id = 'TAL_MIGCHECK_READ' AND action = 'READ' AND outcome = 'REFUSED'
+             AND refusal_code = 'READ_ROLE_NOT_HELD';
+          IF row_count <> 1 THEN
+            RAISE EXCEPTION 'the rollback did not keep the logged READ (found %)', row_count;
+          END IF;
+        END
+        $$;`,
+    },
+    {
+      label: 'down: the older log constraint refuses a new READ row',
+      sql: TENDER_READ_LOG_ROW('TAL_MIGCHECK_AFTER_DOWN'),
+      mustFail: 'ck_tender_approval_log_shape',
+    },
+    {
+      label: 'down: the insert guard is gone (a tender may be inserted past DRAFT again)',
+      sql: `
+        INSERT INTO "tender" ("id", "organization_id", "project_id", "title", "scope_of_work", "status",
+          "status_reason", "status_reason_code", "status_changed_at", "status_changed_by", "created_at",
+          "created_by", "created_correlation_id", "updated_at", "updated_by")
+        VALUES ('TND_MIGCHECK_CANCELLED', 'ORG-MIGCHECK-CON', 'PRJ_MIGCHECK_READ', 'Road resurfacing',
+          'Two kilometres', 'CANCELLED', 'Funding was withdrawn', 'OWNER_REQUEST', now(), 'USR_MIGCHECK',
+          now(), 'USR_MIGCHECK', 'COR-MIGCHECK', now(), 'USR_MIGCHECK');`,
+    },
+    { label: 'up again: the forward migration applies over the READ row', reapply: true },
+    {
+      label: 'up again: the READ row survived the round trip',
+      sql: `
+        DO $$
+        DECLARE row_count INT;
+        BEGIN
+          SELECT count(*) INTO row_count FROM "tender_approval_log" WHERE id = 'TAL_MIGCHECK_READ';
+          IF row_count <> 1 THEN
+            RAISE EXCEPTION 'the logged READ did not survive down → up (found %)', row_count;
+          END IF;
+        END
+        $$;`,
+    },
+    {
+      label: 'up again: the log accepts a new READ row',
+      sql: TENDER_READ_LOG_ROW('TAL_MIGCHECK_AFTER_UP'),
+    },
+    {
+      label: 'up again: a tender is inserted only as a DRAFT',
+      sql: `
+        INSERT INTO "tender" ("id", "organization_id", "project_id", "title", "scope_of_work", "status",
+          "status_reason", "status_reason_code", "status_changed_at", "status_changed_by", "created_at",
+          "created_by", "created_correlation_id", "updated_at", "updated_by")
+        VALUES ('TND_MIGCHECK_REFUSED', 'ORG-MIGCHECK-CON', 'PRJ_MIGCHECK_READ', 'Road resurfacing',
+          'Two kilometres', 'CANCELLED', 'Funding was withdrawn', 'OWNER_REQUEST', now(), 'USR_MIGCHECK',
+          now(), 'USR_MIGCHECK', 'COR-MIGCHECK', now(), 'USR_MIGCHECK');`,
+      mustFail: 'ck_tender_insert_draft',
+    },
+    {
+      // As the database owner, the append-only log is lifted for this one script (DDL is transactional), as
+      // the suites' own cleanup does: the probe rows must not hold up the chain reversal that follows.
+      label: 'cleanup: the probe rows are removed before the chain reversal',
+      sql: `
+        ALTER TABLE "tender_approval_log" DISABLE TRIGGER "tg_tender_approval_log_append_only";
+        DELETE FROM "tender_approval_log" WHERE id LIKE 'TAL_MIGCHECK_%';
+        ALTER TABLE "tender_approval_log" ENABLE TRIGGER "tg_tender_approval_log_append_only";
+        DELETE FROM "tender" WHERE id LIKE 'TND_MIGCHECK_%';
+        DELETE FROM "project" WHERE id = 'PRJ_MIGCHECK_READ';`,
+    },
+  ],
+};
+
 /**
  * What each service's schema must contain after `up`, and must not contain
  * after `down`.
@@ -1078,6 +1190,20 @@ export const EXPECTED = {
     // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch
     // database is created — and migrated — as the migrator, which owns
     // rasta_construction (lib/service-privilege-split.bash).
+    dataRollback: CONSTRUCTION_DATA_ROLLBACK,
+    // The down of the insert guards restores the older log constraint NOT VALID, so a READ already logged is
+    // kept (audit evidence is never deleted or rewritten) while every new row is checked: the one difference
+    // from the state before the migration (CON-002 PR 11, review round 2; CONSTRUCTION_DATA_ROLLBACK).
+    inexactInverse: {
+      '20261004120000_tender_approval_insert_guards': {
+        missing: [
+          `constraint tender_approval_log.ck_tender_approval_log_shape CHECK (((workflow_key = ANY (ARRAY['tender.publication'::text, 'tender.award'::text, 'tender.cancellation'::text])) AND (action = ANY (ARRAY['REQUEST'::text, 'GRANT'::text, 'REJECT'::text, 'EXECUTE'::text, 'STALE'::text])) AND (outcome = ANY (ARRAY['GRANTED'::text, 'REFUSED'::text])) AND ((outcome = 'REFUSED'::text) = (refusal_code IS NOT NULL)) AND (btrim(actor_user_id) <> ''::text) AND (btrim(actor_organization_id) <> ''::text) AND ((step_order IS NULL) OR (step_order >= 1)))) deferrable=false/false valid=true`,
+        ],
+        unexpected: [
+          `constraint tender_approval_log.ck_tender_approval_log_shape CHECK (((workflow_key = ANY (ARRAY['tender.publication'::text, 'tender.award'::text, 'tender.cancellation'::text])) AND (action = ANY (ARRAY['REQUEST'::text, 'GRANT'::text, 'REJECT'::text, 'EXECUTE'::text, 'STALE'::text])) AND (outcome = ANY (ARRAY['GRANTED'::text, 'REFUSED'::text])) AND ((outcome = 'REFUSED'::text) = (refusal_code IS NOT NULL)) AND (btrim(actor_user_id) <> ''::text) AND (btrim(actor_organization_id) <> ''::text) AND ((step_order IS NULL) OR (step_order >= 1)))) NOT VALID deferrable=false/false valid=false`,
+        ],
+      },
+    },
     connectAs: 'migrator',
     scratchDatabase: true,
     tables: [

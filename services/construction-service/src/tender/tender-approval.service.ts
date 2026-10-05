@@ -305,7 +305,9 @@ export class TenderApprovalService {
    * The detail of an award approval names the bid and the justification, so it is read under the rules of
    * deciding it (CON-002 PR 11, review round 1): none of the roles the bid side excludes — on the token and on
    * identity-service's word as of now —, not a member of an organization that bid, and, with
-   * AWARDER_NOT_EVALUATOR, none of the people who evaluated. A refusal is audited (`READ`, refused).
+   * AWARDER_NOT_EVALUATOR, none of the people who evaluated. And (review round 2) the role that grants this
+   * read — the step's authority role, or a project-reader role in the owner's organization — held now, on
+   * identity-service's word, not only on the token's. A refusal is audited (`READ`, refused).
    */
   async assertMayReadAward(step: Approval): Promise<void> {
     const context = getContext();
@@ -319,6 +321,16 @@ export class TenderApprovalService {
       if (!mine) {
         throw RastaError.forbidden(
           'The caller is not a member of the organization they act for, as of now',
+        );
+      }
+      // The role that admitted this read on the token, held now (review round 2): an authority who lost the
+      // step's role, or a reader who lost every project-reader role, keeps a token and maybe another
+      // membership, and is refused here — the bid and justification are not shown.
+      if (!this.access.liveRolesMaySeeApproval(step, mine.roles)) {
+        throw this.refuse(
+          ERROR_CODES.FORBIDDEN,
+          'READ_ROLE_NOT_HELD',
+          'The caller no longer holds, as of now, the role that grants reading this approval',
         );
       }
       this.access.assertMayDecideAward();

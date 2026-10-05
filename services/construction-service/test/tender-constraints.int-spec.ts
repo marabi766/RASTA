@@ -1,10 +1,18 @@
 import { ulid } from 'ulid';
-import { cleanup, newOrganizationId, wire, type Wiring } from './helpers';
+import { PrismaClient } from '../src/generated/prisma';
+import { cleanup, newOrganizationId, ownerDatabaseUrl, wire, type Wiring } from './helpers';
 
 /**
  * What PostgreSQL itself refuses about a tender, whatever a future write path
  * forgets. Each case writes raw SQL — below the DTOs, the services and the
  * tenant guard — and asserts the database answers with the named constraint.
+ *
+ * A tender is inserted only as a DRAFT (`tg_tender_insert_draft_only`, CON-002 PR 11): the service's role
+ * cannot write a row already PUBLISHED, CANCELLED or past them, and that rule has its own cases below. The
+ * cases that probe a constraint of a later state write such a row as the **database owner**, with only that
+ * one trigger lifted for the length of one transaction — the way `cleanup` and the bid suites change what the
+ * application role cannot (`asDatabaseOwner` in `tender-open.int-spec`). DDL is transactional, so a failure
+ * puts the trigger back; the constraint under test answers the same either way.
  */
 
 describe('tender database invariants', () => {
@@ -38,10 +46,12 @@ describe('tender database invariants', () => {
     return id;
   }
 
+  /** One raw INSERT of a tender, the service's role unless the row is past DRAFT (see the suite comment). */
   async function insertTender(
     organizationId: string,
     projectId: string,
     overrides: Record<string, string> = {},
+    options: { asService?: boolean } = {},
   ): Promise<void> {
     const columns: Record<string, string> = {
       id: `'TND_${ulid()}'`,
@@ -59,12 +69,28 @@ describe('tender database invariants', () => {
       updated_by: `'USR_1'`,
       ...overrides,
     };
-    await w.prisma.client.$executeRawUnsafe(
-      `INSERT INTO "tender" (${Object.keys(columns)
-        .map((c) => `"${c}"`)
-        .join(', ')})
-       VALUES (${Object.values(columns).join(', ')})`,
-    );
+    const sql = `INSERT INTO "tender" (${Object.keys(columns)
+      .map((c) => `"${c}"`)
+      .join(', ')})
+       VALUES (${Object.values(columns).join(', ')})`;
+    if (options.asService || columns.status === `'DRAFT'`) {
+      await w.prisma.client.$executeRawUnsafe(sql);
+      return;
+    }
+    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await owner.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "tender" DISABLE TRIGGER "tg_tender_insert_draft_only"',
+        );
+        await tx.$executeRawUnsafe(sql);
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "tender" ENABLE TRIGGER "tg_tender_insert_draft_only"',
+        );
+      });
+    } finally {
+      await owner.$disconnect();
+    }
   }
 
   const COMPLETE = {
@@ -84,6 +110,44 @@ describe('tender database invariants', () => {
     await expect(
       insertTender(a, project, { status: `'PUBLISHED'`, ...COMPLETE, ...PUBLISHED_BY }),
     ).resolves.toBeUndefined();
+  });
+
+  describe('a tender is inserted only as a DRAFT (CON-002 PR 11)', () => {
+    it.each(['PUBLISHED', 'CLOSED', 'EVALUATING', 'EVALUATED', 'AWARDED', 'CANCELLED'])(
+      'refuses the service an insert already %s, however complete the row',
+      async (status) => {
+        const a = org();
+        const project = await insertProject(a);
+        await expect(
+          insertTender(
+            a,
+            project,
+            {
+              status: `'${status}'`,
+              ...COMPLETE,
+              ...PUBLISHED_BY,
+              ...(status === 'CANCELLED'
+                ? {
+                    status_reason: `'Funding was withdrawn'`,
+                    status_reason_code: `'OWNER_REQUEST'`,
+                  }
+                : {}),
+            },
+            { asService: true },
+          ),
+        ).rejects.toThrow(/ck_tender_insert_draft/);
+        const rows = await w.prisma.client.$queryRawUnsafe<{ n: bigint }[]>(
+          `SELECT count(*) AS n FROM "tender" WHERE "organization_id" = '${a}'`,
+        );
+        expect(Number(rows[0]?.n)).toBe(0);
+      },
+    );
+
+    it('accepts the service a DRAFT', async () => {
+      const a = org();
+      const project = await insertProject(a);
+      await expect(insertTender(a, project, {}, { asService: true })).resolves.toBeUndefined();
+    });
   });
 
   it('refuses a tender of one organization on a project of another (the tenant-bound foreign key)', async () => {

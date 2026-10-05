@@ -1326,6 +1326,25 @@ describe('the approval gates of a tender', () => {
       expect(seen.request?.bid).toMatchObject({ bidId: t.bids[0]!.bidId });
     });
 
+    it('the role that grants the read, revoked after the token was issued, reads nothing: 403, audited (review round 2)', async () => {
+      const t = await asked();
+      const demoted = newUserId();
+      // The token still says ORGANIZATION_ADMIN — the step's authority role and the owner's reader role.
+      // identity-service now says FLEET_MANAGER only, and the person keeps a membership elsewhere.
+      w.memberships.rolesOf.set(demoted, ['FLEET_MANAGER']);
+      w.memberships.of.set(demoted, [org()]);
+      const refused = await codeOf(readAs(w, t.owner, t.stepId, demoted));
+      expect(refused.code).toBe('FORBIDDEN');
+      expect(refused.message).toContain('READ_ROLE_NOT_HELD');
+      const log = await refusedReads(w, t.owner, t.tenderId);
+      expect(log).toHaveLength(1);
+      expect(log[0]).toMatchObject({ refusalCode: 'READ_ROLE_NOT_HELD' });
+      // The same person, the role held again: shown.
+      w.memberships.rolesOf.set(demoted, ['ORGANIZATION_ADMIN']);
+      const seen = await readAs(w, t.owner, t.stepId, demoted);
+      expect(seen.request?.bid).toMatchObject({ bidId: t.bids[0]!.bidId });
+    });
+
     it('a membership revoked since the token was issued reads nothing', async () => {
       const t = await asked();
       const gone = newUserId();
