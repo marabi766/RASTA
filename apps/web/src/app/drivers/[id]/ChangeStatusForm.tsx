@@ -69,6 +69,8 @@ export function ChangeStatusForm({
       <Field label="وضعیت تازه" required error={errors.status}>
         {(control) => (
           <select
+            // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+            key={values.status}
             {...control}
             name="status"
             defaultValue={values.status}

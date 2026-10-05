@@ -180,6 +180,8 @@ export function RecordPolicyForm(identity: RecordIdentity) {
           <Field label="نوع پوشش" required error={errors.coverage}>
             {(control) => (
               <select
+                // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+                key={values.coverage}
                 {...control}
                 name="coverage"
                 defaultValue={values.coverage}
@@ -316,6 +318,8 @@ export function RecordInspectionForm(identity: RecordIdentity) {
           <Field label="نتیجهٔ معاینه" required error={errors.result}>
             {(control) => (
               <select
+                // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+                key={values.result}
                 {...control}
                 name="result"
                 defaultValue={values.result}
