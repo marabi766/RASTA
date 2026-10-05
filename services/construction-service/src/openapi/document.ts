@@ -581,7 +581,13 @@ export const REFUSAL_REASONS: Record<string, RouteRefusals> = {
   'GET /v1/tenders/{id}/evaluation': {
     evaluation: ['CONFLICT_OF_INTEREST', 'EVALUATOR_IS_TENDER_AUTHOR', 'NOT_OPENED'],
   },
-  'POST /v1/tenders/{id}/award': { award: AWARD_REFUSALS, approval: GATED },
+  // The winner's price is opened through `BidContentReader`, whose receipt-integrity failure is the
+  // opening area's `INTEGRITY` (422), not an award reason.
+  'POST /v1/tenders/{id}/award': {
+    award: AWARD_REFUSALS,
+    approval: GATED,
+    opening: ['INTEGRITY'],
+  },
   'GET /v1/tenders/{id}/award': { award: ['CONFLICT_OF_INTEREST'] },
   'POST /v1/approvals/{id}/decision': {
     approval: ['CONFLICT_OF_INTEREST', 'APPROVER_IS_EVALUATOR', 'APPROVAL_STALE'],

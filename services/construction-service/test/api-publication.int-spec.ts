@@ -196,6 +196,9 @@ describe('publication API', () => {
     expect(stale.body.message).toContain('APPROVAL_STALE');
     expect(stale.body.code).toBe('CONFLICT');
     expect(reasonsOf(stale.body)).toEqual(['approval:APPROVAL_STALE']);
+    expect(stale.body.details).toEqual([
+      { path: 'approval', code: 'APPROVAL_STALE', message: 'Approval refused: APPROVAL_STALE' },
+    ]);
     expect((await http().get(`/v1/tenders/${id}`).set(as(token))).body.status).toBe('DRAFT');
   });
 

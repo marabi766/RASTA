@@ -28,6 +28,7 @@ import { OrganizationMovedConsumer } from '../src/events/organization-moved.cons
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
 import { StandingBootstrap } from '../src/tender/standing-bootstrap';
 import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
+import { recordRefusals, settleRefusals, type RefusalRecorder } from './refusal-contract';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness
@@ -51,6 +52,8 @@ export interface ApiHarness {
   evidence: FakeTenderEvidence;
   /** identity-service as the approval of an opening sees it. */
   memberships: FakeMemberships;
+  /** Every 403/409/422 this application has answered, as the contract check will see them. */
+  refusals: RefusalRecorder;
   close(): Promise<void>;
 }
 
@@ -283,6 +286,8 @@ export async function startApi(): Promise<ApiHarness> {
   // Same as main.ts: without it every `@Controller({ version: '1' })` route is
   // mounted at a path no client uses, and the whole suite would 404.
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+  // Observes every refusal a suite provokes; `close()` checks them against the published contract.
+  const refusals = recordRefusals(app);
   await app.init();
 
   return {
@@ -292,8 +297,13 @@ export async function startApi(): Promise<ApiHarness> {
     hierarchy,
     evidence: moduleRef.get<FakeTenderEvidence>(TENDER_EVIDENCE_SOURCE),
     memberships: moduleRef.get<FakeMemberships>(MEMBERSHIP_SOURCE),
+    refusals,
     close: async () => {
-      await app.close();
+      try {
+        settleRefusals(app, refusals);
+      } finally {
+        await app.close();
+      }
     },
   };
 }

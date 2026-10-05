@@ -175,6 +175,10 @@ describe('the committed OpenAPI document', () => {
         award: ['ALREADY_AWARDED'],
         approval: ['APPROVAL_STALE'],
       });
+      // The award opens the winning bid: a receipt-integrity failure is the opening area's.
+      expect(enumsOf(detailsOf('POST /v1/tenders/{id}/award', '422')).opening).toEqual([
+        'INTEGRITY',
+      ]);
       expect(enumsOf(detailsOf('POST /v1/tenders/{id}/open-bids/proposal', '422'))).toEqual({
         opening: ['NOT_CLOSED'],
       });
