@@ -1,5 +1,13 @@
 import request from 'supertest';
-import { actor, apiTenant, auditorActor, orgAdmin, startApi, type ApiHarness } from './api-helpers';
+import {
+  reasonsOf,
+  actor,
+  apiTenant,
+  auditorActor,
+  orgAdmin,
+  startApi,
+  type ApiHarness,
+} from './api-helpers';
 import { activatePublicationPolicy, approvedProject, cleanup, wire, type Wiring } from './helpers';
 
 /**
@@ -186,6 +194,8 @@ describe('publication API', () => {
       .send({ expectedVersion: edited.body.version });
     expect(stale.status).toBe(409);
     expect(stale.body.message).toContain('APPROVAL_STALE');
+    expect(stale.body.code).toBe('CONFLICT');
+    expect(reasonsOf(stale.body)).toEqual(['approval:APPROVAL_STALE']);
     expect((await http().get(`/v1/tenders/${id}`).set(as(token))).body.status).toBe('DRAFT');
   });
 
@@ -202,6 +212,14 @@ describe('publication API', () => {
     expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
     expect(refused.body.message).toContain('CRITERIA_WEIGHTS_INCOMPLETE');
     expect(refused.body.message).toContain('INVITATION_REQUIRED');
+    // Every reason, each its own entry of `details`, in the order the message names them.
+    expect(reasonsOf(refused.body)).toEqual([
+      'publication:CRITERIA_WEIGHTS_INCOMPLETE',
+      'publication:INVITATION_REQUIRED',
+    ]);
+    expect(refused.body.details[0].message).toBe(
+      'Tender cannot be published: CRITERIA_WEIGHTS_INCOMPLETE',
+    );
     expect((await http().get(`/v1/tenders/${id}`).set(as(token))).body.status).toBe('DRAFT');
   });
 
@@ -244,6 +262,7 @@ describe('publication API', () => {
     expect(published.status).toBe(422);
     expect(published.body.message).toContain('APPROVAL_POLICY_REQUIRED');
     expect(published.body.message).not.toContain('INVITATION_REQUIRED');
+    expect(reasonsOf(published.body)).toEqual(['publication:APPROVAL_POLICY_REQUIRED']);
 
     const open = await tenderFor(org('invite-public'));
     expect(

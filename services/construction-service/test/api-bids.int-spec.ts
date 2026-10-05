@@ -1,5 +1,13 @@
 import request from 'supertest';
-import { actor, apiTenant, auditorActor, orgAdmin, startApi, type ApiHarness } from './api-helpers';
+import {
+  reasonsOf,
+  actor,
+  apiTenant,
+  auditorActor,
+  orgAdmin,
+  startApi,
+  type ApiHarness,
+} from './api-helpers';
 import { bidContent, cleanup, publishedForBids, qualify, wire, type Wiring } from './helpers';
 
 /**
@@ -131,6 +139,10 @@ describe('bids API', () => {
     expect(refused.status).toBe(422);
     expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
     expect(refused.body.message).toContain('BIDDER_NOT_ELIGIBLE');
+    expect(reasonsOf(refused.body)).toEqual(['bid:BIDDER_NOT_ELIGIBLE']);
+    expect(refused.body.details).toEqual([
+      { path: 'bid', code: 'BIDDER_NOT_ELIGIBLE', message: 'Bid refused: BIDDER_NOT_ELIGIBLE' },
+    ]);
   });
 
   it('refuses bodies that decide what they may not, and a price that is not whole minor units', async () => {

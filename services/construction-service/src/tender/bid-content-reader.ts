@@ -19,6 +19,7 @@ import {
   type TenderChain,
   type TenderEvidenceSource,
 } from './tender-evidence.client';
+import { ruleRefusal } from '../shared/refusal';
 
 /** The evidence, read and checked: the chain as audit-service holds it, and the receipts made from it. */
 export interface Evidence {
@@ -28,7 +29,7 @@ export interface Evidence {
 
 /** The integrity refusal, as the 422 the owner's routes and the contractor's own read both answer. */
 export function integrityRefusal(): RastaError {
-  return RastaError.businessRule('Bids are not opened: INTEGRITY', { refusals: ['INTEGRITY'] });
+  return ruleRefusal('Bids are not opened: INTEGRITY', 'opening', ['INTEGRITY']);
 }
 
 /**

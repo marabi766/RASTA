@@ -37,6 +37,7 @@ import { buildMatrix, matrixDigest } from './evaluation-matrix';
 import { readMatrixInput } from './matrix-input';
 import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import type { AwardTenderDto, TenderAwardView } from './award.dto';
+import { refusal, ruleRefusal } from '../shared/refusal';
 
 /**
  * The closed reasons an award is refused for (ADR-067 § 3, § 4): the metric's label, the access
@@ -506,9 +507,13 @@ export class AwardService {
     if (recorded) {
       if (recorded.bidId !== dto.bidId) {
         awardRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'already_awarded' });
-        throw new RastaError(ERROR_CODES.ALREADY_EXISTS, 'Tender already awarded', {
-          internalContext: { resourceType: 'TenderAward', refusals: ['ALREADY_AWARDED'] },
-        });
+        throw refusal(
+          ERROR_CODES.ALREADY_EXISTS,
+          'Tender already awarded',
+          'award',
+          ['ALREADY_AWARDED'],
+          { resourceType: 'TenderAward' },
+        );
       }
       return { replay: awardView(recorded, true) };
     }
@@ -716,14 +721,14 @@ export class AwardService {
 
   private forbid(reason: AwardRefusal, message: string): RastaError {
     awardRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
-    return new RastaError(ERROR_CODES.FORBIDDEN, `Award refused: ${reason}. ${message}`, {
-      internalContext: { refusals: [reason] },
-    });
+    return refusal(ERROR_CODES.FORBIDDEN, `Award refused: ${reason}. ${message}`, 'award', [
+      reason,
+    ]);
   }
 
   private rule(reason: AwardRefusal, context: Record<string, unknown> = {}): RastaError {
     awardRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
-    return RastaError.businessRule(`Award refused: ${reason}`, { ...context, refusals: [reason] });
+    return ruleRefusal(`Award refused: ${reason}`, 'award', [reason], context);
   }
 
   private conflict(aggregate: 'Bid' | 'Tender', id: string): RastaError {

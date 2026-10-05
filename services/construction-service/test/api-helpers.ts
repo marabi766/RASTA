@@ -77,6 +77,18 @@ export interface TestClaims {
  * Not a JWT and deliberately not shaped like one: a value that looked like a
  * signed token would invite somebody to believe this suite verifies signatures.
  */
+/**
+ * The closed reasons of a refusal, each as `<area>:<CODE>` from `details[].path` and
+ * `details[].code` (docs/06 § 6.7); `undefined` when the body carries no `details` at all.
+ */
+export function reasonsOf(body: unknown): string[] | undefined {
+  const details = (body as { details?: unknown } | null)?.details;
+  if (details === undefined) return undefined;
+  return (details as { path: string; code?: string }[]).map(
+    (detail) => `${detail.path}:${detail.code}`,
+  );
+}
+
 export function bearer(claims: TestClaims): string {
   return `test.${Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')}`;
 }
