@@ -16,6 +16,7 @@ import {
 
 const fact = {
   tenderId: 'TND_1',
+  projectId: 'PRJ_1',
   status: 'AWARDED',
   bidId: 'BID_1',
   bidderOrganizationId: 'ORG_WINNER',
@@ -149,6 +150,16 @@ describe('AwardSourceClient', () => {
         .catch((e: unknown) => e)) as RastaError;
       expect(error.code).toBe(ERROR_CODES.UPSTREAM_UNAVAILABLE);
       expect(error.cause).toBeUndefined();
+    });
+
+    it('an answer without its projectId is unreadable: unavailable, retried, never a contract', async () => {
+      const { projectId: _omitted, ...withoutProject } = fact;
+      const fetchImpl = async () => json(200, withoutProject);
+      const error = await client(fetchImpl as unknown as typeof fetch)
+        .award('ORG_OWNER', 'TND_1')
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(RastaError);
+      expect(error).toEqual(unavailable(ERROR_CODES.UPSTREAM_UNAVAILABLE));
     });
 
     it('an answer that is not JSON', async () => {

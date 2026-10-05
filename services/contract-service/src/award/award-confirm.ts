@@ -16,8 +16,9 @@ import { z } from 'zod';
  * carries one — and is taken from it after it has been checked to be a positive amount
  * that fits a `bigint` column.
  *
- * `projectId` is the one thing the event states that the answer does not (the award view
- * has no project); it is an identifier that decides no money, taken from the event.
+ * The project is compared like the rest: the owner's award view carries the stored
+ * tender's `projectId` (construction-service #229), it is a **required** field of the
+ * answer, and the contract keeps the owner's, never the event's.
  */
 
 /** The largest value of a PostgreSQL `bigint`: a column cannot hold more. */
@@ -33,6 +34,7 @@ const digest = z.string().regex(/^[0-9a-f]{64}$/);
  */
 export const awardFactSchema = z.object({
   tenderId: z.string().min(1).max(128),
+  projectId: z.string().min(1).max(128),
   status: z.string().min(1).max(64),
   bidId: z.string().min(1).max(128),
   bidderOrganizationId: z.string().min(1).max(128),
@@ -48,6 +50,7 @@ export type Mismatch =
   | 'tenant_mismatch'
   | 'not_found'
   | 'tender_mismatch'
+  | 'project_mismatch'
   | 'status_mismatch'
   | 'bid_mismatch'
   | 'contractor_mismatch'
@@ -64,6 +67,7 @@ const refuted = (mismatch: Mismatch): Verdict => ({ confirmed: false, mismatch }
 /** The award as `TENDER_AWARDED` states it (the fields this service compares). */
 export interface AwardClaim {
   readonly tenderId: string;
+  readonly projectId: string;
   readonly organizationId: string;
   readonly winningBidId: string;
   readonly winnerOrganizationId: string;
@@ -94,6 +98,7 @@ export function confirmTenant(
 export function confirmAward(claim: AwardClaim, fact: AwardFact | null): Verdict {
   if (!fact) return refuted('not_found');
   if (fact.tenderId !== claim.tenderId) return refuted('tender_mismatch');
+  if (fact.projectId !== claim.projectId) return refuted('project_mismatch');
   // An award is terminal: an awarded tender stays AWARDED. Anything else means the
   // award this event announces never happened.
   if (fact.status !== 'AWARDED') return refuted('status_mismatch');
@@ -110,6 +115,38 @@ export function confirmAward(claim: AwardClaim, fact: AwardFact | null): Verdict
   return CONFIRMED;
 }
 
+/** The award claims a contract persists: what a redelivery is compared with (EVERY one of them). */
+export interface PersistedAward {
+  readonly tenderId: string;
+  readonly projectId: string;
+  readonly winningBidId: string;
+  readonly contractorOrganizationId: string;
+  readonly matrixDigest: string;
+  readonly awardedBy: string;
+  readonly awardedAt: Date;
+}
+
+/**
+ * The claims of a redelivered `TENDER_AWARDED` that contradict the contract already drafted
+ * for the tender — every persisted award claim, never a subset. Empty means the same award.
+ */
+export function contradictions(
+  existing: PersistedAward,
+  claim: Omit<AwardClaim, 'organizationId'>,
+): string[] {
+  const differing: string[] = [];
+  if (existing.tenderId !== claim.tenderId) differing.push('tenderId');
+  if (existing.projectId !== claim.projectId) differing.push('projectId');
+  if (existing.winningBidId !== claim.winningBidId) differing.push('winningBidId');
+  if (existing.contractorOrganizationId !== claim.winnerOrganizationId) {
+    differing.push('winnerOrganizationId');
+  }
+  if (existing.matrixDigest !== claim.matrixDigest) differing.push('matrixDigest');
+  if (existing.awardedBy !== claim.awardedBy) differing.push('awardedBy');
+  if (!sameInstant(existing.awardedAt, claim.awardedAt)) differing.push('awardedAt');
+  return differing;
+}
+
 /**
  * The contract amount: the owner's `amountMinor`, as a `bigint`, or `null` when it is not a
  * positive amount a `bigint` column holds. Never defaulted, rounded or guessed.
@@ -120,8 +157,9 @@ export function amountOf(fact: Pick<AwardFact, 'amountMinor'>): bigint | null {
   return amount > 0n && amount <= MAX_AMOUNT_MINOR ? amount : null;
 }
 
-function sameInstant(left: string, right: string): boolean {
-  const a = Date.parse(left);
-  const b = Date.parse(right);
+/** Two instants, each a date or an ISO string, are the same moment; an unparseable one is never. */
+export function sameInstant(left: string | Date, right: string | Date): boolean {
+  const a = typeof left === 'string' ? Date.parse(left) : left.getTime();
+  const b = typeof right === 'string' ? Date.parse(right) : right.getTime();
   return Number.isFinite(a) && Number.isFinite(b) && a === b;
 }

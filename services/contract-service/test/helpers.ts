@@ -141,10 +141,13 @@ export class FakeAwards implements AwardSource {
   private readonly facts = new Map<string, AwardFact>();
   /** When set, every question fails with this error, as an owner that is down would. */
   failWith: Error | undefined;
+  /** Runs when a question arrives, before it is answered: lets a test interleave another delivery. */
+  onAsk: (() => Promise<void>) | undefined;
 
   serve(award: AwardFixture, overrides: Partial<AwardFact> = {}): void {
     this.facts.set(`${award.organizationId}|${award.tenderId}`, {
       tenderId: award.tenderId,
+      projectId: award.projectId,
       status: 'AWARDED',
       bidId: award.winningBidId,
       bidderOrganizationId: award.winnerOrganizationId,
@@ -159,6 +162,7 @@ export class FakeAwards implements AwardSource {
   async award(organizationId: string, tenderId: string): Promise<AwardFact | null> {
     this.asked.push({ organizationId, tenderId });
     if (this.failWith) throw this.failWith;
+    await this.onAsk?.();
     return this.facts.get(`${organizationId}|${tenderId}`) ?? null;
   }
 }

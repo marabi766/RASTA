@@ -71,10 +71,10 @@ Temporal و Timeout می‌خواست؛ این ADR آن را **عمداً** تغ
 
 1. **قرارداد شکل.** Payload با Schema خودش Parse می‌شود (فقط میدان‌های مصرفی)؛ ناخوانا ⇒ `VALIDATION_FAILED` (DLQ، بی تلاش دوباره).
 2. **مستأجر.** `envelope.tenantId` باید با `payload.organizationId` یکی باشد (ADR-061 § ۵)، پیش از هر پرسشی؛ وگرنه `SOURCE_UNCONFIRMED`.
-3. **تکرار.** اگر برای `(organizationId, tenderId)` قراردادی هست: ادعاهای رویداد (پیشنهاد برنده، سازمان برنده، پروژه) با آنچه ثبت شده سنجیده می‌شود؛
+3. **تکرار.** اگر برای `(organizationId, tenderId)` قراردادی هست: همهٔ ادعاهای ماندگارِ رویداد (مناقصه، پروژه، پیشنهاد برنده، سازمان برنده، چکیدهٔ ماتریس، انتخاب‌کننده، لحظهٔ انتخاب) با آنچه ثبت شده سنجیده می‌شود؛
    یکی بودن ⇒ `SKIPPED` بی هیچ رفت‌وبرگشت؛ ناهمخوانی (**تکرار متناقض**) ⇒ `VALIDATION_FAILED` با پیام «با آنچه ثبت شده نمی‌خواند» (همان الگوی `SupplierStandingConsumer`).
 4. **پرسیدن از منبع.** `GET {CONSTRUCTION_SERVICE_URL}/v1/tenders/{tenderId}/award` با توکن `SERVICE` امضاشده برای `construction-service` **و برای سازمان مالکِ رویداد**
-   (ADR-035): مالک فقط در امضا می‌آید، نه در Header. پاسخ با رویداد سنجیده می‌شود: همان `tenderId`، وضعیت `AWARDED`، `bidId` = `winningBidId`،
+   (ADR-035): مالک فقط در امضا می‌آید، نه در Header. پاسخ با رویداد سنجیده می‌شود: همان `tenderId`، `projectId` برابر (میدان **الزامی** پاسخ؛ نبودنش پاسخ را ناخوانا می‌کند ⇒ تلاش دوباره، و قرارداد پروژهٔ منبع را نگه می‌دارد)، وضعیت `AWARDED`، `bidId` = `winningBidId`،
    `bidderOrganizationId` = `winnerOrganizationId`، `matrixDigest` برابر، `awardedBy` و `awardedAt` برابر، و `amountMinor` عدد صحیحِ مثبت.
    - منبع تأیید نکند (۴۰۴ با بدنهٔ پلتفرم برای `Tender`/`TenderAward`، یا هر ناهمخوانی) ⇒ **`SOURCE_UNCONFIRMED`** (DLQ).
    - منبع در دسترس نباشد (قطع، کند، `403`/`5xx`، ۴۰۴ی که بدنهٔ پلتفرم نیست، بدنهٔ ناخوانا) ⇒ `UPSTREAM_UNAVAILABLE`/`UPSTREAM_TIMEOUT`؛ Consumer دوباره تلاش می‌کند و پس از پایان تلاش‌ها `UPSTREAM_UNAVAILABLE` (DLQ).

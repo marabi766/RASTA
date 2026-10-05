@@ -18,6 +18,7 @@ import {
   amountOf,
   confirmAward,
   confirmTenant,
+  contradictions,
   type AwardClaim,
   type Mismatch,
 } from '../award/award-confirm';
@@ -120,8 +121,8 @@ export function tenderAwardedConsumerFactory(
  *   1. a delivery whose tender already has a contract is compared with that contract
  *      **before** the owner is asked — the same award again is `SKIPPED` and costs no
  *      round trip (each read of an award is audited by its owner);
- *   2. a delivery that contradicts the contract (another winning bid, another contractor,
- *      another project) is a **conflicting redelivery**: dead-lettered as `VALIDATION_FAILED`
+ *   2. a delivery that contradicts the contract in ANY persisted award claim (tender,
+ *      project, winning bid, contractor, matrix digest, who awarded, when) is a **conflicting redelivery**: dead-lettered as `VALIDATION_FAILED`
  *      with the contract it contradicts named by identifier, never overwriting anything —
  *      the contradiction is the answer, not something to retry;
  *   3. two deliveries at once pass the probe together and meet at the unique index: the one
@@ -185,6 +186,7 @@ export class TenderAwardedConsumer {
     return runWithContext(context, async () => {
       const claim: AwardClaim = {
         tenderId: payload.tenderId,
+        projectId: payload.projectId,
         organizationId: tenant,
         winningBidId: payload.winningBidId,
         winnerOrganizationId: payload.winnerOrganizationId,
@@ -236,7 +238,7 @@ export class TenderAwardedConsumer {
             id: newId(ID_PREFIX.contract),
             organizationId: tenant,
             tenderId: payload.tenderId,
-            projectId: payload.projectId,
+            projectId: fact.projectId,
             winningBidId: fact.bidId,
             contractorOrganizationId: fact.bidderOrganizationId,
             amountMinor,
@@ -291,11 +293,10 @@ export class TenderAwardedConsumer {
     payload: z.infer<typeof tenderAwardedPayload>,
     existing: Contract,
   ): HandlerOutcome {
-    const same =
-      existing.winningBidId === payload.winningBidId &&
-      existing.contractorOrganizationId === payload.winnerOrganizationId &&
-      existing.projectId === payload.projectId;
-    if (same) {
+    // EVERY persisted award claim, never a subset: a redelivery that differs in any one of
+    // them is not the same award, whatever else it shares.
+    const differing = contradictions(existing, payload);
+    if (differing.length === 0) {
       contractDraftsTotal.inc({ service: SERVICE_NAME, outcome: 'replayed' });
       this.logger.debug(
         `${envelope.eventName} ${envelope.eventId}: contract ${existing.id} already drafted; no second effect`,
@@ -309,7 +310,7 @@ export class TenderAwardedConsumer {
     // Not a retry: a verdict on the event. A retry cannot make two different awards one.
     throw new UnprocessableEventError(
       DLQ_REASONS.VALIDATION_FAILED,
-      `${envelope.eventName} ${envelope.eventId} contradicts what is recorded (contract ${existing.id})`,
+      `${envelope.eventName} ${envelope.eventId} contradicts what is recorded (contract ${existing.id}; differs in ${differing.join(', ')})`,
     );
   }
 

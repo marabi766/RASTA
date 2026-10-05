@@ -4,12 +4,14 @@ import {
   awardFactSchema,
   confirmAward,
   confirmTenant,
+  contradictions,
   type AwardClaim,
   type AwardFact,
 } from './award-confirm';
 
 const claim: AwardClaim = {
   tenderId: 'TND_1',
+  projectId: 'PRJ_1',
   organizationId: 'ORG_OWNER',
   winningBidId: 'BID_1',
   winnerOrganizationId: 'ORG_WINNER',
@@ -20,6 +22,7 @@ const claim: AwardClaim = {
 
 const fact: AwardFact = {
   tenderId: 'TND_1',
+  projectId: 'PRJ_1',
   status: 'AWARDED',
   bidId: 'BID_1',
   bidderOrganizationId: 'ORG_WINNER',
@@ -56,6 +59,7 @@ describe('confirmAward', () => {
   it.each<[string, Partial<AwardFact> | null, string]>([
     ['no award at all', null, 'not_found'],
     ['another tender', { tenderId: 'TND_2' }, 'tender_mismatch'],
+    ['another project', { projectId: 'PRJ_2' }, 'project_mismatch'],
     ['a tender that is not awarded', { status: 'EVALUATED' }, 'status_mismatch'],
     ['another bid', { bidId: 'BID_2' }, 'bid_mismatch'],
     ['another contractor', { bidderOrganizationId: 'ORG_X' }, 'contractor_mismatch'],
@@ -86,6 +90,41 @@ describe('confirmAward', () => {
   });
 });
 
+describe('contradictions: every persisted award claim is compared', () => {
+  const persisted = {
+    tenderId: 'TND_1',
+    projectId: 'PRJ_1',
+    winningBidId: 'BID_1',
+    contractorOrganizationId: 'ORG_WINNER',
+    matrixDigest: 'a'.repeat(64),
+    awardedBy: 'USR_1',
+    awardedAt: new Date('2026-10-03T09:30:00.000Z'),
+  };
+
+  it('finds nothing in the same award, however its time is written', () => {
+    expect(contradictions(persisted, claim)).toEqual([]);
+    expect(
+      contradictions(persisted, { ...claim, awardedAt: '2026-10-03T13:00:00.000+03:30' }),
+    ).toEqual([]);
+  });
+
+  it.each<[string, Partial<AwardClaim>]>([
+    ['tenderId', { tenderId: 'TND_2' }],
+    ['projectId', { projectId: 'PRJ_2' }],
+    ['winningBidId', { winningBidId: 'BID_2' }],
+    ['winnerOrganizationId', { winnerOrganizationId: 'ORG_X' }],
+    ['matrixDigest', { matrixDigest: 'b'.repeat(64) }],
+    ['awardedBy', { awardedBy: 'USR_2' }],
+    ['awardedAt', { awardedAt: '2026-10-04T09:30:00.000Z' }],
+  ])('names %s when only it differs', (field, change) => {
+    expect(contradictions(persisted, { ...claim, ...change })).toEqual([field]);
+  });
+
+  it('treats an unparseable award time as a contradiction, never a match', () => {
+    expect(contradictions(persisted, { ...claim, awardedAt: 'soon' })).toEqual(['awardedAt']);
+  });
+});
+
 describe('amountOf', () => {
   it('reads a positive decimal string as a bigint, exactly', () => {
     expect(amountOf({ amountMinor: '9007199254740993' })).toBe(9007199254740993n);
@@ -111,6 +150,7 @@ describe('awardFactSchema', () => {
 
   it.each([
     'tenderId',
+    'projectId',
     'status',
     'bidId',
     'bidderOrganizationId',

@@ -64,6 +64,7 @@ describe('TENDER_AWARDED drafts a contract', () => {
   beforeEach(() => {
     w.awards.asked.length = 0;
     w.awards.failWith = undefined;
+    w.awards.onAsk = undefined;
   });
 
   it('drafts one DRAFT contract, its amount taken from the owner of the award', async () => {
@@ -183,18 +184,64 @@ describe('TENDER_AWARDED drafts a contract', () => {
       expect(await outboxOf(o)).toHaveLength(1);
     });
 
-    it('refuses a redelivery that moves the tender to another project', async () => {
-      const o = employer();
-      const award = newAward(o);
-      served(award);
-      await w.consumer.handle(tenderAwarded(award));
+    // Every persisted award claim: a redelivery that contradicts any one is refused, nothing written.
+    const CONTRADICTIONS: [string, Partial<AwardFixture>][] = [
+      ['projectId', { projectId: `PRJ_${ulid()}` }],
+      ['winningBidId', { winningBidId: `BID_${ulid()}` }],
+      ['winnerOrganizationId', { winnerOrganizationId: `ORG_${ulid()}` }],
+      ['matrixDigest', { matrixDigest: 'c'.repeat(64) }],
+      ['awardedBy', { awardedBy: `USR_${ulid()}` }],
+      ['awardedAt', { awardedAt: '2026-10-04T09:30:00.000Z' }],
+    ];
 
-      const error = await refusal(
-        w.consumer.handle(tenderAwarded({ ...award, projectId: `PRJ_${ulid()}` })),
-      );
-      expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
-      expect(await contractsOf(o)).toHaveLength(1);
-    });
+    it.each(CONTRADICTIONS)(
+      'refuses a redelivery that differs only in %s, before the owner is asked',
+      async (field, change) => {
+        const o = employer();
+        const award = newAward(o);
+        served(award);
+        await w.consumer.handle(tenderAwarded(award));
+        const [before] = await contractsOf(o);
+
+        const error = await refusal(w.consumer.handle(tenderAwarded({ ...award, ...change })));
+
+        expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+        expect(error.message).toContain(before!.id);
+        expect(error.message).toContain(field);
+        expect(w.awards.asked).toHaveLength(1);
+        expect(await contractsOf(o)).toEqual([before]);
+        expect(await outboxOf(o)).toHaveLength(1);
+      },
+    );
+
+    it.each(CONTRADICTIONS)(
+      'refuses the delivery that loses the race when it differs in %s: the in-transaction re-read judges it too',
+      async (field, change) => {
+        const o = employer();
+        const award = newAward(o);
+        const loser = { ...award, ...change };
+        // The loser passed the probe (no contract yet) and its owner confirms ITS award; while
+        // it waits for the owner, the first delivery commits.
+        w.awards.onAsk = async () => {
+          w.awards.onAsk = undefined;
+          served(award);
+          await w.consumer.handle(tenderAwarded(award));
+          served(loser);
+        };
+
+        const error = await refusal(w.consumer.handle(tenderAwarded(loser)));
+
+        expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+        expect(error.message).toContain(field);
+        const rows = await contractsOf(o);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          matrixDigest: award.matrixDigest,
+          projectId: award.projectId,
+        });
+        expect(await outboxOf(o)).toHaveLength(1);
+      },
+    );
 
     it('makes one contract when five deliveries race: the unique index decides', async () => {
       const o = employer();
@@ -250,6 +297,40 @@ describe('TENDER_AWARDED drafts a contract', () => {
       expect(error.reason).toBe(DLQ_REASONS.SOURCE_UNCONFIRMED);
       expect(await contractsOf(o)).toHaveLength(0);
       expect(await outboxOf(o)).toHaveLength(0);
+    });
+
+    it('the event names another project than the owner records: SOURCE_UNCONFIRMED, nothing written', async () => {
+      const o = employer();
+      const award = newAward(o);
+      served(award);
+
+      const error = await refusal(
+        w.consumer.handle(tenderAwarded({ ...award, projectId: `PRJ_${ulid()}` })),
+      );
+
+      expect(error.reason).toBe(DLQ_REASONS.SOURCE_UNCONFIRMED);
+      expect(error.message).toContain('project_mismatch');
+      expect(await contractsOf(o)).toHaveLength(0);
+      expect(await outboxOf(o)).toHaveLength(0);
+    });
+
+    it('an owner answer without a projectId is not a confirmation: no contract (the real client treats it as unreadable and retries)', async () => {
+      const o = employer();
+      const award = newAward(o);
+      w.awards.serve(award, { projectId: undefined as unknown as string });
+
+      await refusal(w.consumer.handle(tenderAwarded(award)));
+
+      expect(await contractsOf(o)).toHaveLength(0);
+      expect(await outboxOf(o)).toHaveLength(0);
+    });
+
+    it('keeps the owner’s project on the contract', async () => {
+      const o = employer();
+      const award = newAward(o);
+      served(award);
+      await w.consumer.handle(tenderAwarded(award));
+      expect((await contractsOf(o))[0]!.projectId).toBe(award.projectId);
     });
 
     it.each([
