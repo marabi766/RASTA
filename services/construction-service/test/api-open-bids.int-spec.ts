@@ -3,6 +3,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import {
   actor,
   apiTenant,
+  bearer,
   auditorActor,
   multiMemberActor,
   orgAdmin,
@@ -72,33 +73,138 @@ describe('open-bids API', () => {
     await api.close();
   });
 
-  it('is closed without a token and to every role the configuration did not grant', async () => {
-    const a = org('closed');
-    const routes: [string, string, object | undefined][] = [
-      ['post', '/v1/tenders/TND_x/open-bids', {}],
-      ['post', '/v1/tenders/TND_x/open-bids/proposal', {}],
-      ['post', '/v1/tenders/TND_x/open-bids/proposal/withdraw', {}],
-      ['get', '/v1/tenders/TND_x/bids', undefined],
-      ['get', '/v1/tenders/TND_x/bids/BID_x', undefined],
-      ['get', '/v1/tenders/TND_x/bid-access-log', undefined],
-    ];
-    for (const [method, path, body] of routes) {
-      const call = (token?: string) => {
-        const req = (http() as unknown as Record<string, (p: string) => request.Test>)[method]!(
-          path,
-        );
-        const authed = token ? req.set(as(token)) : req;
-        return body ? authed.send(body) : authed;
-      };
-      expect((await call()).status).toBe(401);
-      expect((await call(auditorActor(a))).status).toBe(403);
-      expect((await call(actor(a, ['CONTRACTOR']))).status).toBe(403);
-      // The platform administrator has no access to a bid through the API, super-role or not.
-      expect((await call(actor(a, ['SYSTEM_ADMIN']))).status).toBe(403);
-      // ... and not made harmless by also holding the owner's role.
-      expect((await call(actor(a, ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN']))).status).toBe(403);
-      expect((await call(actor(a, ['CONTRACTOR', 'ORGANIZATION_ADMIN']))).status).toBe(403);
+  /** Every owner-side route of a tender's bids: method, path. */
+  const ownerRoutes = (tenderId: string, bidId: string): [string, string][] => [
+    ['post', `/v1/tenders/${tenderId}/open-bids`],
+    ['post', `/v1/tenders/${tenderId}/open-bids/proposal`],
+    ['post', `/v1/tenders/${tenderId}/open-bids/proposal/withdraw`],
+    ['get', `/v1/tenders/${tenderId}/bids`],
+    ['get', `/v1/tenders/${tenderId}/bids/${bidId}`],
+    ['get', `/v1/tenders/${tenderId}/bid-access-log`],
+  ];
+  const call = (method: string, path: string, token?: string) => {
+    const req = (http() as unknown as Record<string, (p: string) => request.Test>)[method]!(path);
+    return token ? req.set(as(token)) : req;
+  };
+
+  it('is closed without a token, and to every role the configuration did not grant in the owning organization', async () => {
+    const { owner, tenderId, bidId } = await closed('closed');
+    for (const [method, path] of ownerRoutes(tenderId, bidId)) {
+      expect((await call(method, path)).status).toBe(401);
+      for (const token of [
+        auditorActor(owner),
+        actor(owner, ['CONTRACTOR']),
+        actor(owner, ['FLEET_MANAGER']),
+        // The platform administrator has no access to a bid through the API, super-role or not.
+        actor(owner, ['SYSTEM_ADMIN']),
+        // ... and not made harmless by also holding the owner's role.
+        actor(owner, ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN']),
+        actor(owner, ['CONTRACTOR', 'ORGANIZATION_ADMIN']),
+      ]) {
+        const res = await call(method, path, token);
+        expect({ path, status: res.status }).toEqual({ path, status: 403 });
+      }
     }
+  });
+
+  it('answers a contractor of another organization what a missing tender gets — 404, ownership before roles — and tells the owner; 403 only inside the owning organization (#223 F3)', async () => {
+    const { owner, bidder, tenderId, bidId } = await closed('f3');
+    const missing = `TND_${tenderId.slice(-6)}MISSING`;
+    // A contractor of the bidding organization, and one of an organization with no part in it.
+    const contractors = [actor(bidder, ['CONTRACTOR']), actor(org('f3-other'), ['CONTRACTOR'])];
+
+    const answer = (res: request.Response) => ({
+      status: res.status,
+      code: res.body.code,
+      message: res.body.message,
+    });
+    for (const token of contractors) {
+      for (const [method, path] of ownerRoutes(tenderId, bidId)) {
+        const other = answer(await call(method, path, token));
+        expect({ path, ...other }).toEqual({
+          path,
+          status: 404,
+          code: 'NOT_FOUND',
+          message: 'Tender not found',
+        });
+        expect(other).toEqual(answer(await call(method, path.replace(tenderId, missing), token)));
+      }
+    }
+
+    // Inside the owning organization, a member without an opening role is told 403.
+    for (const [method, path] of ownerRoutes(tenderId, bidId)) {
+      const res = await call(method, path, actor(owner, ['CONTRACTOR']));
+      expect({ path, status: res.status, code: res.body.code }).toEqual({
+        path,
+        status: 403,
+        code: 'FORBIDDEN',
+      });
+    }
+
+    // Each attempt on a bid route is on the owner's log (reading the log itself is not):
+    // another organization's as before, and now the role refusal inside the owner as well.
+    const rows = await runUnscoped('the suite reads the access log', () =>
+      w.prisma.client.bidAccessLog.findMany({ where: { tenderId, outcome: 'REFUSED' } }),
+    );
+    const refused = (organizationId: string) =>
+      rows
+        .filter((row) => row.accessorOrganizationId === organizationId)
+        .map((row) => `${row.purpose}:${row.refusalCode}`)
+        .sort();
+    const fiveRoutes = (code: string) =>
+      ['OPEN_BIDS', 'PROPOSE_OPENING', 'WITHDRAW_PROPOSAL', 'LIST_BIDS', 'READ_BID']
+        .map((purpose) => `${purpose}:${code}`)
+        .sort();
+    expect(refused(bidder)).toEqual(fiveRoutes('NOT_FOUND'));
+    expect(refused(owner)).toEqual(fiveRoutes('FORBIDDEN'));
+    const row = await runUnscoped('the suite reads the tender', () =>
+      w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
+    );
+    expect(row).toMatchObject({ status: 'CLOSED', openingProposedBy: null, openedAt: null });
+  });
+
+  it('refuses a token without a platform user id 403 on the three commands, before any tender is looked up: the same for its own, a foreign and a missing tender', async () => {
+    const { owner, tenderId } = await closed('no-uid');
+    const stranger = org('no-uid-stranger');
+    const missing = `TND_${tenderId.slice(-6)}MISSING`;
+    // Verified, with the owner's role, but naming no platform user (`rasta_uid`): AuthGuard's
+    // `@RequirePlatformUserId()` refuses it as an authentication precondition (#188), on every
+    // tender alike — the 404-for-other-organizations rule is for identified platform users.
+    const noUid = (organizationId: string) =>
+      bearer({
+        sub: `sub-no-uid-${organizationId}`,
+        organizationId,
+        organizationIds: [organizationId],
+        roles: ['ORGANIZATION_ADMIN'],
+      });
+    const answer = (res: request.Response) => ({
+      status: res.status,
+      code: res.body.code,
+      message: res.body.message,
+    });
+    for (const path of ['/open-bids', '/open-bids/proposal', '/open-bids/proposal/withdraw']) {
+      const own = answer(await call('post', `/v1/tenders/${tenderId}${path}`, noUid(owner)));
+      expect({ path, status: own.status, code: own.code }).toEqual({
+        path,
+        status: 403,
+        code: 'FORBIDDEN',
+      });
+      const foreign = answer(await call('post', `/v1/tenders/${tenderId}${path}`, noUid(stranger)));
+      const absent = answer(await call('post', `/v1/tenders/${missing}${path}`, noUid(stranger)));
+      expect({ path, ...foreign }).toEqual({ path, ...own });
+      expect({ path, ...absent }).toEqual({ path, ...own });
+    }
+    // Refused before the service ran: nothing on the owner's access log, nothing proposed.
+    const rows = await runUnscoped('the suite reads the access log', () =>
+      w.prisma.client.bidAccessLog.count({
+        where: { tenderId, purpose: { in: ['OPEN_BIDS', 'PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] } },
+      }),
+    );
+    expect(rows).toBe(0);
+    const row = await runUnscoped('the suite reads the tender', () =>
+      w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
+    );
+    expect(row).toMatchObject({ status: 'CLOSED', openingProposedBy: null, openedAt: null });
   });
 
   it('opens (200), answers the same view again, and reads the bids with their content (200), each read audited', async () => {
