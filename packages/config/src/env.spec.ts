@@ -65,10 +65,10 @@ describe('loadEnv', () => {
   it.each([
     'postgresql://user:pass@localhost:5432/rasta_asset?schema=public',
     'postgres://user:pass@db.internal:5432/rasta_asset',
-  ])('accepts DATABASE_URL %p', (value) => {
+  ])('accepts DATABASE_URL %p, and opens its sessions in UTC', (value) => {
     expect(
       loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv).DATABASE_URL,
-    ).toBe(value);
+    ).toBe(`${value}${value.includes('?') ? '&' : '?'}options=-c%20TimeZone%3DUTC`);
   });
 
   it('applies pool defaults when not specified', () => {

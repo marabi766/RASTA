@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -68,7 +69,7 @@ export function databaseUrl(): string {
         'start it with `pnpm infra:up` and copy .env.example to .env.',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 /**
@@ -87,7 +88,7 @@ export function ownerDatabaseUrl(): string {
         'through the owner connection, never the runtime one; see .env.migrator.example (docs/23 D-045).',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function brokers(): string[] | null {
@@ -590,6 +591,7 @@ export async function cleanup(
       'reward_balance',
       // Children first: each foreign key here is ON DELETE RESTRICT.
       'payment_reconciliation_task',
+      'payment_refund_decline',
       'payment_intent',
       'wallet_hold',
       'idempotency_key',

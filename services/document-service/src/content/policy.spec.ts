@@ -139,6 +139,15 @@ describe('sanitising a filename for display', () => {
     expect(sanitizeFilename(deceptive)).not.toContain('\u202E');
   });
 
+  it.each([
+    ['U+061C ARABIC LETTER MARK', '\u061C'],
+    ['U+200E LEFT-TO-RIGHT MARK', '\u200E'],
+    ['U+200F RIGHT-TO-LEFT MARK', '\u200F'],
+    ['U+2067 RIGHT-TO-LEFT ISOLATE', '\u2067'],
+  ])('removes %s, which the override list used to miss (#150 triage, item 2)', (_name, mark) => {
+    expect(sanitizeFilename(`قرارداد${mark}-۱۴۰۴.pdf`)).toBe('قرارداد-۱۴۰۴.pdf');
+  });
+
   it('removes control characters', () => {
     expect(sanitizeFilename('report\u0000\u001b.pdf')).toBe('report.pdf');
   });

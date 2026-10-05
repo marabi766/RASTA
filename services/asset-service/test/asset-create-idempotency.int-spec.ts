@@ -19,6 +19,7 @@ import { ClaimService } from '../src/insurance/claim.service';
 import type { AssetView, CreateAssetDto } from '../src/asset/dto';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, id, newPrisma, tenants } from './helpers';
+import { clearingOwners } from './transfer-clearance.fake';
 
 /**
  * Idempotency-Key on POST /v1/assets (#169, docs/06 § 6.8), against real
@@ -36,6 +37,8 @@ const LEASE_SECONDS = 120;
 describe('asset registration under an Idempotency-Key', () => {
   let prisma: PrismaService;
   let assets: AssetService;
+  /** The same repository, with owners that clear a transfer (ADR-062). */
+  let transferring: AssetService;
   let store: IdempotencyStore;
   let controller: AssetController;
   let http: INestApplication;
@@ -45,7 +48,18 @@ describe('asset registration under an Idempotency-Key', () => {
 
   beforeAll(async () => {
     prisma = newPrisma();
-    assets = new AssetService(new AssetRepository(prisma));
+    const repository = new AssetRepository(prisma);
+    assets = new AssetService(repository);
+    transferring = new AssetService(repository, undefined, clearingOwners());
+    for (const organizationId of [org.a, org.b]) {
+      await repository.upsertOrganizationRef({
+        id: organizationId,
+        name: 'سازمان آزمون',
+        type: 'DEHYARI',
+        status: 'ACTIVE',
+        sourceEvent: 'itest',
+      });
+    }
     store = new IdempotencyStore(prisma, {
       ASSET_IDEMPOTENCY_TTL_HOURS: 24,
       ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: LEASE_SECONDS,
@@ -111,6 +125,7 @@ describe('asset registration under an Idempotency-Key', () => {
       'outbox_message',
       'idempotency_key',
       'asset_timeline_entry',
+      'asset_transfer',
       'asset_location',
       'asset',
     ]) {
@@ -119,6 +134,10 @@ describe('asset registration under an Idempotency-Key', () => {
         orgs,
       );
     }
+    await prisma.client.$executeRawUnsafe(
+      `DELETE FROM organization_ref WHERE id = ANY($1::text[])`,
+      orgs,
+    );
     await prisma.onModuleDestroy();
   });
 
@@ -128,6 +147,9 @@ describe('asset registration under an Idempotency-Key', () => {
     type: 'LOADER',
     specifications: {},
   });
+
+  /** What the controller passes the store: the registered asset is still the caller's to see. */
+  const stillVisible = (stored: AssetView) => assets.assertVisible(stored.id);
 
   const create = (
     dto: CreateAssetDto,
@@ -302,15 +324,21 @@ describe('asset registration under an Idempotency-Key', () => {
       // A has claimed and holds its transaction's first statement — the
       // claim's row lock — open.
       const first = asActor(manager, () =>
-        store.execute<AssetView>(CREATE_ASSET_ENDPOINT, key, dto, 201, (fence) =>
-          assets.create(dto, {
-            hold: async (tx) => {
-              await fence.hold(tx);
-              a.reach();
-              await a.opened;
-            },
-            complete: fence.complete,
-          }),
+        store.execute<AssetView>(
+          CREATE_ASSET_ENDPOINT,
+          key,
+          dto,
+          201,
+          (fence) =>
+            assets.create(dto, {
+              hold: async (tx) => {
+                await fence.hold(tx);
+                a.reach();
+                await a.opened;
+              },
+              complete: fence.complete,
+            }),
+          stillVisible,
         ),
       );
       await a.reached;
@@ -427,23 +455,30 @@ describe('asset registration under an Idempotency-Key', () => {
 
       // A's lease is about to lapse as A's transaction takes the claim.
       const first = asActor(manager, () =>
-        store.execute<AssetView>(CREATE_ASSET_ENDPOINT, key, dto, 201, async (fence) => {
-          await prisma.client.$executeRawUnsafe(
-            `UPDATE idempotency_key SET expires_at = now() + make_interval(secs => $3)
+        store.execute<AssetView>(
+          CREATE_ASSET_ENDPOINT,
+          key,
+          dto,
+          201,
+          async (fence) => {
+            await prisma.client.$executeRawUnsafe(
+              `UPDATE idempotency_key SET expires_at = now() + make_interval(secs => $3)
              WHERE organization_id = $1 AND key = $2`,
-            org.a,
-            key,
-            LIFETIME_MS / 1000,
-          );
-          return assets.create(dto, {
-            hold: async (tx) => {
-              await fence.hold(tx);
-              a.reach();
-              await a.opened;
-            },
-            complete: fence.complete,
-          });
-        }),
+              org.a,
+              key,
+              LIFETIME_MS / 1000,
+            );
+            return assets.create(dto, {
+              hold: async (tx) => {
+                await fence.hold(tx);
+                a.reach();
+                await a.opened;
+              },
+              complete: fence.complete,
+            });
+          },
+          stillVisible,
+        ),
       );
       await a.reached;
       await sleep(LIFETIME_MS + 200);
@@ -499,11 +534,18 @@ describe('asset registration under an Idempotency-Key', () => {
       // The holder claims and stalls before its transaction — alive, but slow
       // past its lease, which is all a crashed-and-resumed process looks like.
       const late = asActor(manager, () =>
-        store.execute<AssetView>(CREATE_ASSET_ENDPOINT, key, dto, 201, async (fence) => {
-          holder.reach();
-          await holder.opened;
-          return assets.create(dto, fence);
-        }),
+        store.execute<AssetView>(
+          CREATE_ASSET_ENDPOINT,
+          key,
+          dto,
+          201,
+          async (fence) => {
+            holder.reach();
+            await holder.opened;
+            return assets.create(dto, fence);
+          },
+          stillVisible,
+        ),
       ).then(
         (outcome) => ({ outcome }),
         (error: unknown) => ({ error }),
@@ -640,6 +682,74 @@ describe('asset registration under an Idempotency-Key', () => {
       expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
       expect(JSON.stringify(reused.body)).not.toContain(first.body.id);
       expect(JSON.stringify(reused.body)).not.toContain(dto.name);
+    });
+
+    describe('after the asset is transferred to another organization', () => {
+      const transferAway = (assetId: string) =>
+        asActor(
+          { organizationId: org.a, userId: 'USR-ITEST-ADMIN', roles: ['ORGANIZATION_ADMIN'] },
+          () =>
+            transferring.transfer(assetId, { toOrganizationId: org.b, reason: 'واگذاری آزمون' }),
+        );
+
+      /** Every row either tenant has in the tables a registration or its replay could write. */
+      const footprint = () =>
+        prisma.client.$queryRawUnsafe<{ tbl: string; n: number }[]>(
+          `SELECT 'asset' AS tbl, count(*)::int AS n FROM asset WHERE organization_id = ANY($1::text[])
+           UNION ALL SELECT 'outbox', count(*)::int FROM outbox_message WHERE organization_id = ANY($1::text[])
+           UNION ALL SELECT 'timeline', count(*)::int FROM asset_timeline_entry WHERE organization_id = ANY($1::text[])
+           UNION ALL SELECT 'keys', count(*)::int FROM idempotency_key WHERE organization_id = ANY($1::text[])
+           ORDER BY 1`,
+          [org.a, org.b],
+        );
+
+      /** A 404 as the client sees it, without what differs per request. */
+      const shape = (body: Record<string, unknown>) => ({
+        code: body.code,
+        message: body.message,
+        details: body.details,
+        fields: Object.keys(body).sort(),
+      });
+
+      it('answers the original caller’s replay 404 exactly as a missing asset: no stored body, nothing written', async () => {
+        const dto = machine();
+        const key = id('KEY');
+        const first = await post(dto, key);
+        expect(first.status).toBe(201);
+        // While the asset is still the caller's, the replay is the stored 201.
+        const inTenant = await post(dto, key);
+        expect(inTenant.status).toBe(201);
+        expect(inTenant.body).toEqual(first.body);
+
+        await transferAway(first.body.id);
+        const before = await footprint();
+        const keyBefore = (await keyRow(org.a, key)).map(({ state, claim_token }) => ({
+          state,
+          claim_token,
+        }));
+
+        const replay = await post(dto, key);
+        const missing = await request(http.getHttpServer()).get(`/v1/assets/${id('AST')}`);
+        const freshRead = await request(http.getHttpServer()).get(`/v1/assets/${first.body.id}`);
+
+        expect(replay.status).toBe(404);
+        expect(missing.status).toBe(404);
+        expect(freshRead.status).toBe(404);
+        expect(shape(replay.body)).toEqual(shape(missing.body));
+        expect(shape(replay.body)).toEqual(shape(freshRead.body));
+        expect(JSON.stringify(replay.body)).not.toContain(first.body.id);
+
+        // Nothing written, nothing published, the key untouched; the asset is B's alone.
+        expect(await footprint()).toEqual(before);
+        expect(
+          (await keyRow(org.a, key)).map(({ state, claim_token }) => ({ state, claim_token })),
+        ).toEqual(keyBefore);
+        expect(keyBefore).toEqual([expect.objectContaining({ state: 'COMPLETED' })]);
+        expect(await assetsNamed(dto.name)).toEqual([
+          { id: first.body.id, organization_id: org.b },
+        ]);
+        expect(await createdEvents([first.body.id])).toBe(1);
+      });
     });
 
     it('checks the role before any replay: a caller who may not register gets 403, never the stored asset', async () => {

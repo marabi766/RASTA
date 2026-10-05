@@ -3,6 +3,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { UNSUPPORTED_CHARACTERS, plainText } from '@rasta/contracts';
 import ts from 'typescript';
 
 import {
@@ -12,6 +13,12 @@ import {
   canDecommissionFrom,
   statusTargetsFrom,
 } from '@/lib/asset-lifecycle-fields';
+import {
+  BIDI_CONTROL_CODE_POINTS,
+  OTHER_INVISIBLE_CODE_POINTS,
+  formField,
+  probesFrom,
+} from '@/test/text-rules';
 
 import {
   ACTIVATE_FIELD_MAPPING,
@@ -23,6 +30,8 @@ import {
   DECOMMISSION_REASON_BOUNDS,
   canChangeAssetStatus,
   canDecommissionAsset,
+  changeStatusFormSchema,
+  decommissionFormSchema,
 } from './asset-lifecycle-commands';
 
 /**
@@ -183,13 +192,45 @@ describe('the request bodies', () => {
     ['changeStatusSchema', CHANGE_STATUS_REASON_BOUNDS],
     ['decommissionSchema', DECOMMISSION_REASON_BOUNDS],
   ] as const)(
-    '%s bounds the reason as the form does, and adds no character class',
+    "%s bounds the reason as the form does, with the platform's `plainText()` and no character class",
     (name, bounds) => {
       expect(squash(schemaProperties(name).get('reason'))).toBe(
-        `z.string().trim().min(${bounds.min}).max(${bounds.max})`,
+        `plainText().min(${bounds.min}).max(${bounds.max})`,
       );
     },
   );
+
+  // `plainText()` is the platform's, from `@rasta/contracts`, so each form's
+  // reason is checked against the rule itself: every bidi control refused by
+  // both, ZWNJ and the other invisible characters it admits admitted by both.
+  it.each([
+    ['change status', changeStatusFormSchema, CHANGE_STATUS_REASON_BOUNDS],
+    ['decommission', decommissionFormSchema, DECOMMISSION_REASON_BOUNDS],
+  ] as const)('the %s form refuses exactly what the service refuses', (_form, schema, bounds) => {
+    const service = plainText().min(bounds.min).max(bounds.max);
+    const portal = formField(schema, 'reason');
+    const probes = probesFrom('دستگاه برای تعمیر خارج می‌شود', [
+      ...BIDI_CONTROL_CODE_POINTS,
+      ...OTHER_INVISIBLE_CODE_POINTS,
+    ]);
+    for (const probe of probes) {
+      expect([probe, portal.safeParse(probe).success]).toEqual([
+        probe,
+        service.safeParse(probe).success,
+      ]);
+    }
+    expect(probes.filter((probe) => !service.safeParse(probe).success)).toHaveLength(
+      BIDI_CONTROL_CODE_POINTS.length,
+    );
+  });
+
+  it("translates the service's closed refusal of a reason's characters", () => {
+    for (const mapping of [CHANGE_STATUS_FIELD_MAPPING, DECOMMISSION_FIELD_MAPPING]) {
+      expect(mapping.messages?.[UNSUPPORTED_CHARACTERS]).toBe(
+        'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد',
+      );
+    }
+  });
 });
 
 describe('the transition table the forms are offered from', () => {
@@ -337,7 +378,22 @@ describe('open work in another service (docs/24 Q-94)', () => {
       expect(clear).toContain('WORK_OWNERS.map((owner)=>this.clearance.ask(');
       expect(clear).toContain("outcome.status==='fulfilled'&&outcome.value.clear");
       // An owner that cannot answer is its own error, never a clear.
-      expect(clear).toContain('failure?.reason');
+      expect(clear).toContain("outcome.status==='rejected'");
+      expect(clear).toContain('throwunavailable??failures[0]');
+    });
+
+    it('answers "unavailable" before "blocked by open work" when the owners disagree', () => {
+      // The carried-over LOW of #195: the caller cannot know the full picture
+      // when one owner did not answer, so the portal's 503 sentence — "the check
+      // could not be made", nothing written — is the one that must win over the
+      // open-work refusal. Pinned by source order, and by the codes it prefers.
+      const clear = squash(method('clearForWithdrawal')) ?? '';
+      expect(clear.indexOf('throwunavailable??failures[0]')).toBeGreaterThan(-1);
+      expect(clear.indexOf('throwunavailable??failures[0]')).toBeLessThan(
+        clear.indexOf('throwopenWorkError('),
+      );
+      expect(clear).toContain("reason.code==='UPSTREAM_UNAVAILABLE'");
+      expect(clear).toContain("reason.code==='UPSTREAM_TIMEOUT'");
     });
 
     it('checks the deadline inside the write and lifts the fences whatever happened', () => {

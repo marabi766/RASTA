@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -20,7 +21,7 @@ export function databaseUrl(): string {
         'start it with `pnpm infra:up` and copy .env.example to .env.',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 export function newPrisma(): PrismaService {

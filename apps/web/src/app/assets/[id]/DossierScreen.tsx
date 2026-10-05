@@ -6,6 +6,7 @@ import {
   ErrorState,
   Grid,
   Identifier,
+  IsolatedText,
   NoAccessState,
   PageHeader,
   Section,
@@ -20,6 +21,7 @@ import {
 } from '@/lib/labels';
 import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import type { AssetDossier, ReadResult } from '@/server/assets';
+import type { RecordNotice } from '@/lib/asset-record-fields';
 
 /**
  * The electronic dossier (docs/16 § 16.6, `/assets/[id]`).
@@ -54,6 +56,13 @@ export interface DossierScreenProps {
    */
   readonly lifecycle?: ReactNode;
   /**
+   * The machine's insurance policies and technical inspections with their record
+   * forms (`AssetRecords`), built by the page — which owns the server clock the
+   * "in force" judgement is made against. Drawn below the compliance box, whose
+   * blockers it is what clears.
+   */
+  readonly records?: ReactNode;
+  /**
    * What the write that sent the person here did — decided by the page, which
    * accepts it only from a flash the server signed for this session and this
    * machine (`server/flash.ts`), never from a bare query value. Not rendered at
@@ -66,7 +75,8 @@ export interface DossierScreenProps {
     | 'activated'
     | 'statusChanged'
     | 'decommissioned'
-    | 'lifecycleConflict';
+    | 'lifecycleConflict'
+    | RecordNotice;
 }
 
 const NOTICES = {
@@ -79,6 +89,8 @@ const NOTICES = {
   activated: { tone: 'success', text: 'دارایی فعال شد و به ناوگان پیوست.' },
   statusChanged: { tone: 'success', text: 'وضعیت دارایی تغییر کرد.' },
   decommissioned: { tone: 'success', text: 'دارایی اسقاط شد. این وضعیت نهایی است.' },
+  policyRecorded: { tone: 'success', text: 'بیمه‌نامه ثبت شد.' },
+  inspectionRecorded: { tone: 'success', text: 'معاینهٔ فنی ثبت شد.' },
   lifecycleConflict: {
     tone: 'warning',
     text: 'این دارایی پس از باز شدن این صفحه تغییر کرده بود — شاید همین دستور پیش‌تر اعمال شده باشد. این بار چیزی نوشته نشد. وضعیت فعلی را در همین صفحه ببینید و اگر هنوز لازم است دوباره اقدام کنید.',
@@ -168,6 +180,7 @@ export function DossierScreen({
   assetId,
   editForm,
   lifecycle,
+  records,
   notice,
 }: DossierScreenProps) {
   if (result.kind === 'FORBIDDEN') {
@@ -291,6 +304,8 @@ export function DossierScreen({
 
       <Compliance dossier={result.data} />
 
+      {records}
+
       <Section headingId="costs" title="هزینه‌ها">
         <Grid columns={3}>
           <div className="flex flex-col gap-1">
@@ -335,7 +350,9 @@ export function DossierScreen({
                   {entry.amountMinor ? ` · ${formatMoney(entry.amountMinor)}` : ''}
                 </p>
                 {entry.description ? (
-                  <p className="text-sm text-content-muted">{entry.description}</p>
+                  <p className="text-sm text-content-muted">
+                    <IsolatedText>{entry.description}</IsolatedText>
+                  </p>
                 ) : null}
               </li>
             ))}

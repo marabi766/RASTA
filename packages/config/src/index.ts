@@ -28,6 +28,8 @@ export {
 
 export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, EnvIssue } from './env';
 
+export { UTC_SESSION_OPTION, withUtcSession } from './database-session';
+
 export {
   DEMO_SEED_ENVIRONMENTS,
   DEMO_SEED_OPT_IN,

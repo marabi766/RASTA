@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -267,6 +268,173 @@ INSERT INTO "payment_intent" (
  * decided one included, since those rows are the only record of the evidence
  * (Codex on #175, HIGH 2) — and the table refusing to delete one.
  */
+const MEMBERSHIP_GUARD = '20261004100000_membership_live_duplicates_guard';
+const MEMBERSHIP_GUARD_SQL = readFileSync(
+  new URL(
+    `../services/identity-service/prisma/migrations/${MEMBERSHIP_GUARD}/migration.sql`,
+    import.meta.url,
+  ),
+  'utf8',
+);
+const LIVE_MEMBERSHIP = (id) => `
+  INSERT INTO "membership" (id, user_id, organization_id, roles, updated_at, created_by, updated_by)
+  VALUES ('${id}', 'USR_MIGCHECK', 'ORG-MIGCHECK', ARRAY['FLEET_MANAGER'], now(), 'MIGCHECK', 'MIGCHECK');`;
+
+const MEMBERSHIP_INDEX = '20261004100100_membership_one_live_index';
+
+/** Raises unless ux_membership_live_user_org is there and in the state named. */
+const LIVE_INDEX_IS = (valid) => `
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_index i
+       WHERE i.indexrelid = to_regclass('ux_membership_live_user_org')
+         AND i.indisvalid = ${valid}
+    ) THEN
+      RAISE EXCEPTION 'ux_membership_live_user_org is not there ${valid ? 'and VALID' : 'as an INVALID leftover'}';
+    END IF;
+  END $$;`;
+
+/**
+ * One live membership per (user, organization): fix/identity-one-live-membership.
+ *
+ * The schema before it accepts two live memberships for one user and
+ * organization (NULL deleted_at values are distinct in the old unique index).
+ *
+ * Run as it fails in production (#219 r1): the guard has passed, and a
+ * duplicate arrives before the CONCURRENTLY build, which then fails and leaves
+ * an INVALID index. Every deploy is refused until the failure is resolved; a
+ * leftover is never taken for the real index; and the recovery the runbook
+ * gives — resolve the duplicate, let the guard run again, resolve the failed
+ * build, deploy — ends with a VALID index and no grant deleted or merged.
+ * The guard itself refuses over duplicates, naming the index it will not add.
+ */
+export const IDENTITY_DATA_ROLLBACK = {
+  migration: MEMBERSHIP_GUARD,
+  label: 'two live memberships for one user and organization, and a failed CONCURRENTLY build',
+  steps: [
+    {
+      label: 'rows the old key refuses: two revocations of one pair at the same instant',
+      sql: `
+        INSERT INTO "user" (id, username, email, first_name, last_name, updated_at, created_by, updated_by)
+        VALUES ('USR_MIGCHECK', 'migcheck', 'migcheck@example.test', 'M', 'C', now(), 'MIGCHECK', 'MIGCHECK');
+        INSERT INTO "membership" (id, user_id, organization_id, roles, deleted_at, status, updated_at, created_by, updated_by)
+        VALUES ('MBR_MIGCHECK_R1', 'USR_MIGCHECK', 'ORG-MIGCHECK', ARRAY['DRIVER'], '2026-01-01', 'REVOKED', now(), 'MIGCHECK', 'MIGCHECK'),
+               ('MBR_MIGCHECK_R2', 'USR_MIGCHECK', 'ORG-MIGCHECK', ARRAY['DRIVER'], '2026-01-01', 'REVOKED', now(), 'MIGCHECK', 'MIGCHECK');`,
+    },
+    {
+      label: '(the pre-build itself, alone)',
+      sql: 'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "membership_user_id_organization_id_deleted_at_key" ON "membership" ("user_id", "organization_id", "deleted_at");',
+      // `prisma db execute` reports the failed build by its columns, not its name.
+      mustFail:
+        'Unique constraint failed on the fields: (`user_id`,`organization_id`,`deleted_at`)',
+    },
+    {
+      label: '(and it is there, INVALID)',
+      sql: `
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_index i
+             WHERE i.indexrelid = to_regclass('membership_user_id_organization_id_deleted_at_key')
+               AND NOT i.indisvalid
+          ) THEN
+            RAISE EXCEPTION 'the failed pre-build left no INVALID index';
+          END IF;
+        END $$;`,
+    },
+    {
+      label: 'down: the drop of the old key refuses to roll back onto the INVALID pre-build',
+      runDownScript: ['20261004100200_drop_membership_deleted_at_unique'],
+      mustFail: 'is INVALID; refusing to roll back onto it',
+    },
+    {
+      label: 'clear the pre-build and its rows, as the runbook says',
+      sql: `DROP INDEX "membership_user_id_organization_id_deleted_at_key";
+            DELETE FROM "membership" WHERE user_id = 'USR_MIGCHECK';
+            DELETE FROM "user" WHERE id = 'USR_MIGCHECK';`,
+    },
+    {
+      label: 'down: the old key comes back and the new index goes; the guard stays applied',
+      runDownScript: ['20261004100200_drop_membership_deleted_at_unique', MEMBERSHIP_INDEX],
+    },
+    {
+      label: 'a duplicate arrives after the guard: the old key accepts two live memberships',
+      sql: `
+        INSERT INTO "user" (id, username, email, first_name, last_name, updated_at, created_by, updated_by)
+        VALUES ('USR_MIGCHECK', 'migcheck', 'migcheck@example.test', 'M', 'C', now(), 'MIGCHECK', 'MIGCHECK');
+        ${LIVE_MEMBERSHIP('MBR_MIGCHECK_1')}
+        ${LIVE_MEMBERSHIP('MBR_MIGCHECK_2')}`,
+    },
+    {
+      label: 'up again: the CONCURRENTLY build fails over them (P3018)',
+      deployMustFail: 'could not create unique index "ux_membership_live_user_org"',
+    },
+    {
+      label: 'it leaves ux_membership_live_user_org behind, INVALID',
+      sql: LIVE_INDEX_IS(false),
+    },
+    {
+      label: 'every deploy is refused until the failure is resolved (P3009)',
+      deployMustFail: 'P3009',
+    },
+    {
+      label: 'the guard refuses over them rather than choosing one',
+      sql: MEMBERSHIP_GUARD_SQL,
+      mustFail: 'refusing to add ux_membership_live_user_org',
+    },
+    {
+      label: "recovery 1: resolve the pair as the guard's HINT says — revoke one",
+      sql: `UPDATE "membership" SET deleted_at = now(), status = 'REVOKED' WHERE id = 'MBR_MIGCHECK_2';`,
+    },
+    {
+      label: 'resolve the failed build, but skip the guard: prisma migrate resolve --rolled-back',
+      resolveRolledBack: MEMBERSHIP_INDEX,
+    },
+    {
+      label:
+        'up again: the build fails on the leftover with "already exists" — never taken for the real index',
+      deployMustFail: 'already exists',
+    },
+    { label: 'resolve that failure too', resolveRolledBack: MEMBERSHIP_INDEX },
+    {
+      label: "recovery 2: the guard's down script removes its ledger row, so it runs again",
+      runDownScript: [MEMBERSHIP_GUARD],
+    },
+    {
+      label:
+        'recovery 3: deploy — the guard drops the INVALID leftover and checks again, the build succeeds',
+      reapply: true,
+    },
+    { label: 'ux_membership_live_user_org is VALID', sql: LIVE_INDEX_IS(true) },
+    {
+      label: 'a second live membership for the pair is refused',
+      sql: LIVE_MEMBERSHIP('MBR_MIGCHECK_3'),
+      // `prisma db execute` reports the violation by its columns, not its name.
+      mustFail: 'Unique constraint failed on the fields: (`organization_id`,`user_id`)',
+    },
+    {
+      label: 'no grant was deleted: both memberships are still there',
+      sql: `
+        DO $$
+        BEGIN
+          IF (SELECT count(*) FROM "membership" WHERE user_id = 'USR_MIGCHECK') <> 2 THEN
+            RAISE EXCEPTION 'a membership was deleted or added by the recovery';
+          END IF;
+        END $$;`,
+    },
+    {
+      // Prisma keeps a failed attempt as a rolled-back ledger row; the
+      // whole-chain reversal below asserts a ledger with none.
+      label: 'clean up the probe rows and its rolled-back ledger rows',
+      sql: `DELETE FROM "membership" WHERE user_id = 'USR_MIGCHECK';
+            DELETE FROM "user" WHERE id = 'USR_MIGCHECK';
+            DELETE FROM "_prisma_migrations"
+             WHERE migration_name = '${MEMBERSHIP_INDEX}' AND rolled_back_at IS NOT NULL;`,
+    },
+  ],
+};
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label: 'intents B0 left marked, and the open tasks they get',
@@ -274,6 +442,9 @@ export const ECONOMIC_DATA_ROLLBACK = {
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // Its foreign key needs the intent's (organization_id, id) index,
+        // which 20260930200000's down script drops.
+        '20261003100000_payment_refund_decline',
         '20261001100000_payment_reconciliation_resolution',
         '20260930210000_payment_intent_unfinished_refund_index',
         '20260930200000_payment_reconciliation_task',
@@ -861,6 +1032,7 @@ export const EXPECTED = {
       'payment_reconciliation_task',
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
+      'payment_refund_decline',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -887,6 +1059,8 @@ export const EXPECTED = {
       'ux_transaction_source_fact',
       'ux_payment_reconciliation_open',
       'ux_payment_resolution_pending',
+      // The operator view's tenant-leading access path (#218 r1).
+      'ix_payment_resolution_org_intent',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
@@ -1478,6 +1652,11 @@ export const EXPECTED = {
     ],
     triggers: ['tg_security_event_outbox_guard'],
     functions: ['security_event_outbox_guard'],
+    // One live membership per (user, organization): a down script that dropped
+    // it without the forward migration restoring it would bring back the
+    // concurrent double membership it closes, silently.
+    indexes: ['ux_membership_live_user_org'],
+    dataRollback: IDENTITY_DATA_ROLLBACK,
     constraints: [
       'ck_outbox_claim_triple',
       'ck_outbox_claim_count_nonneg',
@@ -2304,11 +2483,26 @@ const PRISMA_ONLY_PARAMETERS = [
   'statement_cache_size',
 ];
 
+/**
+ * `target` with `params` as its query, each name and value percent-encoded.
+ *
+ * Not `URLSearchParams`: it writes a space as `+`, which libpq's URI parser
+ * does not decode — `options=-c TimeZone=UTC` (L7-37) would reach the server
+ * as `-c+TimeZone=UTC` and the connection be refused. Prisma reads either.
+ */
+function withLibpqQuery(target, params) {
+  const query = params
+    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+    .join('&');
+  target.search = '';
+  return query ? `${target.toString()}?${query}` : target.toString();
+}
+
 /** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
 export function libpqUrl(url) {
   const target = new URL(url);
-  for (const name of PRISMA_ONLY_PARAMETERS) target.searchParams.delete(name);
-  return target.toString();
+  const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
+  return withLibpqQuery(target, kept);
 }
 
 /**
@@ -2326,8 +2520,8 @@ export function libpqInvocation(url) {
     ? decodeURIComponent(target.password)
     : target.searchParams.get('password');
   target.password = '';
-  target.searchParams.delete('password');
-  return { target: target.toString(), env: password ? { PGPASSWORD: password } : {} };
+  const kept = [...target.searchParams].filter(([name]) => name !== 'password');
+  return { target: withLibpqQuery(target, kept), env: password ? { PGPASSWORD: password } : {} };
 }
 
 /**

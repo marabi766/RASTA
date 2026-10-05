@@ -1,9 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { KeycloakAdminClient } from './keycloak.client';
 import {
   divergentAttributes,
+  grantsAnything,
   platformAttributesFor,
+  provenanceOnly,
   type PlatformAttributeName,
   type PlatformAttributes,
 } from './platform-attributes';
@@ -14,13 +18,37 @@ import {
   type KeycloakProjectionTrigger,
 } from '../observability/keycloak-projection.metrics';
 
-/** Above the Keycloak client's worst case: three calls, each bounded at 10 s. */
-const PROJECTION_TRANSACTION_TIMEOUT_MS = 35_000;
+/**
+ * Above the Keycloak client's worst case: six calls — token, the attribute
+ * GET and PUT, and on a first activation the account read and the activation
+ * GET and PUT — each bounded at 10 s.
+ */
+const PROJECTION_TRANSACTION_TIMEOUT_MS = 65_000;
 
 export interface ReconcileFinding {
   userId: string;
   divergent: PlatformAttributeName[];
+  /** An approval committed, but its account has not been enabled yet (#219 r2). */
+  activationPending: boolean;
+  /**
+   * Keycloak's `enabled` disagrees with the platform's user status (#219 r4,
+   * D-049): enabled while the user is not ACTIVE, or disabled while the user
+   * is ACTIVE and no activation is pending — an account disabled in the
+   * Keycloak console rather than through the platform. Null when they agree.
+   */
+  enabledDivergent: { keycloakEnabled: boolean; platformStatus: string } | null;
 }
+
+/** What the orphan repair did with one account (`repairOrphan`). */
+export type OrphanRepairOutcome =
+  /** Disabled and its grants cleared. */
+  | 'repaired'
+  /** Already disabled and granting nothing: kept as it is. */
+  | 'harmless'
+  /** A user row names it now, or a request of the user is approved: not an orphan any more. */
+  | 'owned'
+  /** Its `rasta_user_id` does not name the user, or it is gone. Not touched. */
+  | 'not_ours';
 
 /**
  * Projects a user's memberships into their Keycloak attributes (ADR-060 § 5).
@@ -54,15 +82,20 @@ export class KeycloakProjector {
   ) {}
 
   /** What the user's Keycloak attributes should be, or null when there is no such user. */
-  async expectedAttributes(
-    userId: string,
-  ): Promise<{ keycloakId: string | null; attributes: PlatformAttributes } | null> {
+  async expectedAttributes(userId: string): Promise<{
+    keycloakId: string | null;
+    attributes: PlatformAttributes;
+    activationPending: boolean;
+    status: string;
+  } | null> {
     const user = await this.repository.findUserById(userId);
     if (!user) return null;
     const memberships = await this.repository.listMembershipsForUser(userId);
     return {
       keycloakId: user.keycloakId,
       attributes: platformAttributesFor(user, memberships, new Date()),
+      activationPending: user.accountActivationPending,
+      status: user.status,
     };
   }
 
@@ -108,8 +141,61 @@ export class KeycloakProjector {
   async reconcile(userId: string): Promise<ReconcileFinding | null> {
     const expected = await this.expectedAttributes(userId);
     if (!expected || !expected.keycloakId || !this.keycloak.enabled) return null;
-    const actual = await this.keycloak.getPlatformAttributes(expected.keycloakId);
-    return { userId, divergent: divergentAttributes(actual, expected.attributes) };
+    const account = await this.keycloak.getAccount(expected.keycloakId);
+    // The platform's user status is the authority (ADR-060: Keycloak is a
+    // projection): an account may be enabled only for an ACTIVE user whose
+    // activation has landed.
+    const shouldBeEnabled = expected.status === 'ACTIVE' && !expected.activationPending;
+    return {
+      userId,
+      divergent: divergentAttributes(account.attributes, expected.attributes),
+      activationPending: expected.activationPending,
+      enabledDivergent:
+        account.enabled === shouldBeEnabled
+          ? null
+          : { keycloakEnabled: account.enabled, platformStatus: expected.status },
+    };
+  }
+
+  /**
+   * Makes an orphan harmless: an account under the username of a user who has
+   * none, whose `rasta_user_id` names that user — what a registration approval
+   * leaves when its transaction does not commit (#219 r2). Such an account is
+   * created disabled and granting nothing, so normally there is nothing to do;
+   * one that is enabled or carries a grant is disabled and its grants cleared.
+   * It is **kept, never deleted**: a pending request's next approval adopts
+   * it, and deleting a person's identity-provider account is a retention
+   * decision nothing here makes.
+   *
+   * Decided under the row lock of every registration request of the user —
+   * the lock approval takes — and only while none of them is APPROVED and the
+   * user row still names no account; the Keycloak writes happen while the lock
+   * is held. So an approval that adopts the account either committed first
+   * (and this finds it owned) or waits for this to finish, and its projection
+   * then enables the account. Throws when Keycloak cannot be reached.
+   */
+  async repairOrphan(userId: string, username: string): Promise<OrphanRepairOutcome> {
+    return this.repository.transaction(
+      async (tx) => {
+        const statuses = await this.repository.lockRegistrationRequestsOfUser(tx, userId);
+        const user = await this.repository.findUserById(userId, tx);
+        if (!user || user.keycloakId || statuses.includes('APPROVED')) return 'owned';
+
+        const account = await this.keycloak.findAccountByUsername(username);
+        const provenance = account?.attributes.rasta_user_id ?? [];
+        if (!account || provenance.length !== 1 || provenance[0] !== userId) return 'not_ours';
+        if (!account.enabled && !grantsAnything(account.attributes)) return 'harmless';
+
+        await this.keycloak.setEnabled(account.id, false);
+        await this.keycloak.replacePlatformAttributes(account.id, provenanceOnly(userId));
+        this.logger.warn(
+          { userId, keycloakId: account.id },
+          'Orphan Keycloak account disabled and its grants cleared',
+        );
+        return 'repaired';
+      },
+      { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
+    );
   }
 
   /**
@@ -125,9 +211,9 @@ export class KeycloakProjector {
    * this transaction, so it serialises across replicas and dies with the
    * connection.
    *
-   * The transaction outlives the Keycloak calls (three at most — token, GET,
-   * PUT — each bounded at 10 s by the client), so its timeout is set above
-   * that. A projection that cannot get the lock in time fails and is retried
+   * The transaction outlives the Keycloak calls (three, or six on a first
+   * activation, each bounded at 10 s by the client), so its timeout is set
+   * above that. A projection that cannot get the lock in time fails and is retried
    * by its event, as any other failed projection is.
    */
   private async write(userId: string): Promise<KeycloakProjectionOutcome> {
@@ -135,18 +221,103 @@ export class KeycloakProjector {
     return this.repository.transaction(
       async (tx) => {
         await this.repository.lockUserProjection(tx, userId);
-        const user = await this.repository.findUserById(userId, tx);
+        let user = await this.repository.findUserById(userId, tx);
         if (!user) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
         // A registration not yet approved has no account: nothing to project into.
         if (!user.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
+        const keycloakId = user.keycloakId;
+        if (user.accountActivationPending) {
+          // A first activation is decided on memberships no revocation can
+          // end while it runs: the user row lock is the serialisation point
+          // every membership change takes first (`lockUserMemberships`), so a
+          // revocation either committed before this read — and there is no
+          // live membership to enable for — or waits until this commits, and
+          // its own projection then clears the grants (#219 r3).
+          await this.repository.lockUserMemberships(tx, userId);
+          user = (await this.repository.findUserById(userId, tx)) ?? user;
+        }
         const memberships = await this.repository.listMembershipsForUser(userId, tx);
-        await this.keycloak.replacePlatformAttributes(
-          user.keycloakId,
-          platformAttributesFor(user, memberships, new Date()),
-        );
+        const attributes = platformAttributesFor(user, memberships, new Date());
+        await this.keycloak.replacePlatformAttributes(keycloakId, attributes);
+        if (user.accountActivationPending) {
+          await this.activateOnce(tx, user, keycloakId, attributes);
+        }
+        if (user.status !== 'ACTIVE') await this.disableIfEnabled(user.id, keycloakId);
         return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
       },
       { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
+    );
+  }
+
+  /**
+   * Enables a registration approval's account — once, provably (#219 r3).
+   *
+   * Runs in the projection's transaction, after the grants are written, so the
+   * account's first token is already right. Three outcomes:
+   *
+   * - **Already activated.** The account carries `rasta_activation`: an
+   *   earlier attempt's enable landed, whatever became of its answer or of the
+   *   transaction that would have cleared the flag. It is never enabled again
+   *   — an account an administrator has disabled since stays disabled — and
+   *   only the flag is cleared.
+   * - **Activated now.** The request is APPROVED, the user ACTIVE and holding
+   *   a live membership (read under the user row lock): `enabled: true` and
+   *   the marker are written in one representation update, then the flag is
+   *   cleared. A lost answer leaves the flag set, and the next attempt finds
+   *   the marker.
+   * - **Withheld.** Any of those conditions does not hold: nothing is enabled
+   *   and nothing cleared, so reconcile keeps reporting the user
+   *   (`activationPending`) for an operator to decide. Logged by ids only.
+   */
+  private async activateOnce(
+    tx: ExtendedPrismaClient,
+    user: { id: string; status: string },
+    keycloakId: string,
+    attributes: PlatformAttributes,
+  ): Promise<void> {
+    const account = await this.keycloak.getAccount(keycloakId);
+    if (account.activation === null) {
+      const registrationId = await this.repository.findApprovedRegistrationId(tx, user.id);
+      const withheld = !registrationId
+        ? 'no_approved_registration'
+        : user.status !== 'ACTIVE'
+          ? 'user_not_active'
+          : attributes.organization_ids.length === 0
+            ? 'no_live_membership'
+            : null;
+      if (!registrationId || withheld !== null) {
+        this.logger.warn(
+          { userId: user.id, keycloakId, reason: withheld },
+          'Account activation withheld; the account stays disabled and reconcile reports it',
+        );
+        return;
+      }
+      await this.keycloak.activateAccount(keycloakId, registrationId);
+    }
+    await runUnscoped('the activation flag is the user row, not tenant data', () =>
+      tx.user.update({
+        where: { id: user.id },
+        data: { accountActivationPending: false },
+      }),
+    );
+  }
+
+  /**
+   * The platform's user status is the authority on whether an account may be
+   * enabled (#219 r4, ADR-060: Keycloak is a projection). A user who is not
+   * ACTIVE never keeps an enabled account: every projection of them disables
+   * it. Only ever in that direction — a projection never enables an account
+   * but once, on activation (`activateOnce`) — so an administrator's disable
+   * is never undone, and a status change that commits after an activation is
+   * carried to Keycloak by the projection that change triggers.
+   */
+  private async disableIfEnabled(userId: string, keycloakId: string): Promise<void> {
+    const account = await this.keycloak.getAccount(keycloakId);
+    if (!account.enabled) return;
+    await this.keycloak.setEnabled(keycloakId, false);
+    this.logger.warn(
+      { userId, keycloakId },
+      'Account disabled: the platform user is not ACTIVE, and its status is the authority',
     );
   }
 }

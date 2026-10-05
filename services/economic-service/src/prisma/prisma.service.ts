@@ -45,6 +45,7 @@ export const TENANT_SCOPED_MODELS = [
   'PaymentReconciliationTask',
   'PaymentReconciliationResolution',
   'PaymentReconciliationRequeue',
+  'PaymentRefundDecline',
   'Commission',
   'Reward',
   'RewardSourceEvaluation',

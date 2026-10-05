@@ -1,3 +1,4 @@
+import { withUtcSession } from '@rasta/config';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
@@ -28,7 +29,7 @@ function migratorUrl(): string {
       'DATABASE_URL_IDENTITY_MIGRATOR is not set; see .env.migrator.example (docs/23 D-045).',
     );
   }
-  return url;
+  return withUtcSession(url);
 }
 
 interface CliRun {

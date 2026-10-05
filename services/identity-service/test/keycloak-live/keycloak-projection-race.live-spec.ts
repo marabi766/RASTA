@@ -162,6 +162,7 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
       firstName: 'آزمون',
       lastName: 'مسابقه',
       attributes: platform(userId, ['OPERATOR']),
+      enabled: true,
     });
     if (!keycloakId) throw new Error('createUser returned no id');
     created.push(keycloakId);

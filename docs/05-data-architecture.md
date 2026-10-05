@@ -69,12 +69,26 @@ deleted_at        TIMESTAMPTZ                 -- حذف نرم؛ NULL = فعال
 و `reward_rule` (سراسری، با امکان Override سازمانی)، `audit_event` (دارد اما فقط برای فیلتر).
 
 **اجرای قاعدهٔ Index مرکب (L7-44):** `pnpm check:tenant-index-order` زنجیرهٔ Migrationهای
-supplier، notification، document و audit را بازپخش می‌کند (Index جزئیِ فقط-SQL هم دیده می‌شود)
+supplier، notification، document، audit، construction، organization، fleet، identity، maintenance، marketplace، economic و asset را بازپخش می‌کند (Index جزئیِ فقط-SQL هم دیده می‌شود)
 و هر Index مرکبی را که روی جدول مستأجرمحور با `organization_id` شروع نشود رد می‌کند، مگر به نام
-و با دلیل در `scripts/check-tenant-index-order-lib.mjs` معاف شده باشد. معافیت فقط برای این دسته‌هاست:
+و با تعریفش (جدول و ستون‌ها) و دلیل در `scripts/check-tenant-index-order-lib.mjs` معاف شده باشد؛ Index هم‌نام با ستون‌های دیگر معاف نیست. معافیت فقط برای این دسته‌هاست:
 مسیر عمداً میان‌مستأجری (Worker یا `runUnscoped`)، مسیر والد-فرزند (بارگذاری Relation و بررسی
 کلید خارجی)، قید یکتایی درون یک ردیف والد، و جدول Partition‌شده. معافیتِ کهنه خودش خطاست.
+همان بررسی **جدول** مستأجرمحوری را هم رد می‌کند که هیچ Indexی — تک‌ستونی هم — با `organization_id` شروع نمی‌شود
+(فقط کلید اصلی، کلیدهای تک‌ستونی دیگر، یا هیچ)، چون هر خواندن مستأجرمحورش همهٔ ردیف‌های همهٔ مستأجرها را می‌پیماید؛ مگر جدول
+با دلیل در `TABLE_EXEMPTIONS` معاف شده باشد (#218). یافته‌های سرویس‌های دیگر در روز افزوده‌شدن این بررسی در
+`TABLE_FINDINGS_PENDING` فهرست شده‌اند: گزارش می‌شوند و شکست نمی‌دهند تا مالکشان طبقه‌بندی کند، و هر ورودی‌ای که دیگر
+رخ ندهد خطاست — فهرست فقط کوچک می‌شود. یافتهٔ تازه در هر سرویس خطاست. از آن سیزده یافته، دوازده جدولِ supplier، notification،
+audit، fleet و maintenance در `TABLE_EXEMPTIONS` با Queryِ خوانندهٔ هرکدام معاف شده‌اند؛ تنها `policy_reconciliation_task`ِ construction در فهرست مانده است.
 سرویس‌های دیگر با افزوده‌شدن به `SERVICES` در همان فایل وارد می‌شوند.
+
+**هر نشست پایگاه داده در UTC است (L7-37).** ستون‌های `timestamp(3)` (بی منطقهٔ زمانی) مقدارِ `now()` خامِ SQL را به ساعت
+دیواریِ **نشست** ذخیره می‌کنند و Prisma آن را UTC می‌خواند؛ زیر پیش‌فرضِ `Asia/Tehran` هر چنین لحظه‌ای ۳٫۵ ساعت جابه‌جا
+می‌شد. پس هر اتصال با گزینهٔ آغاز `options=-c TimeZone=UTC` باز می‌شود، که پیش‌فرض Server، پایگاه داده و Role را کنار
+می‌زند و به هر اتصالِ Pool و هر `$queryRaw` می‌رسد: نشانی سرویس‌ها از `databaseEnvSchema` (`withUtcSession` در
+`@rasta/config`)، Migrationها از `scripts/prisma.mjs` و Seedها از همان تابع. اتصالِ تازه (Script، CLI، Worker) باید از
+یکی از این دو بگذرد؛ `scripts/db-session-utc.pg.test.mjs` هر سازوکار را زیر Roleی با پیش‌فرض تهران می‌آزماید. ستونِ تازهٔ
+لحظه `TIMESTAMPTZ` است؛ بدهیِ ستون‌های موجودِ `timestamp(3)`: `docs/23` D-048.
 
 ---
 

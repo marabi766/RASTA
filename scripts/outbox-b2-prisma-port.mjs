@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { B2RefusalError } from './outbox-b2-lib.mjs';
+import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 // The services' own startup gate (@rasta/nest-common runtime-role.ts), as built.
@@ -33,7 +34,10 @@ const { preflightRuntimeRole } = createRequire(import.meta.url)(
  * PostgreSQL refuses inside a transaction block; the backfill itself never
  * vacuums (D-045).
  */
-export function prismaPort(service, url) {
+export function prismaPort(service, givenUrl) {
+  // Every session in UTC, like the service's own (L7-37): the backfill and the
+  // vacuum run raw SQL.
+  const url = typeof givenUrl === 'string' ? withUtcSession(givenUrl) : givenUrl;
   const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);
   const generated = join(serviceDir, 'src', 'generated', 'prisma');
   if (!existsSync(serviceDir)) {

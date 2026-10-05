@@ -43,4 +43,4 @@ export { MoneyField } from './form/MoneyField';
 export { TextField } from './form/TextField';
 
 export { DirectionalIcon } from './text/DirectionalIcon';
-export { Identifier } from './text/Identifier';
+export { Identifier, IsolatedText } from './text/Identifier';

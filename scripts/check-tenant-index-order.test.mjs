@@ -5,7 +5,10 @@ import { fileURLToPath } from 'node:url';
 import {
   EXEMPTIONS,
   SERVICES,
+  TABLE_EXEMPTIONS,
+  TABLE_FINDINGS_PENDING,
   checkTenantIndexOrder,
+  checkTenantLeadingIndex,
   readMigrationTexts,
   replayMigrations,
   stripNonDdl,
@@ -159,8 +162,14 @@ test('an exemption silences exactly its index; a stale or needless one is an err
     CREATE INDEX "ix_a" ON "t"("user_id", "id");
     CREATE INDEX "ix_ok" ON "t"("organization_id", "id");
     CREATE INDEX "ix_single" ON "t"("user_id");`;
-  assert.deepEqual(check(sql, { ix_a: 'reason' }).errors, []);
-  const stale = check(sql, { ix_a: 'r', ix_missing: 'r', ix_ok: 'r', ix_single: 'r' }).errors;
+  const ex = (index) => ({ index, reason: 'r' });
+  assert.deepEqual(check(sql, { ix_a: ex('t (user_id, id)') }).errors, []);
+  const stale = check(sql, {
+    ix_a: ex('t (user_id, id)'),
+    ix_missing: ex('t (x)'),
+    ix_ok: ex('t (organization_id, id)'),
+    ix_single: ex('t (user_id)'),
+  }).errors;
   assert.equal(stale.length, 3);
   assert.match(
     stale.find((e) => e.startsWith('ix_missing')),
@@ -204,4 +213,317 @@ test('reads unquoted identifiers, schema-qualified names and expression keys', (
   assert.deepEqual(indexes.get('audit_x_pkey').columns, ['occurred_at', 'id']);
   assert.deepEqual(indexes.get('audit_x_org_idx').columns, ['organization_id', 'occurred_at']);
   assert.equal(indexes.get('ix_expr').columns[0], '((lower(id)))');
+});
+
+// L7-44, economic-service: every report classified as a legitimate exemption
+// (none needed a fix migration). Without the exemptions the check reports
+// exactly these twelve, so each one is load-bearing.
+const ECONOMIC_EXEMPT = [
+  'commission_rule_transaction_type_status_valid_from_idx',
+  'ix_payment_intent_unfinished_refund',
+  'ix_payment_reconciliation_open_window',
+  'ledger_entry_account_id_posted_at_idx',
+  'reward_level_status_min_points_idx',
+  'reward_rule_id_source_reference_key',
+  'reward_rule_trigger_event_status_valid_from_idx',
+  'settlement_payee_organization_id_settled_at_idx',
+  'transaction_counterparty_organization_id_status_idx',
+  'transaction_leg_transaction_id_role_key',
+  'uq_ledger_account_identity',
+  'uq_wallet_hold_active_reference',
+];
+
+test('economic-service: without its exemptions exactly the classified indexes are reported', () => {
+  const { errors } = checkTenantIndexOrder(replayMigrations(migrationsOf('economic')), {});
+  assert.deepEqual(errors.map((error) => error.split(':')[0]).sort(), [...ECONOMIC_EXEMPT].sort());
+  assert.deepEqual(Object.keys(EXEMPTIONS.economic).sort(), [...ECONOMIC_EXEMPT].sort());
+});
+
+test('every economic exemption says which query or invariant it serves', () => {
+  for (const name of ECONOMIC_EXEMPT) {
+    const { reason } = EXEMPTIONS.economic[name];
+    assert.ok(typeof reason === 'string' && reason.length > 60, name);
+    // A named query (Class.method) or the invariant or foreign key it enforces.
+    assert.match(reason, /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+|invariant|foreign key|_fkey/, name);
+  }
+});
+
+// L7-44, the four services opted in by this change: every report classified as
+// a legitimate exemption (none needed a fix migration). Without the exemptions
+// the check reports exactly these twelve, so each one is load-bearing.
+const OPTED_IN = {
+  fleet: ['asset_transfer_release_pkey'],
+  identity: [
+    'ix_security_event_outbox_claimable',
+    'ix_security_event_outbox_closed_windows',
+    'membership_user_id_status_idx',
+  ],
+  maintenance: ['asset_transfer_release_pkey', 'ux_request_open_per_asset'],
+  marketplace: [
+    'ix_offer_product_status',
+    'ix_offer_status_price',
+    'ix_order_history_order',
+    'ix_order_supplier_status',
+    'uq_offer_price_version',
+    'uq_order_line_offer',
+  ],
+};
+
+test('fleet, identity, maintenance and marketplace: without their exemptions exactly the classified indexes are reported', () => {
+  for (const [service, names] of Object.entries(OPTED_IN)) {
+    const { errors } = checkTenantIndexOrder(replayMigrations(migrationsOf(service)), {});
+    assert.deepEqual(errors.map((error) => error.split(':')[0]).sort(), [...names].sort(), service);
+    assert.deepEqual(Object.keys(EXEMPTIONS[service]).sort(), [...names].sort(), service);
+  }
+});
+
+test('every exemption in those four services says which query or invariant it serves', () => {
+  for (const [service, names] of Object.entries(OPTED_IN)) {
+    for (const name of names) {
+      const { reason } = EXEMPTIONS[service][name];
+      assert.ok(typeof reason === 'string' && reason.length > 60, `${service}.${name}`);
+      // A named query (Class.method) or the invariant the index enforces.
+      assert.match(
+        reason,
+        /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+|invariant|ON CONFLICT|foreign key|_fkey/,
+        `${service}.${name}`,
+      );
+    }
+  }
+});
+
+test('an inherited property is never an exemption (Codex on #217)', () => {
+  for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf']) {
+    const sql = `${TENANT_TABLE}\n    CREATE INDEX "${name}" ON "t"("user_id", "id");`;
+    const { errors } = check(sql, {});
+    assert.equal(errors.length, 1, name);
+    assert.match(errors[0], /must lead with organization_id/, name);
+  }
+});
+
+test('an exemption is bound to its definition: the same name on other columns is refused', () => {
+  const sql = `${TENANT_TABLE}\n    CREATE INDEX "ix_a" ON "t"("user_id", "parent_id");`;
+  const { errors } = check(sql, {
+    ix_a: { index: 't (user_id, id)', reason: 'was on (user_id, id)' },
+  });
+  assert.equal(errors.length, 1);
+  assert.match(
+    errors[0],
+    /exempted as t \(user_id, id\), but the index is t \(user_id, parent_id\)/,
+  );
+});
+
+test('an exemption without { index, reason } fails closed', () => {
+  const sql = `${TENANT_TABLE}\n    CREATE INDEX "ix_a" ON "t"("user_id", "id");`;
+  for (const exemption of [
+    'a bare reason',
+    { index: 't (user_id, id)' },
+    { index: 't (user_id, id)', reason: ' ' },
+    null,
+  ]) {
+    assert.match(check(sql, { ix_a: exemption }).errors[0], /must be \{ index, reason \}/);
+  }
+});
+
+test('every committed exemption names the definition of the index it exempts', () => {
+  for (const service of SERVICES) {
+    for (const [name, exemption] of Object.entries(EXEMPTIONS[service] ?? {})) {
+      assert.match(exemption.index, /^[a-z_]+ \([a-z_]+(, [a-z_]+)+\)$/, `${service}.${name}`);
+      assert.ok(exemption.reason.length > 20, `${service}.${name}`);
+    }
+  }
+});
+
+// #218 r1: a tenant table with no index leading with organization_id at all —
+// the composite check above never looks at it, because its only keys are
+// single-column or not there.
+const leadingCheck = (sql, tableExemptions = {}, pending = []) =>
+  checkTenantLeadingIndex(replayMigrations([sql]), tableExemptions, undefined, pending);
+
+test('refuses a tenant table whose only indexes do not lead with organization_id', () => {
+  const { errors, checked } = leadingCheck(
+    `${TENANT_TABLE} CREATE UNIQUE INDEX "ux_t_parent" ON "t" ("parent_id") WHERE "parent_id" IS NOT NULL;`,
+  );
+  assert.equal(checked, 1);
+  assert.deepEqual(errors, [
+    't: tenant table with no index leading with organization_id; add one, or exempt the table with its reason',
+  ]);
+});
+
+test('accepts any index that leads with organization_id, a single-column one included', () => {
+  for (const index of [
+    'CREATE INDEX "ix_t_org" ON "t" ("organization_id");',
+    'CREATE INDEX "ix_t_org_user" ON "t" ("organization_id", "user_id");',
+    'ALTER TABLE "t" ADD CONSTRAINT "t_org_key" UNIQUE ("organization_id", "id");',
+  ]) {
+    assert.deepEqual(leadingCheck(`${TENANT_TABLE} ${index}`).errors, [], index);
+  }
+});
+
+test('judges the final state: an index dropped later no longer counts', () => {
+  const { errors } = leadingCheck(
+    `${TENANT_TABLE} CREATE INDEX "ix_t_org" ON "t" ("organization_id"); DROP INDEX "ix_t_org";`,
+  );
+  assert.equal(errors.length, 1);
+});
+
+test('ignores tables without organization_id and the outbox', () => {
+  const { errors, checked } = leadingCheck(
+    `CREATE TABLE "plain" ("id" TEXT, CONSTRAINT "plain_pkey" PRIMARY KEY ("id"));
+     CREATE TABLE "outbox_message" ("id" TEXT, "organization_id" TEXT, CONSTRAINT "outbox_message_pkey" PRIMARY KEY ("id"));`,
+  );
+  assert.deepEqual(errors, []);
+  assert.equal(checked, 0);
+});
+
+test('a table exemption needs a reason, and goes stale once the table complies or is gone', () => {
+  assert.deepEqual(
+    leadingCheck(TENANT_TABLE, { t: 'read only by id, never by tenant' }).errors,
+    [],
+  );
+  assert.deepEqual(leadingCheck(TENANT_TABLE, { t: '  ' }).errors, [
+    't: its table exemption must be a reason',
+  ]);
+  assert.match(
+    leadingCheck(`${TENANT_TABLE} CREATE INDEX "ix" ON "t" ("organization_id");`, { t: 'why' })
+      .errors[0],
+    /remove its table exemption/,
+  );
+  assert.match(leadingCheck(TENANT_TABLE, { t: 'why', gone: 'why' }).errors[0], /no such table/);
+  assert.match(
+    leadingCheck(`CREATE TABLE "p" ("id" TEXT);`, { p: 'why' }).errors[0],
+    /not a tenant table/,
+  );
+});
+
+test('a pending finding is reported, not failed — and is an error once it no longer fires', () => {
+  const pending = leadingCheck(TENANT_TABLE, {}, ['t']);
+  assert.deepEqual(pending.errors, []);
+  assert.equal(pending.notes.length, 1);
+  assert.match(
+    leadingCheck(`${TENANT_TABLE} CREATE INDEX "ix" ON "t" ("organization_id");`, {}, ['t'])
+      .errors[0],
+    /remove it from TABLE_FINDINGS_PENDING/,
+  );
+  assert.match(leadingCheck(TENANT_TABLE, {}, ['t', 'nope']).errors[0], /not a tenant table here/);
+  assert.match(
+    leadingCheck(TENANT_TABLE, { t: 'why' }, ['t']).errors[0],
+    /both pending and table-exempted/,
+  );
+});
+
+test('economic-service: payment_reconciliation_resolution was the one table without a tenant-leading index, and its fix migration closes it', () => {
+  const sql = migrationsOf('economic');
+  const fix = sql.findIndex((text) => text.includes('"ix_payment_resolution_org_intent"'));
+  assert.ok(fix > 0, 'the fix migration is there');
+  const before = checkTenantLeadingIndex(replayMigrations(sql.slice(0, fix)), {});
+  assert.deepEqual(
+    before.errors.map((error) => error.split(':')[0]),
+    ['payment_reconciliation_resolution'],
+  );
+  const after = checkTenantLeadingIndex(replayMigrations(sql), TABLE_EXEMPTIONS.economic ?? {});
+  assert.deepEqual(after.errors, []);
+  assert.equal(TABLE_FINDINGS_PENDING.economic, undefined);
+});
+
+for (const service of SERVICES) {
+  test(`${service}-service: every tenant table has an index leading with organization_id, is exempted, or is on the pending list`, () => {
+    const state = replayMigrations(migrationsOf(service));
+    const pending = TABLE_FINDINGS_PENDING[service] ?? [];
+    const { errors, notes, checked } = checkTenantLeadingIndex(
+      state,
+      TABLE_EXEMPTIONS[service] ?? {},
+      undefined,
+      pending,
+    );
+    assert.deepEqual(errors, []);
+    assert.equal(notes.length, pending.length);
+    assert.ok(checked > 0, 'an empty check proves nothing');
+  });
+}
+
+test('the pending list names only opted-in services', () => {
+  for (const service of Object.keys(TABLE_FINDINGS_PENDING)) {
+    assert.ok(SERVICES.includes(service), service);
+  }
+});
+
+// L7-44, asset-service: every report classified as a legitimate exemption
+// (none needed a fix migration). Without the exemptions the check reports
+// exactly these ten, so each one is load-bearing.
+const ASSET_EXEMPT = [
+  'asset_document_ref_asset_id_kind_idx',
+  'asset_location_asset_id_recorded_at_idx',
+  'asset_timeline_entry_asset_id_occurred_at_idx',
+  'asset_timeline_entry_source_event_id_asset_id_key',
+  'asset_transfer_asset_id_transferred_at_idx',
+  'insurance_claim_asset_id_incident_at_idx',
+  'insurance_policy_asset_id_status_idx',
+  'insurance_policy_valid_to_status_idx',
+  'technical_inspection_asset_id_inspected_at_idx',
+  'ux_insurance_policy_number_active',
+];
+
+test('asset-service: without its exemptions exactly the classified indexes are reported', () => {
+  const { errors } = checkTenantIndexOrder(replayMigrations(migrationsOf('asset')), {});
+  assert.deepEqual(errors.map((error) => error.split(':')[0]).sort(), [...ASSET_EXEMPT].sort());
+  assert.deepEqual(Object.keys(EXEMPTIONS.asset).sort(), [...ASSET_EXEMPT].sort());
+});
+
+test('every asset exemption says which query or invariant it serves', () => {
+  for (const name of ASSET_EXEMPT) {
+    const { reason } = EXEMPTIONS.asset[name];
+    assert.ok(typeof reason === 'string' && reason.length > 60, name);
+    assert.match(reason, /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+/, name);
+  }
+});
+
+test('asset-service: every tenant table already has an index leading with organization_id', () => {
+  const { errors, checked } = checkTenantLeadingIndex(replayMigrations(migrationsOf('asset')), {});
+  assert.deepEqual(errors, []);
+  assert.ok(checked > 0);
+  assert.equal(TABLE_EXEMPTIONS.asset, undefined);
+});
+
+// The tables #218's table-level check reported outside economic, classified by
+// their services. Without the table exemptions exactly these are reported, so
+// each is load-bearing; construction's stays pending until its own review.
+const TABLES_CLASSIFIED = {
+  supplier: ['qualification_evidence', 'supplier_capability', 'suspension'],
+  notification: ['delivery_attempt'],
+  audit: [
+    'audit_chain_head',
+    'bid_access_evidence',
+    'tender_receipt_link',
+    'tender_receipt_pending',
+  ],
+  fleet: ['asset_transfer_fence', 'asset_transfer_release'],
+  maintenance: ['asset_transfer_fence', 'asset_transfer_release'],
+};
+
+test('without their table exemptions exactly the classified tables are reported', () => {
+  for (const [service, tables] of Object.entries(TABLES_CLASSIFIED)) {
+    const { errors } = checkTenantLeadingIndex(replayMigrations(migrationsOf(service)), {});
+    assert.deepEqual(
+      errors.map((error) => error.split(':')[0]).sort(),
+      [...tables].sort(),
+      service,
+    );
+    assert.deepEqual(Object.keys(TABLE_EXEMPTIONS[service]).sort(), [...tables].sort(), service);
+    assert.equal(TABLE_FINDINGS_PENDING[service], undefined, service);
+  }
+});
+
+test('every table exemption says which query reads the table', () => {
+  for (const [service, tables] of Object.entries(TABLES_CLASSIFIED)) {
+    for (const table of tables) {
+      const reason = TABLE_EXEMPTIONS[service][table];
+      assert.ok(typeof reason === 'string' && reason.length > 60, `${service}.${table}`);
+      assert.match(reason, /[A-Z][A-Za-z]+\.[a-z][A-Za-z]+/, `${service}.${table}`);
+    }
+  }
+});
+
+test('only construction-service is still pending, with the one table #218 reported', () => {
+  assert.deepEqual(TABLE_FINDINGS_PENDING, { construction: ['policy_reconciliation_task'] });
 });

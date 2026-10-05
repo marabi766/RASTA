@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import { RastaError, getContext, runUnscoped } from '@rasta/nest-common';
 import { AssetRepository, isUniqueViolation } from '../asset/asset.repository';
 import { AssetService } from '../asset/asset.service';
+import type { ClaimFence } from '../asset/idempotency';
 import { INSURANCE_EVENTS, validateInsurancePayload } from '../asset/events';
 import { INSURANCE_TOPIC } from '../config/env';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -57,7 +58,19 @@ export class InsuranceService {
     return rows.map(toPolicyView);
   }
 
-  async recordPolicy(assetId: string, dto: CreatePolicyDto): Promise<InsurancePolicyView> {
+  /**
+   * Records a policy. Under an Idempotency-Key, `fence` is the caller's claim on
+   * it (#169, as for `POST /v1/assets`): locked as the transaction's first
+   * statement, completed with this policy's view as its last — so the claim, the
+   * policy, its outbox row, its timeline entry and the response to replay commit
+   * together, or none of them does. `POST …/insurance-policies` always passes
+   * one; the parameter is optional only for in-process callers.
+   */
+  async recordPolicy(
+    assetId: string,
+    dto: CreatePolicyDto,
+    fence?: ClaimFence<InsurancePolicyView>,
+  ): Promise<InsurancePolicyView> {
     const asset = await this.assertAssetExists(assetId);
 
     const validFrom = new Date(dto.validFrom);
@@ -75,7 +88,10 @@ export class InsuranceService {
     const policyId = `INS_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
 
-    const created = await this.repository.transaction(async (tx) => {
+    return this.repository.transaction(async (tx) => {
+      // The claim is locked by its token before anything else, so a recording
+      // whose claim lapsed and was re-taken by a retry commits nothing.
+      if (fence) await fence.hold(tx);
       const { ownershipGeneration } = await this.lockOwned(tx, assetId, asset.organizationId);
 
       let row;
@@ -137,10 +153,9 @@ export class InsuranceService {
         occurredAt: validFrom,
       });
 
-      return row;
+      const view = toPolicyView(row);
+      return fence ? fence.complete(tx, view) : view;
     });
-
-    return toPolicyView(created);
   }
 
   // =========================================================================
@@ -158,7 +173,16 @@ export class InsuranceService {
     return rows.map(toInspectionView);
   }
 
-  async recordInspection(assetId: string, dto: CreateInspectionDto): Promise<InspectionView> {
+  /**
+   * Records an inspection; `fence` as for {@link InsuranceService.recordPolicy}.
+   * An inspection has no natural unique key, so the Idempotency-Key is the only
+   * thing that stops a replayed form from recording it twice.
+   */
+  async recordInspection(
+    assetId: string,
+    dto: CreateInspectionDto,
+    fence?: ClaimFence<InspectionView>,
+  ): Promise<InspectionView> {
     const asset = await this.assertAssetExists(assetId);
 
     const inspectionId = `INP_${ulid()}`;
@@ -166,7 +190,8 @@ export class InsuranceService {
     const inspectedAt = new Date(dto.inspectedAt);
     const validTo = new Date(dto.validTo);
 
-    const created = await this.repository.transaction(async (tx) => {
+    return this.repository.transaction(async (tx) => {
+      if (fence) await fence.hold(tx);
       await this.lockOwned(tx, assetId, asset.organizationId);
 
       const row = await tx.technicalInspection.create({
@@ -231,10 +256,9 @@ export class InsuranceService {
         occurredAt: inspectedAt,
       });
 
-      return row;
+      const view = toInspectionView(row);
+      return fence ? fence.complete(tx, view) : view;
     });
-
-    return toInspectionView(created);
   }
 
   // =========================================================================

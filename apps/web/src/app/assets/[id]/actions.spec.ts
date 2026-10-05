@@ -231,6 +231,16 @@ describe('what the form itself catches', () => {
     expect(updateAsset).not.toHaveBeenCalled();
   });
 
+  it('does not call the service for a model carrying an invisible direction control', async () => {
+    const model = `WA${String.fromCodePoint(0x202e)}320`;
+    const state = await submit(formData({ ...BASELINE, model }));
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { model: 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد' },
+    });
+    expect(updateAsset).not.toHaveBeenCalled();
+  });
+
   it('does not call the service when the name was cleared', async () => {
     const state = await submit(formData({ ...BASELINE, name: '' }));
     expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { name: expect.any(String) } });

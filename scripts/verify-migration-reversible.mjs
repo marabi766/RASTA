@@ -39,6 +39,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { withUtcSession } from './prisma-lib.mjs';
 
 // What each service's schema must contain, and the SQL that checks it. Kept in
 // a module of its own so `verify-migration-reversible-lib.test.mjs` can execute
@@ -98,7 +99,8 @@ if (connection.error) {
   console.error(connection.error);
   process.exit(1);
 }
-const baseUrl = connection.url;
+// In UTC whatever the server's or the role's default (L7-37).
+const baseUrl = withUtcSession(connection.url);
 
 // …and that variable really names the migrator, not a superuser or any other
 // role (verifierRoleProblem in the lib).
@@ -475,6 +477,24 @@ if (expected.dataRollback) {
       console.log(`  ✓ ${step.label}`);
     } else if (step.reapply) {
       deploy(step.label);
+    } else if (step.deployMustFail) {
+      // A deploy that must be refused — a failed migration, or Prisma refusing
+      // to go on past one — matched on its output like any refusal.
+      const result = prisma(['migrate', 'deploy'], { env: { DATABASE_URL: scratchUrl() } });
+      if (result.ok) fail(`${step.label}: the deploy succeeded, but it must fail`);
+      if (!result.output.includes(step.deployMustFail)) {
+        fail(
+          `${step.label}: the deploy failed, but not with "${step.deployMustFail}":\n${result.output}`,
+        );
+      }
+      console.log(`  ✓ ${step.label}`);
+    } else if (step.resolveRolledBack) {
+      // The operator's step after a failed migration: what the runbook says to run.
+      const result = prisma(['migrate', 'resolve', '--rolled-back', step.resolveRolledBack], {
+        env: { DATABASE_URL: scratchUrl() },
+      });
+      if (!result.ok) fail(`${step.label} failed:\n${result.output}`);
+      console.log(`  ✓ ${step.label}`);
     } else if (step.mustFail) {
       mustFail(step.label, step.sql, step.mustFail);
     } else {

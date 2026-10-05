@@ -158,6 +158,16 @@ describe('recipient resolution failure and recovery', () => {
   });
 
   it('leases disjoint rows to concurrent workers and leaves an expired lease claimable', async () => {
+    // `claimPending` leases due rows of every organization. Earlier tests in this
+    // file leave PENDING rows whose retry time can pass while this one runs (main
+    // run 37192634269: worker-d leased two of them). Push every pending row that
+    // is not this test's out of reach first, so the counts below are only ours.
+    await runUnscoped('the test parks rows left by earlier tests', () =>
+      w.prisma.client.notificationIntent.updateMany({
+        where: { status: 'PENDING' },
+        data: { nextResolutionAt: new Date(Date.now() + 24 * 60 * 60 * 1_000) },
+      }),
+    );
     const organizationId = organization();
     for (let i = 0; i < 6; i += 1) {
       await deliver(

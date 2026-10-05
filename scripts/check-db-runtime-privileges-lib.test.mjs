@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FINDINGS_SQL, classifyServices, verdict } from './check-db-runtime-privileges-lib.mjs';
+import {
+  FINDINGS_SQL,
+  TIMEZONE_FINDINGS_SQL,
+  classifyServices,
+  timezoneVerdict,
+  verdict,
+} from './check-db-runtime-privileges-lib.mjs';
 import { servicesFromLibrary, splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 test('every service is placed exactly once: split or audit (D-045)', () => {
@@ -74,4 +80,26 @@ test('the query asks about every right the PM ruled out, through role membership
     assert.ok(FINDINGS_SQL.includes(fragment), fragment);
   }
   assert.match(FINDINGS_SQL, /rolname = :'runtime'/);
+});
+
+test('UTC session defaults: any finding fails, none passes (L7-37)', () => {
+  assert.equal(timezoneVerdict({ service: 'fleet' }, []).ok, true);
+  const { ok, line } = timezoneVerdict({ service: 'fleet' }, [
+    'database rasta_fleet default TimeZone is unset',
+  ]);
+  assert.equal(ok, false);
+  assert.match(line, /fleet: sessions may not start in UTC:\n {4}- database rasta_fleet/);
+});
+
+test('the UTC query covers the database, both roles and a per-database override', () => {
+  for (const needle of [
+    ":'runtime'",
+    ":'migrator'",
+    'z.setrole = 0',
+    'z.setdatabase = 0',
+    'overrides TimeZone',
+    'does not exist',
+  ]) {
+    assert.ok(TIMEZONE_FINDINGS_SQL.includes(needle), needle);
+  }
 });

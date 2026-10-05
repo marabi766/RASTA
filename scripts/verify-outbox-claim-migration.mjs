@@ -53,6 +53,7 @@ import { createRequire } from 'node:module';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { assertB1Definitions, assertB1Inert, assertB1Objects } from './verify-outbox-b1-lib.mjs';
+import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 /**
@@ -280,7 +281,9 @@ function verify(service) {
     process.env[`${envKey}_MIGRATOR`] ?? process.env[envKey] ?? process.env.DATABASE_URL;
   if (!baseUrl) throw new Error(`${envKey} is not set`);
 
-  const url = new URL(baseUrl);
+  // In UTC whatever the server's or the role's default (L7-37): the probe rows
+  // below write `now()` into `timestamp(3)` columns.
+  const url = new URL(withUtcSession(baseUrl));
   if (!inPlace) url.searchParams.set('schema', scratchSchema);
   const scratchUrl = url.toString();
 
@@ -334,8 +337,13 @@ function verify(service) {
     }
   };
 
+  // In place, the probe rows are the only thing this script adds to the real
+  // database, and they are removed whatever happened — a constraint check that
+  // fails half way must not leave a row in the real outbox for a relay to pick
+  // up (review of #214). The table survives `down.sql`, which drops only the
+  // claim columns, so the delete is valid at every step.
   const cleanup = () =>
-    inPlace ? { ok: true } : sql(`DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE;`);
+    inPlace ? sql(PROBE_CLEANUP) : sql(`DROP SCHEMA IF EXISTS "${scratchSchema}" CASCADE;`);
 
   console.log(`\n${service}:${inPlace ? ' (in place)' : ''}`);
   if (!inPlace) {
@@ -357,6 +365,7 @@ function verify(service) {
     );
   }
 
+  let failure = null;
   try {
     // --- up ------------------------------------------------------------------
     // In place, the migration is already deployed; `migrate deploy` is a no-op
@@ -431,9 +440,20 @@ function verify(service) {
       '  ✓ up again: ADR-051 B1 is inert — the migration sets no head, allocates no ' +
         'sequence and writes no counter row',
     );
-  } finally {
-    cleanup();
+  } catch (error) {
+    failure = error;
   }
+
+  // Whatever happened above.
+  const cleaned = cleanup();
+  if (!cleaned.ok) {
+    const where = inPlace ? ': probe rows may remain in outbox_message' : '';
+    const message = `cleanup failed${where}:\n${cleaned.output}`;
+    // Never in place of the error that brought us here; on its own, a failure.
+    if (failure) console.error(`  ✗ ${message}`);
+    else failure = new Error(message);
+  }
+  if (failure) throw failure;
 }
 
 function readDown(migrationDir) {

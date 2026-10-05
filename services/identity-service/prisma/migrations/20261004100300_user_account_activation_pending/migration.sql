@@ -1,0 +1,15 @@
+-- A registration approval's Keycloak account waits, disabled and without
+-- grants, until the database has decided (#219 r2).
+--
+-- The approval creates the account disabled, carrying only rasta_user_id, and
+-- sets this flag in the same transaction that activates the user. The Keycloak
+-- projector (KeycloakProjector.write, under its per-user lock) writes the
+-- grants, enables the account and clears the flag — once. A lost response, a
+-- crash or a rolled-back approval can then leave only a disabled account with
+-- nothing granted, and a replayed event never re-enables an account an
+-- administrator disabled afterwards, because the flag is already clear.
+--
+-- Additive: a NOT NULL column with a constant default is a catalogue change on
+-- PostgreSQL 11+, no table rewrite. Every existing user is false: their
+-- accounts were provisioned enabled.
+ALTER TABLE "user" ADD COLUMN "account_activation_pending" BOOLEAN NOT NULL DEFAULT false;

@@ -171,7 +171,21 @@ export class RegistrationController {
   @Post(':id/approve')
   @HttpCode(200)
   @Roles('UNION_ADMIN')
-  @ApiOperation({ summary: 'Approve a registration and provision the account' })
+  @ApiOperation({
+    summary: 'Approve a registration and provision the account',
+    description:
+      'Refused with 409 ALREADY_EXISTS, the registration staying PENDING and nothing approved, ' +
+      'when its `details[0].code` is MEMBERSHIP_ALREADY_LIVE (the applicant was given a live ' +
+      'membership in the requested organization meanwhile) or ACCOUNT_NOT_FROM_THIS_REGISTRATION ' +
+      '(the identity provider holds an account under the username that this registration did not ' +
+      'create), and with 409 INVALID_STATE_TRANSITION when another decision on it committed first. ' +
+      'Refused with 503 UPSTREAM_UNAVAILABLE and `details[0].code` ACCOUNT_NOT_CONFIRMED, the ' +
+      'registration staying PENDING, when the identity provider answered the account creation ' +
+      'without its id and no such account can be found; a retry resolves it. ' +
+      'The account is enabled only after the approval commits, once; a retry after any failure ' +
+      'adopts the account an earlier attempt created, disabling it and clearing its grants first ' +
+      'if it is enabled or holds any.',
+  })
   approve(
     @Param('id') id: string,
     @Body(zodPipe(approveRegistrationSchema)) dto: ApproveRegistrationDto,
@@ -182,7 +196,13 @@ export class RegistrationController {
   @Post(':id/reject')
   @HttpCode(200)
   @Roles('UNION_ADMIN')
-  @ApiOperation({ summary: 'Reject a registration, with a required reason' })
+  @ApiOperation({
+    summary: 'Reject a registration, with a required reason',
+    description:
+      'Decided under the registration request lock, as approval is: when another decision on ' +
+      'the same registration committed first, refused with 409 INVALID_STATE_TRANSITION and ' +
+      'nothing written or emitted.',
+  })
   reject(
     @Param('id') id: string,
     @Body(zodPipe(rejectRegistrationSchema)) dto: RejectRegistrationDto,

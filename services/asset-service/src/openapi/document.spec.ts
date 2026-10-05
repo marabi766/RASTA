@@ -6,6 +6,8 @@ import { AssetService } from '../asset/asset.service';
 import { InsuranceService } from '../insurance/insurance.service';
 import { ClaimService } from '../insurance/claim.service';
 import { IdempotencyStore } from '../asset/idempotency';
+import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { z } from 'zod';
 import {
   activateAssetSchema,
   changeStatusSchema,
@@ -204,5 +206,90 @@ describe('POST /v1/assets in the served document (#169)', () => {
       (parameter) => parameter.name === 'Idempotency-Key',
     );
     expect(header).toMatchObject({ in: 'header', required: true });
+  });
+});
+
+describe.each([
+  ['/v1/assets/{id}/insurance-policies', 'insurance policy'],
+  ['/v1/assets/{id}/inspections', 'technical inspection'],
+])('POST %s in the served document (EXP-002 slice 6)', (path, _what) => {
+  it('requires the Idempotency-Key header, as the service itself does', async () => {
+    const document = await buildDocument();
+    const operation = document.paths[path]?.post;
+    expect(operation).toBeDefined();
+
+    const header = ((operation?.parameters ?? []) as unknown as Record<string, unknown>[]).find(
+      (parameter) => parameter.name === 'Idempotency-Key',
+    );
+    expect(header).toMatchObject({ in: 'header', required: true });
+  });
+
+  it('says what a replay returns', async () => {
+    const document = await buildDocument();
+    const operation = document.paths[path]?.post as { description?: string } | undefined;
+    expect(operation?.description).toMatch(/Idempotency-Key/);
+  });
+});
+
+/**
+ * The character rule, published (#220): every hand-written body field whose
+ * Zod schema carries a regex publishes that regex's source as its `pattern` —
+ * read out of the validator itself, so a published rule that drifts from the
+ * one enforced fails here. The fields #220 moved to `plainText()` are named
+ * too, so a body that stops publishing them cannot pass by having no regex.
+ */
+describe('the character rule in the hand-written request bodies', () => {
+  /** Every regex source on a Zod field, through optional, nullable and refinement wrappers. */
+  function regexSources(field: z.ZodTypeAny): string[] {
+    let current: z.ZodTypeAny = field;
+    for (;;) {
+      if (current instanceof z.ZodOptional || current instanceof z.ZodNullable)
+        current = current.unwrap();
+      else if (current instanceof z.ZodEffects) current = current.innerType();
+      else break;
+    }
+    if (!(current instanceof z.ZodString)) return [];
+    return current._def.checks.flatMap((check) =>
+      check.kind === 'regex' ? [check.regex.source] : [],
+    );
+  }
+
+  type Body = { properties: Record<string, { pattern?: string }> };
+  let bodies: Record<string, Body>;
+
+  beforeAll(async () => {
+    const document = await buildDocument();
+    const body = (path: string, method: 'post' | 'patch') =>
+      (
+        document.paths[path]?.[method] as unknown as {
+          requestBody: { content: Record<string, { schema: Body }> };
+        }
+      ).requestBody.content['application/json']!.schema;
+    bodies = {
+      update: body('/v1/assets/{id}', 'patch'),
+      status: body('/v1/assets/{id}/status', 'post'),
+      decommission: body('/v1/assets/{id}/decommission', 'post'),
+    };
+  });
+
+  it.each([
+    ['update', 'model', updateAssetSchema.innerType().shape.model],
+    ['status', 'reason', changeStatusSchema.shape.reason],
+    ['decommission', 'reason', decommissionSchema.shape.reason],
+  ] as const)('%s.%s publishes the bidi rule the validator enforces', (body, field, schema) => {
+    expect(regexSources(schema)).toEqual([WITHOUT_BIDI_CONTROL.source]);
+    expect(bodies[body]!.properties[field]?.pattern).toBe(WITHOUT_BIDI_CONTROL.source);
+  });
+
+  it.each([
+    ['update', updateAssetSchema.innerType().shape],
+    ['status', changeStatusSchema.shape],
+    ['decommission', decommissionSchema.shape],
+  ] as const)('publishes no pattern the %s validator does not enforce', (body, shape) => {
+    for (const [name, property] of Object.entries(bodies[body]!.properties)) {
+      if (property.pattern === undefined) continue;
+      const field = (shape as Record<string, z.ZodTypeAny>)[name]!;
+      expect([name, regexSources(field)]).toEqual([name, [property.pattern]]);
+    }
   });
 });

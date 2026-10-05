@@ -107,6 +107,29 @@ const PAYLOADS = {
     reason: 'INSUFFICIENT_BALANCE',
     detectedAt: '2026-08-29T00:00:03.000Z',
   },
+  PAYMENT_REFUNDED: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    amountMinor: '5000',
+    currency: 'IRR',
+    reversalJournalId: 'JRN_1',
+    refundedBy: 'USR-1',
+    provider: 'mock',
+    simulated: true,
+    refundedAt: '2026-08-29T00:00:04.000Z',
+  },
+  PAYMENT_REFUND_FAILED: {
+    paymentIntentId: INTENT,
+    organizationId: ORG,
+    walletId: 'WAL_1',
+    amountMinor: '5000',
+    currency: 'IRR',
+    reason: 'PROVIDER_DECLINED',
+    provider: 'mock',
+    simulated: true,
+    failedAt: '2026-08-29T00:00:04.000Z',
+  },
   PAYMENT_RECONCILIATION_ESCALATED: {
     paymentIntentId: INTENT,
     organizationId: ORG,
@@ -291,6 +314,8 @@ const EXPECTED: { [N in EconomicEventName]: { scope: PartitionScope; key: string
   PAYMENT_FAILED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_CAPTURE_UNRECONCILED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_REFUND_UNRECONCILED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_REFUNDED: { scope: 'PAYMENT_INTENT', key: INTENT },
+  PAYMENT_REFUND_FAILED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_RECONCILIATION_ESCALATED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_RECONCILIATION_RESOLVED: { scope: 'PAYMENT_INTENT', key: INTENT },
   PAYMENT_RECONCILIATION_OPERATOR_ACTION: { scope: 'PAYMENT_INTENT', key: INTENT },
@@ -316,13 +341,13 @@ describe('every published economic event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the nineteen events the catalogue publishes', () => {
+  it('covers exactly the twenty-one events the catalogue publishes', () => {
     // Guards the table above against drift in both directions: an event added
     // to the catalogue without a row here, and a row left behind for an event
     // that no longer exists.
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(19);
+    expect(NAMES).toHaveLength(21);
   });
 });
 
@@ -453,6 +478,8 @@ describe('aggregate identity is untouched by this change', () => {
       PAYMENT_FAILED: 'PaymentIntent',
       PAYMENT_CAPTURE_UNRECONCILED: 'PaymentIntent',
       PAYMENT_REFUND_UNRECONCILED: 'PaymentIntent',
+      PAYMENT_REFUNDED: 'PaymentIntent',
+      PAYMENT_REFUND_FAILED: 'PaymentIntent',
       PAYMENT_RECONCILIATION_ESCALATED: 'PaymentIntent',
       PAYMENT_RECONCILIATION_RESOLVED: 'PaymentIntent',
       PAYMENT_RECONCILIATION_OPERATOR_ACTION: 'PaymentIntent',

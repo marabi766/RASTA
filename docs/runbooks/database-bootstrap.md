@@ -206,6 +206,52 @@ Index معتبر و بدون از دست رفتن هیچ سفارشی.
 
 ---
 
+<a id="economic-resolution-intent-index"></a>
+
+### economic: شاخص پیشنهادهای حل یک Payment Intent (#218)
+
+`20261004120000_payment_resolution_intent_index` شاخص `ix_payment_resolution_org_intent` روی
+`payment_reconciliation_resolution (organization_id, payment_intent_id)` را با `CONCURRENTLY` می‌سازد؛ مسیر
+`GET /v1/payment-intents/:id/reconciliation` پیش از آن تاریخچهٔ پیشنهادهای همهٔ مستأجرها را می‌پیمود. فقط افزودنی است: نه
+ستونی، نه تغییر داده‌ای.
+
+```bash
+PRISMA="pnpm --filter @rasta/economic-service exec node ../../scripts/prisma.mjs"
+```
+
+#### ساخت شکست خورد
+
+نشانه: `P3018` روی همین Migration (لغو یا Timeout؛ شاخص غیریکتا راه شکست دیگری ندارد)، و پس از آن هر Deploy با
+`P3009`. یک Index **INVALID** می‌ماند.
+
+۱. Index نامعتبر را حذف کن — تنها، بیرون از تراکنش:
+
+```bash
+echo 'DROP INDEX CONCURRENTLY IF EXISTS "ix_payment_resolution_org_intent";' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
+۲. Resolve و Deploy:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20261004120000_payment_resolution_intent_index
+pnpm --filter @rasta/economic-service db:migrate
+```
+
+اگر گام ۱ جا بیفتد، Deploy با `already exists` شکست می‌خورد: Migration عمداً `IF NOT EXISTS` ندارد.
+
+#### بازگرداندن
+
+`down.sql` یک تراکنش است (ردیف دفتر خودش را هم حذف می‌کند و `CONCURRENTLY` با دستور دیگری در یک اسکریپت نمی‌نشیند)، پس
+`DROP INDEX` قفل انحصاری جدول را می‌گیرد: میلی‌ثانیه‌ها نگه داشته می‌شود، ولی پشت هر تراکنش بلند روی جدول صف می‌کند و
+همه پشت آن؛ `lock_timeout = 5s` این انتظار را محدود می‌کند. برای اینکه هیچ قفلی گرفته نشود، پیش از `down.sql` این را تنها
+اجرا کن؛ `IF EXISTS` در `down.sql` سپس چیزی نمی‌یابد و فقط ردیف دفتر را حذف می‌کند:
+
+```bash
+echo 'DROP INDEX CONCURRENTLY IF EXISTS "ix_payment_resolution_org_intent";' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
 <a id="marketplace-idempotency-claim-token"></a>
 
 ### marketplace: توکن Claim کلید Idempotency (#147)
@@ -217,6 +263,124 @@ Migration `20260930120000_idempotency_claim_token` ستون `idempotency_key.cla
 متوقف کن (Scale به صفر)، سپس نمونه‌های جدید را بالا بیاور؛ نسخهٔ قدیم و جدید هرگز
 همزمان اجرا نشوند. نمونهٔ قدیمی `complete`/`release` را بدون توکن انجام می‌دهد و
 می‌تواند Claim نمونهٔ جدید را آزاد یا کامل کند.
+
+<a id="identity-one-live-membership"></a>
+
+### identity: یک عضویت زنده برای هر کاربر و سازمان (#219)
+
+سه Migration پشت سر هم:
+
+| Migration                                          | کار                                                                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `20261004100000_membership_live_duplicates_guard`  | اگر از یک ساخت ناموفق Index **INVALID** مانده باشد، آن را حذف می‌کند؛ سپس اگر تکراری زنده باشد، رد می‌کند |
+| `20261004100100_membership_one_live_index`         | `ux_membership_live_user_org` را با `CONCURRENTLY` و **بدون** `IF NOT EXISTS` می‌سازد                     |
+| `20261004100200_drop_membership_deleted_at_unique` | کلید قدیمی `membership_user_id_organization_id_deleted_at_key` را با `CONCURRENTLY` حذف می‌کند            |
+
+عضویت یک مجوز دسترسی است: هیچ‌کدام از این Migrationها و هیچ گامی در این بخش، عضویتی را حذف یا ادغام
+نمی‌کند. تکراری فقط از مسیر لغو عضویت (که ثبت می‌کند چه کسی و چرا) برطرف می‌شود.
+
+همه دستورها از ریشه Repository، با اتصال مالک (`DATABASE_URL_IDENTITY_MIGRATOR`):
+
+```bash
+PRISMA="pnpm --filter @rasta/identity-service exec node ../../scripts/prisma.mjs"
+```
+
+#### الف) نگهبان روی تکراری‌ها شکست خورد
+
+نشانه: `P3018` روی `20261004100000_membership_live_duplicates_guard` با پیام
+`… pair(s) hold more than one live membership; refusing to add ux_membership_live_user_org`.
+چیزی ساخته نشده است.
+
+۱. تکراری‌ها را ببین (همان پرسشی که `HINT` می‌دهد):
+
+```sql
+SELECT user_id, organization_id, array_agg(id ORDER BY created_at)
+  FROM membership WHERE deleted_at IS NULL GROUP BY 1, 2 HAVING count(*) > 1;
+```
+
+۲. برای هر جفت، تصمیم بگیر کدام عضویت بماند و بقیه را از **مسیر لغو** (`POST /v1/memberships/:id/revoke`)
+لغو کن — هرگز با `DELETE`.
+
+۳. رکورد شکست را Resolve کن، سپس Deploy:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20261004100000_membership_live_duplicates_guard
+pnpm --filter @rasta/identity-service db:migrate
+```
+
+#### ب) ساخت `CONCURRENTLY` شکست خورد
+
+نشانه: `P3018` روی `20261004100100_membership_one_live_index`، مثلاً
+`could not create unique index "ux_membership_live_user_org"` (تکراری‌ای که میان نگهبان و ساخت رسید) یا
+لغو/Timeout. Index با وضعیت **INVALID** می‌ماند: هیچ چیزی را تضمین نمی‌کند و نام را اشغال کرده است. تا
+Resolve نشود، هر Deploy با `P3009` رد می‌شود.
+
+Prisma فقط Migration شکست‌خورده را دوباره اجرا می‌کند، و `CONCURRENTLY` نمی‌تواند با دستور دیگری در یک
+فایل بنشیند. پس حذف Index نامعتبر و بررسی دوبارهٔ تکراری‌ها در **نگهبان** است، و بازیابی نگهبان را هم
+دوباره اجرا می‌کند:
+
+۱. تکراری را برطرف کن (گام‌های ۱ و ۲ از «الف»).
+
+۲. ردیف دفتر نگهبان را بردار تا Deploy بعدی دوباره اجرایش کند — `down.sql` خود نگهبان فقط همین کار را
+می‌کند:
+
+```bash
+$PRISMA db execute --schema prisma/schema.prisma \
+  --file prisma/migrations/20261004100000_membership_live_duplicates_guard/down.sql
+```
+
+۳. رکورد شکست ساخت را Resolve کن، سپس Deploy. نگهبان Index نامعتبر را حذف می‌کند، تکراری‌ها را دوباره
+می‌شمارد، و ساخت از صفر انجام می‌شود:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20261004100100_membership_one_live_index
+pnpm --filter @rasta/identity-service db:migrate
+```
+
+اگر گام ۲ جا بیفتد، Deploy با `relation "ux_membership_live_user_org" already exists` شکست می‌خورد:
+ساخت عمداً `IF NOT EXISTS` ندارد تا Index نامعتبر هرگز به‌جای Index واقعی پذیرفته نشود — Migration بعدی
+کلید قدیمی را به اعتبار همین Index حذف می‌کند. در آن صورت دوباره Resolve کن و از گام ۲ ادامه بده.
+
+۴. تأیید: `indisvalid` باید `true` باشد.
+
+```sql
+SELECT i.indisvalid FROM pg_index i
+ WHERE i.indexrelid = to_regclass('ux_membership_live_user_org');
+```
+
+همین مسیر — شکست واقعی ساخت، `P3009`، `already exists` بدون اجرای دوبارهٔ نگهبان، و بازیابی تا Index
+معتبر بدون حذف هیچ عضویتی — در `pnpm test:migration` اجرا می‌شود (`IDENTITY_DATA_ROLLBACK`،
+`scripts/verify-migration-reversible-lib.mjs`).
+
+#### ج) بازگرداندن: `down.sql` کلید قدیمی را بدون `CONCURRENTLY` می‌سازد
+
+`20261004100200_drop_membership_deleted_at_unique/down.sql` یک تراکنش است: باید ردیف دفتر خودش را هم حذف
+کند، و `CONCURRENTLY` نمی‌تواند با دستور دیگری در یک اسکریپت بنشیند (اجراکنندهٔ `down.sql` هر فایل را یک
+تراکنش ضمنی اجرا می‌کند). پس ساختش قفل `SHARE` روی `membership` می‌گیرد: **خواندن ادامه دارد، نوشتن —
+افزودن، لغو و تغییر نقش عضویت، و تأیید ثبت‌نام — تا پایان ساخت منتظر می‌ماند.** `lock_timeout = 5s` فقط
+انتظار برای گرفتن قفل را محدود می‌کند، نه طول ساخت را.
+
+مرز اندازه‌گیری‌شده (PostgreSQL 16، چهار هسته، `maintenance_work_mem` پیش‌فرض، همین سه ستون):
+۱۰۰٬۰۰۰ ردیف حدود ۰٫۱ ثانیه، ۱٬۰۰۰٬۰۰۰ ردیف حدود ۱٫۷ ثانیه. این عدد روی سخت‌افزار تولید باید دوباره
+سنجیده شود؛ تعداد ردیف را با `SELECT count(*) FROM membership;` ببین.
+
+برای اینکه هیچ نوشتنی منتظر نماند، پیش از `down.sql` این را **تنها و بیرون از هر تراکنش** اجرا کن؛
+`IF NOT EXISTS` در `down.sql` آن را ساخته‌شده می‌یابد و فقط ردیف دفتر را حذف می‌کند:
+
+```bash
+echo 'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "membership_user_id_organization_id_deleted_at_key" ON "membership" ("user_id", "organization_id", "deleted_at");' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
+اگر این ساخت شکست بخورد، Index نامعتبر می‌ماند. `down.sql` آن را نمی‌پذیرد و با
+`… is INVALID; refusing to roll back onto it` رد می‌کند؛ آن را **تنها** حذف کن و دوباره بساز:
+
+```bash
+echo 'DROP INDEX CONCURRENTLY "membership_user_id_organization_id_deleted_at_key";' \
+  | $PRISMA db execute --schema prisma/schema.prisma --stdin
+```
+
+---
 
 ## بازسازی کامل محیط توسعه
 

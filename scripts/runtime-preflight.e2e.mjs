@@ -44,6 +44,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withUtcSession } from './prisma-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -122,7 +123,7 @@ const SERVICES = {
         join(serviceDir('audit-service'), 'src', 'generated', 'prisma'),
       );
       const prisma = new PrismaClient({
-        datasources: { db: { url: required('DATABASE_URL_AUDIT') } },
+        datasources: { db: { url: withUtcSession(required('DATABASE_URL_AUDIT')) } },
       });
       try {
         return await prisma.auditEvent.count({ where: { sourceEventId: eventId } });
@@ -177,7 +178,7 @@ const SERVICES = {
         join(serviceDir('maintenance-service'), 'src', 'generated', 'prisma'),
       );
       const prisma = new PrismaClient({
-        datasources: { db: { url: required('DATABASE_URL_MAINTENANCE') } },
+        datasources: { db: { url: withUtcSession(required('DATABASE_URL_MAINTENANCE')) } },
       });
       try {
         const processed = await prisma.processedEvent.count({ where: { eventId } });

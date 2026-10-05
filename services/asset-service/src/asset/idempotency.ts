@@ -121,6 +121,15 @@ export interface ClaimFence<T> {
   complete(tx: ExtendedPrismaClient, result: T): Promise<T>;
 }
 
+/**
+ * Re-checks, before a completed response is replayed, that the caller may
+ * still see what it names — by the same rule a fresh request applies now, not
+ * the one that held when the response was stored. Throws what that fresh
+ * request would answer (for an asset transferred away since: `404 NOT_FOUND`,
+ * as for one that never existed); the stored body is then never returned.
+ */
+export type ReplayGuard<T> = (stored: T) => Promise<void>;
+
 type Claim = { kind: 'PROCEED'; token: string } | { kind: 'REPLAY'; status: number; body: unknown };
 
 export type IdempotencyEnv = Pick<
@@ -137,7 +146,8 @@ export type IdempotencyEnv = Pick<
  * | --------------------------------------- | ------------------------------------------- |
  * | no key, or one outside 8–255 characters | `400 VALIDATION_FAILED`, nothing claimed    |
  * | new key                                 | the work runs; its 201 body is stored       |
- * | same key, same body, same caller        | the stored 201 body, nothing runs again     |
+ * | same key, same body, same caller        | the stored 201 body, nothing runs again —   |
+ * |                                         | if the caller may still see what it names   |
  * | same key, different body or caller      | `409 IDEMPOTENCY_KEY_REUSED`, no body       |
  * | key in flight past {@link IN_FLIGHT_WAIT_MS} | `409 CONFLICT` + `Retry-After: 1`      |
  *
@@ -148,6 +158,16 @@ export type IdempotencyEnv = Pick<
  * answered with a response that user never asked for. The route's role check
  * runs before the controller, so nothing is replayed to a caller who may not
  * register an asset at all.
+ *
+ * ## A replay is re-authorized, not trusted
+ *
+ * A stored response was right for its caller when it was stored. What it names
+ * can leave the caller's tenant since — an asset transferred to another
+ * organization — while the key still lives. So every completed replay first
+ * passes the route's {@link ReplayGuard}, which applies the rule a fresh read
+ * applies now; a caller who may no longer see the asset gets exactly the
+ * `404` a fresh request for a missing asset gets, and nothing of the stored
+ * body. A replay writes nothing either way.
  *
  * ## Claim first; then check, work and complete in one transaction
  *
@@ -191,7 +211,8 @@ export class IdempotencyStore {
 
   /**
    * Runs `work` at most once for this key, and returns its result — or the
-   * stored result of the request that already ran it. Either way the value is
+   * stored result of the request that already ran it, once `stillVisible` has
+   * confirmed the caller may still see what it names. Either way the value is
    * the JSON the first request answered with.
    */
   async execute<T>(
@@ -200,9 +221,14 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (fence: ClaimFence<T>) => Promise<T>,
+    stillVisible: ReplayGuard<T>,
   ): Promise<{ result: T; executed: boolean }> {
     const claim = await this.claim(endpoint, key, body);
-    if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
+    if (claim.kind === 'REPLAY') {
+      const stored = claim.body as T;
+      await stillVisible(stored);
+      return { result: stored, executed: false };
+    }
 
     let stored: { value: T } | undefined;
     const fence: ClaimFence<T> = {

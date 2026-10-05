@@ -1,4 +1,4 @@
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, WITHOUT_CONTROL_CHARACTER, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import {
@@ -46,6 +46,7 @@ import {
   optionalText,
   readFields,
 } from './maintenance-commands';
+import { BIDI_CONTROL } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
@@ -163,12 +164,25 @@ function requiredText(label: string, min: number, max: number) {
     );
 }
 
-/** An optional reference: any text up to 128 characters, empty meaning none. */
+const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+const REFERENCE_CONTROL_MESSAGE = 'شناسه نویسهٔ نامرئی، نیم‌فاصله یا شکست خط نمی‌پذیرد';
+
+/**
+ * An optional reference, up to 128 characters, empty meaning none — the
+ * service's `referenceId()`: an identifier in another system, not prose, so
+ * besides the Unicode `Bidi_Control` set it refuses every other control or
+ * format character, ZWNJ included, which would make two references look alike
+ * that are not. The bidi refusal speaks first, in the words every other form
+ * uses; the wider set is the platform's own pattern from `@rasta/contracts`,
+ * the one the service applies, so the two cannot drift.
+ */
 function optionalReference(label: string) {
   return z
     .string()
     .trim()
     .max(128, `${label} حداکثر ۱۲۸ نویسه است`)
+    .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
+    .refine((value) => WITHOUT_CONTROL_CHARACTER.test(value), REFERENCE_CONTROL_MESSAGE)
     .transform((value) => (value === '' ? undefined : value));
 }
 
