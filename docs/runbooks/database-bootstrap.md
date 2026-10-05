@@ -380,6 +380,82 @@ echo 'DROP INDEX CONCURRENTLY "membership_user_id_organization_id_deleted_at_key
   | $PRISMA db execute --schema prisma/schema.prisma --stdin
 ```
 
+<a id="asset-insurance-money-non-negative"></a>
+
+### asset: مبلغ‌های بیمه منفی نیستند (L7-36)
+
+چهار ستون پول — `insurance_policy.premium_minor` و `insured_value_minor`، `insurance_claim.claimed_amount_minor`
+و `approved_amount_minor` — اکنون با CHECK هم منفی را رد می‌کنند، نه فقط با `amountMinorSchema` در API. هر
+چهار Nullable می‌مانند («اعلام‌نشده»). `asset_timeline_entry.amount_minor` عمداً بیرون است: اینکه Producer
+خط زمانی هزینهٔ منفی بفرستد یا نه، تصمیم باز مالک است.
+
+| Migration                                              | کار                                                                                                                                 |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `20261005120000_insurance_money_non_negative`          | اگر مبلغ منفی ذخیره‌شده باشد رد می‌کند؛ وگرنه چهار CHECK را `NOT VALID` می‌افزاید — قفل انحصاری چند میلی‌ثانیه، `lock_timeout = 3s` |
+| `20261005120100_insurance_money_non_negative_validate` | همان رد را دوباره می‌سنجد، سپس `VALIDATE CONSTRAINT` — پویش زیر `SHARE UPDATE EXCLUSIVE`: خواندن و نوشتن ادامه دارد                 |
+
+دو فایل‌اند چون PostgreSQL اسکریپت چنددستوری را یک تراکنش ضمنی اجرا می‌کند؛ در یک فایل، قفل انحصاری
+افزودن تا پایان پویش نگه داشته می‌شد. **هیچ‌کدام دادهای را بازنویسی نمی‌کند:** اینکه مبلغ منفی در اصل چه
+بوده (علامت جاافتاده، ردیف آزمایشی، …) تصمیم اپراتور است، نه Migration. پیام خطا فقط شمارش هر ستون را
+می‌دهد، نه شناسه و نه مبلغ.
+
+همه دستورها از ریشه Repository، با اتصال مالک (`DATABASE_URL_ASSET_MIGRATOR`):
+
+```bash
+PRISMA="pnpm --filter @rasta/asset-service exec node ../../scripts/prisma.mjs"
+```
+
+#### الف) Migration افزودن رد کرد
+
+نشانه: `P3018` روی `20261005120000_insurance_money_non_negative` با پیام
+`insurance money: negative amounts stored (premium_minor …, …); refusing to add the non-negative CHECK constraints`.
+هیچ Constraintی ساخته نشده است.
+
+۱. ردیف‌ها را ببین (همان پرسشی که `HINT` می‌دهد):
+
+```sql
+SELECT id FROM insurance_policy WHERE premium_minor < 0 OR insured_value_minor < 0;
+SELECT id FROM insurance_claim WHERE claimed_amount_minor < 0 OR approved_amount_minor < 0;
+```
+
+۲. هر ردیف را با یک اصلاح دادهٔ بازبینی‌شده درست کن. API مسیری برای ویرایش این مبلغ‌ها ندارد، و مقدار درست
+را مالک داده تعیین می‌کند — این Runbook مقداری پیشنهاد نمی‌کند.
+
+۳. رکورد شکست را Resolve کن، سپس Deploy:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20261005120000_insurance_money_non_negative
+pnpm --filter @rasta/asset-service db:migrate
+```
+
+#### ب) اعتبارسنجی رد کرد
+
+نشانه: `P3018` روی `20261005120100_insurance_money_non_negative_validate` با همان پیام و
+`… refusing to validate the non-negative CHECK constraints`. یعنی ردیف منفی‌ای میان بررسی Migration اول و
+افزودن Constraintهایش Commit شده است. Constraintها `NOT VALID` می‌مانند: **هر نوشتن منفی تازه از همین حالا
+رد می‌شود**؛ فقط ردیف‌های قدیمی هنوز سنجیده نشده‌اند. گام‌های ۱ و ۲ از «الف»، سپس:
+
+```bash
+$PRISMA migrate resolve --rolled-back 20261005120100_insurance_money_non_negative_validate
+pnpm --filter @rasta/asset-service db:migrate
+```
+
+تأیید: هر چهار `convalidated` باید `true` باشد.
+
+```sql
+SELECT conname, convalidated FROM pg_constraint WHERE conname LIKE 'ck\_%\_non\_negative'
+   AND conrelid IN ('insurance_policy'::regclass, 'insurance_claim'::regclass);
+```
+
+#### ج) بازگرداندن
+
+اول `20261005120100_…_validate/down.sql` (Constraintها به `NOT VALID` برمی‌گردند — حذف و افزودن دوباره در
+یک دستور، بی‌پویش)، سپس `20261005120000_…/down.sql` (هر چهار حذف می‌شوند). پس از دومی، پایگاه داده دوباره
+مبلغ منفی را می‌پذیرد و فقط API آن را رد می‌کند.
+
+هر دو رد، پیام‌ها، دست‌نخوردن داده، و بازیابی تا Constraint معتبر در `pnpm test:migration` اجرا می‌شوند
+(`ASSET_DATA_ROLLBACK`، `scripts/verify-migration-reversible-lib.mjs`).
+
 ---
 
 ## بازسازی کامل محیط توسعه

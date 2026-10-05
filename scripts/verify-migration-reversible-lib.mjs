@@ -435,6 +435,205 @@ export const IDENTITY_DATA_ROLLBACK = {
   ],
 };
 
+const MONEY_ADD = '20261005120000_insurance_money_non_negative';
+const MONEY_VALIDATE = '20261005120100_insurance_money_non_negative_validate';
+const MONEY_CONSTRAINTS = [
+  'ck_policy_premium_non_negative',
+  'ck_policy_insured_value_non_negative',
+  'ck_claim_claimed_amount_non_negative',
+  'ck_claim_approved_amount_non_negative',
+];
+/** Raises unless each money constraint is there and validated (or there and NOT VALID). */
+const MONEY_CONSTRAINTS_ARE = (validated) => `
+  DO $$
+  BEGIN
+    IF (SELECT count(*) FROM pg_constraint
+         WHERE conname IN (${MONEY_CONSTRAINTS.map((name) => `'${name}'`).join(', ')})
+           AND convalidated = ${validated}) <> ${MONEY_CONSTRAINTS.length} THEN
+      RAISE EXCEPTION 'expected all four money constraints present with convalidated = ${validated}';
+    END IF;
+  END $$;`;
+/** Raises unless the probe rows still hold exactly the amounts they were given. */
+const MONEY_ROWS_UNTOUCHED = (premium) => `
+  DO $$
+  BEGIN
+    IF NOT EXISTS (SELECT 1 FROM "insurance_policy" WHERE id = 'INS_MIGCHECK'
+                    AND premium_minor = ${premium} AND insured_value_minor = -2)
+       OR NOT EXISTS (SELECT 1 FROM "insurance_claim" WHERE id = 'CLM_MIGCHECK'
+                    AND claimed_amount_minor = -3 AND approved_amount_minor = -4) THEN
+      RAISE EXCEPTION 'a stored amount was rewritten';
+    END IF;
+  END $$;`;
+/**
+ * A negative write must be refused by the named constraint, by the database's
+ * own report of it (GET STACKED DIAGNOSTICS) — not by anything else, and never
+ * accepted. Raises otherwise.
+ */
+const NEGATIVE_REFUSED_BY = (constraint, statement) => `
+  DO $$
+  DECLARE
+    refused_by text;
+  BEGIN
+    BEGIN
+      ${statement};
+    EXCEPTION WHEN check_violation THEN
+      GET STACKED DIAGNOSTICS refused_by = CONSTRAINT_NAME;
+      IF refused_by <> '${constraint}' THEN
+        RAISE EXCEPTION 'refused by %, not ${constraint}', refused_by;
+      END IF;
+      RETURN;
+    END;
+    RAISE EXCEPTION 'a negative amount was accepted; ${constraint} refused nothing';
+  END $$;`;
+
+/**
+ * asset-service's non-negative money constraints (audit L7-36), against rows.
+ *
+ * The migrations exist to refuse what an empty schema cannot hold: a negative
+ * amount already stored. So: both migrations rolled back, negative rows
+ * written, and the add migration must refuse — naming counts, changing nothing
+ * — until an operator corrects the rows. Then the race the second migration's
+ * check is there for: a negative row committed between the first migration's
+ * check and its ALTERs sits under a NOT VALID constraint, and the validation
+ * must refuse in words, not as a raw check violation, and leave the
+ * constraints NOT VALID. Last, the runtime shape: NULL and zero accepted, each
+ * negative refused by its own constraint.
+ */
+export const ASSET_DATA_ROLLBACK = {
+  migration: MONEY_ADD,
+  label: 'negative insurance amounts stored before the constraints',
+  steps: [
+    {
+      label: 'down: validation, then the constraints, go',
+      runDownScript: [MONEY_VALIDATE, MONEY_ADD],
+    },
+    {
+      label: 'rows a write around the API could leave: one negative value in each column',
+      sql: `
+        INSERT INTO "asset" (id, organization_id, name, type, updated_at, created_by, updated_by)
+        VALUES ('AST_MIGCHECK', 'ORG-MIGCHECK', 'migcheck', 'GRADER', now(), 'MIGCHECK', 'MIGCHECK');
+        INSERT INTO "insurance_policy" (id, asset_id, organization_id, policy_number, insurer_name, coverage,
+                                        premium_minor, insured_value_minor, valid_from, valid_to,
+                                        updated_at, created_by, updated_by)
+        VALUES ('INS_MIGCHECK', 'AST_MIGCHECK', 'ORG-MIGCHECK', 'MIG-1', 'migcheck', 'THIRD_PARTY',
+                -1, -2, now(), now() + interval '1 year', now(), 'MIGCHECK', 'MIGCHECK');
+        INSERT INTO "insurance_claim" (id, policy_id, asset_id, organization_id, description, incident_at,
+                                       claimed_amount_minor, approved_amount_minor,
+                                       updated_at, created_by, updated_by)
+        VALUES ('CLM_MIGCHECK', 'INS_MIGCHECK', 'AST_MIGCHECK', 'ORG-MIGCHECK', 'migcheck', now(),
+                -3, -4, now(), 'MIGCHECK', 'MIGCHECK');`,
+    },
+    {
+      label: 'up again: the add migration refuses over them, counting each column',
+      deployMustFail:
+        'negative amounts stored (premium_minor 1, insured_value_minor 1, claimed_amount_minor 1, approved_amount_minor 1); refusing to add',
+    },
+    {
+      label: 'nothing changed: no money constraint, every amount as stored',
+      sql: `
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_constraint
+                      WHERE conname IN (${MONEY_CONSTRAINTS.map((name) => `'${name}'`).join(', ')})) THEN
+            RAISE EXCEPTION 'a refused migration left a money constraint behind';
+          END IF;
+        END $$;
+        ${MONEY_ROWS_UNTOUCHED(-1)}`,
+    },
+    {
+      label: 'every deploy is refused until the failure is resolved (P3009)',
+      deployMustFail: 'P3009',
+    },
+    {
+      label: 'an operator corrects the rows (in the probe: the sign)',
+      sql: `UPDATE "insurance_policy" SET premium_minor = 1, insured_value_minor = 2 WHERE id = 'INS_MIGCHECK';
+            UPDATE "insurance_claim" SET claimed_amount_minor = 3, approved_amount_minor = 4 WHERE id = 'CLM_MIGCHECK';`,
+    },
+    { label: 'resolve the refused migration', resolveRolledBack: MONEY_ADD },
+    { label: 'up again: both migrations apply', reapply: true },
+    { label: 'all four constraints are validated', sql: MONEY_CONSTRAINTS_ARE(true) },
+    {
+      label: 'down: the validation only — the constraints are NOT VALID again',
+      runDownScript: [MONEY_VALIDATE],
+    },
+    { label: '(and they are NOT VALID)', sql: MONEY_CONSTRAINTS_ARE(false) },
+    {
+      // The state the race leaves: a NOT VALID constraint over a row it never
+      // checked. Reproduced by re-adding the constraints NOT VALID over the rows.
+      label:
+        'the race: negative rows committed between the first check and its ALTERs, under NOT VALID constraints',
+      sql: `
+        ALTER TABLE "insurance_policy" DROP CONSTRAINT "ck_policy_premium_non_negative",
+                                       DROP CONSTRAINT "ck_policy_insured_value_non_negative";
+        ALTER TABLE "insurance_claim" DROP CONSTRAINT "ck_claim_claimed_amount_non_negative",
+                                      DROP CONSTRAINT "ck_claim_approved_amount_non_negative";
+        UPDATE "insurance_policy" SET premium_minor = -1, insured_value_minor = -2 WHERE id = 'INS_MIGCHECK';
+        UPDATE "insurance_claim" SET claimed_amount_minor = -3, approved_amount_minor = -4 WHERE id = 'CLM_MIGCHECK';
+        ALTER TABLE "insurance_policy"
+          ADD CONSTRAINT "ck_policy_premium_non_negative" CHECK ("premium_minor" >= 0) NOT VALID,
+          ADD CONSTRAINT "ck_policy_insured_value_non_negative" CHECK ("insured_value_minor" >= 0) NOT VALID;
+        ALTER TABLE "insurance_claim"
+          ADD CONSTRAINT "ck_claim_claimed_amount_non_negative" CHECK ("claimed_amount_minor" >= 0) NOT VALID,
+          ADD CONSTRAINT "ck_claim_approved_amount_non_negative" CHECK ("approved_amount_minor" >= 0) NOT VALID;`,
+    },
+    {
+      label: 'up again: the validation refuses in words, not as a raw check violation',
+      deployMustFail:
+        'negative amounts stored (premium_minor 1, insured_value_minor 1, claimed_amount_minor 1, approved_amount_minor 1); refusing to validate',
+    },
+    {
+      label: 'nothing changed: the constraints still NOT VALID, every amount as stored',
+      sql: MONEY_CONSTRAINTS_ARE(false) + MONEY_ROWS_UNTOUCHED(-1),
+    },
+    {
+      label: 'an operator corrects the rows again',
+      sql: `UPDATE "insurance_policy" SET premium_minor = 1, insured_value_minor = 2 WHERE id = 'INS_MIGCHECK';
+            UPDATE "insurance_claim" SET claimed_amount_minor = 3, approved_amount_minor = 4 WHERE id = 'CLM_MIGCHECK';`,
+    },
+    { label: 'resolve the refused validation', resolveRolledBack: MONEY_VALIDATE },
+    { label: 'up again: the validation applies', reapply: true },
+    { label: 'all four constraints are validated again', sql: MONEY_CONSTRAINTS_ARE(true) },
+    {
+      label: 'NULL ("not stated") and zero are accepted in every column',
+      sql: `UPDATE "insurance_policy" SET premium_minor = NULL, insured_value_minor = 0 WHERE id = 'INS_MIGCHECK';
+            UPDATE "insurance_policy" SET premium_minor = 0, insured_value_minor = NULL WHERE id = 'INS_MIGCHECK';
+            UPDATE "insurance_claim" SET claimed_amount_minor = NULL, approved_amount_minor = 0 WHERE id = 'CLM_MIGCHECK';
+            UPDATE "insurance_claim" SET claimed_amount_minor = 0, approved_amount_minor = NULL WHERE id = 'CLM_MIGCHECK';`,
+    },
+    {
+      label: 'each negative amount is refused by its own constraint',
+      sql: [
+        NEGATIVE_REFUSED_BY(
+          'ck_policy_premium_non_negative',
+          `UPDATE "insurance_policy" SET premium_minor = -1 WHERE id = 'INS_MIGCHECK'`,
+        ),
+        NEGATIVE_REFUSED_BY(
+          'ck_policy_insured_value_non_negative',
+          `UPDATE "insurance_policy" SET insured_value_minor = -1 WHERE id = 'INS_MIGCHECK'`,
+        ),
+        NEGATIVE_REFUSED_BY(
+          'ck_claim_claimed_amount_non_negative',
+          `UPDATE "insurance_claim" SET claimed_amount_minor = -1 WHERE id = 'CLM_MIGCHECK'`,
+        ),
+        NEGATIVE_REFUSED_BY(
+          'ck_claim_approved_amount_non_negative',
+          `UPDATE "insurance_claim" SET approved_amount_minor = -1 WHERE id = 'CLM_MIGCHECK'`,
+        ),
+      ].join('\n'),
+    },
+    {
+      // Prisma keeps a failed attempt as a rolled-back ledger row; the
+      // whole-chain reversal below asserts a ledger with none.
+      label: 'clean up the probe rows and the rolled-back ledger rows',
+      sql: `DELETE FROM "insurance_claim" WHERE id = 'CLM_MIGCHECK';
+            DELETE FROM "insurance_policy" WHERE id = 'INS_MIGCHECK';
+            DELETE FROM "asset" WHERE id = 'AST_MIGCHECK';
+            DELETE FROM "_prisma_migrations"
+             WHERE migration_name IN ('${MONEY_ADD}', '${MONEY_VALIDATE}') AND rolled_back_at IS NOT NULL;`,
+    },
+  ],
+};
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
   label: 'intents B0 left marked, and the open tasks they get',
@@ -1600,7 +1799,10 @@ export const EXPECTED = {
       'technical_inspection',
     ],
     triggers: [],
+    dataRollback: ASSET_DATA_ROLLBACK,
     constraints: [
+      'ck_claim_approved_amount_non_negative',
+      'ck_claim_claimed_amount_non_negative',
       'ck_claim_decided_iff_decision_recorded',
       'ck_claim_rejected_has_no_approved_amount',
       'ck_claim_settled_iff_settlement_recorded',
@@ -1613,6 +1815,8 @@ export const EXPECTED = {
       'ck_outbox_attempts_nonneg',
       'ck_outbox_next_attempt_requires_failure',
       'ck_outbox_published_is_clean',
+      'ck_policy_insured_value_non_negative',
+      'ck_policy_premium_non_negative',
     ],
   },
   fleet: {
