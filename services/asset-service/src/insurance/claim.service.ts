@@ -23,6 +23,7 @@ import type {
   SubmitClaimDto,
 } from '../asset/dto';
 import { assertClaimTransition } from './claim-lifecycle';
+import { negativeAmountRefusal, storedAmountRefusal } from './negative-amount';
 import {
   assertMayDecideClaim,
   assertWithinApprovalCeiling,
@@ -144,21 +145,27 @@ export class ClaimService {
       const locked = await this.repository.lockAsset(tx, assetId, asset.organizationId, 'SHARE');
       if (!locked) throw RastaError.notFound('Asset', assetId);
 
-      const row = await tx.insuranceClaim.create({
-        data: {
-          id: claimId,
-          policyId: policy.id,
-          assetId,
-          organizationId: asset.organizationId,
-          claimNumber: dto.claimNumber ?? null,
-          description: dto.description,
-          incidentAt,
-          claimedAmountMinor,
-          status: 'SUBMITTED',
-          createdBy: actor,
-          updatedBy: actor,
-        },
-      });
+      let row;
+      try {
+        row = await tx.insuranceClaim.create({
+          data: {
+            id: claimId,
+            policyId: policy.id,
+            assetId,
+            organizationId: asset.organizationId,
+            claimNumber: dto.claimNumber ?? null,
+            description: dto.description,
+            incidentAt,
+            claimedAmountMinor,
+            status: 'SUBMITTED',
+            createdBy: actor,
+            updatedBy: actor,
+          },
+        });
+      } catch (error) {
+        // A negative claimed amount (L7-36): the API's 400, not a 500.
+        throw negativeAmountRefusal(error) ?? error;
+      }
 
       await this.enqueue(
         tx,
@@ -389,10 +396,19 @@ export class ClaimService {
 
     assertClaimTransition(current.status as ClaimStatus, to);
 
-    const result = await tx.insuranceClaim.updateMany({
-      where: { id: claimId, assetId, status: current.status },
-      data: { ...data, status: to },
-    });
+    let result;
+    try {
+      result = await tx.insuranceClaim.updateMany({
+        where: { id: claimId, assetId, status: current.status },
+        data: { ...data, status: to },
+      });
+    } catch (error) {
+      // A negative amount (L7-36). The approved amount this update writes gets
+      // the API's 400; one the claim already held — the database checks the
+      // whole row on every UPDATE — gets a closed 422 that names no amount the
+      // caller did not send (#222 r1). Never a 500.
+      throw storedAmountRefusal(error, data, { type: 'InsuranceClaim', id: claimId }) ?? error;
+    }
 
     if (result.count !== 1) {
       // Lost the race. Re-read so the error names the state that actually won.

@@ -322,7 +322,11 @@ model InsurancePolicy {
   coverage InsuranceCoverage
 
   /// Premium and insured value in rial minor units, as strings on the wire
-  /// (ADR-022). BigInt in the database.
+  /// (ADR-022). BigInt in the database. Never negative, by CHECK as well as by
+  /// the API: `ck_policy_premium_non_negative` and
+  /// `ck_policy_insured_value_non_negative` (migration
+  /// 20261005120000_insurance_money_non_negative, audit L7-36); NULL is "not
+  /// stated" and passes.
   premiumMinor      BigInt? @map("premium_minor")
   insuredValueMinor BigInt? @map("insured_value_minor")
 
@@ -392,6 +396,9 @@ model InsuranceClaim {
   description String
   incidentAt  DateTime @map("incident_at")
 
+  /// Rial minor units. Never negative, by CHECK as well as by the API:
+  /// `ck_claim_claimed_amount_non_negative` and
+  /// `ck_claim_approved_amount_non_negative` (audit L7-36); NULL passes.
   claimedAmountMinor  BigInt? @map("claimed_amount_minor")
   approvedAmountMinor BigInt? @map("approved_amount_minor")
 
