@@ -3,6 +3,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import {
   actor,
   apiTenant,
+  bearer,
   auditorActor,
   multiMemberActor,
   orgAdmin,
@@ -156,6 +157,50 @@ describe('open-bids API', () => {
         .sort();
     expect(refused(bidder)).toEqual(fiveRoutes('NOT_FOUND'));
     expect(refused(owner)).toEqual(fiveRoutes('FORBIDDEN'));
+    const row = await runUnscoped('the suite reads the tender', () =>
+      w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
+    );
+    expect(row).toMatchObject({ status: 'CLOSED', openingProposedBy: null, openedAt: null });
+  });
+
+  it('refuses a token without a platform user id 403 on the three commands, before any tender is looked up: the same for its own, a foreign and a missing tender', async () => {
+    const { owner, tenderId } = await closed('no-uid');
+    const stranger = org('no-uid-stranger');
+    const missing = `TND_${tenderId.slice(-6)}MISSING`;
+    // Verified, with the owner's role, but naming no platform user (`rasta_uid`): AuthGuard's
+    // `@RequirePlatformUserId()` refuses it as an authentication precondition (#188), on every
+    // tender alike — the 404-for-other-organizations rule is for identified platform users.
+    const noUid = (organizationId: string) =>
+      bearer({
+        sub: `sub-no-uid-${organizationId}`,
+        organizationId,
+        organizationIds: [organizationId],
+        roles: ['ORGANIZATION_ADMIN'],
+      });
+    const answer = (res: request.Response) => ({
+      status: res.status,
+      code: res.body.code,
+      message: res.body.message,
+    });
+    for (const path of ['/open-bids', '/open-bids/proposal', '/open-bids/proposal/withdraw']) {
+      const own = answer(await call('post', `/v1/tenders/${tenderId}${path}`, noUid(owner)));
+      expect({ path, status: own.status, code: own.code }).toEqual({
+        path,
+        status: 403,
+        code: 'FORBIDDEN',
+      });
+      const foreign = answer(await call('post', `/v1/tenders/${tenderId}${path}`, noUid(stranger)));
+      const absent = answer(await call('post', `/v1/tenders/${missing}${path}`, noUid(stranger)));
+      expect({ path, ...foreign }).toEqual({ path, ...own });
+      expect({ path, ...absent }).toEqual({ path, ...own });
+    }
+    // Refused before the service ran: nothing on the owner's access log, nothing proposed.
+    const rows = await runUnscoped('the suite reads the access log', () =>
+      w.prisma.client.bidAccessLog.count({
+        where: { tenderId, purpose: { in: ['OPEN_BIDS', 'PROPOSE_OPENING', 'WITHDRAW_PROPOSAL'] } },
+      }),
+    );
+    expect(rows).toBe(0);
     const row = await runUnscoped('the suite reads the tender', () =>
       w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
     );

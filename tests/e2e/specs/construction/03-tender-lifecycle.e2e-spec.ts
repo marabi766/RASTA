@@ -38,7 +38,9 @@ import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-a
  *   also an authority — and the refusal of approving one's own request is the
  *   real rule, not a missing role. Samples (`isSample`); no legal authority is
  *   claimed (ADR-023, Q-02).
- * - `tenantB` (`ORG-DEH-0002`) is the other tenant, probed at every step;
+ * - `tenantB` (`ORG-DEH-0002`) is the other tenant, probed at every step, and
+ *   **CB** a `CONTRACTOR` provisioned per run acting for it, for the open-tender
+ *   probes (the administrator stops at the contractor role gate);
  *   `systemAdmin` reads audit-service.
  *
  * ## Through the front door
@@ -89,6 +91,7 @@ const SURNAMES: Record<string, string> = {
   c1: 'پیمانکار یکم',
   c2: 'پیمانکار دوم',
   c3: 'پیمانکار سوم',
+  cb: 'پیمانکار دیگر',
 };
 
 const CRITERIA = [
@@ -362,7 +365,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
   const org = { owner: '', c1: '', c2: '', c3: '' };
   const supplier = { c1: '', c2: '' };
   let people: Record<
-    'author' | 'p1' | 'p2' | 'evaluator' | 'awarder' | 'conflicted' | 'c1' | 'c2' | 'c3',
+    'author' | 'p1' | 'p2' | 'evaluator' | 'awarder' | 'conflicted' | 'c1' | 'c2' | 'c3' | 'cb',
     Actor
   >;
 
@@ -464,6 +467,9 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       c1: await provision('c1', org.c1, ['CONTRACTOR']),
       c2: await provision('c2', org.c2, ['CONTRACTOR']),
       c3: await provision('c3', org.c3, ['CONTRACTOR']),
+      // A contractor acting for the other tenant: the open-tender probes need a
+      // caller the bidder's role gate admits, so that what they test is visibility.
+      cb: await provision('cb', ORG.b, ['CONTRACTOR']),
     };
 
     // The conflicted owner administrator also belongs to a bidding contractor,
@@ -484,6 +490,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       c1: org.c1,
       c2: org.c2,
       c3: org.c3,
+      cb: ORG.b,
     } as const;
     const signedIn = {} as typeof people;
     for (const [key, account] of Object.entries(accounts) as [
@@ -841,7 +848,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
   test('the invited contractors find the tender, bid, and one revises; a bidder reaches only its own bid; nothing opens early', async ({
     tenantB,
   }) => {
-    const { p1, c1, c2, c3 } = people;
+    const { p1, c1, c2, c3, cb } = people;
     const missingTender = `TND_${RUN}_MISSING`;
 
     // How a contractor finds a tender (CON-002 PR 6): the published tenders its
@@ -871,30 +878,36 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         })).map((criterion) => expect.objectContaining(criterion)),
       });
     }
-    // C3 is not invited to this RESTRICTED tender: it is not listed, and reading
-    // it is exactly reading a tender that does not exist.
-    expect(await openTenderIds(c3)).not.toContain(tenderId);
-    const uninvited = await inWindow('an uninvited contractor reading the tender', () =>
-      c3.get(`/v1/open-tenders/${tenderId}`),
-    );
-    expectRefusal(uninvited, NOT_FOUND, 'an uninvited contractor reading the tender');
-    expect(refusalOf(uninvited)).toEqual(
-      refusalOf(await c3.get(`/v1/open-tenders/${missingTender}`)),
-    );
-    // Another tenant's administrator is not a contractor: the bidder's route
-    // refuses it by role, before any tender is looked at — the same answer for
-    // this tender as for one that does not exist.
-    const stranger = await inWindow('another tenant reading the tender', () =>
+    // Neither C3, not invited to this RESTRICTED tender, nor a contractor acting
+    // for the other tenant finds it: it is not listed, and reading it is exactly
+    // reading a tender that does not exist.
+    for (const [who, contractor] of [
+      ['an uninvited contractor', c3],
+      ["the other tenant's contractor", cb],
+    ] as const) {
+      expect(await openTenderIds(contractor), `${who}: the list`).not.toContain(tenderId);
+      const uninvited = await inWindow(`${who} reading the tender`, () =>
+        contractor.get(`/v1/open-tenders/${tenderId}`),
+      );
+      expectRefusal(uninvited, NOT_FOUND, `${who} reading the tender`);
+      expect(refusalOf(uninvited), `${who}: against a missing tender`).toEqual(
+        refusalOf(await contractor.get(`/v1/open-tenders/${missingTender}`)),
+      );
+    }
+    // The other tenant's administrator is not a contractor at all: the bidder's
+    // route refuses it by role before any tender is looked at (403
+    // INSUFFICIENT_ROLE) — the same answer for this tender as for a missing one.
+    // A role-gate check, not a visibility one; that is the contractor's above.
+    const administrator = await inWindow("the other tenant's administrator reading", () =>
       tenantB.get(`/v1/open-tenders/${tenderId}`),
     );
-    expectRefusal(stranger, { status: 403, code: 'INSUFFICIENT_ROLE' }, 'another tenant');
-    expect(refusalOf(stranger)).toEqual(
-      refusalOf(await tenantB.get(`/v1/open-tenders/${missingTender}`)),
-    );
     expectRefusal(
-      await tenantB.get('/v1/open-tenders?limit=100'),
+      administrator,
       { status: 403, code: 'INSUFFICIENT_ROLE' },
-      'another tenant listing open tenders',
+      "the other tenant's administrator",
+    );
+    expect(refusalOf(administrator)).toEqual(
+      refusalOf(await tenantB.get(`/v1/open-tenders/${missingTender}`)),
     );
 
     const receipts: Record<'c1' | 'c2', string> = { c1: '', c2: '' };
