@@ -1,14 +1,55 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, plainText } from '@rasta/contracts';
 import { CONTRACT_STATES } from './contract.state-machine';
 
 /**
- * The request and response shapes of the contract read API (ADR-068 § 7).
+ * The request and response shapes of the contract API (ADR-068 § 7; sign and cancel, PR 2).
  *
  * The same Zod schemas validate input, type the code and — through `zod-schema.ts` —
- * become the OpenAPI document, so the three cannot disagree. There is no body
- * anywhere: this change has no route that writes.
+ * become the OpenAPI document, so the three cannot disagree. Both commands take a strict
+ * body: nothing in it decides who acts, for which side, or when.
  */
+
+const expectedVersion = z
+  .number()
+  .int()
+  .min(1)
+  .optional()
+  .describe(
+    'The `version` the caller read. When given, the command applies only to that version ' +
+      '(409 OPTIMISTIC_LOCK_FAILED otherwise). A draft’s version moves only with its status: ' +
+      'the terms it is signed on never change, and a signature does not move it.',
+  );
+
+/** `POST /v1/contracts/{id}/sign`: accept the draft for the side the caller acts for. */
+export const signContractSchema = z.object({ expectedVersion }).strict();
+export type SignContractDto = z.infer<typeof signContractSchema>;
+
+/** Longest note a cancellation carries; the database keeps the same bound (`ck_contract_cancellation`). */
+export const MAX_CANCEL_NOTE_LENGTH = 1000;
+
+/** `POST /v1/contracts/{id}/cancel`: the employer ends a draft, for a reason from a closed list. */
+export const cancelContractSchema = z
+  .object({
+    reasonCode: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]{1,63}$/)
+      .describe(
+        'One of the reasons CONTRACT_CANCEL_REASON_CODES names (the closed list is the ' +
+          'client’s; an unlisted code is 422 CANCEL_REASON_NOT_ALLOWED).',
+      ),
+    note: plainText()
+      .min(1)
+      .max(MAX_CANCEL_NOTE_LENGTH)
+      .optional()
+      .describe(
+        'Optional free text, trimmed, up to 1000 characters, without bidirectional ' +
+          'control characters. Read by the two parties; never on an event.',
+      ),
+    expectedVersion,
+  })
+  .strict();
+export type CancelContractDto = z.infer<typeof cancelContractSchema>;
 
 export const listContractsQuerySchema = cursorPaginationSchema
   .extend({
@@ -41,6 +82,22 @@ export const contractViewSchema = z
           'the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5)).',
       ),
     status: z.enum(CONTRACT_STATES),
+    employerSignedAt: z
+      .string()
+      .nullable()
+      .describe('When the employer accepted the draft (ISO 8601, UTC), or null.'),
+    contractorSignedAt: z
+      .string()
+      .nullable()
+      .describe('When the winning contractor accepted the draft (ISO 8601, UTC), or null.'),
+    cancelReasonCode: z
+      .string()
+      .nullable()
+      .describe('Why the employer cancelled the draft: a code from the closed list, or null.'),
+    cancelNote: z
+      .string()
+      .nullable()
+      .describe('The optional note that came with the cancellation.'),
     awardedAt: z.string().describe('When the tender was awarded (ISO 8601, UTC).'),
     statusChangedAt: z.string(),
     createdAt: z.string(),

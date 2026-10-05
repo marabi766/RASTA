@@ -22,6 +22,9 @@ import { z } from 'zod';
 
 export const CONTRACT_EVENTS = {
   CONTRACT_DRAFTED: 'CONTRACT_DRAFTED',
+  CONTRACT_SIGNATURE_RECORDED: 'CONTRACT_SIGNATURE_RECORDED',
+  CONTRACT_SIGNED: 'CONTRACT_SIGNED',
+  CONTRACT_CANCELLED: 'CONTRACT_CANCELLED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -47,8 +50,73 @@ export const contractDraftedPayload = z
   })
   .strict();
 
+/**
+ * One side accepted the draft (CON-003 PR 2, Q-95 (1)): the audit fact of a signature, published
+ * for **each** of the two, in the transaction that records it. The signer is named by user id —
+ * an identifier, like `awardedBy` on `TENDER_AWARDED` — because a signature without a person is
+ * no audit record; the identity pair used for the separation-of-duties check stays in this
+ * service's database. **No amount.**
+ */
+export const contractSignatureRecordedPayload = z
+  .object({
+    contractId: id,
+    /** The employer — the tender's owner and the tenant of the contract. */
+    organizationId: id,
+    side: z.enum(['EMPLOYER', 'CONTRACTOR']),
+    /** The organization the signer acted for. */
+    signerOrganizationId: id,
+    signedBy: id,
+    /** The role the signature was accepted under, as the configuration named it. */
+    authorityRole: z.string().regex(/^[A-Z][A-Z_]*$/),
+    signedAt: instant,
+  })
+  .strict();
+
+/**
+ * Both sides have accepted the contract and it is SIGNED (ADR-068 § 2, CON-003 PR 2): the
+ * `DRAFT → SIGNED` transition, which `docs/08` § 8.3 names `AWARDED → CONTRACTED`. Published
+ * once, with the second signature, in the transaction that records it. **No amount, no
+ * signer** — instants and organizations only; who signed is on each
+ * `CONTRACT_SIGNATURE_RECORDED` and in the service's own signature record.
+ */
+export const contractSignedPayload = z
+  .object({
+    contractId: id,
+    tenderId: id,
+    projectId: id,
+    /** The employer — the tender's owner and the tenant of the contract. */
+    organizationId: id,
+    contractorOrganizationId: id,
+    winningBidId: id,
+    employerSignedAt: instant,
+    contractorSignedAt: instant,
+    /** When the contract became SIGNED: the later of the two. */
+    signedAt: instant,
+  })
+  .strict();
+
+/**
+ * The employer cancelled a draft (`DRAFT → CANCELLED`). The **closed reason code** only: the
+ * optional free-text note stays in this service's database and is read through the API by
+ * the two parties — it is client free text, and the topic is read by every service.
+ */
+export const contractCancelledPayload = z
+  .object({
+    contractId: id,
+    tenderId: id,
+    projectId: id,
+    organizationId: id,
+    contractorOrganizationId: id,
+    reasonCode: z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/),
+    cancelledAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
+  CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
+  CONTRACT_SIGNED: contractSignedPayload,
+  CONTRACT_CANCELLED: contractCancelledPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

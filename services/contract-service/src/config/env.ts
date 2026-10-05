@@ -3,6 +3,7 @@ import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
   authEnvSchema,
   baseEnvSchema,
+  booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
@@ -48,6 +49,23 @@ function roleList(name: string, options: { min: number }) {
   );
 }
 
+/** A closed code: upper-case words, the shape the database keeps (`ck_contract_cancellation`). */
+const CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** A platform-role list that may be empty: an empty list is "nobody", never "everybody". */
+function optionalRoleList(name: string) {
+  return commaList().pipe(
+    z
+      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
+      .refine((roles) => !roles.includes(REFUSED_ROLE), {
+        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+      })
+      .refine((roles) => !roles.includes('SYSTEM_ADMIN'), {
+        message: `${name} may not name SYSTEM_ADMIN: the platform operator never accepts a contract for a party`,
+      }),
+  );
+}
+
 /**
  * contract-service configuration.
  *
@@ -63,6 +81,31 @@ function roleList(name: string, options: { min: number }) {
  *                                       construction-service. The winning contractor's
  *                                       side is the CONTRACTOR role of its own
  *                                       organization and is not configurable.
+ *   CONTRACT_OWNER_SIGNER_ROLES         Q-95 (1), PR 2. Who, in the employer's organization,
+ *                                       accepts the contract for it. Default **empty: nobody**
+ *                                       — the signing authority is the client's decision, a
+ *                                       platform never defaults to it, and until it is named
+ *                                       the employer's side refuses with 422
+ *                                       SIGNER_AUTHORITY_NOT_CONFIGURED. (The approval-
+ *                                       policy row `contract.signature` of Q-95 arrives with
+ *                                       `approval_policy` in PR 5 and replaces this.) The
+ *                                       contractor's side is the CONTRACTOR role of its own
+ *                                       organization (Q-95 (1)) and is not configurable.
+ *                                       `SYSTEM_ADMIN` and `AUDITOR` may not be named.
+ *   CONTRACT_CANCEL_ROLES               Q-95 (4), PR 2. Who, in the employer's organization,
+ *                                       cancels a draft. Default `ORGANIZATION_ADMIN`, the
+ *                                       reader default; empty is allowed and means nobody.
+ *   CONTRACT_CANCEL_REASON_CODES        The closed list of reasons a draft is cancelled for;
+ *                                       the request names one. The defaults are descriptive
+ *                                       codes with no legal meaning; the client replaces them.
+ *   CONTRACT_CANCEL_AFTER_SIGNATURE     Q-95 (4). Whether a draft one side has already signed
+ *                                       may still be cancelled. Default **false**: conservative;
+ *                                       a client who wants the employer to withdraw before the
+ *                                       contractor signs sets it.
+ *   CONTRACT_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
+ *                                       How long a completed command's response is replayed,
+ *                                       and how long an in-flight claim holds its key before a
+ *                                       retry may take it over (docs/06 § 6.8).
  *   CONSTRUCTION_SERVICE_URL            Where the award is read (ADR-068 § 3):
  *                                       `GET {url}/v1/tenders/{id}/award`, with a service
  *                                       token signed for the tender owner's organization.
@@ -78,8 +121,8 @@ function roleList(name: string, options: { min: number }) {
  * platform, but only while acting for an organization it selected with
  * `X-Organization-Id`.
  *
- * Nothing here names an approval authority, an approval threshold, a deduction
- * rate or a legal procedure. Those are rows in tables of later changes
+ * Nothing here names an approval threshold, a deduction rate or a legal procedure, and no
+ * default grants a signing authority. Those are rows in tables of later changes
  * (ADR-068 § 5), never environment values.
  */
 export const contractEnvSchema = baseEnvSchema
@@ -93,6 +136,44 @@ export const contractEnvSchema = baseEnvSchema
       .string()
       .default('ORGANIZATION_ADMIN')
       .pipe(roleList('CONTRACT_READER_ROLES', { min: 1 })),
+
+    CONTRACT_OWNER_SIGNER_ROLES: z
+      .string()
+      .default('')
+      .pipe(optionalRoleList('CONTRACT_OWNER_SIGNER_ROLES')),
+
+    CONTRACT_CANCEL_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN')
+      .pipe(optionalRoleList('CONTRACT_CANCEL_ROLES')),
+
+    CONTRACT_CANCEL_REASON_CODES: z
+      .string()
+      .default('TERMS_NOT_AGREED,CONTRACTOR_WITHDREW,AWARD_ERROR,OTHER')
+      .pipe(
+        commaList().pipe(
+          z
+            .array(
+              z
+                .string()
+                .regex(CODE_PATTERN, 'A reason code is upper-case words, 2 to 64 characters'),
+            )
+            .min(1, 'CONTRACT_CANCEL_REASON_CODES must name at least one reason')
+            .refine((codes) => new Set(codes).size === codes.length, {
+              message: 'CONTRACT_CANCEL_REASON_CODES names a reason twice',
+            }),
+        ),
+      ),
+
+    /**
+     * Q-95 (4) leaves open whether a draft one side has already signed may still be cancelled.
+     * The conservative answer is the default: **no** — once a side has accepted, the draft is
+     * not withdrawn by the other, and ending it is a decision for the client, who sets this.
+     */
+    CONTRACT_CANCEL_AFTER_SIGNATURE: booleanEnv(false),
+
+    CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(10).max(900).default(120),
 
     CONSTRUCTION_SERVICE_URL: z.string().url().default('http://localhost:3110'),
 

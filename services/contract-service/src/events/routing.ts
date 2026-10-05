@@ -17,6 +17,9 @@ export const AGGREGATE_TYPE = 'Contract';
 
 export const AGGREGATE_OF = {
   CONTRACT_DRAFTED: AGGREGATE_TYPE,
+  CONTRACT_SIGNATURE_RECORDED: AGGREGATE_TYPE,
+  CONTRACT_SIGNED: AGGREGATE_TYPE,
+  CONTRACT_CANCELLED: AGGREGATE_TYPE,
 } as const satisfies Record<ContractEventName, string>;
 
 export interface PartitionDecision {

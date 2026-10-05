@@ -681,16 +681,18 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Contract — `rasta.contract.v1`
 
-| رویداد                 | مصرف‌کنندگان                           | Payload کلیدی                                                                                                                                            |
-| ---------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CONTRACT_DRAFTED`     | audit                                  | `contractId`, `tenderId`, `projectId`, `organizationId`, `contractorOrganizationId`, `winningBidId`, `draftedAt` — **پیاده‌شده (CON-003 PR 1)؛ بی مبلغ** |
-| ~~`CONTRACT_CREATED`~~ | ~~construction · notification~~        | ~~`contractId`, `tenderId`, `parties[]`, `amount`~~ — **جایش را `CONTRACT_DRAFTED` گرفت** (پایین)                                                        |
-| `CONTRACT_SIGNED`      | construction · economic · notification | `contractId`, `signedAt`, `signatories[]`                                                                                                                |
-| `CONTRACT_AMENDED`     | audit · analytics                      | `contractId`, `amendmentId`, `deltaAmount`                                                                                                               |
-| `STATEMENT_SUBMITTED`  | notification · analytics               | `statementId`, `contractId`, `grossAmount`                                                                                                               |
-| `STATEMENT_APPROVED`   | **economic (پرداخت)** · analytics      | `statementId`, `netAmount`, `deductions`, `technicalApprover`, `financialApprover`                                                                       |
-| `STATEMENT_REJECTED`   | notification                           | `statementId`, `reason`                                                                                                                                  |
-| `CONTRACT_COMPLETED`   | supplier (امتیاز) · analytics          | `contractId`, `finalAmount`                                                                                                                              |
+| رویداد                        | مصرف‌کنندگان                                           | Payload کلیدی                                                                                                                                                                                                   |
+| ----------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTRACT_DRAFTED`            | audit                                                  | `contractId`, `tenderId`, `projectId`, `organizationId`, `contractorOrganizationId`, `winningBidId`, `draftedAt` — **پیاده‌شده (CON-003 PR 1)؛ بی مبلغ**                                                        |
+| ~~`CONTRACT_CREATED`~~        | ~~construction · notification~~                        | ~~`contractId`, `tenderId`, `parties[]`, `amount`~~ — **جایش را `CONTRACT_DRAFTED` گرفت** (پایین)                                                                                                               |
+| `CONTRACT_SIGNATURE_RECORDED` | audit                                                  | `contractId`, `organizationId`, `side`, `signerOrganizationId`, `signedBy`, `authorityRole`, `signedAt` — **پیاده‌شده (CON-003 PR 2)؛ بی مبلغ**                                                                 |
+| `CONTRACT_SIGNED`             | audit (+ construction · economic · notification بعداً) | `contractId`, `tenderId`, `projectId`, `organizationId`, `contractorOrganizationId`, `winningBidId`, `employerSignedAt`, `contractorSignedAt`, `signedAt` — **پیاده‌شده (CON-003 PR 2)؛ بی مبلغ، بی امضاکننده** |
+| `CONTRACT_CANCELLED`          | audit                                                  | `contractId`, `tenderId`, `projectId`, `organizationId`, `contractorOrganizationId`, `reasonCode`, `cancelledAt` — **پیاده‌شده (CON-003 PR 2)**                                                                 |
+| `CONTRACT_AMENDED`            | audit · analytics                                      | `contractId`, `amendmentId`, `deltaAmount`                                                                                                                                                                      |
+| `STATEMENT_SUBMITTED`         | notification · analytics                               | `statementId`, `contractId`, `grossAmount`                                                                                                                                                                      |
+| `STATEMENT_APPROVED`          | **economic (پرداخت)** · analytics                      | `statementId`, `netAmount`, `deductions`, `technicalApprover`, `financialApprover`                                                                                                                              |
+| `STATEMENT_REJECTED`          | notification                                           | `statementId`, `reason`                                                                                                                                                                                         |
+| `CONTRACT_COMPLETED`          | supplier (امتیاز) · analytics                          | `contractId`, `finalAmount`                                                                                                                                                                                     |
 
 **پیاده‌شده در CON-003 PR 1 (ADR-068 § ۳ و § ۴).** یک رویداد؛ سایر ردیف‌های بالا **طرح**‌اند (PR 2..6) و هنوز تولید نمی‌شوند.
 
@@ -699,6 +701,12 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
   `contractorOrganizationId`، `winningBidId`، `draftedAt`. **هرگز مبلغ:** مبلغ برنده محتوای یک پیشنهاد است و Topic را `audit-service` در کل
   می‌خواند؛ مصرف‌کننده‌ای که مبلغ لازم دارد از API می‌پرسد (همان دلیل `TENDER_AWARDED`، #199). در **همان** تراکنشی نوشته می‌شود که ردیف `contract` را
   می‌سازد (Outbox)، و `causationId` = شناسهٔ `TENDER_AWARDED` است. هر مناقصه حداکثر یک `CONTRACT_DRAFTED` دارد (یکتایی `(organization_id, tender_id)`).
+  **پیاده‌شده در CON-003 PR 2 (ADR-068 § ۲، ردیف‌های `DRAFT → SIGNED` و `DRAFT → CANCELLED`).** هر سه `.strict()`، `aggregateType = Contract`، کلید پارتیشن `contractId`، و هر کدام در **همان** تراکنشی که وضعیت را تغییر می‌دهد (Outbox)؛ هیچ‌کدام مبلغ ندارد.
+
+- `CONTRACT_SIGNATURE_RECORDED` — برای **هر یک** از دو امضا یک‌بار: `side` ∈ `EMPLOYER`/`CONTRACTOR`، سازمانی که امضاکننده برایش عمل کرده، `signedBy` (شناسهٔ کاربر؛ امضای بی‌شخص رکورد حسابرسی نیست) و نقشی که امضا با آن پذیرفته شد. جفت هویت پایدار برای بررسی تفکیک وظایف (#188) در پایگاه داده‌ی همین سرویس می‌ماند و روی Topic نمی‌آید.
+- `CONTRACT_SIGNED` — فقط با امضای **دوم** و فقط یک‌بار؛ فقط لحظه‌ها و سازمان‌ها، بی امضاکننده. `signedAt` = دیرترین دو امضا. (`docs/08` § 8.3: `AWARDED → CONTRACTED`.) ردیف قدیمی `signatories[]` با این جایگزین شد؛ مصرف‌کنندگان دیگر (construction، economic، notification) با PRهای بعدی افزوده می‌شوند.
+- `CONTRACT_CANCELLED` — فقط **کد دلیل بسته**؛ یادداشت متنی آزاد در پایگاه داده می‌ماند و از API برای دو طرف خوانده می‌شود (متن آزاد مشتری است و Topic را همهٔ سرویس‌ها می‌خوانند).
+
 - **مصرف:** گروه `contract-service.tender-awarded` روی `rasta.construction.v1` (+ `.retry`)، DLQ ‏`rasta.contract.v1.dlq`. کلید Idempotency = `tenderId`
   (در مستأجر). پیش از نوشتن، award از مالکش پرسیده و با رویداد سنجیده می‌شود: عدم تأیید ⇒ `SOURCE_UNCONFIRMED`؛ منبع در دسترس نیست ⇒ تلاش دوباره و
   سپس `UPSTREAM_UNAVAILABLE`؛ پاکت و Payload یک مستأجر نیستند ⇒ `SOURCE_UNCONFIRMED` پیش از هر پرسش؛ تکرار متناقض ⇒ `VALIDATION_FAILED`؛ تکرار همان ⇒ `SKIPPED`.

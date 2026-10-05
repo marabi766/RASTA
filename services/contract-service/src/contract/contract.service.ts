@@ -1,15 +1,69 @@
-import { Injectable } from '@nestjs/common';
-import { RastaError } from '@rasta/nest-common';
-import type { Contract } from '../generated/prisma';
-import { ContractAccess, assertPartyOf } from '../access/access';
+import { Inject, Injectable } from '@nestjs/common';
+import { ERROR_CODES } from '@rasta/contracts';
+import { RastaError, compareActors, currentActor, getContext } from '@rasta/nest-common';
+import type { Contract, ContractSignature } from '../generated/prisma';
+import { ContractAccess, assertPartyOf, sideOf, type ContractSideName } from '../access/access';
+import type { ContractEnv } from '../config/env';
+import { SERVICE_NAME } from '../config/env';
+import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
+import { contractCommandsTotal } from '../observability/metrics';
+import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import type { ClaimFence } from '../shared/idempotency';
+import { transactionNow } from '../shared/clock';
+import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
+import { ENV } from '../tokens';
 import { ContractRepository } from './contract.repository';
-import type { ContractView, CursorPage, ListContractsQuery } from './dto';
-import { toContractView } from './views';
+import { transitionFor } from './contract.state-machine';
+import type {
+  CancelContractDto,
+  ContractView,
+  CursorPage,
+  ListContractsQuery,
+  SignContractDto,
+} from './dto';
+import { toContractView, type SignatureFact } from './views';
+
+/** The person as a signature recorded them, ready for `compareActors` (#188). */
+function signerOf(signature: ContractSignature) {
+  return {
+    userId: signature.signedBy,
+    issuer: signature.signedByIssuer,
+    subject: signature.signedBySubject,
+  };
+}
+
+const factOf = (signature: ContractSignature): SignatureFact => ({
+  side: signature.side,
+  signedAt: signature.signedAt,
+});
 
 /**
- * Reads of a contract (ADR-068 § 7). A contract is made by the consumer of
- * `TENDER_AWARDED` and by nothing else, so this service has no command a user can give;
- * it answers the two parties — the employer, and the winning contractor — and nobody else.
+ * The contract, and the two commands a party gives it (ADR-068 § 2, § 7).
+ *
+ * A contract is **made** by the consumer of `TENDER_AWARDED` and by nothing else; a user
+ * reads it, signs it for their side, and the employer may cancel it while it is a draft.
+ * Every other change — amendments, milestones, statements, completion, settlement — is a
+ * later change (ADR-068 § 9).
+ *
+ * ## How a command is made safe
+ *
+ * - **Object-level authorization first.** The contract is found as the employer (through the
+ *   tenant guard) or as the winning contractor (an explicit predicate on the organization the
+ *   signed token names); anyone else gets the `404` a missing contract gets (S-03). Only then
+ *   are the caller's roles judged — a stranger is never told which role they lacked.
+ * - **One lock, then the state.** Inside one transaction the contract row is locked
+ *   (`FOR UPDATE`) and read again, and only then is anything decided: the two parties' commands
+ *   are ordered, so the second signature is the one that completes the contract and a
+ *   cancellation never interleaves with a signature. The status change is a compare-and-set on
+ *   `organization_id`, `id`, status and `version` (`ContractRepository.transition`).
+ * - **The event and the audit record are in that transaction.** Each signature is a row and a
+ *   `CONTRACT_SIGNATURE_RECORDED`; the second also moves the contract and publishes
+ *   `CONTRACT_SIGNED`; a cancellation publishes `CONTRACT_CANCELLED`. A failure anywhere rolls
+ *   all of it back.
+ * - **Separation of duties on the stable identity** (`compareActors`, #188): one person cannot
+ *   sign for both sides, a member of both organizations is refused whichever side they act for,
+ *   and an identity that cannot be shown to be a different person is `422
+ *   ACTOR_IDENTITY_UNKNOWN` — never a guess. The database refuses the provable cases too.
  *
  * Business rules live here, not in the controller (AGENTS.md A-10).
  */
@@ -18,7 +72,12 @@ export class ContractService {
   constructor(
     private readonly repository: ContractRepository,
     private readonly access: ContractAccess,
+    private readonly prisma: PrismaService,
+    private readonly publisher: EventPublisher,
+    @Inject(ENV) private readonly env: ContractEnv,
   ) {}
+
+  // -- reads ----------------------------------------------------------------------------
 
   /**
    * One contract, to a party to it. Any other caller — an organization that is neither the
@@ -36,7 +95,8 @@ export class ContractService {
 
     // The row-level half of the guard: whatever query produced the row, it is a party's.
     assertPartyOf(row, parties);
-    return toContractView(row);
+    const facts = await this.repository.signatureFacts([row]);
+    return toContractView(row, facts.get(row.id));
   }
 
   /** The caller's contracts, newest first: as employer, as winning contractor, or both. */
@@ -61,10 +121,380 @@ export class ContractService {
     const visible = hasMore ? found.slice(0, query.limit) : found;
     visible.forEach((row) => assertPartyOf(row, parties));
 
+    const facts = await this.repository.signatureFacts(visible);
     return {
-      items: visible.map(toContractView),
+      items: visible.map((row) => toContractView(row, facts.get(row.id))),
       nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
       hasMore,
     };
+  }
+
+  /**
+   * Whether the caller may still see this contract: the check a stored response must pass
+   * before it is replayed (the same rule a fresh request applies now).
+   */
+  async assertVisible(id: string): Promise<void> {
+    await this.get(id);
+  }
+
+  // -- sign -----------------------------------------------------------------------------
+
+  /**
+   * Accepts the draft for the side the caller acts for (`DRAFT → SIGNED` once both have).
+   *
+   * Signing is a recorded acceptance of both parties, not a legal signature (Q-95 (1)); the
+   * employer's authority is `CONTRACT_OWNER_SIGNER_ROLES` — nobody until the client names one.
+   * The same person signing the same side again changes nothing and answers with the contract
+   * as it is; another person for a side that has signed is `409`.
+   */
+  async sign(
+    id: string,
+    dto: SignContractDto,
+    fence?: ClaimFence<ContractView>,
+  ): Promise<ContractView> {
+    const acting = this.access.assertCanCommand();
+    const row = await this.findParty(acting.organizationId, id);
+    const side = sideOf(row, acting.organizationId);
+    if (!side) throw RastaError.notFound('Contract', id);
+
+    const authority = this.access.signingRole(side);
+    if ('notConfigured' in authority) {
+      throw this.refused(
+        'sign',
+        ruleRefusal(
+          'No signing authority is configured for the employer',
+          'signature',
+          ['SIGNER_AUTHORITY_NOT_CONFIGURED'],
+          { contractId: id },
+        ),
+      );
+    }
+    if (this.access.isMemberOfBothParties(row)) {
+      throw this.refused(
+        'sign',
+        forbiddenRefusal(
+          'Separation of duties: one person cannot be a member of both parties to a contract',
+          'signature',
+          ['MEMBER_OF_BOTH_PARTIES'],
+          { contractId: id },
+        ),
+      );
+    }
+    // A person, with an identity that can be compared to another's: a token without it is
+    // refused (403) here, and a token whose issuer and subject are missing (below) is 422.
+    const person = currentActor({ requirePlatformUserId: true });
+    if (person.issuer === null || person.subject === null) {
+      throw this.refused('sign', this.identityUnknown(id));
+    }
+
+    return this.prisma.transaction(async (tx) => {
+      if (fence) await fence.hold(tx);
+      const view = await this.signLocked(tx, row, side, authority.role, person, dto);
+      return fence ? fence.complete(tx, view) : view;
+    });
+  }
+
+  private async signLocked(
+    tx: ExtendedPrismaClient,
+    found: Contract,
+    side: ContractSideName,
+    authorityRole: string,
+    person: { userId: string; issuer: string | null; subject: string | null },
+    dto: SignContractDto,
+  ): Promise<ContractView> {
+    const contract = await this.repository.lockContract(tx, found.organizationId, found.id);
+    // Still a contract the caller is a party to, as it stands under the lock.
+    if (!contract || sideOf(contract, getContext().organizationId ?? '') !== side) {
+      throw RastaError.notFound('Contract', found.id);
+    }
+    const signatures = await this.repository.listSignatures(
+      tx,
+      contract.organizationId,
+      contract.id,
+    );
+
+    // The same person on the same side again: nothing to do, whatever the state has become.
+    const mine = signatures.find((signature) => signature.side === side);
+    if (mine) {
+      const comparison = compareActors(person, signerOf(mine));
+      if (comparison === 'SAME') {
+        contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'unchanged' });
+        return toContractView(contract, signatures.map(factOf));
+      }
+      throw this.refused(
+        'sign',
+        comparison === 'DISTINCT'
+          ? refusal(
+              ERROR_CODES.ALREADY_EXISTS,
+              'This side of the contract has already signed',
+              'signature',
+              ['SIDE_ALREADY_SIGNED'],
+              { contractId: contract.id },
+            )
+          : this.identityUnknown(contract.id),
+      );
+    }
+
+    if (contract.status !== 'DRAFT') {
+      throw this.refused(
+        'sign',
+        ruleRefusal('Only a draft contract is signed', 'signature', ['CONTRACT_NOT_DRAFT'], {
+          contractId: contract.id,
+        }),
+      );
+    }
+    this.assertVersion(contract, dto.expectedVersion);
+
+    // One person is never both sides: provably two people, or the signature is refused.
+    const other = signatures.find((signature) => signature.side !== side);
+    if (other) {
+      const comparison = compareActors(person, signerOf(other));
+      if (comparison === 'SAME') {
+        throw this.refused(
+          'sign',
+          forbiddenRefusal(
+            'Separation of duties: one person cannot sign for both sides of a contract',
+            'signature',
+            ['SAME_PERSON_BOTH_SIDES'],
+            { contractId: contract.id },
+          ),
+        );
+      }
+      if (comparison === 'UNKNOWN') throw this.refused('sign', this.identityUnknown(contract.id));
+    }
+
+    const at = await transactionNow(tx);
+    const correlationId = getContext().correlationId;
+    const recorded = await this.repository.insertSignature(tx, {
+      id: newId(ID_PREFIX.signature),
+      organizationId: contract.organizationId,
+      contractId: contract.id,
+      side,
+      signerOrganizationId: getContext().organizationId ?? '',
+      signedBy: person.userId,
+      signedByIssuer: person.issuer,
+      signedBySubject: person.subject,
+      authorityRole,
+      correlationId,
+      at,
+    });
+    await this.publisher.enqueue(tx, {
+      eventName: 'CONTRACT_SIGNATURE_RECORDED',
+      aggregateId: contract.id,
+      organizationId: contract.organizationId,
+      occurredAt: at,
+      payload: {
+        contractId: contract.id,
+        organizationId: contract.organizationId,
+        side,
+        signerOrganizationId: recorded.signerOrganizationId,
+        signedBy: recorded.signedBy,
+        authorityRole: recorded.authorityRole,
+        signedAt: at.toISOString(),
+      },
+    });
+
+    const all = [...signatures, recorded];
+    if (!other) {
+      contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'recorded' });
+      return toContractView(contract, all.map(factOf));
+    }
+
+    // The second signature completes the contract: DRAFT → SIGNED, in this transaction.
+    const moved = await this.moveTo(tx, contract, 'sign', 'SIGNED', person.userId, at);
+    // Both sides have signed: `other` is the first, `recorded` the second.
+    const signedAt = (s: 'EMPLOYER' | 'CONTRACTOR') =>
+      (other.side === s ? other : recorded).signedAt.toISOString();
+    await this.publisher.enqueue(tx, {
+      eventName: 'CONTRACT_SIGNED',
+      aggregateId: contract.id,
+      organizationId: contract.organizationId,
+      occurredAt: at,
+      payload: {
+        contractId: contract.id,
+        tenderId: contract.tenderId,
+        projectId: contract.projectId,
+        organizationId: contract.organizationId,
+        contractorOrganizationId: contract.contractorOrganizationId,
+        winningBidId: contract.winningBidId,
+        employerSignedAt: signedAt('EMPLOYER'),
+        contractorSignedAt: signedAt('CONTRACTOR'),
+        signedAt: at.toISOString(),
+      },
+    });
+    contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'signed' });
+    return toContractView(moved, all.map(factOf));
+  }
+
+  // -- cancel ---------------------------------------------------------------------------
+
+  /**
+   * The employer ends a draft (`DRAFT → CANCELLED`), for a reason from the configured closed
+   * list (Q-95 (4)). A contract that is not a draft is never cancelled — a signed contract is
+   * ended by no route (`422`) — and, by default, neither is a draft one side has already
+   * signed (`CONTRACT_CANCEL_AFTER_SIGNATURE`).
+   */
+  async cancel(
+    id: string,
+    dto: CancelContractDto,
+    fence?: ClaimFence<ContractView>,
+  ): Promise<ContractView> {
+    const acting = this.access.assertCanCommand();
+    const row = await this.findParty(acting.organizationId, id);
+    const side = sideOf(row, acting.organizationId);
+    if (!side) throw RastaError.notFound('Contract', id);
+    this.access.assertMayCancel(side);
+
+    if (!this.env.CONTRACT_CANCEL_REASON_CODES.includes(dto.reasonCode)) {
+      throw this.refused(
+        'cancel',
+        ruleRefusal('This reason is not one the contract may be cancelled for', 'cancellation', [
+          'CANCEL_REASON_NOT_ALLOWED',
+        ]),
+      );
+    }
+    const person = currentActor({ requirePlatformUserId: true });
+
+    return this.prisma.transaction(async (tx) => {
+      if (fence) await fence.hold(tx);
+      const contract = await this.repository.lockContract(tx, row.organizationId, row.id);
+      if (!contract || sideOf(contract, acting.organizationId) !== 'EMPLOYER') {
+        throw RastaError.notFound('Contract', id);
+      }
+      if (contract.status !== 'DRAFT') {
+        throw this.refused(
+          'cancel',
+          ruleRefusal(
+            'Only a draft contract is cancelled',
+            'cancellation',
+            ['CONTRACT_NOT_DRAFT'],
+            {
+              contractId: contract.id,
+            },
+          ),
+        );
+      }
+      this.assertVersion(contract, dto.expectedVersion);
+      const signatures = await this.repository.listSignatures(
+        tx,
+        contract.organizationId,
+        contract.id,
+      );
+      if (signatures.length > 0 && !this.env.CONTRACT_CANCEL_AFTER_SIGNATURE) {
+        throw this.refused(
+          'cancel',
+          ruleRefusal(
+            'A draft that a party has signed is not cancelled',
+            'cancellation',
+            ['SIGNATURE_RECORDED'],
+            { contractId: contract.id },
+          ),
+        );
+      }
+
+      const at = await transactionNow(tx);
+      const moved = await this.moveTo(tx, contract, 'cancel', 'CANCELLED', person.userId, at, {
+        reasonCode: dto.reasonCode,
+        note: dto.note,
+      });
+      await this.publisher.enqueue(tx, {
+        eventName: 'CONTRACT_CANCELLED',
+        aggregateId: contract.id,
+        organizationId: contract.organizationId,
+        occurredAt: at,
+        payload: {
+          contractId: contract.id,
+          tenderId: contract.tenderId,
+          projectId: contract.projectId,
+          organizationId: contract.organizationId,
+          contractorOrganizationId: contract.contractorOrganizationId,
+          reasonCode: dto.reasonCode,
+          cancelledAt: at.toISOString(),
+        },
+      });
+      contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'cancel', outcome: 'cancelled' });
+      const view = toContractView(moved, signatures.map(factOf));
+      return fence ? fence.complete(tx, view) : view;
+    });
+  }
+
+  // -- shared ---------------------------------------------------------------------------
+
+  /**
+   * The contract, found as the employer (through the tenant guard) or as the winning contractor;
+   * `404` for everyone else, a contract that does not exist included.
+   */
+  private async findParty(organizationId: string, id: string): Promise<Contract> {
+    const row =
+      (await this.repository.findOwn(id)) ??
+      (await this.repository.findAsContractor(organizationId, id));
+    if (!row || !sideOf(row, organizationId)) throw RastaError.notFound('Contract', id);
+    return row;
+  }
+
+  /** `409` when the caller named a version and the contract is no longer at it. */
+  private assertVersion(contract: Contract, expected: number | undefined): void {
+    if (expected !== undefined && expected !== contract.version) {
+      throw RastaError.optimisticLockFailed('Contract', contract.id);
+    }
+  }
+
+  /**
+   * The status change, from the table (`CONTRACT_TRANSITIONS`) and as a compare-and-set on the
+   * version the lock just read. A command the table does not have from this state is a defect,
+   * not a refusal: the caller checked the state first.
+   */
+  private async moveTo(
+    tx: ExtendedPrismaClient,
+    contract: Contract,
+    command: 'sign' | 'cancel',
+    to: 'SIGNED' | 'CANCELLED',
+    actor: string,
+    at: Date,
+    cancellation?: { reasonCode: string; note?: string | undefined },
+  ): Promise<Contract> {
+    const entry = transitionFor(contract.status, command);
+    if (!entry || entry.to !== to) {
+      throw new Error(`contract ${contract.id}: no ${command} from ${contract.status}`);
+    }
+    const moved = await this.repository.transition(tx, {
+      organizationId: contract.organizationId,
+      id: contract.id,
+      from: entry.from,
+      to: entry.to,
+      version: contract.version,
+      actor,
+      at,
+      ...(cancellation ? { cancellation } : {}),
+    });
+    if (!moved) throw RastaError.optimisticLockFailed('Contract', contract.id);
+    return {
+      ...contract,
+      status: entry.to,
+      statusChangedAt: at,
+      statusChangedBy: actor,
+      updatedAt: at,
+      version: contract.version + 1,
+      ...(cancellation
+        ? { cancelReasonCode: cancellation.reasonCode, cancelNote: cancellation.note ?? null }
+        : {}),
+    };
+  }
+
+  /** `422 ACTOR_IDENTITY_UNKNOWN`: the two people cannot be told apart (#188), so neither signs. */
+  private identityUnknown(contractId: string): RastaError {
+    return refusal(
+      ERROR_CODES.ACTOR_IDENTITY_UNKNOWN,
+      'Separation of duties cannot be proven, because a record names no stable identity: the two sides of a contract',
+      'signature',
+      ['ACTOR_IDENTITY_UNKNOWN'],
+      { contractId },
+    );
+  }
+
+  /** Counts the refusal; the error is thrown by the caller. */
+  private refused(command: 'sign' | 'cancel', error: RastaError): RastaError {
+    contractCommandsTotal.inc({ service: SERVICE_NAME, command, outcome: 'refused' });
+    return error;
   }
 }

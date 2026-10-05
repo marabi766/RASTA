@@ -145,10 +145,10 @@ describe('the contract table’s own guarantees', () => {
       expect(message).toContain('ck_contract_origin_immutable');
     });
 
-    it('lets the status and version move, which is all a later change may touch', async () => {
+    it('lets the status and version move along a declared transition, which is all a change may touch', async () => {
       const { id } = await insert();
       const changed = await runtime.$executeRawUnsafe(
-        `UPDATE "contract" SET "status" = 'SIGNED', "version" = "version" + 1, "updated_at" = now(), "status_changed_at" = now() WHERE id = $1`,
+        `UPDATE "contract" SET "status" = 'CANCELLED', "cancel_reason_code" = 'OTHER', "version" = "version" + 1, "updated_at" = now(), "status_changed_at" = now() WHERE id = $1`,
         id,
       );
       expect(changed).toBe(1);

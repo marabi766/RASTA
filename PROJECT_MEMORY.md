@@ -2723,6 +2723,13 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 (§ ۹)؛ E2E. ADR-068 عمداً از `docs/04` و `docs/08` فاصله می‌گیرد (بی Temporal؛ economic می‌کشد، contract `createPayment` را صدا نمی‌زند؛
 `CONTRACT_DRAFTED` به‌جای `CONTRACT_CREATED`) و پذیرفتنش با مدیر پروژه است.
 
+**CON-003 PR 2 — امضا و لغو (شاخهٔ `feat/contract-service-con003-pr2`، پیش‌نویس، انباشته روی PR 1):** `POST /v1/contracts/{id}/sign` و
+`/cancel` با `Idempotency-Key` (انبار خود سرویس: بستن به hash درخواست، تصاحب محدود، آزادسازی در خطا). دو امضا جدا و با هویت پایدار
+(#188)؛ `SIGNED` فقط با امضای دوم؛ اختیار امضای کارفرما از `CONTRACT_OWNER_SIGNER_ROLES` (پیش‌فرض خالی = هیچ‌کس)؛ تفکیک وظایف بستهٔ در
+شکست؛ لغو فقط کارفرما و فقط `DRAFT` و تا پیش از نخستین امضا (مگر `CONTRACT_CANCEL_AFTER_SIGNATURE`)؛ رویدادهای
+`CONTRACT_SIGNATURE_RECORDED`، `CONTRACT_SIGNED`، `CONTRACT_CANCELLED` بی مبلغ در همان تراکنش؛ دلیل ردها در `details[].code`.
+Q-95 همچنان باز است و پاسخ‌ها موقت و پیکربندی‌پذیرند. ساخته نشده: Gateway، الحاقیه، Milestone، صورت‌وضعیت، تسویه.
+
 ---
 
 ## ۸. Domain Ownership

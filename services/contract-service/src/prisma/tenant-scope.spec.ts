@@ -79,13 +79,13 @@ describe('the schema keeps history from being erased', () => {
   });
 });
 
-describe('the schema models nothing CON-003 PR 1 has not decided', () => {
-  it('has the Contract model only (statements, amendments and milestones are later PRs)', () => {
+describe('the schema models nothing CON-003 has not decided so far', () => {
+  it('has the contract, its signatures and the idempotency store (statements, amendments and milestones are later PRs)', () => {
     // Each step adds its models here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()].filter(
       (name) => !['OutboxMessage', 'OutboxStreamSequence'].includes(name),
     );
-    expect(names).toEqual(['Contract']);
+    expect(names).toEqual(['Contract', 'ContractSignature', 'IdempotencyKey']);
   });
 
   it('stores money as a bigint of minor units and no float anywhere', () => {

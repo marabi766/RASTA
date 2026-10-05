@@ -42,6 +42,7 @@ import { ContractAccess } from './access/access';
 import { ContractRepository } from './contract/contract.repository';
 import { ContractService } from './contract/contract.service';
 import { ContractController } from './contract/contract.controller';
+import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import { AWARD_SOURCE, ENV, LOGGER } from './tokens';
 import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
@@ -98,6 +99,13 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     ContractAccess,
     ContractRepository,
     ContractService,
+
+    // Idempotent commands (docs/06 § 6.8): this service's own store for `sign` and `cancel`.
+    {
+      provide: IdempotencyStore,
+      inject: [PrismaService, ENV],
+      useFactory: (prisma: PrismaService, env: ContractEnv) => new IdempotencyStore(prisma, env),
+    },
 
     {
       provide: InternalTokenService,
@@ -211,6 +219,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly relay: OutboxRelay,
     private readonly awarded: TenderAwardedConsumer,
     private readonly store: PrismaOutboxStore,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -241,6 +250,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
       } catch {
         // Upkeep must never take the service down. The relay's own logging covers a
         // persistent database problem.
+      }
+      try {
+        // Expired Idempotency-Key records, removed by age alone: unscoped by necessity, safe
+        // because they are already unusable.
+        await this.idempotency.purgeExpired();
+      } catch {
+        // Upkeep must never take the service down either.
       }
     };
 

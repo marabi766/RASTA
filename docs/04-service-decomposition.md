@@ -536,6 +536,18 @@ Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ
 > و `GET /v1/contracts[/{id}]` (کارفرما و پیمانکار برنده؛ هر سازمان دیگر `404`). **ساخته نشده:** امضا، الحاقیه، Milestone، صورت‌وضعیت، کسورات،
 > تأیید فنی و مالی، تسویه، مسیر Gateway.
 >
+> **CON-003 PR 2 — امضا و لغو پیش‌نویس** (ردیف‌های `DRAFT → SIGNED` و `DRAFT → CANCELLED` در ADR-068 § ۲؛ Q-95 همچنان باز):
+>
+> - `POST /v1/contracts/{id}/sign` (`Idempotency-Key`): هر طرف **جدا** و با هویت پایدار امضاکننده (`compareActors`، #188) ثبت می‌شود؛ قرارداد فقط با
+>   امضای **دوم** `SIGNED` می‌شود (CAS روی `version` با `organization_id` در گزاره). اختیار امضای کارفرما از پیکربندی می‌آید
+>   (`CONTRACT_OWNER_SIGNER_ROLES`، **پیش‌فرض خالی = هیچ‌کس**، ⇒ `422 SIGNER_AUTHORITY_NOT_CONFIGURED`)؛ امضای پیمانکار نقش `CONTRACTOR` در سازمان خودش است.
+>   تفکیک وظایف (بسته در شکست): عضو هر دو سازمان `403 MEMBER_OF_BOTH_PARTIES`؛ یک شخص برای دو طرف `403 SAME_PERSON_BOTH_SIDES`؛ هویت ناشناخته `422 ACTOR_IDENTITY_UNKNOWN`؛ امضای دوباره‌ی همان طرف `409 SIDE_ALREADY_SIGNED`.
+>   هر امضا یک رکورد حسابرسی و رویداد `CONTRACT_SIGNATURE_RECORDED` و امضای دوم `CONTRACT_SIGNED` (هر دو بی مبلغ) در همان تراکنش.
+> - `POST /v1/contracts/{id}/cancel` (`Idempotency-Key`): فقط کارفرما (`CONTRACT_CANCEL_ROLES`)، فقط `DRAFT`، با کد دلیل از فهرست بستهٔ
+>   `CONTRACT_CANCEL_REASON_CODES` و یادداشت اختیاری (متن آزاد، حداکثر ۱۰۰۰ نویسه، بی نویسهٔ کنترل دوسویه)؛ رویداد `CONTRACT_CANCELLED` فقط کد دلیل را دارد.
+>   **پس از یک امضا لغو نمی‌شود** (`422 SIGNATURE_RECORDED`) مگر `CONTRACT_CANCEL_AFTER_SIGNATURE=true` — پاسخ محتاطانهٔ موقت برای Q-95 (۴).
+> - سازمان دیگر ⇒ `404` مثل نبودن؛ `AUDITOR` و توکن سرویس رد می‌شوند؛ دلیل هر رد در `details[].code`. **ساخته نشده:** مسیر Gateway، الحاقیه، Milestone، صورت‌وضعیت، تسویه.
+>
 > **تفاوت عمدی با جدول بالا (ADR-068، پذیرفتنش با مدیر پروژه):**
 >
 > - `POST /contracts` / `CreateContract` **باز نمی‌شود:** قرارداد فقط از `TENDER_AWARDED` می‌آید؛ قرارداد بی مناقصه سند و منبعی برای مبلغش ندارد (Q-95).

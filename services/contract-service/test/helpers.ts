@@ -1,5 +1,6 @@
 import { withUtcSession } from '@rasta/config';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
+import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -204,6 +205,75 @@ export function wire(env: ContractEnv = testEnv()): Wiring {
 }
 
 /**
+ * A draft contract made the way the system makes one: the consumer, from an award its owner
+ * confirms. Returns the contract, and the two parties' organizations.
+ */
+export async function seedDraft(
+  w: Wiring,
+  organizations: string[],
+  overrides: Partial<AwardFixture> = {},
+): Promise<{
+  id: string;
+  employer: string;
+  contractor: string;
+  award: AwardFixture;
+}> {
+  const employer = newOrganizationId();
+  const contractor = overrides.winnerOrganizationId ?? newOrganizationId();
+  organizations.push(employer, contractor);
+  const award = newAward(employer, { winnerOrganizationId: contractor, ...overrides });
+  w.awards.serve(award);
+  await w.consumer.handle(tenderAwarded(award));
+  const row = await runUnscoped('the suite reads back the contract it just seeded', () =>
+    w.contracts.findByTender(employer, award.tenderId),
+  );
+  return { id: row!.id, employer, contractor, award };
+}
+
+/** The envelope `payload`s of the events a contract's organization has in the outbox, oldest first. */
+export async function eventsOf(
+  prisma: PrismaService,
+  organizationId: string,
+  eventName?: string,
+): Promise<{ eventName: string; payload: Record<string, unknown>; occurredAt: string }[]> {
+  const rows = await prisma.client.outboxMessage.findMany({
+    where: { organizationId, ...(eventName ? { eventName } : {}) },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return rows.map((row) => {
+    const envelope = row.payload as { payload: Record<string, unknown>; occurredAt: string };
+    return { eventName: row.eventName, payload: envelope.payload, occurredAt: envelope.occurredAt };
+  });
+}
+
+/**
+ * Waits until `count` database sessions are blocked on a lock — proof, not hope, that the
+ * commands started while a lock is held are really queued behind it (the #186 pattern). Bounded
+ * by wall clock, not by turns; suites run in band, so a waiting session is one the test started.
+ */
+export async function untilSessionsWaitOnALock(
+  prisma: PrismaService,
+  count: number,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await prisma.client.$queryRawUnsafe<{ waiting: bigint }[]>(
+      `SELECT count(*) AS waiting
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND pid <> pg_backend_pid()`,
+    );
+    if (Number(rows[0]?.waiting ?? 0) >= count) return;
+    if (Date.now() > deadline) {
+      throw new Error(`Fewer than ${count} sessions were waiting on a lock after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+/**
  * Removes everything the given organizations wrote. A contract is never deleted by the
  * service (`tg_contract_guard`), so the suite's own removal goes through the **owner**
  * connection and lifts the trigger for the length of one transaction — never through the
@@ -214,10 +284,21 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
+      // A signature is never deleted by the service either (`tg_contract_signature_immutable`);
+      // it goes first, because it references its contract.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "contract_signature" DISABLE TRIGGER "tg_contract_signature_immutable"',
+      );
+      await tx.contractSignature.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "contract_signature" ENABLE TRIGGER "tg_contract_signature_immutable"',
+      );
       await tx.$executeRawUnsafe('ALTER TABLE "contract" DISABLE TRIGGER "tg_contract_guard"');
       await tx.contract.deleteMany({ where: { organizationId: { in: organizationIds } } });
       await tx.$executeRawUnsafe('ALTER TABLE "contract" ENABLE TRIGGER "tg_contract_guard"');
     });
+    // The idempotency keys are the calling organization's — either party's.
+    await owner.idempotencyKey.deleteMany({ where: { organizationId: { in: organizationIds } } });
     await owner.outboxMessage.deleteMany({ where: { organizationId: { in: organizationIds } } });
   } finally {
     await owner.$disconnect();

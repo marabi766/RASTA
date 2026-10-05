@@ -243,6 +243,44 @@ describe('TENDER_AWARDED drafts a contract', () => {
       },
     );
 
+    // The window the in-transaction re-read cannot close: the loser's re-read sees nothing and
+    // its insert meets the winner at the unique index. The re-read is blinded to make the window
+    // deterministic; the verdict must still come from the same comparison as every redelivery.
+    it.each(CONTRADICTIONS)(
+      'refuses the delivery that meets the unique index when it differs in %s',
+      async (field, change) => {
+        const o = employer();
+        const award = newAward(o);
+        const loser = { ...award, ...change };
+        const reread = jest.spyOn(w.contracts, 'findByTender');
+        w.awards.onAsk = async () => {
+          w.awards.onAsk = undefined;
+          served(award);
+          await w.consumer.handle(tenderAwarded(award));
+          served(loser);
+          // The loser's next read is its in-transaction re-read: blind. The one after the
+          // unique violation (the winner it is judged against) is the real one.
+          reread.mockImplementationOnce(async () => null);
+        };
+
+        try {
+          const error = await refusal(w.consumer.handle(tenderAwarded(loser)));
+
+          expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+          expect(error.message).toContain(field);
+        } finally {
+          reread.mockRestore();
+        }
+        const rows = await contractsOf(o);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          matrixDigest: award.matrixDigest,
+          projectId: award.projectId,
+        });
+        expect(await outboxOf(o)).toHaveLength(1);
+      },
+    );
+
     it('makes one contract when five deliveries race: the unique index decides', async () => {
       const o = employer();
       const award = newAward(o);

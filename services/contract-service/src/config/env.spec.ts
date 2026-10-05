@@ -25,6 +25,25 @@ describe('the provisional defaults (Q-95)', () => {
     expect(env.CONTRACT_CONSUMER_RETRY_BACKOFF_MS).toBe(1000);
   });
 
+  it('grants nobody the employer’s signature until the client names one (Q-95 (1))', () => {
+    expect(env.CONTRACT_OWNER_SIGNER_ROLES).toEqual([]);
+  });
+
+  it('lets the reader role cancel a draft, for a reason from a closed list (Q-95 (4))', () => {
+    expect(env.CONTRACT_CANCEL_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.CONTRACT_CANCEL_REASON_CODES).toEqual([
+      'TERMS_NOT_AGREED',
+      'CONTRACTOR_WITHDREW',
+      'AWARD_ERROR',
+      'OTHER',
+    ]);
+  });
+
+  it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
+    expect(env.CONTRACT_IDEMPOTENCY_TTL_HOURS).toBe(24);
+    expect(env.CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
+  });
+
   it('names itself, and listens on 3111', () => {
     expect(env.SERVICE_NAME).toBe('contract-service');
     expect(env.PORT).toBe(3111);
@@ -61,8 +80,26 @@ describe('overrides', () => {
     ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
   });
 
+  it('accepts a configured signer list and an empty cancel list (nobody)', () => {
+    const env = load({
+      CONTRACT_OWNER_SIGNER_ROLES: 'ORGANIZATION_ADMIN,PROCUREMENT_USER',
+      CONTRACT_CANCEL_ROLES: '',
+    });
+    expect(env.CONTRACT_OWNER_SIGNER_ROLES).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+    expect(env.CONTRACT_CANCEL_ROLES).toEqual([]);
+  });
+
   it.each([
     ['AUDITOR among the readers', { CONTRACT_READER_ROLES: 'AUDITOR' }],
+    ['AUDITOR among the signers', { CONTRACT_OWNER_SIGNER_ROLES: 'AUDITOR' }],
+    ['SYSTEM_ADMIN among the signers', { CONTRACT_OWNER_SIGNER_ROLES: 'SYSTEM_ADMIN' }],
+    ['SYSTEM_ADMIN among the cancellers', { CONTRACT_CANCEL_ROLES: 'SYSTEM_ADMIN' }],
+    ['an unknown signer role', { CONTRACT_OWNER_SIGNER_ROLES: 'WIZARD' }],
+    ['no cancel reason', { CONTRACT_CANCEL_REASON_CODES: '' }],
+    ['a reason that is not a code', { CONTRACT_CANCEL_REASON_CODES: 'lower case' }],
+    ['a reason twice', { CONTRACT_CANCEL_REASON_CODES: 'OTHER,OTHER' }],
+    ['a zero idempotency lifetime', { CONTRACT_IDEMPOTENCY_TTL_HOURS: '0' }],
+    ['a lease under ten seconds', { CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
     ['an empty reader list', { CONTRACT_READER_ROLES: '' }],
     ['an unknown role', { CONTRACT_READER_ROLES: 'WIZARD' }],
     ['a timeout under 100 ms', { CONTRACT_AWARD_REQUEST_TIMEOUT_MS: '10' }],

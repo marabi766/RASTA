@@ -27,6 +27,29 @@ export const contractDraftsTotal = new Counter({
 });
 
 /**
+ * What each command did (CON-003 PR 2): `command` is `sign` or `cancel`, `outcome` one of
+ * `recorded` (a signature was recorded, the contract still a draft), `signed`, `cancelled`,
+ * `unchanged` (the same person signing the same side again) or `refused`. Fixed, small sets.
+ */
+export const contractCommandsTotal = new Counter({
+  name: 'rasta_contract_commands_total',
+  help: 'Contract commands handled, by command and outcome',
+  labelNames: ['service', 'command', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * Commands answered from a stored response under their Idempotency-Key: a retry that did
+ * nothing a second time. `endpoint` is the route template, a closed set.
+ */
+export const idempotentReplaysTotal = new Counter({
+  name: 'rasta_contract_idempotent_replays_total',
+  help: 'Requests answered from a stored response under their Idempotency-Key',
+  labelNames: ['service', 'endpoint'] as const,
+  registers: [registry],
+});
+
+/**
  * Checks of an event against the owning service (ADR-061 § 4), by outcome — `confirmed`, or
  * the mismatch that refused it. Any mismatch is worth an alert: either a producer has a
  * defect or somebody is publishing events they do not own.

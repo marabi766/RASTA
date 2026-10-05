@@ -1,7 +1,7 @@
 // contract-service — the contract boundary (CON-003, ADR-068, docs/04 § 4.13).
-// This first change holds the draft contract a tender award creates; amendments,
-// milestones, statements, the separate technical and financial approvals and the
-// settlement boundary are later changes (ADR-068 § 9).
+// It holds the draft contract a tender award creates, and — since PR 2 — its signatures
+// and its cancellation; amendments, milestones, statements, the separate technical and
+// financial approvals and the settlement boundary are later changes (ADR-068 § 9).
 //
 // Everything here is owned by this service alone (AGENTS.md A-01). There is no
 // foreign key into another service's database: `organizationId` (the employer),
@@ -90,8 +90,16 @@ model Contract {
   createdCorrelationId String   @map("created_correlation_id")
   updatedAt            DateTime @map("updated_at") @db.Timestamptz(3)
 
+  /// Why the employer cancelled the draft (CON-003 PR 2, Q-95 (4)): a closed code the
+  /// configuration owns, and an optional bounded note. Set with the transition to
+  /// CANCELLED and nowhere else (`ck_contract_cancellation`).
+  cancelReasonCode String? @map("cancel_reason_code")
+  cancelNote       String? @map("cancel_note")
+
   /// The compare-and-set token. Every change matches on it and increments it.
   version Int @default(1)
+
+  signatures ContractSignature[]
 
   // The idempotency key of the consumer: one contract per awarded tender.
   @@unique([organizationId, tenderId], map: "ux_contract_org_tender")
@@ -102,6 +110,74 @@ model Contract {
   // The contractor's own contracts (ADR-068 § 7): not led by organization_id, on purpose.
   @@index([contractorOrganizationId, id], map: "ix_contract_contractor")
   @@map("contract")
+}
+
+enum ContractSide {
+  EMPLOYER
+  CONTRACTOR
+}
+
+/// One side's acceptance of a draft contract (CON-003 PR 2, ADR-068 § 2, Q-95 (1)):
+/// the audit record of a signature — who accepted for which party, when, and under which
+/// configured authority. A recorded acceptance, not a legal signature. Written once; the
+/// database refuses to change or remove it, to sign a contract that is no longer a draft,
+/// to sign for a side as an organization that is not that side, and one person on both sides.
+///
+/// `organizationId` is the contract's tenant — the employer's — for both sides: the
+/// contractor's signature is written across the tenant boundary on purpose, naming the
+/// contract's organization explicitly (ContractRepository.insertSignature).
+model ContractSignature {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+
+  side                 ContractSide
+  /// The organization the signer acted for (the signed token's).
+  signerOrganizationId String       @map("signer_organization_id")
+
+  /// The person: platform user id, and the token's verified issuer and subject — both or
+  /// neither — so a later separation-of-duties check compares a stable identity (#188).
+  signedBy        String  @map("signed_by")
+  signedByIssuer  String? @map("signed_by_issuer")
+  signedBySubject String? @map("signed_by_subject")
+
+  /// The role the signature was accepted under, as the configuration named it.
+  authorityRole String   @map("authority_role")
+  signedAt      DateTime @map("signed_at") @db.Timestamptz(3)
+  correlationId String   @map("correlation_id")
+
+  contract Contract @relation(fields: [organizationId, contractId], references: [organizationId, id])
+
+  @@unique([organizationId, contractId, side], map: "ux_contract_signature_side")
+  @@map("contract_signature")
+}
+
+/// Idempotent commands (docs/06 § 6.8) — the store asset-service and maintenance-service
+/// keep, in this service's own copy (A-02). Keys are the tenant's: `organization_id`
+/// leads the primary key.
+model IdempotencyKey {
+  key            String @map("key")
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 over the canonical request and the caller.
+  requestHash String @map("request_hash")
+  /// Minted per claim; the command's transaction locks and completes the row by it.
+  claimToken  String @map("claim_token")
+
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
+  /// IN_PROGRESS | COMPLETED (CHECK ck_idempotency_state).
+  state          String
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// While IN_PROGRESS: the claim's lease, after which a retry may take the key over under a
+  /// new token. Once COMPLETED: CONTRACT_IDEMPOTENCY_TTL_HOURS after the response.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
 }
 
 // ---------------------------------------------------------------------------

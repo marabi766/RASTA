@@ -16,7 +16,7 @@ import { PrismaClient } from '../generated/prisma';
  * `tenant-scope.spec.ts` derives the expected list from `schema.prisma`, so an
  * omission fails a unit test rather than passing review.
  */
-export const TENANT_SCOPED_MODELS = ['Contract'] as const;
+export const TENANT_SCOPED_MODELS = ['Contract', 'ContractSignature', 'IdempotencyKey'] as const;
 
 /**
  * Models that carry an organization column and are still not guarded.
