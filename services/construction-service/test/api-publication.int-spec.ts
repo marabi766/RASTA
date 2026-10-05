@@ -212,10 +212,12 @@ describe('publication API', () => {
     expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
     expect(refused.body.message).toContain('CRITERIA_WEIGHTS_INCOMPLETE');
     expect(refused.body.message).toContain('INVITATION_REQUIRED');
-    // Every reason, each its own entry of `details`, in the order the message names them.
+    // Every reason, each its own entry of `details`, in the order the message names them (no
+    // approval policy exists here either, so the gate's reason is one of them).
     expect(reasonsOf(refused.body)).toEqual([
       'publication:CRITERIA_WEIGHTS_INCOMPLETE',
       'publication:INVITATION_REQUIRED',
+      'publication:APPROVAL_POLICY_REQUIRED',
     ]);
     expect(refused.body.details[0].message).toBe(
       'Tender cannot be published: CRITERIA_WEIGHTS_INCOMPLETE',
