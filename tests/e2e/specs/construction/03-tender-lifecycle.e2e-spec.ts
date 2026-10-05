@@ -54,13 +54,22 @@ const config = e2eConfig();
 const RUN = randomUUID().slice(0, 8);
 
 /**
- * How long the bidding window stays open once the tender is published.
+ * How long the bidding window stays open, from the moment it is set.
  *
- * Long enough for publication's approval, two bids and the probes that must
- * happen before the deadline; the deadline itself is then waited for, on the
- * tender's status, never with a sleep.
+ * It must hold only what runs before the early-opening refusal: publication's
+ * approval round, the bids, a revision, a bidder's probes of another bid and
+ * that refusal — about two dozen calls, which take a few seconds. Every other
+ * probe runs after the deadline (#223 review round 1). The deadline itself is
+ * then waited for, on the tender's status, never with a sleep.
  */
-const BIDDING_WINDOW_MS = 75_000;
+const BIDDING_WINDOW_MS = 60_000;
+
+/**
+ * The least that must be left of the window when a step that needs it open
+ * starts. Less, and the spec fails saying so — not with a bid refused as
+ * `BID_WINDOW_CLOSED` or an opening that is suddenly allowed.
+ */
+const WINDOW_MARGIN_MS = 15_000;
 
 /** One poll per second: the gateway allows 300 calls a minute per user. */
 const POLL_INTERVAL_MS = 1_000;
@@ -98,6 +107,19 @@ const CRITERIA = [
 ] as const;
 
 const PRICE = { c1: '4200000000', c2: '4600000000' } as const;
+
+/** A bid's body: a price and an answer to each criterion. */
+function bidContent(price: string, note: string) {
+  return {
+    content: {
+      priceMinor: price,
+      answers: [
+        { criterionCode: 'technical', response: `Method statement — ${note}` },
+        { criterionCode: 'compliance', response: 'All documents attached to the file' },
+      ],
+    },
+  };
+}
 
 interface TenderBody {
   id: string;
@@ -180,6 +202,41 @@ async function until<T>(
     `Timed out after ${timeoutMs}ms waiting for ${description}${last ? `; ${last}` : ''}`,
   );
 }
+
+/**
+ * The closed reason of a construction-service refusal. The service sends it in
+ * one place only: first after the fixed prefix of `message` (`Award refused:
+ * AWARDER_IS_EVALUATOR. …`, `Bids are not opened: NOT_CLOSED`, `Bid refused:
+ * BID_WINDOW_CLOSED`, `Tender <id> cannot be published: APPROVAL_POLICY_REQUIRED`)
+ * — the body has no field of its own for it. So it is read at that anchored
+ * position, never searched for anywhere in the body.
+ */
+const REASON_PATTERN =
+  /^(?:(?:Approval|Award|Evaluation|Bid|Cancel) refused|Bids are not opened|Tender [A-Z0-9_]+ cannot be published): ([A-Z][A-Z_]*)\b/;
+
+function reasonOf(body: unknown): string | undefined {
+  const message = (body as { message?: unknown } | null)?.message;
+  return typeof message === 'string' ? REASON_PATTERN.exec(message)?.[1] : undefined;
+}
+
+/**
+ * A refusal, asserted whole: the status, the platform's top-level `code`, and
+ * — where the service names one — the closed reason (`reasonOf`).
+ */
+function expectRefusal(
+  response: ApiResponse<unknown>,
+  expected: { status: number; code: string; reason?: string },
+  what = 'the refusal',
+): void {
+  const body = JSON.stringify(response.body);
+  expect(response.status, `${what}: ${body}`).toBe(expected.status);
+  expect(errorCode(response.body), `${what}: ${body}`).toBe(expected.code);
+  if (expected.reason !== undefined) {
+    expect(reasonOf(response.body), `${what}: ${body}`).toBe(expected.reason);
+  }
+}
+
+const NOT_FOUND = { status: 404, code: 'NOT_FOUND' } as const;
 
 /** The same refusal: status, platform code and message (which never names a record). */
 function refusalOf(response: ApiResponse<unknown>): {
@@ -285,11 +342,7 @@ async function assertInvisibleToStranger(
     );
   }
   for (const [what, probe] of probes) {
-    const response = await probe();
-    expect(
-      response.status,
-      `another tenant tried to ${what}: ${JSON.stringify(response.body)}`,
-    ).toBe(404);
+    expectRefusal(await probe(), NOT_FOUND, `another tenant tried to ${what}`);
   }
   const list = await stranger.get('/v1/tenders?limit=100');
   expect(list.status).toBe(200);
@@ -316,6 +369,23 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
   let cancelledTenderId = '';
   const bid = { c1: '', c2: '' };
   const approvalIds: string[] = [];
+
+  /** When the bidding window was set (`BIDDING_WINDOW_MS` from then). */
+  let windowSetAt = 0;
+
+  /**
+   * Fails, saying why, when less than `WINDOW_MARGIN_MS` of the bidding window
+   * is left for a step that needs it open; returns the time used so far.
+   */
+  const expectWindowOpenFor = (step: string): number => {
+    const elapsed = Date.now() - windowSetAt;
+    expect(
+      BIDDING_WINDOW_MS - elapsed,
+      `${elapsed} ms of the ${BIDDING_WINDOW_MS} ms bidding window had passed before ${step}: ` +
+        'this runner is too slow for the window — lengthen BIDDING_WINDOW_MS',
+    ).toBeGreaterThanOrEqual(WINDOW_MARGIN_MS);
+    return elapsed;
+  };
 
   /** Correlation ids of the calls whose audit evidence is asserted at the end. */
   const evidence: { label: string; correlationId: string; events: string[] }[] = [];
@@ -587,8 +657,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     const refused = await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
       expectedVersion: current.version,
     });
-    expect(refused.status, JSON.stringify(refused.body)).toBe(422);
-    expect(JSON.stringify(refused.body)).toContain('APPROVAL_POLICY_REQUIRED');
+    expectRefusal(refused, {
+      status: 422,
+      code: 'BUSINESS_RULE_VIOLATION',
+      reason: 'APPROVAL_POLICY_REQUIRED',
+    });
     expect(await requests(author, tenderId, 'tender.publication')).toEqual([]);
     expect((await tender(author, tenderId)).status).toBe('DRAFT');
 
@@ -615,17 +688,18 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     );
   });
 
-  test('publication: requested, refused to its requester, granted by a second person, executed once', async ({
-    tenantB,
-  }) => {
+  test('publication: requested, refused to its requester, granted by a second person, executed once', async () => {
     const { author, p1 } = people;
 
-    // The real window, from now: the bids must arrive inside it.
+    // The real window, from now: the bids must arrive inside it. From here to
+    // the early-opening refusal, only what needs the window open runs, and each
+    // step that needs it first checks that enough of it is left.
     let current = await tender(author, tenderId);
+    windowSetAt = Date.now();
     const window = await send(author, 'PATCH', `/v1/tenders/${tenderId}`, {
       expectedVersion: current.version,
-      bidOpeningAt: new Date().toISOString(),
-      bidClosingAt: new Date(Date.now() + BIDDING_WINDOW_MS).toISOString(),
+      bidOpeningAt: new Date(windowSetAt).toISOString(),
+      bidClosingAt: new Date(windowSetAt + BIDDING_WINDOW_MS).toISOString(),
     });
     expect(window.status, JSON.stringify(window.body)).toBe(200);
     current = window.body as TenderBody;
@@ -647,18 +721,19 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     expect((await tender(author, tenderId)).status).toBe('DRAFT');
 
     // The requester holds the step's role in its organization — and is still
-    // refused: the person who asks is never the person who approves.
+    // refused: the person who asks is never the person who approves. The
+    // shared separation-of-duties rule names no closed reason.
     const self = correlation('self-approval');
-    const own = await decide(author, step, 'GRANT', self);
-    expect(own.status, JSON.stringify(own.body)).toBe(403);
-    expect(errorCode(own.body)).toBe('FORBIDDEN');
+    expectRefusal(
+      await decide(author, step, 'GRANT', self),
+      { status: 403, code: 'FORBIDDEN' },
+      'the requester approving its own request',
+    );
     evidence.push({
       label: 'self-approval refused',
       correlationId: self,
       events: ['TENDER_APPROVAL_ACTION'],
     });
-
-    await assertInvisibleToStranger(tenantB, { tenderId, approvalIds: [step] });
 
     const granted = await decide(p1, step);
     expect(granted.status, JSON.stringify(granted.body)).toBe(200);
@@ -685,15 +760,24 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     const [consumed] = await requests(author, tenderId, 'tender.publication');
     expect(consumed).toMatchObject({ id: request.id, status: 'CONSUMED' });
 
-    // Executed once: neither the old version nor the new one publishes again.
+    // Executed once: the approved version is a stale one now, and the new
+    // version is a tender that is no longer a draft. Neither asks for another
+    // approval.
     const after = await tender(author, tenderId);
-    for (const expectedVersion of [current.version, after.version]) {
-      const again = await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
-        expectedVersion,
-      });
-      expect(again.status, JSON.stringify(again.body)).toBeGreaterThanOrEqual(400);
-      expect(again.status).toBeLessThan(500);
-    }
+    expectRefusal(
+      await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
+        expectedVersion: current.version,
+      }),
+      { status: 409, code: 'OPTIMISTIC_LOCK_FAILED' },
+      'publishing again on the approved version',
+    );
+    expectRefusal(
+      await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
+        expectedVersion: after.version,
+      }),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION' },
+      'publishing the published tender',
+    );
     expect(await tender(author, tenderId)).toMatchObject({
       status: 'PUBLISHED',
       version: after.version,
@@ -701,20 +785,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     expect(await requests(author, tenderId, 'tender.publication')).toHaveLength(1);
   });
 
-  test('two qualified contractors bid; nobody else reads a bid, and a bidder reads only its own', async ({
-    tenantB,
-  }) => {
-    const { author, p1, c1, c2, c3 } = people;
-    const content = (price: string, note: string) => ({
-      content: {
-        priceMinor: price,
-        answers: [
-          { criterionCode: 'technical', response: `Method statement — ${note}` },
-          { criterionCode: 'compliance', response: 'All documents attached to the file' },
-        ],
-      },
-    });
+  test('two qualified contractors bid and one revises; a bidder reaches only its own bid; nothing opens early', async () => {
+    const { p1, c1, c2 } = people;
 
+    expectWindowOpenFor('the bids');
+    const receipts: Record<'c1' | 'c2', string> = { c1: '', c2: '' };
     for (const [key, contractor] of [
       ['c1', c1],
       ['c2', c2],
@@ -723,7 +798,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         contractor,
         'POST',
         `/v1/tenders/${tenderId}/bids`,
-        content(PRICE[key], key),
+        bidContent(PRICE[key], key),
       );
       expect(submitted.status, JSON.stringify(submitted.body)).toBe(201);
       const receipt = submitted.body as ReceiptBody;
@@ -732,91 +807,69 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       // The content is sealed: the answer is the receipt, never what was sent.
       expect(JSON.stringify(receipt)).not.toContain(PRICE[key]);
       bid[key] = receipt.bidId;
+      receipts[key] = receipt.receipt;
     }
 
+    // A bidder revises its sealed bid inside the window: a new revision, a new receipt.
+    const revised = await send(c2, 'PUT', `/v1/tenders/${tenderId}/bids/${bid.c2}`, {
+      expectedRevision: 1,
+      ...bidContent(PRICE.c2, 'c2, revised'),
+    });
+    expect(revised.status, JSON.stringify(revised.body)).toBe(200);
+    expect(revised.body).toMatchObject({ bidId: bid.c2, status: 'SUBMITTED', revision: 2 });
+    expect((revised.body as ReceiptBody).receipt).toMatch(/^[0-9a-f]{64}$/);
+    expect((revised.body as ReceiptBody).receipt).not.toBe(receipts.c2);
+    expect(JSON.stringify(revised.body)).not.toContain(PRICE.c2);
+
     // Each bidder sees its own receipt — no content, and not the other's.
-    for (const [key, contractor] of [
-      ['c1', c1],
-      ['c2', c2],
+    for (const [key, contractor, revision] of [
+      ['c1', c1, 1],
+      ['c2', c2, 2],
     ] as const) {
       const mine = await contractor.get(`/v1/tenders/${tenderId}/bids/mine`);
       expect(mine.status, JSON.stringify(mine.body)).toBe(200);
-      expect(mine.body).toMatchObject({ bidId: bid[key], status: 'SUBMITTED' });
+      expect(mine.body).toMatchObject({ bidId: bid[key], status: 'SUBMITTED', revision });
       expect(JSON.stringify(mine.body)).not.toContain(PRICE[key]);
     }
 
-    // A bidder asking for the other bidder's bid gets exactly what it gets for
-    // a bid that does not exist: the refusal says nothing about the other.
-    //
-    // FINDING F3 (#223): the owner route refuses a contractor of another
-    // organization **403** (`assertCanOpenBids`, a role check, runs before the
-    // ownership check), where ADR-066 § 4 says 404 for every other
-    // organization. Nothing is disclosed — the answer is the same for a bid that
-    // does not exist, which is asserted — but the status is not the ADR's. It is
-    // asserted as it is, and named, so that the fix changes this line.
-    const OWNER_ROUTE_REFUSAL = 403;
+    // A bidder changing the other bidder's bid gets exactly what it gets for a
+    // bid that does not exist: the refusal says nothing about the other. These
+    // need the window open (after the deadline, both would be BID_WINDOW_CLOSED).
     const missing = `BID_${RUN}_MISSING`;
-    const otherAndMissing: [string, number, (bidId: string) => Promise<ApiResponse<unknown>>][] = [
-      [
-        'read through the owner route',
-        OWNER_ROUTE_REFUSAL,
-        (id) => c1.get(`/v1/tenders/${tenderId}/bids/${id}`),
-      ],
+    const changes: [string, (bidId: string) => Promise<ApiResponse<unknown>>][] = [
       [
         'replace',
-        404,
         (id) =>
           send(c1, 'PUT', `/v1/tenders/${tenderId}/bids/${id}`, {
             expectedRevision: 1,
-            ...content('1', 'probe'),
+            ...bidContent('1', 'probe'),
           }),
       ],
       [
         'withdraw',
-        404,
         (id) =>
           send(c1, 'POST', `/v1/tenders/${tenderId}/bids/${id}/withdraw`, { expectedRevision: 1 }),
       ],
     ];
-    for (const [what, status, probe] of otherAndMissing) {
-      const other = refusalOf(await probe(bid.c2));
-      expect(other.status, `a bidder tried to ${what} another bidder's bid`).toBe(status);
-      expect(other, `${what}: the other bidder's bid against a missing one`).toEqual(
+    for (const [what, probe] of changes) {
+      const other = await probe(bid.c2);
+      expectRefusal(other, NOT_FOUND, `a bidder tried to ${what} another bidder's bid`);
+      expect(refusalOf(other), `${what}: the other bidder's bid against a missing one`).toEqual(
         refusalOf(await probe(missing)),
       );
     }
 
-    // A contractor that did not bid reads nothing.
-    const nonBidder = await c3.get(`/v1/tenders/${tenderId}/bids/mine`);
-    expect(nonBidder.status, JSON.stringify(nonBidder.body)).toBe(404);
-    for (const id of [bid.c1, bid.c2]) {
-      const asOwner = refusalOf(await c3.get(`/v1/tenders/${tenderId}/bids/${id}`));
-      expect(asOwner.status).toBe(OWNER_ROUTE_REFUSAL);
-      expect(asOwner).toEqual(refusalOf(await c3.get(`/v1/tenders/${tenderId}/bids/${missing}`)));
-      // C3 is not qualified: the eligibility gate answers before anything about
-      // the tender is looked at — the same answer as for a tender that does not exist.
-      const replace = (path: string) =>
-        send(c3, 'PUT', path, { expectedRevision: 1, ...content('1', 'probe') });
-      const replaced = refusalOf(await replace(`/v1/tenders/${tenderId}/bids/${id}`));
-      expect(replaced.status).toBeGreaterThanOrEqual(400);
-      expect(replaced).toEqual(
-        refusalOf(await replace(`/v1/tenders/TND_${RUN}_MISSING/bids/${id}`)),
-      );
-    }
-
-    // The owner, before the opening: how many and when — not who, not what.
-    const counted = await author.get(`/v1/tenders/${tenderId}/bids`);
-    expect(counted.status, JSON.stringify(counted.body)).toBe(200);
-    expect(counted.body).toMatchObject({ opened: false, bidCount: 2, bids: [] });
-    expect(JSON.stringify(counted.body)).not.toContain(org.c1);
-    expect(JSON.stringify(counted.body)).not.toContain(PRICE.c1);
-
     // Nothing opens before the deadline.
-    const early = await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids/proposal`, {});
-    expect(early.status, JSON.stringify(early.body)).toBe(422);
-    expect(JSON.stringify(early.body)).toContain('NOT_CLOSED');
-
-    await assertInvisibleToStranger(tenantB, { tenderId, bidIds: [bid.c1, bid.c2] });
+    const elapsed = expectWindowOpenFor('the early-opening refusal');
+    test.info().annotations.push({
+      type: 'bidding window',
+      description: `${elapsed} ms of ${BIDDING_WINDOW_MS} ms used before the early-opening refusal`,
+    });
+    expectRefusal(
+      await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids/proposal`, {}),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'NOT_CLOSED' },
+      'an opening proposed before the deadline',
+    );
   });
 
   test('the deadline closes the tender, and a bid after it is refused', async () => {
@@ -839,9 +892,77 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         answers: [{ criterionCode: 'technical', response: 'Too late' }],
       },
     });
-    expect(late.status, JSON.stringify(late.body)).toBe(422);
+    expectRefusal(
+      late,
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'BID_WINDOW_CLOSED' },
+      'a revision after the deadline',
+    );
     const mine = await c1.get(`/v1/tenders/${tenderId}/bids/mine`);
     expect(mine.body).toMatchObject({ bidId: bid.c1, revision: 1 });
+  });
+
+  test('closed, not yet opened: nobody else reads a bid, the owner sees only a count, another tenant sees nothing', async ({
+    tenantB,
+  }) => {
+    const { author, c1, c3 } = people;
+    const missing = `BID_${RUN}_MISSING`;
+
+    // FINDING F3 (#223): the owner route refuses a contractor of another
+    // organization **403** (`assertCanOpenBids`, a role check, runs before the
+    // ownership check), where ADR-066 § 4 says 404 for every other
+    // organization. Nothing is disclosed — the answer is the same for a bid that
+    // does not exist, which is asserted — but the status is not the ADR's. It is
+    // asserted as it is, and named, so that the fix changes this line.
+    const OWNER_ROUTE_REFUSAL = { status: 403, code: 'FORBIDDEN' } as const;
+
+    // A bidder reading the other bidder's bid through the owner's route: the
+    // same answer as for a bid that does not exist.
+    const other = await c1.get(`/v1/tenders/${tenderId}/bids/${bid.c2}`);
+    expectRefusal(other, OWNER_ROUTE_REFUSAL, "a bidder reading another bidder's bid");
+    expect(refusalOf(other)).toEqual(
+      refusalOf(await c1.get(`/v1/tenders/${tenderId}/bids/${missing}`)),
+    );
+
+    // A contractor that did not bid reads nothing.
+    expectRefusal(
+      await c3.get(`/v1/tenders/${tenderId}/bids/mine`),
+      NOT_FOUND,
+      'a contractor that did not bid reading its bid',
+    );
+    for (const id of [bid.c1, bid.c2]) {
+      const asOwner = await c3.get(`/v1/tenders/${tenderId}/bids/${id}`);
+      expectRefusal(asOwner, OWNER_ROUTE_REFUSAL, 'a contractor reading a bid it did not make');
+      expect(refusalOf(asOwner)).toEqual(
+        refusalOf(await c3.get(`/v1/tenders/${tenderId}/bids/${missing}`)),
+      );
+      // C3 is not qualified: the eligibility gate answers before anything about
+      // the tender is looked at — the same answer as for a tender that does not exist.
+      const replace = (path: string) =>
+        send(c3, 'PUT', path, { expectedRevision: 1, ...bidContent('1', 'probe') });
+      const replaced = await replace(`/v1/tenders/${tenderId}/bids/${id}`);
+      expectRefusal(
+        replaced,
+        { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'BIDDER_NOT_ELIGIBLE' },
+        'a contractor that is not qualified replacing a bid',
+      );
+      expect(refusalOf(replaced)).toEqual(
+        refusalOf(await replace(`/v1/tenders/TND_${RUN}_MISSING/bids/${id}`)),
+      );
+    }
+
+    // The owner, before the opening: how many and when — not who, not what.
+    const counted = await author.get(`/v1/tenders/${tenderId}/bids`);
+    expect(counted.status, JSON.stringify(counted.body)).toBe(200);
+    expect(counted.body).toMatchObject({ opened: false, bidCount: 2, bids: [] });
+    expect(JSON.stringify(counted.body)).not.toContain(org.c1);
+    expect(JSON.stringify(counted.body)).not.toContain(PRICE.c1);
+
+    await assertInvisibleToStranger(tenantB, {
+      tenderId,
+      bidIds: [bid.c1, bid.c2],
+      approvalIds: [...approvalIds],
+    });
+    expect((await tender(author, tenderId)).status).toBe('CLOSED');
   });
 
   test('opening takes two people (Q-91) and opens against audit-service’s receipts', async ({
@@ -852,9 +973,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     const proposed = await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids/proposal`, {});
     expect(proposed.status, JSON.stringify(proposed.body)).toBe(200);
 
-    const alone = await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids`, {});
-    expect(alone.status, JSON.stringify(alone.body)).toBe(422);
-    expect(JSON.stringify(alone.body)).toContain('SECOND_PERSON_REQUIRED');
+    expectRefusal(
+      await send(p1, 'POST', `/v1/tenders/${tenderId}/open-bids`, {}),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'SECOND_PERSON_REQUIRED' },
+      'the proposer opening alone',
+    );
     expect((await tender(author, tenderId)).status).toBe('CLOSED');
 
     // audit-service may still be catching up with the last receipts: 503 means
@@ -897,7 +1020,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     const refused = await people.conflicted.get(`/v1/tenders/${tenderId}/evaluation`, {
       correlationId: coi,
     });
-    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expectRefusal(
+      refused,
+      { status: 403, code: 'FORBIDDEN', reason: 'CONFLICT_OF_INTEREST' },
+      'a member of a bidding organization reading the evaluation',
+    );
     expect(JSON.stringify(refused.body)).not.toContain(PRICE.c2);
     evidence.push({
       label: 'conflict of interest refused',
@@ -973,7 +1100,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       { bidId: bid.c1 },
       byEvaluator,
     );
-    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expectRefusal(
+      refused,
+      { status: 403, code: 'FORBIDDEN', reason: 'AWARDER_IS_EVALUATOR' },
+      'the evaluator awarding',
+    );
     evidence.push({
       label: 'awarder is evaluator refused',
       correlationId: byEvaluator,
@@ -990,16 +1121,33 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     // Nor does the evaluator approve it — and the requester never does.
     // It names the bid and the justification, so even reading it is held to the
     // award's rules (Q-84, PR 11 addendum (3)).
-    expect((await evaluator.get(`/v1/approvals/${step}`)).status).toBe(403);
+    const approverIsEvaluator = {
+      status: 403,
+      code: 'FORBIDDEN',
+      reason: 'APPROVER_IS_EVALUATOR',
+    } as const;
+    expectRefusal(
+      await evaluator.get(`/v1/approvals/${step}`),
+      approverIsEvaluator,
+      'the evaluator reading the award approval',
+    );
     const evaluatorApproves = correlation('approver-is-evaluator');
-    const byEvaluatorStep = await decide(evaluator, step, 'GRANT', evaluatorApproves, p1);
-    expect(byEvaluatorStep.status, JSON.stringify(byEvaluatorStep.body)).toBe(403);
+    expectRefusal(
+      await decide(evaluator, step, 'GRANT', evaluatorApproves, p1),
+      approverIsEvaluator,
+      'the evaluator approving the award',
+    );
     evidence.push({
       label: 'approver is evaluator refused',
       correlationId: evaluatorApproves,
       events: ['TENDER_APPROVAL_ACTION'],
     });
-    expect((await decide(awarder, step)).status).toBe(403);
+    // The shared separation-of-duties rule names no closed reason.
+    expectRefusal(
+      await decide(awarder, step),
+      { status: 403, code: 'FORBIDDEN' },
+      'the awarder approving its own request',
+    );
 
     await assertInvisibleToStranger(tenantB, { tenderId, bidIds: [bid.c1], approvalIds: [step] });
 
@@ -1019,8 +1167,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       { bidId: bid.c1, justification: 'A reason the approver never saw' },
       changing,
     );
-    expect(stale.status, JSON.stringify(stale.body)).toBe(409);
-    expect(JSON.stringify(stale.body)).toContain('APPROVAL_STALE');
+    expectRefusal(
+      stale,
+      { status: 409, code: 'CONFLICT', reason: 'APPROVAL_STALE' },
+      'an award that is not the one approved',
+    );
     evidence.push({
       label: 'stale approval refused',
       correlationId: changing,
@@ -1054,8 +1205,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     const notEligible = await send(awarder, 'POST', `/v1/tenders/${tenderId}/award`, {
       bidId: bid.c1,
     });
-    expect(notEligible.status, JSON.stringify(notEligible.body)).toBe(422);
-    expect(JSON.stringify(notEligible.body)).toContain('WINNER_NOT_ELIGIBLE');
+    expectRefusal(
+      notEligible,
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'WINNER_NOT_ELIGIBLE' },
+      'an award to a suspended contractor',
+    );
     expect((await tender(author, tenderId)).status).toBe('EVALUATED');
 
     const reinstated = await systemAdmin.post(`/v1/suppliers/${supplier.c1}/reinstate`, {
