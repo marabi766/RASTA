@@ -70,7 +70,11 @@ const KNOWN_KEYWORDS = new Set([
   'const',
   'enum',
   'description',
+  'format',
 ]);
+
+/** What `Date#toISOString` writes, the only date-time the platform envelope carries. */
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 export function validate(
   document: OpenAPIObject,
@@ -106,6 +110,11 @@ export function validate(
   switch (schema.type) {
     case 'string':
       if (typeof value !== 'string') errors.push(`${at}: not a string`);
+      else if (schema.format === 'date-time' && !DATE_TIME.test(value)) {
+        errors.push(`${at}: not an ISO 8601 date-time`);
+      } else if (schema.format !== undefined && schema.format !== 'date-time') {
+        errors.push(`${at}: the validator does not know format ${String(schema.format)}`);
+      }
       break;
     case 'array':
       if (!Array.isArray(value)) return [`${at}: not an array`];
@@ -153,18 +162,6 @@ export function responseSchemaOf(
   return response?.content?.['application/json']?.schema;
 }
 
-/**
- * `AllExceptionsFilter` adds `timestamp` (and `path`) to every error body, and the shared `ApiError`
- * does not document them — an envelope matter older than the closed reasons and not this contract's
- * to settle (reported on #227). They are set aside so that what is checked is the code, the message
- * and `details`, which is what a client branches on.
- */
-function withoutEnvelopeExtras(body: unknown): unknown {
-  if (typeof body !== 'object' || body === null) return body;
-  const { timestamp: _timestamp, path: _path, ...rest } = body as Record<string, unknown>;
-  return rest;
-}
-
 /** Every recorded refusal that the document does not describe, one line each. */
 export function violationsOf(
   app: INestApplication,
@@ -178,7 +175,7 @@ export function violationsOf(
       violations.push(`${refusal.key} ${refusal.status}: the document declares no such response`);
       continue;
     }
-    for (const error of validate(document, schema, withoutEnvelopeExtras(refusal.body))) {
+    for (const error of validate(document, schema, refusal.body)) {
       violations.push(`${refusal.key} ${refusal.status}: ${error}`);
     }
   }

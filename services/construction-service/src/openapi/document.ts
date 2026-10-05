@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
+import { apiErrorSchema as sharedApiErrorSchema } from '@rasta/contracts';
 import {
   tenderApprovalRequestViewSchema,
   listTenderApprovalsQuerySchema,
@@ -154,13 +155,14 @@ const errorDetailSchema = z
   .object({ path: z.string(), message: z.string(), code: z.string().optional() })
   .strict();
 
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(errorDetailSchema).optional(),
-  })
+/**
+ * The platform error envelope exactly as `AllExceptionsFilter` emits it: `correlationId` and
+ * `timestamp` always, `traceId` and `path` when the request context has them, `details` only when
+ * non-empty. Taken from the shared schema so the two cannot drift; only `details` and strictness are
+ * construction's own.
+ */
+const apiErrorSchema = sharedApiErrorSchema
+  .extend({ details: z.array(errorDetailSchema).optional() })
   .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>

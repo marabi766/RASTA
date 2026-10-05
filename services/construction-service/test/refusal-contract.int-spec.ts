@@ -234,6 +234,10 @@ describe('the refusal contract: real refusals against the generated OpenAPI docu
       code: 'BUSINESS_RULE_VIOLATION',
       message: 'Award refused',
       details: [{ path, code, message: 'x' }],
+      correlationId: 'corr-1',
+      traceId: 'trace-1',
+      timestamp: '2026-10-05T00:00:00.000Z',
+      path: '/v1/tenders/TND_X/award',
     });
 
     it('accepts the answers the document describes, including the opening area the award now lists', () => {
