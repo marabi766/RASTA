@@ -24,7 +24,7 @@ import {
 } from '../approval/approval.state-machine';
 import type { ApprovalBindingView, DecisionDto } from '../approval/dto';
 import { refusalCodeOf } from './bid-access-audit';
-import { approvalStale } from './tender-approval.errors';
+import { approvalStale, type TenderApprovalRefusal } from './tender-approval.errors';
 import { OwnerIdentity } from './owner-identity';
 import { TenderRepository } from './tender.repository';
 import { TenderApprovalAudit } from './tender-approval.audit';
@@ -35,6 +35,7 @@ import {
   type ListTenderApprovalsQuery,
   type TenderApprovalRequestView,
 } from './tender-approval.dto';
+import { refusal } from '../shared/refusal';
 
 /** The outcome of the decision transaction: committed, or committed having found the request stale. */
 type Decided = 'DECIDED' | 'STALE';
@@ -449,10 +450,12 @@ export class TenderApprovalService {
 
   // -- errors --------------------------------------------------------------------------------------------
 
-  private refuse(code: typeof ERROR_CODES.FORBIDDEN, reason: string, message: string): RastaError {
-    return new RastaError(code, `Approval refused: ${reason}. ${message}`, {
-      internalContext: { refusals: [reason] },
-    });
+  private refuse(
+    code: typeof ERROR_CODES.FORBIDDEN,
+    reason: TenderApprovalRefusal,
+    message: string,
+  ): RastaError {
+    return refusal(code, `Approval refused: ${reason}. ${message}`, 'approval', [reason]);
   }
 
   private conflict(aggregate: string, id: string): RastaError {

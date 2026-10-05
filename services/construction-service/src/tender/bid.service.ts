@@ -29,6 +29,7 @@ import type {
   SubmitBidDto,
   WithdrawBidDto,
 } from './bid.dto';
+import { ruleRefusal } from '../shared/refusal';
 
 /** The closed codes a refused bid names in its 422 message (never any content). */
 export const BID_REFUSALS = [
@@ -549,9 +550,8 @@ export class BidService {
   }
 
   private refused(subject: string, refusals: readonly BidRefusal[]): RastaError {
-    return RastaError.businessRule(`Bid refused: ${refusals.join(', ')}`, {
+    return ruleRefusal(`Bid refused: ${refusals.join(', ')}`, 'bid', refusals, {
       subject,
-      refusals,
       correlationId: getContext().correlationId,
     });
   }

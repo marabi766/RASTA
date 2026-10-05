@@ -28,6 +28,7 @@ import { OrganizationMovedConsumer } from '../src/events/organization-moved.cons
 import { SupplierStandingConsumer } from '../src/events/supplier-standing.consumer';
 import { StandingBootstrap } from '../src/tender/standing-bootstrap';
 import { PolicyReconciliationSweeper } from '../src/approval/policy-reconciliation.sweeper';
+import { recordRefusals, settleRefusals, type RefusalRecorder } from './refusal-contract';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness
@@ -51,6 +52,8 @@ export interface ApiHarness {
   evidence: FakeTenderEvidence;
   /** identity-service as the approval of an opening sees it. */
   memberships: FakeMemberships;
+  /** Every 403/409/422 this application has answered, as the contract check will see them. */
+  refusals: RefusalRecorder;
   close(): Promise<void>;
 }
 
@@ -77,6 +80,18 @@ export interface TestClaims {
  * Not a JWT and deliberately not shaped like one: a value that looked like a
  * signed token would invite somebody to believe this suite verifies signatures.
  */
+/**
+ * The closed reasons of a refusal, each as `<area>:<CODE>` from `details[].path` and
+ * `details[].code` (docs/06 § 6.7); `undefined` when the body carries no `details` at all.
+ */
+export function reasonsOf(body: unknown): string[] | undefined {
+  const details = (body as { details?: unknown } | null)?.details;
+  if (details === undefined) return undefined;
+  return (details as { path: string; code?: string }[]).map(
+    (detail) => `${detail.path}:${detail.code}`,
+  );
+}
+
 export function bearer(claims: TestClaims): string {
   return `test.${Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')}`;
 }
@@ -271,6 +286,8 @@ export async function startApi(): Promise<ApiHarness> {
   // Same as main.ts: without it every `@Controller({ version: '1' })` route is
   // mounted at a path no client uses, and the whole suite would 404.
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+  // Observes every refusal a suite provokes; `close()` checks them against the published contract.
+  const refusals = recordRefusals(app);
   await app.init();
 
   return {
@@ -280,8 +297,13 @@ export async function startApi(): Promise<ApiHarness> {
     hierarchy,
     evidence: moduleRef.get<FakeTenderEvidence>(TENDER_EVIDENCE_SOURCE),
     memberships: moduleRef.get<FakeMemberships>(MEMBERSHIP_SOURCE),
+    refusals,
     close: async () => {
-      await app.close();
+      try {
+        settleRefusals(app, refusals);
+      } finally {
+        await app.close();
+      }
     },
   };
 }

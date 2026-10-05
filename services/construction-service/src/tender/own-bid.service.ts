@@ -11,6 +11,7 @@ import { BidRepository } from './bid.repository';
 import { buildMatrix, maxTotalScaled } from './evaluation-matrix';
 import type { OwnEvaluationView } from './evaluation.dto';
 import type { OwnOpenedBidView } from './bid.dto';
+import { ruleRefusal } from '../shared/refusal';
 
 const OWN_BID_CONTENT = 'OWN_BID_CONTENT';
 
@@ -67,7 +68,7 @@ export class OwnBidService {
       const refusal = !bid
         ? RastaError.notFound('Bid', tenderId)
         : tender.openedAt === null || NOT_OPENED_STATES.includes(bid.status)
-          ? RastaError.businessRule('Bids are not opened: NOT_OPENED', { refusals: ['NOT_OPENED'] })
+          ? ruleRefusal('Bids are not opened: NOT_OPENED', 'opening', ['NOT_OPENED'])
           : null;
       if (refusal) {
         await this.log(
@@ -100,9 +101,7 @@ export class OwnBidService {
             const bid = await this.bids.findBidOf(tx, tenderId, bidder);
             if (!tender || !bid) throw RastaError.notFound('Bid', tenderId);
             if (tender.openedAt === null || NOT_OPENED_STATES.includes(bid.status)) {
-              throw RastaError.businessRule('Bids are not opened: NOT_OPENED', {
-                refusals: ['NOT_OPENED'],
-              });
+              throw ruleRefusal('Bids are not opened: NOT_OPENED', 'opening', ['NOT_OPENED']);
             }
             const at = await transactionNow(tx);
 

@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import {
+  reasonsOf,
   actor,
   apiTenant,
   auditorActor,
@@ -195,6 +196,7 @@ describe('evaluation API', () => {
       .send({ decision: 'DISQUALIFIED', reasonCode: 'OTHER', reasonText: 'Changed my mind' });
     expect(different.status).toBe(422);
     expect(different.body.message).toContain('BID_ALREADY_DECIDED');
+    expect(reasonsOf(different.body)).toEqual(['evaluation:BID_ALREADY_DECIDED']);
 
     const disqualified = await http()
       .post(`/v1/tenders/${tenderId}/bids/${second.bidId}/qualification`)
@@ -320,6 +322,8 @@ describe('evaluation API', () => {
       );
       expect(conflicted.status).toBe(403);
       expect(conflicted.body.message).toContain('CONFLICT_OF_INTEREST');
+      expect(reasonsOf(conflicted.body)).toEqual(['evaluation:CONFLICT_OF_INTEREST']);
+      expect(foreign.body).not.toHaveProperty('details');
     }
     const row = await runUnscoped('the suite reads the tender', () =>
       w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),

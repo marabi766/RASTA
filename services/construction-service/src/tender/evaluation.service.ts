@@ -45,6 +45,7 @@ import type {
   ScoreBidDto,
   ScoreRecordedView,
 } from './evaluation.dto';
+import { refusal, ruleRefusal } from '../shared/refusal';
 
 /**
  * The closed reasons an evaluation command or read is refused for (ADR-067 § 4): the metric's
@@ -930,17 +931,17 @@ export class EvaluationService {
 
   private forbid(reason: EvaluationRefusal, message: string): RastaError {
     evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
-    return new RastaError(ERROR_CODES.FORBIDDEN, `Evaluation refused: ${reason}. ${message}`, {
-      internalContext: { refusals: [reason] },
-    });
+    return refusal(
+      ERROR_CODES.FORBIDDEN,
+      `Evaluation refused: ${reason}. ${message}`,
+      'evaluation',
+      [reason],
+    );
   }
 
   private rule(reason: EvaluationRefusal, context: Record<string, unknown> = {}): RastaError {
     evaluationRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
-    return RastaError.businessRule(`Evaluation refused: ${reason}`, {
-      ...context,
-      refusals: [reason],
-    });
+    return ruleRefusal(`Evaluation refused: ${reason}`, 'evaluation', [reason], context);
   }
 
   private conflict(aggregate: 'Bid' | 'Tender', id: string): RastaError {
