@@ -67,7 +67,8 @@ export interface CallOptions {
  */
 export class Actor {
   constructor(
-    readonly username: E2eUser,
+    /** A seeded user (`E2E_USERS`), or an account a scenario provisioned through the platform. */
+    readonly username: E2eUser | (string & {}),
     private readonly context: APIRequestContext,
     private readonly token: string,
     private readonly config: E2eConfig,
@@ -85,6 +86,11 @@ export class Actor {
     return this.call('PATCH', path, options);
   }
 
+  /** A whole replacement — a tender's criteria, a bid's next revision. */
+  put(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
+    return this.call('PUT', path, options);
+  }
+
   /**
    * Deletion, which on this platform is a tombstone rather than a removal.
    *
@@ -97,7 +103,7 @@ export class Actor {
   }
 
   async call(
-    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
     path: string,
     options: CallOptions = {},
   ): Promise<ApiResponse<unknown>> {

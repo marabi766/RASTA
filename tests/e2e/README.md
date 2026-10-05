@@ -17,6 +17,7 @@ Kafka منتشر می‌شود:
 | `04-financial-safety`      | خرج بیش از موجودی، Idempotency، اعتراض، عدد بزرگ‌تر از `Number`                                                |
 | `05-correlation`           | یک `correlationId` از HTTP تا Header و Envelope رویداد روی Kafka                                               |
 | `construction/01-…`        | CON-001: بسته بودن بی‌توکن، ساخت Idempotent، چرخهٔ پروژه و نیاز، ۴۰۹ نسخهٔ کهنه، ۴۰۴ میان‌مستأجری، رکورد Audit |
+| `construction/03-…`        | CON-002: مناقصه سرتاسر — موافقت‌ها، پیشنهاد مهرشده، بستن، بازگشایی چهارچشمی، ارزیابی، انتخاب، ابطال، ۴۰۴       |
 
 `docs/14 § 14.7` ردیف‌های ۱، ۴، ۸ و ۹ — با نیمه Marketplace حذف‌شده، نه
 شبیه‌سازی‌شده: قرارداد `ORDER_*` طبق ADR-032 موکول است و نوشتن Payload سرویسی که
@@ -50,6 +51,9 @@ pnpm --filter @rasta/economic-service build && \
   pnpm --filter @rasta/economic-service start     # :3112
 pnpm --filter @rasta/construction-service build && \
   pnpm --filter @rasta/construction-service start # :3110 (CON-001؛ E2E_CONSTRUCTION_URL)
+                                                 # CON-002: با CONSTRUCTION_TENDER_KEKS/_KEK_CURRENT
+pnpm --filter @rasta/supplier-service build && \
+  pnpm --filter @rasta/supplier-service start     # :3108 (CON-002؛ E2E_SUPPLIER_URL)
 pnpm --filter @rasta/api-gateway build && \
   pnpm --filter @rasta/api-gateway start          # :3000 (یا PORT_API_GATEWAY)
 
