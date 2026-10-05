@@ -10,8 +10,10 @@ const OWNER_NOTE =
   'refused whenever present, whatever other role the user holds), a service token and a member of any ' +
   'organization that bid on the tender (on every route here, the access log included; judged on the ' +
   'token and on identity-service now, which cannot be reached: 502/504, nothing shown) are refused. A ' +
-  'tender of another organization ' +
-  'answers 404, never 403, and the attempt is logged under its owner.';
+  'tender of another organization answers 404, never 403, whatever roles the caller holds: ownership ' +
+  'is checked before any role, so a contractor of another organization gets exactly what a missing ' +
+  'tender gets; the attempt is logged under its owner. 403 is only ever answered to a member of the ' +
+  'owning organization.';
 
 const AUDIT_NOTE =
   'Every call is audited in the same transaction: a bid_access_log row and BID_ACCESSED per bid read, ' +

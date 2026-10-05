@@ -38,16 +38,18 @@ import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-a
  *   also an authority — and the refusal of approving one's own request is the
  *   real rule, not a missing role. Samples (`isSample`); no legal authority is
  *   claimed (ADR-023, Q-02).
- * - `tenantB` (`ORG-DEH-0002`) is the other tenant, probed at every step;
+ * - `tenantB` (`ORG-DEH-0002`) is the other tenant, probed at every step, and
+ *   **CB** a `CONTRACTOR` provisioned per run acting for it, for the open-tender
+ *   probes (the administrator stops at the contractor role gate);
  *   `systemAdmin` reads audit-service.
  *
- * ## Through the front door, with one exception that is a finding
+ * ## Through the front door
  *
- * `GET /v1/open-tenders` — how a contractor finds a tender — is not routed by
- * api-gateway, and neither is `/v1/criteria-templates` (reported on #223). The
- * contractors are given the tender id the way an invitation would carry it,
- * and the criteria are written out on the tender. Nothing here reaches a
- * service directly.
+ * Every call goes through api-gateway; nothing here reaches a service directly.
+ * The owner applies criteria from its own template (`/v1/criteria-templates`),
+ * and the second tender carries criteria written out — both are product paths.
+ * The invited contractors find the RESTRICTED tender through
+ * `/v1/open-tenders`; C3, which is not invited, does not.
  */
 
 const config = e2eConfig();
@@ -57,10 +59,12 @@ const RUN = randomUUID().slice(0, 8);
  * How long the bidding window stays open, from the moment it is set.
  *
  * It must hold only what runs before the early-opening refusal: publication's
- * approval round, the bids, a revision, a bidder's probes of another bid and
- * that refusal — about two dozen calls, which take a few seconds. Every other
- * probe runs after the deadline (#223 review round 1). The deadline itself is
- * then waited for, on the tender's status, never with a sleep.
+ * approval round, the invited contractors finding the tender (and C3 not), the
+ * bids, a revision, a bidder's probes of another bid and that refusal — a few
+ * dozen calls, about a second locally. Every other probe runs after it (#223
+ * review round 1), and each call that needs the window first checks that
+ * enough of it is left (`inWindow`). The deadline itself is then waited for,
+ * on the tender's status, never with a sleep.
  */
 const BIDDING_WINDOW_MS = 60_000;
 
@@ -87,6 +91,7 @@ const SURNAMES: Record<string, string> = {
   c1: 'پیمانکار یکم',
   c2: 'پیمانکار دوم',
   c3: 'پیمانکار سوم',
+  cb: 'پیمانکار دیگر',
 };
 
 const CRITERIA = [
@@ -360,13 +365,14 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
   const org = { owner: '', c1: '', c2: '', c3: '' };
   const supplier = { c1: '', c2: '' };
   let people: Record<
-    'author' | 'p1' | 'p2' | 'evaluator' | 'awarder' | 'conflicted' | 'c1' | 'c2' | 'c3',
+    'author' | 'p1' | 'p2' | 'evaluator' | 'awarder' | 'conflicted' | 'c1' | 'c2' | 'c3' | 'cb',
     Actor
   >;
 
   let projectId = '';
   let tenderId = '';
   let cancelledTenderId = '';
+  let templateId = '';
   const bid = { c1: '', c2: '' };
   const approvalIds: string[] = [];
 
@@ -386,6 +392,19 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     ).toBeGreaterThanOrEqual(WINDOW_MARGIN_MS);
     return elapsed;
   };
+
+  /**
+   * A call that needs the window open, made only after `expectWindowOpenFor`
+   * shows enough of it is left for this call (#223 review: before each one,
+   * not once for a group of them).
+   */
+  const inWindow = <T>(step: string, call: () => Promise<T>): Promise<T> => {
+    expectWindowOpenFor(step);
+    return call();
+  };
+
+  /** The tender version publication was approved and executed on. */
+  let approvedVersion = 0;
 
   /** Correlation ids of the calls whose audit evidence is asserted at the end. */
   const evidence: { label: string; correlationId: string; events: string[] }[] = [];
@@ -448,6 +467,9 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       c1: await provision('c1', org.c1, ['CONTRACTOR']),
       c2: await provision('c2', org.c2, ['CONTRACTOR']),
       c3: await provision('c3', org.c3, ['CONTRACTOR']),
+      // A contractor acting for the other tenant: the open-tender probes need a
+      // caller the bidder's role gate admits, so that what they test is visibility.
+      cb: await provision('cb', ORG.b, ['CONTRACTOR']),
     };
 
     // The conflicted owner administrator also belongs to a bidding contractor,
@@ -468,6 +490,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       c1: org.c1,
       c2: org.c2,
       c3: org.c3,
+      cb: ORG.b,
     } as const;
     const signedIn = {} as typeof people;
     for (const [key, account] of Object.entries(accounts) as [
@@ -643,13 +666,55 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       expect(invitation.status, JSON.stringify(invitation.body)).toBe(201);
     }
 
+    // The owner's criteria come from a template of its own organization (CON-002
+    // PR 4a): written once, listed and read back, then copied onto the tender.
+    const label = `Road works ${RUN} (sample)`;
+    const written = await author.post('/v1/criteria-templates', {
+      body: { label, criteria: CRITERIA },
+    });
+    expect(written.status, JSON.stringify(written.body)).toBe(201);
+    expect(written.body).toMatchObject({
+      organizationId: org.owner,
+      label,
+      version: 1,
+      totalWeightBp: 10_000,
+    });
+    templateId = (written.body as { id: string }).id;
+    const listed = await author.get(
+      `/v1/criteria-templates?label=${encodeURIComponent(label)}&limit=10`,
+    );
+    expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+    expect((listed.body as { items: { id: string }[] }).items.map((item) => item.id)).toEqual([
+      templateId,
+    ]);
+    const read = await author.get(`/v1/criteria-templates/${templateId}`);
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body).toMatchObject({ id: templateId, criteria: CRITERIA });
+
     current = await tender(author, tenderId);
     const criteria = await send(author, 'PUT', `/v1/tenders/${tenderId}/criteria`, {
       expectedVersion: current.version,
-      criteria: CRITERIA,
+      templateId,
     });
     expect(criteria.status, JSON.stringify(criteria.body)).toBe(200);
     expect(criteria.body).toMatchObject({ totalWeightBp: 10_000, complete: true });
+    expect(
+      (criteria.body as { items: { code: string; templateId: string | null }[] }).items,
+    ).toEqual(CRITERIA.map(({ code }) => expect.objectContaining({ code, templateId })));
+
+    // The second tender's criteria are written out: the other product path.
+    const second = await tender(author, cancelledTenderId);
+    const inline = await send(author, 'PUT', `/v1/tenders/${cancelledTenderId}/criteria`, {
+      expectedVersion: second.version,
+      criteria: CRITERIA,
+    });
+    expect(inline.status, JSON.stringify(inline.body)).toBe(200);
+    expect(inline.body).toMatchObject({ totalWeightBp: 10_000, complete: true });
+    expect(
+      (inline.body as { items: { templateId: string | null }[] }).items.every(
+        (item) => item.templateId === null,
+      ),
+    ).toBe(true);
 
     // Everything a publication needs is in place but the policy: refused, and
     // no approval request is opened — an absent policy is not "nothing to approve".
@@ -667,6 +732,18 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
 
     await assertInvisibleToStranger(tenantB, { tenderId });
     await assertInvisibleToStranger(tenantB, { tenderId: cancelledTenderId });
+
+    // Another tenant neither reads the template nor finds it in its own list.
+    expectRefusal(
+      await tenantB.get(`/v1/criteria-templates/${templateId}`),
+      NOT_FOUND,
+      "another tenant reading the owner's criteria template",
+    );
+    const theirs = await tenantB.get(
+      `/v1/criteria-templates?label=${encodeURIComponent(label)}&limit=10`,
+    );
+    expect(theirs.status, JSON.stringify(theirs.body)).toBe(200);
+    expect((theirs.body as { items: unknown[] }).items).toEqual([]);
   });
 
   test('the union writes the three tender policies and the platform approves them', async ({
@@ -693,7 +770,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
 
     // The real window, from now: the bids must arrive inside it. From here to
     // the early-opening refusal, only what needs the window open runs, and each
-    // step that needs it first checks that enough of it is left.
+    // call that needs it first checks that enough of it is left (`inWindow`).
     let current = await tender(author, tenderId);
     windowSetAt = Date.now();
     const window = await send(author, 'PATCH', `/v1/tenders/${tenderId}`, {
@@ -703,10 +780,13 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     });
     expect(window.status, JSON.stringify(window.body)).toBe(200);
     current = window.body as TenderBody;
+    approvedVersion = current.version;
 
-    const asked = await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
-      expectedVersion: current.version,
-    });
+    const asked = await inWindow('the publication request', () =>
+      send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
+        expectedVersion: current.version,
+      }),
+    );
     expect(asked.status, JSON.stringify(asked.body)).toBe(202);
     const request = asked.body as RequestBody;
     expect(request).toMatchObject({
@@ -742,12 +822,14 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
 
     // The same command, on the same version, now executes and uses the approval up.
     const published = correlation('publish');
-    const executed = await send(
-      author,
-      'POST',
-      `/v1/tenders/${tenderId}/publish`,
-      { expectedVersion: current.version },
-      published,
+    const executed = await inWindow('the publication', () =>
+      send(
+        author,
+        'POST',
+        `/v1/tenders/${tenderId}/publish`,
+        { expectedVersion: current.version },
+        published,
+      ),
     );
     expect(executed.status, JSON.stringify(executed.body)).toBe(200);
     expect(executed.body).toMatchObject({ id: tenderId, status: 'PUBLISHED' });
@@ -759,46 +841,82 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
 
     const [consumed] = await requests(author, tenderId, 'tender.publication');
     expect(consumed).toMatchObject({ id: request.id, status: 'CONSUMED' });
-
-    // Executed once: the approved version is a stale one now, and the new
-    // version is a tender that is no longer a draft. Neither asks for another
-    // approval.
-    const after = await tender(author, tenderId);
-    expectRefusal(
-      await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
-        expectedVersion: current.version,
-      }),
-      { status: 409, code: 'OPTIMISTIC_LOCK_FAILED' },
-      'publishing again on the approved version',
-    );
-    expectRefusal(
-      await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
-        expectedVersion: after.version,
-      }),
-      { status: 422, code: 'BUSINESS_RULE_VIOLATION' },
-      'publishing the published tender',
-    );
-    expect(await tender(author, tenderId)).toMatchObject({
-      status: 'PUBLISHED',
-      version: after.version,
-    });
-    expect(await requests(author, tenderId, 'tender.publication')).toHaveLength(1);
+    // That it does not publish again is shown after the early-opening refusal:
+    // nothing that does not need the window runs inside it.
   });
 
-  test('two qualified contractors bid and one revises; a bidder reaches only its own bid; nothing opens early', async () => {
-    const { p1, c1, c2 } = people;
+  test('the invited contractors find the tender, bid, and one revises; a bidder reaches only its own bid; nothing opens early', async ({
+    tenantB,
+  }) => {
+    const { p1, c1, c2, c3, cb } = people;
+    const missingTender = `TND_${RUN}_MISSING`;
 
-    expectWindowOpenFor('the bids');
+    // How a contractor finds a tender (CON-002 PR 6): the published tenders its
+    // organization may bid on. These need the tender PUBLISHED, so they run in
+    // the window too.
+    const openTenderIds = async (contractor: Actor): Promise<string[]> => {
+      const response = await inWindow('a contractor listing open tenders', () =>
+        contractor.get('/v1/open-tenders?limit=100'),
+      );
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      return (response.body as { items: { id: string }[] }).items.map((item) => item.id);
+    };
+    for (const contractor of [c1, c2]) {
+      expect(await openTenderIds(contractor)).toContain(tenderId);
+      const found = await inWindow('a contractor reading the tender', () =>
+        contractor.get(`/v1/open-tenders/${tenderId}`),
+      );
+      expect(found.status, JSON.stringify(found.body)).toBe(200);
+      expect(found.body).toMatchObject({
+        id: tenderId,
+        visibility: 'RESTRICTED',
+        criteria: CRITERIA.map(({ code, weightBp, scoringMethod, maxScore }) => ({
+          code,
+          weightBp,
+          scoringMethod,
+          maxScore,
+        })).map((criterion) => expect.objectContaining(criterion)),
+      });
+    }
+    // Neither C3, not invited to this RESTRICTED tender, nor a contractor acting
+    // for the other tenant finds it: it is not listed, and reading it is exactly
+    // reading a tender that does not exist.
+    for (const [who, contractor] of [
+      ['an uninvited contractor', c3],
+      ["the other tenant's contractor", cb],
+    ] as const) {
+      expect(await openTenderIds(contractor), `${who}: the list`).not.toContain(tenderId);
+      const uninvited = await inWindow(`${who} reading the tender`, () =>
+        contractor.get(`/v1/open-tenders/${tenderId}`),
+      );
+      expectRefusal(uninvited, NOT_FOUND, `${who} reading the tender`);
+      expect(refusalOf(uninvited), `${who}: against a missing tender`).toEqual(
+        refusalOf(await contractor.get(`/v1/open-tenders/${missingTender}`)),
+      );
+    }
+    // The other tenant's administrator is not a contractor at all: the bidder's
+    // route refuses it by role before any tender is looked at (403
+    // INSUFFICIENT_ROLE) — the same answer for this tender as for a missing one.
+    // A role-gate check, not a visibility one; that is the contractor's above.
+    const administrator = await inWindow("the other tenant's administrator reading", () =>
+      tenantB.get(`/v1/open-tenders/${tenderId}`),
+    );
+    expectRefusal(
+      administrator,
+      { status: 403, code: 'INSUFFICIENT_ROLE' },
+      "the other tenant's administrator",
+    );
+    expect(refusalOf(administrator)).toEqual(
+      refusalOf(await tenantB.get(`/v1/open-tenders/${missingTender}`)),
+    );
+
     const receipts: Record<'c1' | 'c2', string> = { c1: '', c2: '' };
     for (const [key, contractor] of [
       ['c1', c1],
       ['c2', c2],
     ] as const) {
-      const submitted = await send(
-        contractor,
-        'POST',
-        `/v1/tenders/${tenderId}/bids`,
-        bidContent(PRICE[key], key),
+      const submitted = await inWindow(`the bid of ${key}`, () =>
+        send(contractor, 'POST', `/v1/tenders/${tenderId}/bids`, bidContent(PRICE[key], key)),
       );
       expect(submitted.status, JSON.stringify(submitted.body)).toBe(201);
       const receipt = submitted.body as ReceiptBody;
@@ -811,10 +929,12 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     }
 
     // A bidder revises its sealed bid inside the window: a new revision, a new receipt.
-    const revised = await send(c2, 'PUT', `/v1/tenders/${tenderId}/bids/${bid.c2}`, {
-      expectedRevision: 1,
-      ...bidContent(PRICE.c2, 'c2, revised'),
-    });
+    const revised = await inWindow('the revision', () =>
+      send(c2, 'PUT', `/v1/tenders/${tenderId}/bids/${bid.c2}`, {
+        expectedRevision: 1,
+        ...bidContent(PRICE.c2, 'c2, revised'),
+      }),
+    );
     expect(revised.status, JSON.stringify(revised.body)).toBe(200);
     expect(revised.body).toMatchObject({ bidId: bid.c2, status: 'SUBMITTED', revision: 2 });
     expect((revised.body as ReceiptBody).receipt).toMatch(/^[0-9a-f]{64}$/);
@@ -852,10 +972,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       ],
     ];
     for (const [what, probe] of changes) {
-      const other = await probe(bid.c2);
+      const other = await inWindow(`a bidder's ${what} of the other bid`, () => probe(bid.c2));
       expectRefusal(other, NOT_FOUND, `a bidder tried to ${what} another bidder's bid`);
+      const absent = await inWindow(`a bidder's ${what} of a missing bid`, () => probe(missing));
       expect(refusalOf(other), `${what}: the other bidder's bid against a missing one`).toEqual(
-        refusalOf(await probe(missing)),
+        refusalOf(absent),
       );
     }
 
@@ -870,6 +991,28 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'NOT_CLOSED' },
       'an opening proposed before the deadline',
     );
+
+    // Publication was executed once — shown here, after the window's last
+    // step: the approved version is a stale one now, and the new version is a
+    // tender that is no longer a draft. Neither asks for another approval.
+    const { author } = people;
+    const after = await tender(author, tenderId);
+    expectRefusal(
+      await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
+        expectedVersion: approvedVersion,
+      }),
+      { status: 409, code: 'OPTIMISTIC_LOCK_FAILED' },
+      'publishing again on the approved version',
+    );
+    expectRefusal(
+      await send(author, 'POST', `/v1/tenders/${tenderId}/publish`, {
+        expectedVersion: after.version,
+      }),
+      { status: 422, code: 'BUSINESS_RULE_VIOLATION' },
+      'publishing the tender again',
+    );
+    expect((await tender(author, tenderId)).version).toBe(after.version);
+    expect(await requests(author, tenderId, 'tender.publication')).toHaveLength(1);
   });
 
   test('the deadline closes the tender, and a bid after it is refused', async () => {
@@ -907,13 +1050,10 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     const { author, c1, c3 } = people;
     const missing = `BID_${RUN}_MISSING`;
 
-    // FINDING F3 (#223): the owner route refuses a contractor of another
-    // organization **403** (`assertCanOpenBids`, a role check, runs before the
-    // ownership check), where ADR-066 § 4 says 404 for every other
-    // organization. Nothing is disclosed — the answer is the same for a bid that
-    // does not exist, which is asserted — but the status is not the ADR's. It is
-    // asserted as it is, and named, so that the fix changes this line.
-    const OWNER_ROUTE_REFUSAL = { status: 403, code: 'FORBIDDEN' } as const;
+    // The owner's route answers a contractor of another organization 404 —
+    // ownership is checked before any role (ADR-066 § 4) — exactly what a bid
+    // that does not exist gets.
+    const OWNER_ROUTE_REFUSAL = NOT_FOUND;
 
     // A bidder reading the other bidder's bid through the owner's route: the
     // same answer as for a bid that does not exist.

@@ -23,8 +23,9 @@ export const inviteBidderSchema = z
       .min(1)
       .max(64)
       .describe(
-        'The organization invited to bid. Not validated against organization-service: like an ' +
-          'approval step’s authority, the invitation names an identifier (docs/24 Q-70 (8)).',
+        'The organization invited to bid. It must exist: it is confirmed with organization-service ' +
+          'before anything is written (422 INVITED_ORGANIZATION_NOT_FOUND if it does not; 503/504 ' +
+          'if it cannot be confirmed, and nothing is invited unconfirmed).',
       ),
   })
   .strict();
