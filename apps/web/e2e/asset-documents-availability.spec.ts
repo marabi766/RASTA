@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
+import { registerDocument } from './document-fixture';
 import { installLiveSession } from './live-session';
 
 /**
@@ -755,7 +756,11 @@ test.describe('another organization’s machine: documents and availability, thr
     const window = (await declared.json()) as Window;
     const reference = await request.post(gatewayUrl(`/v1/assets/${asset.id}/documents`), {
       headers: auth(owner),
-      data: { documentId: 'DOC_01J00000000000000000000001', kind: 'OTHER', title: 'مدرک مالک' },
+      data: {
+        documentId: await registerDocument(request, owner, { ownerAssetId: asset.id }),
+        kind: 'OTHER',
+        title: 'مدرک مالک',
+      },
     });
     expect(reference.status()).toBe(201);
 

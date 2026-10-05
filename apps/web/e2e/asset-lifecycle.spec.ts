@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
+import { sharedDocument } from './document-fixture';
 import { installLiveSession } from './live-session';
 
 /**
@@ -137,7 +138,11 @@ async function registerMachine(
     expect(policy.status()).toBe(201);
     const title = await request.post(gatewayUrl(`/v1/assets/${asset.id}/documents`), {
       headers: auth(token),
-      data: { documentId: `DOC-E2E-${suffix}`, kind: 'OWNERSHIP_TITLE', title: 'سند مالکیت آزمون' },
+      data: {
+        documentId: await sharedDocument(request, token),
+        kind: 'OWNERSHIP_TITLE',
+        title: 'سند مالکیت آزمون',
+      },
     });
     expect(title.status()).toBe(201);
   }
