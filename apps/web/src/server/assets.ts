@@ -92,6 +92,21 @@ const timelineEntrySchema = z.object({
 
 export type TimelineEntry = z.infer<typeof timelineEntrySchema>;
 
+/**
+ * A document reference as the dossier lists it — the reference asset-service
+ * keeps on the machine, not the file (`server/asset-documents.ts`).
+ */
+export const assetDocumentSchema = z.object({
+  id: z.string(),
+  documentId: z.string(),
+  kind: z.string(),
+  title: z.string(),
+  issuedAt: z.string().nullable().default(null),
+  expiresAt: z.string().nullable().default(null),
+});
+
+export type AssetDocumentSummary = z.infer<typeof assetDocumentSchema>;
+
 const dossierSchema = z.object({
   asset: assetSchema,
   organizationName: z.string().nullable().default(null),
@@ -103,6 +118,7 @@ const dossierSchema = z.object({
     entryCount: z.number().int(),
   }),
   recentActivity: z.array(timelineEntrySchema).default([]),
+  documents: z.array(assetDocumentSchema).default([]),
   transferCount: z.number().int().default(0),
 });
 

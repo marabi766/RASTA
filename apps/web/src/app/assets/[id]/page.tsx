@@ -9,6 +9,15 @@ import {
   sealAssetRecordBaseline,
 } from '@/server/asset-records';
 import { RECORD_NOTICES } from '@/lib/asset-record-fields';
+import { DOCUMENT_NOTICES } from '@/lib/asset-document-fields';
+import { AVAILABILITY_NOTICES } from '@/lib/fleet-availability-fields';
+import { canAttachAssetDocuments, sealAssetDocumentBaseline } from '@/server/asset-documents';
+import {
+  canManageAvailability,
+  fetchAvailability,
+  fetchAvailabilityWindows,
+  sealAvailabilityBaseline,
+} from '@/server/fleet-availability';
 import type { UpdateAssetFormValues } from '@/lib/asset-form-fields';
 import { canManageAssets, sealAssetBaseline } from '@/server/asset-commands';
 import {
@@ -34,6 +43,10 @@ import { UpdateAssetForm } from './UpdateAssetForm';
 import { LifecycleControls, type LifecycleToken } from './LifecycleControls';
 import { AssetRecords } from './AssetRecords';
 import { RecordInspectionForm, RecordPolicyForm } from './AssetRecordForms';
+import { AssetDocuments } from './AssetDocuments';
+import { AttachDocumentForm } from './AssetDocumentForm';
+import { AssetAvailability } from './AssetAvailability';
+import { DeclareAvailabilityForm, RevokeAvailabilityForm } from './AvailabilityForms';
 
 /**
  * The `/assets/[id]` route.
@@ -111,11 +124,13 @@ export default async function AssetDossierPage({
   // judged against this instant, here and not in the browser.
   const now = new Date();
 
-  const [result, currentUser, policies, inspections] = await Promise.all([
+  const [result, currentUser, policies, inspections, availability, windows] = await Promise.all([
     fetchDossier(session, id),
     fetchCurrentUser(session),
     fetchInsurancePolicies(session, id),
     fetchInspections(session, id),
+    fetchAvailability(session, id),
+    fetchAvailabilityWindows(session, id),
   ]);
 
   // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
@@ -158,6 +173,26 @@ export default async function AssetDossierPage({
     result.kind === 'OK' &&
     result.data.asset.status !== 'DECOMMISSIONED';
 
+  // The attach form: a role asset-service admits for the POST, on a machine that
+  // is still a live record. UX as everywhere — the service decides again.
+  const documentForm =
+    currentUser.kind === 'USER' &&
+    canAttachAssetDocuments(currentUser.user.effectiveRoles) &&
+    result.kind === 'OK' &&
+    result.data.asset.status !== 'DECOMMISSIONED';
+
+  // The availability forms: a role fleet-service admits for both POSTs, on a
+  // machine that is still a live record **and that fleet-service knows** — a
+  // declaration for a machine its replica has not received is answered "not
+  // found", which would read as the person's mistake.
+  const availabilityForms =
+    currentUser.kind === 'USER' &&
+    canManageAvailability(currentUser.user.effectiveRoles) &&
+    result.kind === 'OK' &&
+    result.data.asset.status !== 'DECOMMISSIONED' &&
+    availability.kind === 'OK' &&
+    availability.data !== null;
+
   return (
     <AppShell
       topBar={
@@ -188,6 +223,8 @@ export default async function AssetDossierPage({
             'decommissioned',
             'lifecycleConflict',
             ...RECORD_NOTICES,
+            ...DOCUMENT_NOTICES,
+            ...AVAILABILITY_NOTICES,
           ],
         )}
         records={
@@ -214,6 +251,57 @@ export default async function AssetDossierPage({
                   baseline={sealAssetRecordBaseline(session, { assetId: id, record: 'inspection' })}
                 />
               ) : undefined
+            }
+          />
+        }
+        documents={
+          <AssetDocuments
+            documents={result.kind === 'OK' ? result.data.documents : []}
+            now={now}
+            attachForm={
+              documentForm ? (
+                <AttachDocumentForm
+                  assetId={id}
+                  csrfToken={session.csrfToken}
+                  submissionId={mintSubmissionId(session)}
+                  baseline={sealAssetDocumentBaseline(session, { assetId: id })}
+                />
+              ) : undefined
+            }
+          />
+        }
+        availability={
+          <AssetAvailability
+            availability={availability}
+            windows={windows}
+            assetStatus={result.kind === 'OK' ? result.data.asset.status : undefined}
+            now={now}
+            declareForm={
+              availabilityForms ? (
+                <DeclareAvailabilityForm
+                  assetId={id}
+                  csrfToken={session.csrfToken}
+                  submissionId={mintSubmissionId(session)}
+                  baseline={sealAvailabilityBaseline(session, { assetId: id, command: 'declare' })}
+                />
+              ) : undefined
+            }
+            revoke={
+              availabilityForms
+                ? (window) => (
+                    <RevokeAvailabilityForm
+                      assetId={id}
+                      windowId={window.id}
+                      csrfToken={session.csrfToken}
+                      submissionId={mintSubmissionId(session)}
+                      baseline={sealAvailabilityBaseline(session, {
+                        assetId: id,
+                        command: 'revoke',
+                        windowId: window.id,
+                      })}
+                    />
+                  )
+                : undefined
             }
           />
         }
