@@ -278,12 +278,24 @@ export const FILE_MISSING_MESSAGE = 'فایل مدرک را انتخاب کنی�
 export const FILE_EMPTY_MESSAGE = 'فایل انتخاب‌شده خالی است';
 
 /**
+ * An input with nothing chosen reaches a Server Action as a zero-byte `File`
+ * with **no name** — an empty one on a plain post, and the string `"undefined"`
+ * through React's action transport (seen in the live browser scenario, #225).
+ * Both mean "nothing was chosen", and the person is told to choose a file,
+ * not that the file they never picked is empty. A zero-byte file with a real
+ * name is one they did pick, and is refused as empty below.
+ */
+function isNoSelection(file: File): boolean {
+  return file.name === '' || (file.size === 0 && file.name === 'undefined');
+}
+
+/**
  * Only whether there is a file, and whether it has any bytes. Whether its type
  * or size is acceptable is document-service's to say — it is asked, not copied.
  */
 export function chosenFile(form: FormData, field: string): ChosenFile {
   const value = form.get(field);
-  if (!(value instanceof File) || value.name === '') {
+  if (!(value instanceof File) || isNoSelection(value)) {
     return { ok: false, message: FILE_MISSING_MESSAGE };
   }
   if (value.size === 0) return { ok: false, message: FILE_EMPTY_MESSAGE };

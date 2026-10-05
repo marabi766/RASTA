@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
@@ -169,5 +169,34 @@ describe('the attach-document form', () => {
     const { container } = render(<AttachDocumentForm {...IDENTITY} />);
     expect(container.innerHTML).not.toMatch(PHYSICAL_DIRECTION);
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the form is reset after every action — what survives a refused attempt', () => {
+  // React resets an action's form when the action returns, to each field's
+  // *default*. A select's `defaultValue` is read once, at mount, so a choice
+  // made after mounting would reset to the blank it mounted with and the next
+  // send would carry no kind (found by the live browser scenario on #225).
+  it('keeps the kind the person chose, so the second send names one', () => {
+    const { container, rerender } = render(<AttachDocumentForm {...IDENTITY} />);
+    const kind = () => container.querySelector('select[name="kind"]') as HTMLSelectElement;
+
+    fireEvent.change(kind(), { target: { value: DOCUMENT_KINDS[0] } });
+    expect(kind()).toHaveValue(DOCUMENT_KINDS[0]);
+
+    // The action came back refusing the file; the form is then reset.
+    setState({
+      kind: 'INVALID',
+      submissionId: SUBMISSION,
+      values: { kind: DOCUMENT_KINDS[0], title: 'سند', issuedAt: '', expiresAt: '' },
+      fieldErrors: { file: 'پیام' },
+      message: null,
+      resume: null,
+    });
+    rerender(<AttachDocumentForm {...IDENTITY} />);
+    container.querySelector('form')!.reset();
+
+    expect(kind()).toHaveValue(DOCUMENT_KINDS[0]);
+    expect(container.querySelector('input[name="title"]')).toHaveValue('سند');
   });
 });

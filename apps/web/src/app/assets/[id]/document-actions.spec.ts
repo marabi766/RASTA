@@ -286,6 +286,11 @@ describe('the form is judged before the file moves', () => {
     ['no file', null, FILE_MISSING_MESSAGE],
     ['an empty selection', new File([], '', { type: '' }), FILE_MISSING_MESSAGE],
     [
+      'an empty selection as the action transport delivers it',
+      new File([], 'undefined', { type: 'application/octet-stream' }),
+      FILE_MISSING_MESSAGE,
+    ],
+    [
       'a file with no bytes',
       new File([], 'empty.pdf', { type: 'application/pdf' }),
       FILE_EMPTY_MESSAGE,

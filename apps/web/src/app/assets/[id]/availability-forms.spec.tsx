@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
@@ -193,5 +193,30 @@ describe('the revoke control', () => {
     expect(container.querySelectorAll('input:not([type="hidden"]), select, textarea')).toHaveLength(
       0,
     );
+  });
+});
+
+describe('the declare form is reset after every action', () => {
+  // React reads a select's `defaultValue` once, at mount: without a key the
+  // reset that follows a refused attempt returned the choice to blank.
+  it('keeps the status the person chose', () => {
+    const { container, rerender } = render(<DeclareAvailabilityForm {...IDENTITY} />);
+    const choice = () => container.querySelector('select[name="available"]') as HTMLSelectElement;
+    const value = [...choice().options].map((option) => option.value).find((v) => v !== '')!;
+
+    fireEvent.change(choice(), { target: { value } });
+    expect(choice()).toHaveValue(value);
+
+    setState({
+      kind: 'INVALID',
+      submissionId: SUBMISSION,
+      values: { available: value, reason: '', validFrom: '', validTo: '' },
+      fieldErrors: {},
+      message: 'پیام',
+    });
+    rerender(<DeclareAvailabilityForm {...IDENTITY} />);
+    container.querySelector('form')!.reset();
+
+    expect(choice()).toHaveValue(value);
   });
 });

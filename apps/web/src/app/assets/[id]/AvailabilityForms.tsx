@@ -165,6 +165,10 @@ export function DeclareAvailabilityForm(identity: AvailabilityIdentity) {
               <select
                 {...control}
                 name="available"
+                // Keyed by its default: React reads a select's `defaultValue`
+                // once, at mount, so without this the reset that follows every
+                // action returns the choice to blank (see `AssetDocumentForm`).
+                key={values.available}
                 defaultValue={values.available}
                 className={controlClassName}
               >

@@ -155,6 +155,13 @@ export function AttachDocumentForm(identity: DocumentIdentity) {
               <select
                 {...control}
                 name="kind"
+                // React reads a select's `defaultValue` once, at mount. The form
+                // is reset after every action, and a select whose default moved
+                // since (blank → the kind just chosen) would reset to the
+                // blank it mounted with and lose the choice: the next send would
+                // carry no kind. Keying by the default remounts it with the new
+                // one; the text inputs follow their `defaultValue` unaided.
+                key={values.kind}
                 defaultValue={values.kind}
                 className={controlClassName}
               >

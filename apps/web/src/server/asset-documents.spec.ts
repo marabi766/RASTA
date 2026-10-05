@@ -175,6 +175,11 @@ describe('the file the person chose', () => {
       FILE_MISSING_MESSAGE,
     ],
     [
+      'the empty selection React’s action transport hands over: a zero-byte file named "undefined"',
+      new File([], 'undefined', { type: 'application/octet-stream' }),
+      FILE_MISSING_MESSAGE,
+    ],
+    [
       'a file with no bytes',
       new File([], 'empty.pdf', { type: 'application/pdf' }),
       FILE_EMPTY_MESSAGE,
