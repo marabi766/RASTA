@@ -55,9 +55,25 @@ const INSPECTION = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+const DOCUMENT = (over: Record<string, unknown> = {}) => ({
+  documentId: `DOC_${ulid()}`,
+  kind: 'OWNERSHIP_TITLE',
+  title: 'سند مالکیت',
+  ...over,
+});
+
 interface Route {
   readonly name: string;
   readonly path: (assetId: string) => string;
+  /**
+   * Where the records are read back, and how the answer lists them: the two
+   * records have a list of their own; a document reference is read on the
+   * dossier (there is no `GET …/documents`).
+   */
+  readonly readPath: (assetId: string) => string;
+  readonly listed: (body: Record<string, unknown>) => string[];
+  /** The aggregate the event is published on: the record, or the asset itself. */
+  readonly aggregate: 'record' | 'asset';
   readonly body: (over?: Record<string, unknown>) => Record<string, unknown>;
   readonly table: string;
   readonly aggregateType: string;
@@ -73,6 +89,9 @@ const ROUTES: readonly Route[] = [
   {
     name: 'insurance policy',
     path: (assetId) => `/v1/assets/${assetId}/insurance-policies`,
+    readPath: (assetId) => `/v1/assets/${assetId}/insurance-policies`,
+    listed: (body) => (body as unknown as { id: string }[]).map((record) => record.id),
+    aggregate: 'record',
     body: POLICY,
     table: 'insurance_policy',
     aggregateType: 'InsurancePolicy',
@@ -87,6 +106,9 @@ const ROUTES: readonly Route[] = [
   {
     name: 'technical inspection',
     path: (assetId) => `/v1/assets/${assetId}/inspections`,
+    readPath: (assetId) => `/v1/assets/${assetId}/inspections`,
+    listed: (body) => (body as unknown as { id: string }[]).map((record) => record.id),
+    aggregate: 'record',
     body: INSPECTION,
     table: 'technical_inspection',
     aggregateType: 'TechnicalInspection',
@@ -96,9 +118,24 @@ const ROUTES: readonly Route[] = [
     refused: { validTo: new Date(Date.now() - 10 * day).toISOString() },
     corrected: {},
   },
+  {
+    name: 'document reference',
+    path: (assetId) => `/v1/assets/${assetId}/documents`,
+    readPath: (assetId) => `/v1/assets/${assetId}/dossier`,
+    listed: (body) => (body.documents as { id: string }[]).map((document) => document.id),
+    aggregate: 'asset',
+    body: DOCUMENT,
+    table: 'asset_document_ref',
+    aggregateType: 'Asset',
+    recordedEvent: 'ASSET_DOCUMENT_ATTACHED',
+    other: { kind: 'MANUAL' },
+    // A title below the service's two-character floor is refused by the body.
+    refused: { title: 'x' },
+    corrected: {},
+  },
 ];
 
-describe('recording an insurance policy or an inspection under an Idempotency-Key', () => {
+describe('recording an insurance policy, an inspection or a document reference under an Idempotency-Key', () => {
   let prisma: PrismaService;
   let assets: AssetService;
   /** The same repository, with owners that clear a transfer (ADR-062). */
@@ -185,6 +222,7 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
       'asset_timeline_entry',
       'insurance_policy',
       'technical_inspection',
+      'asset_document_ref',
       'asset_transfer',
       'asset_location',
       'asset',
@@ -238,13 +276,26 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
     ).map((row) => row.id);
 
   const events = async (route: Route, assetId: string): Promise<Record<string, number>> => {
-    const found = await prisma.client.$queryRawUnsafe<{ event_name: string; n: number }[]>(
-      `SELECT event_name, count(*)::int AS n FROM outbox_message
-       WHERE aggregate_type = $2 AND aggregate_id IN (SELECT id FROM ${route.table} WHERE asset_id = $1)
-       GROUP BY event_name`,
-      assetId,
-      route.aggregateType,
-    );
+    // A record's events are on the record; a document reference's are on the
+    // asset itself, which has events of its own, so only its own are counted.
+    const found =
+      route.aggregate === 'asset'
+        ? await prisma.client.$queryRawUnsafe<{ event_name: string; n: number }[]>(
+            `SELECT event_name, count(*)::int AS n FROM outbox_message
+             WHERE aggregate_type = $2 AND aggregate_id = $1 AND event_name = $3
+             GROUP BY event_name`,
+            assetId,
+            route.aggregateType,
+            route.recordedEvent,
+          )
+        : await prisma.client.$queryRawUnsafe<{ event_name: string; n: number }[]>(
+            `SELECT event_name, count(*)::int AS n FROM outbox_message
+             WHERE aggregate_type = $2
+               AND aggregate_id IN (SELECT id FROM ${route.table} WHERE asset_id = $1)
+             GROUP BY event_name`,
+            assetId,
+            route.aggregateType,
+          );
     return Object.fromEntries(found.map((row) => [row.event_name, row.n]));
   };
 
@@ -413,8 +464,8 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
 
         const foreignWrite = await post(route.path(assetId), route.body(), k, { org: org.b });
         const missingWrite = await post(route.path(missing), route.body(), k, { org: org.b });
-        const foreignRead = await get(route.path(assetId), { org: org.b });
-        const missingRead = await get(route.path(missing), { org: org.b });
+        const foreignRead = await get(route.readPath(assetId), { org: org.b });
+        const missingRead = await get(route.readPath(missing), { org: org.b });
 
         for (const answer of [foreignWrite, missingWrite, foreignRead, missingRead]) {
           expect(answer.status).toBe(404);
@@ -443,7 +494,7 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
 
         const replay = await post(route.path(assetId), body, k);
         const missing = await post(route.path(`AST_${ulid()}`), route.body(), key());
-        const freshRead = await get(route.path(assetId));
+        const freshRead = await get(route.readPath(assetId));
 
         expect(replay.status).toBe(404);
         expect(missing.status).toBe(404);
@@ -481,11 +532,11 @@ describe('recording an insurance policy or an inspection under an Idempotency-Ke
         const assetA = await machine(org.a);
         const recorded = await post(route.path(assetA), route.body(), key());
 
-        const own = await get(route.path(assetA));
-        const foreign = await get(route.path(assetA), { org: org.b });
+        const own = await get(route.readPath(assetA));
+        const foreign = await get(route.readPath(assetA), { org: org.b });
 
         expect(own.status).toBe(200);
-        expect(own.body.map((record: { id: string }) => record.id)).toEqual([recorded.body.id]);
+        expect(route.listed(own.body)).toEqual([recorded.body.id]);
         expect(foreign.status).toBe(404);
       });
     });

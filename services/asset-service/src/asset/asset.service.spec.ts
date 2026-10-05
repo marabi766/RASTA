@@ -136,7 +136,7 @@ interface TxMock {
   asset: { create: jest.Mock; updateMany: jest.Mock };
   assetTransfer: { create: jest.Mock; updateMany: jest.Mock };
   assetLocation: { updateMany: jest.Mock };
-  assetDocumentRef: { updateMany: jest.Mock };
+  assetDocumentRef: { create: jest.Mock; updateMany: jest.Mock };
   assetTimelineEntry: { updateMany: jest.Mock };
   insurancePolicy: { updateMany: jest.Mock };
   insuranceClaim: { updateMany: jest.Mock };
@@ -1907,6 +1907,77 @@ describe('AssetService', () => {
         run(() => h.service.recordLocation(ASSET_ID, { source: 'MANUAL' })),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
       expect(h.tx.assetLocation.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('attaching a document reference under an idempotency fence (EXP-002 slice 7)', () => {
+    const ATTACH = {
+      documentId: 'DOC_01JDOCUMENT00000000000001',
+      kind: 'OWNERSHIP_TITLE',
+      title: 'سند مالکیت',
+    } as const;
+
+    function fence(order: string[]) {
+      return {
+        hold: jest.fn(async () => {
+          order.push('hold');
+        }),
+        complete: jest.fn(async (_tx: unknown, result: unknown) => {
+          order.push('complete');
+          return result;
+        }),
+      } as never;
+    }
+
+    it('holds the claim before writing the reference and completes it last', async () => {
+      const order: string[] = [];
+      const h = harness({
+        lockAsset: jest.fn(async () => {
+          order.push('lock');
+          return { status: 'ACTIVE' };
+        }),
+      });
+      h.tx.assetDocumentRef.create.mockImplementation(async (args: { data: object }) => {
+        order.push('write');
+        return { ...args.data, issuedAt: null, expiresAt: null };
+      });
+
+      const view = await run(() => h.service.attachDocument(ASSET_ID, ATTACH, fence(order)));
+
+      expect(order[0]).toBe('hold');
+      expect(order[order.length - 1]).toBe('complete');
+      expect(order.indexOf('lock')).toBeLessThan(order.indexOf('write'));
+      expect(view).toMatchObject({ documentId: ATTACH.documentId, kind: 'OWNERSHIP_TITLE' });
+    });
+
+    it('still attaches without a fence (internal callers)', async () => {
+      const h = harness();
+      h.tx.assetDocumentRef.create.mockImplementation(async (args: { data: object }) => ({
+        ...args.data,
+        issuedAt: null,
+        expiresAt: null,
+      }));
+
+      await expect(run(() => h.service.attachDocument(ASSET_ID, ATTACH))).resolves.toMatchObject({
+        documentId: ATTACH.documentId,
+      });
+      expect(h.enqueued.map((event) => event.eventName)).toEqual([
+        ASSET_EVENTS.ASSET_DOCUMENT_ATTACHED,
+      ]);
+    });
+
+    it('writes nothing when the claim is no longer the caller’s', async () => {
+      const h = harness();
+      const lost = {
+        hold: jest.fn(async () => {
+          throw new RastaError('CONFLICT', 'claim lost');
+        }),
+        complete: jest.fn(),
+      } as never;
+
+      await expect(run(() => h.service.attachDocument(ASSET_ID, ATTACH, lost))).rejects.toThrow();
+      expect(h.tx.assetDocumentRef.create).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
     });
   });
 });

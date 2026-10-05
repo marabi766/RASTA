@@ -81,19 +81,19 @@ asset-service** — نه فقط در Gateway، که برای پیشوند `asset
 Claim رهاشده را با توکن تازه برمی‌دارد و تکمیل دیرهنگام صاحب قبلی با توکن رد می‌شود. کلیدها مال مستأجرند (`organization_id`
 ستون نخست کلید اصلی): مستأجر B کلید مستأجر A را بازپخش نمی‌کند، دارایی خودش را ثبت می‌کند.
 
-**`Idempotency-Key` روی `POST /v1/assets/{id}/insurance-policies` و `POST /v1/assets/{id}/inspections`** (EXP-002، برش ۶):
-**اجباری، در خودِ asset-service**، با **همان سازوکار** `POST /v1/assets` (`IdempotencyStore`؛ سازوکار دومی نیست) — نبودن یا
+**`Idempotency-Key` روی `POST /v1/assets/{id}/insurance-policies`، `POST /v1/assets/{id}/inspections` و `POST /v1/assets/{id}/documents`** (EXP-002، برش ۶ و ۷؛ سومی بازپخش «ارجاع مدرک» است نه خودِ فایل — فایل هرگز از asset-service نمی‌گذرد):
+**اجباری، در خودِ asset-service**، با **همان سازوکار** `POST /v1/assets` (`IdempotencyStore`؛ سازوکار دومی نیست؛ برای مدرک، همان ارجاع `documentId` + `kind` + عنوان است که در Hash می‌آید، پس همان کلید با `documentId` دیگر `409 IDEMPOTENCY_KEY_REUSED` است) — نبودن یا
 خالی بودن یا خارج از ۸ تا ۲۵۵ نویسه `400 VALIDATION_FAILED` با مسیر جزئیات `Idempotency-Key` و هیچ چیز ثبت نمی‌شود. نقش
 فراخوان (`ORGANIZATION_ADMIN`، `FLEET_MANAGER`، `UNION_ADMIN`) پیش از هر بازپخش بررسی می‌شود. Hash درخواست **شناسهٔ دارایی
 مسیر**، بدنه و کاربر را می‌بندد: همان کلید + همان بدنه + همان دارایی + همان کاربر = همان `201` اول (همان شناسهٔ رکورد) بی
-هیچ ردیف، رویداد (`INSURANCE_RECORDED` / `INSPECTION_RECORDED`) یا ورودی تاریخچهٔ تازه؛ بدنهٔ دیگر، دارایی دیگر یا کاربر
+هیچ ردیف، رویداد (`INSURANCE_RECORDED` / `INSPECTION_RECORDED` / `ASSET_DOCUMENT_ATTACHED`) یا ورودی تاریخچهٔ تازه؛ بدنهٔ دیگر، دارایی دیگر یا کاربر
 دیگر = `409 IDEMPOTENCY_KEY_REUSED`؛ تکراری هم‌زمان تا ۵ ثانیه منتظر می‌ماند و همان `201` را می‌گیرد، وگرنه `409 CONFLICT` با
 `Retry-After: 1`. Claim پیش از کار Commit می‌شود؛ سپس **رکورد، ردیف Outbox، ورودی تاریخچه و پاسخ تکمیل‌شده یک تراکنش‌اند**
 (Claim را نخستین دستور تراکنش قفل می‌کند و پاسخ آخرین دستور آن است). کلیدها مال مستأجرند. پاسخ‌های رد‌شده (۴۰۴، ۴۲۲، ۴۰۹
 یکتایی) Claim را آزاد می‌کنند تا ارسال اصلاح‌شده با همان کلید اجرا شود. دارایی مستأجر دیگر برای خواندن و هر دو نوشتن `404`
 است، دقیقاً مثل شناسهٔ ناموجود. پورتال شناسهٔ ارسال بسته به نشست را همان کلید می‌فرستد (docs/16).
 
-**بازپخش در asset-service دوباره مجوز می‌گیرد** (بازبینی #206 دور ۱؛ هر سه مسیر بالا، `POST /v1/assets` هم): پیش از
+**بازپخش در asset-service دوباره مجوز می‌گیرد** (بازبینی #206 دور ۱؛ هر چهار مسیر بالا، `POST /v1/assets` هم): پیش از
 بازگرداندن هر پاسخ تکمیل‌شده، `IdempotencyStore` بررسی «هنوز می‌تواند ببیند»ِ همان مسیر (`ReplayGuard`) را اجرا می‌کند —
 همان قاعدهٔ خواندن تازه، با وضعیت امروز: دارایی هنوز مال سازمان فراخوان است. دارایی‌ای که در عمر کلید به سازمان دیگری
 منتقل شده، برای بازپخش همان کاربر `404 NOT_FOUND` است، دقیقاً مثل دارایی ناموجود، بی هیچ چیز از بدنهٔ ذخیره‌شده و بی هیچ
@@ -416,6 +416,7 @@ GET    /v1/assets/{id}/insurance-policies  فهرست بیمه‌نامه‌ها
 POST   /v1/assets/{id}/insurance-policies ثبت بیمه‌نامه   [Idempotency-Key اجباری در سرویس، EXP-002 برش ۶]
 GET    /v1/assets/{id}/inspections         فهرست معاینه‌های فنی (با daysUntilExpiry)
 POST   /v1/assets/{id}/inspections         ثبت معاینهٔ فنی [Idempotency-Key اجباری در سرویس، EXP-002 برش ۶]
+POST   /v1/assets/{id}/documents           پیوست ارجاع مدرکِ document-service [Idempotency-Key اجباری در سرویس، EXP-002 برش ۷؛ فهرست در `GET …/dossier`]
 GET    /v1/insurance-policies/expiring   بیمه‌های در آستانه انقضا
 
 # ادعای خسارت پایه (docs/17 § ۱۷٫۲؛ مرز ADR-046) — پیاده‌شده زیر همان دارایی،

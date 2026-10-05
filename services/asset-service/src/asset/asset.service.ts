@@ -43,6 +43,7 @@ import type {
   AssetLocationView,
   AssetView,
   AttachDocumentDto,
+  AttachedDocumentView,
   ChangeStatusDto,
   CreateAssetDto,
   DecommissionDto,
@@ -1102,14 +1103,31 @@ export class AssetService {
     };
   }
 
-  async attachDocument(id: string, dto: AttachDocumentDto) {
+  /**
+   * Attaches a reference to a document document-service holds. Under an
+   * Idempotency-Key, `fence` is the caller's claim on it (#169, as for the two
+   * records of `insurance.service.ts`): locked as the transaction's first
+   * statement, completed with the reference as its last, so the claim, the
+   * reference, its outbox row, its timeline entry and the response to replay
+   * commit together, or none of them does. A reference has no natural unique
+   * key — the same document may be attached twice — so the key is the only
+   * thing that stops a replayed form from attaching it twice.
+   */
+  async attachDocument(
+    id: string,
+    dto: AttachDocumentDto,
+    fence?: ClaimFence<AttachedDocumentView>,
+  ): Promise<AttachedDocumentView> {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
 
     const refId = `ADR_${ulid()}`;
     const actor = getContext().userId ?? 'SYSTEM';
 
-    const created = await this.repository.transaction(async (tx) => {
+    return this.repository.transaction(async (tx) => {
+      // The claim is locked by its token before anything else, so an attach
+      // whose claim lapsed and was re-taken by a retry commits nothing.
+      if (fence) await fence.hold(tx);
       await this.lockOwned(tx, id, asset.organizationId, 'SHARE');
 
       const row = await tx.assetDocumentRef.create({
@@ -1153,17 +1171,16 @@ export class AssetService {
         occurredAt: new Date(),
       });
 
-      return row;
+      const view: AttachedDocumentView = {
+        id: row.id,
+        documentId: row.documentId,
+        kind: row.kind,
+        title: row.title,
+        issuedAt: row.issuedAt?.toISOString() ?? null,
+        expiresAt: row.expiresAt?.toISOString() ?? null,
+      };
+      return fence ? fence.complete(tx, view) : view;
     });
-
-    return {
-      id: created.id,
-      documentId: created.documentId,
-      kind: created.kind,
-      title: created.title,
-      issuedAt: created.issuedAt?.toISOString() ?? null,
-      expiresAt: created.expiresAt?.toISOString() ?? null,
-    };
   }
 
   // =========================================================================
