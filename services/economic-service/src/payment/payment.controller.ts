@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
-import { PaymentService } from './payment.service';
+import { PaymentService, REFUND_REFUSALS } from './payment.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
@@ -76,7 +76,8 @@ export class PaymentController {
       'A-06). History is untouched: the top-up and its reversal both remain, which is what an ' +
       'auditor needs to see. Refused with 422 INSUFFICIENT_BALANCE when the money has since ' +
       'been spent, because refunding it would drive the wallet negative. Requires an ' +
-      '`Idempotency-Key`.',
+      '`Idempotency-Key`. A refund the payment provider declined is final: the same key and ' +
+      'body replay the recorded 422 instead of holding the amount again.',
   })
   async refund(
     @Param('id') id: string,
@@ -108,6 +109,7 @@ export class PaymentController {
           },
         };
       },
+      { terminalRefusals: REFUND_REFUSALS },
     );
   }
 }

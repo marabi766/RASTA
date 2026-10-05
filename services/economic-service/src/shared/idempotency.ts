@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
+import { ERROR_STATUS, type ErrorCode } from '@rasta/contracts';
 import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../ledger/ledger.repository';
@@ -236,9 +237,15 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: () => Promise<T>,
+    options?: { terminalRefusals?: TerminalRefusals },
   ): Promise<T> {
     const claim = await this.claim(endpoint, key, body);
-    if (claim.kind === 'REPLAY') return claim.body as T;
+    if (claim.kind === 'REPLAY') {
+      if (claim.status >= REFUSAL_STATUS_FLOOR) {
+        throw replayedRefusal(claim.body, options?.terminalRefusals);
+      }
+      return claim.body as T;
+    }
 
     // Only a failure of `work` releases the claim. A failure to record the
     // response comes after the work committed — the money has moved — so the
@@ -249,11 +256,44 @@ export class IdempotencyStore {
     try {
       result = await work();
     } catch (error) {
+      const declared =
+        error instanceof TerminalRefusalError &&
+        options?.terminalRefusals !== undefined &&
+        isDeclared(options.terminalRefusals, error.refusal);
+      if (declared && (await this.completeRefusal(endpoint, key, error))) throw error;
       await this.release(endpoint, key);
       throw error;
     }
     await this.complete(endpoint, key, successStatus, result);
     return result;
+  }
+
+  /**
+   * Records a terminal refusal as the key's completed outcome: its HTTP status
+   * and the closed refusal name — nothing else (S-09). Returns whether it was
+   * recorded; when not, the caller releases the key as it does for any other
+   * error, because a refusal the store could not record is not one it can
+   * replay.
+   */
+  private async completeRefusal(
+    endpoint: string,
+    key: string,
+    error: TerminalRefusalError,
+  ): Promise<boolean> {
+    const organizationId = getOrganizationId();
+    try {
+      const { count } = await this.prisma.client.idempotencyKey.updateMany({
+        where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+        data: {
+          state: 'COMPLETED',
+          responseStatus: error.status,
+          responseBody: { refusal: error.refusal },
+        },
+      });
+      return count === 1;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -281,6 +321,63 @@ export class IdempotencyStore {
     );
     return result.count;
   }
+}
+
+/**
+ * A business refusal an endpoint treats as the final answer to its request: the
+ * same key and body will never be answered otherwise, so the store records it
+ * and replays it instead of releasing the key (docs/06 § 6.8).
+ *
+ * **Closed on purpose.** A refusal is a name this table declares, with the
+ * error code and the fixed, author-written message it is answered with — the
+ * store keeps the name and the status, never the thrown error's message,
+ * context or any client input (S-09). Declare only a refusal that cannot turn
+ * into success later: an insufficient balance can (a top-up), an unavailable
+ * dependency can, a 5xx can — those stay released.
+ */
+export interface TerminalRefusal {
+  code: ErrorCode;
+  message: string;
+}
+
+export type TerminalRefusals = Readonly<Record<string, TerminalRefusal>>;
+
+/** A declared refusal: thrown by an endpoint's work, recorded and replayed by the store. */
+export class TerminalRefusalError extends RastaError {
+  constructor(
+    readonly refusal: string,
+    definition: TerminalRefusal,
+    internalContext?: Record<string, unknown>,
+  ) {
+    super(definition.code, definition.message, { internalContext });
+    this.name = 'TerminalRefusalError';
+  }
+}
+
+/** A stored status at or above this is a recorded refusal, not a response body. */
+const REFUSAL_STATUS_FLOOR = 400;
+
+function isDeclared(refusals: TerminalRefusals, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(refusals, name);
+}
+
+/**
+ * The error a recorded refusal is answered with. A stored name the endpoint no
+ * longer declares is a fault, answered as a server error — never as a success
+ * and never as a refusal nobody can name.
+ */
+function replayedRefusal(stored: unknown, refusals: TerminalRefusals = {}): RastaError {
+  const name =
+    typeof stored === 'object' && stored !== null
+      ? (stored as { refusal?: unknown }).refusal
+      : undefined;
+  if (typeof name === 'string' && isDeclared(refusals, name)) {
+    const definition = refusals[name] as TerminalRefusal;
+    if (ERROR_STATUS[definition.code] >= REFUSAL_STATUS_FLOOR) {
+      return new TerminalRefusalError(name, definition);
+    }
+  }
+  return RastaError.internal('A recorded refusal is not declared by its endpoint');
 }
 
 /**
