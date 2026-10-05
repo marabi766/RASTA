@@ -210,6 +210,10 @@ describe('resolveRoute', () => {
     ['/projects/PRJ_1/approvals', 'construction'],
     ['/approvals/APR_1/decision', 'construction'],
     ['/approval-policies/APL_1/activate', 'construction'],
+    ['/open-tenders', 'construction'],
+    ['/open-tenders/TND_1', 'construction'],
+    ['/criteria-templates', 'construction'],
+    ['/criteria-templates/CTP_1', 'construction'],
     ['/ledger/trial-balance', 'economic'],
   ])('routes %s to %s', (path, service) => {
     expect(resolveRoute(path)?.service).toBe(service);
@@ -410,4 +414,19 @@ describe('the notification inbox route (ADR-054 § 11, NTF-002)', () => {
     expect(resolveRoute('/notifications/NTN_1/read')?.service).toBe('notification');
     expect(resolveRoute('/notifications/unread-count')?.service).toBe('notification');
   });
+});
+
+/**
+ * The two construction prefixes a contractor and an owner need before a tender's own routes
+ * (#223 F1): closed like every other route, and no new public one.
+ */
+describe('the open-tenders and criteria-templates prefixes', () => {
+  it.each(['open-tenders', 'criteria-templates'])(
+    '%s is closed, carries no role filter of its own, and reaches construction-service',
+    (prefix) => {
+      const route = resolveRoute(prefix);
+      expect(route).toEqual({ prefix, service: 'construction' });
+      expect(route!.publicReason).toBeUndefined();
+    },
+  );
 });

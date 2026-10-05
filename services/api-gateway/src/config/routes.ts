@@ -158,6 +158,14 @@ export const ROUTES: readonly RouteRule[] = [
   // authorities and thresholds a project's approvals come from.
   { prefix: 'approval-policies', service: 'construction' },
   { prefix: 'tenders', service: 'construction', requiresIdempotencyKey: true },
+  // How a contractor finds a tender to bid on (CON-002 PR 6): the published tenders its
+  // organization may bid on, public or invited, never its own. Read-only. construction-service
+  // decides what is visible, and anything else answers 404 there (#223 F1).
+  { prefix: 'open-tenders', service: 'construction' },
+  // The owner's evaluation criteria templates (CON-002 PR 4a): versioned, never edited, scoped
+  // to the caller's organization. A write takes the optional Idempotency-Key construction-service
+  // honours; nothing here moves money or is irreversible, so the edge does not require one (#223 F1).
+  { prefix: 'criteria-templates', service: 'construction' },
   { prefix: 'contracts', service: 'contract' },
   { prefix: 'statements', service: 'contract', requiresIdempotencyKey: true },
 
