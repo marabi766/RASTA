@@ -4,7 +4,7 @@ import request from 'supertest';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { buildConstructionOpenApiDocument, formatDocument } from '../src/openapi/document';
 import { actor, apiTenant, orgAdmin, startApi, type ApiHarness } from './api-helpers';
-import { PROJECT, cleanup } from './helpers';
+import { PROJECT, approvedProject, cleanup, ensureGatePolicy, wire } from './helpers';
 
 /**
  * The published contract, checked against the service that answers it.
@@ -180,6 +180,37 @@ describe('the published OpenAPI contract (real application)', () => {
       } finally {
         api.hierarchy[mode] = false;
       }
+    }
+
+    // CON-002 PR 11: a gated command with a policy in force opens its approval request — 202.
+    const w = wire();
+    try {
+      const project = await approvedProject(w, org);
+      const day = 24 * 60 * 60 * 1000;
+      const tender = await http()
+        .post(`/v1/projects/${project.id}/tenders`)
+        .set('authorization', `Bearer ${token}`)
+        .send({
+          title: 'Road resurfacing',
+          scopeOfWork: 'Two kilometres',
+          procurementNature: 'FORMAL_TENDER',
+          visibility: 'PUBLIC',
+          bidOpeningAt: new Date(Date.now() + day).toISOString(),
+          bidClosingAt: new Date(Date.now() + 30 * day).toISOString(),
+        });
+      await ensureGatePolicy(w, org, 'tender.cancellation');
+      reached.add(
+        String(
+          (
+            await http()
+              .post(`/v1/tenders/${tender.body.id as string}/cancel`)
+              .set('authorization', `Bearer ${token}`)
+              .send({ expectedVersion: 1, reason: 'Funding was withdrawn' })
+          ).status,
+        ),
+      ); // 202
+    } finally {
+      await w.close();
     }
 
     documented.delete('500');

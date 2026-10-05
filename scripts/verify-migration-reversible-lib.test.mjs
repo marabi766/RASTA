@@ -770,11 +770,35 @@ test('after a down, the ledger assertion requires that migration to have no row 
   assert.throws(() => ledgerAssertionScript([], 'ctx', "b'; DROP TABLE x; --"));
 });
 
-test('the only inexact-inverse allowance is marketplace cancel_before_hold', () => {
+test('the only inexact-inverse allowances are marketplace cancel_before_hold and construction tender_approval_insert_guards', () => {
   const allowances = Object.entries(EXPECTED).flatMap(([service, entry]) =>
     Object.keys(entry.inexactInverse ?? {}).map((name) => `${service}/${name}`),
   );
-  assert.deepEqual(allowances, ['marketplace/20260830103500_cancel_before_hold']);
+  assert.deepEqual(allowances.sort(), [
+    'construction/20261004120000_tender_approval_insert_guards',
+    'marketplace/20260830103500_cancel_before_hold',
+  ]);
+});
+
+test('each inexact-inverse allowance only turns a validated constraint into the same one NOT VALID', () => {
+  for (const [service, entry] of Object.entries(EXPECTED)) {
+    for (const [name, allowance] of Object.entries(entry.inexactInverse ?? {})) {
+      assert.equal(allowance.missing.length, 1, `${service}/${name}`);
+      assert.equal(allowance.unexpected.length, 1, `${service}/${name}`);
+      const [missing] = allowance.missing;
+      const [unexpected] = allowance.unexpected;
+      assert.match(missing, / valid=true$/, `${service}/${name}`);
+      assert.equal(
+        unexpected,
+        missing
+          .replace(/ deferrable=/, ' NOT VALID deferrable=')
+          .replace(/ valid=true$/, ' valid=false'),
+        `${service}/${name}`,
+      );
+      // The probe that makes the allowance necessary rolls the migration back over real rows.
+      assert.equal(entry.dataRollback?.migration, name, `${service}/${name}`);
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

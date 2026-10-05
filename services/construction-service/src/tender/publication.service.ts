@@ -16,6 +16,10 @@ import { tenderTransitionsTotal, versionConflictsTotal } from '../observability/
 import { CriteriaRepository } from './criteria.repository';
 import { TenderRepository, type LockedTender } from './tender.repository';
 import { PublicationRepository } from './publication.repository';
+import { TenderApprovalGate, type GateCaller } from './tender-approval.gate';
+import { TenderApprovalRepository } from './tender-approval.repository';
+import { approvalStale } from './tender-approval.errors';
+import { toRequestView, type Gated, type TenderApprovalRequestView } from './tender-approval.dto';
 import { publicationRefusals } from './publication';
 import { assertTenderTransition } from './tender.state-machine';
 import { SealingError } from './sealing/errors';
@@ -29,6 +33,8 @@ import type {
   ListInvitationsQuery,
   PublishTenderDto,
 } from './publication.dto';
+
+const WORKFLOW = 'tender.publication' as const;
 
 /**
  * PublishTender and the invitations to a restricted tender (ADR-065, ADR-066).
@@ -49,13 +55,13 @@ import type {
  * refused transaction. If no key-encryption key is configured nothing is
  * published (`503`): a tender whose bids cannot be sealed must not open.
  *
- * ## The approval gate (Q-84) — fail closed
+ * ## The approval gate (Q-84, CON-002 PR 11) — fail closed
  *
- * `publish` (the route) refuses `APPROVAL_POLICY_REQUIRED` with no active
- * `tender.publication` policy, and `APPROVAL_REQUIRED` while the approval round is
- * not wired (PR 11) even when one is in force. `publishApproved` is the same core
- * with the gate satisfied; it is not routed, and PR 11 adds only the call that
- * reaches it once a round has been granted.
+ * `publish` refuses `APPROVAL_POLICY_REQUIRED` with no active `tender.publication` policy. With
+ * one it opens the round (`TenderApprovalGate`) bound to the tender and its version and answers the
+ * request; the same command publishes only when the request is APPROVED, using it up in the
+ * publication's own transaction under the tender's lock, and refuses a stale one (409) — what the
+ * authority approved is exactly what is published.
  */
 @Injectable()
 export class PublicationService {
@@ -69,84 +75,114 @@ export class PublicationService {
     @Inject(ENV) private readonly env: ConstructionEnv,
     @Inject(TENDER_KEY_PROVIDER) private readonly keys: TenderKeyProvider,
     private readonly directory: OrganizationDirectory,
+    private readonly gate: TenderApprovalGate,
+    private readonly requests: TenderApprovalRepository,
   ) {}
 
   /**
-   * POST /publish. **Fails closed on the approval gate (Q-84):** with no active
-   * `tender.publication` policy it refuses `APPROVAL_POLICY_REQUIRED`, and while
-   * the approval round is not wired (PR 11) even a policy in force refuses
-   * `APPROVAL_REQUIRED`. Nothing is published on an approval nobody gave.
+   * POST /publish — the command behind the approval gate (Q-84, CON-002 PR 11). With no `tender.publication`
+   * policy in force: 422 naming `APPROVAL_POLICY_REQUIRED` (with every other reason). With one: a publication
+   * that could succeed opens (or finds) an approval request bound to this tender and its version, and the
+   * answer is the request (`executed: false`, 202); once every step is granted the same command — on the same
+   * version — publishes and uses the approval up in the same transaction (`executed: true`). A tender that
+   * changed since the approval is 409 `APPROVAL_STALE`: nothing is published.
    */
-  publish(tenderId: string, dto: PublishTenderDto): Promise<TenderView> {
-    return this.execute(tenderId, dto, false);
-  }
-
-  /**
-   * The publication core, with the approval gate satisfied. Not routed: PR 11 calls
-   * it once a `tender.publication` round has been granted, which is then the only
-   * thing that changes. Kept public so the core (every other refusal, the key, the
-   * event) is tested directly now.
-   */
-  publishApproved(tenderId: string, dto: PublishTenderDto): Promise<TenderView> {
-    return this.execute(tenderId, dto, true);
-  }
-
-  private async execute(
-    tenderId: string,
-    dto: PublishTenderDto,
-    approved: boolean,
-  ): Promise<TenderView> {
+  async publish(tenderId: string, dto: PublishTenderDto): Promise<Gated<TenderView>> {
     const { organizationId, actor } = this.access.assertCanWrite();
+    const caller: GateCaller = {
+      userId: actor,
+      organizationId,
+      identity: storedIdentityOf(currentActor()),
+    };
 
-    // A cheap, unlocked look at the version and the state, so a stale or
-    // repeated request does not cost a key pair. Advisory only: everything is
-    // decided again under the lock, and the deadline is never judged here (that
-    // would be the application clock).
+    // A cheap, unlocked look at the version and the state, so a stale or repeated request does not cost a key
+    // pair. Advisory only: everything is decided again under the lock, and the deadline is never judged here
+    // (that would be the application clock).
     const first = await this.tenders.findTender(tenderId);
     if (!first) throw RastaError.notFound('Tender', tenderId);
     assertOwnTender(first, organizationId);
-    if (first.version !== dto.expectedVersion) throw this.conflict(tenderId);
-    assertTenderTransition(tenderId, first.status, 'PUBLISHED');
 
-    // Not approved: judge everything under the lock so the answer names every
-    // reason at once, then refuse — the gate is never satisfied on this path. No key
-    // pair is made for a request that cannot succeed (RSA generation is slow).
-    if (!approved) {
-      await this.prisma.transaction(async (tx) => {
-        const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
-        if (locked.version !== dto.expectedVersion) throw this.conflict(tenderId);
-        assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
-        const { refusals } = await this.judge(tx, tenderId, false);
-        throw this.refused(tenderId, refusals);
-      });
-    }
+    const own = { organizationId, id: tenderId, projectId: first.projectId };
+    return this.gate.guarded(own, WORKFLOW, caller, () => this.publishGated(tenderId, dto, caller));
+  }
+
+  private async publishGated(
+    tenderId: string,
+    dto: PublishTenderDto,
+    caller: GateCaller,
+  ): Promise<Gated<TenderView>> {
+    const { organizationId, userId: actor } = caller;
+    // Asked before any transaction: no row lock is held across a network call.
+    const confirmedPolicyId = await this.gate.confirmPolicy(organizationId, WORKFLOW);
+    const ready =
+      confirmedPolicyId !== null &&
+      (await this.gate.hasApproved(organizationId, tenderId, WORKFLOW));
+    if (!ready) return this.askForApproval(tenderId, dto, caller, confirmedPolicyId);
 
     const keyId = newId(ID_PREFIX.tenderKey);
     const { publicKeyPem, wrapped } = await this.makeKey(tenderId, keyId);
 
-    // The answer is read inside the transaction, with the tender still locked
-    // (the defect Codex found in #162): what the caller is told is the state
-    // their own publication produced.
-    const view = await withFinancialSpan(
+    // The answer is read inside the transaction, with the tender still locked (the defect Codex found in
+    // #162): what the caller is told is the state their own publication produced.
+    const outcome = await withFinancialSpan(
       'construction.tender.publish',
       () =>
-        this.prisma.transaction(async (tx) => {
+        this.prisma.transaction(async (tx): Promise<Gated<TenderView> | 'STALE'> => {
           const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
-          if (locked.version !== dto.expectedVersion) throw this.conflict(tenderId);
+          if (locked.version !== dto.expectedVersion) {
+            const stale = await this.gate.endIfBehind(
+              tx,
+              {
+                organizationId,
+                id: tenderId,
+                projectId: locked.projectId,
+                version: locked.version,
+              },
+              WORKFLOW,
+              caller,
+              await decisionInstant(tx),
+            );
+            if (stale) return 'STALE';
+            throw this.conflict(tenderId);
+          }
           assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
 
-          // One instant, read **after** the lock: the deadline is judged on it, and
-          // the row, the key and the event are all stamped with it. The transaction's
-          // start (`now()`) can precede a long wait for the lock by seconds, which
-          // would date a publication before the decision that made it.
+          // One instant, read **after** the lock: the deadline is judged on it, and the row, the key and the
+          // event are all stamped with it. The transaction's start (`now()`) can precede a long wait for the
+          // lock by seconds, which would date a publication before the decision that made it.
           const { row, criteria, refusals, at } = await this.judge(tx, tenderId, true);
           if (refusals.length > 0) throw this.refused(tenderId, refusals);
+
+          const resolution = await this.gate.resolve(tx, {
+            tender: {
+              organizationId,
+              id: tenderId,
+              projectId: locked.projectId,
+              version: locked.version,
+            },
+            binding: { workflowKey: WORKFLOW },
+            confirmedPolicyId: confirmedPolicyId as string,
+            caller,
+            at,
+          });
+          // Ended in this transaction (committed with it): the command answers 409 once it is.
+          if (resolution.kind === 'STALE') return 'STALE';
+          // Not approved (any more): no key was made for a request that is only now being asked.
+          if (resolution.kind === 'REQUESTED') {
+            return {
+              executed: false,
+              request: toRequestView(
+                resolution.request,
+                await this.requests.steps(tx, resolution.request),
+              ),
+            };
+          }
 
           const matched = await this.tenders.publishTender(tx, {
             tenderId,
             expectedVersion: dto.expectedVersion,
             actor,
-            actorIdentity: storedIdentityOf(currentActor()),
+            actorIdentity: caller.identity,
             at,
           });
           if (matched === 0) throw this.conflict(tenderId);
@@ -160,9 +196,18 @@ export class PublicationService {
             actor,
             at,
           });
+          // The approval is used up here, once, in the transaction that publishes (the database refuses a
+          // publication without it, and a second use of it).
+          await this.gate.consume(
+            tx,
+            resolution.request,
+            { organizationId, id: tenderId, projectId: locked.projectId, version: locked.version },
+            caller,
+            at,
+          );
 
-          // `row` was read before the update; the window and visibility it holds
-          // are what was judged and what is now published.
+          // `row` was read before the update; the window and visibility it holds are what was judged and
+          // what is now published.
           await this.events.enqueue(tx, {
             eventName: 'TENDER_PUBLISHED',
             aggregateId: tenderId,
@@ -176,18 +221,74 @@ export class PublicationService {
               bidClosingAt: row.bidClosingAt?.toISOString(),
               criteriaCount: criteria.length,
               keyId,
+              approvalRequestId: resolution.request.id,
               publishedBy: actor,
               publishedAt: at.toISOString(),
             },
             occurredAt: at,
           });
-          return this.view(organizationId, tenderId, tx);
+          return { executed: true, result: await this.view(organizationId, tenderId, tx) };
         }),
       { 'rasta.tender.command': 'publish' },
     );
-    tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'publish' });
+    if (outcome === 'STALE') throw approvalStale(WORKFLOW);
+    if (outcome.executed) tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'publish' });
+    return outcome;
+  }
 
-    return view;
+  /**
+   * Nothing is ready to be used: judge everything under the lock so the answer names every reason at once,
+   * then open (or find) the request. No key pair is made for a request that cannot be executed yet (RSA
+   * generation is slow). A request that finds itself approved in the meantime is a retry (409), not a
+   * publication without its key.
+   */
+  private async askForApproval(
+    tenderId: string,
+    dto: PublishTenderDto,
+    caller: GateCaller,
+    confirmedPolicyId: string | null,
+  ): Promise<Gated<TenderView>> {
+    const { organizationId } = caller;
+    const outcome = await this.prisma.transaction(
+      async (tx): Promise<TenderApprovalRequestView | 'STALE'> => {
+        const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
+        if (locked.version !== dto.expectedVersion) {
+          const stale = await this.gate.endIfBehind(
+            tx,
+            { organizationId, id: tenderId, projectId: locked.projectId, version: locked.version },
+            WORKFLOW,
+            caller,
+            await decisionInstant(tx),
+          );
+          if (stale) return 'STALE';
+          throw this.conflict(tenderId);
+        }
+        assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
+        const { refusals, at } = await this.judge(tx, tenderId, confirmedPolicyId !== null);
+        if (refusals.length > 0 || confirmedPolicyId === null) {
+          throw this.refused(tenderId, refusals);
+        }
+        const resolution = await this.gate.resolve(tx, {
+          tender: {
+            organizationId,
+            id: tenderId,
+            projectId: locked.projectId,
+            version: locked.version,
+          },
+          binding: { workflowKey: WORKFLOW },
+          confirmedPolicyId,
+          caller,
+          at,
+        });
+        if (resolution.kind === 'STALE') return 'STALE';
+        if (resolution.kind === 'APPROVED') {
+          throw RastaError.optimisticLockFailed('TenderApprovalRequest', resolution.request.id);
+        }
+        return toRequestView(resolution.request, await this.requests.steps(tx, resolution.request));
+      },
+    );
+    if (outcome === 'STALE') throw approvalStale(WORKFLOW);
+    return { executed: false, request: outcome };
   }
 
   // -- invitations ------------------------------------------------------------
@@ -309,7 +410,7 @@ export class PublicationService {
    * Reads what publishing is judged on, under the tender's lock, and judges it.
    * `at` is the database's instant read after the lock (`clock_timestamp()`).
    */
-  private async judge(tx: ExtendedPrismaClient, tenderId: string, approved: boolean) {
+  private async judge(tx: ExtendedPrismaClient, tenderId: string, policyInForce: boolean) {
     const at = await decisionInstant(tx);
     const row = await this.tenders.findTender(tenderId, tx);
     if (!row) throw RastaError.notFound('Tender', tenderId);
@@ -324,11 +425,7 @@ export class PublicationService {
       criteriaCount: criteria.length,
       totalWeightBp: criteria.reduce((sum, criterion) => sum + criterion.weightBp, 0),
       invitationCount: await this.publications.countInvitations(tx, tenderId),
-      approval: approved
-        ? 'GRANTED'
-        : (await this.publications.hasActivePublicationPolicy(tx))
-          ? 'NOT_GRANTED'
-          : 'NO_POLICY',
+      approval: policyInForce ? 'POLICY_IN_FORCE' : 'NO_POLICY',
     });
     return { row, criteria, refusals, at };
   }

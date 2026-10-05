@@ -487,8 +487,9 @@ test('asset-service: every tenant table already has an index leading with organi
 
 // The tables #218's table-level check reported outside economic, classified by
 // their services. Without the table exemptions exactly these are reported, so
-// each is load-bearing; construction's stays pending until its own review.
+// each is load-bearing; construction's was classified in #208 (review round 2).
 const TABLES_CLASSIFIED = {
+  construction: ['policy_reconciliation_task'],
   supplier: ['qualification_evidence', 'supplier_capability', 'suspension'],
   notification: ['delivery_attempt'],
   audit: [
@@ -524,6 +525,6 @@ test('every table exemption says which query reads the table', () => {
   }
 });
 
-test('only construction-service is still pending, with the one table #218 reported', () => {
-  assert.deepEqual(TABLE_FINDINGS_PENDING, { construction: ['policy_reconciliation_task'] });
+test('no table is pending any more: every one #218 reported is classified (#208)', () => {
+  assert.deepEqual(TABLE_FINDINGS_PENDING, {});
 });

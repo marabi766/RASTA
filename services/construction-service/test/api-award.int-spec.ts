@@ -19,6 +19,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  awardApproved,
 } from './helpers';
 
 /**
@@ -58,7 +59,13 @@ describe('award API', () => {
     ),
   });
 
+  // The people who evaluated the suite's tenders hold identities of the suite's own issuer, which a token of
+  // the API's issuer cannot be compared with (UNKNOWN, fail closed): with AWARDER_NOT_EVALUATOR on, no award
+  // passes through HTTP here. The rule has its own suites; this one proves the gate, so it is off for its length.
+  const coiBefore = process.env.CONSTRUCTION_COI_RULES;
+
   beforeAll(async () => {
+    process.env.CONSTRUCTION_COI_RULES = '';
     api = await startApi();
     w = wire(testEnv({ CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' }));
     await loadStanding(w);
@@ -70,6 +77,8 @@ describe('award API', () => {
   });
 
   afterAll(async () => {
+    if (coiBefore === undefined) delete process.env.CONSTRUCTION_COI_RULES;
+    else process.env.CONSTRUCTION_COI_RULES = coiBefore;
     await cleanup(api.prisma, organizations);
     await w.close();
     await api.close();
@@ -189,7 +198,7 @@ describe('award API', () => {
     expect(await stateOf(tenderId)).toEqual({ tender: 'EVALUATED', awards: 0 });
   });
 
-  it('fails closed on the approval gate: 422 APPROVAL_POLICY_REQUIRED with no policy, APPROVAL_REQUIRED with one — awarding nothing', async () => {
+  it('fails closed with no policy (422 APPROVAL_POLICY_REQUIRED); with one, answers 202 and awards only once another person approved it', async () => {
     const { owner, tenderId, bids } = await evaluated();
     const award = () =>
       http()
@@ -202,16 +211,50 @@ describe('award API', () => {
     expect(none.body.message).toContain('APPROVAL_POLICY_REQUIRED');
     expect(await stateOf(tenderId)).toEqual({ tender: 'EVALUATED', awards: 0 });
 
-    await activateAwardPolicy(w, owner);
-    const inForce = await award();
-    expect(inForce.status).toBe(422);
-    expect(inForce.body.message).toContain('APPROVAL_REQUIRED');
-    expect(inForce.body.message).not.toContain('APPROVAL_POLICY_REQUIRED');
-    expect(await stateOf(tenderId)).toEqual({ tender: 'EVALUATED', awards: 0 });
-    expect((await refusedRows(tenderId)).map((r) => r.refusalCode).sort()).toEqual([
+    expect((await refusedRows(tenderId)).map((r) => r.refusalCode)).toEqual([
       'APPROVAL_POLICY_REQUIRED',
-      'APPROVAL_REQUIRED',
     ]);
+
+    await activateAwardPolicy(w, owner);
+    const requester = orgAdmin(owner);
+    const ask = () =>
+      http()
+        .post(`/v1/tenders/${tenderId}/award`)
+        .set(as(requester))
+        .send({ bidId: bids[0]!.bidId });
+    const asked = await ask();
+    expect(asked.status).toBe(202);
+    expect(asked.body).toMatchObject({ workflowKey: 'tender.award', status: 'PENDING' });
+    expect(await stateOf(tenderId)).toEqual({ tender: 'EVALUATED', awards: 0 });
+
+    // The approver is shown the bid it decides on, never the price; the requester does not approve it.
+    const stepId = asked.body.steps[0].approvalId as string;
+    const approver = orgAdmin(owner);
+    const seen = await http().get(`/v1/approvals/${stepId}`).set(as(approver));
+    expect(seen.status).toBe(200);
+    expect(seen.body.request.bid).toMatchObject({
+      bidId: bids[0]!.bidId,
+      standingVerdict: 'ELIGIBLE',
+    });
+    expect(JSON.stringify(seen.body)).not.toMatch(/amount|price/i);
+    const decision = (token: string) =>
+      http()
+        .post(`/v1/approvals/${stepId}/decision`)
+        .set(as(token))
+        .send({ decision: 'GRANT', expectedVersion: seen.body.version });
+    expect((await decision(requester)).status).toBe(403);
+    expect((await decision(approver)).status).toBe(200);
+
+    const awarded = await ask();
+    expect(awarded.status).toBe(200);
+    expect(awarded.body).toMatchObject({
+      status: 'AWARDED',
+      bidId: bids[0]!.bidId,
+      alreadyAwarded: false,
+    });
+    expect(await stateOf(tenderId)).toEqual({ tender: 'AWARDED', awards: 1 });
+    // The same award again answers itself and uses nothing.
+    expect((await ask()).body).toMatchObject({ alreadyAwarded: true });
   });
 
   it('serves the award, with the winner’s price, to the owner’s person and to contract-service only, through the real guards', async () => {
@@ -230,7 +273,7 @@ describe('award API', () => {
     expect((await get(orgAdmin(owner))).status).toBe(404);
     expect((await service('contract-service', owner)).status).toBe(404);
 
-    await asAdmin(owner, () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }));
+    await asAdmin(owner, () => awardApproved(w, tenderId, { bidId: bids[0]!.bidId }));
 
     const read = await get(orgAdmin(owner));
     expect(read.status).toBe(200);
@@ -295,7 +338,7 @@ describe('award API', () => {
   it('shows a contractor its own outcome of an award made through the core, and the owner the bids’ outcome', async () => {
     const { owner, tenderId, bids } = await evaluated();
     // The core, as the owner's person: the route cannot award until the approval round is wired.
-    await asAdmin(owner, () => w.award.awardApproved(tenderId, { bidId: bids[0]!.bidId }));
+    await asAdmin(owner, () => awardApproved(w, tenderId, { bidId: bids[0]!.bidId }));
 
     const path = `/v1/tenders/${tenderId}/bids/mine/opened`;
     const winner = await http()

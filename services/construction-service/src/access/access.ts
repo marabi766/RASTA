@@ -307,6 +307,23 @@ export class ProjectAccess {
     return authority || this.canReadProjectsOf(approval.organizationId);
   }
 
+  /**
+   * Whether the roles identity-service reports the caller holds **now**, in the organization they act for,
+   * still grant reading this approval (CON-002 PR 11, review round 2). `assertCanSeeApproval` answers on the
+   * token, which outlives a revoked role: the read is re-checked on the grant that admits it — the step's
+   * authority role for its authority organization, or a project-reader role for the owner's organization.
+   */
+  liveRolesMaySeeApproval(approval: ApprovalAuthority, liveRoles: readonly string[]): boolean {
+    const context = getContext();
+    const authority =
+      context.organizationId === approval.authorityOrganizationId &&
+      liveRoles.includes(approval.authorityRole);
+    const reader =
+      context.organizationId === approval.organizationId &&
+      this.readers.some((role) => liveRoles.includes(role));
+    return authority || reader;
+  }
+
   /** The caller's organization and roles, for the authority inbox. */
   inboxScope(): { organizationId: string; roles: readonly string[] } {
     assertNotAuditor();
@@ -414,6 +431,26 @@ export class ProjectAccess {
     organizationIds: readonly string[];
   } {
     return this.assertOwnerBidSide(this.awarders, 'award its evaluated tender');
+  }
+
+  /**
+   * The roles an approver of an **award** may not hold (CON-002 PR 11): the same exclusions as for
+   * awarding, opening and evaluating — `SYSTEM_ADMIN`, `AUDITOR`, `CONTRACTOR`, each whenever present,
+   * from the one list `BID_EXCLUDED_ROLES`. The approver does not need the owner's roles (the policy
+   * names who approves, and it may be another organization), only none of these: an award approval
+   * names a bid, so it is as much a matter of the bid side as the award is.
+   */
+  assertMayDecideAward(): void {
+    assertNotServiceCaller();
+    assertNoBidExcludedRole(getContext().roles);
+  }
+
+  /**
+   * The same exclusions on the roles identity-service says the approver (or reader) of an award holds
+   * **now** in the organization they act for: a token outlives a role added since it was issued.
+   */
+  assertLiveRolesMayDecideAward(liveRoles: readonly string[]): void {
+    assertNoBidExcludedRole(liveRoles);
   }
 
   /** `assertCanAward` on the live roles identity-service reports, as for opening. */

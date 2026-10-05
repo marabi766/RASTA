@@ -34,9 +34,13 @@ describe('createPolicy', () => {
       createPolicySchema.safeParse({ ...POLICY, steps: [{ ...STEP, authorityRole: 'MAYOR' }] })
         .success,
     ).toBe(false);
-    expect(createPolicySchema.safeParse({ ...POLICY, workflowKey: 'tender.award' }).success).toBe(
+    expect(createPolicySchema.safeParse({ ...POLICY, workflowKey: 'tender.unknown' }).success).toBe(
       false,
     );
+    // The three tender gates are workflows of their own (CON-002 PR 11, Q-84).
+    for (const workflowKey of ['tender.publication', 'tender.award', 'tender.cancellation']) {
+      expect(createPolicySchema.safeParse({ ...POLICY, workflowKey }).success).toBe(true);
+    }
     expect(createPolicySchema.safeParse({ ...POLICY, steps: [] }).success).toBe(false);
   });
 

@@ -185,10 +185,47 @@ export const policyViewSchema = z
   })
   .strict();
 
+/**
+ * What a tender approval step is about (CON-002 PR 11): the request the round is bound to. For an
+ * award, `bid` names the bid, its bidder, its rank, the justification and the standing read it was
+ * decided on — **never the price**; it is shown only to an authority who is not in conflict with the
+ * tender (a member of a bidding organization sees none: 403 on the single read, `null` in a list).
+ */
+export const approvalBindingSchema = z
+  .object({
+    requestId: z.string(),
+    tenderVersion: z.number().int(),
+    status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'STALE', 'CONSUMED']),
+    requestedBy: z.string(),
+    requestedAt: z.string(),
+    bid: z
+      .object({
+        bidId: z.string(),
+        bidderOrganizationId: z.string(),
+        rank: z.number().int(),
+        tied: z.boolean(),
+        justification: z.string().nullable(),
+        matrixDigest: z.string(),
+        standingVerdict: z.string(),
+        standingAsOf: z.string(),
+      })
+      .strict()
+      .nullable(),
+    cancellation: z
+      .object({ reason: z.string(), reasonCode: z.enum(['OWNER_REQUEST', 'NO_QUALIFIED_BID']) })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
 export const approvalViewSchema = z
   .object({
     id: z.string(),
     projectId: z.string(),
+    /** Set for a tender workflow (`tender.*`): the tender this step is about. */
+    tenderId: z.string().nullable(),
+    /** The request a tender round is bound to; `null` for a project's. */
+    request: approvalBindingSchema.nullable(),
     projectOrganizationId: z.string(),
     workflowKey: z.enum(WORKFLOW_KEYS),
     round: z.number().int(),
@@ -226,3 +263,4 @@ export const approvalViewSchema = z
 
 export type PolicyView = z.infer<typeof policyViewSchema>;
 export type ApprovalView = z.infer<typeof approvalViewSchema>;
+export type ApprovalBindingView = z.infer<typeof approvalBindingSchema>;

@@ -11,6 +11,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  awardApproved,
 } from './helpers';
 
 /**
@@ -69,11 +70,9 @@ describe('tenant isolation — award', () => {
     const asB = <T>(fn: () => T) => asAdmin(b.owner, fn, user);
     for (const call of [
       () => asB(() => w.award.award(a.tenderId, { bidId: a.bids[0]!.bidId })),
-      () => asB(() => w.award.awardApproved(a.tenderId, { bidId: a.bids[0]!.bidId })),
+      () => asB(() => awardApproved(w, a.tenderId, { bidId: a.bids[0]!.bidId })),
       () =>
-        asB(() =>
-          w.award.awardApproved(a.tenderId, { bidId: a.bids[1]!.bidId, justification: 'x' }),
-        ),
+        asB(() => awardApproved(w, a.tenderId, { bidId: a.bids[1]!.bidId, justification: 'x' })),
     ]) {
       expect(await codeOf(call())).toBe('NOT_FOUND');
     }
@@ -100,10 +99,10 @@ describe('tenant isolation — award', () => {
 
   it('answers a tender that does not exist exactly as another organization’s', async () => {
     const missing = await codeOf(
-      asAdmin(b.owner, () => w.award.awardApproved('TND_NONE', { bidId: a.bids[0]!.bidId })),
+      asAdmin(b.owner, () => awardApproved(w, 'TND_NONE', { bidId: a.bids[0]!.bidId })),
     );
     const foreign = await codeOf(
-      asAdmin(b.owner, () => w.award.awardApproved(a.tenderId, { bidId: a.bids[0]!.bidId })),
+      asAdmin(b.owner, () => awardApproved(w, a.tenderId, { bidId: a.bids[0]!.bidId })),
     );
     expect(missing).toBe('NOT_FOUND');
     expect(foreign).toBe(missing);
@@ -112,7 +111,7 @@ describe('tenant isolation — award', () => {
   it('does not let B award its own tender to A’s bid: that bid is not B’s to name', async () => {
     expect(
       await codeOf(
-        asAdmin(b.owner, () => w.award.awardApproved(b.tenderId, { bidId: a.bids[0]!.bidId })),
+        asAdmin(b.owner, () => awardApproved(w, b.tenderId, { bidId: a.bids[0]!.bidId })),
       ),
     ).toBe('NOT_FOUND');
     expect(await awardsOf(b.tenderId)).toHaveLength(0);
@@ -122,7 +121,7 @@ describe('tenant isolation — award', () => {
   it('keeps a contractor out of the owner’s award, whichever tender it bid on', async () => {
     for (const contractor of [a.bids[0]!.bidder, b.bids[0]!.bidder]) {
       const call = asBidder(contractor, () =>
-        w.award.awardApproved(a.tenderId, { bidId: a.bids[0]!.bidId }),
+        awardApproved(w, a.tenderId, { bidId: a.bids[0]!.bidId }),
       );
       // The contractor acts for its own organization, not the tender's owner: ownership first, so 404.
       expect(await codeOf(call)).toBe('NOT_FOUND');
@@ -132,7 +131,7 @@ describe('tenant isolation — award', () => {
 
   it('awards each owner’s tender on its own, and leaves the other’s exactly as it was', async () => {
     const view = await asAdmin(a.owner, () =>
-      w.award.awardApproved(a.tenderId, { bidId: a.bids[0]!.bidId }),
+      awardApproved(w, a.tenderId, { bidId: a.bids[0]!.bidId }),
     );
     expect(view).toMatchObject({ tenderId: a.tenderId, bidId: a.bids[0]!.bidId });
     // B's tender and its bid are untouched by A's award.
@@ -145,7 +144,7 @@ describe('tenant isolation — award', () => {
     expect(await statusOf(b.bids[0]!.bidId)).toBe('QUALIFIED');
 
     const own = await asAdmin(b.owner, () =>
-      w.award.awardApproved(b.tenderId, { bidId: b.bids[0]!.bidId }),
+      awardApproved(w, b.tenderId, { bidId: b.bids[0]!.bidId }),
     );
     expect(own).toMatchObject({ tenderId: b.tenderId, bidId: b.bids[0]!.bidId, rank: 1 });
     expect(await awardsOf(a.tenderId)).toHaveLength(1);

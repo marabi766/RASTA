@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { PROJECT_STATES } from '../project/project.state-machine';
-import { WORKFLOW_KEYS } from '../approval/approval.state-machine';
+import { TENDER_WORKFLOW_KEYS, WORKFLOW_KEYS } from '../approval/approval.state-machine';
 import { CANCELLATION_CODES, TENDER_STATES } from '../tender/tender.state-machine';
 
 /**
@@ -118,6 +118,10 @@ export const CONSTRUCTION_EVENTS = {
   // CON-002 PR 10, round 1: the detective control after an award committed (ADR-067 § 3,
   // the residual of the winner's standing check). Ids and times only.
   TENDER_AWARD_STANDING_CONFLICT_DETECTED: 'TENDER_AWARD_STANDING_CONFLICT_DETECTED',
+  // CON-002 PR 11 (Q-84 item 5): every request, decision, execution and refusal of the approval
+  // gates of a tender, as one event (the BID_ACCESSED pattern). Awaits acceptance by the project
+  // manager. Ids, closed codes and times only: never a reason, a justification or an amount.
+  TENDER_APPROVAL_ACTION: 'TENDER_APPROVAL_ACTION',
 } as const;
 
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
@@ -474,6 +478,8 @@ export const tenderCancelledPayload = z
     ...tenderIdentity,
     from: tenderState,
     reasonCode: z.enum(CANCELLATION_CODES),
+    /** The approved request this cancellation used up (CON-002 PR 11). */
+    approvalRequestId: identifier,
     cancelledBy: identifier,
     cancelledAt: isoTimestamp,
   })
@@ -522,6 +528,8 @@ export const tenderPublishedPayload = z
     bidClosingAt: isoTimestamp,
     criteriaCount: z.number().int().positive(),
     keyId: identifier,
+    /** The approved request this publication used up (CON-002 PR 11). */
+    approvalRequestId: identifier,
     publishedBy: identifier,
     publishedAt: isoTimestamp,
   })
@@ -807,8 +815,33 @@ export const tenderAwardedPayload = z
     winnerOrganizationId: identifier,
     hasJustification: z.boolean(),
     matrixDigest: sha256Hex,
+    /** The approved request this award used up (CON-002 PR 11). */
+    approvalRequestId: identifier,
     awardedBy: identifier,
     awardedAt: isoTimestamp,
+  })
+  .strict();
+
+/**
+ * One act of a tender approval gate (CON-002 PR 11): a request opened (`REQUEST`), a step granted or
+ * rejected (`GRANT`, `REJECT`), the approved command executed (`EXECUTE`; the command's own event
+ * is published as well), a request the system ended because what it was asked on changed
+ * (`STALE`), a refused read of an award approval (`READ`) — or the refusal of any of them. Who and when, and the closed refusal code; never the
+ * reason, the justification, a bid or an amount: those are read through the API, under authorization.
+ */
+export const tenderApprovalActionPayload = z
+  .object({
+    ...tenderIdentity,
+    workflowKey: z.enum(TENDER_WORKFLOW_KEYS),
+    /** Null when the act named no request (a refusal before one was found). */
+    requestId: identifier.nullable(),
+    action: z.enum(['REQUEST', 'GRANT', 'REJECT', 'EXECUTE', 'STALE', 'READ']),
+    outcome: z.enum(['GRANTED', 'REFUSED']),
+    refusalCode: z.string().min(1).max(64).nullable(),
+    stepOrder: z.number().int().positive().nullable(),
+    actedBy: identifier,
+    actorOrganizationId: identifier,
+    actedAt: isoTimestamp,
   })
   .strict();
 
@@ -897,6 +930,7 @@ export const CONSTRUCTION_EVENT_SCHEMAS = {
   TENDER_AWARDED: tenderAwardedPayload,
   BID_NOT_AWARDED: bidNotAwardedPayload,
   TENDER_AWARD_STANDING_CONFLICT_DETECTED: tenderAwardStandingConflictDetectedPayload,
+  TENDER_APPROVAL_ACTION: tenderApprovalActionPayload,
 } as const satisfies Record<ConstructionEventName, z.ZodTypeAny>;
 
 export type ConstructionEventPayload<N extends ConstructionEventName> = z.infer<

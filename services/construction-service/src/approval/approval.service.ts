@@ -19,11 +19,13 @@ import { ApprovalRepository } from './approval.repository';
 import { PolicySuspensionService } from './policy-suspension.service';
 import {
   assertDecidable,
+  isTenderWorkflow,
   stepApplies,
   type ApprovalStateName,
   type WorkflowKey,
 } from './approval.state-machine';
 import { toApprovalView } from './views';
+import { TenderApprovalService } from '../tender/tender-approval.service';
 import type {
   ApprovalView,
   DecisionDto,
@@ -73,6 +75,7 @@ export class ApprovalService {
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly directory: OrganizationDirectory,
     private readonly suspension: PolicySuspensionService,
+    private readonly tenderApprovals: TenderApprovalService,
   ) {}
 
   private readonly logger = new Logger(ApprovalService.name);
@@ -147,6 +150,13 @@ export class ApprovalService {
     if (!located) throw RastaError.notFound('Approval', approvalId);
     const { actor } = this.access.assertIsAuthority(located);
     const organizationId = located.organizationId;
+
+    // A tender's round is the same machine, decided under the tender's lock and not the project's, and
+    // granting it allows one command to run instead of moving a state (CON-002 PR 11).
+    if (isTenderWorkflow(located.workflowKey)) {
+      await this.tenderApprovals.decide(located, dto, actor);
+      return this.view(approvalId);
+    }
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
@@ -238,14 +248,19 @@ export class ApprovalService {
       ...(query.workflowKey ? { workflowKey: query.workflowKey } : {}),
       ...(query.round ? { round: query.round } : {}),
     });
-    return rows.map((row) => toApprovalView(row, project));
+    const bindings = await this.tenderApprovals.bindings(rows, { detail: false });
+    return rows.map((row) => toApprovalView(row, project, bindings.get(row.id) ?? null));
   }
 
   async get(approvalId: string): Promise<ApprovalView> {
     const approval = await this.approvals.findApproval(this.prisma.client, approvalId);
     if (!approval) throw RastaError.notFound('Approval', approvalId);
     this.access.assertCanSeeApproval(approval);
-    return this.view(approvalId);
+    // What an award approval is about names a bid: not shown to one in conflict with the tender.
+    if (approval.workflowKey === 'tender.award') {
+      await this.tenderApprovals.assertMayReadAward(approval);
+    }
+    return this.view(approvalId, { detail: true });
   }
 
   /** The authority's inbox: steps addressed to its organization and roles. */
@@ -260,6 +275,7 @@ export class ApprovalService {
     });
     const hasMore = rows.length > query.limit;
     const visible = hasMore ? rows.slice(0, query.limit) : rows;
+    const bindings = await this.tenderApprovals.bindings(visible, { detail: false });
     const items: ApprovalView[] = [];
     for (const row of visible) {
       const brief = await this.approvals.projectBrief(
@@ -267,7 +283,7 @@ export class ApprovalService {
         row.organizationId,
         row.projectId,
       );
-      if (brief) items.push(toApprovalView(row, brief));
+      if (brief) items.push(toApprovalView(row, brief, bindings.get(row.id) ?? null));
     }
     return {
       items,
@@ -352,6 +368,8 @@ export class ApprovalService {
     input: {
       organizationId: string;
       projectId: string;
+      /** Set for a tender's round (CON-002 PR 11): the steps are then about that tender; the project is its own. */
+      tenderId?: string;
       /** From `confirmGoverningPolicy`, asked before this transaction. */
       confirmedPolicyId: string | null;
       workflowKey: WorkflowKey;
@@ -381,6 +399,7 @@ export class ApprovalService {
       id: `${APPROVAL_ID_PREFIX}_${ulid()}`,
       organizationId: input.organizationId,
       projectId: input.projectId,
+      tenderId: input.tenderId ?? null,
       workflowKey: input.workflowKey,
       round: input.round,
       stepOrder: step.stepOrder,
@@ -447,6 +466,7 @@ export class ApprovalService {
     const next = await this.approvals.nextQueued(tx, {
       organizationId: approval.organizationId,
       projectId: approval.projectId,
+      tenderId: approval.tenderId,
       workflowKey: approval.workflowKey,
       round: approval.round,
     });
@@ -507,6 +527,7 @@ export class ApprovalService {
       {
         organizationId: approval.organizationId,
         projectId: approval.projectId,
+        tenderId: approval.tenderId,
         workflowKey: approval.workflowKey,
       },
       at,
@@ -593,7 +614,10 @@ export class ApprovalService {
     return locked;
   }
 
-  private async view(approvalId: string): Promise<ApprovalView> {
+  private async view(
+    approvalId: string,
+    options: { detail: boolean } = { detail: false },
+  ): Promise<ApprovalView> {
     const approval = await this.approvals.findApproval(this.prisma.client, approvalId);
     if (!approval) throw RastaError.notFound('Approval', approvalId);
     const brief = await this.approvals.projectBrief(
@@ -602,7 +626,8 @@ export class ApprovalService {
       approval.projectId,
     );
     if (!brief) throw RastaError.notFound('Approval', approvalId);
-    return toApprovalView(approval, brief);
+    const bindings = await this.tenderApprovals.bindings([approval], options);
+    return toApprovalView(approval, brief, bindings.get(approval.id) ?? null);
   }
 
   private conflict(aggregate: string, id: string): RastaError {
