@@ -703,9 +703,12 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
   می‌سازد (Outbox)، و `causationId` = شناسهٔ `TENDER_AWARDED` است. هر مناقصه حداکثر یک `CONTRACT_DRAFTED` دارد (یکتایی `(organization_id, tender_id)`).
   **پیاده‌شده در CON-003 PR 2 (ADR-068 § ۲، ردیف‌های `DRAFT → SIGNED` و `DRAFT → CANCELLED`).** هر سه `.strict()`، `aggregateType = Contract`، کلید پارتیشن `contractId`، و هر کدام در **همان** تراکنشی که وضعیت را تغییر می‌دهد (Outbox)؛ هیچ‌کدام مبلغ ندارد.
 
-- `CONTRACT_SIGNATURE_RECORDED` — برای **هر یک** از دو امضا یک‌بار: `side` ∈ `EMPLOYER`/`CONTRACTOR`، سازمانی که امضاکننده برایش عمل کرده، `signedBy` (شناسهٔ کاربر؛ امضای بی‌شخص رکورد حسابرسی نیست) و نقشی که امضا با آن پذیرفته شد. جفت هویت پایدار برای بررسی تفکیک وظایف (#188) در پایگاه داده‌ی همین سرویس می‌ماند و روی Topic نمی‌آید.
+- `CONTRACT_SIGNATURE_RECORDED` — برای **هر یک** از دو امضا یک‌بار: `side` ∈ `EMPLOYER`/`CONTRACTOR`، سازمانی که امضاکننده برایش عمل کرده، `signedBy` (شناسهٔ کاربر؛ امضای بی‌شخص رکورد حسابرسی نیست)، نقشی که امضا با آن پذیرفته شد، و برای کارفرما `policyId`/`policyVersion` (سیاست `contract.signature` که اختیار را داد؛ برای پیمانکار `null`). جفت هویت پایدار برای بررسی تفکیک وظایف (#188) در پایگاه داده‌ی همین سرویس می‌ماند و روی Topic نمی‌آید.
 - `CONTRACT_SIGNED` — فقط با امضای **دوم** و فقط یک‌بار؛ فقط لحظه‌ها و سازمان‌ها، بی امضاکننده. `signedAt` = دیرترین دو امضا. (`docs/08` § 8.3: `AWARDED → CONTRACTED`.) ردیف قدیمی `signatories[]` با این جایگزین شد؛ مصرف‌کنندگان دیگر (construction، economic، notification) با PRهای بعدی افزوده می‌شوند.
 - `CONTRACT_CANCELLED` — فقط **کد دلیل بسته**؛ یادداشت متنی آزاد در پایگاه داده می‌ماند و از API برای دو طرف خوانده می‌شود (متن آزاد مشتری است و Topic را همهٔ سرویس‌ها می‌خوانند).
+- `APPROVAL_POLICY_CREATED` · `_SUBMITTED` · `_REJECTED` · `_ACTIVATED` · `_RETIRED` — سیاستی که می‌گوید چه نقش‌هایی از سازمان کارفرما برای او امضا می‌کنند (ADR-068 § ۵؛ همان سازوکار و همان شکل رویدادهای `construction-service`، بدون `SUSPENDED`).
+  `aggregateType = ApprovalPolicy`؛ کلید پارتیشن `(organizationId)/(workflowKey)` تا همهٔ نسخه‌های یک خط سیاست روی یک پارتیشن بمانند؛ `.strict()`: `policyId`، `organizationId`، `workflowKey` (`contract.signature`)، `policyVersion` و چه‌کسی/چه‌وقت (و برای `CREATED` نویسنده و تعداد گام‌ها،
+  برای `ACTIVATED` سیاستِ بازنشسته‌شده). **هرگز برچسب، توجیه، دلیل رد یا نقش‌ها**: آن‌ها با خودِ سیاست می‌مانند و از API خوانده می‌شوند.
 
 - **مصرف:** گروه `contract-service.tender-awarded` روی `rasta.construction.v1` (+ `.retry`)، DLQ ‏`rasta.contract.v1.dlq`. کلید Idempotency = `tenderId`
   (در مستأجر). پیش از نوشتن، award از مالکش پرسیده و با رویداد سنجیده می‌شود: عدم تأیید ⇒ `SOURCE_UNCONFIRMED`؛ منبع در دسترس نیست ⇒ تلاش دوباره و

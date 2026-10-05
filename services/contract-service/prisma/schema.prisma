@@ -141,15 +141,120 @@ model ContractSignature {
   signedByIssuer  String? @map("signed_by_issuer")
   signedBySubject String? @map("signed_by_subject")
 
-  /// The role the signature was accepted under, as the configuration named it.
+  /// The role the signature was accepted under: the role the employer's policy names for the
+  /// employer's side, `CONTRACTOR` for the contractor's.
   authorityRole String   @map("authority_role")
   signedAt      DateTime @map("signed_at") @db.Timestamptz(3)
   correlationId String   @map("correlation_id")
 
-  contract Contract @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  /// The `contract.signature` policy that authorised the employer's side — its id and version —
+  /// and nothing for the contractor's (`ck_signature_policy`).
+  policyId      String? @map("policy_id")
+  policyVersion Int?    @map("policy_version")
+
+  contract Contract        @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  policy   ApprovalPolicy? @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([organizationId, contractId, side], map: "ux_contract_signature_side")
   @@map("contract_signature")
+}
+
+// ---------------------------------------------------------------------------
+// Approval policy — configuration as data (ADR-068 § 5, ADR-063, ADR-023, Q-70, Q-95)
+// ---------------------------------------------------------------------------
+
+enum ApprovalPolicyStatus {
+  DRAFT
+  PENDING_PLATFORM_APPROVAL
+  ACTIVE
+  REJECTED
+  RETIRED
+}
+
+/// Who may do what to a contract, as rows written by the people entitled to write them, never by
+/// code or environment: the platform stores the authority it is told and creates none (ADR-023).
+/// `contract.signature` is the one workflow so far — which roles of the employer's organization
+/// accept a contract for it. A policy is immutable once written (the database keeps it so): a
+/// change is a new version, put in force in place of the old one, so what a signature recorded
+/// stays true.
+model ApprovalPolicy {
+  id String @id
+
+  /// The organization this policy governs (the employer whose contracts it applies to).
+  organizationId       String @map("organization_id")
+  /// The organization whose administrator wrote it: the governed organization's union or an
+  /// ancestor union, or the platform (Q-70 (7), decided).
+  authorOrganizationId String @map("author_organization_id")
+  /// `UNION_ADMIN` or `SYSTEM_ADMIN` (`ck_policy_author_role`).
+  authorRole           String @map("author_role")
+
+  /// `contract.signature` (`ck_policy_workflow_key`).
+  workflowKey   String @map("workflow_key")
+  /// 1, 2, 3 … per (organization, workflow key).
+  policyVersion Int    @map("policy_version")
+
+  status    ApprovalPolicyStatus @default(DRAFT)
+  label     String
+  /// Why this policy — a governance setting without a rationale is unauditable.
+  rationale String
+  /// Demo data labelled «نمونه — نیازمند تصویب» (ADR-023).
+  isSample  Boolean              @default(false) @map("is_sample")
+
+  createdAt            DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy            String    @map("created_by")
+  /// The author's and the submitter's stable identity (#188): the token's issuer and subject,
+  /// both or neither. NULL is unknown, which the four-eyes check treats as the approver's own work.
+  createdByIssuer      String?   @map("created_by_issuer")
+  createdBySubject     String?   @map("created_by_subject")
+  createdCorrelationId String    @map("created_correlation_id")
+  submittedAt          DateTime? @map("submitted_at") @db.Timestamptz(3)
+  submittedBy          String?   @map("submitted_by")
+  submittedByIssuer    String?   @map("submitted_by_issuer")
+  submittedBySubject   String?   @map("submitted_by_subject")
+  /// The platform approval: the SYSTEM_ADMIN who approved it, and when.
+  activatedAt          DateTime? @map("activated_at") @db.Timestamptz(3)
+  activatedBy          String?   @map("activated_by")
+  rejectedAt           DateTime? @map("rejected_at") @db.Timestamptz(3)
+  rejectedBy           String?   @map("rejected_by")
+  rejectionReason      String?   @map("rejection_reason")
+  retiredAt            DateTime? @map("retired_at") @db.Timestamptz(3)
+  retiredBy            String?   @map("retired_by")
+
+  version Int @default(1)
+
+  steps      ApprovalPolicyStep[]
+  signatures ContractSignature[]
+
+  // SQL-only: `ux_approval_policy_active` — at most one ACTIVE policy per
+  // (organization, workflow key).
+  @@unique([organizationId, id], map: "ux_approval_policy_org_id")
+  @@unique([organizationId, workflowKey, policyVersion], map: "ux_approval_policy_version")
+  @@index([organizationId, workflowKey, status], map: "ix_approval_policy_org_key_status")
+  @@map("approval_policy")
+}
+
+/// One authority a policy names. For `contract.signature` each step is a role of the governed
+/// organization that may accept a contract for it (alternatives, not a sequence).
+model ApprovalPolicyStep {
+  id String @id
+
+  organizationId String @map("organization_id")
+  policyId       String @map("policy_id")
+
+  policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  stepOrder Int @map("step_order")
+
+  /// The authority: an organization and a role within it. Stored as written; for
+  /// `contract.signature` the organization is the governed one (checked when written and again,
+  /// by the database, when a signature is recorded).
+  authorityOrganizationId String @map("authority_organization_id")
+  authorityRole           String @map("authority_role")
+  authorityLabel          String @map("authority_label")
+
+  @@unique([organizationId, policyId, stepOrder], map: "ux_approval_policy_step_order")
+  @@unique([organizationId, policyId, authorityOrganizationId, authorityRole], map: "ux_approval_policy_step_authority")
+  @@map("approval_policy_step")
 }
 
 /// Idempotent commands (docs/06 § 6.8) — the store asset-service and maintenance-service

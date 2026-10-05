@@ -73,12 +73,10 @@ export function sideOf(
 @Injectable()
 export class ContractAccess {
   private readonly employerReaders: readonly string[];
-  private readonly employerSigners: readonly string[];
   private readonly cancellers: readonly string[];
 
   constructor(@Inject(ENV) env: ContractEnv) {
     this.employerReaders = [SUPER_ROLE, ...env.CONTRACT_READER_ROLES];
-    this.employerSigners = env.CONTRACT_OWNER_SIGNER_ROLES;
     this.cancellers = env.CONTRACT_CANCEL_ROLES;
   }
 
@@ -106,24 +104,18 @@ export class ContractAccess {
   }
 
   /**
-   * The role the caller's signature is accepted under, for the side they sign for — from
-   * configuration, never from code (Q-95 (1)). The contractor's side is the `CONTRACTOR` role of
-   * its own organization. The employer's is `CONTRACT_OWNER_SIGNER_ROLES`, which has no default:
-   * until the client names it, nobody signs for the employer (`422`), and a platform never
-   * grants itself that authority.
+   * The contractor's signing role: the `CONTRACTOR` role of its own organization, which is not
+   * configurable (Q-95 (1)). The employer's side has no role here: who signs for it is the
+   * `contract.signature` policy of the employer's organization (`employerSigningRole`), read
+   * under the contract's lock — never a service-wide list, which would let one role sign for
+   * every employer.
    */
-  signingRole(side: ContractSideName): { role: string } | { notConfigured: true } {
+  contractorSigningRole(): string {
     const roles = getContext().roles;
-    if (side === 'CONTRACTOR') {
-      if (!roles.includes(CONTRACTOR_ROLE)) {
-        throw RastaError.insufficientRole([CONTRACTOR_ROLE], roles);
-      }
-      return { role: CONTRACTOR_ROLE };
+    if (!roles.includes(CONTRACTOR_ROLE)) {
+      throw RastaError.insufficientRole([CONTRACTOR_ROLE], roles);
     }
-    if (this.employerSigners.length === 0) return { notConfigured: true };
-    const held = this.employerSigners.find((role) => roles.includes(role));
-    if (!held) throw RastaError.insufficientRole(this.employerSigners, roles);
-    return { role: held };
+    return CONTRACTOR_ROLE;
   }
 
   /** Only the employer cancels, with a role `CONTRACT_CANCEL_ROLES` names (Q-95 (4)). */

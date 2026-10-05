@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { WORKFLOW_KEYS } from '../policy/policy.state-machine';
 
 /**
  * Events published by contract-service, on `rasta.contract.v1`.
@@ -25,6 +26,11 @@ export const CONTRACT_EVENTS = {
   CONTRACT_SIGNATURE_RECORDED: 'CONTRACT_SIGNATURE_RECORDED',
   CONTRACT_SIGNED: 'CONTRACT_SIGNED',
   CONTRACT_CANCELLED: 'CONTRACT_CANCELLED',
+  APPROVAL_POLICY_CREATED: 'APPROVAL_POLICY_CREATED',
+  APPROVAL_POLICY_SUBMITTED: 'APPROVAL_POLICY_SUBMITTED',
+  APPROVAL_POLICY_REJECTED: 'APPROVAL_POLICY_REJECTED',
+  APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
+  APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -66,8 +72,11 @@ export const contractSignatureRecordedPayload = z
     /** The organization the signer acted for. */
     signerOrganizationId: id,
     signedBy: id,
-    /** The role the signature was accepted under, as the configuration named it. */
+    /** The role the signature was accepted under: the policy's for the employer, CONTRACTOR for the contractor. */
     authorityRole: z.string().regex(/^[A-Z][A-Z_]*$/),
+    /** The `contract.signature` policy that authorised the employer's side; null for the contractor's. */
+    policyId: id.nullable(),
+    policyVersion: z.number().int().min(1).nullable(),
     signedAt: instant,
   })
   .strict();
@@ -112,11 +121,86 @@ export const contractCancelledPayload = z
   })
   .strict();
 
+const workflowKey = z.enum(WORKFLOW_KEYS);
+const positive = z.number().int().min(1);
+
+/** A signing policy was written (a DRAFT): who, for which organization, how many authorities. */
+export const approvalPolicyCreatedPayload = z
+  .object({
+    policyId: id,
+    /** The organization the policy governs. */
+    organizationId: id,
+    /** Who wrote it: the governed organization's union, or the platform. */
+    authorOrganizationId: id,
+    authorRole: z.enum(['UNION_ADMIN', 'SYSTEM_ADMIN']),
+    workflowKey,
+    policyVersion: positive,
+    stepCount: positive,
+    isSample: z.boolean(),
+    createdBy: id,
+    createdAt: instant,
+  })
+  .strict();
+
+/** Sent for the platform administrator's approval (Q-70 (7)). */
+export const approvalPolicySubmittedPayload = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    workflowKey,
+    policyVersion: positive,
+    submittedBy: id,
+    submittedAt: instant,
+  })
+  .strict();
+
+/** Refused by the platform administrator. The reason stays with the policy. */
+export const approvalPolicyRejectedPayload = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    workflowKey,
+    policyVersion: positive,
+    rejectedBy: id,
+    rejectedAt: instant,
+  })
+  .strict();
+
+/** Put in force by the platform administrator's approval; `activatedBy` is that administrator. */
+export const approvalPolicyActivatedPayload = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    workflowKey,
+    policyVersion: positive,
+    /** The policy this one replaced, retired in the same transaction. */
+    retiredPolicyId: id.nullable(),
+    activatedBy: id,
+    activatedAt: instant,
+  })
+  .strict();
+
+export const approvalPolicyRetiredPayload = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    workflowKey,
+    policyVersion: positive,
+    retiredBy: id,
+    retiredAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
   CONTRACT_SIGNED: contractSignedPayload,
   CONTRACT_CANCELLED: contractCancelledPayload,
+  APPROVAL_POLICY_CREATED: approvalPolicyCreatedPayload,
+  APPROVAL_POLICY_SUBMITTED: approvalPolicySubmittedPayload,
+  APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
+  APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
+  APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

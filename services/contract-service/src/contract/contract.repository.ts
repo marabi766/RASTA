@@ -18,6 +18,9 @@ export interface SignatureInput {
   readonly signedByIssuer: string | null;
   readonly signedBySubject: string | null;
   readonly authorityRole: string;
+  /** The policy that authorised the employer's side (id and version); null for the contractor's. */
+  readonly policyId: string | null;
+  readonly policyVersion: number | null;
   readonly correlationId: string;
   readonly at: Date;
 }
@@ -164,6 +167,8 @@ export class ContractRepository {
             signedByIssuer: input.signedByIssuer,
             signedBySubject: input.signedBySubject,
             authorityRole: input.authorityRole,
+            policyId: input.policyId,
+            policyVersion: input.policyVersion,
             signedAt: input.at,
             correlationId: input.correlationId,
           },

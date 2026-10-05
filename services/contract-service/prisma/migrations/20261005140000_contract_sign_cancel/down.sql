@@ -5,14 +5,35 @@
 -- erased), drops the signatures, the cancellation columns and the idempotency store, then
 -- the enum. Roll the code back first: it reads and writes all of these.
 --
--- **This destroys every signature and every cancellation reason recorded.** A contract
--- already SIGNED or CANCELLED stays in that status (the column is not touched), so after
--- this reverse the database holds signed contracts with no signature behind them; the
--- `CONTRACT_SIGNED` and `CONTRACT_CANCELLED` events already published are what remains,
--- and audit-service keeps its own copy of each.
+-- **Refuses, and changes nothing, once any of this has been used.** A signature is the audit
+-- record of who accepted a contract, and a cancellation reason is the record of why it ended;
+-- both are immutable, and dropping them would leave contracts that are SIGNED or CANCELLED with
+-- nothing behind them. So this script stops, with a message, when any `contract_signature` row
+-- exists, any contract is SIGNED or CANCELLED, or any contract carries cancellation data. On a
+-- database where signing and cancelling were never used it restores the previous schema
+-- exactly (the `idempotency_key` rows are a replay cache, not a record, and are dropped).
 --
 -- The `_prisma_migrations` row is removed last so the forward migration can be re-applied.
 -- =============================================================================
+
+-- Locked first, so no signature or cancellation can be written between the check and the drops.
+LOCK TABLE "contract_signature", "contract" IN ACCESS EXCLUSIVE MODE;
+
+DO $preflight_sign_cancel$
+DECLARE
+  signatures integer;
+  ended integer;
+BEGIN
+  SELECT count(*) INTO signatures FROM "contract_signature";
+  SELECT count(*) INTO ended FROM "contract"
+   WHERE "status" IN ('SIGNED', 'CANCELLED')
+      OR "cancel_reason_code" IS NOT NULL OR "cancel_note" IS NOT NULL;
+  IF signatures > 0 OR ended > 0 THEN
+    RAISE EXCEPTION 'down refused: % signature(s) and % signed or cancelled contract(s) exist; nothing was changed', signatures, ended
+      USING ERRCODE = 'check_violation';
+  END IF;
+END
+$preflight_sign_cancel$;
 
 DROP TABLE IF EXISTS "idempotency_key";
 

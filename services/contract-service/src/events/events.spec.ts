@@ -34,16 +34,100 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the four of the lifecycle so far, each with a schema and the contract as aggregate', () => {
+  it('are the lifecycle’s four and the approval policy’s five, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
       'CONTRACT_SIGNED',
       'CONTRACT_CANCELLED',
+      'APPROVAL_POLICY_CREATED',
+      'APPROVAL_POLICY_SUBMITTED',
+      'APPROVAL_POLICY_REJECTED',
+      'APPROVAL_POLICY_ACTIVATED',
+      'APPROVAL_POLICY_RETIRED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
     expect(Object.keys(AGGREGATE_OF)).toEqual(names);
+    for (const name of names) {
+      expect(AGGREGATE_OF[name as keyof typeof AGGREGATE_OF]).toBe(
+        name.startsWith('APPROVAL_POLICY_') ? 'ApprovalPolicy' : AGGREGATE_TYPE,
+      );
+    }
+  });
+});
+
+describe('the approval policy events', () => {
+  const base = {
+    policyId: 'APL_1',
+    organizationId: 'ORG_OWNER',
+    workflowKey: 'contract.signature',
+    policyVersion: 2,
+  };
+  const payloads = {
+    APPROVAL_POLICY_CREATED: {
+      ...base,
+      authorOrganizationId: 'ORG_UNION',
+      authorRole: 'UNION_ADMIN',
+      stepCount: 1,
+      isSample: false,
+      createdBy: 'USR_1',
+      createdAt: '2026-10-05T10:00:00.000Z',
+    },
+    APPROVAL_POLICY_SUBMITTED: {
+      ...base,
+      submittedBy: 'USR_1',
+      submittedAt: '2026-10-05T10:00:00.000Z',
+    },
+    APPROVAL_POLICY_REJECTED: {
+      ...base,
+      rejectedBy: 'USR_2',
+      rejectedAt: '2026-10-05T10:00:00.000Z',
+    },
+    APPROVAL_POLICY_ACTIVATED: {
+      ...base,
+      retiredPolicyId: null,
+      activatedBy: 'USR_2',
+      activatedAt: '2026-10-05T10:00:00.000Z',
+    },
+    APPROVAL_POLICY_RETIRED: { ...base, retiredBy: 'USR_2', retiredAt: '2026-10-05T10:00:00.000Z' },
+  } as const;
+
+  it.each(Object.entries(payloads))('%s accepts the payload as published', (name, payload) => {
+    expect(validateContractPayload(name as keyof typeof payloads, payload)).toEqual(payload);
+  });
+
+  it.each(Object.keys(payloads))(
+    '%s refuses a field it does not publish: no rationale, no rejection reason, no amount',
+    (name) => {
+      for (const field of ['rationale', 'rejectionReason', 'reason', 'amountMinor', 'label']) {
+        expect(() =>
+          validateContractPayload(name as keyof typeof payloads, {
+            ...payloads[name as keyof typeof payloads],
+            [field]: 'x',
+          }),
+        ).toThrow(/does not match its published contract/);
+      }
+    },
+  );
+
+  it('refuses a workflow that has no policy', () => {
+    expect(() =>
+      validateContractPayload('APPROVAL_POLICY_SUBMITTED', {
+        ...payloads.APPROVAL_POLICY_SUBMITTED,
+        workflowKey: 'contract.amendment',
+      }),
+    ).toThrow();
+  });
+
+  it('is keyed by (organization, workflow key), so every version of one line shares a stream', () => {
+    for (const name of Object.keys(payloads)) {
+      const decision = resolvePartitionKey(
+        name as keyof typeof payloads,
+        payloads[name as keyof typeof payloads],
+      );
+      expect(decision.key).toBe('ORG_OWNER/contract.signature');
+    }
   });
 });
 
@@ -55,11 +139,28 @@ describe('CONTRACT_SIGNATURE_RECORDED', () => {
     signerOrganizationId: 'ORG_CONTRACTOR',
     signedBy: 'USR_SIGNER',
     authorityRole: 'CONTRACTOR',
+    policyId: null,
+    policyVersion: null,
     signedAt: '2026-10-05T10:00:00.000Z',
   };
 
   it('accepts the payload as published, naming the signer by user id', () => {
     expect(validateContractPayload('CONTRACT_SIGNATURE_RECORDED', recorded)).toEqual(recorded);
+  });
+
+  it('names the policy that authorised the employer’s side, by id and version', () => {
+    const employer = {
+      ...recorded,
+      side: 'EMPLOYER',
+      signerOrganizationId: 'ORG_EMPLOYER',
+      authorityRole: 'ORGANIZATION_ADMIN',
+      policyId: 'APL_1',
+      policyVersion: 3,
+    };
+    expect(validateContractPayload('CONTRACT_SIGNATURE_RECORDED', employer)).toEqual(employer);
+    expect(() =>
+      validateContractPayload('CONTRACT_SIGNATURE_RECORDED', { ...employer, policyVersion: 0 }),
+    ).toThrow();
   });
 
   it.each(['amountMinor', 'amount', 'signedByIssuer', 'signedBySubject', 'note', 'email'])(

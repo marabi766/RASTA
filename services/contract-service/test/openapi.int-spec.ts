@@ -126,4 +126,106 @@ describe('the published OpenAPI contract (real application)', () => {
     // The statuses a client is told about are the ones the service answers.
     for (const status of reached) expect(documented.has(status)).toBe(true);
   });
+
+  it('can produce every documented status of the approval-policy routes except 500', async () => {
+    const operations = Object.entries(document.paths ?? {})
+      .filter(([path]) => path.startsWith('/v1/approval-policies'))
+      .flatMap(([, item]) =>
+        Object.values(item as Record<string, { responses: Record<string, unknown> }>),
+      );
+    const documented = new Set(operations.flatMap((operation) => Object.keys(operation.responses)));
+
+    const union = `ORG-OAS-UNION-${ulid()}`;
+    const target = `ORG-OAS-TARGET-${ulid()}`;
+    const stranger = `ORG-OAS-STRANGER-${ulid()}`;
+    organizations.push(union, target, stranger);
+    api.hierarchy.everyoneIsMine = false;
+    api.hierarchy.adopt(union, target);
+    const http = () => request(api.app.getHttpServer());
+    const unionToken = person(union, ['UNION_ADMIN']);
+    const platformToken = person('ORG-OAS-PLATFORM', ['SYSTEM_ADMIN']);
+    const reached = new Set<string>();
+    const note = async (call: request.Test) => {
+      const res = await call;
+      reached.add(String(res.status));
+      return res;
+    };
+    const body = (organizationId: string, steps?: object[]) => ({
+      organizationId,
+      workflowKey: 'contract.signature',
+      label: 'Who signs',
+      rationale: 'The statuses of the policy routes',
+      steps: steps ?? [
+        {
+          authorityOrganizationId: organizationId,
+          authorityRole: 'ORGANIZATION_ADMIN',
+          authorityLabel: 'Signer',
+        },
+      ],
+    });
+    const create = (
+      token: string | undefined,
+      payload: object,
+      key: string | undefined = `oas-${ulid()}`,
+    ) => {
+      const r = http().post('/v1/approval-policies');
+      if (token) r.set('authorization', `Bearer ${token}`);
+      if (key) r.set('idempotency-key', key);
+      return r.send(payload);
+    };
+    const act = (token: string, id: string, verb: string, payload: object) =>
+      http()
+        .post(`/v1/approval-policies/${id}/${verb}`)
+        .set('authorization', `Bearer ${token}`)
+        .send(payload);
+
+    const written = await note(create(unionToken, body(target))); // 201
+    await note(create(unionToken, { ...body(target), steps: [] })); // 400
+    await note(create(undefined, body(target))); // 401
+    await note(create(person(target, ['ORGANIZATION_ADMIN']), body(target))); // 403
+    const k = `oas-${ulid()}`;
+    await note(create(unionToken, body(target), k));
+    await note(create(unionToken, { ...body(target), label: 'Another' }, k)); // 409 key reused
+    await note(
+      create(
+        unionToken,
+        body(target, [
+          {
+            authorityOrganizationId: stranger,
+            authorityRole: 'ORGANIZATION_ADMIN',
+            authorityLabel: 'Foreign',
+          },
+        ]),
+      ),
+    ); // 422
+    api.hierarchy.unavailable = true;
+    await note(create(unionToken, body(target))); // 503
+    api.hierarchy.unavailable = false;
+    api.hierarchy.timedOut = true;
+    await note(create(unionToken, body(target))); // 504
+    api.hierarchy.timedOut = false;
+
+    await note(act(unionToken, written.body.id, 'submit', { expectedVersion: 1 })); // 200
+    await note(act(unionToken, written.body.id, 'retire', { expectedVersion: 2 })); // 422 (not ACTIVE)
+    await note(act(unionToken, `APL_${ulid()}`, 'submit', { expectedVersion: 1 })); // 404
+    await note(act(unionToken, written.body.id, 'submit', { expectedVersion: 99 })); // 409 version
+    await note(http().get('/v1/approval-policies').set('authorization', `Bearer ${unionToken}`)); // 200
+    await note(
+      http()
+        .get(`/v1/approval-policies/${written.body.id}`)
+        .set('authorization', `Bearer ${platformToken}`),
+    ); // 200
+    await note(
+      http()
+        .get('/v1/approval-policies/pending-platform-approval')
+        .set('authorization', `Bearer ${platformToken}`),
+    ); // 200
+    await note(act(platformToken, written.body.id, 'approve', { expectedVersion: 2 })); // 200
+
+    for (const status of documented) {
+      if (status === '500') continue;
+      expect({ status, reached: reached.has(status) }).toEqual({ status, reached: true });
+    }
+    for (const status of reached) expect(documented.has(status)).toBe(true);
+  });
 });

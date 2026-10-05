@@ -42,6 +42,11 @@ import { ContractAccess } from './access/access';
 import { ContractRepository } from './contract/contract.repository';
 import { ContractService } from './contract/contract.service';
 import { ContractController } from './contract/contract.controller';
+import { PolicyAccess } from './policy/policy.access';
+import { PolicyController } from './policy/policy.controller';
+import { PolicyRepository } from './policy/policy.repository';
+import { PolicyService } from './policy/policy.service';
+import { OrganizationDirectory } from './organization/organization-directory';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import { AWARD_SOURCE, ENV, LOGGER } from './tokens';
@@ -60,7 +65,7 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * with economic-service are later changes (ADR-068 § 9) and bring their own wiring.
  */
 @Module({
-  controllers: [ContractController, HealthController, MetricsController],
+  controllers: [ContractController, PolicyController, HealthController, MetricsController],
   providers: [
     { provide: ENV, useFactory: () => loadContractEnv() },
 
@@ -99,6 +104,10 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     ContractAccess,
     ContractRepository,
     ContractService,
+    PolicyAccess,
+    PolicyRepository,
+    PolicyService,
+    OrganizationDirectory,
 
     // Idempotent commands (docs/06 § 6.8): this service's own store for `sign` and `cancel`.
     {

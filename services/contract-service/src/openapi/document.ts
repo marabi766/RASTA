@@ -13,6 +13,15 @@ import {
   listContractsQuerySchema,
   signContractSchema,
 } from '../contract/dto';
+import { PolicyController } from '../policy/policy.controller';
+import { PolicyService } from '../policy/policy.service';
+import {
+  createPolicySchema,
+  listPoliciesQuerySchema,
+  policyRejectionSchema,
+  policyTransitionSchema,
+  policyViewSchema,
+} from '../policy/dto';
 import { IdempotencyStore } from '../shared/idempotency';
 import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
@@ -63,18 +72,49 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/contracts/{id}': { status: '200', schema: contractViewSchema },
   'POST /v1/contracts/{id}/sign': { status: '200', schema: contractViewSchema },
   'POST /v1/contracts/{id}/cancel': { status: '200', schema: contractViewSchema },
+  'POST /v1/approval-policies': { status: '201', schema: policyViewSchema },
+  'GET /v1/approval-policies': { status: '200', schema: cursorPageOf(policyViewSchema) },
+  'GET /v1/approval-policies/pending-platform-approval': {
+    status: '200',
+    schema: cursorPageOf(policyViewSchema),
+  },
+  'GET /v1/approval-policies/{id}': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/submit': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/approve': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/reject': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/retire': { status: '200', schema: policyViewSchema },
 };
 
-/** The two commands: a strict body and a required `Idempotency-Key` each (docs/06 § 6.8). */
+/** Every command takes a strict body. */
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/contracts/{id}/sign': signContractSchema,
   'POST /v1/contracts/{id}/cancel': cancelContractSchema,
+  'POST /v1/approval-policies': createPolicySchema,
+  'POST /v1/approval-policies/{id}/submit': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/approve': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/reject': policyRejectionSchema,
+  'POST /v1/approval-policies/{id}/retire': policyTransitionSchema,
 };
+
+/** The commands that require an `Idempotency-Key` (docs/06 § 6.8). */
+const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/contracts/{id}/sign',
+  'POST /v1/contracts/{id}/cancel',
+  'POST /v1/approval-policies',
+]);
+
+/** The policy commands that confirm the union's hierarchy with organization-service. */
+const HIERARCHY_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/approval-policies',
+  'POST /v1/approval-policies/{id}/submit',
+  'POST /v1/approval-policies/{id}/approve',
+]);
 
 /** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/contracts/{id}/sign': 'signature',
   'POST /v1/contracts/{id}/cancel': 'cancellation',
+  'POST /v1/approval-policies': 'policy',
 };
 
 /** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
@@ -109,22 +149,37 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
 
 const REFUSAL_DETAILS_NOTE =
   ' When refused for a closed reason, `details` names it: one entry, `path` the area (signature, ' +
-  'cancellation) and `code` the reason, one of those listed here. Branch on `code` and ' +
+  'cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and ' +
   '`details[].code`, never on `message`. A refusal without a closed reason (a role the ' +
   'configuration does not grant) carries no `details`.';
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/contracts': listContractsQuerySchema,
+  'GET /v1/approval-policies': listPoliciesQuerySchema,
+  'GET /v1/approval-policies/pending-platform-approval': listPoliciesQuerySchema,
 };
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
   400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role CONTRACT_OWNER_SIGNER_ROLES, CONTRACT_CANCEL_ROLES or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.',
+  403: 'Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.',
   404: 'Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.',
   409: 'On sign: another person for a side that has already signed (SIDE_ALREADY_SIGNED); on either command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
-  422: 'Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no signing authority configured for the employer (SIGNER_AUTHORITY_NOT_CONFIGURED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED).',
+  422: 'Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED).',
   500: 'Unexpected server error.',
+};
+
+/** The same statuses on the approval-policy routes, which answer for other reasons (Q-70 (7)). */
+export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
+  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.',
+  401: ERROR_DESCRIPTIONS[401] as string,
+  403: 'Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.',
+  404: 'Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).',
+  409: 'The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
+  422: 'Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).',
+  500: 'Unexpected server error.',
+  503: 'organization-service could not confirm the hierarchy (UPSTREAM_UNAVAILABLE): the write is refused, never assumed.',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.',
 };
 
 const DESCRIPTION =
@@ -135,7 +190,10 @@ const DESCRIPTION =
   'two parties only: the employer’s organization and the winning contractor’s; anyone else ' +
   'gets 404. Each party signs separately — a recorded acceptance, not a legal signature ' +
   '(Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft ' +
-  'for a closed reason. Amounts are decimal strings of minor units (rials). Amendments, milestones, ' +
+  'for a closed reason. Who may sign for the employer is the `contract.signature` approval ' +
+  'policy of its own organization (/v1/approval-policies): written by a union or the platform, ' +
+  'put in force by a platform administrator who is not its author, and never an environment ' +
+  'setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). Amendments, milestones, ' +
   'statements with their separate technical and financial approvals, and the settlement ' +
   'boundary with economic-service follow (ADR-068 § 9); no money is ever held here.';
 
@@ -158,9 +216,10 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
  * endpoint and produces the same bytes on every machine.
  */
 @Module({
-  controllers: [ContractController],
+  controllers: [ContractController, PolicyController],
   providers: [
     { provide: ContractService, useValue: {} },
+    { provide: PolicyService, useValue: {} },
     { provide: IdempotencyStore, useValue: {} },
   ],
 })
@@ -199,6 +258,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           required: true,
           content: { 'application/json': { schema: toJsonSchema(body) } },
         };
+      }
+      const idempotent = IDEMPOTENT_COMMANDS.has(key);
+      if (idempotent) {
         // Nest's `@ApiHeader` has no schema; replaced with the truth: required, bounded.
         operation.parameters = operation.parameters.filter(
           (parameter) => !isHeader(parameter, 'idempotency-key'),
@@ -226,16 +288,23 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
       }
 
-      for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
+      const descriptions = path.startsWith('/v1/approval-policies')
+        ? POLICY_ERROR_DESCRIPTIONS
+        : ERROR_DESCRIPTIONS;
+      for (const [status, description] of Object.entries(descriptions)) {
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
         // Only a route with a query or a body can answer 400 (the id is an opaque string).
         if (status === '400' && !query && !body) continue;
         // 409 and 422 are a command's: a read has no state to move and no rule to refuse.
         if ((status === '409' || status === '422') && !body) continue;
+        // 503 and 504: only the commands that ask organization-service.
+        if ((status === '503' || status === '504') && !HIERARCHY_COMMANDS.has(key)) continue;
         operation.responses[status] ??= {
           description,
-          ...(status === '409' ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } } : {}),
+          ...(status === '409' && idempotent
+            ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
+            : {}),
           content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
         };
       }

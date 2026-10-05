@@ -48,6 +48,79 @@ describe('the signature and lifecycle guarantees of the database', () => {
     return { id, employer, contractor };
   }
 
+  type PolicyStage = 'DRAFT' | 'PENDING_PLATFORM_APPROVAL' | 'ACTIVE' | 'RETIRED';
+
+  interface RawPolicy {
+    id: string;
+    version: number;
+  }
+
+  /**
+   * A `contract.signature` policy for `employer`, taken through the lifecycle the database keeps
+   * (each UPDATE is a declared transition with its who-and-when) as far as `stage`. Raw SQL through
+   * the runtime role, because it is the database that is under test.
+   */
+  async function policyOf(
+    employer: string,
+    stage: PolicyStage = 'ACTIVE',
+    roles: string[] = ['ORGANIZATION_ADMIN'],
+    policyVersion = 1,
+  ): Promise<RawPolicy> {
+    const id = `APL_${ulid()}`;
+    const at = new Date();
+    organizations.push(employer);
+    await runtime.$executeRawUnsafe(
+      `INSERT INTO "approval_policy" ("id","organization_id","author_organization_id","author_role",
+         "workflow_key","policy_version","label","rationale","created_at","created_by",
+         "created_correlation_id")
+       VALUES ($1,$2,'ORG_UNION','UNION_ADMIN','contract.signature',$3,'who signs','a reason',$4,
+         'USR_AUTHOR',$5)`,
+      id,
+      employer,
+      policyVersion,
+      at,
+      ulid(),
+    );
+    let order = 1;
+    for (const role of roles) {
+      await runtime.$executeRawUnsafe(
+        `INSERT INTO "approval_policy_step" ("id","organization_id","policy_id","step_order",
+           "authority_organization_id","authority_role","authority_label")
+         VALUES ($1,$2,$3,$4,$2,$5,'signer')`,
+        `APS_${ulid()}`,
+        employer,
+        id,
+        order++,
+        role,
+      );
+    }
+    const to = async (set: string) => {
+      await runtime.$executeRawUnsafe(
+        `UPDATE "approval_policy" SET ${set}, "version" = "version" + 1 WHERE "id" = $1`,
+        id,
+      );
+    };
+    if (stage === 'DRAFT') return { id, version: policyVersion };
+    await to(
+      `"status" = 'PENDING_PLATFORM_APPROVAL', "submitted_at" = now(), "submitted_by" = 'USR_AUTHOR'`,
+    );
+    if (stage === 'PENDING_PLATFORM_APPROVAL') return { id, version: policyVersion };
+    await to(`"status" = 'ACTIVE', "activated_at" = now(), "activated_by" = 'USR_PLATFORM'`);
+    if (stage === 'ACTIVE') return { id, version: policyVersion };
+    await to(`"status" = 'RETIRED', "retired_at" = now(), "retired_by" = 'USR_PLATFORM'`);
+    return { id, version: policyVersion };
+  }
+
+  /** The policy each employer's signatures rest on, unless a test names another. */
+  const inForce = new Map<string, RawPolicy>();
+  async function activePolicyOf(employer: string): Promise<RawPolicy> {
+    const known = inForce.get(employer);
+    if (known) return known;
+    const created = await policyOf(employer);
+    inForce.set(employer, created);
+    return created;
+  }
+
   interface SignatureOverrides {
     side?: 'EMPLOYER' | 'CONTRACTOR';
     signer?: string;
@@ -55,19 +128,27 @@ describe('the signature and lifecycle guarantees of the database', () => {
     issuer?: string | null;
     subject?: string | null;
     role?: string;
+    /** The policy the signature names: the employer's in force by default; `null` for none. */
+    policy?: RawPolicy | null;
   }
 
   /** One signature as the service writes it, with whatever the test wants to get wrong. */
-  function sign(contract: Seeded, overrides: SignatureOverrides = {}): Promise<number> {
+  async function sign(contract: Seeded, overrides: SignatureOverrides = {}): Promise<number> {
     const side = overrides.side ?? 'EMPLOYER';
     const signer =
       overrides.signer ?? (side === 'EMPLOYER' ? contract.employer : contract.contractor);
     const user = overrides.signedBy ?? `USR_${ulid()}`;
+    const policy =
+      'policy' in overrides
+        ? overrides.policy
+        : side === 'EMPLOYER'
+          ? await activePolicyOf(contract.employer)
+          : null;
     return runtime.$executeRawUnsafe(
       `INSERT INTO "contract_signature" ("id","organization_id","contract_id","side",
          "signer_organization_id","signed_by","signed_by_issuer","signed_by_subject",
-         "authority_role","signed_at","correlation_id")
-       VALUES ($1,$2,$3,$4::"ContractSide",$5,$6,$7,$8,$9,now(),$10)`,
+         "authority_role","signed_at","correlation_id","policy_id","policy_version")
+       VALUES ($1,$2,$3,$4::"ContractSide",$5,$6,$7,$8,$9,now(),$10,$11,$12)`,
       `CSG_${ulid()}`,
       contract.employer,
       contract.id,
@@ -78,6 +159,8 @@ describe('the signature and lifecycle guarantees of the database', () => {
       'subject' in overrides ? overrides.subject : `sub-${ulid()}`,
       overrides.role ?? (side === 'EMPLOYER' ? 'ORGANIZATION_ADMIN' : 'CONTRACTOR'),
       ulid(),
+      policy?.id ?? null,
+      policy?.version ?? null,
     );
   }
 
@@ -188,9 +271,207 @@ describe('the signature and lifecycle guarantees of the database', () => {
 
     it('is accepted only under a role that is a code', async () => {
       const contract = await draft();
-      expect(await refusal(sign(contract, { role: 'not a role' }))).toContain(
+      // The contractor's side: the employer's role is judged against its policy first.
+      expect(await refusal(sign(contract, { side: 'CONTRACTOR', role: 'not a role' }))).toContain(
         'ck_signature_authority_role',
       );
+    });
+  });
+
+  describe('the employer’s side rests on a policy in force, whatever the code forgets', () => {
+    it('is refused with no policy named, and the contractor’s side is refused one', async () => {
+      const contract = await draft();
+      expect(await refusal(sign(contract, { side: 'EMPLOYER', policy: null }))).toContain(
+        'ck_signature_policy',
+      );
+      const policy = await activePolicyOf(contract.employer);
+      expect(await refusal(sign(contract, { side: 'CONTRACTOR', policy }))).toContain(
+        'ck_signature_policy',
+      );
+    });
+
+    it.each<[string, PolicyStage]>([
+      ['a draft', 'DRAFT'],
+      ['one awaiting the platform’s approval', 'PENDING_PLATFORM_APPROVAL'],
+      ['one retired', 'RETIRED'],
+    ])('is refused under %s: only a policy in force authorises', async (_label, stage) => {
+      const contract = await draft();
+      const policy = await policyOf(contract.employer, stage);
+      expect(await refusal(sign(contract, { policy }))).toContain('ck_signature_policy_authority');
+    });
+
+    it('is refused under the version it does not name, a role the policy does not name, and another organization’s policy', async () => {
+      const contract = await draft();
+      const policy = await policyOf(contract.employer, 'ACTIVE', ['PROCUREMENT_USER']);
+      expect(await refusal(sign(contract, { policy: { ...policy, version: 2 } }))).toContain(
+        'ck_signature_policy_authority',
+      );
+      expect(await refusal(sign(contract, { policy, role: 'ORGANIZATION_ADMIN' }))).toContain(
+        'ck_signature_policy_authority',
+      );
+      expect(await sign(contract, { policy, role: 'PROCUREMENT_USER' })).toBe(1);
+
+      // A policy of another organization is not this employer's: the foreign key is tenant-bound.
+      const other = await draft();
+      const foreign = await policyOf(other.employer);
+      expect(await refusal(sign(contract, { side: 'CONTRACTOR', policy: foreign }))).toMatch(
+        /ck_signature_policy|violates foreign key|23503/,
+      );
+      const third = await draft();
+      expect(await refusal(sign(third, { policy: foreign }))).toMatch(
+        /violates foreign key|23503|ck_signature_policy_authority/,
+      );
+    });
+
+    it('accepts the employer under a policy in force that names its role', async () => {
+      const contract = await draft();
+      expect(await sign(contract)).toBe(1);
+    });
+  });
+
+  describe('a policy is written once, in force at most once, and never erased', () => {
+    it('cannot be edited: its words, its author and its history are fixed', async () => {
+      const contract = await draft();
+      const policy = await policyOf(contract.employer);
+      for (const set of [
+        `"label" = 'another'`,
+        `"rationale" = 'another reason'`,
+        `"organization_id" = 'ORG_ELSEWHERE'`,
+        `"author_role" = 'SYSTEM_ADMIN'`,
+        `"created_by" = 'USR_OTHER'`,
+        `"policy_version" = 9`,
+      ]) {
+        expect(
+          await refusal(
+            runtime.$executeRawUnsafe(
+              `UPDATE "approval_policy" SET ${set} WHERE "id" = $1`,
+              policy.id,
+            ),
+          ),
+        ).toContain('ck_policy_immutable');
+      }
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(
+            `UPDATE "approval_policy" SET "activated_by" = 'USR_OTHER' WHERE "id" = $1`,
+            policy.id,
+          ),
+        ),
+      ).toContain('ck_policy_history_immutable');
+    });
+
+    it('moves only along the declared transitions, each with its who and when', async () => {
+      const contract = await draft();
+      const policy = await policyOf(contract.employer, 'DRAFT');
+      const move = (set: string) =>
+        runtime.$executeRawUnsafe(`UPDATE "approval_policy" SET ${set} WHERE "id" = $1`, policy.id);
+      expect(
+        await refusal(
+          move(`"status" = 'ACTIVE', "activated_at" = now(), "activated_by" = 'USR_X'`),
+        ),
+      ).toContain('ck_policy_transition');
+      expect(await refusal(move(`"status" = 'RETIRED'`))).toContain('ck_policy_transition');
+      // Declared, but without who and when: the table's checks refuse a policy in force that no
+      // platform administrator approved.
+      expect(await refusal(move(`"status" = 'PENDING_PLATFORM_APPROVAL'`))).toContain(
+        'ck_policy_submission_complete',
+      );
+    });
+
+    it('has at most one policy in force per organization and workflow', async () => {
+      const contract = await draft();
+      await policyOf(contract.employer, 'ACTIVE', ['ORGANIZATION_ADMIN'], 1);
+      expect(
+        await refusal(policyOf(contract.employer, 'ACTIVE', ['ORGANIZATION_ADMIN'], 2)),
+      ).toMatch(/ux_approval_policy_active|23505|already exists/);
+    });
+
+    it('is never deleted or truncated, and its steps are never changed, deleted or added to after the draft', async () => {
+      const contract = await draft();
+      const policy = await policyOf(contract.employer);
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(`DELETE FROM "approval_policy" WHERE "id" = $1`, policy.id),
+        ),
+      ).toContain('ck_policy_not_erasable');
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(
+            `UPDATE "approval_policy_step" SET "authority_role" = 'DRIVER' WHERE "policy_id" = $1`,
+            policy.id,
+          ),
+        ),
+      ).toContain('ck_step_immutable');
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(
+            `DELETE FROM "approval_policy_step" WHERE "policy_id" = $1`,
+            policy.id,
+          ),
+        ),
+      ).toContain('ck_step_immutable');
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(
+            `INSERT INTO "approval_policy_step" ("id","organization_id","policy_id","step_order",
+               "authority_organization_id","authority_role","authority_label")
+             VALUES ($1,$2,$3,9,$2,'DRIVER','late')`,
+            `APS_${ulid()}`,
+            contract.employer,
+            policy.id,
+          ),
+        ),
+      ).toContain('ck_step_policy_draft');
+      expect(
+        await refusal(runtime.$executeRawUnsafe('TRUNCATE TABLE "approval_policy" CASCADE')),
+      ).toMatch(/ck_policy_not_erasable|permission denied/);
+    });
+
+    it('never names the oversight role or the platform operator as an authority, nor a workflow it has no policy for', async () => {
+      const contract = await draft();
+      for (const [index, role] of ['AUDITOR', 'SYSTEM_ADMIN'].entries()) {
+        // A distinct version each: the policy row of a refused step is already written.
+        expect(await refusal(policyOf(contract.employer, 'DRAFT', [role], index + 10))).toContain(
+          'ck_step_authority_not_oversight',
+        );
+      }
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(
+            `INSERT INTO "approval_policy" ("id","organization_id","author_organization_id","author_role",
+               "workflow_key","policy_version","label","rationale","created_at","created_by",
+               "created_correlation_id")
+             VALUES ($1,$2,'ORG_UNION','UNION_ADMIN','contract.amendment',1,'x','y',now(),'USR_A',$3)`,
+            `APL_${ulid()}`,
+            contract.employer,
+            ulid(),
+          ),
+        ),
+      ).toContain('ck_policy_workflow_key');
+      expect(
+        await refusal(
+          runtime.$executeRawUnsafe(
+            `INSERT INTO "approval_policy" ("id","organization_id","author_organization_id","author_role",
+               "workflow_key","policy_version","label","rationale","created_at","created_by",
+               "created_correlation_id")
+             VALUES ($1,$2,$2,'ORGANIZATION_ADMIN','contract.signature',1,'x','y',now(),'USR_A',$3)`,
+            `APL_${ulid()}`,
+            contract.employer,
+            ulid(),
+          ),
+        ),
+      ).toContain('ck_policy_author_role');
+    });
+
+    it('the runtime role cannot lift any of it (D-045)', async () => {
+      for (const statement of [
+        'ALTER TABLE "approval_policy" DISABLE TRIGGER "tg_approval_policy_guard"',
+        'ALTER TABLE "approval_policy_step" DISABLE TRIGGER "tg_approval_policy_step_immutable"',
+        'DROP TRIGGER "tg_approval_policy_no_truncate" ON "approval_policy"',
+        'ALTER TABLE "approval_policy" ADD COLUMN d045_probe int',
+      ]) {
+        await refusal(runtime.$executeRawUnsafe(statement));
+      }
     });
   });
 

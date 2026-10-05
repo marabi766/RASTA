@@ -81,18 +81,32 @@ function optionalRoleList(name: string) {
  *                                       construction-service. The winning contractor's
  *                                       side is the CONTRACTOR role of its own
  *                                       organization and is not configurable.
- *   CONTRACT_OWNER_SIGNER_ROLES         Q-95 (1), PR 2. Who, in the employer's organization,
- *                                       accepts the contract for it. Default **empty: nobody**
- *                                       — the signing authority is the client's decision, a
- *                                       platform never defaults to it, and until it is named
- *                                       the employer's side refuses with 422
- *                                       SIGNER_AUTHORITY_NOT_CONFIGURED. (The approval-
- *                                       policy row `contract.signature` of Q-95 arrives with
- *                                       `approval_policy` in PR 5 and replaces this.) The
- *                                       contractor's side is the CONTRACTOR role of its own
- *                                       organization (Q-95 (1)) and is not configurable.
- *                                       `SYSTEM_ADMIN` and `AUDITOR` may not be named.
- *   CONTRACT_CANCEL_ROLES               Q-95 (4), PR 2. Who, in the employer's organization,
+ *   (no signer setting)                 Who accepts a contract for the employer is **not** an
+ *                                       environment value: it is the `contract.signature`
+ *                                       approval policy of the employer's own organization
+ *                                       (Q-95 (1), ADR-068 § 5) — rows written by the people
+ *                                       entitled to, put in force by a platform administrator.
+ *                                       An environment value can only narrow, never grant, and
+ *                                       a service-wide role list would let that role sign for
+ *                                       every employer. No policy in force: 422
+ *                                       SIGNATURE_POLICY_REQUIRED. The contractor's side is the
+ *                                       CONTRACTOR role of its own organization and is not
+ *                                       configurable.
+ *   ORGANIZATION_SERVICE_URL            Where the union hierarchy is confirmed when a policy is
+ *                                       written, submitted and approved (`GET {url}/v1/
+ *                                       organizations/{id}`, a service token signed for the
+ *                                       union), as construction-service asks it.
+ *   CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS
+ *                                       How long that question may take, body included; no
+ *                                       answer in time refuses the write (fail closed).
+ *   CONTRACT_POLICY_FOUR_EYES           PROVISIONAL, pending the owner (Q-70, as in
+ *                                       construction-service): default **on** — the platform
+ *                                       administrator who approves a policy is neither its author
+ *                                       nor its submitter. Switched off, it relaxes only a
+ *                                       SYSTEM_ADMIN approving its own policy; a union-written
+ *                                       policy is never approved by the person who wrote or
+ *                                       submitted it.
+ *   CONTRACT_CANCEL_ROLES              Q-95 (4), PR 2. Who, in the employer's organization,
  *                                       cancels a draft. Default `ORGANIZATION_ADMIN`, the
  *                                       reader default; empty is allowed and means nobody.
  *   CONTRACT_CANCEL_REASON_CODES        The closed list of reasons a draft is cancelled for;
@@ -137,10 +151,16 @@ export const contractEnvSchema = baseEnvSchema
       .default('ORGANIZATION_ADMIN')
       .pipe(roleList('CONTRACT_READER_ROLES', { min: 1 })),
 
-    CONTRACT_OWNER_SIGNER_ROLES: z
-      .string()
-      .default('')
-      .pipe(optionalRoleList('CONTRACT_OWNER_SIGNER_ROLES')),
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+
+    CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .default(3000),
+
+    CONTRACT_POLICY_FOUR_EYES: booleanEnv(true),
 
     CONTRACT_CANCEL_ROLES: z
       .string()

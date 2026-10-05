@@ -12,6 +12,7 @@ import { RastaError } from '@rasta/nest-common';
 export const REFUSAL_AREAS = {
   signature: 'Contract cannot be signed',
   cancellation: 'Contract cannot be cancelled',
+  policy: 'Approval policy cannot be written',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -23,7 +24,7 @@ export type RefusalArea = keyof typeof REFUSAL_AREAS;
  */
 export const REFUSAL_REASONS = {
   signature: {
-    SIGNER_AUTHORITY_NOT_CONFIGURED: 422,
+    SIGNATURE_POLICY_REQUIRED: 422,
     CONTRACT_NOT_DRAFT: 422,
     ACTOR_IDENTITY_UNKNOWN: 422,
     MEMBER_OF_BOTH_PARTIES: 403,
@@ -34,6 +35,9 @@ export const REFUSAL_REASONS = {
     CANCEL_REASON_NOT_ALLOWED: 422,
     CONTRACT_NOT_DRAFT: 422,
     SIGNATURE_RECORDED: 422,
+  },
+  policy: {
+    AUTHORITY_NOT_GOVERNED_ORGANIZATION: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

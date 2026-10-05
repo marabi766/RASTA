@@ -96,9 +96,10 @@ export class ContractController {
       'the second acceptance, in the same transaction, moves the contract (compare-and-set on ' +
       'its version) and publishes CONTRACT_SIGNED; every acceptance is an audit record ' +
       '(CONTRACT_SIGNATURE_RECORDED). It is a recorded acceptance of both parties — not a legal ' +
-      'signature (Q-95 (1)). The employer’s side is signed by the roles of ' +
-      'CONTRACT_OWNER_SIGNER_ROLES, which has no default: until the client names them, 422 ' +
-      '`SIGNER_AUTHORITY_NOT_CONFIGURED`. The contractor’s side is signed by the CONTRACTOR role ' +
+      'signature (Q-95 (1)). The employer’s side is signed by the roles the ' +
+      '`contract.signature` approval policy in force for its organization names ' +
+      '(/v1/approval-policies; the signature records the policy’s id and version): with none ' +
+      'in force nobody signs for the employer, 422 `SIGNATURE_POLICY_REQUIRED`. The contractor’s side is signed by the CONTRACTOR role ' +
       'of its own organization. One person cannot sign for both sides — a caller who is a member ' +
       'of both organizations is refused (403 `MEMBER_OF_BOTH_PARTIES`) and so is one who already ' +
       'signed the other side (403 `SAME_PERSON_BOTH_SIDES`); two signers whose identities cannot ' +

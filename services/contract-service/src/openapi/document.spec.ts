@@ -43,7 +43,7 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes the two reads and the two commands of CON-003, each closed, and no route that creates a contract', () => {
+  it('publishes the two reads and the two commands of CON-003 and the approval-policy routes, each closed, and no route that creates a contract', () => {
     const document = buildContractOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -53,16 +53,90 @@ describe('the committed OpenAPI document', () => {
 
     expect(operations.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     expect(operations.map((o) => o.key).sort()).toEqual([
+      'GET /v1/approval-policies',
+      'GET /v1/approval-policies/pending-platform-approval',
+      'GET /v1/approval-policies/{id}',
       'GET /v1/contracts',
       'GET /v1/contracts/{id}',
+      'POST /v1/approval-policies',
+      'POST /v1/approval-policies/{id}/approve',
+      'POST /v1/approval-policies/{id}/reject',
+      'POST /v1/approval-policies/{id}/retire',
+      'POST /v1/approval-policies/{id}/submit',
       'POST /v1/contracts/{id}/cancel',
       'POST /v1/contracts/{id}/sign',
     ]);
-    for (const { operation } of operations) {
+    for (const { key, operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);
-      expect(operation.responses['200']).toBeDefined();
-      expect(operation.responses['201']).toBeUndefined();
+      // The one route that creates answers 201; every other answers 200.
+      const created = key === 'POST /v1/approval-policies';
+      expect(operation.responses['200'] !== undefined).toBe(!created);
+      expect(operation.responses['201'] !== undefined).toBe(created);
     }
+  });
+
+  describe('the approval-policy routes (ADR-068 § 5, Q-70 (7))', () => {
+    type Op = { parameters: { name: string; in: string }[]; responses: Record<string, unknown> };
+    const operation = (path: string, method: 'get' | 'post'): Op =>
+      (buildContractOpenApiDocument(app).paths?.[path] as unknown as Record<string, Op>)[method]!;
+
+    it('requires an Idempotency-Key on the create only', () => {
+      const headerOf = (op: Op) =>
+        op.parameters.filter((parameter) => parameter.in === 'header').map((p) => p.name);
+      expect(headerOf(operation('/v1/approval-policies', 'post'))).toEqual(['Idempotency-Key']);
+      for (const verb of ['submit', 'approve', 'reject', 'retire']) {
+        expect(headerOf(operation(`/v1/approval-policies/{id}/${verb}`, 'post'))).toEqual([]);
+      }
+    });
+
+    it('answers 503 and 504 only where organization-service is asked: create, submit, approve', () => {
+      const asks = (path: string) =>
+        ['503', '504'].map((s) => operation(path, 'post').responses[s] !== undefined);
+      expect(asks('/v1/approval-policies')).toEqual([true, true]);
+      expect(asks('/v1/approval-policies/{id}/submit')).toEqual([true, true]);
+      expect(asks('/v1/approval-policies/{id}/approve')).toEqual([true, true]);
+      expect(asks('/v1/approval-policies/{id}/reject')).toEqual([false, false]);
+      expect(asks('/v1/approval-policies/{id}/retire')).toEqual([false, false]);
+    });
+
+    it('types the create’s 422 with the closed policy reason', () => {
+      const schema = (
+        operation('/v1/approval-policies', 'post').responses['422'] as {
+          content: Record<
+            string,
+            {
+              schema: {
+                properties: {
+                  details: {
+                    items: { properties: { path: { const: string }; code: { enum: string[] } } };
+                  };
+                };
+              };
+            }
+          >;
+        }
+      ).content['application/json']!.schema;
+      expect(schema.properties.details.items.properties.path.const).toBe('policy');
+      expect(schema.properties.details.items.properties.code.enum).toEqual([
+        'AUTHORITY_NOT_GOVERNED_ORGANIZATION',
+      ]);
+    });
+
+    it('never offers the oversight role or the platform operator as an authority', () => {
+      const body = (
+        buildContractOpenApiDocument(app).paths?.['/v1/approval-policies'] as unknown as {
+          post: {
+            requestBody: {
+              content: Record<string, { schema: { properties: { steps: { items: unknown } } } }>;
+            };
+          };
+        }
+      ).post.requestBody.content['application/json']!.schema.properties.steps.items;
+      const text = JSON.stringify(body);
+      // The enum of authority roles lists every platform role but these two.
+      expect(text).not.toContain('"AUDITOR"');
+      expect(text).not.toContain('"SYSTEM_ADMIN"');
+    });
   });
 
   it('documents 400 on the list (a query) and the commands (a body and a key), 404 on every route by id, 409 and 422 only on the commands', () => {
@@ -165,7 +239,7 @@ describe('the committed OpenAPI document', () => {
       expect(codesOf('sign', '409')).toEqual({ area: 'signature', codes: ['SIDE_ALREADY_SIGNED'] });
       expect(codesOf('sign', '422')).toEqual({
         area: 'signature',
-        codes: ['SIGNER_AUTHORITY_NOT_CONFIGURED', 'CONTRACT_NOT_DRAFT', 'ACTOR_IDENTITY_UNKNOWN'],
+        codes: ['SIGNATURE_POLICY_REQUIRED', 'CONTRACT_NOT_DRAFT', 'ACTOR_IDENTITY_UNKNOWN'],
       });
       expect(codesOf('cancel', '422')).toEqual({
         area: 'cancellation',

@@ -25,8 +25,18 @@ describe('the provisional defaults (Q-95)', () => {
     expect(env.CONTRACT_CONSUMER_RETRY_BACKOFF_MS).toBe(1000);
   });
 
-  it('grants nobody the employer’s signature until the client names one (Q-95 (1))', () => {
-    expect(env.CONTRACT_OWNER_SIGNER_ROLES).toEqual([]);
+  it('has no signer setting at all: the employer’s signature is a policy, not an environment value (Q-95 (1))', () => {
+    expect(Object.keys(env).filter((name) => /SIGNER/.test(name))).toEqual([]);
+    // Even if one is supplied, it is not read: an environment value cannot grant authority.
+    expect(load({ CONTRACT_OWNER_SIGNER_ROLES: 'ORGANIZATION_ADMIN' })).not.toHaveProperty(
+      'CONTRACT_OWNER_SIGNER_ROLES',
+    );
+  });
+
+  it('asks organization-service on its port within three seconds, and keeps four eyes on', () => {
+    expect(env.ORGANIZATION_SERVICE_URL).toBe('http://localhost:3102');
+    expect(env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(3000);
+    expect(env.CONTRACT_POLICY_FOUR_EYES).toBe(true);
   });
 
   it('lets the reader role cancel a draft, for a reason from a closed list (Q-95 (4))', () => {
@@ -80,21 +90,17 @@ describe('overrides', () => {
     ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
   });
 
-  it('accepts a configured signer list and an empty cancel list (nobody)', () => {
-    const env = load({
-      CONTRACT_OWNER_SIGNER_ROLES: 'ORGANIZATION_ADMIN,PROCUREMENT_USER',
-      CONTRACT_CANCEL_ROLES: '',
-    });
-    expect(env.CONTRACT_OWNER_SIGNER_ROLES).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
+  it('accepts an empty cancel list (nobody) and four eyes switched off', () => {
+    const env = load({ CONTRACT_CANCEL_ROLES: '', CONTRACT_POLICY_FOUR_EYES: 'false' });
     expect(env.CONTRACT_CANCEL_ROLES).toEqual([]);
+    expect(env.CONTRACT_POLICY_FOUR_EYES).toBe(false);
   });
 
   it.each([
     ['AUDITOR among the readers', { CONTRACT_READER_ROLES: 'AUDITOR' }],
-    ['AUDITOR among the signers', { CONTRACT_OWNER_SIGNER_ROLES: 'AUDITOR' }],
-    ['SYSTEM_ADMIN among the signers', { CONTRACT_OWNER_SIGNER_ROLES: 'SYSTEM_ADMIN' }],
     ['SYSTEM_ADMIN among the cancellers', { CONTRACT_CANCEL_ROLES: 'SYSTEM_ADMIN' }],
-    ['an unknown signer role', { CONTRACT_OWNER_SIGNER_ROLES: 'WIZARD' }],
+    ['an organization URL that is not a URL', { ORGANIZATION_SERVICE_URL: 'organization' }],
+    ['an organization timeout under 100 ms', { CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '10' }],
     ['no cancel reason', { CONTRACT_CANCEL_REASON_CODES: '' }],
     ['a reason that is not a code', { CONTRACT_CANCEL_REASON_CODES: 'lower case' }],
     ['a reason twice', { CONTRACT_CANCEL_REASON_CODES: 'OTHER,OTHER' }],

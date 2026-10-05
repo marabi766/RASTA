@@ -11,6 +11,9 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import type { ClaimFence } from '../shared/idempotency';
 import { transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
+import { signingRoleUnder } from '../policy/policy.access';
+import { PolicyRepository } from '../policy/policy.repository';
+import { SIGNATURE_WORKFLOW } from '../policy/policy.state-machine';
 import { ENV } from '../tokens';
 import { ContractRepository } from './contract.repository';
 import { transitionFor } from './contract.state-machine';
@@ -71,6 +74,7 @@ const factOf = (signature: ContractSignature): SignatureFact => ({
 export class ContractService {
   constructor(
     private readonly repository: ContractRepository,
+    private readonly policies: PolicyRepository,
     private readonly access: ContractAccess,
     private readonly prisma: PrismaService,
     private readonly publisher: EventPublisher,
@@ -143,7 +147,8 @@ export class ContractService {
    * Accepts the draft for the side the caller acts for (`DRAFT → SIGNED` once both have).
    *
    * Signing is a recorded acceptance of both parties, not a legal signature (Q-95 (1)); the
-   * employer's authority is `CONTRACT_OWNER_SIGNER_ROLES` — nobody until the client names one.
+   * employer's authority is the `contract.signature` approval policy in force for its own
+   * organization — nobody until one is written and approved (422 `SIGNATURE_POLICY_REQUIRED`).
    * The same person signing the same side again changes nothing and answers with the contract
    * as it is; another person for a side that has signed is `409`.
    */
@@ -157,18 +162,11 @@ export class ContractService {
     const side = sideOf(row, acting.organizationId);
     if (!side) throw RastaError.notFound('Contract', id);
 
-    const authority = this.access.signingRole(side);
-    if ('notConfigured' in authority) {
-      throw this.refused(
-        'sign',
-        ruleRefusal(
-          'No signing authority is configured for the employer',
-          'signature',
-          ['SIGNER_AUTHORITY_NOT_CONFIGURED'],
-          { contractId: id },
-        ),
-      );
-    }
+    // The contractor's side is a fixed role of its own organization and is judged now. The
+    // employer's is the `contract.signature` policy of its organization, which can change under
+    // a concurrent approval or retirement: it is read and judged under the contract's lock, in
+    // the transaction that records the signature (`signLocked`).
+    const contractorRole = side === 'CONTRACTOR' ? this.access.contractorSigningRole() : undefined;
     if (this.access.isMemberOfBothParties(row)) {
       throw this.refused(
         'sign',
@@ -189,16 +187,67 @@ export class ContractService {
 
     return this.prisma.transaction(async (tx) => {
       if (fence) await fence.hold(tx);
-      const view = await this.signLocked(tx, row, side, authority.role, person, dto);
+      const view = await this.signLocked(tx, row, side, contractorRole, person, dto);
       return fence ? fence.complete(tx, view) : view;
     });
+  }
+
+  /**
+   * The authority a signature is accepted under, judged inside the signing transaction.
+   *
+   * The contractor's is its fixed role. The employer's is read from the `contract.signature`
+   * policy **in force** for the employer's organization, under the policy slot's advisory lock
+   * (after the contract's row lock — the one lock order, `PolicyRepository.lockPolicySlot`), so a
+   * policy approved or retired at the same moment is either entirely before this signature or
+   * entirely after it. No policy in force: `422 SIGNATURE_POLICY_REQUIRED` — the platform never
+   * defaults to granting that authority. A policy that does not name a role the caller holds: 403.
+   * The policy's id and version are recorded on the signature.
+   */
+  private async authorityOf(
+    tx: ExtendedPrismaClient,
+    contract: Contract,
+    side: ContractSideName,
+    contractorRole: string | undefined,
+  ): Promise<{ role: string; policy: { id: string; version: number } | null }> {
+    if (side === 'CONTRACTOR') {
+      return { role: contractorRole ?? this.access.contractorSigningRole(), policy: null };
+    }
+    await this.policies.lockPolicySlot(tx, contract.organizationId, SIGNATURE_WORKFLOW);
+    const policy = await this.policies.findActivePolicyOf(
+      tx,
+      contract.organizationId,
+      SIGNATURE_WORKFLOW,
+    );
+    if (!policy) {
+      throw this.refused(
+        'sign',
+        ruleRefusal(
+          'No signing policy is in force for the employer: nobody may sign for it yet',
+          'signature',
+          ['SIGNATURE_POLICY_REQUIRED'],
+          { contractId: contract.id },
+        ),
+      );
+    }
+    const roles = getContext().roles;
+    const role = signingRoleUnder(policy, roles);
+    if (!role) {
+      throw this.refused(
+        'sign',
+        RastaError.insufficientRole(
+          policy.steps.map((step) => step.authorityRole),
+          roles,
+        ),
+      );
+    }
+    return { role, policy: { id: policy.id, version: policy.policyVersion } };
   }
 
   private async signLocked(
     tx: ExtendedPrismaClient,
     found: Contract,
     side: ContractSideName,
-    authorityRole: string,
+    contractorRole: string | undefined,
     person: { userId: string; issuer: string | null; subject: string | null },
     dto: SignContractDto,
   ): Promise<ContractView> {
@@ -245,6 +294,10 @@ export class ContractService {
     }
     this.assertVersion(contract, dto.expectedVersion);
 
+    // Who may sign, as the contract stands: the policy in force now (employer), and its id and
+    // version are what the signature records.
+    const authority = await this.authorityOf(tx, contract, side, contractorRole);
+
     // One person is never both sides: provably two people, or the signature is refused.
     const other = signatures.find((signature) => signature.side !== side);
     if (other) {
@@ -274,7 +327,9 @@ export class ContractService {
       signedBy: person.userId,
       signedByIssuer: person.issuer,
       signedBySubject: person.subject,
-      authorityRole,
+      authorityRole: authority.role,
+      policyId: authority.policy?.id ?? null,
+      policyVersion: authority.policy?.version ?? null,
       correlationId,
       at,
     });
@@ -290,6 +345,8 @@ export class ContractService {
         signerOrganizationId: recorded.signerOrganizationId,
         signedBy: recorded.signedBy,
         authorityRole: recorded.authorityRole,
+        policyId: recorded.policyId,
+        policyVersion: recorded.policyVersion,
         signedAt: at.toISOString(),
       },
     });

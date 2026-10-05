@@ -186,7 +186,24 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
     await http().get(`/v1/organizations/${union}`).set('x-internal-token', token).expect(404);
   });
 
-  it('refuses every other calling service (403): only construction-service may ask', async () => {
+  it('answers contract-service the same question the same way (ADR-068 § 5): { id } within, 404 outside', async () => {
+    const token = await serviceToken('contract-service', union);
+    const within = await http()
+      .get(`/v1/organizations/${dehyari}`)
+      .set('x-internal-token', token)
+      .expect(200);
+    expect(within.body).toEqual({ id: dehyari });
+    await http().get(`/v1/organizations/${stranger}`).set('x-internal-token', token).expect(404);
+    const downward = await serviceToken('contract-service', dehyari);
+    await http().get(`/v1/organizations/${union}`).set('x-internal-token', downward).expect(404);
+    // And only that route: contract-service reads nothing else here.
+    await http()
+      .get(`/v1/organizations/${union}/subtree`)
+      .set('x-internal-token', token)
+      .expect(403);
+  });
+
+  it('refuses every other calling service (403): only construction-service and contract-service may ask', async () => {
     const token = await serviceToken('marketplace-service', union);
     await http().get(`/v1/organizations/${dehyari}`).set('x-internal-token', token).expect(403);
   });

@@ -548,14 +548,20 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 > **CON-003 PR 2 — امضا و لغو پیش‌نویس** (ردیف‌های `DRAFT → SIGNED` و `DRAFT → CANCELLED` در ADR-068 § ۲؛ Q-95 همچنان باز):
 >
 > - `POST /v1/contracts/{id}/sign` (`Idempotency-Key`): هر طرف **جدا** و با هویت پایدار امضاکننده (`compareActors`، #188) ثبت می‌شود؛ قرارداد فقط با
->   امضای **دوم** `SIGNED` می‌شود (CAS روی `version` با `organization_id` در گزاره). اختیار امضای کارفرما از پیکربندی می‌آید
->   (`CONTRACT_OWNER_SIGNER_ROLES`، **پیش‌فرض خالی = هیچ‌کس**، ⇒ `422 SIGNER_AUTHORITY_NOT_CONFIGURED`)؛ امضای پیمانکار نقش `CONTRACTOR` در سازمان خودش است.
+>   امضای **دوم** `SIGNED` می‌شود (CAS روی `version` با `organization_id` در گزاره). اختیار امضای کارفرما **سیاست `contract.signature` سازمان خود او** است
+>   (جدول `approval_policy` همین سرویس؛ نه فهرست نقش در محیط اجرا که برای همهٔ کارفرمایان معتبر می‌شد): بدون سیاستِ برقرار ⇒ `422 SIGNATURE_POLICY_REQUIRED`؛ شناسه و نسخهٔ سیاست روی امضا ثبت می‌شود؛
+>   امضای پیمانکار نقش `CONTRACTOR` در سازمان خودش است.
 >   تفکیک وظایف (بسته در شکست): عضو هر دو سازمان `403 MEMBER_OF_BOTH_PARTIES`؛ یک شخص برای دو طرف `403 SAME_PERSON_BOTH_SIDES`؛ هویت ناشناخته `422 ACTOR_IDENTITY_UNKNOWN`؛ امضای دوباره‌ی همان طرف `409 SIDE_ALREADY_SIGNED`.
 >   هر امضا یک رکورد حسابرسی و رویداد `CONTRACT_SIGNATURE_RECORDED` و امضای دوم `CONTRACT_SIGNED` (هر دو بی مبلغ) در همان تراکنش.
 > - `POST /v1/contracts/{id}/cancel` (`Idempotency-Key`): فقط کارفرما (`CONTRACT_CANCEL_ROLES`)، فقط `DRAFT`، با کد دلیل از فهرست بستهٔ
 >   `CONTRACT_CANCEL_REASON_CODES` و یادداشت اختیاری (متن آزاد، حداکثر ۱۰۰۰ نویسه، بی نویسهٔ کنترل دوسویه)؛ رویداد `CONTRACT_CANCELLED` فقط کد دلیل را دارد.
 >   **پس از یک امضا لغو نمی‌شود** (`422 SIGNATURE_RECORDED`) مگر `CONTRACT_CANCEL_AFTER_SIGNATURE=true` — پاسخ محتاطانهٔ موقت برای Q-95 (۴).
 > - سازمان دیگر ⇒ `404` مثل نبودن؛ `AUDITOR` و توکن سرویس رد می‌شوند؛ دلیل هر رد در `details[].code`. **ساخته نشده:** مسیر Gateway، الحاقیه، Milestone، صورت‌وضعیت، تسویه.
+> - **سیاست‌های تأیید (`/v1/approval-policies`، ADR-068 § ۵، همان سازوکار `construction-service`، Q-70 (۷)):** پیش‌نویس را `UNION_ADMIN` برای سازمان خود یا سازمانِ زیردستش می‌نویسد
+>   (سلسله‌مراتب را `organization-service` تأیید می‌کند؛ پاسخ ناتأییدشده نوشتن را رد می‌کند) یا `SYSTEM_ADMIN` برای هر سازمانِ موجود؛ `ORGANIZATION_ADMIN` هرگز سیاست خودش را نمی‌نویسد.
+>   `DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED`، و `ACTIVE → RETIRED`؛ فقط `SYSTEM_ADMIN` برقرار می‌کند و **هرگز نویسنده یا ارسال‌کنندهٔ همان سیاست** (چهار چشم، روی هویت پایدار؛ سیاستِ نوشتهٔ اتحادیه حتی با خاموش‌بودن
+>   `CONTRACT_POLICY_FOUR_EYES` به‌دست همان شخص تأیید نمی‌شود). سیاست یک‌بار نوشته می‌شود و ویرایش نمی‌شود (پایگاه داده نگه می‌دارد)؛ تغییر یعنی نسخهٔ تازه که در تراکنش تأیید، نسخهٔ پیشین را بازنشسته می‌کند.
+>   برای `contract.signature` هر گام یک نقش از **همان سازمانِ تحت پوشش** است (جایگزین‌ها، نه ترتیب)؛ `AUDITOR` و `SYSTEM_ADMIN` هرگز مرجع نیستند. **این PR تعلیق سیاست هنگام `ORGANIZATION_MOVED` را ندارد** (در `construction-service` هست؛ پیگیری لازم).
 >
 > **تفاوت عمدی با جدول بالا (ADR-068، پذیرفتنش با مدیر پروژه):**
 >

@@ -14,7 +14,8 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { TenderAwardedConsumer } from '../src/events/tender-awarded.consumer';
-import { databaseUrl } from './helpers';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
+import { FakeHierarchy, databaseUrl } from './helpers';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness construction-service
@@ -32,6 +33,8 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** The organization hierarchy the application sees instead of organization-service. */
+  hierarchy: FakeHierarchy;
   close(): Promise<void>;
 }
 
@@ -156,16 +159,8 @@ export function internalToken(
   );
 }
 
-/**
- * Configuration the commands need and the service deliberately does not default (Q-95 (1)): the
- * employer's signing authority. A suite that tests its absence passes `''`.
- */
-const DEFAULT_TEST_ENV: Record<string, string> = {
-  CONTRACT_OWNER_SIGNER_ROLES: 'ORGANIZATION_ADMIN',
-};
-
 function applyEnvironment(overrides: Record<string, string>): () => void {
-  const wanted = { ...DEFAULT_TEST_ENV, ...overrides };
+  const wanted = { ...overrides };
   const before = new Map(Object.keys(wanted).map((name) => [name, process.env[name]]));
   Object.assign(process.env, wanted);
   process.env.DATABASE_URL = databaseUrl();
@@ -193,6 +188,7 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
   const restoreEnvironment = applyEnvironment(env);
 
   const publisher = new InMemoryEventPublisher();
+  const hierarchy = new FakeHierarchy();
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(KafkaEventPublisher)
@@ -201,6 +197,10 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
     .useValue(inert)
     .overrideProvider(TenderAwardedConsumer)
     .useValue(inert)
+    // The HTTP client to organization-service is proven against its contract in
+    // organization-directory.int-spec.ts; here the hierarchy is given.
+    .overrideProvider(OrganizationDirectory)
+    .useValue(hierarchy)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -241,6 +241,7 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    hierarchy,
     close: async () => {
       await app.close();
       restoreEnvironment();

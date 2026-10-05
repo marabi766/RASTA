@@ -115,6 +115,9 @@ export const ID_PREFIX = {
   contract: ID_PREFIXES.contract,
   /** A contract's signature record (this service's own prefix: the shared list has none). */
   signature: 'CSG',
+  /** An approval policy and its steps, the prefixes construction-service gives its own. */
+  policy: 'APL',
+  policyStep: 'APS',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

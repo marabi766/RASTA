@@ -11,6 +11,9 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import {
+  activateSigningPolicy,
+  asPlatform,
+  asSetter,
   cleanup,
   eventsOf,
   seedDraft,
@@ -187,6 +190,9 @@ describe('POST /v1/contracts/{id}/sign', () => {
           signerOrganizationId: employer,
           signedBy: employerClaims.rastaUserId,
           authorityRole: 'ORGANIZATION_ADMIN',
+          // The employer's side names the policy that authorised it; the contractor's has none.
+          policyId: one!.policyId,
+          policyVersion: 1,
           signedAt: one!.signedAt.toISOString(),
         },
         {
@@ -196,9 +202,13 @@ describe('POST /v1/contracts/{id}/sign', () => {
           signerOrganizationId: contractor,
           signedBy: contractorClaims.rastaUserId,
           authorityRole: 'CONTRACTOR',
+          policyId: null,
+          policyVersion: null,
           signedAt: two!.signedAt.toISOString(),
         },
       ]);
+      expect(one!.policyId).toMatch(/^APL_/);
+      expect(two!.policyId).toBeNull();
     });
 
     it('a party sees that the other side accepted and when — never by whom', async () => {
@@ -349,14 +359,107 @@ describe('POST /v1/contracts/{id}/sign', () => {
     });
   });
 
-  describe('the authority to sign comes from configuration, not from code', () => {
-    it('the employer’s side is the roles CONTRACT_OWNER_SIGNER_ROLES names; any other role is 403', async () => {
+  describe('the authority to sign comes from the employer’s policy, not from code or the environment', () => {
+    it('the employer’s side is the roles its policy names; any other role is 403', async () => {
       const { id, employer } = await draft();
       for (const roles of [['DRIVER'], ['FLEET_MANAGER'], ['CONTRACTOR']]) {
         const res = await sign(id, person(employer, roles)).expect(403);
         expect(res.body.code).toBe('INSUFFICIENT_ROLE');
       }
       expect(await signaturesOf(id)).toHaveLength(0);
+    });
+
+    it('a policy that names another role signs for that role only — and the signature records the policy', async () => {
+      const { id, employer } = await seedDraft(
+        w,
+        organizations,
+        {},
+        { signingPolicy: ['FLEET_MANAGER'] },
+      );
+      // The default role is not named by this employer's policy.
+      await sign(id, person(employer, ['ORGANIZATION_ADMIN'])).expect(403);
+      const res = await sign(id, person(employer, ['FLEET_MANAGER'])).expect(200);
+      expect(res.body.employerSignedAt).toEqual(expect.any(String));
+
+      const [signature] = await signaturesOf(id);
+      const policy = await runUnscoped('the suite reads the policy', () =>
+        w.prisma.client.approvalPolicy.findFirstOrThrow({
+          where: { organizationId: employer, workflowKey: 'contract.signature', status: 'ACTIVE' },
+        }),
+      );
+      expect(signature).toMatchObject({
+        side: 'EMPLOYER',
+        authorityRole: 'FLEET_MANAGER',
+        policyId: policy.id,
+        policyVersion: policy.policyVersion,
+      });
+      const [event] = await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_RECORDED');
+      expect(event!.payload).toMatchObject({
+        authorityRole: 'FLEET_MANAGER',
+        policyId: policy.id,
+        policyVersion: policy.policyVersion,
+      });
+    });
+
+    it('a role in force at ANOTHER employer authorises nothing here: no policy of this employer, 422', async () => {
+      // Employer A has a policy naming ORGANIZATION_ADMIN; employer B has none. A holder of the
+      // role in B signs nothing for B — and the role in A is not a role in B (the service-wide
+      // role list this replaced would have let both through).
+      const a = await draft();
+      const b = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      await sign(a.id, employerSigner(a.employer)).expect(200);
+      const refused = await sign(b.id, employerSigner(b.employer)).expect(422);
+      expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
+      expect(reasons(refused.body)).toEqual(['signature:SIGNATURE_POLICY_REQUIRED']);
+      expect(await signaturesOf(b.id)).toHaveLength(0);
+      expect(await signaturesOf(a.id)).toHaveLength(1);
+    });
+
+    it('a policy retired takes the authority with it: 422 again, and the signatures already made stand', async () => {
+      const { id, employer, contractor } = await draft();
+      const signer = employerSigner(employer);
+      await sign(id, signer).expect(200);
+      const policy = await runUnscoped('the suite reads the policy', () =>
+        w.prisma.client.approvalPolicy.findFirstOrThrow({
+          where: { organizationId: employer, status: 'ACTIVE' },
+        }),
+      );
+      await asSetter(employer, () =>
+        w.policies.retire(policy.id, { expectedVersion: policy.version }),
+      );
+
+      // The same person signing the same side again changes nothing, whatever the policy has become.
+      await sign(id, signer).expect(200);
+      expect(await signaturesOf(id)).toHaveLength(1);
+      // The contractor's side needs no policy: the contract completes with the employer's
+      // signature that was made while the policy was in force.
+      await sign(id, contractorSigner(contractor)).expect(200);
+      expect((await rowOf(id)).status).toBe('SIGNED');
+
+      // A different contract of the same employer: nobody signs for it now.
+      const next = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const refused = await sign(next.id, employerSigner(next.employer)).expect(422);
+      expect(reasons(refused.body)).toEqual(['signature:SIGNATURE_POLICY_REQUIRED']);
+    });
+
+    it('a replacement policy governs from its approval; the signature before it keeps the version it was made under', async () => {
+      const { id, employer, contractor } = await draft();
+      const first = await runUnscoped('the suite reads the policy', () =>
+        w.prisma.client.approvalPolicy.findFirstOrThrow({
+          where: { organizationId: employer, status: 'ACTIVE' },
+        }),
+      );
+      await sign(id, employerSigner(employer)).expect(200);
+
+      const second = await activateSigningPolicy(w, employer, ['FLEET_MANAGER']);
+      const retired = await runUnscoped('the suite reads the policy', () =>
+        w.prisma.client.approvalPolicy.findFirstOrThrow({ where: { id: first.id } }),
+      );
+      expect(retired.status).toBe('RETIRED');
+      const [signature] = await signaturesOf(id);
+      expect(signature).toMatchObject({ policyId: first.id, policyVersion: 1 });
+      expect(second).not.toBe(first.id);
+      await sign(id, contractorSigner(contractor)).expect(200);
     });
 
     it('the contractor’s side is the CONTRACTOR role of its own organization', async () => {
@@ -584,33 +687,65 @@ describe('POST /v1/contracts/{id}/sign', () => {
     });
   });
 
-  describe('without a configured signing authority for the employer (Q-95 (1))', () => {
-    let bare_: ApiHarness;
+  describe('without a signing policy in force for the employer (Q-95 (1))', () => {
+    it('nobody signs for the employer: 422 SIGNATURE_POLICY_REQUIRED — and the contractor still can', async () => {
+      const { id, employer, contractor } = await seedDraft(
+        w,
+        organizations,
+        {},
+        {
+          signingPolicy: false,
+        },
+      );
 
-    beforeAll(async () => {
-      bare_ = await startApi({ CONTRACT_OWNER_SIGNER_ROLES: '' });
-    });
-
-    afterAll(async () => {
-      await bare_.close();
-    });
-
-    it('nobody signs for the employer: 422 SIGNER_AUTHORITY_NOT_CONFIGURED — and the contractor still can', async () => {
-      const { id, employer, contractor } = await draft();
-      const call = (token: string) =>
-        request(bare_.app.getHttpServer())
-          .post(`/v1/contracts/${id}/sign`)
-          .set('authorization', `Bearer ${token}`)
-          .set('idempotency-key', key())
-          .send({});
-
-      const refused = await call(actor(employer, ['ORGANIZATION_ADMIN'])).expect(422);
+      const refused = await sign(id, actor(employer, ['ORGANIZATION_ADMIN'])).expect(422);
       expect(refused.body.code).toBe('BUSINESS_RULE_VIOLATION');
-      expect(reasons(refused.body)).toEqual(['signature:SIGNER_AUTHORITY_NOT_CONFIGURED']);
+      expect(reasons(refused.body)).toEqual(['signature:SIGNATURE_POLICY_REQUIRED']);
       expect(await signaturesOf(id)).toHaveLength(0);
 
-      await call(actor(contractor, ['CONTRACTOR'])).expect(200);
+      await sign(id, actor(contractor, ['CONTRACTOR'])).expect(200);
       expect((await rowOf(id)).status).toBe('DRAFT');
+    });
+
+    it('a policy that is only written, or only submitted, authorises nothing: only the platform’s approval does', async () => {
+      const { id, employer } = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policy = await asSetter(employer, () =>
+        w.policies.create({
+          organizationId: employer,
+          workflowKey: 'contract.signature',
+          label: 'Who signs',
+          rationale: 'Written by the integration suite',
+          isSample: true,
+          steps: [
+            {
+              authorityOrganizationId: employer,
+              authorityRole: 'ORGANIZATION_ADMIN',
+              authorityLabel: 'Signer',
+            },
+          ],
+        }),
+      );
+      await sign(id, employerSigner(employer)).expect(422);
+      await asSetter(employer, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
+      await sign(id, employerSigner(employer)).expect(422);
+      await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
+      await sign(id, employerSigner(employer)).expect(200);
+    });
+
+    it('no environment value grants it: the old service-wide role list is not read', async () => {
+      const withEnv = await startApi({ CONTRACT_OWNER_SIGNER_ROLES: 'ORGANIZATION_ADMIN' });
+      try {
+        const { id, employer } = await seedDraft(w, organizations, {}, { signingPolicy: false });
+        const res = await request(withEnv.app.getHttpServer())
+          .post(`/v1/contracts/${id}/sign`)
+          .set('authorization', `Bearer ${actor(employer, ['ORGANIZATION_ADMIN'])}`)
+          .set('idempotency-key', key())
+          .send({})
+          .expect(422);
+        expect(reasons(res.body)).toEqual(['signature:SIGNATURE_POLICY_REQUIRED']);
+      } finally {
+        await withEnv.close();
+      }
     });
   });
 });
