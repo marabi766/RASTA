@@ -432,6 +432,7 @@ jobs:
           pnpm --filter @rasta/organization-service run db:migrate
           pnpm --filter @rasta/asset-service run db:migrate
           pnpm --filter @rasta/maintenance-service run db:migrate
+          pnpm --filter @rasta/document-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -443,6 +444,8 @@ jobs:
           DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -480,6 +483,41 @@ jobs:
           --filter=@rasta/organization-service...
           --filter=@rasta/asset-service...
           --filter=@rasta/maintenance-service...
+          --filter=@rasta/document-service...
+
+      - name: Start MinIO and create the document bucket
+        # EXP-002 slice 7: the portal attaches a file by having its server ask
+        # document-service for a signed URL and put the bytes in object storage
+        # (ADR-014), so the document scenarios need a real bucket — the same
+        # image, run the same way, as the document-service job below
+        # (`docker run`, because a service container cannot override the
+        # image's command; tmpfs because the image runs as uid 65532 with no
+        # shell; `mc` through MC_HOST_<alias>). A private bucket, explicitly:
+        # every read of it is a signed URL.
+        run: |
+          set -euo pipefail
+          docker run -d --name rasta-web-e2e-minio --network host \
+            --tmpfs /data:uid=65532,gid=65532 \
+            -e MINIO_ROOT_USER=rasta_minio_admin \
+            -e MINIO_ROOT_PASSWORD=rasta_minio_ci_password \
+            "$MINIO_IMAGE" server /data --address ':9000'
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo 'MinIO is live'
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:9000/minio/health/live >/dev/null
+
+          mc() {
+            docker run --rm --network host \
+              -e MC_HOST_rasta=http://rasta_minio_admin:rasta_minio_ci_password@localhost:9000 \
+              "$MC_IMAGE" -C /tmp/.mc "$@"
+          }
+          mc mb --ignore-existing rasta/rasta-documents
+          mc anonymous set none rasta/rasta-documents
 
       - name: Wait for Keycloak to import the realm
         run: |
@@ -595,6 +633,23 @@ jobs:
             DATABASE_URL=postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/maintenance.log 2>&1 & )
 
+          # document-service (EXP-002 slice 7): the portal's attach-document
+          # scenarios register a real file. The scanner is the development stub
+          # (`disabled`, refused in production) and its worker is off: a
+          # registered document stays PENDING, which nothing here needs to
+          # change — attaching a reference does not wait for a verdict, and the
+          # scan pipeline is proven by document-service's own job.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service document-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/document-service && \
+            PORT=3114 SERVICE_NAME=document-service \
+            DATABASE_URL=postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public \
+            S3_ENDPOINT=http://localhost:9000 S3_REGION=us-east-1 \
+            S3_ACCESS_KEY=rasta_minio_admin S3_SECRET_KEY=rasta_minio_ci_password \
+            S3_BUCKET_DOCUMENTS=rasta-documents S3_FORCE_PATH_STYLE=true \
+            DOCUMENT_SCANNER_DRIVER=disabled DOCUMENT_SCAN_WORKER_ENABLED=false \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/document.log 2>&1 & )
+
           # The per-person allowance (GATEWAY_RATE_LIMIT_MAX, 300 a minute per
           # user and route prefix by default) is sized for one human. Here three
           # seeded people stand in for every scenario of both Playwright
@@ -623,23 +678,27 @@ jobs:
               http://localhost:3103/health/ready || true)"
             maintenance="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3105/health/ready || true)"
+            document="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3114/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/usage-records || true)"
             if [ "$identity" = "200" ] && [ "$fleet" = "200" ] \
                && [ "$organization" = "200" ] && [ "$asset" = "200" ] \
-               && [ "$maintenance" = "200" ] && [ "$gateway" = "401" ]; then
+               && [ "$maintenance" = "200" ] && [ "$document" = "200" ] \
+               && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
           cat /tmp/rasta-web-e2e-logs/organization.log
           cat /tmp/rasta-web-e2e-logs/asset.log
           cat /tmp/rasta-web-e2e-logs/maintenance.log
+          cat /tmp/rasta-web-e2e-logs/document.log
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
@@ -705,6 +764,8 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/asset.log || true
           echo '--- maintenance-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/maintenance.log || true
+          echo '--- document-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/document.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
           echo '--- keycloak ---'
