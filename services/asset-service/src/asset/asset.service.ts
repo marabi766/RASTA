@@ -502,6 +502,7 @@ export class AssetService {
         {
           status: 'ACTIVE',
           commissionedAt,
+          commissionedForOrganizationId: asset.organizationId,
           updatedBy: actor,
         },
         { version: dto.expectedVersion },
@@ -548,6 +549,12 @@ export class AssetService {
    * be put into service without its own paperwork (REGISTERED → OUT_OF_SERVICE → ACTIVE). IDLE →
    * ACTIVE needs none: IDLE is reachable only from ACTIVE, so an IDLE asset was commissioned by the
    * owner it has now (a transfer always lands in REGISTERED).
+   *
+   * Round 2: the dossier is needed only when the asset is not **commissioned for its current owner**
+   * (`commissionedForOrganizationId`, set on activation, cleared by a transfer). OUT_OF_SERVICE →
+   * ACTIVE for an asset its owner commissioned — seeded, or repaired by the reconciliation runbook —
+   * needs none; after a transfer (A→B, A→B→A) the new owner commissions with its own documents (A's
+   * retained rows are A's own, so they suffice when the asset is back with A).
    */
   private async assertCommissioningDossier(id: string): Promise<void> {
     const [policy, ownershipDoc] = await Promise.all([
@@ -591,7 +598,11 @@ export class AssetService {
     // Returning from OUT_OF_SERVICE is a way into service like any other: an asset the current owner
     // has not commissioned (one that came from a transfer and was withdrawn before it was ever
     // activated) goes through the same dossier check as `activate`.
-    if (asset.status === 'OUT_OF_SERVICE' && dto.status === 'ACTIVE') {
+    // An asset commissioned for its CURRENT owner returns without a new dossier: a seeded active
+    // asset, or one a runbook repaired, has none to show. A transfer clears the record, so the new
+    // owner (and A in A→B→A) commissions with its own documents.
+    const returning = asset.status === 'OUT_OF_SERVICE' && dto.status === 'ACTIVE';
+    if (returning && asset.commissionedForOrganizationId !== asset.organizationId) {
       await this.assertCommissioningDossier(id);
     }
 
@@ -604,6 +615,7 @@ export class AssetService {
           dto.status,
           dto.reason,
           dto.expectedVersion,
+          returning ? { commissionedForOrganizationId: asset.organizationId } : {},
         );
         // Still inside the transaction: too late rolls it back.
         assertWithinDeadline();
@@ -994,6 +1006,8 @@ export class AssetService {
               // A new ownership generation, under the row lock this takes.
               // Policies recorded from here on carry it (PR #108 round 2 #5).
               ownershipGeneration: { increment: 1 },
+              // The new owner has commissioned nothing yet (#234 round 2).
+              commissionedForOrganizationId: null,
               updatedBy: actor,
             },
             { organizationId: from },
@@ -1353,6 +1367,7 @@ export class AssetService {
     newStatus: AssetStatus,
     reason: string,
     expectedVersion?: number,
+    extra: Record<string, unknown> = {},
   ) {
     const actor = getContext().userId ?? 'SYSTEM';
     const previousStatus = asset.status;
@@ -1361,7 +1376,7 @@ export class AssetService {
       tx,
       id,
       previousStatus,
-      { status: newStatus, updatedBy: actor },
+      { status: newStatus, ...extra, updatedBy: actor },
       // A user's command names the version it was made against; an event from
       // another service has none and is judged on the status alone.
       expectedVersion === undefined ? {} : { version: expectedVersion },

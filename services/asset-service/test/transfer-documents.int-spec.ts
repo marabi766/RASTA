@@ -354,6 +354,98 @@ describe('document references on an ownership transfer (Q-99)', () => {
       expect((await putBack(org.a, idle.assetId)).status).toBe('ACTIVE');
     });
 
+    const commissionedFor = async (assetId: string) =>
+      (
+        await prisma.client.$queryRawUnsafe<{ commissioned_for_organization_id: string | null }[]>(
+          `SELECT commissioned_for_organization_id FROM asset WHERE id = $1`,
+          assetId,
+        )
+      )[0]!.commissioned_for_organization_id;
+
+    describe('commissioned per ownership generation (#234 round 2)', () => {
+      it('a seeded active asset (commissioned, no document references) goes OUT_OF_SERVICE and back', async () => {
+        const created = await asActor(manager(org.a), () =>
+          assets.create({ name: 'لودر دادهٔ اولیه', type: 'LOADER', specifications: {} } as never),
+        );
+        // What the migration's backfill leaves for a never-transferred, commissioned asset.
+        await prisma.client.$executeRawUnsafe(
+          `UPDATE asset SET status = 'ACTIVE'::"OperationalStatus", commissioned_at = now(),
+                  commissioned_for_organization_id = organization_id WHERE id = $1`,
+          created.id,
+        );
+        expect(await refsOf(created.id)).toEqual([]);
+
+        expect((await withdraw(org.a, created.id)).status).toBe('OUT_OF_SERVICE');
+        expect((await putBack(org.a, created.id)).status).toBe('ACTIVE');
+        expect(await commissionedFor(created.id)).toBe(org.a);
+      });
+
+      it('activation records the owner; the return then needs no dossier, and a transfer clears the record', async () => {
+        const { assetId } = await machineWithDocument(org.a);
+        await record(org.a, assetId);
+        await withdraw(org.a, assetId);
+        await putBack(org.a, assetId); // no record yet: the dossier is complete, so it passes …
+        expect(await commissionedFor(assetId)).toBe(org.a); // … and the owner is recorded
+
+        // The references are gone (a repair, a clean-up): a commissioned asset still returns.
+        await prisma.client.$executeRawUnsafe(
+          `DELETE FROM asset_document_ref WHERE asset_id = $1`,
+          assetId,
+        );
+        await withdraw(org.a, assetId);
+        expect((await putBack(org.a, assetId)).status).toBe('ACTIVE');
+
+        await transfer(assetId, org.a, org.b);
+        expect(await commissionedFor(assetId)).toBeNull();
+      });
+
+      it('a transferred asset needs B’s own documents, however B reaches service', async () => {
+        const { assetId } = await machineWithDocument(org.a);
+        await record(org.a, assetId);
+        await prisma.client.$executeRawUnsafe(
+          `UPDATE asset SET commissioned_for_organization_id = organization_id WHERE id = $1`,
+          assetId,
+        );
+        await transfer(assetId, org.a, org.b);
+        await withdraw(org.b, assetId);
+
+        const refused = await putBack(org.b, assetId).catch((error: unknown) => error);
+        expect(missingOf(refused)).toEqual(['an ownership title or registration card']);
+
+        const own = id('DOC');
+        documents.ownedBy(own, org.b);
+        await asActor(manager(org.b), () =>
+          assets.attachDocument(assetId, {
+            documentId: own,
+            kind: 'OWNERSHIP_TITLE',
+            title: TITLE_B,
+          }),
+        );
+        expect((await putBack(org.b, assetId)).status).toBe('ACTIVE');
+        expect(await commissionedFor(assetId)).toBe(org.b);
+      });
+
+      it('A → B → A: A must commission again; its retained documents (its own rows) suffice, a missing policy does not', async () => {
+        const { assetId } = await machineWithDocument(org.a);
+        await prisma.client.$executeRawUnsafe(
+          `UPDATE asset SET commissioned_for_organization_id = organization_id WHERE id = $1`,
+          assetId,
+        );
+        await transfer(assetId, org.a, org.b);
+        await transfer(assetId, org.b, org.a);
+        expect(await commissionedFor(assetId)).toBeNull();
+
+        await withdraw(org.a, assetId);
+        // Its own title is retained, so only the policy is missing — the record did not carry over.
+        const refused = await putBack(org.a, assetId).catch((error: unknown) => error);
+        expect(missingOf(refused)).toEqual(['an insurance policy currently in force']);
+
+        await record(org.a, assetId);
+        expect((await putBack(org.a, assetId)).status).toBe('ACTIVE');
+        expect(await commissionedFor(assetId)).toBe(org.a);
+      });
+    });
+
     it('an asset withdrawn from service whose dossier has since lost its policy is refused its return, with what is missing', async () => {
       const { assetId } = await machineWithDocument(org.a);
       await withdraw(org.a, assetId);
