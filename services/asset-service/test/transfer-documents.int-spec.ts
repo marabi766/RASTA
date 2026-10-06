@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
+import { InsuranceService } from '../src/insurance/insurance.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { FakeDocuments, asActor, id, newPrisma, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
@@ -23,6 +24,7 @@ describe('document references on an ownership transfer (Q-99)', () => {
   let prisma: PrismaService;
   let repository: AssetRepository;
   let assets: AssetService;
+  let insurance: InsuranceService;
   const documents = new FakeDocuments();
 
   const manager = (organizationId: string) => ({ organizationId, roles: ['FLEET_MANAGER'] });
@@ -74,6 +76,7 @@ describe('document references on an ownership transfer (Q-99)', () => {
     await prisma.onModuleInit();
     repository = new AssetRepository(prisma);
     assets = new AssetService(repository, undefined, clearingOwners(), documents);
+    insurance = new InsuranceService(repository, assets, 30);
     for (const organizationId of orgs) {
       await repository.upsertOrganizationRef({
         id: organizationId,
@@ -91,6 +94,7 @@ describe('document references on an ownership transfer (Q-99)', () => {
       orgs,
     );
     for (const table of [
+      'insurance_policy',
       'asset_document_ref',
       'asset_timeline_entry',
       'asset_transfer',
@@ -247,5 +251,149 @@ describe('document references on an ownership transfer (Q-99)', () => {
       { document_id: theirs.documentId, organization_id: third },
     ]);
     expect(await documentsSeenBy(third, theirs.assetId)).toHaveLength(1);
+  });
+
+  describe('commissioning is the current owner’s, by every way into service (#234 round 1)', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const version = async (organizationId: string, assetId: string) =>
+      (await asActor(manager(organizationId), () => assets.get(assetId))).version;
+    const withdraw = async (organizationId: string, assetId: string) =>
+      asActor(manager(organizationId), async () =>
+        assets.changeStatus(assetId, {
+          status: 'OUT_OF_SERVICE',
+          reason: 'خارج از سرویس',
+          expectedVersion: await version(organizationId, assetId),
+        }),
+      );
+    const putBack = async (organizationId: string, assetId: string) =>
+      asActor(manager(organizationId), async () =>
+        assets.changeStatus(assetId, {
+          status: 'ACTIVE',
+          reason: 'بازگشت',
+          expectedVersion: await version(organizationId, assetId),
+        }),
+      );
+    const record = (organizationId: string, assetId: string) =>
+      asActor(manager(organizationId), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - DAY).toISOString(),
+          validTo: new Date(Date.now() + 300 * DAY).toISOString(),
+        }),
+      );
+    const missingOf = (error: unknown) =>
+      (error as { internalContext?: { missing?: string[] } }).internalContext?.missing;
+
+    it('REGISTERED → OUT_OF_SERVICE → ACTIVE is no way round activation: the new owner needs its own ownership document (and a policy) for the return too', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      await transfer(assetId, org.a, org.b);
+
+      // REGISTERED → ACTIVE through the plain status route is refused, as before.
+      await expect(putBack(org.b, assetId)).rejects.toMatchObject({
+        code: 'INVALID_STATE_TRANSITION',
+      });
+      // REGISTERED → OUT_OF_SERVICE is allowed (a machine can turn out to be unusable) …
+      expect((await withdraw(org.b, assetId)).status).toBe('OUT_OF_SERVICE');
+      // … but the return is a way into service, and runs the commissioning check.
+      const refused = await putBack(org.b, assetId).catch((error: unknown) => error);
+      expect(refused).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        internalContext: expect.objectContaining({ rule: 'INCOMPLETE_DOSSIER' }),
+      });
+      expect(missingOf(refused)).toContain('an ownership title or registration card');
+      expect((await asActor(manager(org.b), () => assets.get(assetId))).status).toBe(
+        'OUT_OF_SERVICE',
+      );
+
+      // B attaches its own document: still no policy.
+      const documentId = id('DOC');
+      documents.ownedBy(documentId, org.b);
+      await asActor(manager(org.b), () =>
+        assets.attachDocument(assetId, { documentId, kind: 'OWNERSHIP_TITLE', title: TITLE_B }),
+      );
+      const stillRefused = await putBack(org.b, assetId).catch((error: unknown) => error);
+      expect(missingOf(stillRefused)).toEqual(['an insurance policy currently in force']);
+
+      // With its own document and a policy the current owner may return the asset to service.
+      await record(org.b, assetId);
+      expect((await putBack(org.b, assetId)).status).toBe('ACTIVE');
+    });
+
+    it('the previous owner’s ownership document never satisfies the check, however the asset comes back', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      await record(org.a, assetId);
+      await transfer(assetId, org.a, org.b);
+      await withdraw(org.b, assetId);
+      // A's in-force policy follows the vehicle (Q-66); A's document does not (Q-99).
+      const refused = await putBack(org.b, assetId).catch((error: unknown) => error);
+      expect(missingOf(refused)).toEqual(['an ownership title or registration card']);
+      await expect(
+        asActor(manager(org.b), async () =>
+          assets.activate(assetId, { expectedVersion: await version(org.b, assetId) }),
+        ),
+      ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+    });
+
+    it('an owner that commissioned its own asset withdraws and returns it with its dossier complete; IDLE → ACTIVE asks nothing more', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      await record(org.a, assetId);
+      expect((await withdraw(org.a, assetId)).status).toBe('OUT_OF_SERVICE');
+      expect((await putBack(org.a, assetId)).status).toBe('ACTIVE');
+
+      // IDLE is reachable only from ACTIVE, so an IDLE asset was commissioned by its current owner.
+      const idle = await machineWithDocument(org.a);
+      await asActor(manager(org.a), async () =>
+        assets.changeStatus(idle.assetId, {
+          status: 'IDLE',
+          reason: 'بی‌کار',
+          expectedVersion: await version(org.a, idle.assetId),
+        }),
+      );
+      expect((await putBack(org.a, idle.assetId)).status).toBe('ACTIVE');
+    });
+
+    it('an asset withdrawn from service whose dossier has since lost its policy is refused its return, with what is missing', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      await withdraw(org.a, assetId);
+      const refused = await putBack(org.a, assetId).catch((error: unknown) => error);
+      expect(missingOf(refused)).toEqual(['an insurance policy currently in force']);
+    });
+  });
+
+  describe('the cost summary is the current owner’s own rows (#234 round 1)', () => {
+    it('the previous owner’s DOCUMENT timeline rows and their amounts are not in the new owner’s dossier', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset_timeline_entry SET amount_minor = 5000000
+          WHERE asset_id = $1 AND category = 'DOCUMENT'`,
+        assetId,
+      );
+      const before = await asActor(manager(org.a), () => assets.dossier(assetId));
+      expect(before.costs.totalMinor).toBe('5000000');
+
+      await transfer(assetId, org.a, org.b);
+
+      const after = await asActor(manager(org.b), () => assets.dossier(assetId));
+      expect(after.costs.totalMinor).toBe('0');
+      const own = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM asset_timeline_entry
+          WHERE asset_id = $1 AND organization_id = $2`,
+        assetId,
+        org.b,
+      );
+      expect(after.costs.entryCount).toBe(own[0]!.n);
+      // A's DOCUMENT row is still A's, and is not counted for B.
+      expect(await documentTimelineOf(assetId)).toEqual([
+        { organization_id: org.a, description: TITLE_A },
+      ]);
+    });
+
+    it('answers by organization in the query itself: asking as another organization sums nothing', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      expect((await repository.costSummary(assetId, third)).length).toBe(0);
+      expect((await repository.costSummary(assetId, org.a)).length).toBeGreaterThan(0);
+    });
   });
 });

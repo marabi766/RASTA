@@ -350,25 +350,27 @@ export class AssetRepository {
   async setLocationPoint(
     tx: ExtendedPrismaClient,
     locationId: string,
+    organizationId: string,
     latitude: number,
     longitude: number,
   ): Promise<void> {
     await tx.$executeRaw`
       UPDATE asset_location
       SET point = ST_SetSRID(ST_MakePoint(${longitude}, ${latitude}), 4326)::geography
-      WHERE id = ${locationId}
+      WHERE id = ${locationId} AND organization_id = ${organizationId}
     `;
   }
 
   async readCoordinate(
     locationId: string,
+    organizationId: string,
   ): Promise<{ latitude: number; longitude: number } | null> {
     const rows = await this.client.$queryRaw<
       { latitude: number | null; longitude: number | null }[]
     >`
       SELECT ST_Y(point::geometry)::float8 AS latitude,
              ST_X(point::geometry)::float8 AS longitude
-      FROM asset_location WHERE id = ${locationId}
+      FROM asset_location WHERE id = ${locationId} AND organization_id = ${organizationId}
     `;
     const row = rows[0];
     if (!row || row.latitude === null || row.longitude === null) return null;
@@ -454,14 +456,19 @@ export class AssetRepository {
    * Aggregated in the database rather than by loading every row: an asset with
    * a decade of history would otherwise pull thousands of entries into memory
    * to add up a handful of numbers.
+   *
+   * Raw SQL, so outside the tenant extension: the organization is part of the predicate. It must
+   * be — a transfer leaves the previous owner's DOCUMENT timeline rows (and their amounts) under the
+   * previous owner's organization (docs/24 Q-99), and an asset-only filter would add them to the new
+   * owner's totals (#234 round 1).
    */
-  async costSummary(assetId: string): Promise<CostSummaryRow[]> {
+  async costSummary(assetId: string, organizationId: string): Promise<CostSummaryRow[]> {
     return this.client.$queryRaw<CostSummaryRow[]>`
       SELECT category::text AS category,
              COALESCE(SUM(amount_minor), 0)::text AS total_minor,
              COUNT(*)::int AS entry_count
       FROM asset_timeline_entry
-      WHERE asset_id = ${assetId}
+      WHERE asset_id = ${assetId} AND organization_id = ${organizationId}
       GROUP BY category
     `;
   }

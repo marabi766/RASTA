@@ -163,7 +163,7 @@ export class AssetService {
     const [policy, inspection, costRows, transferCount, recent, organization] = await Promise.all([
       this.findCountingPolicy(id),
       this.repository.findLatestInspection(id),
-      this.repository.costSummary(id),
+      this.repository.costSummary(id, asset.organizationId),
       this.repository.countTransfers(id),
       this.repository.listTimeline(id, { limit: 10 } as TimelineQuery),
       this.repository.findOrganizationRef(asset.organizationId),
@@ -188,7 +188,10 @@ export class AssetService {
             id: currentLocation.id,
             siteName: currentLocation.siteName,
             addressLine: currentLocation.addressLine,
-            coordinate: await this.repository.readCoordinate(currentLocation.id),
+            coordinate: await this.repository.readCoordinate(
+              currentLocation.id,
+              asset.organizationId,
+            ),
             source: currentLocation.source,
             recordedAt: currentLocation.recordedAt.toISOString(),
           }
@@ -486,30 +489,7 @@ export class AssetService {
     this.assertVersion(asset, dto.expectedVersion);
     this.assertTransition(asset.status as AssetStatus, 'ACTIVE', 'USER');
 
-    // Any in-force policy that counts for the current owner: under the project
-    // owner's decision the previous owner's policy follows the vehicle
-    // (docs/24 Q-66).
-    const [policy, ownershipDoc] = await Promise.all([
-      this.findCountingPolicy(id),
-      this.repository.client.assetDocumentRef.findFirst({
-        where: {
-          assetId: id,
-          deletedAt: null,
-          kind: { in: ['OWNERSHIP_TITLE', 'REGISTRATION_CARD'] },
-        },
-      }),
-    ]);
-
-    const missing: string[] = [];
-    if (!policy) missing.push('an insurance policy currently in force');
-    if (!ownershipDoc) missing.push('an ownership title or registration card');
-
-    if (missing.length > 0) {
-      throw RastaError.businessRule(
-        `The asset cannot be activated without ${missing.join(' and ')}.`,
-        { rule: 'INCOMPLETE_DOSSIER', assetId: id, missing },
-      );
-    }
+    await this.assertCommissioningDossier(id);
 
     const commissionedAt = dto.commissionedAt ? new Date(dto.commissionedAt) : new Date();
     const actor = getContext().userId ?? 'SYSTEM';
@@ -557,6 +537,42 @@ export class AssetService {
     return toView(updated);
   }
 
+  /**
+   * What "commissioned for the current owner" means (#234 round 1): the CURRENT owner holds the
+   * commissioning dossier now — an insurance policy that counts for it (Q-66: the previous owner's
+   * in-force policy follows the vehicle) **and** an ownership title or registration card that is its
+   * own row (`organization_id` is the current owner's; the previous owner's references stay with
+   * it, Q-99, so they never satisfy this). The check is made on every user transition into an
+   * operable state from an asset the current owner has not commissioned: REGISTERED → ACTIVE
+   * (`activate`) and OUT_OF_SERVICE → ACTIVE, which is how a transferred asset could otherwise
+   * be put into service without its own paperwork (REGISTERED → OUT_OF_SERVICE → ACTIVE). IDLE →
+   * ACTIVE needs none: IDLE is reachable only from ACTIVE, so an IDLE asset was commissioned by the
+   * owner it has now (a transfer always lands in REGISTERED).
+   */
+  private async assertCommissioningDossier(id: string): Promise<void> {
+    const [policy, ownershipDoc] = await Promise.all([
+      this.findCountingPolicy(id),
+      this.repository.client.assetDocumentRef.findFirst({
+        where: {
+          assetId: id,
+          deletedAt: null,
+          kind: { in: ['OWNERSHIP_TITLE', 'REGISTRATION_CARD'] },
+        },
+      }),
+    ]);
+
+    const missing: string[] = [];
+    if (!policy) missing.push('an insurance policy currently in force');
+    if (!ownershipDoc) missing.push('an ownership title or registration card');
+
+    if (missing.length > 0) {
+      throw RastaError.businessRule(
+        `The asset cannot be activated without ${missing.join(' and ')}.`,
+        { rule: 'INCOMPLETE_DOSSIER', assetId: id, missing },
+      );
+    }
+  }
+
   async changeStatus(id: string, dto: ChangeStatusDto): Promise<AssetView> {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
@@ -571,6 +587,13 @@ export class AssetService {
     }
 
     this.assertTransition(asset.status as AssetStatus, dto.status as AssetStatus, 'USER');
+
+    // Returning from OUT_OF_SERVICE is a way into service like any other: an asset the current owner
+    // has not commissioned (one that came from a transfer and was withdrawn before it was ever
+    // activated) goes through the same dossier check as `activate`.
+    if (asset.status === 'OUT_OF_SERVICE' && dto.status === 'ACTIVE') {
+      await this.assertCommissioningDossier(id);
+    }
 
     const write = (assertWithinDeadline: () => void = () => undefined) =>
       this.repository.transaction(async (tx) => {
@@ -1121,7 +1144,7 @@ export class AssetService {
       id: row.id,
       siteName: row.siteName,
       addressLine: row.addressLine,
-      coordinate: await this.repository.readCoordinate(row.id),
+      coordinate: await this.repository.readCoordinate(row.id, row.organizationId),
       source: row.source,
       recordedAt: row.recordedAt.toISOString(),
     };
@@ -1465,6 +1488,7 @@ export class AssetService {
       await this.repository.setLocationPoint(
         tx,
         locationId,
+        organizationId,
         dto.coordinate.latitude,
         dto.coordinate.longitude,
       );
