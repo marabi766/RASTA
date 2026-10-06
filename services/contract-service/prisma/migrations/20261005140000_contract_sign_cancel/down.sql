@@ -14,7 +14,15 @@
 -- exactly (the `idempotency_key` rows are a replay cache, not a record, and are dropped).
 --
 -- The `_prisma_migrations` row is removed last so the forward migration can be re-applied.
+--
+-- The whole file is one transaction (`BEGIN; … COMMIT;`): run with `psql --file` (autocommit by
+-- default) the lock would otherwise end before the check and a signature could commit between the
+-- check and the drops, and a refusal need not stop the statements after it. Inside it the lock,
+-- the check that RAISEs and every change commit together or not at all. Run it with
+-- `-v ON_ERROR_STOP=1`; without it a refusal still leaves nothing changed (the transaction aborts).
 -- =============================================================================
+
+BEGIN;
 
 -- Locked first, so no signature or cancellation can be written between the check and the drops.
 LOCK TABLE "contract_signature", "contract" IN ACCESS EXCLUSIVE MODE;
@@ -79,3 +87,5 @@ ALTER TABLE "contract"
 DROP TYPE IF EXISTS "ContractSide";
 
 DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261005140000_contract_sign_cancel';
+
+COMMIT;

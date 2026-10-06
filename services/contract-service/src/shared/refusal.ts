@@ -25,6 +25,8 @@ export type RefusalArea = keyof typeof REFUSAL_AREAS;
 export const REFUSAL_REASONS = {
   signature: {
     SIGNATURE_POLICY_REQUIRED: 422,
+    /** The union that wrote the employer's signing policy no longer governs the employer (Q-83). */
+    POLICY_AUTHOR_NOT_GOVERNING: 403,
     CONTRACT_NOT_DRAFT: 422,
     ACTOR_IDENTITY_UNKNOWN: 422,
     MEMBER_OF_BOTH_PARTIES: 403,

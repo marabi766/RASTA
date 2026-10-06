@@ -166,11 +166,54 @@ export class PolicyRepository {
   }
 
   /**
+   * Every ACTIVE or PENDING_PLATFORM_APPROVAL policy a union wrote for an organization other than
+   * its own, across all tenants — the ones an ORGANIZATION_MOVED can strand (Q-83). A pending one
+   * is listed because approval can activate it after the move (see `PolicySuspensionService`).
+   * Nothing but identifiers is read, and the caller acts on each in the tenant that row names. A
+   * union's policy for itself needs no hierarchy, and a platform administrator's is never stranded
+   * by a move.
+   */
+  async listUnionPoliciesToReconfirm(): Promise<
+    {
+      id: string;
+      organizationId: string;
+      authorOrganizationId: string;
+      workflowKey: WorkflowKey;
+      policyVersion: number;
+    }[]
+  > {
+    const rows = await runUnscoped(
+      'an organization move re-confirms every union-written policy in force, in any tenant (Q-83)',
+      () =>
+        this.prisma.client.approvalPolicy.findMany({
+          where: {
+            status: { in: ['ACTIVE', 'PENDING_PLATFORM_APPROVAL'] },
+            authorRole: 'UNION_ADMIN',
+          },
+          select: {
+            id: true,
+            organizationId: true,
+            authorOrganizationId: true,
+            workflowKey: true,
+            policyVersion: true,
+          },
+          orderBy: { id: 'asc' },
+        }),
+    );
+    return rows
+      .filter((row) => row.authorOrganizationId !== row.organizationId)
+      .map((row) => ({ ...row, workflowKey: row.workflowKey as WorkflowKey }));
+  }
+
+  /**
    * Policies an organization governs by or wrote — or, with `organizationId` null, every
-   * organization's (the platform administrator's queue).
+   * organization's (the platform administrator's queue). `visibleTo` is the object-level read rule
+   * (`PolicyAccess.listVisibility`) as a predicate, applied **in the query**, so a page holds only
+   * what the caller may read one by one — never a page filtered afterwards.
    */
   async listPolicies(filter: {
     organizationId: string | null;
+    visibleTo: Prisma.ApprovalPolicyWhereInput | null;
     workflowKey?: WorkflowKey;
     status?: PolicyStateName;
     cursor?: string;
@@ -179,14 +222,19 @@ export class PolicyRepository {
     return runUnscoped(POLICY_REASON, () =>
       this.prisma.client.approvalPolicy.findMany({
         where: {
-          ...(filter.organizationId !== null
-            ? {
-                OR: [
-                  { organizationId: filter.organizationId },
-                  { authorOrganizationId: filter.organizationId },
-                ],
-              }
-            : {}),
+          AND: [
+            ...(filter.organizationId !== null
+              ? [
+                  {
+                    OR: [
+                      { organizationId: filter.organizationId },
+                      { authorOrganizationId: filter.organizationId },
+                    ],
+                  },
+                ]
+              : []),
+            ...(filter.visibleTo ? [filter.visibleTo] : []),
+          ],
           ...(filter.workflowKey ? { workflowKey: filter.workflowKey } : {}),
           ...(filter.status ? { status: filter.status } : {}),
           ...(filter.cursor ? { id: { lt: filter.cursor } } : {}),

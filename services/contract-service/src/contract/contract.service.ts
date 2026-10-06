@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, compareActors, currentActor, getContext } from '@rasta/nest-common';
 import type { Contract, ContractSignature } from '../generated/prisma';
@@ -11,8 +11,10 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import type { ClaimFence } from '../shared/idempotency';
 import { transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
-import { signingRoleUnder } from '../policy/policy.access';
+import { OrganizationDirectory } from '../organization/organization-directory';
+import { UNION_ROLE, signingRoleUnder } from '../policy/policy.access';
 import { PolicyRepository } from '../policy/policy.repository';
+import { PolicySuspensionService } from '../policy/policy-suspension.service';
 import { SIGNATURE_WORKFLOW } from '../policy/policy.state-machine';
 import { ENV } from '../tokens';
 import { ContractRepository } from './contract.repository';
@@ -33,6 +35,22 @@ function signerOf(signature: ContractSignature) {
     issuer: signature.signedByIssuer,
     subject: signature.signedBySubject,
   };
+}
+
+/**
+ * The policy in force was written by a union that no longer governs the employer. Thrown from
+ * inside the signing transaction — which rolls back, so nothing is recorded — and turned by `sign`
+ * into the caller's refusal after it has suspended the policy in a transaction of its own (a
+ * suspension written inside the rolled-back one would be lost with it).
+ */
+class StrandedSigningPolicy extends Error {
+  constructor(
+    readonly policyId: string,
+    readonly organizationId: string,
+    readonly refusal: RastaError,
+  ) {
+    super('The signing policy in force is stranded');
+  }
 }
 
 const factOf = (signature: ContractSignature): SignatureFact => ({
@@ -72,9 +90,13 @@ const factOf = (signature: ContractSignature): SignatureFact => ({
  */
 @Injectable()
 export class ContractService {
+  private readonly logger = new Logger(ContractService.name);
+
   constructor(
     private readonly repository: ContractRepository,
     private readonly policies: PolicyRepository,
+    private readonly directory: OrganizationDirectory,
+    private readonly suspension: PolicySuspensionService,
     private readonly access: ContractAccess,
     private readonly prisma: PrismaService,
     private readonly publisher: EventPublisher,
@@ -185,11 +207,38 @@ export class ContractService {
       throw this.refused('sign', this.identityUnknown(id));
     }
 
-    return this.prisma.transaction(async (tx) => {
-      if (fence) await fence.hold(tx);
-      const view = await this.signLocked(tx, row, side, contractorRole, person, dto);
-      return fence ? fence.complete(tx, view) : view;
-    });
+    try {
+      return await this.prisma.transaction(
+        async (tx) => {
+          if (fence) await fence.hold(tx);
+          const view = await this.signLocked(tx, row, side, contractorRole, person, dto);
+          return fence ? fence.complete(tx, view) : view;
+        },
+        // The hierarchy is asked inside it (`authorityOf`), under its own deadline.
+        { timeoutMs: this.env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + 10_000 },
+      );
+    } catch (error) {
+      if (!(error instanceof StrandedSigningPolicy)) throw error;
+      // Not only refused: suspended, with the same event and audit as the sweeper's (Q-83), so
+      // the policy does not wait for a queued task to stop being in force. The caller's refusal
+      // is the same either way, and a suspension that fails must not turn it into another error.
+      await this.suspension
+        .suspend(
+          { id: error.policyId, organizationId: error.organizationId },
+          {
+            reason: 'SIGNING_RECHECK',
+            correlationId: getContext().correlationId,
+            callerService: SERVICE_NAME,
+          },
+        )
+        .catch((suspendError: unknown) => {
+          this.logger.warn(
+            `Could not suspend stranded signing policy ${error.policyId}: ` +
+              `${suspendError instanceof RastaError ? suspendError.code : 'INTERNAL'}`,
+          );
+        });
+      throw error.refusal;
+    }
   }
 
   /**
@@ -228,6 +277,34 @@ export class ContractService {
           { contractId: contract.id },
         ),
       );
+    }
+    // The policy rests on a union governing the employer, and that is the hierarchy's to say, now
+    // (Q-70 (7), Q-83): a union-written policy keeps no authority once its union has lost the
+    // employer, however long ago it was approved. Asked here, under the slot's lock, so the
+    // answer and the signature are one decision — a policy approved, retired or suspended at the
+    // same moment is either entirely before this or entirely after it. "Could not confirm" is
+    // an upstream error that rolls this back: nothing is recorded on a relation that was not
+    // confirmed (fail closed). A platform administrator's policy needs no hierarchy.
+    if (policy.authorRole === UNION_ROLE) {
+      const within = await this.directory.isWithin(
+        policy.authorOrganizationId,
+        contract.organizationId,
+      );
+      if (!within) {
+        throw new StrandedSigningPolicy(
+          policy.id,
+          contract.organizationId,
+          this.refused(
+            'sign',
+            forbiddenRefusal(
+              'The union that wrote the signing policy in force no longer governs this employer',
+              'signature',
+              ['POLICY_AUTHOR_NOT_GOVERNING'],
+              { contractId: contract.id },
+            ),
+          ),
+        );
+      }
     }
     const roles = getContext().roles;
     const role = signingRoleUnder(policy, roles);

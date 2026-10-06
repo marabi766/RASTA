@@ -14,7 +14,9 @@ const DECLARED: ReadonlyArray<readonly [PolicyStateName, PolicyStateName]> = [
   ['DRAFT', 'PENDING_PLATFORM_APPROVAL'],
   ['PENDING_PLATFORM_APPROVAL', 'ACTIVE'],
   ['PENDING_PLATFORM_APPROVAL', 'REJECTED'],
+  ['PENDING_PLATFORM_APPROVAL', 'SUSPENDED'],
   ['ACTIVE', 'RETIRED'],
+  ['ACTIVE', 'SUSPENDED'],
 ];
 
 describe('the approval policy lifecycle', () => {
@@ -27,9 +29,10 @@ describe('the approval policy lifecycle', () => {
     }
   });
 
-  it('lets nothing leave REJECTED or RETIRED, and only ACTIVE governs', () => {
+  it('lets nothing leave REJECTED, RETIRED or SUSPENDED, and only ACTIVE governs', () => {
     expect(POLICY_TRANSITIONS.REJECTED).toEqual([]);
     expect(POLICY_TRANSITIONS.RETIRED).toEqual([]);
+    expect(POLICY_TRANSITIONS.SUSPENDED).toEqual([]);
     expect(GOVERNING_POLICY_STATE).toBe('ACTIVE');
   });
 
@@ -50,7 +53,7 @@ describe('the approval policy lifecycle', () => {
         '..',
         'prisma',
         'migrations',
-        '20261005150000_signing_policy',
+        '20261006100000_policy_suspension',
         'migration.sql',
       ),
       'utf8',

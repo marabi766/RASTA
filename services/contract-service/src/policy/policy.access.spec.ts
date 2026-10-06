@@ -25,6 +25,91 @@ const union = { organizationId: 'ORG_UNION', userId: 'USR_U', roles: ['UNION_ADM
 const platform = { organizationId: 'ORG_PLATFORM', userId: 'USR_P', roles: ['SYSTEM_ADMIN'] };
 const employer = { organizationId: 'ORG_EMPLOYER', userId: 'USR_E', roles: ['ORGANIZATION_ADMIN'] };
 
+describe('the list applies the read rule: listVisibility is canSeePolicy as a predicate (#231 r2)', () => {
+  /** Evaluates the predicate's only two shapes against one policy, as the database would. */
+  function matches(
+    predicate: ReturnType<PolicyAccess['listVisibility']>,
+    row: typeof policy,
+  ): boolean {
+    if (predicate === null) return true;
+    const clauses = (predicate.OR ?? []) as Partial<typeof policy>[];
+    return clauses.some((clause) =>
+      Object.entries(clause).every(
+        ([column, value]) => row[column as keyof typeof policy] === value,
+      ),
+    );
+  }
+
+  const callers: [string, Partial<RequestContext>][] = [
+    ['the platform administrator', platform],
+    ['a union administrator of the author', union],
+    [
+      'an organization administrator of the author (no UNION_ADMIN)',
+      { ...union, roles: ['ORGANIZATION_ADMIN'] },
+    ],
+    [
+      'a union administrator and reader of the author',
+      { ...union, roles: ['UNION_ADMIN', 'ORGANIZATION_ADMIN'] },
+    ],
+    ['an organization administrator of the employer', employer],
+    ['a union administrator of the employer', { ...employer, roles: ['UNION_ADMIN'] }],
+    ['a contractor of the employer', { ...employer, roles: ['CONTRACTOR'] }],
+    [
+      'a stranger',
+      {
+        organizationId: 'ORG_ELSEWHERE',
+        userId: 'USR_X',
+        roles: ['ORGANIZATION_ADMIN', 'UNION_ADMIN'],
+      },
+    ],
+    [
+      'a caller with no organization',
+      {
+        organizationId: undefined as unknown as string,
+        userId: 'USR_N',
+        roles: ['ORGANIZATION_ADMIN'],
+      },
+    ],
+  ];
+  const policies = [
+    policy,
+    { ...policy, id: 'APL_2', authorOrganizationId: 'ORG_EMPLOYER' },
+    { ...policy, id: 'APL_3', organizationId: 'ORG_UNION' },
+    {
+      ...policy,
+      id: 'APL_4',
+      organizationId: 'ORG_OTHER',
+      authorOrganizationId: 'ORG_OTHER_UNION',
+    },
+  ];
+
+  it.each(callers)(
+    '%s: the list shows exactly what a read does not answer 404 to',
+    (_who, caller) => {
+      for (const row of policies) {
+        const read = as(caller, () => access.canSeePolicy(row));
+        const listed = matches(
+          as(caller, () => access.listVisibility()),
+          row,
+        );
+        expect([row.id, listed]).toEqual([row.id, read]);
+      }
+    },
+  );
+
+  it('an organization administrator of the author sees none of the policies it wrote, as the single read says', () => {
+    const asReader = { ...union, roles: ['ORGANIZATION_ADMIN'] };
+    expect(as(asReader, () => access.canSeePolicy(policy))).toBe(false);
+    expect(as(asReader, () => access.listVisibility())).toEqual({
+      OR: [{ organizationId: 'ORG_UNION' }],
+    });
+    expect(as(union, () => access.listVisibility())).toEqual({
+      OR: [{ authorOrganizationId: 'ORG_UNION' }],
+    });
+    expect(as(platform, () => access.listVisibility())).toBeNull();
+  });
+});
+
 describe('who writes, approves, retires and reads an approval policy (Q-70 (7))', () => {
   describe('writing', () => {
     it('a union administrator or the platform administrator writes; the role is the one held', () => {

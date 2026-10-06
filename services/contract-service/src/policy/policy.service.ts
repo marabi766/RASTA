@@ -10,6 +10,7 @@ import {
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import type { ContractEnv } from '../config/env';
+import type { Prisma } from '../generated/prisma';
 import { EventPublisher, ID_PREFIX } from '../events/publisher';
 import { OrganizationDirectory } from '../organization/organization-directory';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
@@ -63,7 +64,9 @@ export const CREATE_POLICY_ENDPOINT = 'POST /v1/approval-policies';
  *   submitted the policy (four eyes). Only a `SYSTEM_ADMIN`'s own policy may be self-approved, and
  *   only with `CONTRACT_POLICY_FOUR_EYES` off — a provisional, pending-owner flag. Approval puts
  *   the policy in force and retires the one it replaces, in one transaction.
- * - **Governing.** Only an ACTIVE policy governs; a DRAFT, PENDING or REJECTED one never does.
+ * - **Governing.** Only an ACTIVE policy governs; a DRAFT, PENDING, REJECTED or SUSPENDED one never
+ *   does. The system suspends a union's ACTIVE or PENDING policy when an `ORGANIZATION_MOVED` takes
+ *   its organization out of the union (`PolicySuspensionService`, Q-83); nobody revives it.
  *
  * Nothing here decides whether an authority a policy names is legitimate: the union wrote it and
  * the platform approved it; this service stores it. Every transition writes its event in the same
@@ -422,13 +425,15 @@ export class PolicyService implements OnModuleInit {
   /** Policies the caller's organization is governed by or wrote. */
   async list(query: ListPoliciesQuery): Promise<CursorPage<PolicyView>> {
     const { organizationId } = this.access.assertCanListPolicies();
-    return this.page(organizationId, query);
+    // The same rule a read of one policy applies, in the query (review #231 r2): a caller who
+    // would be told 404 for a policy is not shown it in a list.
+    return this.page(organizationId, this.access.listVisibility(), query);
   }
 
   /** The platform administrator's queue: every organization's pending policies. */
   async platformQueue(query: ListPoliciesQuery): Promise<CursorPage<PolicyView>> {
     this.access.assertPlatformAdministrator();
-    return this.page(null, { ...query, status: 'PENDING_PLATFORM_APPROVAL' });
+    return this.page(null, null, { ...query, status: 'PENDING_PLATFORM_APPROVAL' });
   }
 
   // -------------------------------------------------------------------------
@@ -529,10 +534,12 @@ export class PolicyService implements OnModuleInit {
 
   private async page(
     organizationId: string | null,
+    visibleTo: Prisma.ApprovalPolicyWhereInput | null,
     query: ListPoliciesQuery,
   ): Promise<CursorPage<PolicyView>> {
     const rows = await this.repository.listPolicies({
       organizationId,
+      visibleTo,
       ...(query.workflowKey ? { workflowKey: query.workflowKey } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),

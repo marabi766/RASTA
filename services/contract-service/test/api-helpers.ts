@@ -14,6 +14,8 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { TenderAwardedConsumer } from '../src/events/tender-awarded.consumer';
+import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { PolicyReconciliationSweeper } from '../src/policy/policy-reconciliation.sweeper';
 import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { FakeHierarchy, databaseUrl } from './helpers';
 
@@ -196,6 +198,13 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
     .overrideProvider(OutboxRelay)
     .useValue(inert)
     .overrideProvider(TenderAwardedConsumer)
+    .useValue(inert)
+    // The move consumer and the sweeper behind it are proven in organization-moved.int-spec.ts,
+    // driven directly: booted here they would subscribe to a broker and sweep rows other suites
+    // assert on.
+    .overrideProvider(OrganizationMovedConsumer)
+    .useValue(inert)
+    .overrideProvider(PolicyReconciliationSweeper)
     .useValue(inert)
     // The HTTP client to organization-service is proven against its contract in
     // organization-directory.int-spec.ts; here the hierarchy is given.

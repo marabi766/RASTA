@@ -468,6 +468,10 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
       await tx.$executeRawUnsafe(
         'ALTER TABLE "approval_policy_step" ENABLE TRIGGER "tg_approval_policy_step_immutable"',
       );
+      // The reconciliation queue is work, not a record, and names its policy by foreign key.
+      await tx.policyReconciliationTask.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
       await tx.$executeRawUnsafe(
         'ALTER TABLE "approval_policy" DISABLE TRIGGER "tg_approval_policy_guard"',
       );

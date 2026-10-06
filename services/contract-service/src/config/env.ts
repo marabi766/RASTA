@@ -130,6 +130,9 @@ function optionalRoleList(name: string) {
  *                                       How often the `TENDER_AWARDED` consumer retries an
  *                                       award that could not be read before it dead-letters
  *                                       the event as UPSTREAM_UNAVAILABLE.
+ *   CONTRACT_RECONCILE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS / _BACKOFF_SECONDS /
+ *   _BACKOFF_MAX_SECONDS                The sweeper that suspends signing policies a moved
+ *                                       organization stranded (Q-83), as construction-service's.
  *
  * `SYSTEM_ADMIN` is always accepted for the employer's side, as everywhere on the
  * platform, but only while acting for an organization it selected with
@@ -201,6 +204,20 @@ export const contractEnvSchema = baseEnvSchema
 
     CONTRACT_CONSUMER_MAX_RETRIES: z.coerce.number().int().min(1).max(20).default(5),
     CONTRACT_CONSUMER_RETRY_BACKOFF_MS: z.coerce.number().int().min(10).max(60_000).default(1000),
+
+    /**
+     * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041), construction-service's
+     * numbers. A sweep every `INTERVAL_MS` claims at most `BATCH_SIZE` due tasks, so one sweep
+     * costs at most BATCH_SIZE × CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS; `LEASE_SECONDS` must
+     * exceed that, or a slow sweep loses its claims to another instance (harmless — the writes are
+     * conditional — but wasteful). A failed task is retried after `BACKOFF_SECONDS`, doubling to
+     * `BACKOFF_MAX_SECONDS`.
+     */
+    CONTRACT_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(500).max(300_000).default(5000),
+    CONTRACT_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    CONTRACT_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
+    CONTRACT_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(30),
+    CONTRACT_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(900),
   });
 
 export type ContractEnv = z.infer<typeof contractEnvSchema>;

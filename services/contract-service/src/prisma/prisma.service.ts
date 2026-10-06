@@ -22,6 +22,7 @@ export const TENANT_SCOPED_MODELS = [
   'IdempotencyKey',
   'ApprovalPolicy',
   'ApprovalPolicyStep',
+  'PolicyReconciliationTask',
 ] as const;
 
 /**

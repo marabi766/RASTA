@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { SUPER_ROLE, assertNotAuditor, assertNotServiceCaller } from '../access/access';
 import type { ContractEnv } from '../config/env';
+import type { Prisma } from '../generated/prisma';
 import { ENV } from '../tokens';
 
 /**
@@ -116,6 +117,30 @@ export class PolicyAccess {
       context.organizationId === policy.organizationId &&
       this.readers.some((role) => context.roles.includes(role))
     );
+  }
+
+  /**
+   * `canSeePolicy` as a predicate on the table, for the caller: what a listing applies **in its
+   * query** so that it returns exactly what a read of each row would not answer 404 to. `null`: no
+   * restriction (the platform administrator). Otherwise a union administrator sees the policies its
+   * own organization **wrote**, and a contract reader the policies that **govern** its own
+   * organization — and nothing else: an organization administrator of the author's organization
+   * who is not a `UNION_ADMIN` sees none of the policies it wrote, as the single read says. No
+   * clause means no row (`OR: []` matches nothing).
+   *
+   * Callers have passed `assertCanListPolicies`, which refuses the oversight role and a service
+   * caller, as `canSeePolicy` does.
+   */
+  listVisibility(): Prisma.ApprovalPolicyWhereInput | null {
+    const context = getContext();
+    if (context.roles.includes(SUPER_ROLE)) return null;
+    const own = context.organizationId;
+    const clauses: Prisma.ApprovalPolicyWhereInput[] = [];
+    if (own && context.roles.includes(UNION_ROLE)) clauses.push({ authorOrganizationId: own });
+    if (own && this.readers.some((role) => context.roles.includes(role))) {
+      clauses.push({ organizationId: own });
+    }
+    return { OR: clauses };
   }
 
   assertCanSeePolicy(policy: PolicyOwnership): void {

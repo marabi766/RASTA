@@ -504,7 +504,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
             "content": {
               "application/json": {
                 "schema": {
@@ -529,7 +529,11 @@
                           },
                           "code": {
                             "type": "string",
-                            "enum": ["MEMBER_OF_BOTH_PARTIES", "SAME_PERSON_BOTH_SIDES"]
+                            "enum": [
+                              "POLICY_AUTHOR_NOT_GOVERNING",
+                              "MEMBER_OF_BOTH_PARTIES",
+                              "SAME_PERSON_BOTH_SIDES"
+                            ]
                           },
                           "message": {
                             "type": "string"
@@ -1028,7 +1032,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -1387,7 +1392,14 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["DRAFT", "PENDING_PLATFORM_APPROVAL", "ACTIVE", "REJECTED", "RETIRED"]
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
             }
           }
         ],
@@ -1431,7 +1443,8 @@
                               "PENDING_PLATFORM_APPROVAL",
                               "ACTIVE",
                               "REJECTED",
-                              "RETIRED"
+                              "RETIRED",
+                              "SUSPENDED"
                             ]
                           },
                           "label": {
@@ -1648,7 +1661,14 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["DRAFT", "PENDING_PLATFORM_APPROVAL", "ACTIVE", "REJECTED", "RETIRED"]
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
             }
           }
         ],
@@ -1692,7 +1712,8 @@
                               "PENDING_PLATFORM_APPROVAL",
                               "ACTIVE",
                               "REJECTED",
-                              "RETIRED"
+                              "RETIRED",
+                              "SUSPENDED"
                             ]
                           },
                           "label": {
@@ -1918,7 +1939,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -2132,7 +2154,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -2415,7 +2438,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -2698,7 +2722,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {
@@ -2966,7 +2991,8 @@
                         "PENDING_PLATFORM_APPROVAL",
                         "ACTIVE",
                         "REJECTED",
-                        "RETIRED"
+                        "RETIRED",
+                        "SUSPENDED"
                       ]
                     },
                     "label": {

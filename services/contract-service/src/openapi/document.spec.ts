@@ -234,7 +234,7 @@ describe('the committed OpenAPI document', () => {
       };
       expect(codesOf('sign', '403')).toEqual({
         area: 'signature',
-        codes: ['MEMBER_OF_BOTH_PARTIES', 'SAME_PERSON_BOTH_SIDES'],
+        codes: ['POLICY_AUTHOR_NOT_GOVERNING', 'MEMBER_OF_BOTH_PARTIES', 'SAME_PERSON_BOTH_SIDES'],
       });
       expect(codesOf('sign', '409')).toEqual({ area: 'signature', codes: ['SIDE_ALREADY_SIGNED'] });
       expect(codesOf('sign', '422')).toEqual({

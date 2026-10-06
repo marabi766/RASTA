@@ -169,6 +169,9 @@ enum ApprovalPolicyStatus {
   ACTIVE
   REJECTED
   RETIRED
+  /// Taken out of force by the system because the union that wrote it no longer governs the
+  /// organization it was written for (Q-83). Never revived: a new version replaces it.
+  SUSPENDED
 }
 
 /// Who may do what to a contract, as rows written by the people entitled to write them, never by
@@ -219,11 +222,17 @@ model ApprovalPolicy {
   rejectionReason      String?   @map("rejection_reason")
   retiredAt            DateTime? @map("retired_at") @db.Timestamptz(3)
   retiredBy            String?   @map("retired_by")
+  /// The system suspended it (ORGANIZATION_MOVED, Q-83): when, by whom (`system:contract-service`),
+  /// and a closed-code reason. All three or none, exactly when the status is SUSPENDED.
+  suspendedAt          DateTime? @map("suspended_at") @db.Timestamptz(3)
+  suspendedBy          String?   @map("suspended_by")
+  suspensionReason     String?   @map("suspension_reason")
 
   version Int @default(1)
 
-  steps      ApprovalPolicyStep[]
-  signatures ContractSignature[]
+  steps               ApprovalPolicyStep[]
+  signatures          ContractSignature[]
+  reconciliationTasks PolicyReconciliationTask[]
 
   // SQL-only: `ux_approval_policy_active` — at most one ACTIVE policy per
   // (organization, workflow key).
@@ -231,6 +240,49 @@ model ApprovalPolicy {
   @@unique([organizationId, workflowKey, policyVersion], map: "ux_approval_policy_version")
   @@index([organizationId, workflowKey, status], map: "ix_approval_policy_org_key_status")
   @@map("approval_policy")
+}
+
+enum PolicyReconciliationStatus {
+  PENDING
+  DONE
+}
+
+/// The durable work queue behind ORGANIZATION_MOVED (Q-83, docs/23 D-041): one task per policy a
+/// move could have stranded. The Kafka handler inserts, a sweeper claims, asks organization-service
+/// and suspends. `organizationId` is the tenant of the policy, not the moved organization.
+model PolicyReconciliationTask {
+  id String @id
+
+  organizationId      String @map("organization_id")
+  policyId            String @map("policy_id")
+  /// The union that wrote the policy: the scope its hierarchy question is signed for.
+  unionId             String @map("union_id")
+  /// The move that queued it, and the organization that moved — for the record.
+  sourceEventId       String @map("source_event_id")
+  movedOrganizationId String @map("moved_organization_id")
+  correlationId       String @map("correlation_id")
+
+  status        PolicyReconciliationStatus @default(PENDING)
+  attempts      Int                        @default(0)
+  /// Bumped when a later move coalesces into this open task: a sweeper that claimed an older
+  /// generation must not finish it (its lookup may predate the move).
+  generation    Int                        @default(0)
+  nextAttemptAt DateTime                   @map("next_attempt_at") @db.Timestamptz(3)
+  /// The claim: a time and the token that fences its holder.
+  leaseUntil    DateTime?                  @map("lease_until") @db.Timestamptz(3)
+  leaseToken    String?                    @map("lease_token")
+  /// A closed code (`UPSTREAM_UNAVAILABLE` …), never a message.
+  lastErrorCode String?                    @map("last_error_code")
+
+  createdAt DateTime  @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @map("updated_at") @db.Timestamptz(3)
+  doneAt    DateTime? @map("done_at") @db.Timestamptz(3)
+
+  policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  // SQL-only: `ux_policy_reconciliation_open` — at most one PENDING task per policy;
+  // `ix_policy_reconciliation_due` — the sweeper's scan.
+  @@map("policy_reconciliation_task")
 }
 
 /// One authority a policy names. For `contract.signature` each step is a role of the governed

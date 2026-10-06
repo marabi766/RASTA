@@ -31,6 +31,7 @@ export const CONTRACT_EVENTS = {
   APPROVAL_POLICY_REJECTED: 'APPROVAL_POLICY_REJECTED',
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
+  APPROVAL_POLICY_SUSPENDED: 'APPROVAL_POLICY_SUSPENDED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -191,6 +192,31 @@ export const approvalPolicyRetiredPayload = z
   })
   .strict();
 
+/**
+ * Taken out of force because the union that wrote it no longer governs the organization (Q-83),
+ * the payload construction-service publishes for its own policies. `suspendedBy` is the system
+ * actor; the cause is the ORGANIZATION_MOVED event and the organization it moved, or a signature
+ * being attempted on it. No free text: the reason is a closed code.
+ */
+export const approvalPolicySuspendedPayload = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    authorOrganizationId: id,
+    workflowKey,
+    policyVersion: positive,
+    /** In force, or still waiting for the platform approval, when it was suspended. */
+    fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
+    /** A move found it (the sweeper), or a signature being attempted on it did. */
+    reason: z.enum(['ORGANIZATION_MOVED', 'SIGNING_RECHECK']),
+    /** The ORGANIZATION_MOVED event and the organization it moved; null when a signature found it. */
+    causeEventId: id.nullable(),
+    movedOrganizationId: id.nullable(),
+    suspendedBy: id,
+    suspendedAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -201,6 +227,7 @@ export const CONTRACT_EVENT_SCHEMAS = {
   APPROVAL_POLICY_REJECTED: approvalPolicyRejectedPayload,
   APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
   APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
+  APPROVAL_POLICY_SUSPENDED: approvalPolicySuspendedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

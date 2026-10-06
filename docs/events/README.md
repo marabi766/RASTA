@@ -89,14 +89,14 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 
 ## Organization — `rasta.organization.v1`
 
-| رویداد                         | مصرف‌کنندگان                                | Payload کلیدی                                                                                                     |
-| ------------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `ORGANIZATION_CREATED`         | **همه (Replica مرجع)** · economic (کیف پول) | `organizationId`, `name`, `type`, `parentId`                                                                      |
-| `ORGANIZATION_UPDATED`         | همه (Replica مرجع)                          | `organizationId`, `changes`                                                                                       |
-| `ORGANIZATION_MOVED`           | analytics · audit · construction (Q-83)     | `organizationId`, `fromParentId`, `toParentId`                                                                    |
-| `ORGANIZATION_DEACTIVATED`     | identity (ابطال عضویت) · همه                | `organizationId`, `reason`                                                                                        |
-| `ORGANIZATION_POLICY_CHANGED`  | audit                                       | `organizationId`, `policyKey`, `value`                                                                            |
-| `ORGANIZATION_CONTACT_CHANGED` | audit                                       | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
+| رویداد                         | مصرف‌کنندگان                                       | Payload کلیدی                                                                                                     |
+| ------------------------------ | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `ORGANIZATION_CREATED`         | **همه (Replica مرجع)** · economic (کیف پول)        | `organizationId`, `name`, `type`, `parentId`                                                                      |
+| `ORGANIZATION_UPDATED`         | همه (Replica مرجع)                                 | `organizationId`, `changes`                                                                                       |
+| `ORGANIZATION_MOVED`           | analytics · audit · construction · contract (Q-83) | `organizationId`, `fromParentId`, `toParentId`                                                                    |
+| `ORGANIZATION_DEACTIVATED`     | identity (ابطال عضویت) · همه                       | `organizationId`, `reason`                                                                                        |
+| `ORGANIZATION_POLICY_CHANGED`  | audit                                              | `organizationId`, `policyKey`, `value`                                                                            |
+| `ORGANIZATION_CONTACT_CHANGED` | audit                                              | `organizationId`, `contactId`, `change`, `kind`, `isPrimary`, `demotedContactIds[]` — **بدون** تلفن، ایمیل یا نام |
 
 ## Asset — `rasta.asset.v1`
 
@@ -706,13 +706,14 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 - `CONTRACT_SIGNATURE_RECORDED` — برای **هر یک** از دو امضا یک‌بار: `side` ∈ `EMPLOYER`/`CONTRACTOR`، سازمانی که امضاکننده برایش عمل کرده، `signedBy` (شناسهٔ کاربر؛ امضای بی‌شخص رکورد حسابرسی نیست)، نقشی که امضا با آن پذیرفته شد، و برای کارفرما `policyId`/`policyVersion` (سیاست `contract.signature` که اختیار را داد؛ برای پیمانکار `null`). جفت هویت پایدار برای بررسی تفکیک وظایف (#188) در پایگاه داده‌ی همین سرویس می‌ماند و روی Topic نمی‌آید.
 - `CONTRACT_SIGNED` — فقط با امضای **دوم** و فقط یک‌بار؛ فقط لحظه‌ها و سازمان‌ها، بی امضاکننده. `signedAt` = دیرترین دو امضا. (`docs/08` § 8.3: `AWARDED → CONTRACTED`.) ردیف قدیمی `signatories[]` با این جایگزین شد؛ مصرف‌کنندگان دیگر (construction، economic، notification) با PRهای بعدی افزوده می‌شوند.
 - `CONTRACT_CANCELLED` — فقط **کد دلیل بسته**؛ یادداشت متنی آزاد در پایگاه داده می‌ماند و از API برای دو طرف خوانده می‌شود (متن آزاد مشتری است و Topic را همهٔ سرویس‌ها می‌خوانند).
-- `APPROVAL_POLICY_CREATED` · `_SUBMITTED` · `_REJECTED` · `_ACTIVATED` · `_RETIRED` — سیاستی که می‌گوید چه نقش‌هایی از سازمان کارفرما برای او امضا می‌کنند (ADR-068 § ۵؛ همان سازوکار و همان شکل رویدادهای `construction-service`، بدون `SUSPENDED`).
+- `APPROVAL_POLICY_CREATED` · `_SUBMITTED` · `_REJECTED` · `_ACTIVATED` · `_RETIRED` · `_SUSPENDED` — سیاستی که می‌گوید چه نقش‌هایی از سازمان کارفرما برای او امضا می‌کنند (ADR-068 § ۵؛ همان سازوکار و همان شکل رویدادهای `construction-service`). `APPROVAL_POLICY_SUSPENDED` (دور دوم بازبینی #231، Q-83): `authorOrganizationId`، `fromStatus` (`ACTIVE` \| `PENDING_PLATFORM_APPROVAL`)، `reason` (`ORGANIZATION_MOVED` \| `SIGNING_RECHECK`)، `causeEventId` و `movedOrganizationId` (برای دومی `null`)، `suspendedBy` (بازیگر سیستمی `system:contract-service`) و `suspendedAt`؛ دلیل متنی روی رویداد نمی‌آید.
   `aggregateType = ApprovalPolicy`؛ کلید پارتیشن `(organizationId)/(workflowKey)` تا همهٔ نسخه‌های یک خط سیاست روی یک پارتیشن بمانند؛ `.strict()`: `policyId`، `organizationId`، `workflowKey` (`contract.signature`)، `policyVersion` و چه‌کسی/چه‌وقت (و برای `CREATED` نویسنده و تعداد گام‌ها،
   برای `ACTIVATED` سیاستِ بازنشسته‌شده). **هرگز برچسب، توجیه، دلیل رد یا نقش‌ها**: آن‌ها با خودِ سیاست می‌مانند و از API خوانده می‌شوند.
 
 - **مصرف:** گروه `contract-service.tender-awarded` روی `rasta.construction.v1` (+ `.retry`)، DLQ ‏`rasta.contract.v1.dlq`. کلید Idempotency = `tenderId`
   (در مستأجر). پیش از نوشتن، award از مالکش پرسیده و با رویداد سنجیده می‌شود: عدم تأیید ⇒ `SOURCE_UNCONFIRMED`؛ منبع در دسترس نیست ⇒ تلاش دوباره و
   سپس `UPSTREAM_UNAVAILABLE`؛ پاکت و Payload یک مستأجر نیستند ⇒ `SOURCE_UNCONFIRMED` پیش از هر پرسش؛ تکرار متناقض ⇒ `VALIDATION_FAILED`؛ تکرار همان ⇒ `SKIPPED`.
+- **مصرف دوم (Q-83):** گروه `contract-service.organization-moves` روی `rasta.organization.v1` (+ `.retry`)، همان DLQ؛ فقط `ORGANIZATION_MOVED`، به‌عنوان **ماشه** نه پاسخ: برای هر سیاستِ نوشتهٔ اتحادیه یک وظیفهٔ بازبینی در صف پایدار می‌گذارد (بدون هیچ فراخوانی شبکه‌ای در Handler؛ تکرار و `.retry` در همان وظیفهٔ باز ادغام می‌شوند) و پاروبِ پس‌زمینه از `organization-service` می‌پرسد و تعلیق می‌کند.
 - Topic، تولیدکننده/مصرف‌کننده و ACLهای کافکا از `packages/contracts` (`TOPIC_PRODUCERS`، `TOPIC_CONSUMERS`) با `pnpm kafka:acl:generate` تولید می‌شوند؛
   `audit-service` برچسب منبع `rasta.contract.v1` را هم می‌خواند.
 

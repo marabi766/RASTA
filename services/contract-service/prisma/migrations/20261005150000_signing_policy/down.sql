@@ -10,7 +10,15 @@
 -- reads and writes all of these.
 --
 -- The `_prisma_migrations` row is removed last so the forward migration can be re-applied.
+--
+-- The whole file is one transaction (`BEGIN; … COMMIT;`): run with `psql --file` (autocommit by
+-- default) the lock would otherwise end before the check and a policy or signature could commit
+-- between the check and the drops, and a refusal need not stop the statements after it. Inside it
+-- the lock, the check that RAISEs and every change commit together or not at all. Run it with
+-- `-v ON_ERROR_STOP=1`; without it a refusal still leaves nothing changed (the transaction aborts).
 -- =============================================================================
+
+BEGIN;
 
 -- Locked first, so no policy or signature can be written between the check and the drops.
 LOCK TABLE "approval_policy", "approval_policy_step", "contract_signature" IN ACCESS EXCLUSIVE MODE;
@@ -92,3 +100,5 @@ DROP TABLE IF EXISTS "approval_policy";
 DROP TYPE IF EXISTS "ApprovalPolicyStatus";
 
 DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261005150000_signing_policy';
+
+COMMIT;

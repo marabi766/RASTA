@@ -512,6 +512,44 @@ describe('approval policies (contract.signature)', () => {
       expect(asStranger.body.items).toEqual([]);
     });
 
+    it('lists exactly what a read of each policy would not answer 404 to: an author-organization reader without UNION_ADMIN sees nothing in the list and 404 on the read (review #231 r2)', async () => {
+      const first = await pending();
+      const another = newOrg();
+      api.hierarchy.adopt(union, another);
+      const second = await pending(another);
+      // An ORGANIZATION_ADMIN of the union's own organization passes the list's role check (it is a
+      // contract reader) but is neither a UNION_ADMIN nor the governed organization's reader.
+      const authorOrgReader = orgAdmin(union);
+
+      await get(authorOrgReader, first.id).expect(404);
+      await get(authorOrgReader, second.id).expect(404);
+      // Whatever the page size: the predicate is in the query, not applied to a page afterwards.
+      for (const limit of [1, 2, 50]) {
+        const listed = await http()
+          .get(`/v1/approval-policies?limit=${limit}`)
+          .set('authorization', `Bearer ${authorOrgReader}`)
+          .expect(200);
+        expect(listed.body).toMatchObject({ items: [], hasMore: false, nextCursor: null });
+      }
+
+      // The union administrator, who may read both, sees both — and a page of one still reaches the second.
+      await get(unionAdmin, first.id).expect(200);
+      await get(unionAdmin, second.id).expect(200);
+      const page = await http()
+        .get('/v1/approval-policies?limit=1')
+        .set('authorization', `Bearer ${unionAdmin}`)
+        .expect(200);
+      expect(page.body.items).toHaveLength(1);
+      expect(page.body.hasMore).toBe(true);
+      const next = await http()
+        .get(`/v1/approval-policies?limit=1&cursor=${page.body.nextCursor}`)
+        .set('authorization', `Bearer ${unionAdmin}`)
+        .expect(200);
+      expect(
+        [...page.body.items, ...next.body.items].map((item: { id: string }) => item.id).sort(),
+      ).toEqual([first.id, second.id].sort());
+    });
+
     it('the same Idempotency-Key in two organizations is two requests: one tenant never reaches another’s stored response', async () => {
       const k = key();
       const one = await create(unionAdmin, body(employer), k).expect(201);

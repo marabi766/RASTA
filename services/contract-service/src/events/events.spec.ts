@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four and the approval policy’s five, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four and the approval policy’s six, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -45,6 +45,7 @@ describe('the contract events', () => {
       'APPROVAL_POLICY_REJECTED',
       'APPROVAL_POLICY_ACTIVATED',
       'APPROVAL_POLICY_RETIRED',
+      'APPROVAL_POLICY_SUSPENDED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -91,6 +92,16 @@ describe('the approval policy events', () => {
       activatedAt: '2026-10-05T10:00:00.000Z',
     },
     APPROVAL_POLICY_RETIRED: { ...base, retiredBy: 'USR_2', retiredAt: '2026-10-05T10:00:00.000Z' },
+    APPROVAL_POLICY_SUSPENDED: {
+      ...base,
+      authorOrganizationId: 'ORG_UNION',
+      fromStatus: 'ACTIVE',
+      reason: 'ORGANIZATION_MOVED',
+      causeEventId: 'EVT_1',
+      movedOrganizationId: 'ORG_OWNER',
+      suspendedBy: 'system:contract-service',
+      suspendedAt: '2026-10-05T10:00:00.000Z',
+    },
   } as const;
 
   it.each(Object.entries(payloads))('%s accepts the payload as published', (name, payload) => {
