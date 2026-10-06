@@ -42,7 +42,13 @@ function build(tasks: ClaimedTask[] = []) {
   const suspension = {
     suspend: jest.fn(async (): Promise<SuspendResult> => 'SUSPENDED'),
   };
-  const directory = { isWithin: jest.fn(async () => false) };
+  const directory = {
+    isWithin: jest.fn(async () => false),
+    // The employer is in the moved organization's subtree and carries the task's move version.
+    withinVersion: jest.fn(async (): Promise<{ hierarchyVersion: number } | null> => ({
+      hierarchyVersion: 4,
+    })),
+  };
   const sweeper = new PolicyReconciliationSweeper(
     reconciliations as unknown as PolicyReconciliationRepository,
     suspension as unknown as PolicySuspensionService,
@@ -91,6 +97,51 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     expect(outcome).toMatchObject({ confirmed: 1, requeued: 1, suspended: 0 });
     // One question for the (union, organization) pair, whatever the number of tasks it answers.
     expect(directory.isWithin).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['an employer that is not within the moved organization (an unrelated move)', null],
+    ['an employer that carries another move’s version', { hierarchyVersion: 9 }],
+  ])(
+    'names no cause for %s: MOVE_RECHECK, no event, no instant (round 6)',
+    async (_what, answer) => {
+      const { sweeper, suspension, directory } = build([task()]);
+      directory.withinVersion.mockResolvedValue(answer);
+
+      await sweeper.runOnce();
+
+      expect(directory.withinVersion).toHaveBeenCalledWith('ORG_E', 'ORG_E');
+      const cause = (suspension.suspend.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+      expect(cause).toEqual({
+        reason: 'MOVE_RECHECK',
+        movedVersion: 4,
+        correlationId: 'COR_1',
+        callerService: 'organization-service',
+      });
+    },
+  );
+
+  it('names no cause for a move that carries no version: nothing to prove it by, and no question asked', async () => {
+    const { sweeper, suspension, directory } = build([task({ movedVersion: null })]);
+
+    await sweeper.runOnce();
+
+    expect(directory.withinVersion).not.toHaveBeenCalled();
+    expect((suspension.suspend.mock.calls[0] as unknown[])[1]).toMatchObject({
+      reason: 'MOVE_RECHECK',
+      movedVersion: null,
+    });
+  });
+
+  it('retries the task when the proof cannot be had, rather than naming a cause it did not confirm', async () => {
+    const { sweeper, reconciliations, suspension, directory } = build([task()]);
+    directory.withinVersion.mockRejectedValue(new Error('organization-service down'));
+
+    const outcome = await sweeper.runOnce();
+
+    expect(suspension.suspend).not.toHaveBeenCalled();
+    expect(reconciliations.retryLater).toHaveBeenCalled();
+    expect(outcome.retried).toBe(1);
   });
 
   it('gives a task back, open and due, when a move coalesced after the claim made the worker’s answer stale (round 5)', async () => {

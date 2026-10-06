@@ -219,6 +219,7 @@ describe('the authority events (D-050, review round 3)', () => {
     policyVersion: 2,
     reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
     causeEventId: 'EVT_1',
+    detectedBy: 'ORGANIZATION_MOVED',
     movedAt: '2026-10-06T10:00:00.000Z',
     movedVersion: 7,
     flaggedAt: '2026-10-06T10:00:05.000Z',
@@ -237,6 +238,14 @@ describe('the authority events (D-050, review round 3)', () => {
     expect(validateContractPayload('CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', flagged)).toEqual(
       flagged,
     );
+    expect(
+      validateContractPayload('CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', {
+        ...flagged,
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      }),
+    ).toMatchObject({ detectedBy: 'MOVE_RECHECK', causeEventId: null, movedAt: null });
     expect(validateContractPayload('CONTRACT_SIGNATURE_REFUSED', refused)).toEqual(refused);
     expect(
       validateContractPayload('CONTRACT_SIGNATURE_REFUSED', { ...refused, policyId: null })
@@ -317,6 +326,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
       policyId: 'APL_1',
       policyVersion: 2,
       reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+      detectedBy: 'ORGANIZATION_MOVED',
       causeEventId: 'EVT_1',
       movedAt: at,
       movedVersion: 7,

@@ -114,29 +114,56 @@ export class AmendmentService {
   /** One amendment, to a party to its contract; any other caller gets the `404` a missing one gets. */
   async get(contractId: string, amendmentId: string): Promise<AmendmentView> {
     const contract = await this.readableContract(contractId);
-    const row = await this.repository.findOne(contract.organizationId, contract.id, amendmentId);
-    if (!row) throw RastaError.notFound('Amendment', amendmentId);
-    const facts = await this.repository.signatureFacts(contract.organizationId, contract.id, [
-      row.id,
-    ]);
-    return toAmendmentView(row, facts.get(row.id));
+    // The amendment and its signatures from ONE snapshot: read apart, a second signature landing
+    // between the two reads showed a PROPOSED amendment with both signatures (#235 round 1).
+    return this.prisma.transaction(
+      async (tx) => {
+        const row = await this.repository.findOne(
+          contract.organizationId,
+          contract.id,
+          amendmentId,
+          tx,
+        );
+        if (!row) throw RastaError.notFound('Amendment', amendmentId);
+        const facts = await this.repository.signatureFacts(
+          contract.organizationId,
+          contract.id,
+          [row.id],
+          tx,
+        );
+        return toAmendmentView(row, facts.get(row.id));
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
   }
 
   /** The contract's amendments, oldest first. */
   async list(contractId: string, query: ListAmendmentsQuery): Promise<CursorPage<AmendmentView>> {
     const contract = await this.readableContract(contractId);
-    const rows = await this.repository.list(
-      contract.organizationId,
-      contract.id,
-      query.cursor === undefined ? undefined : Number(query.cursor),
-      query.limit,
-    );
-    const hasMore = rows.length > query.limit;
-    const visible = hasMore ? rows.slice(0, query.limit) : rows;
-    const facts = await this.repository.signatureFacts(
-      contract.organizationId,
-      contract.id,
-      visible.map((row) => row.id),
+    // One snapshot for the rows and their signatures, as in `get` (#235 round 1).
+    const { visible, hasMore, facts } = await this.prisma.transaction(
+      async (tx) => {
+        const rows = await this.repository.list(
+          contract.organizationId,
+          contract.id,
+          query.cursor === undefined ? undefined : Number(query.cursor),
+          query.limit,
+          tx,
+        );
+        const more = rows.length > query.limit;
+        const shown = more ? rows.slice(0, query.limit) : rows;
+        return {
+          visible: shown,
+          hasMore: more,
+          facts: await this.repository.signatureFacts(
+            contract.organizationId,
+            contract.id,
+            shown.map((row) => row.id),
+            tx,
+          ),
+        };
+      },
+      { isolationLevel: 'RepeatableRead' },
     );
     return {
       items: visible.map((row) => toAmendmentView(row, facts.get(row.id))),

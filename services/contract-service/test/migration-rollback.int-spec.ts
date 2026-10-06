@@ -130,6 +130,7 @@ describe('each down.sql, run whole with psql --file', () => {
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
   const AMENDMENTS = '20261007100000_amendments_milestones';
+  const DETECTION = '20261006160000_review_detection_provenance';
   const VERSION = '20261006140000_signature_hierarchy_version';
   const REVIEW = '20261006120000_signature_authority_review';
   const SUSPENSION = '20261006100000_policy_suspension';
@@ -522,7 +523,7 @@ describe('each down.sql, run whole with psql --file', () => {
         const result = psql(unused, ['--file', down(AMENDMENTS)]);
         expect(result.out).toBe('');
         expect(result.ok).toBe(true);
-        expect(shape(unused)).toBe(shape(scratch(VERSION)));
+        expect(shape(unused)).toBe(shape(scratch(DETECTION)));
       },
     );
   });

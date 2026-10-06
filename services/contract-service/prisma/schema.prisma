@@ -197,8 +197,11 @@ model SignatureAuthorityReview {
   policyId        String       @map("policy_id")
   /// `AUTHORITY_CHANGED_DURING_SIGNING` (the only one so far).
   reason          String
-  causeEventId    String       @map("cause_event_id")
-  movedAt         DateTime     @map("moved_at") @db.Timestamptz(3)
+  /// The move proven to be the cause, with its instant — or neither (`detectedBy` = MOVE_RECHECK).
+  causeEventId    String?      @map("cause_event_id")
+  movedAt         DateTime?    @map("moved_at") @db.Timestamptz(3)
+  /// `ORGANIZATION_MOVED` (a proven cause) or `MOVE_RECHECK` (a move queued the re-check; not shown to be its cause).
+  detectedBy      String       @map("detected_by")
   /// What was compared: the move's hierarchy version and the one the signature recorded (NULL for
   /// a move or signature from before versions).
   movedVersion    BigInt?      @map("moved_version")
@@ -307,8 +310,10 @@ model AmendmentSignatureReview {
   policyId        String       @map("policy_id")
   /// `AUTHORITY_CHANGED_DURING_SIGNING` (the only one so far).
   reason          String
-  causeEventId    String       @map("cause_event_id")
-  movedAt         DateTime     @map("moved_at") @db.Timestamptz(3)
+  /// The move proven to be the cause, with its instant — or neither (`detectedBy` = MOVE_RECHECK).
+  causeEventId    String?      @map("cause_event_id")
+  movedAt         DateTime?    @map("moved_at") @db.Timestamptz(3)
+  detectedBy      String       @map("detected_by")
   movedVersion    BigInt?      @map("moved_version")
   recordedVersion BigInt?      @map("recorded_version")
   flaggedAt       DateTime     @map("flagged_at") @db.Timestamptz(3)

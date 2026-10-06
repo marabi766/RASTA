@@ -377,8 +377,9 @@ CREATE TABLE "amendment_signature_review" (
     "side" "ContractSide" NOT NULL,
     "policy_id" TEXT NOT NULL,
     "reason" TEXT NOT NULL,
-    "cause_event_id" TEXT NOT NULL,
-    "moved_at" TIMESTAMPTZ(3) NOT NULL,
+    "cause_event_id" TEXT,
+    "moved_at" TIMESTAMPTZ(3),
+    "detected_by" TEXT NOT NULL,
     "moved_version" BIGINT,
     "recorded_version" BIGINT,
     "flagged_at" TIMESTAMPTZ(3) NOT NULL,
@@ -407,7 +408,12 @@ ALTER TABLE "amendment_signature_review"
 ALTER TABLE "amendment_signature_review" ADD CONSTRAINT "ck_amendment_review_reason"
   CHECK ("reason" = 'AUTHORITY_CHANGED_DURING_SIGNING'
          AND "side" = 'EMPLOYER'
-         AND btrim("cause_event_id") <> ''
+         -- A review names a move only when one is shown to be the cause (#231 round 6): with
+         -- `ORGANIZATION_MOVED` the event and its instant are both there, with `MOVE_RECHECK` neither.
+         AND "detected_by" IN ('ORGANIZATION_MOVED', 'MOVE_RECHECK')
+         AND (("detected_by" = 'ORGANIZATION_MOVED')
+              = ("cause_event_id" IS NOT NULL AND "moved_at" IS NOT NULL))
+         AND ("cause_event_id" IS NULL OR btrim("cause_event_id") <> '')
          AND ("moved_version" IS NULL OR "moved_version" >= 1)
          AND ("recorded_version" IS NULL OR "recorded_version" >= 1));
 

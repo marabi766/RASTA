@@ -76,11 +76,12 @@ export class AmendmentRepository {
     contractId: string,
     after: number | undefined,
     limit: number,
+    client: ExtendedPrismaClient = this.prisma.client,
   ): Promise<Amendment[]> {
     return runUnscoped(
       'a party lists the amendments of a contract it is a party to, by the contract’s organization and id',
       () =>
-        this.prisma.client.amendment.findMany({
+        client.amendment.findMany({
           where: {
             organizationId,
             contractId,
@@ -298,8 +299,10 @@ export class AmendmentRepository {
     input: {
       organizationId: string;
       policyId: string;
-      causeEventId: string;
-      movedAt: Date;
+      /** The move proven to be the cause; null (with `movedAt`) when none is (`detectedBy` MOVE_RECHECK). */
+      causeEventId: string | null;
+      movedAt: Date | null;
+      detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
       movedVersion: number | null;
       at: Date;
     },
@@ -337,6 +340,7 @@ export class AmendmentRepository {
               reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
               causeEventId: input.causeEventId,
               movedAt: input.movedAt,
+              detectedBy: input.detectedBy,
               movedVersion: input.movedVersion === null ? null : BigInt(input.movedVersion),
               recordedVersion: signature.hierarchyVersion,
               flaggedAt: input.at,

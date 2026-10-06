@@ -322,6 +322,7 @@ describe('the authority an amendment is signed under', () => {
         side: 'EMPLOYER',
         policyId: raced.policyId,
         reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+        detectedBy: 'ORGANIZATION_MOVED',
         causeEventId: event.eventId,
         movedVersion: BigInt(movedVersion),
         recordedVersion: evidence.hierarchyVersion,
@@ -334,6 +335,7 @@ describe('the authority an amendment is signed under', () => {
         policyId: raced.policyId,
         policyVersion: 1,
         reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+        detectedBy: 'ORGANIZATION_MOVED',
         causeEventId: event.eventId,
         movedVersion,
       });
@@ -365,6 +367,36 @@ describe('the authority an amendment is signed under', () => {
         .set('authorization', `Bearer ${raced.contractorToken}`)
         .expect(200);
       expect(read.body.authorityReviewRequired).toBe(true);
+    });
+
+    it('a move that is not shown to be the cause (no version) still flags the raced signature, but names no event or instant (#231 round 6)', async () => {
+      const raced = await signedUnderUnion();
+      await signAmendment(api, raced.id, raced.amendmentId, raced.employerToken).expect(200);
+      const evidence = await evidenceOf(raced.amendmentId);
+
+      api.hierarchy.adopt(newOrg(), raced.employer);
+      const event = moved(raced.employer);
+      await consumer.handle(event);
+      await sweeper.runOnce();
+
+      const reviews = await reviewsOf(raced.amendmentId);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+        movedVersion: null,
+        recordedVersion: evidence.hierarchyVersion,
+      });
+      const events = await flaggedEvents(raced.employer);
+      expect(events).toHaveLength(1);
+      expect(events[0]!.payload).toMatchObject({
+        amendmentId: raced.amendmentId,
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      });
+      expect(JSON.stringify(events[0]!.payload)).not.toContain(event.eventId);
     });
 
     it('a signature that read the tree after the move recorded its version: not raced, not flagged', async () => {

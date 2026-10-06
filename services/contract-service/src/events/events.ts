@@ -217,7 +217,7 @@ export const approvalPolicySuspendedPayload = z
     /** In force, or still waiting for the platform approval, when it was suspended. */
     fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
     /** A move found it (the sweeper), or a signature being attempted on it did. */
-    reason: z.enum(['ORGANIZATION_MOVED', 'SIGNING_RECHECK']),
+    reason: z.enum(['ORGANIZATION_MOVED', 'MOVE_RECHECK', 'SIGNING_RECHECK']),
     /** The ORGANIZATION_MOVED event and the organization it moved; null when a signature found it. */
     causeEventId: id.nullable(),
     movedOrganizationId: id.nullable(),
@@ -241,8 +241,14 @@ export const contractSignatureAuthorityFlaggedPayload = z
     policyVersion: positive,
     reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
     /** The ORGANIZATION_MOVED event that stranded the policy, and when the move took effect. */
-    causeEventId: id,
-    movedAt: instant,
+    /**
+     * What found it: a move proven to be the cause (`ORGANIZATION_MOVED`, which names the event and
+     * its instant) or a re-check a move queued without being shown to be its cause (`MOVE_RECHECK`,
+     * which names neither — never a wrong event).
+     */
+    detectedBy: z.enum(['ORGANIZATION_MOVED', 'MOVE_RECHECK']),
+    causeEventId: id.nullable(),
+    movedAt: instant.nullable(),
     /** The move's hierarchy version, which the signature's recorded one was lower than (D-050). */
     movedVersion: positive.nullable(),
     flaggedAt: instant,
@@ -336,8 +342,10 @@ export const contractAmendmentSignatureAuthorityFlaggedPayload = z
     policyId: id,
     policyVersion: positive,
     reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
-    causeEventId: id,
-    movedAt: instant,
+    /** What found it: a proven cause (names the event and instant) or a re-check (names neither). */
+    detectedBy: z.enum(['ORGANIZATION_MOVED', 'MOVE_RECHECK']),
+    causeEventId: id.nullable(),
+    movedAt: instant.nullable(),
     movedVersion: positive.nullable(),
     flaggedAt: instant,
   })

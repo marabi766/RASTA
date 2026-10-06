@@ -78,7 +78,7 @@ export class PolicyReconciliationSweeper {
   constructor(
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly suspension: PolicySuspensionService,
-    private readonly directory: Pick<OrganizationDirectory, 'isWithin'>,
+    private readonly directory: Pick<OrganizationDirectory, 'isWithin' | 'withinVersion'>,
     private readonly options: SweeperOptions,
   ) {}
 
@@ -158,17 +158,27 @@ export class PolicyReconciliationSweeper {
             }
             return;
           }
+          // The union no longer governs the employer. Whether THIS move is why is a separate
+          // question, answered from the hierarchy and never assumed (round 6).
+          const proven = await this.isCause(task);
           const result = await this.suspension.suspend(
             { id: task.policyId, organizationId: task.organizationId },
-            {
-              reason: 'ORGANIZATION_MOVED',
-              eventId: task.sourceEventId,
-              movedOrganizationId: task.movedOrganizationId,
-              movedAt: task.movedAt,
-              movedVersion: task.movedVersion,
-              correlationId: task.correlationId,
-              callerService: MOVE_PRODUCER,
-            },
+            proven
+              ? {
+                  reason: 'ORGANIZATION_MOVED',
+                  eventId: task.sourceEventId,
+                  movedOrganizationId: task.movedOrganizationId,
+                  movedAt: task.movedAt,
+                  movedVersion: task.movedVersion,
+                  correlationId: task.correlationId,
+                  callerService: MOVE_PRODUCER,
+                }
+              : {
+                  reason: 'MOVE_RECHECK',
+                  movedVersion: task.movedVersion,
+                  correlationId: task.correlationId,
+                  callerService: MOVE_PRODUCER,
+                },
             this.reconciliations.ownershipOf(task),
           );
           if (result === 'STALE') {
@@ -206,6 +216,24 @@ export class PolicyReconciliationSweeper {
       );
     }
     return outcome;
+  }
+
+  /**
+   * Whether the move this task carries is shown to be why the union lost the employer: the employer
+   * is in the moved organization's subtree **and** carries that move's hierarchy version — a move
+   * stamps the moved organization and every descendant with its version in its own transaction, so
+   * a different (later or earlier) version means another move last touched the employer, and a
+   * missing one means there is nothing to prove it by. An organization that is not within the moved
+   * one — an unrelated move that merely queued this re-check — proves nothing. Fail closed: no
+   * proof is "not shown", and a question that cannot be answered is retried like any other.
+   */
+  private async isCause(task: ClaimedTask): Promise<boolean> {
+    if (task.movedVersion === null) return false;
+    const answer = await this.directory.withinVersion(
+      task.movedOrganizationId,
+      task.organizationId,
+    );
+    return answer !== null && answer.hierarchyVersion === task.movedVersion;
   }
 
   private async retryLater(task: ClaimedTask, error: unknown): Promise<void> {
