@@ -289,8 +289,9 @@ export class AmendmentRepository {
   /**
    * Flags the employer amendment signatures under `policyId` that a move raced (D-050), as
    * `ContractRepository.flagRacedSignatures` does for the contract's own: the version they recorded
-   * is LOWER than the move's (or none), and they could still have committed after the move was
-   * prepared. Never revokes: one append-only review row each, once.
+   * is LOWER than the move's (or none) — **by the version alone**, no timestamp takes part (round 5
+   * of #231: two services' clocks cannot order a move); a move with no version flags every
+   * unreviewed one. Never revokes: one append-only review row each, once.
    */
   async flagRacedSignatures(
     tx: ExtendedPrismaClient,
@@ -311,7 +312,6 @@ export class AmendmentRepository {
             organizationId: input.organizationId,
             policyId: input.policyId,
             side: 'EMPLOYER',
-            hierarchyCommitDeadline: { gte: input.movedAt },
             ...(input.movedVersion === null
               ? {}
               : {

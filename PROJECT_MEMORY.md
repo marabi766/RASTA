@@ -2730,6 +2730,8 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 بدون سیاستِ برقرار ⇒ ۴۲۲ `SIGNATURE_POLICY_REQUIRED`؛ شناسهٔ سیاست و نسخه روی امضا) — نه فهرست نقش در محیط اجرا (دور اول #231)؛ تفکیک وظایف بستهٔ در
 شکست؛ لغو فقط کارفرما و فقط `DRAFT` و تا پیش از نخستین امضا (مگر `CONTRACT_CANCEL_AFTER_SIGNATURE`)؛ رویدادهای
 `CONTRACT_SIGNATURE_RECORDED`، `CONTRACT_SIGNED`، `CONTRACT_CANCELLED` بی مبلغ در همان تراکنش؛ دلیل ردها در `details[].code`.
+
+**CON-003 PR 3 — الحاقیه و Milestone (شاخهٔ `feat/contract-service-con003-pr3`، پیش‌نویس، انباشته روی #231):** الحاقیهٔ قرارداد `SIGNED` (`POST …/amendments` و `…/sign`، `Idempotency-Key`): کارفرما پیشنهاد می‌دهد (`deltaMinor` `bigint` **مثبت**؛ کاهش رد و در Q-100)، هر دو طرف با **همان `SigningAuthority`** امضا می‌کنند، امضای دوم زیر قفل ردیف قرارداد الحاقیه را `EFFECTIVE` و `amendments_total_minor` را زیاد می‌کند؛ تغییرناپذیر؛ `CONTRACT_AMENDED` بی مبلغ. Milestone: عنوان + **تاریخ `DATE`** + سهم اختیاری bp، ویرایش تا پیش از ارجاع صورت‌وضعیت (`first_referenced_at`، PR 4). زمینهٔ سقف ADR-068 § ۵ در پایگاه داده (`CHECK approved ≤ amount + amendments`، کران سرریز). رد طرف قرارداد = رویداد `CONTRACT_AUTHORITY_REFUSED`. Migration `20261007100000_amendments_milestones` برگشت‌پذیر با `down.sql` ردکنندهٔ داده. ساخته نشده: صورت‌وضعیت (PR 4)، تأیید (PR 5)، تسویه (PR 6)، Gateway (PR 7).
 `down.sql` هر دو Migration تا وقتی امضا، لغو یا سیاستی ثبت شده باشد **رد می‌کند و چیزی را پاک نمی‌کند** (سابقهٔ #208/#222).
 `organization-service` اکنون پرسش سلسله‌مراتب را از `contract-service` هم می‌پذیرد (`@AllowService`). Q-95 همچنان باز است و پاسخ‌ها موقت و
 پیکربندی‌پذیرند. ساخته نشده: تعلیق سیاست هنگام `ORGANIZATION_MOVED`، Gateway، الحاقیه، Milestone، صورت‌وضعیت، تسویه.

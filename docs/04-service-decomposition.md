@@ -585,6 +585,19 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 > - **بی Temporal:** گذارها ماشین حالت پایگاه داده‌اند و هیچ مهلتی تأییدی نمی‌سازد (ADR-043)؛ ردیف «Temporal» در Dependencies تا PR 5 اجرا نمی‌شود.
 > - **جهت تسویه برعکس `docs/08` § ۸٫۵:** `contract-service` پول حرکت نمی‌دهد و `economic.createPayment` را صدا نمی‌زند؛ تأیید مالی `STATEMENT_APPROVED` را (فقط شناسه) می‌نویسد و economic تعهد را از REST احرازشدهٔ contract می‌کشد (ADR-068 § ۶، Q-97).
 > - تأیید فنی و مالی دو **زنجیرهٔ جدا** با سیاست قابل‌پیکربندی‌اند (نه مرجع، نرخ یا آستانهٔ سخت‌کد؛ Q-96).
+>
+> **CON-003 PR 3 — الحاقیه و Milestone** (ADR-068 § ۹؛ Q-100 — شمارهٔ موقت تا تأیید مدیر پروژه):
+>
+> - **الحاقیه** روی قرارداد `SIGNED`: `POST /v1/contracts/{id}/amendments` (`Idempotency-Key`؛ فقط کارفرما با نقش‌های `CONTRACT_AMENDMENT_ROLES`) با `deltaMinor` (رشتهٔ عدد صحیح، `bigint`؛ **مثبت** — کاهش را هیچ سندی نمی‌گوید و `422 AMENDMENT_DELTA_NOT_POSITIVE` است)،
+>   `reasonCode` از فهرست بستهٔ `CONTRACT_AMENDMENT_REASON_CODES` و `reasonText` (حداکثر ۱۰۰۰ نویسه، بی نویسهٔ کنترل دوسویه). `POST …/amendments/{aid}/sign` هر طرف را **جدا** امضا می‌کند، با **همان سازوکار امضای قرارداد** (`SigningAuthority`: سیاست `contract.signature` در دست برای کارفرما با پرسش سلسله‌مراتب و نسخهٔ آن،
+>   `CONTRACTOR` برای پیمانکار، تفکیک وظایف روی هویت پایدار). امضای **دوم**، در همان تراکنش و زیر قفل ردیف قرارداد، الحاقیه را `EFFECTIVE` می‌کند (`PROPOSED → EFFECTIVE`، تنها گذار؛ CAS روی `version`) و `contract.amendments_total_minor` را به‌اندازهٔ delta زیاد می‌کند (نسخهٔ قرارداد هم می‌چرخد)؛ الحاقیهٔ مؤثر **تغییرناپذیر** است (Trigger) و هیچ مسیری پس‌گرفتن، ویرایش یا حذف ندارد.
+>   `GET …/amendments[/{aid}]` برای دو طرف؛ `GET /v1/contracts/{id}` اکنون `amendmentsTotalMinor` و `currentAmountMinor` (= مبلغ + الحاقیه‌ها) را هم می‌دهد.
+> - **Invariant سقف** (ADR-068 § ۵) از همین حالا در پایگاه داده است: ستون‌های `amendments_total_minor` و `approved_total_minor` و `CHECK (approved_total_minor <= amount_minor + amendments_total_minor)`؛ `amendments_total_minor` را فقط مؤثر شدن یک الحاقیه و فقط تا **مجموع دقیق** deltaهای مؤثر عوض می‌کند (`contract_guard` + Constraint Trigger تأخیری که در Commit توافق دو سو را می‌سنجد). `approved_total_minor` را PR 4 می‌چرخاند.
+>   سرریز `bigint` پیش از نوشتن `422 AMENDMENT_EXCEEDS_LIMIT` است.
+> - **Milestone** روی قرارداد `SIGNED`: `POST /v1/contracts/{id}/milestones` و `PATCH …/milestones/{mid}` (`Idempotency-Key`؛ فقط کارفرما با `CONTRACT_MILESTONE_ROLES`): عنوان (حداکثر ۲۰۰)، **تاریخ برنامه‌ای `YYYY-MM-DD` (روز، نه لحظه)** و سهم اختیاری به basis point (۱ تا ۱۰۰۰۰؛ **جمع سهم‌ها کنترل نمی‌شود**، هیچ سندی تعریفش نکرده).
+>   ویرایش فقط تا پیش از ارجاع صورت‌وضعیت (`first_referenced_at` که PR 4 می‌گذارد؛ `422 MILESTONE_REFERENCED`)؛ حذف نیست؛ `GET …/milestones[/{mid}]` برای دو طرف (پیمانکار فقط می‌خواند).
+> - هر فرمان `Idempotency-Key` دارد؛ سازمان دیگر ⇒ `404`؛ رد در `details[].code` (حوزه‌های `amendment` و `milestone`). **هر ردِ طرفِ قرارداد برای نبود اختیار** (نقش، سیاست، «نویسندهٔ سیاست دیگر کارفرما را اداره نمی‌کند») رویداد حسابرسی `CONTRACT_AUTHORITY_REFUSED` در تراکنشی جدا می‌نویسد؛ نشدنِ نوشتنش `503` و بی‌اثر است.
+> - Migration `20261007100000_amendments_milestones` برگشت‌پذیر؛ `down.sql` با وجود هر الحاقیه، امضا، بازبینی، Milestone یا شمارندهٔ غیرصفر **رد می‌کند و چیزی تغییر نمی‌دهد**. **ساخته نشده:** صورت‌وضعیت (PR 4)، زنجیره‌های تأیید (PR 5)، تسویه (PR 6)، Gateway (PR 7).
 
 ---
 

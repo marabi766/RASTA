@@ -14,7 +14,6 @@ import {
   http,
   idemKey,
   propose,
-  proposeBody,
   reasons,
   signAmendment,
 } from './amendment-helpers';

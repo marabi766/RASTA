@@ -39,10 +39,12 @@ ALTER TABLE "contract"
   ADD COLUMN "approved_total_minor" BIGINT NOT NULL DEFAULT 0;
 
 -- The amendments only ever add (Q-100), so the total is never negative, and it is bounded so that
--- `amount + total` — the cap — can never overflow a bigint. This constraint's name sorts before
--- the cap's, and PostgreSQL tests CHECKs by name, so the overflow is refused here, not by an
--- arithmetic error in the next one.
-ALTER TABLE "contract" ADD CONSTRAINT "ck_contract_amendments_total"
+-- `amount + total` — the cap — can never overflow a bigint. PostgreSQL tests CHECKs in the
+-- alphabetical order of their names, and the names are chosen for it: `ck_contract_amount_positive`
+-- (a negative price is refused as that, before this subtracts it), then this one, then
+-- `ck_contract_approved_cap`, whose sum this has already bounded — so an overflow is refused by a
+-- named constraint, never by an arithmetic error in the next one.
+ALTER TABLE "contract" ADD CONSTRAINT "ck_contract_amount_total_bound"
   CHECK ("amendments_total_minor" >= 0
          AND "amendments_total_minor" <= 9223372036854775807 - "amount_minor");
 

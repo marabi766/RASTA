@@ -131,7 +131,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 ALTER TABLE "contract" DROP CONSTRAINT IF EXISTS "ck_contract_approved_cap";
-ALTER TABLE "contract" DROP CONSTRAINT IF EXISTS "ck_contract_amendments_total";
+ALTER TABLE "contract" DROP CONSTRAINT IF EXISTS "ck_contract_amount_total_bound";
 ALTER TABLE "contract"
   DROP COLUMN IF EXISTS "approved_total_minor",
   DROP COLUMN IF EXISTS "amendments_total_minor";
