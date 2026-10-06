@@ -20,7 +20,7 @@ import { TenderApprovalGate, type GateCaller } from './tender-approval.gate';
 import { TenderApprovalRepository } from './tender-approval.repository';
 import { approvalStale } from './tender-approval.errors';
 import { toRequestView, type Gated, type TenderApprovalRequestView } from './tender-approval.dto';
-import { publicationRefusals } from './publication';
+import { publicationRefusals, type PublicationRefusal } from './publication';
 import { assertTenderTransition } from './tender.state-machine';
 import { SealingError } from './sealing/errors';
 import { generateTenderKeyPair } from './sealing/sealing';
@@ -33,6 +33,7 @@ import type {
   ListInvitationsQuery,
   PublishTenderDto,
 } from './publication.dto';
+import { ruleRefusal } from '../shared/refusal';
 
 const WORKFLOW = 'tender.publication' as const;
 
@@ -314,9 +315,11 @@ export class PublicationService {
       dto.organizationId !== organizationId &&
       !(await this.directory.exists(dto.organizationId))
     ) {
-      throw RastaError.businessRule(
+      throw ruleRefusal(
         `Organization ${dto.organizationId} does not exist; it cannot be invited`,
-        { tenderId, refusals: ['INVITED_ORGANIZATION_NOT_FOUND'] },
+        'invitation',
+        ['INVITED_ORGANIZATION_NOT_FOUND'],
+        { tenderId },
       );
     }
 
@@ -430,10 +433,12 @@ export class PublicationService {
     return { row, criteria, refusals, at };
   }
 
-  private refused(tenderId: string, refusals: readonly string[]): RastaError {
-    return RastaError.businessRule(
+  private refused(tenderId: string, refusals: readonly PublicationRefusal[]): RastaError {
+    return ruleRefusal(
       `Tender ${tenderId} cannot be published: ${refusals.join(', ')}`,
-      { tenderId, refusals },
+      'publication',
+      refusals,
+      { tenderId },
     );
   }
 

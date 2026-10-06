@@ -49,6 +49,7 @@ import type {
   OpenedBidView,
   TenderBidsView,
 } from './bid-opening.dto';
+import { ruleRefusal } from '../shared/refusal';
 
 /** The closed reasons an opening or an owner read is refused for; the metric's label and the 422's code. */
 export const OPENING_REFUSALS = [
@@ -1165,7 +1166,7 @@ export class TenderOpenService {
     ) {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
     }
-    return RastaError.businessRule(`Bids are not opened: ${reason}`, { refusals: [reason] });
+    return ruleRefusal(`Bids are not opened: ${reason}`, 'opening', [reason]);
   }
 }
 

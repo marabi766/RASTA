@@ -85,7 +85,11 @@ export type ErrorDetail = z.infer<typeof errorDetailSchema>;
 export const apiErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
-  /** Field-level problems; present for VALIDATION_FAILED. */
+  /**
+   * Field-level problems for VALIDATION_FAILED; for a refusal with a closed reason, that reason
+   * in `code` (docs/06 § 6.7 — identity's registration approval, asset's open work,
+   * construction's refusals). Absent, never empty, when there is nothing to say.
+   */
   details: z.array(errorDetailSchema).optional(),
   /** Echoed from the request so a user can quote it to support. */
   correlationId: z.string(),

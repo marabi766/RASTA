@@ -27,6 +27,7 @@ import type {
   TenderView,
   UpdateTenderDto,
 } from './dto';
+import { ruleRefusal } from '../shared/refusal';
 
 const WORKFLOW = 'tender.cancellation' as const;
 
@@ -334,9 +335,11 @@ export class TenderService {
             if (dto.reasonCode === 'NO_QUALIFIED_BID') {
               const qualified = await tx.bid.count({ where: { tenderId, status: 'QUALIFIED' } });
               if (locked.status !== 'EVALUATING' || qualified > 0) {
-                throw RastaError.businessRule(
+                throw ruleRefusal(
                   'Cancel refused: NO_QUALIFIED_BID is the reason of an EVALUATING tender in which no bid was qualified',
-                  { tenderId, status: locked.status, refusals: ['REASON_CODE_NOT_APPLICABLE'] },
+                  'cancellation',
+                  ['REASON_CODE_NOT_APPLICABLE'],
+                  { tenderId, status: locked.status },
                 );
               }
             }

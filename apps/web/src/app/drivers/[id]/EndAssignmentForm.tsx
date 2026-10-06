@@ -51,6 +51,8 @@ export function EndAssignmentForm({
         <Field label="دلیل پایان" error={errors.reason}>
           {(control) => (
             <select
+              // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+              key={values.reason}
               {...control}
               name="reason"
               defaultValue={values.reason}

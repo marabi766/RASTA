@@ -132,7 +132,7 @@ describe('the approval gates of a tender', () => {
     ((await call.then(
       () => undefined,
       (e: unknown) => e,
-    )) ?? {}) as { code?: string; message?: string };
+    )) ?? {}) as { code?: string; message?: string; details?: { path: string; code?: string }[] };
 
   beforeAll(() => {
     const open = { CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' };
@@ -1033,7 +1033,16 @@ describe('the approval gates of a tender', () => {
       await asAdmin(t.owner, () =>
         w.evaluation.qualify(t.tenderId, t.bids[0]!.bidId, { decision: 'QUALIFIED' }),
       );
-      expect((await refused()).message).toContain('NO_QUALIFIED_BID');
+      const error = await refused();
+      expect(error.message).toContain('NO_QUALIFIED_BID');
+      // The closed reason is the refusal's own, not the reason code the command sent.
+      expect(error.details).toEqual([
+        {
+          path: 'cancellation',
+          code: 'REASON_CODE_NOT_APPLICABLE',
+          message: 'Cancel refused: REASON_CODE_NOT_APPLICABLE',
+        },
+      ]);
     });
 
     it('with every bid disqualified, the owner cancels with NO_QUALIFIED_BID and the event carries the closed code', async () => {

@@ -255,6 +255,13 @@ Endpoint در Schema اعلام می‌شود. مرتب‌سازی آزاد رو
 درصدی نادرست در مسیر) `400 VALIDATION_FAILED` با متن ثابت می‌گیرد («The request body is not valid JSON» یا «The request could
 not be read»)؛ متن Parser که بایت‌های کلاینت را نقل می‌کند نه به پاسخ می‌رسد نه به Log.
 
+**دلیل بستهٔ امتناع در `details`.** امتناعی که دلیلش یکی از فهرستی بسته است، آن دلیل را در `details[].code` می‌آورد.
+`code` سطح بالا (`FORBIDDEN`، `CONFLICT`، `BUSINESS_RULE_VIOLATION` …) و `message` همان می‌مانند. کلاینت اول روی `code` و سپس روی `details[].code`
+شاخه می‌زند و هرگز `message` را تجزیه نمی‌کند. `path` می‌گوید دلیل از کجاست: میدان (`status` در asset)، منبع (`registration` در identity)
+یا حوزهٔ قاعده (`publication`، `bid`، `opening`، `evaluation`، `award`، `approval`، `cancellation` در construction، #227). `message` هر ورودی متن ثابت است.
+در `details` فقط کد بسته می‌آید، نه شناسه، نه متن آزاد، نه `internalContext`. امتناع بی‌دلیل بسته `details` ندارد: نه آرایهٔ خالی، نه ورودی ناقص.
+فهرست بستهٔ هر مسیر در OpenAPI همان سرویس آمده است.
+
 **`internalContext` چه می‌تواند داشته باشد.** این زمینه هرگز به کلاینت نمی‌رسد و برای تشخیص اپراتور در Log سرور است؛ پس
 **شناسه و مبلغ** مجاز است — شناسهٔ رکورد و مستأجر، Endpoint، موجودی درخواستی و موجود کیف پول (`{walletId, requested,
 available}`)، گذار وضعیت — اما **هرگز**: اعتبارنامه یا کلید (توکن، گذرواژه، `Idempotency-Key` یا هر چیز مشتق از آن)، **دادهٔ

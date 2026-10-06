@@ -31,6 +31,11 @@
 هم اعتبارسنجی سرور، هم نوع TypeScript، هم مستند OpenAPI. اگر فرم و API از هم واگرا شوند،
 Build می‌شکند.
 
+**فرم‌های Server Action — `<select>` با `key`.** React مقدار `defaultValue` یک `<select>` را فقط هنگام Mount می‌خواند و
+Reset فرم پس از هر Action همان انتخابِ Mount را برمی‌گرداند؛ پس انتخابِ فرمی که رد شد و مقدارهای شخص را پس داد خالی می‌شد.
+هر `<select>` که پیش‌فرضش از وضعیت برگشتی Action می‌آید، `key={values.x}` هم‌نام `defaultValue={values.x}` را می‌گیرد (پیش از
+`{...control}`)؛ ورودی متنی، `textarea`، چک‌باکس و رادیو نیازی ندارند. محافظ: `apps/web/src/app/select-reset.spec.tsx`.
+
 ---
 
 ## ۱۶٫۲ دو اپلیکیشن

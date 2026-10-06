@@ -41,6 +41,10 @@ module.exports = {
       testRegex: '.*\.int-spec\.ts$',
       transform: swcTransform,
       setupFiles,
+      // After a whole run, every route of REFUSAL_REASONS has answered a real refusal with its
+      // closed reason (docs/06 § 6.7); see test/refusal-coverage.teardown.ts.
+      globalSetup: '<rootDir>/test/refusal-coverage.setup.ts',
+      globalTeardown: '<rootDir>/test/refusal-coverage.teardown.ts',
       clearMocks: true,
       collectCoverageFrom,
     },

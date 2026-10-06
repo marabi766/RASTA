@@ -1,5 +1,6 @@
 import request from 'supertest';
 import {
+  reasonsOf,
   actor,
   apiTenant,
   auditorActor,
@@ -128,6 +129,14 @@ describe('tender API', () => {
     const ungated = await cancel(token);
     expect(ungated.status).toBe(422);
     expect(ungated.body.message).toContain('APPROVAL_POLICY_REQUIRED');
+    expect(reasonsOf(ungated.body)).toEqual(['approval:APPROVAL_POLICY_REQUIRED']);
+    expect(ungated.body.details).toEqual([
+      {
+        path: 'approval',
+        code: 'APPROVAL_POLICY_REQUIRED',
+        message: 'Approval refused: APPROVAL_POLICY_REQUIRED',
+      },
+    ]);
     await ensureGatePolicy(w, a, 'tender.cancellation');
     const asked = await cancel(token);
     expect(asked.status).toBe(202);

@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import {
+  reasonsOf,
   actor,
   apiTenant,
   bearer,
@@ -231,6 +232,7 @@ describe('open-bids API', () => {
       .set(as(orgAdmin(owner)));
     expect(noProposal.status).toBe(422);
     expect(noProposal.body.message).toContain('PROPOSAL_REQUIRED');
+    expect(reasonsOf(noProposal.body)).toEqual(['opening:PROPOSAL_REQUIRED']);
     const proposer = orgAdmin(owner);
     const proposal = await http()
       .post(`/v1/tenders/${tenderId}/open-bids/proposal`)
@@ -240,6 +242,7 @@ describe('open-bids API', () => {
     const self = await http().post(`/v1/tenders/${tenderId}/open-bids`).set(as(proposer));
     expect(self.status).toBe(422);
     expect(self.body.message).toContain('SECOND_PERSON_REQUIRED');
+    expect(reasonsOf(self.body)).toEqual(['opening:SECOND_PERSON_REQUIRED']);
     // Only the proposer may take it back; then anyone eligible proposes afresh.
     const stranger = await http()
       .post(`/v1/tenders/${tenderId}/open-bids/proposal/withdraw`)
@@ -330,6 +333,8 @@ describe('open-bids API', () => {
       .post(`/v1/tenders/${tenderId}/open-bids`)
       .set(as(multiMemberActor(owner, [bidder], ['ORGANIZATION_ADMIN'])));
     expect(conflicted.status).toBe(403);
+    expect(conflicted.body.code).toBe('FORBIDDEN');
+    expect(reasonsOf(conflicted.body)).toEqual(['opening:CONFLICT_OF_INTEREST']);
     const row = await runUnscoped('the suite reads the tender', () =>
       w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
     );
@@ -347,6 +352,7 @@ describe('open-bids API', () => {
     expect(early.status).toBe(422);
     expect(early.body.code).toBe('BUSINESS_RULE_VIOLATION');
     expect(early.body.message).toContain('NOT_CLOSED');
+    expect(reasonsOf(early.body)).toEqual(['opening:NOT_CLOSED']);
 
     const { owner: o2, tenderId } = await closed('refusals');
     api.evidence.failure = new Error('connect ECONNREFUSED');
@@ -355,6 +361,8 @@ describe('open-bids API', () => {
       .set(as(orgAdmin(o2)));
     expect(down.status).toBe(503);
     expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+    // Not a closed refusal: no `details`, not even an empty one.
+    expect(down.body).not.toHaveProperty('details');
     api.evidence.failure = undefined;
 
     // Proposed, so that it is the evidence that refuses and not the missing second person.
@@ -372,6 +380,7 @@ describe('open-bids API', () => {
       .set(as(orgAdmin(o2)));
     expect(forged.status).toBe(422);
     expect(forged.body.message).toContain('INTEGRITY');
+    expect(reasonsOf(forged.body)).toEqual(['opening:INTEGRITY']);
 
     const row = await runUnscoped('the suite reads the tender', () =>
       w.prisma.client.tender.findFirstOrThrow({ where: { id: tenderId } }),
