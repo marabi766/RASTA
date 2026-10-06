@@ -1014,9 +1014,18 @@ export class AssetService {
           // (audit L3-08), and the earlier transfer records too. A table left
           // out here stays with the previous owner.
           const moved = { where: { assetId: id }, data: { organizationId: dto.toOrganizationId } };
-          await tx.assetTimelineEntry.updateMany(moved);
+          // The previous owner's documents do NOT go with the asset (docs/24 Q-99, provisional):
+          // document-service keeps those files owned by the previous owner, so a reference moved
+          // here would be one the new owner cannot read (404), and a later grant would hand it
+          // private data nobody decided to share. The references stay the previous owner's rows —
+          // its history, reachable by no read path of the new owner — and so do the timeline
+          // entries that name them (`DOCUMENT`: the title is in the description). The new owner
+          // starts with an empty documents list and attaches its own.
+          await tx.assetTimelineEntry.updateMany({
+            where: { assetId: id, category: { not: 'DOCUMENT' } },
+            data: { organizationId: dto.toOrganizationId },
+          });
           await tx.assetLocation.updateMany(moved);
-          await tx.assetDocumentRef.updateMany(moved);
           // A policy or claim holding a negative amount from before the
           // constraints (NOT VALID, L7-36) is refused by the database on any
           // UPDATE of its row: the transfer is refused as a closed 422, not a

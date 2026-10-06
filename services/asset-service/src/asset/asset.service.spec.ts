@@ -1449,19 +1449,19 @@ describe('AssetService', () => {
       const h = harness();
       await run(() => h.service.transfer(ASSET_ID, dto));
 
-      // Timeline, locations and documents all follow the asset — otherwise the
-      // new owner sees a machine with no past, and the old owner keeps rows
-      // for a machine they no longer hold.
+      // Timeline and locations follow the asset — otherwise the new owner sees
+      // a machine with no past, and the old owner keeps rows for a machine they
+      // no longer hold. The previous owner's DOCUMENTS do not (Q-99): not the
+      // references, and not the timeline entries that carry their titles.
       const moved = { organizationId: DEH2 };
-      expect(h.tx.assetTimelineEntry.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ data: moved }),
-      );
+      expect(h.tx.assetTimelineEntry.updateMany).toHaveBeenCalledWith({
+        where: { assetId: ASSET_ID, category: { not: 'DOCUMENT' } },
+        data: moved,
+      });
       expect(h.tx.assetLocation.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ data: moved }),
       );
-      expect(h.tx.assetDocumentRef.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ data: moved }),
-      );
+      expect(h.tx.assetDocumentRef.updateMany).not.toHaveBeenCalled();
       // Audit L3-08: the insurance and inspection record, and the earlier
       // transfers, are part of that history too.
       for (const table of [
