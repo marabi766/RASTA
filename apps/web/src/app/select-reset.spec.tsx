@@ -6,8 +6,10 @@ import { render } from '@testing-library/react';
 import { pickSubmitAndRead } from '@/test/refusal';
 
 import { RegisterAssetForm } from './assets/RegisterAssetForm';
+import { AttachDocumentForm } from './assets/[id]/AssetDocumentForm';
 import { ChangeStatusForm as AssetChangeStatusForm } from './assets/[id]/AssetLifecycleForms';
 import { RecordInspectionForm, RecordPolicyForm } from './assets/[id]/AssetRecordForms';
+import { DeclareAvailabilityForm } from './assets/[id]/AvailabilityForms';
 import { ChangeStatusForm as DriverChangeStatusForm } from './drivers/[id]/ChangeStatusForm';
 import { EndAssignmentForm } from './drivers/[id]/EndAssignmentForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
@@ -35,6 +37,14 @@ jest.mock('./assets/actions', () => {
 jest.mock('./assets/[id]/lifecycle-actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
   return { submitActivateAsset: refuse, submitChangeStatus: refuse, submitDecommission: refuse };
+});
+jest.mock('./assets/[id]/document-actions', () => {
+  const { refuse } = jest.requireActual('@/test/refusal');
+  return { submitAttachDocument: refuse };
+});
+jest.mock('./assets/[id]/availability-actions', () => {
+  const { refuse } = jest.requireActual('@/test/refusal');
+  return { submitDeclareAvailability: refuse, submitRevokeAvailability: refuse };
 });
 jest.mock('./assets/[id]/record-actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
@@ -103,6 +113,16 @@ const CASES = [
     form: 'record inspection',
     select: 'result',
     mount: () => <RecordInspectionForm {...ASSET_IDENTITY} />,
+  },
+  {
+    form: 'attach asset document',
+    select: 'kind',
+    mount: () => <AttachDocumentForm {...ASSET_IDENTITY} />,
+  },
+  {
+    form: 'declare asset availability',
+    select: 'available',
+    mount: () => <DeclareAvailabilityForm {...ASSET_IDENTITY} />,
   },
   {
     form: 'change driver status',
