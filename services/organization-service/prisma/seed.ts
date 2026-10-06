@@ -254,9 +254,11 @@ async function main(): Promise<void> {
       },
     });
 
-    // The ltree column is `Unsupported` in Prisma, so it is set with raw SQL.
+    // The ltree column is `Unsupported` in Prisma, so it is set with raw SQL. Insert-only: a row
+    // that already has a path keeps it — a move (`OrganizationService.move`) owns the tree after the
+    // first write, and a seed rewriting it would race one (round 6).
     await prisma.$executeRaw`
-      UPDATE organization SET path = ${path}::ltree WHERE id = ${org.id}
+      UPDATE organization SET path = ${path}::ltree WHERE id = ${org.id} AND path IS NULL
     `;
 
     if (org.location) {

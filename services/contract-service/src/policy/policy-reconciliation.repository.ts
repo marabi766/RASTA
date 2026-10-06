@@ -98,11 +98,14 @@ export class PolicyReconciliationRepository {
     // task must not lose the re-check: a sweeper holding it may have asked the hierarchy before the
     // move landed, so the conflicting task's generation advances (that sweeper then cannot finish it
     // on its stale answer) and it falls due now. The lease is left alone (a live claim is not
-    // stolen), and the first move's event and instant stay — the earlier instant flags more, never
-    // fewer, signatures — while the version becomes the HIGHER of the two, so a signature that read
-    // the tree between the moves is flagged against the later one too (D-050). `xmax = 0` is what PostgreSQL gives a row this statement inserted
-    // rather than updated, so the count is of tasks created, whatever instant either carries — a
-    // second move in the very millisecond the first task was made included.
+    // stolen). The task keeps the provenance of the move whose version it keeps (round 6): when the
+    // later move has the HIGHER version, its event, moved organization, correlation id and instant
+    // replace the first's together with the version — never a version with another move's event, or
+    // a review would claim a cause that is not the one its version came from. A move without a
+    // version, or a lower one, changes none of them. A signature that read the tree between the
+    // moves is still flagged, against the higher version (D-050). `xmax = 0` is what PostgreSQL gives
+    // a row this statement inserted rather than updated, so the count is of tasks created, whatever
+    // instant either carries — a second move in the very millisecond the first task was made included.
     const result = await runUnscoped(
       'an organization move queues a task for every union-written policy it could have stranded, in any tenant (Q-83)',
       () =>
@@ -120,7 +123,23 @@ export class PolicyReconciliationRepository {
            ON CONFLICT (policy_id) WHERE status = 'PENDING'
            DO UPDATE SET generation = policy_reconciliation_task.generation + 1,
                          next_attempt_at = LEAST(policy_reconciliation_task.next_attempt_at, $9::timestamptz),
-                         moved_version = GREATEST(policy_reconciliation_task.moved_version, $10::bigint),
+                         source_event_id = CASE WHEN EXCLUDED.moved_version IS NOT NULL
+                              AND (policy_reconciliation_task.moved_version IS NULL
+                                   OR EXCLUDED.moved_version > policy_reconciliation_task.moved_version)
+                              THEN EXCLUDED.source_event_id ELSE policy_reconciliation_task.source_event_id END,
+                         moved_organization_id = CASE WHEN EXCLUDED.moved_version IS NOT NULL
+                              AND (policy_reconciliation_task.moved_version IS NULL
+                                   OR EXCLUDED.moved_version > policy_reconciliation_task.moved_version)
+                              THEN EXCLUDED.moved_organization_id ELSE policy_reconciliation_task.moved_organization_id END,
+                         correlation_id = CASE WHEN EXCLUDED.moved_version IS NOT NULL
+                              AND (policy_reconciliation_task.moved_version IS NULL
+                                   OR EXCLUDED.moved_version > policy_reconciliation_task.moved_version)
+                              THEN EXCLUDED.correlation_id ELSE policy_reconciliation_task.correlation_id END,
+                         moved_at = CASE WHEN EXCLUDED.moved_version IS NOT NULL
+                              AND (policy_reconciliation_task.moved_version IS NULL
+                                   OR EXCLUDED.moved_version > policy_reconciliation_task.moved_version)
+                              THEN EXCLUDED.moved_at ELSE policy_reconciliation_task.moved_at END,
+                         moved_version = GREATEST(policy_reconciliation_task.moved_version, EXCLUDED.moved_version),
                          updated_at = $9::timestamptz
            RETURNING (xmax = 0) AS inserted`,
           rows.map((row) => row.id),

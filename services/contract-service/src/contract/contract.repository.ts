@@ -223,8 +223,10 @@ export class ContractRepository {
     input: {
       organizationId: string;
       policyId: string;
-      causeEventId: string;
-      movedAt: Date;
+      /** The move proven to be the cause; null (with `movedAt`) when none is (`detectedBy` MOVE_RECHECK). */
+      causeEventId: string | null;
+      movedAt: Date | null;
+      detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
       /** The move's hierarchy version; null for an event that predates versions. */
       movedVersion: number | null;
       at: Date;
@@ -269,6 +271,7 @@ export class ContractRepository {
               reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
               causeEventId: input.causeEventId,
               movedAt: input.movedAt,
+              detectedBy: input.detectedBy,
               movedVersion: input.movedVersion === null ? null : BigInt(input.movedVersion),
               recordedVersion: signature.hierarchyVersion,
               flaggedAt: input.at,

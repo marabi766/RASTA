@@ -237,7 +237,7 @@ describe('a signing policy follows an organization move', () => {
 
       // The employer moves to another union. The event says only that something moved.
       api.hierarchy.adopt(newOrg(), draft.employer);
-      const event = moved(draft.employer);
+      const event = moved(draft.employer, undefined, api.hierarchy.bump(draft.employer));
       await consumer.handle(event);
       const outcome = await sweeper.runOnce();
       expect(outcome.suspended).toBeGreaterThanOrEqual(1);
@@ -582,23 +582,31 @@ describe('a signing policy follows an organization move', () => {
         const reviews = await reviewsOf(who.draft.id);
         const events = await flaggedEventsOf(who.draft.employer);
         if (flagged) {
+          // A move that carries a version the employer carries too is proven to be the cause; one
+          // with no version proves nothing, and the review names no event (round 6).
+          const proven = movedVersion !== undefined;
           expect(reviews).toHaveLength(1);
           expect(reviews[0]).toMatchObject({
             side: 'EMPLOYER',
             policyId: who.policyId,
             reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
-            causeEventId: event.eventId,
+            detectedBy: proven ? 'ORGANIZATION_MOVED' : 'MOVE_RECHECK',
+            causeEventId: proven ? event.eventId : null,
             movedVersion: movedVersion === undefined ? null : BigInt(movedVersion),
             recordedVersion: who.evidence.hierarchyVersion,
           });
-          expect(reviews[0]!.movedAt.toISOString()).toBe(movedAt.toISOString());
+          expect(reviews[0]!.movedAt?.toISOString() ?? null).toBe(
+            proven ? movedAt.toISOString() : null,
+          );
           expect(events).toHaveLength(1);
           expect(events[0]!.payload).toMatchObject({
             contractId: who.draft.id,
             policyId: who.policyId,
             policyVersion: 1,
             reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
-            causeEventId: event.eventId,
+            detectedBy: proven ? 'ORGANIZATION_MOVED' : 'MOVE_RECHECK',
+            causeEventId: proven ? event.eventId : null,
+            movedAt: proven ? movedAt.toISOString() : null,
             movedVersion: movedVersion ?? null,
           });
         } else {
@@ -1028,6 +1036,154 @@ describe('a signing policy follows an organization move', () => {
     });
   });
 
+  describe('a review names the move that caused it, and only that one (round 6, ruling 1)', () => {
+    const reviewsOf = (contractId: string) =>
+      runUnscoped('the suite reads the reviews', () =>
+        w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId } }),
+      );
+    const flagged = (employer: string) =>
+      eventsOf(api.prisma, employer, 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED');
+
+    /** A contract the employer signed once under a union's policy. */
+    async function signedOnce() {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+      await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
+      return { union, draft, policyId };
+    }
+
+    it('a move that coalesces into an open task with a HIGHER version takes over its whole provenance: event, organization, instant and version together', async () => {
+      const { draft, policyId } = await signedOnce();
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const firstVersion = api.hierarchy.bump(draft.employer);
+      const first = moved(draft.employer, new Date('2026-10-06T10:00:00.000Z'), firstVersion);
+      await consumer.handle(first);
+      const secondVersion = api.hierarchy.bump(draft.employer);
+      const secondAt = new Date('2026-10-06T10:05:00.000Z');
+      const second = moved(draft.employer, secondAt, secondVersion);
+      await consumer.handle(second);
+
+      // The one open task now says the second move, with the second's version — never a mixture.
+      const [task] = await tasksOf(policyId);
+      expect(task).toMatchObject({
+        status: 'PENDING',
+        sourceEventId: second.eventId,
+        movedOrganizationId: draft.employer,
+        movedVersion: BigInt(secondVersion),
+        generation: 1,
+      });
+      expect(task!.movedAt!.toISOString()).toBe(secondAt.toISOString());
+
+      await sweeper.runOnce();
+      const [review] = await reviewsOf(draft.id);
+      expect(review).toMatchObject({
+        detectedBy: 'ORGANIZATION_MOVED',
+        causeEventId: second.eventId,
+        movedVersion: BigInt(secondVersion),
+      });
+      expect(review!.movedAt!.toISOString()).toBe(secondAt.toISOString());
+      const [event] = await flagged(draft.employer);
+      expect(event!.payload).toMatchObject({
+        detectedBy: 'ORGANIZATION_MOVED',
+        causeEventId: second.eventId,
+        movedAt: secondAt.toISOString(),
+        movedVersion: secondVersion,
+      });
+      expect(event!.payload.causeEventId).not.toBe(first.eventId);
+    });
+
+    it('a move with a LOWER (or no) version coalescing later changes nothing of the provenance', async () => {
+      const { draft, policyId } = await signedOnce();
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const lowerVersion = api.hierarchy.bump(draft.employer);
+      const higherVersion = api.hierarchy.bump(draft.employer);
+      // Delivered out of order: the higher first, then the lower, then one that carries no version.
+      const higher = moved(draft.employer, new Date('2026-10-06T10:05:00.000Z'), higherVersion);
+      await consumer.handle(higher);
+      await consumer.handle(
+        moved(draft.employer, new Date('2026-10-06T10:00:00.000Z'), lowerVersion),
+      );
+      await consumer.handle(moved(draft.employer, new Date('2026-10-06T10:09:00.000Z')));
+
+      const [task] = await tasksOf(policyId);
+      expect(task).toMatchObject({
+        sourceEventId: higher.eventId,
+        movedVersion: BigInt(higherVersion),
+        generation: 2,
+      });
+      await sweeper.runOnce();
+      expect((await reviewsOf(draft.id))[0]).toMatchObject({
+        detectedBy: 'ORGANIZATION_MOVED',
+        causeEventId: higher.eventId,
+        movedVersion: BigInt(higherVersion),
+      });
+      expect((await flagged(draft.employer))[0]!.payload.causeEventId).toBe(higher.eventId);
+    });
+
+    it('an unrelated move that queues an employer already outside the union is not named as the cause: the review and its event carry a closed detectedBy and no event, no instant', async () => {
+      const { union, draft, policyId } = await signedOnce();
+      // The employer is already outside the union (no move event was seen); then an organization
+      // that has nothing to do with it moves, and queues the re-check of every union policy.
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const unrelated = newOrg();
+      const unrelatedVersion = api.hierarchy.bump(unrelated);
+      const event = moved(unrelated, new Date('2026-10-06T11:00:00.000Z'), unrelatedVersion);
+      await consumer.handle(event);
+      await sweeper.runOnce();
+
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      const [review] = await reviewsOf(draft.id);
+      expect(review).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+        // The basis the signature was compared against stays on record.
+        movedVersion: BigInt(unrelatedVersion),
+      });
+      const [flaggedEvent] = await flagged(draft.employer);
+      expect(flaggedEvent!.payload).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+        movedVersion: unrelatedVersion,
+      });
+      expect(JSON.stringify(flaggedEvent)).not.toContain(event.eventId);
+
+      // The suspension says the same: no event named, no moved organization.
+      const [suspended] = (await policyEventsOf(api.prisma, draft.employer)).filter(
+        (e) => e.eventName === 'APPROVAL_POLICY_SUSPENDED',
+      );
+      expect(suspended!.payload).toMatchObject({
+        authorOrganizationId: union,
+        reason: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedOrganizationId: null,
+      });
+      expect((await policyRow(policyId)).suspensionReason).not.toContain(event.eventId);
+    });
+
+    it('the database holds the same rule: a review names an event and an instant exactly when a move is its proven cause', async () => {
+      const { draft } = await signedOnce();
+      const row = (cause: string, at: string, by: string) =>
+        `INSERT INTO signature_authority_review
+           (id, organization_id, contract_id, side, policy_id, reason, cause_event_id, moved_at,
+            detected_by, flagged_at)
+         SELECT 'SAR_x' || substr(md5(random()::text), 1, 8), organization_id, contract_id, side,
+                policy_id, 'AUTHORITY_CHANGED_DURING_SIGNING', ${cause}, ${at}, '${by}', now()
+           FROM contract_signature WHERE contract_id = '${draft.id}' AND side = 'EMPLOYER'`;
+      await expect(
+        w.prisma.client.$executeRawUnsafe(row('NULL', 'NULL', 'ORGANIZATION_MOVED')),
+      ).rejects.toThrow(/ck_review_detection/);
+      await expect(
+        w.prisma.client.$executeRawUnsafe(row("'EVT_1'", 'now()', 'MOVE_RECHECK')),
+      ).rejects.toThrow(/ck_review_detection/);
+      await expect(w.prisma.client.$executeRawUnsafe(row('NULL', 'NULL', 'GUESS'))).rejects.toThrow(
+        /ck_review_detection/,
+      );
+    });
+  });
+
   describe('a failed release cannot mask the audit 503 (round 5, ruling 3)', () => {
     it('answers the original 503, logs the release failure, holds the key until its lease lapses — then the same request is refused normally and recorded', async () => {
       const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
@@ -1113,12 +1269,13 @@ describe('a signing policy follows an organization move', () => {
       const tasks = await tasksOf(policyId);
       expect(tasks).toHaveLength(1);
       expect(tasks[0]).toMatchObject({ id: 'PRT_same_ms_1', generation: 2, status: 'PENDING' });
-      // The first move's event and instant stay: the earlier instant flags more, never fewer.
-      expect(tasks[0]!.sourceEventId).toBe('EVT_PRT_same_ms_1');
-      expect(tasks[0]!.movedAt!.toISOString()).toBe(sameInstant.toISOString());
       // The version is the HIGHEST of the moves that coalesced, in whatever order they arrived
-      // (3, 5, 4): the flagging then covers a signature that read between the moves too.
+      // (3, 5, 4): the flagging then covers a signature that read between the moves too. And the
+      // task carries the event of the move whose version it holds (the second, 5) — never a
+      // version with another move's event (round 6).
       expect(tasks[0]!.movedVersion).toBe(5n);
+      expect(tasks[0]!.sourceEventId).toBe('EVT_PRT_same_ms_2');
+      expect(tasks[0]!.movedAt!.toISOString()).toBe(sameInstant.toISOString());
     });
 
     it('a task from a move without a version takes the version of a later one, and keeps none when none has one', async () => {
