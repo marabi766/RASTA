@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import type { ReadingParties } from '../access/access';
 import type { Contract, ContractSignature } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { INITIAL_CONTRACT_STATE, type ContractStateName } from './contract.state-machine';
@@ -348,6 +349,30 @@ export class ContractRepository {
       facts.set(row.contractId, list);
     }
     return facts;
+  }
+
+  /**
+   * The contract, found as the employer (through the tenant guard) or as the winning contractor;
+   * `null` for everyone else, a contract that does not exist included. The one door a command on
+   * a contract's children (amendments, milestones) comes through.
+   */
+  async findParty(organizationId: string, id: string): Promise<Contract | null> {
+    const row = (await this.findOwn(id)) ?? (await this.findAsContractor(organizationId, id));
+    if (!row) return null;
+    return row.organizationId === organizationId || row.contractorOrganizationId === organizationId
+      ? row
+      : null;
+  }
+
+  /**
+   * The contract a reader may see: as the employer when the caller's roles read for it, else as the
+   * winning contractor. The caller applies `assertPartyOf` to what comes back.
+   */
+  async findReadable(parties: ReadingParties, id: string): Promise<Contract | null> {
+    let row: Contract | null = null;
+    if (parties.employer) row = await this.findOwn(id);
+    if (!row && parties.contractor) row = await this.findAsContractor(parties.organizationId, id);
+    return row;
   }
 
   // -- the employer's side (through the tenant guard) --------------------------

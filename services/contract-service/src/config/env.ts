@@ -116,6 +116,16 @@ function optionalRoleList(name: string) {
  *                                       may still be cancelled. Default **false**: conservative;
  *                                       a client who wants the employer to withdraw before the
  *                                       contractor signs sets it.
+ *   CONTRACT_AMENDMENT_ROLES            CON-003 PR 3, Q-100. Who, in the employer's organization,
+ *                                       proposes an amendment of a signed contract. Default
+ *                                       `ORGANIZATION_ADMIN`; empty means nobody. Signing it is not
+ *                                       configured here: the employer signs under the
+ *                                       `contract.signature` policy in force, as for the contract.
+ *   CONTRACT_AMENDMENT_REASON_CODES     The closed list of reasons an amendment is proposed for.
+ *   CONTRACT_MILESTONE_ROLES            Who, in the employer's organization, plans and edits
+ *                                       milestones. Default `ORGANIZATION_ADMIN`; empty means nobody.
+ *   CONTRACT_MILESTONE_LIMIT            The most milestones one contract holds (default 100):
+ *                                       protection of the service, not a business rule.
  *   CONTRACT_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
  *                                       How long a completed command's response is replayed,
  *                                       and how long an in-flight claim holds its key before a
@@ -194,6 +204,40 @@ export const contractEnvSchema = baseEnvSchema
      * not withdrawn by the other, and ending it is a decision for the client, who sets this.
      */
     CONTRACT_CANCEL_AFTER_SIGNATURE: booleanEnv(false),
+
+    /** Who, in the employer's organization, proposes an amendment (CON-003 PR 3, Q-100). */
+    CONTRACT_AMENDMENT_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN')
+      .pipe(optionalRoleList('CONTRACT_AMENDMENT_ROLES')),
+
+    /** The closed list of reasons an amendment is proposed for; descriptive codes, no legal meaning. */
+    CONTRACT_AMENDMENT_REASON_CODES: z
+      .string()
+      .default('SCOPE_CHANGE,PRICE_ADJUSTMENT,SCHEDULE_CHANGE,OTHER')
+      .pipe(
+        commaList().pipe(
+          z
+            .array(
+              z
+                .string()
+                .regex(CODE_PATTERN, 'A reason code is upper-case words, 2 to 64 characters'),
+            )
+            .min(1, 'CONTRACT_AMENDMENT_REASON_CODES must name at least one reason')
+            .refine((codes) => new Set(codes).size === codes.length, {
+              message: 'CONTRACT_AMENDMENT_REASON_CODES names a reason twice',
+            }),
+        ),
+      ),
+
+    /** Who, in the employer's organization, plans and edits milestones (CON-003 PR 3, Q-100). */
+    CONTRACT_MILESTONE_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN')
+      .pipe(optionalRoleList('CONTRACT_MILESTONE_ROLES')),
+
+    /** The most milestones one contract holds: protection of the service, not a business rule. */
+    CONTRACT_MILESTONE_LIMIT: z.coerce.number().int().min(1).max(1000).default(100),
 
     CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(10).max(900).default(120),

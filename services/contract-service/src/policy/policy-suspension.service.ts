@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { AmendmentRepository } from '../amendment/amendment.repository';
 import { SERVICE_NAME } from '../config/env';
 import { ContractRepository } from '../contract/contract.repository';
 import { EventPublisher } from '../events/publisher';
@@ -131,6 +132,7 @@ export class PolicySuspensionService {
     private readonly events: EventPublisher,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly contracts: ContractRepository,
+    private readonly amendments: AmendmentRepository,
   ) {}
 
   /**
@@ -324,6 +326,43 @@ export class PolicySuspensionService {
       });
       this.logger.warn(
         `Signature of contract ${signature.contractId} flagged for review: the authority it rested ` +
+          `on changed while it was being made (${cause.eventId})`,
+      );
+    }
+
+    // The employer signatures of amendments rest on the same policy and the same hierarchy
+    // evidence (CON-003 PR 3): flagged by the same rule, in the same transaction.
+    const flaggedAmendments = await this.amendments.flagRacedSignatures(tx, {
+      organizationId: policy.organizationId,
+      policyId: policy.id,
+      causeEventId: cause.eventId,
+      movedAt: cause.movedAt,
+      movedVersion: cause.movedVersion,
+      at,
+    });
+    for (const signature of flaggedAmendments) {
+      await this.events.enqueue(tx, {
+        eventName: 'CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED',
+        aggregateId: signature.contractId,
+        organizationId: policy.organizationId,
+        payload: {
+          contractId: signature.contractId,
+          amendmentId: signature.amendmentId,
+          organizationId: policy.organizationId,
+          side: 'EMPLOYER',
+          policyId: policy.id,
+          policyVersion: signature.policyVersion,
+          reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+          causeEventId: cause.eventId,
+          movedAt: cause.movedAt.toISOString(),
+          movedVersion: cause.movedVersion,
+          flaggedAt: at.toISOString(),
+        },
+        causationId: cause.eventId,
+        occurredAt: at,
+      });
+      this.logger.warn(
+        `Signature of amendment ${signature.amendmentId} flagged for review: the authority it rested ` +
           `on changed while it was being made (${cause.eventId})`,
       );
     }

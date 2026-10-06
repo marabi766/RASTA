@@ -115,6 +115,11 @@ export const ID_PREFIX = {
   contract: ID_PREFIXES.contract,
   /** A contract's signature record (this service's own prefix: the shared list has none). */
   signature: 'CSG',
+  /** An amendment, its signature records and the review of a raced one (CON-003 PR 3). */
+  amendment: 'AMD',
+  amendmentSignature: 'AMS',
+  amendmentReview: 'AMR',
+  milestone: 'MLS',
   /** An approval policy and its steps, the prefixes construction-service gives its own. */
   policy: 'APL',
   policyStep: 'APS',

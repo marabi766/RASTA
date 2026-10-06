@@ -471,6 +471,33 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
+      // The amendments (CON-003 PR 3) hang off the contract and the policies: reviews, then
+      // signatures, then amendments, then milestones — each never deleted by the service, so each
+      // goes with its own guard lifted for this transaction only.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature_review" DISABLE TRIGGER "tg_amendment_signature_review_immutable"',
+      );
+      await tx.amendmentSignatureReview.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature_review" ENABLE TRIGGER "tg_amendment_signature_review_immutable"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature" DISABLE TRIGGER "tg_amendment_signature_immutable"',
+      );
+      await tx.amendmentSignature.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature" ENABLE TRIGGER "tg_amendment_signature_immutable"',
+      );
+      await tx.$executeRawUnsafe('ALTER TABLE "amendment" DISABLE TRIGGER "tg_amendment_guard"');
+      await tx.amendment.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe('ALTER TABLE "amendment" ENABLE TRIGGER "tg_amendment_guard"');
+      await tx.$executeRawUnsafe('ALTER TABLE "milestone" DISABLE TRIGGER "tg_milestone_guard"');
+      await tx.milestone.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe('ALTER TABLE "milestone" ENABLE TRIGGER "tg_milestone_guard"');
       // A review of a signature (D-050) names its signature and its policy, and is never deleted
       // by the service either: it goes first of all.
       await tx.$executeRawUnsafe(

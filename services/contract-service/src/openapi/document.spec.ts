@@ -43,7 +43,7 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes the two reads and the two commands of CON-003 and the approval-policy routes, each closed, and no route that creates a contract', () => {
+  it('publishes the reads and commands of CON-003, its amendments and milestones and the approval-policy routes, each closed, and no route that creates a contract', () => {
     const document = buildContractOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -58,18 +58,30 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/approval-policies/{id}',
       'GET /v1/contracts',
       'GET /v1/contracts/{id}',
+      'GET /v1/contracts/{id}/amendments',
+      'GET /v1/contracts/{id}/amendments/{amendmentId}',
+      'GET /v1/contracts/{id}/milestones',
+      'GET /v1/contracts/{id}/milestones/{milestoneId}',
+      'PATCH /v1/contracts/{id}/milestones/{milestoneId}',
       'POST /v1/approval-policies',
       'POST /v1/approval-policies/{id}/approve',
       'POST /v1/approval-policies/{id}/reject',
       'POST /v1/approval-policies/{id}/retire',
       'POST /v1/approval-policies/{id}/submit',
+      'POST /v1/contracts/{id}/amendments',
+      'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
       'POST /v1/contracts/{id}/cancel',
+      'POST /v1/contracts/{id}/milestones',
       'POST /v1/contracts/{id}/sign',
     ]);
     for (const { key, operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);
-      // The one route that creates answers 201; every other answers 200.
-      const created = key === 'POST /v1/approval-policies';
+      // The routes that create (a policy, an amendment, a milestone) answer 201; every other 200.
+      const created = [
+        'POST /v1/approval-policies',
+        'POST /v1/contracts/{id}/amendments',
+        'POST /v1/contracts/{id}/milestones',
+      ].includes(key);
       expect(operation.responses['200'] !== undefined).toBe(!created);
       expect(operation.responses['201'] !== undefined).toBe(created);
     }
@@ -257,6 +269,133 @@ describe('the committed OpenAPI document', () => {
         expect(responses['409']!.headers).toHaveProperty('Retry-After');
         expect(responses['422']!.headers).toBeUndefined();
       }
+    });
+  });
+
+  describe('the amendment and milestone routes (CON-003 PR 3)', () => {
+    type Op = {
+      parameters: { name: string; in: string; required?: boolean; schema?: unknown }[];
+      requestBody?: { content: Record<string, { schema: Record<string, unknown> }> };
+      responses: Record<
+        string,
+        { content: Record<string, { schema: Record<string, unknown> }>; headers?: unknown }
+      >;
+    };
+    const operation = (path: string, method: 'get' | 'post' | 'patch'): Op =>
+      (buildContractOpenApiDocument(app).paths?.[path] as unknown as Record<string, Op>)[method]!;
+    const COMMANDS = [
+      ['/v1/contracts/{id}/amendments', 'post'],
+      ['/v1/contracts/{id}/amendments/{amendmentId}/sign', 'post'],
+      ['/v1/contracts/{id}/milestones', 'post'],
+      ['/v1/contracts/{id}/milestones/{milestoneId}', 'patch'],
+    ] as const;
+
+    it.each(COMMANDS)(
+      '%s %s requires an Idempotency-Key of 8 to 255 characters and takes a strict body',
+      (path, method) => {
+        const op = operation(path, method);
+        expect(op.parameters.filter((p) => p.in === 'header')).toEqual([
+          expect.objectContaining({
+            name: 'Idempotency-Key',
+            required: true,
+            schema: { type: 'string', minLength: 8, maxLength: 255 },
+          }),
+        ]);
+        const body = op.requestBody!.content['application/json']!.schema as {
+          additionalProperties?: boolean;
+        };
+        expect(body.additionalProperties).toBe(false);
+        expect(op.responses['409']!.headers).toHaveProperty('Retry-After');
+      },
+    );
+
+    it('reads are keyless and cannot answer 409 or 422', () => {
+      for (const path of [
+        '/v1/contracts/{id}/amendments',
+        '/v1/contracts/{id}/amendments/{amendmentId}',
+        '/v1/contracts/{id}/milestones',
+        '/v1/contracts/{id}/milestones/{milestoneId}',
+      ]) {
+        const op = operation(path, 'get');
+        expect(op.parameters.filter((p) => p.in === 'header')).toEqual([]);
+        expect(op.responses['409']).toBeUndefined();
+        expect(op.responses['422']).toBeUndefined();
+        expect(op.responses['404']).toBeDefined();
+      }
+    });
+
+    it('sends every amount as a string and the planned day as a date, never an instant', () => {
+      const amendment = (
+        operation('/v1/contracts/{id}/amendments/{amendmentId}', 'get').responses['200']!.content[
+          'application/json'
+        ]!.schema as { properties: Record<string, { type?: string }> }
+      ).properties;
+      expect(amendment.deltaMinor?.type).toBe('string');
+      const request = operation('/v1/contracts/{id}/amendments', 'post').requestBody!.content[
+        'application/json'
+      ]!.schema as { properties: Record<string, { type?: string; maxLength?: number }> };
+      expect(request.properties.deltaMinor?.type).toBe('string');
+      expect(request.properties.reasonText?.maxLength).toBe(1000);
+      const milestone = operation('/v1/contracts/{id}/milestones', 'post').requestBody!.content[
+        'application/json'
+      ]!.schema as { required: string[]; properties: Record<string, { pattern?: string }> };
+      expect(milestone.required).toEqual(['title', 'plannedDate']);
+      expect(milestone.properties.plannedDate?.pattern).toBe('^\\d{4}-\\d{2}-\\d{2}$');
+    });
+
+    it('types each refusal’s details by area with the closed codes answered with that status', () => {
+      const codesOf = (path: string, method: 'post' | 'patch', status: string) => {
+        const schema = operation(path, method).responses[status]!.content['application/json']!
+          .schema as {
+          properties: {
+            details: {
+              items: { properties: { path: { const: string }; code: { enum: string[] } } };
+            };
+          };
+        };
+        const item = schema.properties.details.items.properties;
+        return { area: item.path.const, codes: item.code.enum };
+      };
+      expect(codesOf('/v1/contracts/{id}/amendments', 'post', '403')).toEqual({
+        area: 'amendment',
+        codes: [
+          'PROPOSER_NOT_EMPLOYER',
+          'POLICY_AUTHOR_NOT_GOVERNING',
+          'MEMBER_OF_BOTH_PARTIES',
+          'SAME_PERSON_BOTH_SIDES',
+        ],
+      });
+      expect(codesOf('/v1/contracts/{id}/amendments', 'post', '422').codes).toEqual(
+        expect.arrayContaining([
+          'AMENDMENT_DELTA_NOT_POSITIVE',
+          'AMENDMENT_EXCEEDS_LIMIT',
+          'AMENDMENT_REASON_NOT_ALLOWED',
+          'CONTRACT_NOT_SIGNED',
+        ]),
+      );
+      expect(codesOf('/v1/contracts/{id}/milestones/{milestoneId}', 'patch', '422')).toEqual({
+        area: 'milestone',
+        codes: ['CONTRACT_NOT_SIGNED', 'MILESTONE_REFERENCED', 'MILESTONE_LIMIT_REACHED'],
+      });
+      expect(codesOf('/v1/contracts/{id}/milestones', 'post', '403')).toEqual({
+        area: 'milestone',
+        codes: ['EDITOR_NOT_EMPLOYER'],
+      });
+    });
+
+    it('answers 503 where a refusal is recorded or the hierarchy is asked, and 504 only for the latter', () => {
+      const answers = (path: string, method: 'post' | 'patch') =>
+        ['503', '504'].map((s) => operation(path, method).responses[s] !== undefined);
+      expect(answers('/v1/contracts/{id}/amendments', 'post')).toEqual([true, false]);
+      expect(answers('/v1/contracts/{id}/amendments/{amendmentId}/sign', 'post')).toEqual([
+        true,
+        true,
+      ]);
+      expect(answers('/v1/contracts/{id}/milestones', 'post')).toEqual([true, false]);
+      expect(answers('/v1/contracts/{id}/milestones/{milestoneId}', 'patch')).toEqual([
+        true,
+        false,
+      ]);
     });
   });
 
