@@ -3,6 +3,7 @@ import { PrismaClient } from '../src/generated/prisma';
 import { assertDemoSeedAllowed, assertDemoSeedDatabase, withUtcSession } from '@rasta/config';
 import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
 import { toLabel } from '../src/organization/organization.repository';
+import { assertSeedDoesNotReparent } from '../src/organization/seed-guard';
 
 /**
  * Demo seed for organization-service.
@@ -221,6 +222,16 @@ async function main(): Promise<void> {
     const depth = path.split('.').length - 1;
     pathById.set(org.id, path);
 
+    // Re-parenting is a versioned move (`OrganizationService.move`), never a seed's rewrite.
+    assertSeedDoesNotReparent(
+      org.id,
+      await prisma.organization.findUnique({
+        where: { id: org.id },
+        select: { parentId: true },
+      }),
+      org.parentId,
+    );
+
     await prisma.organization.upsert({
       where: { id: org.id },
       create: {
@@ -239,8 +250,6 @@ async function main(): Promise<void> {
       update: {
         name: org.name,
         type: org.type,
-        parentId: org.parentId,
-        depth,
         updatedBy: 'SEED',
       },
     });

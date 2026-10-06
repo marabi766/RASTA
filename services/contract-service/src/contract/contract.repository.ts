@@ -211,9 +211,9 @@ export class ContractRepository {
    * Flags the employer signatures under `policyId` that a move raced (D-050): the tree they
    * rested on is older than the move's — the hierarchy version they recorded is LOWER than the
    * move's, a number organization-service stamps in the move's own transaction, so no clock
-   * orders it — and they could still have committed after the move was prepared
-   * (`movedAt <= commit deadline`). A signature that read the tree after the move recorded the
-   * move's version or more; one out of its window before it was made on authority that held.
+   * orders it. **Only the version decides**: the commit deadline and the move's `occurredAt` are
+   * two services' clocks and take no part. A signature that read the tree after the move recorded
+   * the move's version or more, and is not flagged.
    * Never revokes: it writes one append-only review row each, once
    * (`ux_signature_authority_review_signature`), and returns the ones it newly flagged. Runs under
    * the policy slot's lock, so no signature is recorded under the policy meanwhile.
@@ -238,12 +238,13 @@ export class ContractRepository {
             organizationId: input.organizationId,
             policyId: input.policyId,
             side: 'EMPLOYER',
-            // Could still have committed after the move was prepared: a signature out of its
-            // window before then was made on authority that held.
-            hierarchyCommitDeadline: { gte: input.movedAt },
-            // And rests on a tree older than the move's: a lower version, or none recorded (a
-            // signature from before versions: it cannot show it read the moved tree). A move with
-            // no version (an event from before them) orders nothing, so the window decides alone.
+            // Decided by the version alone — no timestamp takes part (round 5): the move's
+            // instant is organization-service's clock and the deadline this database's, and two
+            // clocks cannot order a move against a signature. A signature rests on a tree older
+            // than the move's when it recorded a lower version, or none (a signature from before
+            // versions cannot show it read the moved tree). A move with no version (an event from
+            // before them) orders nothing, so every unreviewed signature under the policy is
+            // flagged: flagging too many is safe, flagging too few is not.
             ...(input.movedVersion === null
               ? {}
               : {

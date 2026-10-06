@@ -223,13 +223,18 @@ export class IdempotencyStore {
     try {
       await work(fence);
     } catch (error) {
-      await this.release(endpoint, key, claim.token);
+      // The work's own failure is the answer. A release that fails on top of it (the database that
+      // refused the work may refuse this too) must not replace it — a refusal-audit 503, say,
+      // would turn into an unrelated error: it is logged, and the claim simply stays until its
+      // lease lapses (CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS, docs/06 § 6.8), after which a retry
+      // takes the key over. Until then a retry with the same key is 409 CONFLICT with Retry-After.
+      await this.releaseQuietly(endpoint, key, claim.token);
       throw error;
     }
     // A work that returned without completing its claim committed nothing the key can
     // replay: a defect, never a success to report.
     if (!stored) {
-      await this.release(endpoint, key, claim.token);
+      await this.releaseQuietly(endpoint, key, claim.token);
       throw new Error(`${endpoint}: the work returned without completing its idempotency claim`);
     }
     return { result: stored.value, executed: true };
@@ -454,6 +459,19 @@ export class IdempotencyStore {
     }
     const waited = Date.now() - started;
     if (waited < IN_FLIGHT_POLL_MS) await sleep(IN_FLIGHT_POLL_MS - waited);
+  }
+
+  /** {@link release} on a failure path: never throws, so it can never mask the failure being answered. */
+  private async releaseQuietly(endpoint: string, key: string, token: string): Promise<void> {
+    try {
+      await this.release(endpoint, key, token);
+    } catch (releaseError: unknown) {
+      this.logger.error(
+        `Could not release the idempotency claim of ${endpoint} (${
+          releaseError instanceof Error ? releaseError.name : 'unknown'
+        }); it expires with its lease`,
+      );
+    }
   }
 
   /**

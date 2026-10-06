@@ -171,6 +171,13 @@ export class PolicyReconciliationSweeper {
             },
             this.reconciliations.ownershipOf(task),
           );
+          if (result === 'STALE') {
+            // A move coalesced after the claim: give the task back, due at once, for a fresh look.
+            await this.reconciliations.release(task);
+            outcome.requeued += 1;
+            policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'requeued' });
+            return;
+          }
           if (result === 'SUSPENDED') outcome.suspended += 1;
           else if (result === 'NOTHING') outcome.confirmed += 1;
           else outcome.notOwned += 1;
