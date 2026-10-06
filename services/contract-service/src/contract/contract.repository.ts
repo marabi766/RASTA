@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
+import { ulid } from 'ulid';
 import type { Contract, ContractSignature } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { INITIAL_CONTRACT_STATE, type ContractStateName } from './contract.state-machine';
@@ -21,8 +22,23 @@ export interface SignatureInput {
   /** The policy that authorised the employer's side (id and version); null for the contractor's. */
   readonly policyId: string | null;
   readonly policyVersion: number | null;
+  /**
+   * What the hierarchy said when a union-written policy authorised the employer's side (D-050);
+   * null for the contractor's side and for a platform-written policy, which needs none.
+   */
+  readonly hierarchyEvidence: HierarchyEvidence | null;
   readonly correlationId: string;
   readonly at: Date;
+}
+
+/** The organization-service answer a signature rested on, and the window it could have committed in. */
+export interface HierarchyEvidence {
+  /** The author organization asked about. */
+  readonly authorOrganizationId: string;
+  /** When the answer arrived (the database's clock). */
+  readonly readAt: Date;
+  /** The latest instant the signing transaction could commit at: its own deadline. */
+  readonly commitDeadline: Date;
 }
 
 export interface TransitionInput {
@@ -145,10 +161,14 @@ export class ContractRepository {
     tx: ExtendedPrismaClient,
     organizationId: string,
     contractId: string,
-  ): Promise<ContractSignature[]> {
+  ): Promise<(ContractSignature & { review?: { id: string } | null })[]> {
     return runUnscoped(
       'a command reads the signatures of the contract it holds the lock of, by its organization and id',
-      () => tx.contractSignature.findMany({ where: { organizationId, contractId } }),
+      () =>
+        tx.contractSignature.findMany({
+          where: { organizationId, contractId },
+          include: { review: { select: { id: true } } },
+        }),
     );
   }
 
@@ -169,10 +189,76 @@ export class ContractRepository {
             authorityRole: input.authorityRole,
             policyId: input.policyId,
             policyVersion: input.policyVersion,
+            ...(input.hierarchyEvidence
+              ? {
+                  hierarchyAuthorOrganizationId: input.hierarchyEvidence.authorOrganizationId,
+                  hierarchyAnswer: 'WITHIN',
+                  hierarchyReadAt: input.hierarchyEvidence.readAt,
+                  hierarchyCommitDeadline: input.hierarchyEvidence.commitDeadline,
+                }
+              : {}),
             signedAt: input.at,
             correlationId: input.correlationId,
           },
         }),
+    );
+  }
+
+  /**
+   * Flags the employer signatures under `policyId` that a move may have raced (D-050): the
+   * hierarchy answer they rested on predates the move (`read < movedAt`) and they could still have
+   * committed after it (`movedAt <= commit deadline`). A signature whose answer came after the
+   * move rested on the hierarchy as it then was; one that was out of its window before it was
+   * made on authority that held. Never revokes: it writes one append-only review row each, once
+   * (`ux_signature_authority_review_signature`), and returns the ones it newly flagged. Runs under
+   * the policy slot's lock, so no signature is recorded under the policy meanwhile.
+   */
+  async flagRacedSignatures(
+    tx: ExtendedPrismaClient,
+    input: {
+      organizationId: string;
+      policyId: string;
+      causeEventId: string;
+      movedAt: Date;
+      at: Date;
+    },
+  ): Promise<{ contractId: string; policyVersion: number }[]> {
+    return runUnscoped(
+      'the reconciliation of a move flags the signatures of the policy it stranded, named by its organization and id',
+      async () => {
+        const raced = await tx.contractSignature.findMany({
+          where: {
+            organizationId: input.organizationId,
+            policyId: input.policyId,
+            side: 'EMPLOYER',
+            hierarchyReadAt: { lt: input.movedAt },
+            hierarchyCommitDeadline: { gte: input.movedAt },
+            review: null,
+          },
+          orderBy: { id: 'asc' },
+        });
+        const flagged: { contractId: string; policyVersion: number }[] = [];
+        for (const signature of raced) {
+          await tx.signatureAuthorityReview.create({
+            data: {
+              id: `SAR_${ulid()}`,
+              organizationId: signature.organizationId,
+              contractId: signature.contractId,
+              side: 'EMPLOYER',
+              policyId: input.policyId,
+              reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+              causeEventId: input.causeEventId,
+              movedAt: input.movedAt,
+              flaggedAt: input.at,
+            },
+          });
+          flagged.push({
+            contractId: signature.contractId,
+            policyVersion: signature.policyVersion ?? 1,
+          });
+        }
+        return flagged;
+      },
     );
   }
 
@@ -227,12 +313,17 @@ export class ContractRepository {
               contractId: contract.id,
             })),
           },
-          select: { contractId: true, side: true, signedAt: true },
+          select: {
+            contractId: true,
+            side: true,
+            signedAt: true,
+            review: { select: { id: true } },
+          },
         }),
     );
     for (const row of rows) {
       const list = facts.get(row.contractId) ?? [];
-      list.push({ side: row.side, signedAt: row.signedAt });
+      list.push({ side: row.side, signedAt: row.signedAt, reviewRequired: row.review !== null });
       facts.set(row.contractId, list);
     }
     return facts;

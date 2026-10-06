@@ -127,11 +127,11 @@ describe('a signing policy follows an organization move', () => {
       w.prisma.client.contractSignature.findMany({ where: { contractId } }),
     );
 
-  const moved = (organizationId: string): EventEnvelope =>
+  const moved = (organizationId: string, occurredAt: Date = new Date()): EventEnvelope =>
     eventEnvelopeSchema.parse({
       eventId: ulid(),
       eventName: 'ORGANIZATION_MOVED',
-      occurredAt: new Date().toISOString(),
+      occurredAt: occurredAt.toISOString(),
       producer: 'organization-service',
       aggregateType: 'Organization',
       aggregateId: organizationId,
@@ -451,6 +451,282 @@ describe('a signing policy follows an organization move', () => {
       expect((await signaturesOf(draft.id))[0]).toMatchObject({ policyId, policyVersion: 1 });
       expect((await retired!).status).toBe(200);
       expect((await policyRow(policyId)).status).toBe('RETIRED');
+    });
+  });
+
+  // -- D-050: the read-then-commit window between the two services cannot be closed; it is made
+  // visible. A signature records what it rested on; a move that raced it flags it, never revokes.
+  describe('a signature a move may have raced is flagged, never revoked (D-050)', () => {
+    const evidenceOf = (contractId: string) =>
+      runUnscoped('the suite reads the evidence', () =>
+        w.prisma.client.contractSignature.findFirstOrThrow({
+          where: { contractId, side: 'EMPLOYER' },
+        }),
+      );
+    const reviewsOf = (contractId: string) =>
+      runUnscoped('the suite reads the reviews', () =>
+        w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId } }),
+      );
+    const flaggedEventsOf = (employer: string) =>
+      eventsOf(api.prisma, employer, 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED');
+    const view = (contractId: string, token: string) =>
+      http().get(`/v1/contracts/${contractId}`).set('authorization', `Bearer ${token}`);
+
+    /** A draft whose employer is under a union that has signed it once, as a union's policy allows. */
+    async function signedUnderUnion() {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+      await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
+      return { union, draft, policyId, evidence: await evidenceOf(draft.id) };
+    }
+
+    it('records on the employer’s signature the hierarchy evidence it rested on; the contractor’s and a platform-written policy’s have none', async () => {
+      const { union, draft, evidence } = await signedUnderUnion();
+      expect(evidence.hierarchyAuthorOrganizationId).toBe(union);
+      expect(evidence.hierarchyAnswer).toBe('WITHIN');
+      // Asked after the transaction began, and the commit cannot come later than its deadline.
+      expect(evidence.hierarchyReadAt!.getTime()).toBeGreaterThanOrEqual(
+        evidence.signedAt.getTime(),
+      );
+      expect(evidence.hierarchyCommitDeadline!.getTime()).toBeGreaterThan(
+        evidence.hierarchyReadAt!.getTime(),
+      );
+
+      await sign(draft.id, person(draft.contractor, ['CONTRACTOR'])).expect(200);
+      const contractor = await runUnscoped('the suite reads the contractor signature', () =>
+        w.prisma.client.contractSignature.findFirstOrThrow({
+          where: { contractId: draft.id, side: 'CONTRACTOR' },
+        }),
+      );
+      expect(contractor.hierarchyReadAt).toBeNull();
+
+      const other = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      await activePlatformPolicy(other.employer);
+      await sign(other.id, person(other.employer, ['ORGANIZATION_ADMIN'])).expect(200);
+      expect((await evidenceOf(other.id)).hierarchyReadAt).toBeNull();
+    });
+
+    it('flags exactly the signatures whose answer predates the move and whose commit could have followed it — deterministically, from the evidence', async () => {
+      const raced = await signedUnderUnion();
+      const answeredAfter = await signedUnderUnion();
+      const committedBefore = await signedUnderUnion();
+      const at = (signature: typeof raced.evidence, offsetMs: number, from: 'read' | 'deadline') =>
+        new Date(
+          (from === 'read'
+            ? signature.hierarchyReadAt!.getTime()
+            : signature.hierarchyCommitDeadline!.getTime()) + offsetMs,
+        );
+
+      const cases = [
+        // The move landed 1 ms after the question was asked: the answer may predate it.
+        { who: raced, movedAt: at(raced.evidence, 1, 'read'), flagged: true },
+        // The move landed 1 ms before it was asked: the answer is the post-move hierarchy.
+        { who: answeredAfter, movedAt: at(answeredAfter.evidence, -1, 'read'), flagged: false },
+        // The move landed 1 ms after the latest instant the signature could have committed at.
+        {
+          who: committedBefore,
+          movedAt: at(committedBefore.evidence, 1, 'deadline'),
+          flagged: false,
+        },
+      ];
+      for (const { who, movedAt, flagged } of cases) {
+        // The employer left the union; its event carries the move's own instant.
+        api.hierarchy.adopt(newOrg(), who.draft.employer);
+        const event = moved(who.draft.employer, movedAt);
+        await consumer.handle(event);
+        await sweeper.runOnce();
+
+        expect((await policyRow(who.policyId)).status).toBe('SUSPENDED');
+        const reviews = await reviewsOf(who.draft.id);
+        const events = await flaggedEventsOf(who.draft.employer);
+        if (flagged) {
+          expect(reviews).toHaveLength(1);
+          expect(reviews[0]).toMatchObject({
+            side: 'EMPLOYER',
+            policyId: who.policyId,
+            reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+            causeEventId: event.eventId,
+          });
+          expect(reviews[0]!.movedAt.toISOString()).toBe(movedAt.toISOString());
+          expect(events).toHaveLength(1);
+          expect(events[0]!.payload).toMatchObject({
+            contractId: who.draft.id,
+            policyId: who.policyId,
+            policyVersion: 1,
+            reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+            causeEventId: event.eventId,
+          });
+        } else {
+          expect(reviews).toEqual([]);
+          expect(events).toEqual([]);
+        }
+      }
+    });
+
+    it('never revokes: the signature, the contract and its status stand; a party sees the flag in the read API; the review itself is append-only', async () => {
+      const { draft, evidence } = await signedUnderUnion();
+      const before = await view(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(
+        200,
+      );
+      expect(before.body).toMatchObject({
+        authorityReviewRequired: false,
+        authorityReviewReason: null,
+      });
+
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      await consumer.handle(
+        moved(draft.employer, new Date(evidence.hierarchyReadAt!.getTime() + 1)),
+      );
+      await sweeper.runOnce();
+
+      // Both parties see it; the contract is as it was.
+      for (const token of [
+        person(draft.employer, ['ORGANIZATION_ADMIN']),
+        person(draft.contractor, ['CONTRACTOR']),
+      ]) {
+        const after = await view(draft.id, token).expect(200);
+        expect(after.body).toMatchObject({
+          status: 'DRAFT',
+          employerSignedAt: before.body.employerSignedAt,
+          authorityReviewRequired: true,
+          authorityReviewReason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+        });
+      }
+      expect(await signaturesOf(draft.id)).toHaveLength(1);
+      // The contractor may still sign, and the contract completes: nothing was cancelled.
+      const done = await sign(draft.id, person(draft.contractor, ['CONTRACTOR'])).expect(200);
+      expect(done.body).toMatchObject({ status: 'SIGNED', authorityReviewRequired: true });
+
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `UPDATE signature_authority_review SET reason = reason WHERE contract_id = $1`,
+          draft.id,
+        ),
+      ).rejects.toThrow(/ck_review_immutable/);
+      await expect(
+        w.prisma.client.$executeRawUnsafe(
+          `DELETE FROM signature_authority_review WHERE contract_id = $1`,
+          draft.id,
+        ),
+      ).rejects.toThrow(/ck_review_immutable/);
+    });
+
+    it('flags once, also when the policy was already suspended by a signature attempt and the move is reconciled later', async () => {
+      const { draft, policyId, evidence } = await signedUnderUnion();
+      const suspension = api.app.get(PolicySuspensionService);
+      const cause = {
+        reason: 'ORGANIZATION_MOVED' as const,
+        eventId: ulid(),
+        movedOrganizationId: draft.employer,
+        movedAt: new Date(evidence.hierarchyReadAt!.getTime() + 1),
+        correlationId: ulid(),
+        callerService: 'organization-service',
+      };
+      // A later signing attempt on another contract of this employer suspends the stranded policy first.
+      await suspension.suspend(
+        { id: policyId, organizationId: draft.employer },
+        { reason: 'SIGNING_RECHECK', correlationId: ulid(), callerService: 'contract-service' },
+      );
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      expect(await reviewsOf(draft.id)).toEqual([]);
+
+      await suspension.suspend({ id: policyId, organizationId: draft.employer }, cause);
+      await suspension.suspend({ id: policyId, organizationId: draft.employer }, cause);
+      expect(await reviewsOf(draft.id)).toHaveLength(1);
+      expect(await flaggedEventsOf(draft.employer)).toHaveLength(1);
+    });
+  });
+
+  describe('a refused signature leaves a durable audit record, committed though the request fails', () => {
+    const refusals = (employer: string) =>
+      eventsOf(api.prisma, employer, 'CONTRACT_SIGNATURE_REFUSED');
+
+    it('no policy in force, a suspended one, and one whose union lost the employer: each refusal is recorded once, with its closed reason', async () => {
+      // No policy at all.
+      const none = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      await sign(none.id, person(none.employer, ['ORGANIZATION_ADMIN'])).expect(422);
+      const noneEvents = await refusals(none.employer);
+      expect(noneEvents).toHaveLength(1);
+      expect(noneEvents[0]!.payload).toMatchObject({
+        contractId: none.id,
+        side: 'EMPLOYER',
+        reason: 'SIGNATURE_POLICY_REQUIRED',
+        policyId: null,
+      });
+      expect(await signaturesOf(none.id)).toEqual([]);
+
+      // A policy the union no longer governs: refused (403), the policy is suspended, and both are recorded.
+      const union = newOrg();
+      const stranded = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, stranded.employer);
+      api.hierarchy.adopt(newOrg(), stranded.employer);
+      const user = person(stranded.employer, ['ORGANIZATION_ADMIN']);
+      await sign(stranded.id, user).expect(403);
+      const strandedEvents = await refusals(stranded.employer);
+      expect(strandedEvents).toHaveLength(1);
+      expect(strandedEvents[0]!.payload).toMatchObject({
+        reason: 'POLICY_AUTHOR_NOT_GOVERNING',
+        policyId,
+        side: 'EMPLOYER',
+      });
+      expect(strandedEvents[0]!.payload.refusedBy).toEqual(expect.any(String));
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+
+      // The policy is now suspended: the next attempt is refused for want of a policy, and recorded too.
+      await sign(stranded.id, user).expect(422);
+      expect((await refusals(stranded.employer)).map((e) => e.payload.reason)).toEqual([
+        'POLICY_AUTHOR_NOT_GOVERNING',
+        'SIGNATURE_POLICY_REQUIRED',
+      ]);
+    });
+
+    it('records no refusal for a signature that fails for another reason, or one that cannot be confirmed', async () => {
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      await activeUnionPolicy(newOrg(), draft.employer);
+      api.hierarchy.unavailable = true;
+      await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(503);
+      api.hierarchy.unavailable = false;
+      // A person the policy does not name: 403, a role refusal — not a want of authority in force.
+      await sign(draft.id, person(draft.employer, ['CONTRACTOR'])).expect(403);
+      expect(await refusals(draft.employer)).toEqual([]);
+    });
+  });
+
+  describe('a move in the very millisecond the first task was made is not lost (review round 3)', () => {
+    it('advances the generation of the open task by row identity, whatever instants the two moves carry', async () => {
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(newOrg(), draft.employer);
+      const queue = api.app.get(PolicyReconciliationRepository);
+      const row = (id: string) => ({
+        id,
+        organizationId: draft.employer,
+        policyId,
+        unionId: 'ORG_U',
+        sourceEventId: `EVT_${id}`,
+        movedOrganizationId: draft.employer,
+        correlationId: 'COR_1',
+      });
+      // One instant for everything: the task's creation, the move, and the second move's `now()`.
+      const sameInstant = new Date('2026-10-06T12:00:00.000Z');
+
+      const first = await api.prisma.transaction((tx) =>
+        queue.enqueue(tx, [row('PRT_same_ms_1')], sameInstant, sameInstant),
+      );
+      const second = await api.prisma.transaction((tx) =>
+        queue.enqueue(tx, [row('PRT_same_ms_2')], sameInstant, sameInstant),
+      );
+      const third = await api.prisma.transaction((tx) =>
+        queue.enqueue(tx, [row('PRT_same_ms_3')], sameInstant, sameInstant),
+      );
+
+      expect([first, second, third]).toEqual([1, 0, 0]);
+      const tasks = await tasksOf(policyId);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).toMatchObject({ id: 'PRT_same_ms_1', generation: 2, status: 'PENDING' });
+      // The first move's event and instant stay: the earlier instant flags more, never fewer.
+      expect(tasks[0]!.sourceEventId).toBe('EVT_PRT_same_ms_1');
+      expect(tasks[0]!.movedAt!.toISOString()).toBe(sameInstant.toISOString());
     });
   });
 });

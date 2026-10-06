@@ -91,6 +91,8 @@ describe('OrganizationMovedConsumer (Q-83)', () => {
     expect(enqueueMove).toHaveBeenCalledWith({
       eventId: 'EVT_1',
       movedOrganizationId: 'ORG_MOVED',
+      // The move's own instant, from the envelope: what a signature's evidence is compared with.
+      movedAt: new Date('2026-10-06T10:00:00.000Z'),
       correlationId: 'COR_1',
     });
     expect(info).toHaveBeenCalledWith(expect.stringContaining('2 of 3 union-written policies'));

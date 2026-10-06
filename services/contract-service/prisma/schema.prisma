@@ -152,11 +152,44 @@ model ContractSignature {
   policyId      String? @map("policy_id")
   policyVersion Int?    @map("policy_version")
 
-  contract Contract        @relation(fields: [organizationId, contractId], references: [organizationId, id])
-  policy   ApprovalPolicy? @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  /// The hierarchy evidence an employer signature under a union-written policy rested on (D-050):
+  /// the author organization asked about, the answer (always WITHIN — any other refused the
+  /// signature), when it arrived, and the latest instant the signature could have committed. All
+  /// four or none (`ck_signature_hierarchy_evidence`); none for the contractor's side and for a
+  /// platform-written policy, which needs no hierarchy.
+  hierarchyAuthorOrganizationId String?   @map("hierarchy_author_organization_id")
+  hierarchyAnswer               String?   @map("hierarchy_answer")
+  hierarchyReadAt               DateTime? @map("hierarchy_read_at") @db.Timestamptz(3)
+  hierarchyCommitDeadline       DateTime? @map("hierarchy_commit_deadline") @db.Timestamptz(3)
+
+  contract Contract                  @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  policy   ApprovalPolicy?           @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  review   SignatureAuthorityReview?
 
   @@unique([organizationId, contractId, side], map: "ux_contract_signature_side")
   @@map("contract_signature")
+}
+
+/// A signature a move may have raced (D-050): flagged, never revoked. Written once by the
+/// reconciliation of an ORGANIZATION_MOVED that stranded the policy the signature rests on, and
+/// never changed (`tg_signature_authority_review_immutable`).
+model SignatureAuthorityReview {
+  id             String       @id
+  organizationId String       @map("organization_id")
+  contractId     String       @map("contract_id")
+  side           ContractSide
+  policyId       String       @map("policy_id")
+  /// `AUTHORITY_CHANGED_DURING_SIGNING` (the only one so far).
+  reason         String
+  causeEventId   String       @map("cause_event_id")
+  movedAt        DateTime     @map("moved_at") @db.Timestamptz(3)
+  flaggedAt      DateTime     @map("flagged_at") @db.Timestamptz(3)
+
+  signature ContractSignature @relation(fields: [organizationId, contractId, side], references: [organizationId, contractId, side], onDelete: Restrict, onUpdate: Restrict)
+  policy    ApprovalPolicy    @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, contractId, side], map: "ux_signature_authority_review_signature")
+  @@map("signature_authority_review")
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +266,7 @@ model ApprovalPolicy {
   steps               ApprovalPolicyStep[]
   signatures          ContractSignature[]
   reconciliationTasks PolicyReconciliationTask[]
+  reviews             SignatureAuthorityReview[]
 
   // SQL-only: `ux_approval_policy_active` — at most one ACTIVE policy per
   // (organization, workflow key).
@@ -277,6 +311,9 @@ model PolicyReconciliationTask {
   createdAt DateTime  @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime  @map("updated_at") @db.Timestamptz(3)
   doneAt    DateTime? @map("done_at") @db.Timestamptz(3)
+  /// When the move took effect (the event's own instant): what a signature's hierarchy evidence is
+  /// compared with. NULL only on a task queued before it existed; `created_at` stands in.
+  movedAt   DateTime? @map("moved_at") @db.Timestamptz(3)
 
   policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 

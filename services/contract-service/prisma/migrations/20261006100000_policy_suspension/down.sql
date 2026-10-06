@@ -1,14 +1,14 @@
 -- =============================================================================
 -- Reverse of `migration.sql` (20261006100000_policy_suspension, CON-003 PR 2 review round 2).
 --
--- **Refuses, and changes nothing, once a policy has been suspended.** That a policy stopped
+-- **Refuses, and changes nothing, while a reconciliation task is open** (a re-check a move asked
+-- for that nobody has done), **or once a policy has been suspended.** That a policy stopped
 -- authorising signatures, when, and why, is the record of why a signature was refused for an
 -- employer; the older enum cannot hold the value, and turning the policy into a RETIRED one would
 -- rewrite who ended it. So this script stops, with a message, when any `approval_policy` row is
--- SUSPENDED. On a database where no policy was suspended it restores the previous schema exactly;
--- the queue (`policy_reconciliation_task`) is work still to do, not a record, and is dropped with
--- its open tasks — a policy whose task was waiting is no longer re-checked after a move until a
--- signature is attempted on it.
+-- SUSPENDED or any `policy_reconciliation_task` is still open. On a database where neither holds
+-- it restores the previous schema exactly; the queue's finished (DONE) tasks are history of work
+-- already done and go with the table.
 --
 -- The whole file is one transaction, so it holds with `psql --file` (autocommit by default) as with
 -- a single `-c`: the lock, the check and every change commit together or not at all, and nothing
@@ -25,10 +25,14 @@ LOCK TABLE "approval_policy", "policy_reconciliation_task" IN ACCESS EXCLUSIVE M
 DO $preflight_suspension$
 DECLARE
   suspended integer;
+  open_tasks integer;
 BEGIN
   SELECT count(*) INTO suspended FROM "approval_policy" WHERE "status"::text = 'SUSPENDED';
-  IF suspended > 0 THEN
-    RAISE EXCEPTION 'down refused: % suspended approval polic(ies) exist; nothing was changed', suspended
+  -- An open task is a re-check a move asked for and nobody has done yet: dropping it would
+  -- leave a stranded policy in force with nothing left to find it (review round 3).
+  SELECT count(*) INTO open_tasks FROM "policy_reconciliation_task" WHERE "status"::text = 'PENDING';
+  IF suspended > 0 OR open_tasks > 0 THEN
+    RAISE EXCEPTION 'down refused: % suspended approval polic(ies) and % open reconciliation task(s) exist; nothing was changed', suspended, open_tasks
       USING ERRCODE = 'check_violation';
   END IF;
 END

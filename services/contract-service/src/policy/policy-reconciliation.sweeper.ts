@@ -164,6 +164,7 @@ export class PolicyReconciliationSweeper {
               reason: 'ORGANIZATION_MOVED',
               eventId: task.sourceEventId,
               movedOrganizationId: task.movedOrganizationId,
+              movedAt: task.movedAt,
               correlationId: task.correlationId,
               callerService: MOVE_PRODUCER,
             },

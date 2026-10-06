@@ -121,6 +121,8 @@ export class OrganizationMovedConsumer {
     const outcome = await this.suspension.enqueueMove({
       eventId: envelope.eventId,
       movedOrganizationId: payload.data.organizationId,
+      // The move's own instant — organization-service's, in the transaction that made the move.
+      movedAt: new Date(envelope.occurredAt),
       correlationId: envelope.correlationId,
     });
     this.logger.info(

@@ -445,6 +445,17 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
+      // A review of a signature (D-050) names its signature and its policy, and is never deleted
+      // by the service either: it goes first of all.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "signature_authority_review" DISABLE TRIGGER "tg_signature_authority_review_immutable"',
+      );
+      await tx.signatureAuthorityReview.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "signature_authority_review" ENABLE TRIGGER "tg_signature_authority_review_immutable"',
+      );
       // A signature is never deleted by the service either (`tg_contract_signature_immutable`);
       // it goes first, because it references its contract.
       await tx.$executeRawUnsafe(

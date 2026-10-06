@@ -6,6 +6,8 @@ import type { ContractStateName } from './contract.state-machine';
 export interface SignatureFact {
   readonly side: 'EMPLOYER' | 'CONTRACTOR';
   readonly signedAt: Date;
+  /** The signature is flagged: the authority it rested on may have changed while it was made (D-050). */
+  readonly reviewRequired?: boolean;
 }
 
 /**
@@ -33,6 +35,10 @@ export function toContractView(
     status: row.status as ContractStateName,
     employerSignedAt: signedAt('EMPLOYER'),
     contractorSignedAt: signedAt('CONTRACTOR'),
+    authorityReviewRequired: signatures.some((signature) => signature.reviewRequired === true),
+    authorityReviewReason: signatures.some((signature) => signature.reviewRequired === true)
+      ? 'AUTHORITY_CHANGED_DURING_SIGNING'
+      : null,
     cancelReasonCode: row.cancelReasonCode,
     cancelNote: row.cancelNote,
     awardedAt: row.awardedAt.toISOString(),

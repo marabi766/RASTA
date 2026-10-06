@@ -41,6 +41,8 @@ export interface ClaimedTask {
   /** The generation at claim: what `complete` must still find for a "nothing to do" verdict. */
   generation: number;
   leaseToken: string;
+  /** When the move took effect (the event's instant); the task's creation for an older task. */
+  movedAt: Date;
 }
 
 /**
@@ -70,33 +72,55 @@ export class PolicyReconciliationRepository {
    * (`ux_policy_reconciliation_open`): `ON CONFLICT DO NOTHING`, so a replay, a `.retry` delivery
    * and a second move while the first is queued add nothing. Returns the tasks actually created.
    */
-  async enqueue(tx: ExtendedPrismaClient, rows: NewTask[], at: Date): Promise<number> {
+  async enqueue(
+    tx: ExtendedPrismaClient,
+    rows: NewTask[],
+    /** When the move took effect: the event's own instant. */
+    movedAt: Date,
+    /** This transaction's `now()`. */
+    at: Date,
+  ): Promise<number> {
     if (rows.length === 0) return 0;
+    // One statement decides, per policy, between "a new task" and "the open one already there",
+    // by the unique index itself — never by comparing instants. A move that coalesces into an open
+    // task must not lose the re-check: a sweeper holding it may have asked the hierarchy before the
+    // move landed, so the conflicting task's generation advances (that sweeper then cannot finish it
+    // on its stale answer) and it falls due now. The lease is left alone (a live claim is not
+    // stolen), and the first move's event and instant stay — the earlier instant flags more, never
+    // fewer, signatures (D-050). `xmax = 0` is what PostgreSQL gives a row this statement inserted
+    // rather than updated, so the count is of tasks created, whatever instant either carries — a
+    // second move in the very millisecond the first task was made included.
     const result = await runUnscoped(
       'an organization move queues a task for every union-written policy it could have stranded, in any tenant (Q-83)',
       () =>
-        tx.policyReconciliationTask.createMany({
-          data: rows.map((row) => ({ ...row, nextAttemptAt: at, createdAt: at, updatedAt: at })),
-          skipDuplicates: true,
-        }),
+        tx.$queryRawUnsafe<{ inserted: boolean }[]>(
+          `INSERT INTO policy_reconciliation_task
+                  (id, organization_id, policy_id, union_id, source_event_id,
+                   moved_organization_id, correlation_id, moved_at,
+                   next_attempt_at, created_at, updated_at)
+           SELECT t.id, t.organization_id, t.policy_id, t.union_id, t.source_event_id,
+                  t.moved_organization_id, t.correlation_id, $8::timestamptz,
+                  $9::timestamptz, $9::timestamptz, $9::timestamptz
+             FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+                  AS t(id, organization_id, policy_id, union_id, source_event_id,
+                       moved_organization_id, correlation_id)
+           ON CONFLICT (policy_id) WHERE status = 'PENDING'
+           DO UPDATE SET generation = policy_reconciliation_task.generation + 1,
+                         next_attempt_at = LEAST(policy_reconciliation_task.next_attempt_at, $9::timestamptz),
+                         updated_at = $9::timestamptz
+           RETURNING (xmax = 0) AS inserted`,
+          rows.map((row) => row.id),
+          rows.map((row) => row.organizationId),
+          rows.map((row) => row.policyId),
+          rows.map((row) => row.unionId),
+          rows.map((row) => row.sourceEventId),
+          rows.map((row) => row.movedOrganizationId),
+          rows.map((row) => row.correlationId),
+          movedAt,
+          at,
+        ),
     );
-
-    // The coalesced ones — an open task that was already there — must not lose this move: a
-    // sweeper holding one may have asked the hierarchy before it landed. Bump the generation, so
-    // that sweeper cannot finish the task, and make it due now. The lease is left alone (a live
-    // claim is not stolen); the tasks created above carry this transaction's `at` and are skipped.
-    await runUnscoped('a later move re-opens the open tasks it coalesces into (Q-83)', () =>
-      tx.$executeRawUnsafe(
-        `UPDATE policy_reconciliation_task
-            SET generation = generation + 1,
-                next_attempt_at = LEAST(next_attempt_at, $2::timestamptz),
-                updated_at = $2::timestamptz
-          WHERE status = 'PENDING' AND created_at < $2::timestamptz AND policy_id = ANY($1::text[])`,
-        rows.map((row) => row.policyId),
-        at,
-      ),
-    );
-    return result.count;
+    return result.filter((row) => row.inserted).length;
   }
 
   /**
@@ -131,7 +155,8 @@ export class PolicyReconciliationRepository {
                   correlation_id AS "correlationId",
                   attempts,
                   generation,
-                  lease_token AS "leaseToken"`,
+                  lease_token AS "leaseToken",
+                  COALESCE(moved_at, created_at) AS "movedAt"`,
           limit,
           leaseSeconds,
           token,

@@ -9,7 +9,7 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ClaimFence } from '../shared/idempotency';
-import { transactionNow } from '../shared/clock';
+import { databaseClock, transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
 import { OrganizationDirectory } from '../organization/organization-directory';
 import { UNION_ROLE, signingRoleUnder } from '../policy/policy.access';
@@ -17,7 +17,7 @@ import { PolicyRepository } from '../policy/policy.repository';
 import { PolicySuspensionService } from '../policy/policy-suspension.service';
 import { SIGNATURE_WORKFLOW } from '../policy/policy.state-machine';
 import { ENV } from '../tokens';
-import { ContractRepository } from './contract.repository';
+import { ContractRepository, type HierarchyEvidence } from './contract.repository';
 import { transitionFor } from './contract.state-machine';
 import type {
   CancelContractDto,
@@ -38,24 +38,33 @@ function signerOf(signature: ContractSignature) {
 }
 
 /**
- * The policy in force was written by a union that no longer governs the employer. Thrown from
- * inside the signing transaction — which rolls back, so nothing is recorded — and turned by `sign`
- * into the caller's refusal after it has suspended the policy in a transaction of its own (a
- * suspension written inside the rolled-back one would be lost with it).
+ * The employer's signature was refused for want of authority: no policy in force (none was ever
+ * approved, or it was suspended, retired or replaced), or the policy in force was written by a
+ * union that no longer governs the employer. Thrown from inside the signing transaction — which
+ * rolls back, so nothing is recorded — and turned by `sign` into the caller's refusal after two
+ * things written in transactions of their own, because anything written inside the rolled-back one
+ * would be lost with it: the policy's suspension (when it is stranded), and the durable refusal
+ * audit record (`CONTRACT_SIGNATURE_REFUSED`, review round 3).
  */
-class StrandedSigningPolicy extends Error {
+class SigningAuthorityRefused extends Error {
   constructor(
-    readonly policyId: string,
+    readonly reason: 'SIGNATURE_POLICY_REQUIRED' | 'POLICY_AUTHOR_NOT_GOVERNING',
+    readonly contractId: string,
     readonly organizationId: string,
+    /** The policy that was in force and stranded; null when there was none. */
+    readonly policyId: string | null,
     readonly refusal: RastaError,
   ) {
-    super('The signing policy in force is stranded');
+    super('The signature was refused for want of authority');
   }
 }
 
-const factOf = (signature: ContractSignature): SignatureFact => ({
+const factOf = (
+  signature: ContractSignature & { review?: { id: string } | null },
+): SignatureFact => ({
   side: signature.side,
   signedAt: signature.signedAt,
+  reviewRequired: signature.review != null,
 });
 
 /**
@@ -215,30 +224,67 @@ export class ContractService {
           return fence ? fence.complete(tx, view) : view;
         },
         // The hierarchy is asked inside it (`authorityOf`), under its own deadline.
-        { timeoutMs: this.env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + 10_000 },
+        { timeoutMs: this.signingTransactionTimeoutMs() },
       );
     } catch (error) {
-      if (!(error instanceof StrandedSigningPolicy)) throw error;
-      // Not only refused: suspended, with the same event and audit as the sweeper's (Q-83), so
-      // the policy does not wait for a queued task to stop being in force. The caller's refusal
-      // is the same either way, and a suspension that fails must not turn it into another error.
-      await this.suspension
-        .suspend(
-          { id: error.policyId, organizationId: error.organizationId },
-          {
-            reason: 'SIGNING_RECHECK',
-            correlationId: getContext().correlationId,
-            callerService: SERVICE_NAME,
-          },
-        )
-        .catch((suspendError: unknown) => {
-          this.logger.warn(
-            `Could not suspend stranded signing policy ${error.policyId}: ` +
-              `${suspendError instanceof RastaError ? suspendError.code : 'INTERNAL'}`,
-          );
-        });
+      if (!(error instanceof SigningAuthorityRefused)) throw error;
+      // Not only refused: a stranded policy is suspended, with the same event and audit as the
+      // sweeper's (Q-83), so it does not wait for a queued task to stop being in force. The
+      // caller's refusal is the same either way, and a write that fails must not turn it into
+      // another error.
+      if (error.reason === 'POLICY_AUTHOR_NOT_GOVERNING' && error.policyId) {
+        const policyId = error.policyId;
+        await this.suspension
+          .suspend(
+            { id: policyId, organizationId: error.organizationId },
+            {
+              reason: 'SIGNING_RECHECK',
+              correlationId: getContext().correlationId,
+              callerService: SERVICE_NAME,
+            },
+          )
+          .catch((suspendError: unknown) => {
+            this.logger.warn(
+              `Could not suspend stranded signing policy ${policyId}: ` +
+                `${suspendError instanceof RastaError ? suspendError.code : 'INTERNAL'}`,
+            );
+          });
+      }
+      await this.recordRefusal(error).catch((auditError: unknown) => {
+        this.logger.error(
+          `Could not record the refusal of a signature (${error.reason}): ` +
+            `${auditError instanceof RastaError ? auditError.code : 'INTERNAL'}`,
+        );
+      });
       throw error.refusal;
     }
+  }
+
+  /**
+   * The durable audit record of a signature refused for want of authority: `CONTRACT_SIGNATURE_
+   * REFUSED` through the outbox, committed in a transaction of its own — the signing transaction
+   * rolled back, and a refusal that left no trace would be invisible to the one audit that must
+   * show who tried to sign for an employer when nobody had the authority (S-06).
+   */
+  private async recordRefusal(refused: SigningAuthorityRefused): Promise<void> {
+    await this.prisma.transaction(async (tx) => {
+      const at = await transactionNow(tx);
+      await this.publisher.enqueue(tx, {
+        eventName: 'CONTRACT_SIGNATURE_REFUSED',
+        aggregateId: refused.contractId,
+        organizationId: refused.organizationId,
+        payload: {
+          contractId: refused.contractId,
+          organizationId: refused.organizationId,
+          side: 'EMPLOYER',
+          reason: refused.reason,
+          policyId: refused.policyId,
+          refusedBy: getContext().userId ?? 'unknown',
+          refusedAt: at.toISOString(),
+        },
+        occurredAt: at,
+      });
+    });
   }
 
   /**
@@ -257,9 +303,17 @@ export class ContractService {
     contract: Contract,
     side: ContractSideName,
     contractorRole: string | undefined,
-  ): Promise<{ role: string; policy: { id: string; version: number } | null }> {
+  ): Promise<{
+    role: string;
+    policy: { id: string; version: number } | null;
+    evidence: HierarchyEvidence | null;
+  }> {
     if (side === 'CONTRACTOR') {
-      return { role: contractorRole ?? this.access.contractorSigningRole(), policy: null };
+      return {
+        role: contractorRole ?? this.access.contractorSigningRole(),
+        policy: null,
+        evidence: null,
+      };
     }
     await this.policies.lockPolicySlot(tx, contract.organizationId, SIGNATURE_WORKFLOW);
     const policy = await this.policies.findActivePolicyOf(
@@ -268,13 +322,19 @@ export class ContractService {
       SIGNATURE_WORKFLOW,
     );
     if (!policy) {
-      throw this.refused(
-        'sign',
-        ruleRefusal(
-          'No signing policy is in force for the employer: nobody may sign for it yet',
-          'signature',
-          ['SIGNATURE_POLICY_REQUIRED'],
-          { contractId: contract.id },
+      throw new SigningAuthorityRefused(
+        'SIGNATURE_POLICY_REQUIRED',
+        contract.id,
+        contract.organizationId,
+        null,
+        this.refused(
+          'sign',
+          ruleRefusal(
+            'No signing policy is in force for the employer: nobody may sign for it yet',
+            'signature',
+            ['SIGNATURE_POLICY_REQUIRED'],
+            { contractId: contract.id },
+          ),
         ),
       );
     }
@@ -285,15 +345,22 @@ export class ContractService {
     // same moment is either entirely before this or entirely after it. "Could not confirm" is
     // an upstream error that rolls this back: nothing is recorded on a relation that was not
     // confirmed (fail closed). A platform administrator's policy needs no hierarchy.
+    let evidence: HierarchyEvidence | null = null;
     if (policy.authorRole === UNION_ROLE) {
+      // The instant the question was asked, not the one the answer came back: organization-service
+      // read its hierarchy somewhere in between, so the earlier instant is the safe one — a move
+      // after it is one the answer may predate (D-050).
+      const askedAt = await databaseClock(tx);
       const within = await this.directory.isWithin(
         policy.authorOrganizationId,
         contract.organizationId,
       );
       if (!within) {
-        throw new StrandedSigningPolicy(
-          policy.id,
+        throw new SigningAuthorityRefused(
+          'POLICY_AUTHOR_NOT_GOVERNING',
+          contract.id,
           contract.organizationId,
+          policy.id,
           this.refused(
             'sign',
             forbiddenRefusal(
@@ -305,6 +372,15 @@ export class ContractService {
           ),
         );
       }
+      // The signing transaction's own timeout is the latest this signature can commit at
+      // (`sign`), so a move landing between `askedAt` and that deadline is one it may have raced.
+      evidence = {
+        authorOrganizationId: policy.authorOrganizationId,
+        readAt: askedAt,
+        commitDeadline: new Date(
+          (await transactionNow(tx)).getTime() + this.signingTransactionTimeoutMs(),
+        ),
+      };
     }
     const roles = getContext().roles;
     const role = signingRoleUnder(policy, roles);
@@ -317,7 +393,12 @@ export class ContractService {
         ),
       );
     }
-    return { role, policy: { id: policy.id, version: policy.policyVersion } };
+    return { role, policy: { id: policy.id, version: policy.policyVersion }, evidence };
+  }
+
+  /** How long the signing transaction may run: the hierarchy question's deadline and some room. */
+  private signingTransactionTimeoutMs(): number {
+    return this.env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + 10_000;
   }
 
   private async signLocked(
@@ -407,6 +488,7 @@ export class ContractService {
       authorityRole: authority.role,
       policyId: authority.policy?.id ?? null,
       policyVersion: authority.policy?.version ?? null,
+      hierarchyEvidence: authority.evidence,
       correlationId,
       at,
     });

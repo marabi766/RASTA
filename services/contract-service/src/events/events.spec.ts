@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four and the approval policy’s six, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s six and the authority review’s two, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -46,6 +46,8 @@ describe('the contract events', () => {
       'APPROVAL_POLICY_ACTIVATED',
       'APPROVAL_POLICY_RETIRED',
       'APPROVAL_POLICY_SUSPENDED',
+      'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
+      'CONTRACT_SIGNATURE_REFUSED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -196,6 +198,68 @@ describe('CONTRACT_SIGNATURE_RECORDED', () => {
       validateContractPayload('CONTRACT_SIGNATURE_RECORDED', {
         ...recorded,
         authorityRole: 'not a role',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('the authority events (D-050, review round 3)', () => {
+  const flagged = {
+    contractId: 'CTR_1',
+    organizationId: 'ORG_E',
+    side: 'EMPLOYER',
+    policyId: 'APL_1',
+    policyVersion: 2,
+    reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+    causeEventId: 'EVT_1',
+    movedAt: '2026-10-06T10:00:00.000Z',
+    flaggedAt: '2026-10-06T10:00:05.000Z',
+  };
+  const refused = {
+    contractId: 'CTR_1',
+    organizationId: 'ORG_E',
+    side: 'EMPLOYER',
+    reason: 'POLICY_AUTHOR_NOT_GOVERNING',
+    policyId: 'APL_1',
+    refusedBy: 'USR_1',
+    refusedAt: '2026-10-06T10:00:05.000Z',
+  };
+
+  it('accept the payloads as published, keyed by the contract they concern', () => {
+    expect(validateContractPayload('CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', flagged)).toEqual(
+      flagged,
+    );
+    expect(validateContractPayload('CONTRACT_SIGNATURE_REFUSED', refused)).toEqual(refused);
+    expect(
+      validateContractPayload('CONTRACT_SIGNATURE_REFUSED', { ...refused, policyId: null })
+        .policyId,
+    ).toBeNull();
+    expect(resolvePartitionKey('CONTRACT_SIGNATURE_REFUSED', refused).key).toBe('CTR_1');
+    expect(AGGREGATE_OF.CONTRACT_SIGNATURE_AUTHORITY_FLAGGED).toBe(AGGREGATE_TYPE);
+  });
+
+  it.each(['note', 'message', 'amountMinor', 'role'])(
+    'refuse %s: no free text, no amount',
+    (field) => {
+      for (const [name, payload] of [
+        ['CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', flagged],
+        ['CONTRACT_SIGNATURE_REFUSED', refused],
+      ] as const) {
+        expect(() => validateContractPayload(name, { ...payload, [field]: 'x' })).toThrow(
+          /does not match its published contract/,
+        );
+      }
+    },
+  );
+
+  it('name only closed reasons', () => {
+    expect(() =>
+      validateContractPayload('CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', { ...flagged, reason: 'X' }),
+    ).toThrow();
+    expect(() =>
+      validateContractPayload('CONTRACT_SIGNATURE_REFUSED', {
+        ...refused,
+        reason: 'CONTRACT_NOT_DRAFT',
       }),
     ).toThrow();
   });

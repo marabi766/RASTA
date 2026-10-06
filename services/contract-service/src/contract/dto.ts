@@ -90,6 +90,17 @@ export const contractViewSchema = z
       .string()
       .nullable()
       .describe('When the winning contractor accepted the draft (ISO 8601, UTC), or null.'),
+    authorityReviewRequired: z
+      .boolean()
+      .describe(
+        'True when the employer’s signature is flagged for review: an organization move that ' +
+          'stranded the signing policy landed while it was being made (D-050). The contract stays ' +
+          'as it is — a flag is never a revocation or a cancellation.',
+      ),
+    authorityReviewReason: z
+      .literal('AUTHORITY_CHANGED_DURING_SIGNING')
+      .nullable()
+      .describe('The closed reason of the flag, or null when there is none.'),
     cancelReasonCode: z
       .string()
       .nullable()

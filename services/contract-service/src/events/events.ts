@@ -32,6 +32,8 @@ export const CONTRACT_EVENTS = {
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
   APPROVAL_POLICY_SUSPENDED: 'APPROVAL_POLICY_SUSPENDED',
+  CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
+  CONTRACT_SIGNATURE_REFUSED: 'CONTRACT_SIGNATURE_REFUSED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -217,6 +219,46 @@ export const approvalPolicySuspendedPayload = z
   })
   .strict();
 
+/**
+ * An employer signature may rest on authority that changed while it was being made (D-050): an
+ * ORGANIZATION_MOVED that stranded the policy it was made under landed between the hierarchy
+ * answer and the commit. Flagged for review, never revoked. Identifiers, a closed code and
+ * instants only.
+ */
+export const contractSignatureAuthorityFlaggedPayload = z
+  .object({
+    contractId: id,
+    organizationId: id,
+    side: z.literal('EMPLOYER'),
+    policyId: id,
+    policyVersion: positive,
+    reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
+    /** The ORGANIZATION_MOVED event that stranded the policy, and when the move took effect. */
+    causeEventId: id,
+    movedAt: instant,
+    flaggedAt: instant,
+  })
+  .strict();
+
+/**
+ * A signature was refused for want of authority (the audit record of the refusal, written in a
+ * transaction of its own so it survives the request failing): no policy in force, or the union that
+ * wrote it no longer governs the employer. Who asked, for which contract, and the closed reason —
+ * no free text.
+ */
+export const contractSignatureRefusedPayload = z
+  .object({
+    contractId: id,
+    organizationId: id,
+    side: z.literal('EMPLOYER'),
+    reason: z.enum(['SIGNATURE_POLICY_REQUIRED', 'POLICY_AUTHOR_NOT_GOVERNING']),
+    /** The policy that was in force and stranded; null when none was. */
+    policyId: id.nullable(),
+    refusedBy: id,
+    refusedAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -228,6 +270,8 @@ export const CONTRACT_EVENT_SCHEMAS = {
   APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
   APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
   APPROVAL_POLICY_SUSPENDED: approvalPolicySuspendedPayload,
+  CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: contractSignatureAuthorityFlaggedPayload,
+  CONTRACT_SIGNATURE_REFUSED: contractSignatureRefusedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

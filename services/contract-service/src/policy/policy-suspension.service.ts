@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { SERVICE_NAME } from '../config/env';
+import { ContractRepository } from '../contract/contract.repository';
 import { EventPublisher } from '../events/publisher';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { transactionNow } from '../shared/clock';
@@ -34,6 +35,8 @@ export type SuspensionCause =
       eventId: string;
       /** The organization that moved — a trigger, never the answer. */
       movedOrganizationId: string;
+      /** When the move took effect: the event's own instant (D-050). */
+      movedAt: Date;
       correlationId: string;
       callerService: string;
     }
@@ -45,6 +48,8 @@ export type SuspendResult = 'SUSPENDED' | 'NOTHING' | 'NOT_OWNER';
 export interface MoveCause {
   eventId: string;
   movedOrganizationId: string;
+  /** When the move took effect: the event's `occurredAt`. */
+  movedAt: Date;
   correlationId: string;
 }
 
@@ -121,6 +126,7 @@ export class PolicySuspensionService {
     private readonly repository: PolicyRepository,
     private readonly events: EventPublisher,
     private readonly reconciliations: PolicyReconciliationRepository,
+    private readonly contracts: ContractRepository,
   ) {}
 
   /**
@@ -144,6 +150,7 @@ export class PolicySuspensionService {
           movedOrganizationId: cause.movedOrganizationId,
           correlationId: cause.correlationId,
         })),
+        cause.movedAt,
         at,
       );
     });
@@ -208,11 +215,16 @@ export class PolicySuspensionService {
       found.workflowKey as WorkflowKey,
     );
     const policy = await this.repository.findPolicy(tx, policyId);
-    if (policy?.status !== 'ACTIVE' && policy?.status !== 'PENDING_PLATFORM_APPROVAL') {
-      return false;
-    }
+    if (!policy) return false;
     // A policy the platform wrote never depends on the hierarchy: not suspended by a move.
     if (policy.authorRole !== UNION_ROLE) return false;
+    if (policy.status === 'SUSPENDED' || policy.status === 'RETIRED') {
+      // Out of force already — a signature attempt found it stranded first, or it was replaced —
+      // but a signature that raced this very move may rest on it all the same (D-050).
+      if (cause.reason === 'ORGANIZATION_MOVED') await this.flagRaced(tx, policy, cause, at);
+      return false;
+    }
+    if (policy.status !== 'ACTIVE' && policy.status !== 'PENDING_PLATFORM_APPROVAL') return false;
     const from = policy.status as PolicyStateName;
     assertPolicyTransition(policy.id, from, 'SUSPENDED');
 
@@ -256,10 +268,56 @@ export class PolicySuspensionService {
       ...(cause.reason === 'ORGANIZATION_MOVED' ? { causationId: cause.eventId } : {}),
       occurredAt: at,
     });
+    if (cause.reason === 'ORGANIZATION_MOVED') await this.flagRaced(tx, policy, cause, at);
     this.logger.warn(
       `Suspended approval policy ${policy.id} (${cause.reason}): ${policy.authorOrganizationId} ` +
         `no longer governs ${policy.organizationId}`,
     );
     return true;
+  }
+
+  /**
+   * Flags, for review, every employer signature under this policy that the move may have raced
+   * (D-050): its hierarchy answer predates the move and it could still have committed after it.
+   * Never revokes or cancels anything; one review row and one audit event per signature, in the
+   * transaction that found the policy stranded, under the policy slot's lock.
+   */
+  private async flagRaced(
+    tx: ExtendedPrismaClient,
+    policy: { id: string; organizationId: string },
+    cause: Extract<SuspensionCause, { reason: 'ORGANIZATION_MOVED' }>,
+    at: Date,
+  ): Promise<void> {
+    const flagged = await this.contracts.flagRacedSignatures(tx, {
+      organizationId: policy.organizationId,
+      policyId: policy.id,
+      causeEventId: cause.eventId,
+      movedAt: cause.movedAt,
+      at,
+    });
+    for (const signature of flagged) {
+      await this.events.enqueue(tx, {
+        eventName: 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
+        aggregateId: signature.contractId,
+        organizationId: policy.organizationId,
+        payload: {
+          contractId: signature.contractId,
+          organizationId: policy.organizationId,
+          side: 'EMPLOYER',
+          policyId: policy.id,
+          policyVersion: signature.policyVersion,
+          reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+          causeEventId: cause.eventId,
+          movedAt: cause.movedAt.toISOString(),
+          flaggedAt: at.toISOString(),
+        },
+        causationId: cause.eventId,
+        occurredAt: at,
+      });
+      this.logger.warn(
+        `Signature of contract ${signature.contractId} flagged for review: the authority it rested ` +
+          `on changed while it was being made (${cause.eventId})`,
+      );
+    }
   }
 }

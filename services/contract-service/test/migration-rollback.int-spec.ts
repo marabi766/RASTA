@@ -129,6 +129,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const REVIEW = '20261006120000_signature_authority_review';
   const SUSPENSION = '20261006100000_policy_suspension';
   const SIGNING_POLICY = '20261005150000_signing_policy';
   const SIGN_CANCEL = '20261005140000_contract_sign_cancel';
@@ -216,7 +217,7 @@ describe('each down.sql, run whole with psql --file', () => {
     }
   });
 
-  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION])(
+  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
       const statements = readFileSync(down(migration), 'utf8')
@@ -255,7 +256,9 @@ describe('each down.sql, run whole with psql --file', () => {
       const refused = psql(schema, ['--file', down(SUSPENSION)], stop);
       // Without ON_ERROR_STOP psql goes on and exits 0: the file itself must hold the line.
       if (stop) expect(refused.ok).toBe(false);
-      expect(refused.out).toMatch(/down refused: 1 suspended approval polic\(ies\) exist/);
+      expect(refused.out).toMatch(
+        /down refused: 1 suspended approval polic\(ies\) and 0 open reconciliation task\(s\) exist/,
+      );
       expect(shape(schema)).toBe(before);
     }
     expect(mustRun(schema, ['-c', `SELECT "status"::text FROM "approval_policy"`])).toBe(
@@ -269,6 +272,99 @@ describe('each down.sql, run whole with psql --file', () => {
     expect(result.ok).toBe(true);
     expect(shape(unused)).toBe(shape(scratch(SIGNING_POLICY)));
   });
+
+  const openTask = `INSERT INTO "policy_reconciliation_task"
+      ("id", "organization_id", "policy_id", "union_id", "source_event_id",
+       "moved_organization_id", "correlation_id", "next_attempt_at", "created_at", "updated_at")
+    VALUES ('PRT_rb', 'ORG_E', 'APL_rb', 'ORG_U', 'EVT_1', 'ORG_E', 'COR_1', now(), now(), now())`;
+
+  const contractRow = `INSERT INTO "contract"
+      ("id", "organization_id", "tender_id", "project_id", "winning_bid_id",
+       "contractor_organization_id", "amount_minor", "matrix_digest", "awarded_by", "awarded_at",
+       "status_changed_at", "status_changed_by", "source_event_id", "created_at", "created_by",
+       "created_correlation_id", "updated_at")
+    VALUES ('CTR_rb', 'ORG_E', 'TND_1', 'PRJ_1', 'BID_1', 'ORG_C', 1, repeat('a', 64), 'USR_1',
+            now(), now(), 'system', 'EVT_1', now(), 'system', 'COR_1', now())`;
+
+  // An employer signature with its hierarchy evidence. The signing guard (which judges the policy
+  // in force) is lifted for this one insert in the scratch schema, which the owner may do.
+  const evidencedSignature = `ALTER TABLE "contract_signature" DISABLE TRIGGER "tg_contract_signature_insert";
+    INSERT INTO "contract_signature"
+      ("id", "organization_id", "contract_id", "side", "signer_organization_id", "signed_by",
+       "signed_by_issuer", "signed_by_subject", "authority_role", "signed_at", "correlation_id",
+       "policy_id", "policy_version", "hierarchy_author_organization_id", "hierarchy_answer",
+       "hierarchy_read_at", "hierarchy_commit_deadline")
+    VALUES ('CSG_rb', 'ORG_E', 'CTR_rb', 'EMPLOYER', 'ORG_E', 'USR_2', 'iss', 'sub',
+            'ORGANIZATION_ADMIN', now(), 'COR_2', 'APL_rb', 1, 'ORG_U', 'WITHIN', now(),
+            now() + interval '13 seconds');
+    ALTER TABLE "contract_signature" ENABLE TRIGGER "tg_contract_signature_insert"`;
+
+  const review = `INSERT INTO "signature_authority_review"
+      ("id", "organization_id", "contract_id", "side", "policy_id", "reason", "cause_event_id",
+       "moved_at", "flagged_at")
+    VALUES ('SAR_rb', 'ORG_E', 'CTR_rb', 'EMPLOYER', 'APL_rb', 'AUTHORITY_CHANGED_DURING_SIGNING',
+            'EVT_1', now(), now())`;
+
+  it('policy_suspension: an open reconciliation task alone refuses it (review round 3): nothing changes, with ON_ERROR_STOP and without it', () => {
+    const schema = scratch(SUSPENSION);
+    mustRun(schema, ['-c', `${policyRow}; ${openTask}`]);
+    const before = shape(schema);
+    for (const stop of [true, false]) {
+      const refused = psql(schema, ['--file', down(SUSPENSION)], stop);
+      if (stop) expect(refused.ok).toBe(false);
+      expect(refused.out).toMatch(
+        /down refused: 0 suspended approval polic\(ies\) and 1 open reconciliation task\(s\) exist/,
+      );
+      expect(shape(schema)).toBe(before);
+    }
+    expect(mustRun(schema, ['-c', `SELECT count(*) FROM "policy_reconciliation_task"`])).toBe('1');
+
+    // Once the task is finished the same file succeeds: DONE work is history, not work to lose.
+    mustRun(schema, [
+      '-c',
+      `UPDATE "policy_reconciliation_task" SET "status" = 'DONE', "done_at" = now() WHERE "id" = 'PRT_rb'`,
+    ]);
+    const result = psql(schema, ['--file', down(SUSPENSION)]);
+    expect(result.out).toBe('');
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([
+    [
+      'an open reconciliation task',
+      `${policyRow}; ${openTask}`,
+      /0 authority review\(s\), 0 signature\(s\) with hierarchy evidence and 1 open reconciliation task\(s\)/,
+    ],
+    [
+      'a signature with hierarchy evidence',
+      `${policyRow}; ${contractRow}; ${evidencedSignature}`,
+      /0 authority review\(s\), 1 signature\(s\) with hierarchy evidence and 0 open reconciliation task\(s\)/,
+    ],
+    [
+      'an authority review',
+      `${policyRow}; ${contractRow}; ${evidencedSignature}; ${review}`,
+      /1 authority review\(s\), 1 signature\(s\) with hierarchy evidence and 0 open reconciliation task\(s\)/,
+    ],
+  ])(
+    'signature_authority_review: over %s it refuses and changes nothing, with ON_ERROR_STOP and without it; over none it succeeds',
+    (_what, populate, message) => {
+      const schema = scratch(REVIEW);
+      mustRun(schema, ['-c', populate]);
+      const before = shape(schema);
+      for (const stop of [true, false]) {
+        const refused = psql(schema, ['--file', down(REVIEW)], stop);
+        if (stop) expect(refused.ok).toBe(false);
+        expect(refused.out).toMatch(message);
+        expect(shape(schema)).toBe(before);
+      }
+
+      const unused = scratch(REVIEW);
+      const result = psql(unused, ['--file', down(REVIEW)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      expect(shape(unused)).toBe(shape(scratch(SUSPENSION)));
+    },
+  );
 
   it('signing_policy: over a policy that exists it refuses and changes nothing, with ON_ERROR_STOP and without it; over none it succeeds', () => {
     const schema = scratch(SIGNING_POLICY);
