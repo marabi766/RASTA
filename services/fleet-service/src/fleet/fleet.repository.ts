@@ -13,6 +13,7 @@ import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
   ListAssignmentsQuery,
+  ListAvailabilityWindowsQuery,
   ListDriversQuery,
   ListUsageQuery,
   UtilizationQuery,
@@ -614,6 +615,22 @@ export class FleetRepository {
   }
 
   /**
+   * A machine's windows, newest first. Ids are `AVW_<ULID>`: they sort by
+   * creation, so the id is the cursor and no second sort key is needed.
+   */
+  async listAvailabilityWindows(query: ListAvailabilityWindowsQuery) {
+    const rows = await this.client.availabilityWindow.findMany({
+      where: {
+        assetId: query.assetId,
+        ...(query.cursor ? { id: { lt: query.cursor } } : {}),
+      },
+      orderBy: { id: 'desc' },
+      take: query.limit + 1,
+    });
+    return page(rows, query.limit, (row) => row.id);
+  }
+
+  /**
    * Declared windows in force at `at`, for the given assets.
    *
    * "In force" means started, not yet finished, and not revoked. A revoked
@@ -630,6 +647,53 @@ export class FleetRepository {
       },
       orderBy: { fromAt: 'desc' },
     });
+  }
+
+  /**
+   * Revokes every live window an organization declared on a machine that has
+   * since left it (review #225 round 1 finding 4, round 2), and returns what it
+   * revoked so the caller can publish each withdrawal. A window declared before
+   * the transfer is revoked too, so it cannot block the machine again if it
+   * returns to that organization.
+   *
+   * Unscoped, keyed by asset and the previous owner: the consumer's context
+   * carries the new owner's tenant, and the rows belong to the old one. Guarded
+   * on `revoked_at IS NULL` so a person's concurrent revoke is left alone and
+   * not returned. Must be called after {@link lockAssetRef} in the same
+   * transaction.
+   */
+  async revokeWindowsAfterTransfer(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    previousOrganizationId: string,
+    revokedAt: Date,
+    revokedBy: string,
+    reason: 'ASSET_TRANSFERRED',
+  ) {
+    return runUnscoped(
+      "windows declared by the previous owner after a transfer are revoked whoever's context runs the consumer",
+      async () => {
+        const live = await tx.availabilityWindow.findMany({
+          where: {
+            assetId,
+            organizationId: previousOrganizationId,
+            revokedAt: null,
+          },
+          orderBy: { id: 'asc' },
+        });
+
+        const revoked: typeof live = [];
+        for (const window of live) {
+          const result = await tx.availabilityWindow.updateMany({
+            where: { id: window.id, revokedAt: null },
+            data: { revokedAt, revokedBy, revokeReason: reason },
+          });
+          if (result.count === 1)
+            revoked.push({ ...window, revokedAt, revokedBy, revokeReason: reason });
+        }
+        return revoked;
+      },
+    );
   }
 
   async listAssetRefs(organizationId: string, query: AvailabilityQuery) {

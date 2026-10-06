@@ -82,6 +82,20 @@ export const fleetEnvSchema = baseEnvSchema
           .filter((coverage) => coverage.length > 0),
       )
       .pipe(z.array(z.enum(INSURANCE_COVERAGES)).min(1)),
+
+    /**
+     * How long a **completed** `POST /v1/fleet/availability` under an
+     * `Idempotency-Key` is replayed, in hours (EXP-002 slice 7). Past it the
+     * key is free again. Counted from the response, not from the claim.
+     */
+    FLEET_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+
+    /**
+     * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
+     * the lease after which an abandoned claim (its process died between the
+     * claim and the window) is taken over by a retry under a new token.
+     */
+    FLEET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;

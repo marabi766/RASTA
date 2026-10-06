@@ -25,6 +25,7 @@ export const TENANT_SCOPED_MODELS = [
   'Assignment',
   'UsageRecord',
   'AvailabilityWindow',
+  'IdempotencyKey',
 ] as const;
 
 /**

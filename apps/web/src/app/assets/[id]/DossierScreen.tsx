@@ -22,6 +22,8 @@ import {
 import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import type { AssetDossier, ReadResult } from '@/server/assets';
 import type { RecordNotice } from '@/lib/asset-record-fields';
+import type { DocumentNotice } from '@/lib/asset-document-fields';
+import type { AvailabilityNotice } from '@/lib/fleet-availability-fields';
 
 /**
  * The electronic dossier (docs/16 § 16.6, `/assets/[id]`).
@@ -63,6 +65,17 @@ export interface DossierScreenProps {
    */
   readonly records?: ReactNode;
   /**
+   * The machine's documents with the attach form (`AssetDocuments`), built by
+   * the page, which owns the server clock "expired" is judged against.
+   */
+  readonly documents?: ReactNode;
+  /**
+   * The machine's availability — whether it can be dispatched, every blocker with
+   * its owner, and the fleet manager's declarations with their forms
+   * (`AssetAvailability`) — built by the page like the records.
+   */
+  readonly availability?: ReactNode;
+  /**
    * What the write that sent the person here did — decided by the page, which
    * accepts it only from a flash the server signed for this session and this
    * machine (`server/flash.ts`), never from a bare query value. Not rendered at
@@ -76,7 +89,9 @@ export interface DossierScreenProps {
     | 'statusChanged'
     | 'decommissioned'
     | 'lifecycleConflict'
-    | RecordNotice;
+    | RecordNotice
+    | DocumentNotice
+    | AvailabilityNotice;
 }
 
 const NOTICES = {
@@ -91,6 +106,9 @@ const NOTICES = {
   decommissioned: { tone: 'success', text: 'دارایی اسقاط شد. این وضعیت نهایی است.' },
   policyRecorded: { tone: 'success', text: 'بیمه‌نامه ثبت شد.' },
   inspectionRecorded: { tone: 'success', text: 'معاینهٔ فنی ثبت شد.' },
+  documentAttached: { tone: 'success', text: 'مدرک بارگذاری و به دارایی پیوست شد.' },
+  availabilityDeclared: { tone: 'success', text: 'اعلام وضعیت ثبت شد.' },
+  availabilityRevoked: { tone: 'success', text: 'اعلام باطل شد.' },
   lifecycleConflict: {
     tone: 'warning',
     text: 'این دارایی پس از باز شدن این صفحه تغییر کرده بود — شاید همین دستور پیش‌تر اعمال شده باشد. این بار چیزی نوشته نشد. وضعیت فعلی را در همین صفحه ببینید و اگر هنوز لازم است دوباره اقدام کنید.',
@@ -181,6 +199,8 @@ export function DossierScreen({
   editForm,
   lifecycle,
   records,
+  documents,
+  availability,
   notice,
 }: DossierScreenProps) {
   if (result.kind === 'FORBIDDEN') {
@@ -305,6 +325,10 @@ export function DossierScreen({
       <Compliance dossier={result.data} />
 
       {records}
+
+      {documents}
+
+      {availability}
 
       <Section headingId="costs" title="هزینه‌ها">
         <Grid columns={3}>

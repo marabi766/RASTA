@@ -12,7 +12,11 @@ import { SESSION_COOKIE } from '@/server/session';
 // header tests run against the real code path.
 jest.mock('@/server/session-refresh', () => ({ renewSession: jest.fn() }));
 jest.mock('@/server/env', () => ({
-  webServerEnv: () => ({ WEB_COOKIE_SECURE: true }),
+  webServerEnv: () => ({
+    WEB_COOKIE_SECURE: true,
+    WEB_SESSION_SECRET: 'a-session-secret-that-is-long-enough-to-be-one',
+    WEB_SESSION_MAX_AGE_SECONDS: 3600,
+  }),
 }));
 
 const renew = renewSession as jest.MockedFunction<typeof renewSession>;
@@ -206,5 +210,55 @@ describe('the session cookie, renewed before the route runs', () => {
     const response = await middleware(withSession('good-cookie'));
 
     expect(response.cookies.get(SESSION_COOKIE)).toBeUndefined();
+  });
+});
+
+describe('what is refused before the body is read (ADR-069)', () => {
+  const post = (path: string, headers: Record<string, string>) =>
+    new NextRequest(`http://localhost:3200${path}`, { method: 'POST', headers });
+
+  beforeEach(() => renew.mockReset());
+
+  it('refuses a Server Action POST without a session: 401, and no refresh is attempted', async () => {
+    const response = await middleware(
+      post('/drivers', { 'next-action': 'abc', 'content-length': '300' }),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ code: 'NO_SESSION' });
+    expect(renew).not.toHaveBeenCalled();
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+  it('refuses a cookie it cannot open, however well-formed it looks', async () => {
+    const response = await middleware(
+      post('/drivers', {
+        'next-action': 'abc',
+        'content-length': '300',
+        cookie: `${SESSION_COOKIE}=forged`,
+      }),
+    );
+    expect(response.status).toBe(401);
+    expect(renew).not.toHaveBeenCalled();
+  });
+
+  it('refuses an oversize body anywhere but the asset page: 413', async () => {
+    const response = await middleware(
+      post('/drivers', { 'next-action': 'abc', 'content-length': String(26 * 1024 * 1024) }),
+    );
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ code: 'BODY_TOO_LARGE' });
+  });
+
+  it('does not refuse a large body on the asset page on size grounds (it still needs a session)', async () => {
+    const response = await middleware(
+      post('/assets/9f1c', { 'next-action': 'abc', 'content-length': String(26 * 1024 * 1024) }),
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ code: 'NO_SESSION' });
+  });
+
+  it('leaves a signed-out page view alone', async () => {
+    const response = await middleware(new NextRequest('http://localhost:3200/login'));
+    expect(response.status).toBe(200);
   });
 });

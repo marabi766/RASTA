@@ -34,6 +34,11 @@ import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { AssetRepository } from './asset/asset.repository';
+import {
+  DOCUMENT_LOOKUP,
+  DocumentLookupClient,
+  type DocumentLookup,
+} from './asset/document-lookup';
 import { IdempotencyStore } from './asset/idempotency';
 import { AssetService } from './asset/asset.service';
 import { TRANSFER_INSURANCE_POLICY, type TransferInsurancePolicy } from './insurance/ownership';
@@ -142,6 +147,22 @@ const CONSUMED_TOPICS = [
           },
           timeoutMs: env.ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS,
           fenceTtlSeconds: env.ASSET_TRANSFER_FENCE_TTL_SECONDS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
+    // EXP-002 slice 7: who owns a document, asked before a reference to it is
+    // stored. Its own minting `InternalTokenService`, as the clearance has.
+    {
+      provide: DOCUMENT_LOOKUP,
+      inject: [ENV],
+      useFactory: (env: AssetEnv): DocumentLookup =>
+        new DocumentLookupClient({
+          baseUrl: env.DOCUMENT_SERVICE_URL,
+          timeoutMs: env.ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS,
           tokens: new InternalTokenService(
             env.INTERNAL_TOKEN_SECRET,
             env.INTERNAL_TOKEN_ISSUER,

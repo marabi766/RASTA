@@ -26,10 +26,17 @@ interface OpenAssignment {
   startedAt: Date;
 }
 
+/** A live availability window of the previous owner, as the repository hands it back once revoked. */
+interface LiveWindow {
+  id: string;
+  organizationId: string;
+}
+
 function buildConsumer(options: {
   existing?: Record<string, unknown> | null;
   alreadyProcessed?: boolean;
   open?: OpenAssignment[];
+  windows?: LiveWindow[];
 }) {
   const recorded: Recorded = { upserts: [], processed: [], events: [] };
 
@@ -39,6 +46,10 @@ function buildConsumer(options: {
         ...row,
         endedAt: row.startedAt > at ? row.startedAt : at,
       })),
+    ),
+    revokeWindowsAfterTransfer: jest.fn(
+      async (_tx: unknown, _assetId: string, _previousOrganizationId: string, revokedAt: Date) =>
+        (options.windows ?? []).map((row) => ({ ...row, revokedAt })),
     ),
     enqueueEvent: jest.fn(async (_tx: unknown, input: OutboxMessageInput) => {
       const context = tryGetContext();
@@ -302,6 +313,64 @@ describe('AssetSyncConsumer', () => {
       driverId: 'DRV-1',
       startedAt: new Date('2026-08-27T08:00:00.000Z'),
     };
+
+    it('revokes every live window of the previous owner, as the system, and publishes each under that owner (review #225 r1, r2)', async () => {
+      const { consumer, repository, recorded } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+        windows: [{ id: 'AVW-1', organizationId: 'ORG-DEH-0001' }],
+      });
+
+      await consumer.handle(transfer());
+
+      expect(repository.revokeWindowsAfterTransfer).toHaveBeenCalledWith(
+        expect.anything(),
+        'AST-SEED-0001',
+        // The previous owner's windows — never the new owner's.
+        'ORG-DEH-0001',
+        expect.any(Date),
+        'SYSTEM',
+        'ASSET_TRANSFERRED',
+      );
+      expect(recorded.events).toHaveLength(1);
+      expect(recorded.events[0]).toMatchObject({
+        eventName: 'AVAILABILITY_CHANGED',
+        aggregateType: 'AvailabilityWindow',
+        aggregateId: 'AVW-1',
+        organizationId: 'ORG-DEH-0001',
+        contextTenant: 'ORG-DEH-0001',
+        callerService: 'fleet-service',
+        causationId: 'EVT-TRANSFER-1',
+        payload: {
+          assetId: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0001',
+          available: true,
+          to: null,
+        },
+      });
+    });
+
+    it('revokes the windows after the replica names the new owner, so a declaration queued behind the lock is refused', async () => {
+      const { consumer, repository } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+      });
+
+      await consumer.handle(transfer());
+
+      const upsert = (repository.upsertAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
+      const revoke = (repository.revokeWindowsAfterTransfer as jest.Mock).mock
+        .invocationCallOrder[0]!;
+      expect(upsert).toBeLessThan(revoke);
+    });
+
+    it('publishes nothing when the previous owner had no window to revoke', async () => {
+      const { consumer, recorded } = buildConsumer({
+        existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
+      });
+
+      await consumer.handle(transfer());
+
+      expect(recorded.events).toEqual([]);
+    });
 
     it('ends it as the system, with a reason, and publishes the release under the old owner', async () => {
       const { consumer, repository, recorded } = buildConsumer({

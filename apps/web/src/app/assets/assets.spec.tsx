@@ -175,6 +175,7 @@ const DOSSIER: AssetDossier = {
     partsAndOrdersMinor: '30000000',
     entryCount: 7,
   },
+  documents: [],
   recentActivity: [
     {
       id: 'TL_1',

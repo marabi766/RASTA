@@ -326,6 +326,9 @@ const CONSUMER_NAME = 'fleet-service.asset-sync';
 /** Who ended an assignment nobody ended by hand; the same value as elsewhere. */
 const SYSTEM_ACTOR = 'SYSTEM';
 
+/** The reason recorded on a window the transfer revokes (`availability_window.revoke_reason`). */
+const WINDOW_REVOKE_REASON = 'ASSET_TRANSFERRED';
+
 /** Stored as the assignment's end notes. Persian: it reaches the user unchanged. */
 const TRANSFER_END_NOTES = 'پایان خودکار: ماشین به سازمان دیگری منتقل شد.';
 
@@ -516,10 +519,18 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           const previousOwner = current?.organizationId;
           if (previousOwner && previousOwner !== refresh.organizationId) {
             await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
+            await this.revokeWindowsOnTransfer(tx, envelope, assetId, previousOwner, now);
           }
           await this.settleStaleFence(tx, assetId, refresh.organizationId);
         } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
           await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
+          await this.revokeWindowsOnTransfer(
+            tx,
+            envelope,
+            assetId,
+            payload.fromOrganizationId as string,
+            now,
+          );
           // The fence the previous owner placed to clear this transfer
           // (ADR-062). The replica now names the new owner, which refuses the
           // previous one from here on; left in place, the fence would refuse the
@@ -600,6 +611,77 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         ...(inMaintenance === undefined ? {} : { inMaintenance }),
       },
     };
+  }
+
+  /**
+   * Revokes the availability windows the previous owner declared in the lag
+   * between asset-service committing the transfer and this service learning of
+   * it (review #225 round 1, finding 4).
+   *
+   * Fleet has no synchronous dependency on asset-service, so until this event
+   * is applied the replica still names the previous owner, who can declare on a
+   * machine that is no longer theirs. Declarations take the asset's lock and
+   * re-read its owner under it, so everything after this commit is refused; this
+   * withdraws what committed before it. Every live window of the departing
+   * owner is revoked, not only those declared in the lag: an open-ended
+   * unavailable window declared earlier would otherwise outlive the transfer and
+   * block the machine again when it returns to that owner (A→B→A). The row stays
+   * as that organization's own history, which the new owner never sees (queries
+   * are tenant-scoped).
+   *
+   * Each withdrawal is published like a person's revoke, under the tenant that
+   * made the declaration, with fleet-service as the actor and the transfer
+   * event as its cause. The residual lag window is documented in docs/04 § fleet.
+   */
+  private async revokeWindowsOnTransfer(
+    tx: ExtendedPrismaClient,
+    envelope: EventEnvelope,
+    assetId: string,
+    previousOwner: string,
+    now: Date,
+  ): Promise<void> {
+    const revoked = await this.repository.revokeWindowsAfterTransfer(
+      tx,
+      assetId,
+      previousOwner,
+      now,
+      SYSTEM_ACTOR,
+      WINDOW_REVOKE_REASON,
+    );
+
+    for (const window of revoked) {
+      const context = createSystemContext({
+        correlationId: envelope.correlationId,
+        organizationId: window.organizationId,
+        callerService: SERVICE_NAME,
+      });
+      await runWithContext(context, () =>
+        this.repository.enqueueEvent(tx, {
+          aggregateType: 'AvailabilityWindow',
+          aggregateId: window.id,
+          eventName: FLEET_EVENTS.AVAILABILITY_CHANGED,
+          topic: FLEET_TOPIC,
+          organizationId: window.organizationId,
+          causationId: envelope.eventId,
+          payload: validateFleetPayload(FLEET_EVENTS.AVAILABILITY_CHANGED, {
+            assetId,
+            organizationId: window.organizationId,
+            // As for a person's revoke: the fleet's own objection is withdrawn.
+            available: true,
+            reason: 'Declaration withdrawn: the machine was transferred to another organization',
+            from: now.toISOString(),
+            to: null,
+          }),
+        }),
+      );
+    }
+
+    if (revoked.length > 0) {
+      this.logger.log(
+        `Revoked ${revoked.length} availability window(s) on ${assetId} declared after it was ` +
+          `transferred (${envelope.eventId})`,
+      );
+    }
   }
 
   /**

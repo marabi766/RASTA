@@ -109,11 +109,17 @@ test.describe('tenant isolation through the live stack', () => {
     test('the asset list holds its own machines and none of the other organization’s', async ({
       page,
     }) => {
-      await page.goto('/assets');
+      // The seeded machine is found by its tag, not by position: the list is one
+      // page of twenty, ordered by id, and every browser scenario registers
+      // machines of its own in this organization that sort ahead of the seeds
+      // and are never deleted — so the seed's place on page one is not a fact.
+      await page.goto(`/assets?q=${encodeURIComponent(OWN_ASSET_TAG)}`);
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('ماشین‌آلات');
+      expect(await mainText(page)).toContain(OWN_ASSET_TAG);
 
+      // And the list itself, unfiltered, holds none of another tenant's.
+      await page.goto('/assets');
       const text = await mainText(page);
-      expect(text).toContain(OWN_ASSET_TAG);
       // Neither the other organization's tag nor the union's.
       expect(text).not.toContain(OTHER_TENANT_ASSET_TAG);
       expect(text).not.toContain('UN-WTR-001');
@@ -317,11 +323,14 @@ test.describe('tenant isolation through the live stack', () => {
     });
 
     test('sees its own machine and not ORG-DEH-0001’s', async ({ page }) => {
-      await page.goto('/assets');
+      // By tag, not by position (see the same scenario for ORG-DEH-0001): this
+      // organization's seeded machine is not always on the first page of twenty.
+      await page.goto(`/assets?q=${encodeURIComponent(OTHER_TENANT_ASSET_TAG)}`);
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('ماشین‌آلات');
+      expect(await mainText(page)).toContain(OTHER_TENANT_ASSET_TAG);
 
+      await page.goto('/assets');
       const text = await mainText(page);
-      expect(text).toContain(OTHER_TENANT_ASSET_TAG);
       expect(text).not.toContain(OWN_ASSET_TAG);
       expect(text).not.toContain('D1-');
     });

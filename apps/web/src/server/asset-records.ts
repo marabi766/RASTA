@@ -215,14 +215,15 @@ export function validityWindowOf(from: string, to: string, now: Date): ValidityW
 // What a person types
 // ---------------------------------------------------------------------------
 
-const fa = (value: number): string => toPersianDigits(String(value));
+export const fa = (value: number): string => toPersianDigits(String(value));
 
-const UNSUPPORTED_CHARACTERS = 'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند';
-const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
-const DATE_MESSAGE = 'تاریخ معتبر نیست';
+export const UNSUPPORTED_CHARACTERS =
+  'نویسهٔ غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و علائم معمول مجازند';
+export const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+export const DATE_MESSAGE = 'تاریخ معتبر نیست';
 
 /** The service's `displayText(min, max)`: name-like text in its character set. */
-const displayText = (label: string, min: number, max: number) =>
+export const displayText = (label: string, min: number, max: number) =>
   z
     .string()
     .transform((raw) => normalizePersianText(raw))
@@ -270,7 +271,7 @@ const documentNumber = (label: string, min: number, max: number) =>
     .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE);
 
 /** A calendar day, as the Tehran-midnight instant the service takes. */
-const requiredDate = (label: string) =>
+export const requiredDate = (label: string) =>
   z.string().transform((raw, ctx): string => {
     if (raw.trim() === '') {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} را وارد کنید` });
