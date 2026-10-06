@@ -650,15 +650,11 @@ export class FleetRepository {
   }
 
   /**
-   * Revokes the live windows an organization declared on a machine that has
-   * since left it (review #225 round 1, finding 4), and returns what it
-   * revoked so the caller can publish each withdrawal.
-   *
-   * `since` is the transfer's effective time: only windows declared at or after
-   * it are revoked, which are the ones declared in the lag between asset-service
-   * committing the transfer and this service learning of it. `null` revokes
-   * every live window of that organization on the machine, for a transfer
-   * discovered from the owner's snapshot with no event time to compare.
+   * Revokes every live window an organization declared on a machine that has
+   * since left it (review #225 round 1 finding 4, round 2), and returns what it
+   * revoked so the caller can publish each withdrawal. A window declared before
+   * the transfer is revoked too, so it cannot block the machine again if it
+   * returns to that organization.
    *
    * Unscoped, keyed by asset and the previous owner: the consumer's context
    * carries the new owner's tenant, and the rows belong to the old one. Guarded
@@ -670,7 +666,6 @@ export class FleetRepository {
     tx: ExtendedPrismaClient,
     assetId: string,
     previousOrganizationId: string,
-    since: Date | null,
     revokedAt: Date,
     revokedBy: string,
     reason: 'ASSET_TRANSFERRED',
@@ -683,7 +678,6 @@ export class FleetRepository {
             assetId,
             organizationId: previousOrganizationId,
             revokedAt: null,
-            ...(since ? { createdAt: { gte: since } } : {}),
           },
           orderBy: { id: 'asc' },
         });

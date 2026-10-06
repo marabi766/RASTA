@@ -519,17 +519,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           const previousOwner = current?.organizationId;
           if (previousOwner && previousOwner !== refresh.organizationId) {
             await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
-            await this.revokeWindowsOnTransfer(
-              tx,
-              envelope,
-              assetId,
-              previousOwner,
-              // A replayed transfer still carries its own effective time; any
-              // other event that merely revealed the new owner does not, so
-              // everything the previous owner still has live is withdrawn.
-              transferredAtOf(envelope, payload),
-              now,
-            );
+            await this.revokeWindowsOnTransfer(tx, envelope, assetId, previousOwner, now);
           }
           await this.settleStaleFence(tx, assetId, refresh.organizationId);
         } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
@@ -539,7 +529,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
             envelope,
             assetId,
             payload.fromOrganizationId as string,
-            transferredAtOf(envelope, payload),
             now,
           );
           // The fence the previous owner placed to clear this transfer
@@ -633,10 +622,12 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * is applied the replica still names the previous owner, who can declare on a
    * machine that is no longer theirs. Declarations take the asset's lock and
    * re-read its owner under it, so everything after this commit is refused; this
-   * withdraws what committed before it. Only windows declared at or after the
-   * transfer's effective time are revoked: an earlier one was a true statement
-   * by the owner of the day and stays, as that organization's own history, which
-   * the new owner never sees (queries are tenant-scoped).
+   * withdraws what committed before it. Every live window of the departing
+   * owner is revoked, not only those declared in the lag: an open-ended
+   * unavailable window declared earlier would otherwise outlive the transfer and
+   * block the machine again when it returns to that owner (A→B→A). The row stays
+   * as that organization's own history, which the new owner never sees (queries
+   * are tenant-scoped).
    *
    * Each withdrawal is published like a person's revoke, under the tenant that
    * made the declaration, with fleet-service as the actor and the transfer
@@ -647,14 +638,12 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     envelope: EventEnvelope,
     assetId: string,
     previousOwner: string,
-    since: Date | null,
     now: Date,
   ): Promise<void> {
     const revoked = await this.repository.revokeWindowsAfterTransfer(
       tx,
       assetId,
       previousOwner,
-      since,
       now,
       SYSTEM_ACTOR,
       WINDOW_REVOKE_REASON,
@@ -767,16 +756,6 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       );
     }
   }
-}
-
-/**
- * When the transfer took effect, from the event's own payload — asset-service's
- * clock, the producer's word. `null` when this event does not carry one.
- */
-function transferredAtOf(envelope: EventEnvelope, payload: Record<string, unknown>): Date | null {
-  if (envelope.eventName !== CONSUMED_EVENTS.ASSET_TRANSFERRED) return null;
-  const stated = new Date(String(payload.transferredAt));
-  return Number.isNaN(stated.getTime()) ? null : stated;
 }
 
 /** The later of two instants, either of which may be missing. */

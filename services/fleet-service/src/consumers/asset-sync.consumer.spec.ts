@@ -48,13 +48,8 @@ function buildConsumer(options: {
       })),
     ),
     revokeWindowsAfterTransfer: jest.fn(
-      async (
-        _tx: unknown,
-        _assetId: string,
-        _previousOrganizationId: string,
-        _since: Date | null,
-        revokedAt: Date,
-      ) => (options.windows ?? []).map((row) => ({ ...row, revokedAt })),
+      async (_tx: unknown, _assetId: string, _previousOrganizationId: string, revokedAt: Date) =>
+        (options.windows ?? []).map((row) => ({ ...row, revokedAt })),
     ),
     enqueueEvent: jest.fn(async (_tx: unknown, input: OutboxMessageInput) => {
       const context = tryGetContext();
@@ -319,7 +314,7 @@ describe('AssetSyncConsumer', () => {
       startedAt: new Date('2026-08-27T08:00:00.000Z'),
     };
 
-    it('revokes the previous owner’s windows declared at or after the transfer, as the system, and publishes each under that owner (review #225 r1)', async () => {
+    it('revokes every live window of the previous owner, as the system, and publishes each under that owner (review #225 r1, r2)', async () => {
       const { consumer, repository, recorded } = buildConsumer({
         existing: { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0001' },
         windows: [{ id: 'AVW-1', organizationId: 'ORG-DEH-0001' }],
@@ -332,7 +327,6 @@ describe('AssetSyncConsumer', () => {
         'AST-SEED-0001',
         // The previous owner's windows — never the new owner's.
         'ORG-DEH-0001',
-        new Date('2026-08-27T10:00:00.000Z'),
         expect.any(Date),
         'SYSTEM',
         'ASSET_TRANSFERRED',

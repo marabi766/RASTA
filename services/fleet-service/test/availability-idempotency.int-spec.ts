@@ -510,7 +510,12 @@ describe('declaring availability under an Idempotency-Key', () => {
   describe('a declaration while the machine changes hands', () => {
     const consumer = () => new AssetSyncConsumer(null, repository);
 
-    const transferEnvelope = (assetId: string, transferredAt: Date, to = org.b): EventEnvelope => ({
+    const transferEnvelope = (
+      assetId: string,
+      transferredAt: Date,
+      to = org.b,
+      from = org.a,
+    ): EventEnvelope => ({
       eventId: id('EVT'),
       eventName: 'ASSET_TRANSFERRED',
       eventVersion: 1,
@@ -523,7 +528,7 @@ describe('declaring availability under an Idempotency-Key', () => {
       correlationId: id('COR'),
       payload: {
         assetId,
-        fromOrganizationId: org.a,
+        fromOrganizationId: from,
         toOrganizationId: to,
         reason: 'واگذاری',
         referenceNo: null,
@@ -584,17 +589,52 @@ describe('declaring availability under an Idempotency-Key', () => {
       });
     });
 
-    it('leaves a window declared before the transfer took effect: it was true when made and is the previous owner’s history', async () => {
+    it('revokes a window declared before the transfer took effect too, keeping the row as the previous owner’s history (review #225 r2)', async () => {
       const assetId = await machine(org.a);
       const earlier = await declare(body(assetId), key());
 
       await consumer().handle(transferEnvelope(assetId, new Date(Date.now() + 60_000)));
 
-      expect((await windowRow(earlier.body.id)).revoked_at).toBeNull();
+      const row = await windowRow(earlier.body.id);
+      expect(row.revoked_at).not.toBeNull();
+      expect(row.revoked_by).toBe('SYSTEM');
+      expect(row.revoke_reason).toBe('ASSET_TRANSFERRED');
+      expect(await liveRows(assetId)).toEqual([]);
       // The new owner never sees it: every read is its own tenant's.
       const asNewOwner = await windows(assetId, '', { org: org.b });
       expect(asNewOwner.status).toBe(200);
       expect(asNewOwner.body.items).toEqual([]);
+    });
+
+    it('starts the original owner with no live window when the machine returns A→B→A: the open-ended window it declared is gone for good (review #225 r2)', async () => {
+      const assetId = await machine(org.a);
+      const open = await declare(body(assetId), key());
+      expect(open.status).toBe(201);
+
+      await consumer().handle(transferEnvelope(assetId, new Date(Date.now() - 4_000)));
+      await consumer().handle(
+        transferEnvelope(assetId, new Date(Date.now() - 2_000), org.a, org.b),
+      );
+
+      // A's old window is revoked by the system, with its reason, history kept.
+      const row = await windowRow(open.body.id);
+      expect(row.organization_id).toBe(org.a);
+      expect(row.revoked_at).not.toBeNull();
+      expect(row.revoked_by).toBe('SYSTEM');
+      expect(row.revoke_reason).toBe('ASSET_TRANSFERRED');
+      // And said so, under A, by the first transfer.
+      const published = await withdrawals(open.body.id);
+      expect(published).toHaveLength(2);
+      expect(published[1]!.organizationId).toBe(org.a);
+      // After the return A has nothing live: the machine is not blocked.
+      expect(await liveRows(assetId)).toEqual([]);
+      const current = await windows(assetId, '', { org: org.a });
+      expect(current.status).toBe(200);
+      expect(current.body.items.filter((w: { revokedAt: unknown }) => !w.revokedAt)).toEqual([]);
+      // A declares afresh on its machine.
+      const again = await declare(body(assetId), key());
+      expect(again.status).toBe(201);
+      expect(await liveRows(assetId, org.a)).toEqual([again.body.id]);
     });
 
     it('refuses the previous owner from the moment the transfer is applied — a new declaration and a replay alike, 404 exactly as a missing machine', async () => {
