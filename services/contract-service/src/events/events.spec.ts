@@ -213,6 +213,7 @@ describe('the authority events (D-050, review round 3)', () => {
     reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
     causeEventId: 'EVT_1',
     movedAt: '2026-10-06T10:00:00.000Z',
+    movedVersion: 7,
     flaggedAt: '2026-10-06T10:00:05.000Z',
   };
   const refused = {

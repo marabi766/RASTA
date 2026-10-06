@@ -7,8 +7,8 @@ import { SERVICE_NAME, type ContractEnv } from '../config/env';
 export const ORGANIZATION_SERVICE = 'organization-service';
 
 /**
- * The only valid answer is `{ "id": "<organization id>" }` — well under this.
- * Anything longer is not the contract and is refused unread.
+ * The only valid answer is `{ "id": "<organization id>", "hierarchyVersion": <n> }` — well under
+ * this. Anything longer is not the contract and is refused unread.
  */
 export const MAX_RESPONSE_BYTES = 1024;
 
@@ -71,6 +71,29 @@ export class OrganizationDirectory {
   ) {}
 
   async isWithin(scopeOrganizationId: string, organizationId: string): Promise<boolean> {
+    return (await this.ask(scopeOrganizationId, organizationId, false)) !== null;
+  }
+
+  /**
+   * `isWithin`, and the hierarchy version of `organizationId` in the tree the answer came from
+   * (D-050): `null` when it is not within. A signature that rests on "within" records the version,
+   * so a later `ORGANIZATION_MOVED` is ordered against it by number, not by clock. An answer that
+   * names no valid version is `UPSTREAM_UNAVAILABLE` — "within" without its version is not
+   * evidence, and the signature is refused rather than recorded on it (fail closed).
+   */
+  async withinVersion(
+    scopeOrganizationId: string,
+    organizationId: string,
+  ): Promise<{ hierarchyVersion: number } | null> {
+    const answer = await this.ask(scopeOrganizationId, organizationId, true);
+    return answer === null ? null : { hierarchyVersion: answer.hierarchyVersion as number };
+  }
+
+  private async ask(
+    scopeOrganizationId: string,
+    organizationId: string,
+    requireVersion: boolean,
+  ): Promise<{ hierarchyVersion: number | null } | null> {
     const token = await this.tokens.issue(
       SERVICE_NAME,
       ORGANIZATION_SERVICE,
@@ -99,7 +122,7 @@ export class OrganizationDirectory {
 
       if (response.status === 404) {
         await response.body?.cancel().catch(() => undefined);
-        return false;
+        return null;
       }
       if (response.status !== 200) {
         await response.body?.cancel().catch(() => undefined);
@@ -114,15 +137,23 @@ export class OrganizationDirectory {
         this.logger.warn('organization-service answered a body larger than { id }; refusing');
         throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
       }
-      let body: { id?: unknown } | null = null;
+      let body: { id?: unknown; hierarchyVersion?: unknown } | null = null;
       try {
-        body = JSON.parse(text) as { id?: unknown } | null;
+        body = JSON.parse(text) as { id?: unknown; hierarchyVersion?: unknown } | null;
       } catch {
         body = null;
       }
-      if (body?.id === organizationId) return true;
-      this.logger.warn('organization-service answered 200 without naming the organization asked');
-      throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+      if (body?.id !== organizationId) {
+        this.logger.warn('organization-service answered 200 without naming the organization asked');
+        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+      }
+      const version = body.hierarchyVersion;
+      const valid = typeof version === 'number' && Number.isSafeInteger(version) && version >= 1;
+      if (requireVersion && !valid) {
+        this.logger.warn('organization-service answered 200 without a hierarchy version; refusing');
+        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+      }
+      return { hierarchyVersion: valid ? version : null };
     } catch (error) {
       if (error instanceof RastaError) throw error;
       if (controller.signal.aborted) {

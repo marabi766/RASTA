@@ -250,12 +250,22 @@ export class ContractService {
             );
           });
       }
-      await this.recordRefusal(error).catch((auditError: unknown) => {
+      // The refusal is an audit fact (S-06): when it cannot be recorded it is not answered as the
+      // normal refusal — a retryable 503, the claim released by the caller's failure path, so the
+      // same request can be made again and leave its trace. Nothing was signed either way.
+      try {
+        await this.recordRefusal(error);
+      } catch (auditError: unknown) {
         this.logger.error(
           `Could not record the refusal of a signature (${error.reason}): ` +
             `${auditError instanceof RastaError ? auditError.code : 'INTERNAL'}`,
         );
-      });
+        throw new RastaError(
+          ERROR_CODES.UPSTREAM_UNAVAILABLE,
+          'The refusal could not be recorded; nothing was signed. Retry shortly',
+          { cause: auditError, retryAfterSeconds: 1, internalContext: { reason: error.reason } },
+        );
+      }
       throw error.refusal;
     }
   }
@@ -347,11 +357,12 @@ export class ContractService {
     // confirmed (fail closed). A platform administrator's policy needs no hierarchy.
     let evidence: HierarchyEvidence | null = null;
     if (policy.authorRole === UNION_ROLE) {
-      // The instant the question was asked, not the one the answer came back: organization-service
-      // read its hierarchy somewhere in between, so the earlier instant is the safe one — a move
-      // after it is one the answer may predate (D-050).
+      // The answer carries the hierarchy version of the employer, and that version — not a clock —
+      // is what a later move is ordered against (D-050). The instants are kept beside it: the
+      // question's, and the latest this signature could commit at, bound which signatures a move
+      // can have raced at all.
       const askedAt = await databaseClock(tx);
-      const within = await this.directory.isWithin(
+      const within = await this.directory.withinVersion(
         policy.authorOrganizationId,
         contract.organizationId,
       );
@@ -376,6 +387,8 @@ export class ContractService {
       // (`sign`), so a move landing between `askedAt` and that deadline is one it may have raced.
       evidence = {
         authorOrganizationId: policy.authorOrganizationId,
+        // What orders this signature against a move: the version of the tree the answer came from.
+        hierarchyVersion: within.hierarchyVersion,
         readAt: askedAt,
         commitDeadline: new Date(
           (await transactionNow(tx)).getTime() + this.signingTransactionTimeoutMs(),

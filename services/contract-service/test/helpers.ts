@@ -237,6 +237,32 @@ export class FakeHierarchy {
     this.parents.set(child, parent);
   }
 
+  /**
+   * organization-service's hierarchy version (D-050): 1 until an organization's ancestry changes,
+   * then the value a move stamped — one above every version there was, the same for the organizations
+   * the move touched.
+   */
+  private readonly versions = new Map<string, number>();
+
+  versionOf(organizationId: string): number {
+    return this.versions.get(organizationId) ?? 1;
+  }
+
+  /** A move: stamps one new, higher version on every organization named, and returns it. */
+  bump(...organizationIds: string[]): number {
+    const next = Math.max(1, ...this.versions.values()) + 1;
+    for (const id of organizationIds) this.versions.set(id, next);
+    return next;
+  }
+
+  async withinVersion(
+    scope: string,
+    organizationId: string,
+  ): Promise<{ hierarchyVersion: number } | null> {
+    const within = await this.isWithin(scope, organizationId);
+    return within ? { hierarchyVersion: this.versionOf(organizationId) } : null;
+  }
+
   async isWithin(scope: string, organizationId: string): Promise<boolean> {
     this.asked.push([scope, organizationId]);
     if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');

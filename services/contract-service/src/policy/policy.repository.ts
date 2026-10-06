@@ -166,9 +166,13 @@ export class PolicyRepository {
   }
 
   /**
-   * Every ACTIVE or PENDING_PLATFORM_APPROVAL policy a union wrote for an organization other than
-   * its own, across all tenants — the ones an ORGANIZATION_MOVED can strand (Q-83). A pending one
-   * is listed because approval can activate it after the move (see `PolicySuspensionService`).
+   * Every ACTIVE, PENDING_PLATFORM_APPROVAL or SUSPENDED policy a union wrote for an organization
+   * other than its own, across all tenants — the ones an ORGANIZATION_MOVED can strand (Q-83). A
+   * pending one is listed because approval can activate it after the move (see
+   * `PolicySuspensionService`). A suspended one is listed because a signing-time check may have
+   * suspended it before the move's event arrived, and a signature that raced that very move still
+   * rests on it: the task reaches `suspend`, which flags those signatures (D-050) and changes
+   * nothing else about a policy already out of force.
    * Nothing but identifiers is read, and the caller acts on each in the tenant that row names. A
    * union's policy for itself needs no hierarchy, and a platform administrator's is never stranded
    * by a move.
@@ -187,7 +191,7 @@ export class PolicyRepository {
       () =>
         this.prisma.client.approvalPolicy.findMany({
           where: {
-            status: { in: ['ACTIVE', 'PENDING_PLATFORM_APPROVAL'] },
+            status: { in: ['ACTIVE', 'PENDING_PLATFORM_APPROVAL', 'SUSPENDED'] },
             authorRole: 'UNION_ADMIN',
           },
           select: {

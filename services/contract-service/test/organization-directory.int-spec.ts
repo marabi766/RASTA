@@ -13,7 +13,7 @@ import { testEnv } from './helpers';
  *
  *   X-Internal-Token from contract-service, for organization-service,
  *   signed for the scope organization; GET /v1/organizations/{id}
- *     id is the scope, or beneath it → 200 { id }
+ *     id is the scope, or beneath it → 200 { id, hierarchyVersion }
  *     otherwise                      → 404
  *
  * The server verifies the token with the real verifier, so a client that sent the wrong audience,
@@ -37,7 +37,18 @@ function within(scope: string, id: string): boolean {
   return false;
 }
 
-type Behaviour = 'contract' | 'error' | 'wrong-body' | 'slow' | 'stalled-body' | 'oversized';
+/** The hierarchy version each organization is at (organization-service stamps it on a move). */
+const VERSION: Record<string, number> = { 'ORG-DEHYARI': 7, 'ORG-COUNTY': 3 };
+
+type Behaviour =
+  | 'contract'
+  | 'error'
+  | 'wrong-body'
+  | 'slow'
+  | 'stalled-body'
+  | 'oversized'
+  | 'no-version'
+  | 'bad-version';
 
 describe('OrganizationDirectory against the organization-service contract', () => {
   let server: Server;
@@ -76,6 +87,11 @@ describe('OrganizationDirectory against the organization-service contract', () =
           res.end(JSON.stringify({ id: 'ORG-SOMETHING-ELSE' }));
           return;
         }
+        if (behaviour === 'bad-version') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id, hierarchyVersion: '7' }));
+          return;
+        }
         const claims = await tokens.verify(token ?? '', 'organization-service').catch(() => null);
         if (!claims || claims.callerService !== 'contract-service' || !claims.organizationId) {
           res.writeHead(403).end();
@@ -86,7 +102,12 @@ describe('OrganizationDirectory against the organization-service contract', () =
           return;
         }
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ id }));
+        // `no-version`: an organization-service from before hierarchy versions (D-050).
+        res.end(
+          JSON.stringify(
+            behaviour === 'no-version' ? { id } : { id, hierarchyVersion: VERSION[id] ?? 1 },
+          ),
+        );
       })();
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -128,6 +149,32 @@ describe('OrganizationDirectory against the organization-service contract', () =
   it('confirms a descendant two levels down, a child, and the scope itself', async () => {
     for (const id of ['ORG-DEHYARI', 'ORG-COUNTY', 'ORG-UNION']) {
       await expect(asked(() => directory().isWithin('ORG-UNION', id))).resolves.toBe(true);
+    }
+  });
+
+  it('answers the hierarchy version of the organization asked, with "within" (D-050)', async () => {
+    await expect(
+      asked(() => directory().withinVersion('ORG-UNION', 'ORG-DEHYARI')),
+    ).resolves.toEqual({ hierarchyVersion: 7 });
+    await expect(
+      asked(() => directory().withinVersion('ORG-UNION', 'ORG-COUNTY')),
+    ).resolves.toEqual({ hierarchyVersion: 3 });
+    // Outside the scope there is no version: not within.
+    await expect(
+      asked(() => directory().withinVersion('ORG-UNION', 'ORG-STRANGER')),
+    ).resolves.toBeNull();
+  });
+
+  it('refuses "within" that arrives without a valid version when a version is needed (503), and still answers the plain question', async () => {
+    for (const mode of ['no-version', 'bad-version'] as const) {
+      behaviour = mode;
+      await expect(
+        asked(() => directory().withinVersion('ORG-UNION', 'ORG-DEHYARI')),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      // The policy commands ask only "within": a version is not needed for them.
+      await expect(asked(() => directory().isWithin('ORG-UNION', 'ORG-DEHYARI'))).resolves.toBe(
+        true,
+      );
     }
   });
 

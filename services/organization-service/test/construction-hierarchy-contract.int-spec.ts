@@ -150,23 +150,92 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
     await app?.close();
   });
 
-  it('answers { id } — and nothing more — for a descendant two levels down', async () => {
+  it('answers { id, hierarchyVersion } — and nothing more — for a descendant two levels down', async () => {
     const token = await serviceToken('construction-service', union);
     const response = await http()
       .get(`/v1/organizations/${dehyari}`)
       .set('x-internal-token', token)
       .expect(200);
-    expect(response.body).toEqual({ id: dehyari });
+    expect(response.body).toEqual({ id: dehyari, hierarchyVersion: expect.any(Number) });
   });
 
-  it('answers { id } for a direct child and for the signed organization itself', async () => {
+  it('answers { id, hierarchyVersion } for a direct child and for the signed organization itself', async () => {
     const token = await serviceToken('construction-service', union);
     for (const id of [county, union]) {
       const response = await http()
         .get(`/v1/organizations/${id}`)
         .set('x-internal-token', token)
         .expect(200);
-      expect(response.body).toEqual({ id });
+      expect(response.body).toEqual({ id, hierarchyVersion: expect.any(Number) });
+    }
+  });
+
+  it('a move raises the version of the moved organization and every descendant to one value above every earlier one, and the event carries it (D-050)', async () => {
+    const organizations = app.get(OrganizationService);
+    const prisma = app.get(PrismaService);
+    const operator = <T>(fn: () => Promise<T>) =>
+      asActor({ organizationId: 'ORG-CONTRACT-OPERATOR', roles: ['SYSTEM_ADMIN'] }, fn);
+    const county2 = (
+      await operator(() =>
+        organizations.create({
+          name: 'شهرستان دوم',
+          type: 'GOVERNMENT',
+          metadata: {},
+          parentId: union,
+        } as never),
+      )
+    ).id;
+    const village = (
+      await operator(() =>
+        organizations.create({
+          name: 'آبادی',
+          type: 'DEHYARI',
+          metadata: {},
+          parentId: dehyari,
+        } as never),
+      )
+    ).id;
+    try {
+      const token = await serviceToken('contract-service', union);
+      const versionOf = async (id: string) =>
+        (await http().get(`/v1/organizations/${id}`).set('x-internal-token', token).expect(200))
+          .body.hierarchyVersion as number;
+      const before = { dehyari: await versionOf(dehyari), village: await versionOf(village) };
+      const untouched = await versionOf(county);
+
+      await operator(() => organizations.move(dehyari, { parentId: county2, reason: 'rezoned' }));
+
+      const after = { dehyari: await versionOf(dehyari), village: await versionOf(village) };
+      // One value for the root and its descendant, above everything there was.
+      expect(after.dehyari).toBe(after.village);
+      expect(after.dehyari).toBeGreaterThan(Math.max(before.dehyari, before.village));
+      expect(after.dehyari).toBeGreaterThan(untouched);
+      // An organization whose ancestry did not change keeps its version.
+      expect(await versionOf(county)).toBe(untouched);
+
+      const rows = await prisma.client.outboxMessage.findMany({
+        where: { eventName: 'ORGANIZATION_MOVED', aggregateId: dehyari },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.payload).toMatchObject({
+        organizationId: dehyari,
+        hierarchyVersion: after.dehyari,
+      });
+
+      // A second move is strictly higher again, for the same two.
+      await operator(() => organizations.move(dehyari, { parentId: county, reason: 'back' }));
+      expect(await versionOf(village)).toBeGreaterThan(after.village);
+    } finally {
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE organization SET parent_id = $1 WHERE id = $2`,
+        county,
+        dehyari,
+      );
+      await prisma.client.$executeRawUnsafe(
+        `DELETE FROM organization WHERE id IN ($1, $2)`,
+        village,
+        county2,
+      );
     }
   });
 
@@ -192,7 +261,7 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
       .get(`/v1/organizations/${dehyari}`)
       .set('x-internal-token', token)
       .expect(200);
-    expect(within.body).toEqual({ id: dehyari });
+    expect(within.body).toEqual({ id: dehyari, hierarchyVersion: expect.any(Number) });
     await http().get(`/v1/organizations/${stranger}`).set('x-internal-token', token).expect(404);
     const downward = await serviceToken('contract-service', dehyari);
     await http().get(`/v1/organizations/${union}`).set('x-internal-token', downward).expect(404);

@@ -35,7 +35,9 @@ export interface SignatureInput {
 export interface HierarchyEvidence {
   /** The author organization asked about. */
   readonly authorOrganizationId: string;
-  /** When the answer arrived (the database's clock). */
+  /** The employer's hierarchy version in the tree the answer came from (organization-service). */
+  readonly hierarchyVersion: number;
+  /** When the question was asked (the database's clock). */
   readonly readAt: Date;
   /** The latest instant the signing transaction could commit at: its own deadline. */
   readonly commitDeadline: Date;
@@ -193,6 +195,7 @@ export class ContractRepository {
               ? {
                   hierarchyAuthorOrganizationId: input.hierarchyEvidence.authorOrganizationId,
                   hierarchyAnswer: 'WITHIN',
+                  hierarchyVersion: BigInt(input.hierarchyEvidence.hierarchyVersion),
                   hierarchyReadAt: input.hierarchyEvidence.readAt,
                   hierarchyCommitDeadline: input.hierarchyEvidence.commitDeadline,
                 }
@@ -205,11 +208,13 @@ export class ContractRepository {
   }
 
   /**
-   * Flags the employer signatures under `policyId` that a move may have raced (D-050): the
-   * hierarchy answer they rested on predates the move (`read < movedAt`) and they could still have
-   * committed after it (`movedAt <= commit deadline`). A signature whose answer came after the
-   * move rested on the hierarchy as it then was; one that was out of its window before it was
-   * made on authority that held. Never revokes: it writes one append-only review row each, once
+   * Flags the employer signatures under `policyId` that a move raced (D-050): the tree they
+   * rested on is older than the move's — the hierarchy version they recorded is LOWER than the
+   * move's, a number organization-service stamps in the move's own transaction, so no clock
+   * orders it — and they could still have committed after the move was prepared
+   * (`movedAt <= commit deadline`). A signature that read the tree after the move recorded the
+   * move's version or more; one out of its window before it was made on authority that held.
+   * Never revokes: it writes one append-only review row each, once
    * (`ux_signature_authority_review_signature`), and returns the ones it newly flagged. Runs under
    * the policy slot's lock, so no signature is recorded under the policy meanwhile.
    */
@@ -220,6 +225,8 @@ export class ContractRepository {
       policyId: string;
       causeEventId: string;
       movedAt: Date;
+      /** The move's hierarchy version; null for an event that predates versions. */
+      movedVersion: number | null;
       at: Date;
     },
   ): Promise<{ contractId: string; policyVersion: number }[]> {
@@ -231,8 +238,20 @@ export class ContractRepository {
             organizationId: input.organizationId,
             policyId: input.policyId,
             side: 'EMPLOYER',
-            hierarchyReadAt: { lt: input.movedAt },
+            // Could still have committed after the move was prepared: a signature out of its
+            // window before then was made on authority that held.
             hierarchyCommitDeadline: { gte: input.movedAt },
+            // And rests on a tree older than the move's: a lower version, or none recorded (a
+            // signature from before versions: it cannot show it read the moved tree). A move with
+            // no version (an event from before them) orders nothing, so the window decides alone.
+            ...(input.movedVersion === null
+              ? {}
+              : {
+                  OR: [
+                    { hierarchyVersion: null },
+                    { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
+                  ],
+                }),
             review: null,
           },
           orderBy: { id: 'asc' },
@@ -249,6 +268,8 @@ export class ContractRepository {
               reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
               causeEventId: input.causeEventId,
               movedAt: input.movedAt,
+              movedVersion: input.movedVersion === null ? null : BigInt(input.movedVersion),
+              recordedVersion: signature.hierarchyVersion,
               flaggedAt: input.at,
             },
           });

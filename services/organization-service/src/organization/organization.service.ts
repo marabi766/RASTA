@@ -221,15 +221,17 @@ export class OrganizationService {
    * token alone; without one, the answer is 404 (fail closed). One statement
    * answers both "exists" and "is within", so the two cannot disagree.
    */
-  async confirmWithinCaller(id: string): Promise<{ id: string }> {
+  async confirmWithinCaller(id: string): Promise<{ id: string; hierarchyVersion: number }> {
     const { authType, organizationId } = getContext();
     if (authType !== 'SERVICE' || !organizationId) throw RastaError.notFound('Organization', id);
 
-    const within = await this.repository.readSnapshot((db) =>
-      this.repository.isAncestorOf(organizationId, id, db),
+    const version = await this.repository.readSnapshot((db) =>
+      this.repository.withinVersion(organizationId, id, db),
     );
-    if (!within) throw RastaError.notFound('Organization', id);
-    return { id };
+    if (version === null) throw RastaError.notFound('Organization', id);
+    // The version of the tree this answer came from: a caller that acts on "within" records it,
+    // and a later move is ordered against it by number, not by clock (D-050).
+    return { id, hierarchyVersion: Number(version) };
   }
 
   async list(query: ListOrganizationsQuery) {
@@ -523,7 +525,15 @@ export class OrganizationService {
         assertNoBlockingAncestor(chain, 'move an active organization');
       }
 
-      const affectedCount = await this.repository.rewriteSubtreePath(tx, oldPath, newPath);
+      // In the same transaction as the rewrite: the version a reader gets is the tree before this
+      // move (lower) or after it (this value), whatever instant either is stamped with (D-050).
+      const hierarchyVersion = await this.repository.nextHierarchyVersion(tx);
+      const affectedCount = await this.repository.rewriteSubtreePath(
+        tx,
+        oldPath,
+        newPath,
+        hierarchyVersion,
+      );
 
       const row = await tx.organization.update({
         where: { id },
@@ -543,6 +553,7 @@ export class OrganizationService {
           previousPath: oldPath,
           newPath,
           affectedCount,
+          hierarchyVersion: Number(hierarchyVersion),
           reason: dto.reason,
         }),
       });

@@ -161,6 +161,11 @@ model ContractSignature {
   hierarchyAnswer               String?   @map("hierarchy_answer")
   hierarchyReadAt               DateTime? @map("hierarchy_read_at") @db.Timestamptz(3)
   hierarchyCommitDeadline       DateTime? @map("hierarchy_commit_deadline") @db.Timestamptz(3)
+  /// The employer's hierarchy version in the tree that answer came from (organization-service's
+  /// number, stamped in the move's own transaction): what a later ORGANIZATION_MOVED is ordered
+  /// against, by number, not by clock. NULL on a signature from before versions and where there is
+  /// no evidence (`ck_signature_hierarchy_version`).
+  hierarchyVersion              BigInt?   @map("hierarchy_version")
 
   contract Contract                  @relation(fields: [organizationId, contractId], references: [organizationId, id])
   policy   ApprovalPolicy?           @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
@@ -183,6 +188,10 @@ model SignatureAuthorityReview {
   reason         String
   causeEventId   String       @map("cause_event_id")
   movedAt        DateTime     @map("moved_at") @db.Timestamptz(3)
+  /// What was compared: the move's hierarchy version and the one the signature recorded (NULL for
+  /// a move or signature from before versions).
+  movedVersion    BigInt?     @map("moved_version")
+  recordedVersion BigInt?     @map("recorded_version")
   flaggedAt      DateTime     @map("flagged_at") @db.Timestamptz(3)
 
   signature ContractSignature @relation(fields: [organizationId, contractId, side], references: [organizationId, contractId, side], onDelete: Restrict, onUpdate: Restrict)
@@ -314,6 +323,9 @@ model PolicyReconciliationTask {
   /// When the move took effect (the event's own instant): what a signature's hierarchy evidence is
   /// compared with. NULL only on a task queued before it existed; `created_at` stands in.
   movedAt   DateTime? @map("moved_at") @db.Timestamptz(3)
+  /// The move's hierarchy version: signatures that recorded a LOWER one are flagged. A move that
+  /// coalesces into the open task keeps the higher. NULL on a task from before versions.
+  movedVersion BigInt? @map("moved_version")
 
   policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 

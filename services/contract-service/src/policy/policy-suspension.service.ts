@@ -37,6 +37,8 @@ export type SuspensionCause =
       movedOrganizationId: string;
       /** When the move took effect: the event's own instant (D-050). */
       movedAt: Date;
+      /** The move's hierarchy version (organization-service's); null for an event without one. */
+      movedVersion: number | null;
       correlationId: string;
       callerService: string;
     }
@@ -50,6 +52,8 @@ export interface MoveCause {
   movedOrganizationId: string;
   /** When the move took effect: the event's `occurredAt`. */
   movedAt: Date;
+  /** The move's hierarchy version; null for an event that carries none. */
+  movedVersion: number | null;
   correlationId: string;
 }
 
@@ -152,6 +156,7 @@ export class PolicySuspensionService {
         })),
         cause.movedAt,
         at,
+        cause.movedVersion,
       );
     });
     return { candidates: candidates.length, queued };
@@ -277,8 +282,9 @@ export class PolicySuspensionService {
   }
 
   /**
-   * Flags, for review, every employer signature under this policy that the move may have raced
-   * (D-050): its hierarchy answer predates the move and it could still have committed after it.
+   * Flags, for review, every employer signature under this policy that the move raced (D-050): it
+   * recorded a hierarchy version lower than the move's — it read the tree before the move — and it
+   * could still have committed after the move was prepared.
    * Never revokes or cancels anything; one review row and one audit event per signature, in the
    * transaction that found the policy stranded, under the policy slot's lock.
    */
@@ -293,6 +299,7 @@ export class PolicySuspensionService {
       policyId: policy.id,
       causeEventId: cause.eventId,
       movedAt: cause.movedAt,
+      movedVersion: cause.movedVersion,
       at,
     });
     for (const signature of flagged) {
@@ -309,6 +316,7 @@ export class PolicySuspensionService {
           reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
           causeEventId: cause.eventId,
           movedAt: cause.movedAt.toISOString(),
+          movedVersion: cause.movedVersion,
           flaggedAt: at.toISOString(),
         },
         causationId: cause.eventId,

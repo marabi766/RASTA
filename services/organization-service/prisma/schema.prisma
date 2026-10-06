@@ -69,6 +69,13 @@ model Organization {
   version   Int       @default(1)
   deletedAt DateTime? @map("deleted_at")
 
+  /// Bumped in the transaction of any move that changes this organization's
+  /// ancestry — the moved root and every descendant, all to one value above
+  /// every version there was. What a cross-service read returns is ordered
+  /// against a move by this, never by a clock (D-050). SQL-only: the CHECK
+  /// `ck_organization_hierarchy_version_positive`.
+  hierarchyVersion BigInt @default(1) @map("hierarchy_version")
+
   parent   Organization?  @relation("OrganizationTree", fields: [parentId], references: [id])
   children Organization[] @relation("OrganizationTree")
 
@@ -79,6 +86,7 @@ model Organization {
   @@index([parentId])
   @@index([type, status])
   @@index([status])
+  @@index([hierarchyVersion])
   @@map("organization")
 }
 

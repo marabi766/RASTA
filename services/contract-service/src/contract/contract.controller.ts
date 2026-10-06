@@ -115,16 +115,23 @@ export class ContractController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<ContractView> {
     const key = requiredIdempotencyKey(idempotencyKey);
+    // A replay answers the recorded outcome (success — a refusal stores nothing), but the body is
+    // the contract as it is now, re-read and scoped to the caller as a fresh GET would: the stored
+    // one is a snapshot, and `authorityReviewRequired` or the status may have changed since (a
+    // move flagged the signature, the other side signed). The same read is the check that the
+    // caller may still see it: it throws the 404 a fresh request would get.
+    let current: ContractView | undefined;
     const { result } = await this.idempotency.execute<ContractView>(
       SIGN_CONTRACT_ENDPOINT,
       key,
       { id, ...dto },
       200,
       (fence) => this.contracts.sign(id, dto, fence),
-      // The caller may have stopped being a party since.
-      (stored) => this.contracts.assertVisible(stored.id),
+      async (stored) => {
+        current = await this.contracts.get(stored.id);
+      },
     );
-    return result;
+    return current ?? result;
   }
 
   @RequirePlatformUserId()

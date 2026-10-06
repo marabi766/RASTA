@@ -3,6 +3,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { EventPublisher } from '../src/events/publisher';
 import { PolicyReconciliationRepository } from '../src/policy/policy-reconciliation.repository';
 import { PolicyReconciliationSweeper } from '../src/policy/policy-reconciliation.sweeper';
 import { PolicySuspensionService } from '../src/policy/policy-suspension.service';
@@ -12,6 +13,8 @@ import {
   eventsOf,
   policyEventsOf,
   seedDraft,
+  newAward,
+  tenderAwarded,
   untilSessionsWaitOnALock,
   wire,
   type Wiring,
@@ -127,7 +130,12 @@ describe('a signing policy follows an organization move', () => {
       w.prisma.client.contractSignature.findMany({ where: { contractId } }),
     );
 
-  const moved = (organizationId: string, occurredAt: Date = new Date()): EventEnvelope =>
+  /** `hierarchyVersion` is what organization-service stamps on the move; omit it for an older event. */
+  const moved = (
+    organizationId: string,
+    occurredAt: Date = new Date(),
+    hierarchyVersion?: number,
+  ): EventEnvelope =>
     eventEnvelopeSchema.parse({
       eventId: ulid(),
       eventName: 'ORGANIZATION_MOVED',
@@ -136,7 +144,12 @@ describe('a signing policy follows an organization move', () => {
       aggregateType: 'Organization',
       aggregateId: organizationId,
       correlationId: ulid(),
-      payload: { organizationId, fromParentId: 'ORG_OLD', toParentId: 'ORG_NEW' },
+      payload: {
+        organizationId,
+        fromParentId: 'ORG_OLD',
+        toParentId: 'ORG_NEW',
+        ...(hierarchyVersion === undefined ? {} : { hierarchyVersion }),
+      },
     }) as EventEnvelope;
 
   let consumer: OrganizationMovedConsumer;
@@ -472,19 +485,29 @@ describe('a signing policy follows an organization move', () => {
     const view = (contractId: string, token: string) =>
       http().get(`/v1/contracts/${contractId}`).set('authorization', `Bearer ${token}`);
 
-    /** A draft whose employer is under a union that has signed it once, as a union's policy allows. */
-    async function signedUnderUnion() {
+    /**
+     * A draft whose employer is under a union that has signed it once, as a union's policy allows.
+     * `beforeSigning` runs after the policy is in force and before the signature: a move there is
+     * one the signature's answer already reflects.
+     */
+    async function signedUnderUnion(beforeSigning?: (employer: string) => void) {
       const union = newOrg();
       const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
       const policyId = await activeUnionPolicy(union, draft.employer);
+      beforeSigning?.(draft.employer);
       await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
       return { union, draft, policyId, evidence: await evidenceOf(draft.id) };
     }
+    /** An instant inside the signature's window: after it began, before its commit deadline. */
+    const inWindow = (signature: { hierarchyCommitDeadline: Date | null }) =>
+      new Date(signature.hierarchyCommitDeadline!.getTime() - 1);
 
     it('records on the employer’s signature the hierarchy evidence it rested on; the contractor’s and a platform-written policy’s have none', async () => {
       const { union, draft, evidence } = await signedUnderUnion();
       expect(evidence.hierarchyAuthorOrganizationId).toBe(union);
       expect(evidence.hierarchyAnswer).toBe('WITHIN');
+      // The version of the employer's tree the answer came from: what a move is ordered against.
+      expect(evidence.hierarchyVersion).toBe(BigInt(api.hierarchy.versionOf(draft.employer)));
       // Asked after the transaction began, and the commit cannot come later than its deadline.
       expect(evidence.hierarchyReadAt!.getTime()).toBeGreaterThanOrEqual(
         evidence.signedAt.getTime(),
@@ -500,40 +523,57 @@ describe('a signing policy follows an organization move', () => {
         }),
       );
       expect(contractor.hierarchyReadAt).toBeNull();
+      expect(contractor.hierarchyVersion).toBeNull();
 
       const other = await seedDraft(w, organizations, {}, { signingPolicy: false });
       await activePlatformPolicy(other.employer);
       await sign(other.id, person(other.employer, ['ORGANIZATION_ADMIN'])).expect(200);
-      expect((await evidenceOf(other.id)).hierarchyReadAt).toBeNull();
+      const platformSigned = await evidenceOf(other.id);
+      expect(platformSigned.hierarchyReadAt).toBeNull();
+      expect(platformSigned.hierarchyVersion).toBeNull();
     });
 
-    it('flags exactly the signatures whose answer predates the move and whose commit could have followed it — deterministically, from the evidence', async () => {
+    it('flags exactly the signatures that recorded a LOWER hierarchy version than the move’s and could still have committed after it — deterministically, from the evidence', async () => {
+      // Read the tree before the move, within the window: raced.
       const raced = await signedUnderUnion();
-      const answeredAfter = await signedUnderUnion();
+      // Read the tree AFTER the move (the version was already stamped): not raced.
+      const answeredAfter = await signedUnderUnion((employer) => {
+        api.hierarchy.bump(employer);
+      });
+      // Read the old tree, but out of its window before the move was even prepared: made on
+      // authority that held.
       const committedBefore = await signedUnderUnion();
-      const at = (signature: typeof raced.evidence, offsetMs: number, from: 'read' | 'deadline') =>
-        new Date(
-          (from === 'read'
-            ? signature.hierarchyReadAt!.getTime()
-            : signature.hierarchyCommitDeadline!.getTime()) + offsetMs,
-        );
+      // An event from before versions: nothing to order by, so the window alone decides.
+      const unversioned = await signedUnderUnion();
 
       const cases = [
-        // The move landed 1 ms after the question was asked: the answer may predate it.
-        { who: raced, movedAt: at(raced.evidence, 1, 'read'), flagged: true },
-        // The move landed 1 ms before it was asked: the answer is the post-move hierarchy.
-        { who: answeredAfter, movedAt: at(answeredAfter.evidence, -1, 'read'), flagged: false },
-        // The move landed 1 ms after the latest instant the signature could have committed at.
+        { who: raced, movedAt: inWindow(raced.evidence), stamp: 'new', flagged: true },
         {
-          who: committedBefore,
-          movedAt: at(committedBefore.evidence, 1, 'deadline'),
+          // The move committed before this signature read: its version is the one it recorded.
+          who: answeredAfter,
+          movedAt: inWindow(answeredAfter.evidence),
+          stamp: 'existing',
           flagged: false,
         },
-      ];
-      for (const { who, movedAt, flagged } of cases) {
-        // The employer left the union; its event carries the move's own instant.
+        {
+          who: committedBefore,
+          movedAt: new Date(committedBefore.evidence.hierarchyCommitDeadline!.getTime() + 1),
+          stamp: 'new',
+          flagged: false,
+        },
+        { who: unversioned, movedAt: inWindow(unversioned.evidence), stamp: 'none', flagged: true },
+      ] as const;
+      for (const { who, movedAt, stamp, flagged } of cases) {
+        // The employer left the union: a move stamps a version above every earlier one in its own
+        // transaction, and its event carries it.
         api.hierarchy.adopt(newOrg(), who.draft.employer);
-        const event = moved(who.draft.employer, movedAt);
+        const movedVersion =
+          stamp === 'new'
+            ? api.hierarchy.bump(who.draft.employer)
+            : stamp === 'existing'
+              ? api.hierarchy.versionOf(who.draft.employer)
+              : undefined;
+        const event = moved(who.draft.employer, movedAt, movedVersion);
         await consumer.handle(event);
         await sweeper.runOnce();
 
@@ -547,6 +587,8 @@ describe('a signing policy follows an organization move', () => {
             policyId: who.policyId,
             reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
             causeEventId: event.eventId,
+            movedVersion: movedVersion === undefined ? null : BigInt(movedVersion),
+            recordedVersion: who.evidence.hierarchyVersion,
           });
           expect(reviews[0]!.movedAt.toISOString()).toBe(movedAt.toISOString());
           expect(events).toHaveLength(1);
@@ -556,12 +598,45 @@ describe('a signing policy follows an organization move', () => {
             policyVersion: 1,
             reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
             causeEventId: event.eventId,
+            movedVersion: movedVersion ?? null,
           });
         } else {
           expect(reviews).toEqual([]);
           expect(events).toEqual([]);
         }
       }
+    });
+
+    it('a move whose event is stamped BEFORE the signature’s hierarchy read — yet commits after it — is flagged: a version orders what a timestamp cannot (review round 4, ruling 1)', async () => {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+
+      // The signature's read sees the OLD tree (version 1) …
+      const before = api.hierarchy.versionOf(draft.employer);
+      const eventInstant = new Date();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
+      const evidence = await evidenceOf(draft.id);
+      // … taken AFTER the instant the move's event carries (it was prepared first, committed later).
+      expect(evidence.hierarchyReadAt!.getTime()).toBeGreaterThan(eventInstant.getTime());
+      expect(evidence.hierarchyVersion).toBe(BigInt(before));
+
+      // The move commits now; organization-service stamped its version in that transaction.
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const stamped = api.hierarchy.bump(draft.employer);
+      const event = moved(draft.employer, eventInstant, stamped);
+      await consumer.handle(event);
+      await sweeper.runOnce();
+
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      const reviews = await reviewsOf(draft.id);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        causeEventId: event.eventId,
+        movedVersion: BigInt(stamped),
+        recordedVersion: BigInt(before),
+      });
     });
 
     it('never revokes: the signature, the contract and its status stand; a party sees the flag in the read API; the review itself is append-only', async () => {
@@ -576,7 +651,7 @@ describe('a signing policy follows an organization move', () => {
 
       api.hierarchy.adopt(newOrg(), draft.employer);
       await consumer.handle(
-        moved(draft.employer, new Date(evidence.hierarchyReadAt!.getTime() + 1)),
+        moved(draft.employer, inWindow(evidence), api.hierarchy.bump(draft.employer)),
       );
       await sweeper.runOnce();
 
@@ -612,27 +687,85 @@ describe('a signing policy follows an organization move', () => {
       ).rejects.toThrow(/ck_review_immutable/);
     });
 
-    it('flags once, also when the policy was already suspended by a signature attempt and the move is reconciled later', async () => {
-      const { draft, policyId, evidence } = await signedUnderUnion();
-      const suspension = api.app.get(PolicySuspensionService);
-      const cause = {
-        reason: 'ORGANIZATION_MOVED' as const,
-        eventId: ulid(),
-        movedOrganizationId: draft.employer,
-        movedAt: new Date(evidence.hierarchyReadAt!.getTime() + 1),
-        correlationId: ulid(),
-        callerService: 'organization-service',
-      };
-      // A later signing attempt on another contract of this employer suspends the stranded policy first.
-      await suspension.suspend(
-        { id: policyId, organizationId: draft.employer },
-        { reason: 'SIGNING_RECHECK', correlationId: ulid(), callerService: 'contract-service' },
+    it('an idempotent replay of a sign answers the CURRENT contract, party-scoped: the review flag and the status are not the stored snapshot’s (review round 4, ruling 3)', async () => {
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      await activeUnionPolicy(newOrg(), draft.employer);
+      const token = person(draft.employer, ['ORGANIZATION_ADMIN']);
+      const replayKey = key();
+      const signWithKey = (as: string) =>
+        http()
+          .post(`/v1/contracts/${draft.id}/sign`)
+          .set('authorization', `Bearer ${as}`)
+          .set('idempotency-key', replayKey)
+          .send({});
+
+      const first = await signWithKey(token).expect(200);
+      expect(first.body).toMatchObject({ authorityReviewRequired: false, status: 'DRAFT' });
+      const evidence = await evidenceOf(draft.id);
+
+      // Afterwards a move flags that signature, and the contractor signs.
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      await consumer.handle(
+        moved(draft.employer, inWindow(evidence), api.hierarchy.bump(draft.employer)),
       );
-      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      await sweeper.runOnce();
+      await sign(draft.id, person(draft.contractor, ['CONTRACTOR'])).expect(200);
+
+      // The replay is the recorded outcome (success), with the body as the contract is now.
+      const replay = await signWithKey(token).expect(200);
+      expect(replay.body).toMatchObject({
+        id: draft.id,
+        status: 'SIGNED',
+        authorityReviewRequired: true,
+        authorityReviewReason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+      });
+      // … and it is exactly what a fresh read answers the same caller.
+      const fresh = await view(draft.id, token).expect(200);
+      expect(replay.body).toEqual(fresh.body);
+
+      // Idempotency keys are scoped to the organization: another organization's request with the
+      // same key is a request of its own, and the contract is not its own (404).
+      await signWithKey(person(newOrg(), ['ORGANIZATION_ADMIN'])).expect(404);
+    });
+
+    it('a policy a signature attempt already suspended is still reconciled when the move arrives: the raced signature is flagged, once — through the consumer and the sweeper (review round 4, ruling 2)', async () => {
+      const { draft, policyId, evidence } = await signedUnderUnion();
+
+      // The employer left the union; before the move's event arrives, a signature attempt on
+      // ANOTHER contract of the same employer finds the policy stranded and suspends it.
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const award = newAward(draft.employer, { winnerOrganizationId: newOrg() });
+      w.awards.serve(award);
+      await w.consumer.handle(tenderAwarded(award));
+      const second = await runUnscoped('the suite reads back the second contract', () =>
+        w.contracts.findByTender(draft.employer, award.tenderId),
+      );
+      await sign(second!.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(403);
+      const suspended = await policyRow(policyId);
+      expect(suspended.status).toBe('SUSPENDED');
+      expect(suspended.suspensionReason).toMatch(/^SIGNING_RECHECK: /);
       expect(await reviewsOf(draft.id)).toEqual([]);
 
-      await suspension.suspend({ id: policyId, organizationId: draft.employer }, cause);
-      await suspension.suspend({ id: policyId, organizationId: draft.employer }, cause);
+      // The move's event arrives: the suspended policy is queued like any other …
+      const event = moved(draft.employer, inWindow(evidence), api.hierarchy.bump(draft.employer));
+      await consumer.handle(event);
+      expect(await tasksOf(policyId)).toEqual([expect.objectContaining({ status: 'PENDING' })]);
+      // … and the sweeper's reconciliation flags the signature that raced it.
+      await sweeper.runOnce();
+      expect((await tasksOf(policyId))[0]!.status).toBe('DONE');
+      expect(await reviewsOf(draft.id)).toHaveLength(1);
+      expect(await flaggedEventsOf(draft.employer)).toHaveLength(1);
+      // Still suspended by the first cause, with no second suspension event.
+      expect((await policyRow(policyId)).suspensionReason).toMatch(/^SIGNING_RECHECK: /);
+      expect(
+        (await policyEventsOf(api.prisma, draft.employer)).filter(
+          (e) => e.eventName === 'APPROVAL_POLICY_SUSPENDED',
+        ),
+      ).toHaveLength(1);
+
+      // A redelivery of the same event flags nothing more.
+      await consumer.handle(event);
+      await sweeper.runOnce();
       expect(await reviewsOf(draft.id)).toHaveLength(1);
       expect(await flaggedEventsOf(draft.employer)).toHaveLength(1);
     });
@@ -681,6 +814,42 @@ describe('a signing policy follows an organization move', () => {
       ]);
     });
 
+    it('a refusal that cannot be recorded is a retryable 503, not the normal refusal: nothing is signed, the key is released, and the repeated request leaves its trace (review round 4, ruling 4)', async () => {
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const user = person(draft.employer, ['ORGANIZATION_ADMIN']);
+      const retryKey = key();
+      const attempt = () =>
+        http()
+          .post(`/v1/contracts/${draft.id}/sign`)
+          .set('authorization', `Bearer ${user}`)
+          .set('idempotency-key', retryKey)
+          .send({});
+
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'CONTRACT_SIGNATURE_REFUSED') throw new Error('outbox down');
+          return original(...args);
+        });
+      try {
+        const down = await attempt().expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+        // Nothing of the cause reaches the caller.
+        expect(JSON.stringify(down.body)).not.toContain('outbox');
+      } finally {
+        failing.mockRestore();
+      }
+      expect(await signaturesOf(draft.id)).toEqual([]);
+      expect(await refusals(draft.employer)).toEqual([]);
+
+      // The key was released: the same request now gets the normal refusal, and it is recorded.
+      await attempt().expect(422);
+      expect(await refusals(draft.employer)).toHaveLength(1);
+    });
+
     it('records no refusal for a signature that fails for another reason, or one that cannot be confirmed', async () => {
       const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
       await activeUnionPolicy(newOrg(), draft.employer);
@@ -711,13 +880,13 @@ describe('a signing policy follows an organization move', () => {
       const sameInstant = new Date('2026-10-06T12:00:00.000Z');
 
       const first = await api.prisma.transaction((tx) =>
-        queue.enqueue(tx, [row('PRT_same_ms_1')], sameInstant, sameInstant),
+        queue.enqueue(tx, [row('PRT_same_ms_1')], sameInstant, sameInstant, 3),
       );
       const second = await api.prisma.transaction((tx) =>
-        queue.enqueue(tx, [row('PRT_same_ms_2')], sameInstant, sameInstant),
+        queue.enqueue(tx, [row('PRT_same_ms_2')], sameInstant, sameInstant, 5),
       );
       const third = await api.prisma.transaction((tx) =>
-        queue.enqueue(tx, [row('PRT_same_ms_3')], sameInstant, sameInstant),
+        queue.enqueue(tx, [row('PRT_same_ms_3')], sameInstant, sameInstant, 4),
       );
 
       expect([first, second, third]).toEqual([1, 0, 0]);
@@ -727,6 +896,37 @@ describe('a signing policy follows an organization move', () => {
       // The first move's event and instant stay: the earlier instant flags more, never fewer.
       expect(tasks[0]!.sourceEventId).toBe('EVT_PRT_same_ms_1');
       expect(tasks[0]!.movedAt!.toISOString()).toBe(sameInstant.toISOString());
+      // The version is the HIGHEST of the moves that coalesced, in whatever order they arrived
+      // (3, 5, 4): the flagging then covers a signature that read between the moves too.
+      expect(tasks[0]!.movedVersion).toBe(5n);
+    });
+
+    it('a task from a move without a version takes the version of a later one, and keeps none when none has one', async () => {
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(newOrg(), draft.employer);
+      const queue = api.app.get(PolicyReconciliationRepository);
+      const row = (id: string) => ({
+        id,
+        organizationId: draft.employer,
+        policyId,
+        unionId: 'ORG_U',
+        sourceEventId: `EVT_${id}`,
+        movedOrganizationId: draft.employer,
+        correlationId: 'COR_1',
+      });
+      const instant = new Date('2026-10-06T12:00:00.000Z');
+      await api.prisma.transaction((tx) =>
+        queue.enqueue(tx, [row('PRT_nv_1')], instant, instant, null),
+      );
+      expect((await tasksOf(policyId))[0]!.movedVersion).toBeNull();
+      await api.prisma.transaction((tx) =>
+        queue.enqueue(tx, [row('PRT_nv_2')], instant, instant, 6),
+      );
+      expect((await tasksOf(policyId))[0]!.movedVersion).toBe(6n);
+      await api.prisma.transaction((tx) =>
+        queue.enqueue(tx, [row('PRT_nv_3')], instant, instant, null),
+      );
+      expect((await tasksOf(policyId))[0]!.movedVersion).toBe(6n);
     });
   });
 });

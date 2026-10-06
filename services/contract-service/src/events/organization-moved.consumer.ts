@@ -23,7 +23,15 @@ export const ORGANIZATION_MOVED = 'ORGANIZATION_MOVED';
  * Only the field this service uses. organization-service owns the full schema and this service
  * does not import it (no cross-service imports); an extra field is not this consumer's business.
  */
-const movedPayload = z.object({ organizationId: z.string().min(1) });
+const movedPayload = z.object({
+  organizationId: z.string().min(1),
+  /**
+   * The hierarchy version the move stamped (D-050), what a signature's recorded version is ordered
+   * against. Optional only for an event published before it existed; such a move orders nothing,
+   * and the signing window alone bounds what is flagged.
+   */
+  hierarchyVersion: z.number().int().min(1).optional(),
+});
 
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
@@ -122,7 +130,10 @@ export class OrganizationMovedConsumer {
       eventId: envelope.eventId,
       movedOrganizationId: payload.data.organizationId,
       // The move's own instant — organization-service's, in the transaction that made the move.
+      // Only the bound of the signing window now: the instant is taken before the move commits and
+      // orders nothing. The version below does (D-050).
       movedAt: new Date(envelope.occurredAt),
+      movedVersion: payload.data.hierarchyVersion ?? null,
       correlationId: envelope.correlationId,
     });
     this.logger.info(

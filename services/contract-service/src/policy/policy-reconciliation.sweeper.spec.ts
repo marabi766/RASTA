@@ -26,6 +26,7 @@ const task = (overrides: Partial<ClaimedTask> = {}): ClaimedTask => ({
   generation: 0,
   leaseToken: 'TOKEN',
   movedAt: new Date('2026-10-06T10:00:00.000Z'),
+  movedVersion: 4,
   ...overrides,
 });
 
@@ -64,6 +65,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
         eventId: 'EVT_1',
         movedOrganizationId: 'ORG_E',
         movedAt: new Date('2026-10-06T10:00:00.000Z'),
+        movedVersion: 4,
         callerService: 'organization-service',
       }),
       expect.anything(),

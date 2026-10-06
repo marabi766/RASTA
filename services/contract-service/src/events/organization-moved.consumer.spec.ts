@@ -87,16 +87,44 @@ describe('OrganizationMovedConsumer (Q-83)', () => {
 
   it('queues a re-check naming the event and the organization that moved — a trigger, not the answer', async () => {
     const { consumer, enqueueMove, info } = build();
-    await consumer.handle(envelope());
+    await consumer.handle(
+      envelope({
+        payload: {
+          organizationId: 'ORG_MOVED',
+          fromParentId: 'A',
+          toParentId: 'B',
+          hierarchyVersion: 9,
+        },
+      }),
+    );
     expect(enqueueMove).toHaveBeenCalledWith({
       eventId: 'EVT_1',
       movedOrganizationId: 'ORG_MOVED',
-      // The move's own instant, from the envelope: what a signature's evidence is compared with.
+      // The move's own instant, from the envelope: it bounds the signing window, nothing more.
       movedAt: new Date('2026-10-06T10:00:00.000Z'),
+      // What orders a signature against the move (D-050): organization-service's version.
+      movedVersion: 9,
       correlationId: 'COR_1',
     });
     expect(info).toHaveBeenCalledWith(expect.stringContaining('2 of 3 union-written policies'));
   });
+
+  it('an event from before versions queues the check with no version: the window alone bounds it', async () => {
+    const { consumer, enqueueMove } = build();
+    await consumer.handle(envelope());
+    expect(enqueueMove).toHaveBeenCalledWith(expect.objectContaining({ movedVersion: null }));
+  });
+
+  it.each([0, -1, 1.5, '3', null])(
+    'refuses an event whose hierarchyVersion is %p: it can never parse',
+    async (hierarchyVersion) => {
+      const { consumer, enqueueMove } = build();
+      await expect(
+        consumer.handle(envelope({ payload: { organizationId: 'ORG_MOVED', hierarchyVersion } })),
+      ).rejects.toBeInstanceOf(UnprocessableEventError);
+      expect(enqueueMove).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['ORGANIZATION_CREATED', 'ORGANIZATION_UPDATED'])(
     'skips %s: it is none of its business',

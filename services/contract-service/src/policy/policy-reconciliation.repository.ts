@@ -43,6 +43,8 @@ export interface ClaimedTask {
   leaseToken: string;
   /** When the move took effect (the event's instant); the task's creation for an older task. */
   movedAt: Date;
+  /** The move's hierarchy version (the highest of the moves coalesced); null for an older task. */
+  movedVersion: number | null;
 }
 
 /**
@@ -79,6 +81,8 @@ export class PolicyReconciliationRepository {
     movedAt: Date,
     /** This transaction's `now()`. */
     at: Date,
+    /** The move's hierarchy version; null for an event that carries none. */
+    movedVersion: number | null,
   ): Promise<number> {
     if (rows.length === 0) return 0;
     // One statement decides, per policy, between "a new task" and "the open one already there",
@@ -87,7 +91,8 @@ export class PolicyReconciliationRepository {
     // move landed, so the conflicting task's generation advances (that sweeper then cannot finish it
     // on its stale answer) and it falls due now. The lease is left alone (a live claim is not
     // stolen), and the first move's event and instant stay — the earlier instant flags more, never
-    // fewer, signatures (D-050). `xmax = 0` is what PostgreSQL gives a row this statement inserted
+    // fewer, signatures — while the version becomes the HIGHER of the two, so a signature that read
+    // the tree between the moves is flagged against the later one too (D-050). `xmax = 0` is what PostgreSQL gives a row this statement inserted
     // rather than updated, so the count is of tasks created, whatever instant either carries — a
     // second move in the very millisecond the first task was made included.
     const result = await runUnscoped(
@@ -96,10 +101,10 @@ export class PolicyReconciliationRepository {
         tx.$queryRawUnsafe<{ inserted: boolean }[]>(
           `INSERT INTO policy_reconciliation_task
                   (id, organization_id, policy_id, union_id, source_event_id,
-                   moved_organization_id, correlation_id, moved_at,
+                   moved_organization_id, correlation_id, moved_at, moved_version,
                    next_attempt_at, created_at, updated_at)
            SELECT t.id, t.organization_id, t.policy_id, t.union_id, t.source_event_id,
-                  t.moved_organization_id, t.correlation_id, $8::timestamptz,
+                  t.moved_organization_id, t.correlation_id, $8::timestamptz, $10::bigint,
                   $9::timestamptz, $9::timestamptz, $9::timestamptz
              FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
                   AS t(id, organization_id, policy_id, union_id, source_event_id,
@@ -107,6 +112,7 @@ export class PolicyReconciliationRepository {
            ON CONFLICT (policy_id) WHERE status = 'PENDING'
            DO UPDATE SET generation = policy_reconciliation_task.generation + 1,
                          next_attempt_at = LEAST(policy_reconciliation_task.next_attempt_at, $9::timestamptz),
+                         moved_version = GREATEST(policy_reconciliation_task.moved_version, $10::bigint),
                          updated_at = $9::timestamptz
            RETURNING (xmax = 0) AS inserted`,
           rows.map((row) => row.id),
@@ -118,6 +124,7 @@ export class PolicyReconciliationRepository {
           rows.map((row) => row.correlationId),
           movedAt,
           at,
+          movedVersion,
         ),
     );
     return result.filter((row) => row.inserted).length;
@@ -130,10 +137,14 @@ export class PolicyReconciliationRepository {
    * lease was taken back can neither complete nor fail the new holder's task.
    */
   async claimDue(limit: number, leaseSeconds: number, token: string): Promise<ClaimedTask[]> {
-    return runUnscoped(
+    const claimed = await runUnscoped(
       'the sweeper claims due reconciliation tasks of every tenant; each is then handled in its own tenant (Q-83)',
       () =>
-        this.prisma.client.$queryRawUnsafe<ClaimedTask[]>(
+        this.prisma.client.$queryRawUnsafe<
+          (Omit<ClaimedTask, 'movedVersion'> & {
+            movedVersion: bigint | null;
+          })[]
+        >(
           `UPDATE policy_reconciliation_task
               SET lease_until = now() + ($2::int * interval '1 second'),
                   lease_token = $3,
@@ -156,12 +167,17 @@ export class PolicyReconciliationRepository {
                   attempts,
                   generation,
                   lease_token AS "leaseToken",
-                  COALESCE(moved_at, created_at) AS "movedAt"`,
+                  COALESCE(moved_at, created_at) AS "movedAt",
+                  moved_version AS "movedVersion"`,
           limit,
           leaseSeconds,
           token,
         ),
     );
+    return claimed.map((task) => ({
+      ...task,
+      movedVersion: task.movedVersion === null ? null : Number(task.movedVersion),
+    }));
   }
 
   /**

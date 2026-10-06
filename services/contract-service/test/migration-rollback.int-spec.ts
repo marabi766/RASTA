@@ -129,6 +129,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const VERSION = '20261006140000_signature_hierarchy_version';
   const REVIEW = '20261006120000_signature_authority_review';
   const SUSPENSION = '20261006100000_policy_suspension';
   const SIGNING_POLICY = '20261005150000_signing_policy';
@@ -217,7 +218,7 @@ describe('each down.sql, run whole with psql --file', () => {
     }
   });
 
-  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW])(
+  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW, VERSION])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
       const statements = readFileSync(down(migration), 'utf8')
@@ -363,6 +364,61 @@ describe('each down.sql, run whole with psql --file', () => {
       expect(result.out).toBe('');
       expect(result.ok).toBe(true);
       expect(shape(unused)).toBe(shape(scratch(SUSPENSION)));
+    },
+  );
+
+  // The hierarchy version of review round 4: the same signature, version recorded.
+  const versionedSignature = evidencedSignature
+    .replace('"hierarchy_commit_deadline")', '"hierarchy_commit_deadline", "hierarchy_version")')
+    .replace("now() + interval '13 seconds')", "now() + interval '13 seconds', 4)");
+  const versionedReview = review
+    .replace(
+      '"moved_at", "flagged_at")',
+      '"moved_at", "flagged_at", "moved_version", "recorded_version")',
+    )
+    .replace('now(), now())', 'now(), now(), 5, 4)');
+  const versionedTask = openTask
+    .replace('"updated_at")', '"updated_at", "moved_version")')
+    .replace('now(), now(), now())', 'now(), now(), now(), 5)');
+
+  it.each([
+    [
+      'a signature that records a hierarchy version',
+      `${policyRow}; ${contractRow}; ${versionedSignature}`,
+      /1 signature\(s\) record a hierarchy version, 0 review\(s\) record a version and 0 open reconciliation task\(s\)/,
+    ],
+    [
+      'a review that records the versions compared',
+      `${policyRow}; ${contractRow}; ${evidencedSignature}; ${versionedReview}`,
+      /0 signature\(s\) record a hierarchy version, 1 review\(s\) record a version and 0 open/,
+    ],
+    [
+      'an open task holding a move version',
+      `${policyRow}; ${versionedTask}`,
+      /0 signature\(s\) record a hierarchy version, 0 review\(s\) record a version and 1 open/,
+    ],
+  ])(
+    'signature_hierarchy_version: over %s it refuses and changes nothing, with ON_ERROR_STOP and without it; over none (and over a signature from before versions) it succeeds',
+    (_what, populate, message) => {
+      const schema = scratch(VERSION);
+      mustRun(schema, ['-c', populate]);
+      const before = shape(schema);
+      for (const stop of [true, false]) {
+        const refused = psql(schema, ['--file', down(VERSION)], stop);
+        if (stop) expect(refused.ok).toBe(false);
+        expect(refused.out).toMatch(message);
+        expect(shape(schema)).toBe(before);
+      }
+
+      // Evidence recorded before versions existed carries none: dropping the columns loses nothing.
+      const unused = scratch(VERSION);
+      mustRun(unused, ['-c', `${policyRow}; ${contractRow}; ${evidencedSignature}`]);
+      const result = psql(unused, ['--file', down(VERSION)]);
+      expect(result.out).toBe('');
+      expect(result.ok).toBe(true);
+      const previous = scratch(REVIEW);
+      mustRun(previous, ['-c', `${policyRow}; ${contractRow}; ${evidencedSignature}`]);
+      expect(shape(unused)).toBe(shape(previous));
     },
   );
 

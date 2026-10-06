@@ -236,6 +236,8 @@ export const contractSignatureAuthorityFlaggedPayload = z
     /** The ORGANIZATION_MOVED event that stranded the policy, and when the move took effect. */
     causeEventId: id,
     movedAt: instant,
+    /** The move's hierarchy version, which the signature's recorded one was lower than (D-050). */
+    movedVersion: positive.nullable(),
     flaggedAt: instant,
   })
   .strict();
