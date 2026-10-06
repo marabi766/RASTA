@@ -134,15 +134,24 @@ describe('each down.sql, run whole with psql --file', () => {
   const SIGN_CANCEL = '20261005140000_contract_sign_cancel';
   const schemas: string[] = [];
 
+  /**
+   * What psql connects with, as the PG* environment — host, user, password and database — so no
+   * url, and no password, is ever on a command line another local user can read (D-045 follow-up).
+   * `search_path` points the session at the scratch schema alone.
+   */
   const connection = (schema: string): NodeJS.ProcessEnv => {
-    const url = new URL(ownerDatabaseUrl());
+    const parts = /^postgres(?:ql)?:\/\/([^:@/]+):([^@]*)@([^:/?]+)(?::(\d+))?\/([^?]+)/.exec(
+      ownerDatabaseUrl(),
+    );
+    if (!parts) throw new Error('DATABASE_URL_CONTRACT_MIGRATOR is not a postgresql:// url');
+    const [, user, password, host, port, database] = parts;
     return {
       ...process.env,
-      PGHOST: url.hostname,
-      PGPORT: url.port || '5432',
-      PGUSER: decodeURIComponent(url.username),
-      PGPASSWORD: decodeURIComponent(url.password),
-      PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
+      PGHOST: host!,
+      PGPORT: port ?? '5432',
+      PGUSER: decodeURIComponent(user!),
+      PGPASSWORD: decodeURIComponent(password!),
+      PGDATABASE: decodeURIComponent(database!),
       PGOPTIONS: `-c search_path=${schema} -c timezone=UTC`,
     };
   };
