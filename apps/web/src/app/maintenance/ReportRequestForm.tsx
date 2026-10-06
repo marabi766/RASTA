@@ -124,6 +124,8 @@ export function ReportRequestForm({
         <Field label={LABELS.type} required error={errors.type}>
           {(control) => (
             <select
+              // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+              key={values.type}
               {...control}
               name="type"
               defaultValue={values.type}
@@ -146,6 +148,8 @@ export function ReportRequestForm({
         >
           {(control) => (
             <select
+              // Keyed by its default: a select reads `defaultValue` only at mount (docs/16 § ۱۶٫۱).
+              key={values.severity}
               {...control}
               name="severity"
               defaultValue={values.severity}

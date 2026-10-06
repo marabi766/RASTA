@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import {
+  reasonsOf,
   actor,
   auditorActor,
   internalToken,
@@ -180,6 +181,7 @@ describe('award API', () => {
       .send({ bidId: bids[0]!.bidId });
     expect(res.status).toBe(403);
     expect(res.body.message).toContain('CONFLICT_OF_INTEREST');
+    expect(reasonsOf(res.body)).toEqual(['award:CONFLICT_OF_INTEREST']);
     expect((await refusedRows(tenderId)).map((r) => r.refusalCode)).toEqual([
       'CONFLICT_OF_INTEREST',
     ]);
@@ -209,6 +211,7 @@ describe('award API', () => {
     const none = await award();
     expect(none.status).toBe(422);
     expect(none.body.message).toContain('APPROVAL_POLICY_REQUIRED');
+    expect(reasonsOf(none.body)).toEqual(['award:APPROVAL_POLICY_REQUIRED']);
     expect(await stateOf(tenderId)).toEqual({ tender: 'EVALUATED', awards: 0 });
 
     expect((await refusedRows(tenderId)).map((r) => r.refusalCode)).toEqual([

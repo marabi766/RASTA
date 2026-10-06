@@ -1,10 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { RastaError } from '@rasta/nest-common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { ProjectAccess } from '../access/access';
 import { SERVICE_NAME } from '../config/env';
 import { bidOpeningRefusalsTotal } from '../observability/metrics';
 import { MEMBERSHIP_SOURCE } from '../tokens';
 import type { LiveAnswer, MembershipSource } from './membership.client';
+import { refusalDetails } from '../shared/refusal';
 
 /** The caller as the token names them: the organization they act for, who they are, every organization they belong to. */
 export interface Principal {
@@ -84,7 +86,10 @@ export class OwnerIdentity {
     const bidders = new Set(bidderOrganizationIds);
     if (memberOf.some((organization) => bidders.has(organization))) {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
-      throw RastaError.forbidden(message);
+      // The closed reason in `details` only: the access log keeps this refusal's code as it was.
+      throw new RastaError(ERROR_CODES.FORBIDDEN, message, {
+        details: refusalDetails('opening', ['CONFLICT_OF_INTEREST']),
+      });
     }
   }
 }
