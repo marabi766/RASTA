@@ -2794,6 +2794,53 @@ export function psqlRunner(url) {
   };
 }
 
+/**
+ * Runs one SQL **file** the way a rollback is run by hand:
+ * `psql -v ON_ERROR_STOP=1 --file <file>` — no `--single-transaction`, no `-c`
+ * around the file. That is the supported path for a `down.sql`
+ * (docs/runbooks/database-bootstrap.md § «اجرای down.sql»).
+ *
+ * Each statement the file does not itself wrap in BEGIN … COMMIT commits on its
+ * own, and ON_ERROR_STOP ends the run at the first error, so a down that fails
+ * half-way leaves the half-rolled-back schema behind — which is what the
+ * verifier must be able to see. Handing the same text to `psql -c` (or to
+ * Prisma's `db execute`) runs it as one implicit transaction that rolls
+ * everything back on error, and so can never show that. `--single-transaction`
+ * is not used: the down files open their own transaction, and a nested BEGIN
+ * would only warn while the file's COMMIT ended the outer one early.
+ *
+ * `schema` becomes the session's `search_path`, as Prisma's `?schema=` does for
+ * the commands it runs; psql has no such parameter, and an unqualified name in
+ * a down would otherwise resolve against `public`. A separate `-c`, run before
+ * the file in the same session, rather than `PGOPTIONS`, which a URL's own
+ * `options` parameter would silently override.
+ */
+export function psqlFileRunner(url, schema) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
+    throw new Error(`psqlFileRunner: "${schema}" is not a plain lowercase identifier`);
+  }
+  const { target, env } = libpqInvocation(url);
+  return (file) => {
+    const result = spawnSync(
+      'psql',
+      [
+        target,
+        '-X',
+        '-q',
+        '-v',
+        'ON_ERROR_STOP=1',
+        '-c',
+        `SET search_path TO "${schema}"`,
+        '--file',
+        file,
+      ],
+      { encoding: 'utf8', env: { ...process.env, ...env } },
+    );
+    const stderr = result.stderr ?? (result.error ? String(result.error) : '');
+    return { ok: result.status === 0, output: `${result.stdout ?? ''}${stderr}` };
+  };
+}
+
 /** SQLSTATE 55006 — `object_in_use`: another backend is still in the database after PostgreSQL's own wait. */
 const OBJECT_IN_USE = '55006';
 

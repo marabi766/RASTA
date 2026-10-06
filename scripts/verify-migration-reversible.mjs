@@ -16,7 +16,8 @@
 //   1. create the scratch schema, empty
 //   2. `prisma migrate deploy`          — up
 //   3. assert the schema is really there (tables, triggers, CHECK constraints)
-//   4. run `down.sql`                   — down
+//   4. run `down.sql`                   — down, as `psql -v ON_ERROR_STOP=1 --file`
+//                                         (the supported rollback path; see runDown)
 //   5. assert every one of those objects is gone
 //   6. `prisma migrate deploy` again    — up, a second time
 //   7. assert the schema is back
@@ -55,6 +56,7 @@ import {
   dropScratchDatabase,
   ledgerAssertionScript,
   newScratchDatabase,
+  psqlFileRunner,
   psqlRunner,
   recordSnapshotScript,
   snapshotStoreScript,
@@ -299,6 +301,58 @@ function mustFail(label, script, expectedError) {
   console.log(`  ✓ ${label}`);
 }
 
+/**
+ * Runs the `down.sql` of each named migration, in order, as the supported
+ * rollback path does: `psql -v ON_ERROR_STOP=1 --file` (psqlFileRunner), one
+ * file at a time, stopping at the first that fails. Never through
+ * `prisma db execute`, which wraps a file in one transaction and so hides a
+ * half-applied rollback.
+ */
+function runDown(names) {
+  const run = psqlFileRunner(scratchUrl(), targetSchema);
+  let output = '';
+  for (const name of names) {
+    const result = run(join(migrationsDir, name, 'down.sql'));
+    output += result.output;
+    if (!result.ok) return { ok: false, output };
+  }
+  return { ok: true, output };
+}
+
+/**
+ * Runs a down that must be **refused** and proves the refusal changed nothing:
+ * the schema is recorded first and must be identical afterwards. Refusing is not
+ * enough when the file commits statements one by one — it must refuse before
+ * the first of them.
+ */
+function mustRefuseDown(label, names, expectedError, snapshotLabel) {
+  mustRun(
+    `${label}: record the state before the refusal`,
+    searchPath(targetSchema) +
+      recordSnapshotScript(metaSchema, snapshotLabel, targetSchema, extensionHome),
+  );
+  const result = runDown(names);
+  if (result.ok) fail(`${label}: the database accepted a statement it should have refused.`);
+  if (expectedError && !result.output.includes(expectedError)) {
+    fail(
+      `${label}: refused, but not for the expected reason.\n` +
+        `  expected the error to mention: ${expectedError}\n${result.output}`,
+    );
+  }
+  mustRun(
+    `${label}: the refusal changed nothing`,
+    searchPath(targetSchema) +
+      assertSnapshotScript(
+        metaSchema,
+        snapshotLabel,
+        targetSchema,
+        `after the refused ${names.join(', ')}`,
+        undefined,
+        { extensionHome },
+      ),
+  );
+}
+
 function fail(message) {
   console.error(`\n✗ ${message}`);
   // Best effort: leave nothing behind even on failure. A scratch schema that
@@ -453,21 +507,20 @@ if (expected.dataRollback) {
   const probe = expected.dataRollback;
   console.log(`\n  rolling back ${probe.migration} over ${probe.label}:`);
 
-  const downOf = (name) => readFileSync(join(migrationsDir, name, 'down.sql'), 'utf8');
   // `true` rolls back the probe's migration; a list rolls back those, in order —
-  // for a later migration that depends on it and must go first.
-  const downScriptFor = (step) =>
-    Array.isArray(step.runDownScript)
-      ? step.runDownScript.map(downOf).join('\n')
-      : downOf(probe.migration);
+  // for a later migration that depends on it and must go first. Each is its own
+  // `psql --file`, and the first to fail ends the run (see runDown).
+  const downsFor = (step) =>
+    Array.isArray(step.runDownScript) ? step.runDownScript : [probe.migration];
 
-  for (const step of probe.steps) {
-    const downScript = step.runDownScript ? downScriptFor(step) : '';
+  for (const [stepIndex, step] of probe.steps.entries()) {
     if (step.runDownScript && step.mustFail) {
-      // A down script that must refuse the data in front of it.
-      mustFail(step.label, downScript, step.mustFail);
+      // A down script that must refuse the data in front of it — and, run as a
+      // file, must refuse *before* it has changed anything: a preflight placed
+      // after a statement that commits on its own would leave half a rollback.
+      mustRefuseDown(step.label, downsFor(step), step.mustFail, `refusal:${stepIndex}`);
     } else if (step.runDownScript) {
-      const result = sql(downScript);
+      const result = runDown(downsFor(step));
       if (!result.ok) {
         fail(
           `${step.label} failed. The rollback cannot be applied to a database ` +
@@ -512,8 +565,7 @@ if (expected.dataRollback) {
 // here and names the migration.
 for (let index = migrations.length - 1; index >= 0; index -= 1) {
   const name = migrations[index];
-  const script = readFileSync(join(migrationsDir, name, 'down.sql'), 'utf8');
-  const result = sql(script);
+  const result = runDown([name]);
   if (!result.ok) fail(`down: ${name}/down.sql failed:\n${result.output}`);
 
   const exact = sql(

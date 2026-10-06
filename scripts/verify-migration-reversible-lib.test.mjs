@@ -16,6 +16,7 @@ import {
   libpqInvocation,
   libpqUrl,
   newScratchDatabase,
+  psqlFileRunner,
   psqlRunner,
   recordSnapshotScript,
   scratchDatabaseSql,
@@ -1657,4 +1658,141 @@ test('a migrator-verified service is verified only as exactly its migrator — n
   assert.match(verifierRoleProblem('construction', ''), /could not tell/);
   const runtimeService = Object.entries(EXPECTED).find(([, entry]) => !entry.connectAs)?.[0];
   if (runtimeService) assert.equal(verifierRoleProblem(runtimeService, 'rasta|rasta|t'), null);
+});
+
+// ---------------------------------------------------------------------------
+// A down.sql run as a file: `psql -v ON_ERROR_STOP=1 --file` (psqlFileRunner)
+//
+// The supported rollback path (docs/runbooks/database-bootstrap.md). A file
+// handed to `psql -c` or Prisma's `db execute` is one implicit transaction, so
+// an error rolls all of it back and a half-applied rollback can never be seen;
+// run as a file, every statement the file does not wrap in BEGIN … COMMIT
+// commits on its own, and the verifier has to catch what is left behind.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds `setup` in schema `target` of a scratch database, records an empty
+ * `target` as the state before it, then runs `down` as a file. Returns
+ * `{ down, still, assertion }`: the file run's result, whether each named table
+ * survives, and the verifier's exact-inverse assertion against the empty state.
+ */
+function downFileCase(setup, down, tables) {
+  const scratch = newScratchDatabase(LIB_PURPOSE, 'down_file');
+  createAsOwner(scratch);
+  const dir = mkdtempSync(join(tmpdir(), 'down-file-'));
+  let primary = null;
+  try {
+    const run = (script) => psqlAt(libDatabaseUrl, script, scratch.name);
+    const must = (result, what) => {
+      if (result.status !== 0) throw new Error(`${what}: ${result.stderr}`);
+    };
+    must(
+      run(
+        'CREATE SCHEMA target;' +
+          snapshotStoreScript('meta') +
+          recordSnapshotScript('meta', 'before', 'target'),
+      ),
+      'record before',
+    );
+    must(run(`SET search_path TO target; ${setup}`), 'up');
+    const file = join(dir, 'down.sql');
+    writeFileSync(file, down);
+    const target = new URL(libDatabaseUrl);
+    target.pathname = `/${scratch.name}`;
+    const ran = psqlFileRunner(target.toString(), 'target')(file);
+    const still = {};
+    for (const table of tables) {
+      const seen = psqlRunner(target.toString())(
+        `SELECT to_regclass('target.${table}') IS NOT NULL`,
+      );
+      assert.equal(seen.ok, true, seen.output);
+      still[table] = seen.stdout.trim() === 't';
+    }
+    const assertion = run(
+      assertSnapshotScript('meta', 'before', 'target', 'down: m1', undefined, {}),
+    );
+    return { down: ran, still, assertion };
+  } catch (error) {
+    primary = error;
+    throw error;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    const dropped = dropAsOwner(scratch);
+    // eslint-disable-next-line no-unsafe-finally
+    if (!primary && !dropped.ok) throw new Error(`cleanup failed: ${dropped.output}`);
+  }
+}
+
+const TWO_TABLES = 'CREATE TABLE a (x int); CREATE TABLE b (x int); INSERT INTO a VALUES (1);';
+
+test(
+  'a down whose preflight raises stops there: nothing after it runs',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      [
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM a) THEN RAISE EXCEPTION 'refusing to roll back: a holds rows'; END IF; END $$;",
+        'DROP TABLE b;',
+        'DROP TABLE a;',
+      ].join('\n'),
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /refusing to roll back: a holds rows/);
+    // Not one later statement ran — psql did not carry on past the error.
+    assert.deepEqual(result.still, { a: true, b: true });
+  },
+);
+
+test(
+  'a non-transactional down that fails half-way leaves a half-rolled-back schema, and it is caught',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      // `a` is dropped, and committed, before the statement that fails.
+      'DROP TABLE a;\nDROP TABLE no_such_table;\nDROP TABLE b;',
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /no_such_table/);
+    // The state a real rollback would leave: one table gone, the other not.
+    assert.deepEqual(result.still, { a: false, b: true });
+    // And the verifier's own assertion names what is left behind.
+    assert.notEqual(result.assertion.status, 0);
+    assert.match(
+      result.assertion.stderr,
+      /present but not expected:\s+column b\.x[^\n]*\n\s+relation b kind=r/,
+    );
+  },
+);
+
+test(
+  'the same failing down inside BEGIN … COMMIT leaves the schema as it was',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      'BEGIN;\nDROP TABLE a;\nDROP TABLE no_such_table;\nDROP TABLE b;\nCOMMIT;',
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.deepEqual(result.still, { a: true, b: true });
+  },
+);
+
+test(
+  'a down that succeeds as a file resolves unqualified names in the schema under test',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(TWO_TABLES, 'DROP TABLE a;\nDROP TABLE b;', ['a', 'b']);
+    assert.equal(result.down.ok, true, result.down.output);
+    assert.deepEqual(result.still, { a: false, b: false });
+    assert.equal(result.assertion.status, 0, result.assertion.stderr);
+  },
+);
+
+test('a schema that is not a plain identifier is refused before psql is started', () => {
+  assert.throws(() => psqlFileRunner('postgresql://u@h/d', 'x"; DROP SCHEMA y; --'), /plain/);
 });

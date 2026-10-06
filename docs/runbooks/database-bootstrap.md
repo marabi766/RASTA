@@ -114,6 +114,35 @@ pnpm --filter @rasta/asset-service exec prisma migrate resolve --rolled-back <mi
 
 **در Production هرگز `migrate reset` نزن.**
 
+<a id="running-down-sql"></a>
+
+### اجرای `down.sql` — مسیر پشتیبانی‌شدهٔ بازگشت
+
+هر `down.sql` را **این‌گونه** اجرا کن، با نقش مالک (مهاجر) سرویس، و نه راه دیگر:
+
+```bash
+psql "<URL بی گذرواژه>" -v ON_ERROR_STOP=1 \
+  -c 'SET search_path TO "<schema>"' \
+  --file services/<svc>-service/prisma/migrations/<migration>/down.sql
+```
+
+(گذرواژه در `PGPASSWORD`؛ در Schema پیش‌فرض `public`، همان `SET search_path` لازم است.) `pnpm test:migration`
+**دقیقاً همین** را اجرا می‌کند (`psqlFileRunner` در `scripts/verify-migration-reversible-lib.mjs`)، پس چیزی که
+تأیید شده همان چیزی است که شب حادثه اجرا می‌شود.
+
+- **`ON_ERROR_STOP=1` الزامی است.** بی آن `psql` پس از خطا ادامه می‌دهد و دستورهای بعدی را روی Schemaی نیمه‌برگشته
+  اجرا می‌کند.
+- **`--single-transaction` نه.** `down.sql`ها خودشان `BEGIN … COMMIT` دارند؛ `BEGIN` تو در تو فقط هشدار می‌دهد و
+  `COMMIT` فایل تراکنش بیرونی را زودتر می‌بندد.
+- **`-c` به‌جای `--file` نه، و `prisma db execute` برای `down.sql` نه.** هر دو متن را یک تراکنش ضمنی اجرا می‌کنند
+  که با خطا کاملاً برمی‌گردد؛ پس رفتار «هر دستور خودش Commit می‌شود» را نمی‌بینند و نیمه‌ماندن را پنهان می‌کنند.
+  `db execute` فقط برای یک دستور تک‌خطی در همین runbook (مثل `DROP INDEX CONCURRENTLY`) مجاز است.
+- **قاعدهٔ نوشتن:** پیش‌شرط‌ها (`RAISE EXCEPTION`) پیش از **نخستین** دستور تغییردهنده بیایند، و فایل جز در
+  `CONCURRENTLY` یک `BEGIN … COMMIT` باشد؛ فایلی که بیرون از تراکنش چند دستور Commit می‌کند و وسطش شکست
+  می‌خورد، Schemaی نیمه‌برگشته به‌جا می‌گذارد. Verifier این را می‌گیرد: خطای `down.sql`، و نیز هر امتناعی که
+  Schema را تغییر دهد (`mustRefuseDown`)، بازگشت را رد می‌کند.
+- چند `down.sql` پشت‌سرهم: هرکدام یک `psql` جدا، از جدیدترین به قدیمی‌ترین، و با نخستین شکست بایست.
+
 <a id="marketplace-order-key-index"></a>
 
 ### marketplace: شکست Migrationهای یکتایی کلید سفارش
@@ -325,7 +354,7 @@ Prisma فقط Migration شکست‌خورده را دوباره اجرا می‌
 می‌کند:
 
 ```bash
-$PRISMA db execute --schema prisma/schema.prisma \
+psql "<URL بی گذرواژه>" -v ON_ERROR_STOP=1 \
   --file prisma/migrations/20261004100000_membership_live_duplicates_guard/down.sql
 ```
 
@@ -355,8 +384,7 @@ SELECT i.indisvalid FROM pg_index i
 #### ج) بازگرداندن: `down.sql` کلید قدیمی را بدون `CONCURRENTLY` می‌سازد
 
 `20261004100200_drop_membership_deleted_at_unique/down.sql` یک تراکنش است: باید ردیف دفتر خودش را هم حذف
-کند، و `CONCURRENTLY` نمی‌تواند با دستور دیگری در یک اسکریپت بنشیند (اجراکنندهٔ `down.sql` هر فایل را یک
-تراکنش ضمنی اجرا می‌کند). پس ساختش قفل `SHARE` روی `membership` می‌گیرد: **خواندن ادامه دارد، نوشتن —
+کند، و `CONCURRENTLY` نمی‌تواند با دستور دیگری در یک اسکریپت بنشیند (روش اجرای `down.sql`: [اجرای `down.sql`](#running-down-sql)). پس ساختش قفل `SHARE` روی `membership` می‌گیرد: **خواندن ادامه دارد، نوشتن —
 افزودن، لغو و تغییر نقش عضویت، و تأیید ثبت‌نام — تا پایان ساخت منتظر می‌ماند.** `lock_timeout = 5s` فقط
 انتظار برای گرفتن قفل را محدود می‌کند، نه طول ساخت را.
 
