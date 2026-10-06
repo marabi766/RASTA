@@ -217,7 +217,8 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
         where: { eventName: 'ORGANIZATION_MOVED', aggregateId: dehyari },
       });
       expect(rows).toHaveLength(1);
-      expect(rows[0]!.payload).toMatchObject({
+      // The outbox row holds the whole envelope; the event's own payload is inside it.
+      expect((rows[0]!.payload as { payload: unknown }).payload).toMatchObject({
         organizationId: dehyari,
         hierarchyVersion: after.dehyari,
       });
