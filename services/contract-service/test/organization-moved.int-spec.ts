@@ -4,6 +4,7 @@ import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { EventPublisher } from '../src/events/publisher';
+import { IdempotencyStore } from '../src/shared/idempotency';
 import { PolicyReconciliationRepository } from '../src/policy/policy-reconciliation.repository';
 import { PolicyReconciliationSweeper } from '../src/policy/policy-reconciliation.sweeper';
 import { PolicySuspensionService } from '../src/policy/policy-suspension.service';
@@ -533,15 +534,15 @@ describe('a signing policy follows an organization move', () => {
       expect(platformSigned.hierarchyVersion).toBeNull();
     });
 
-    it('flags exactly the signatures that recorded a LOWER hierarchy version than the move’s and could still have committed after it — deterministically, from the evidence', async () => {
+    it('flags exactly the signatures that recorded a LOWER hierarchy version than the move’s — by the version alone, whatever instant the move carries (round 5)', async () => {
       // Read the tree before the move, within the window: raced.
       const raced = await signedUnderUnion();
       // Read the tree AFTER the move (the version was already stamped): not raced.
       const answeredAfter = await signedUnderUnion((employer) => {
         api.hierarchy.bump(employer);
       });
-      // Read the old tree, but out of its window before the move was even prepared: made on
-      // authority that held.
+      // Read the old tree; the move's event is stamped LONG after this signature's deadline — a
+      // skewed clock in organization-service. No timestamp decides: the version does, so it is flagged.
       const committedBefore = await signedUnderUnion();
       // An event from before versions: nothing to order by, so the window alone decides.
       const unversioned = await signedUnderUnion();
@@ -557,9 +558,9 @@ describe('a signing policy follows an organization move', () => {
         },
         {
           who: committedBefore,
-          movedAt: new Date(committedBefore.evidence.hierarchyCommitDeadline!.getTime() + 1),
+          movedAt: new Date(committedBefore.evidence.hierarchyCommitDeadline!.getTime() + 30_000),
           stamp: 'new',
-          flagged: false,
+          flagged: true,
         },
         { who: unversioned, movedAt: inWindow(unversioned.evidence), stamp: 'none', flagged: true },
       ] as const;
@@ -860,6 +861,225 @@ describe('a signing policy follows an organization move', () => {
       await sign(draft.id, person(draft.employer, ['CONTRACTOR'])).expect(403);
       expect(await refusals(draft.employer)).toEqual([]);
     });
+  });
+
+  describe('flagging is decided by the version alone: skewed clocks change nothing (round 5, ruling 1)', () => {
+    const reviewsOf = (contractId: string) =>
+      runUnscoped('the suite reads the reviews', () =>
+        w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId } }),
+      );
+    const evidenceOf = (contractId: string) =>
+      runUnscoped('the suite reads the evidence', () =>
+        w.prisma.client.contractSignature.findFirstOrThrow({
+          where: { contractId, side: 'EMPLOYER' },
+        }),
+      );
+
+    /** A contract signed once by the employer under a union's policy. */
+    async function signedOnce() {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+      await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
+      return { draft, policyId, evidence: await evidenceOf(draft.id) };
+    }
+
+    it.each([
+      ['30 s before the signature', -30_000],
+      ['30 s after its commit deadline', 30_000],
+      ['exactly at the deadline', 0],
+    ])(
+      'a signature on the older tree is flagged, and one that read the moved tree is not, with the move stamped %s',
+      async (_label, skew) => {
+        const older = await signedOnce();
+        const newer = await signedOnce();
+        // The newer read the tree after the move stamped its version.
+        const movedVersion = api.hierarchy.bump(newer.draft.employer);
+        api.hierarchy.bump(older.draft.employer, newer.draft.employer);
+        await sign(newer.draft.id, person(newer.draft.contractor, ['CONTRACTOR'])).expect(200);
+        const read = await evidenceOf(newer.draft.id);
+        expect(Number(read.hierarchyVersion)).toBeLessThan(
+          api.hierarchy.versionOf(newer.draft.employer),
+        );
+
+        for (const [who, version] of [
+          [older, api.hierarchy.versionOf(older.draft.employer)],
+          [newer, Number(read.hierarchyVersion)],
+        ] as const) {
+          api.hierarchy.adopt(newOrg(), who.draft.employer);
+          const at = new Date(who.evidence.hierarchyCommitDeadline!.getTime() + skew);
+          await consumer.handle(moved(who.draft.employer, at, version));
+          await sweeper.runOnce();
+        }
+        expect(movedVersion).toBeGreaterThan(0);
+        // Older: its recorded version is below the move's → flagged. Newer: equal → not.
+        expect(await reviewsOf(older.draft.id)).toHaveLength(1);
+        expect(await reviewsOf(newer.draft.id)).toEqual([]);
+      },
+    );
+
+    it('a move with no version orders nothing: every unreviewed signature under the policy is flagged (too many is safe)', async () => {
+      const one = await signedOnce();
+      api.hierarchy.adopt(newOrg(), one.draft.employer);
+      await consumer.handle(
+        moved(
+          one.draft.employer,
+          new Date(one.evidence.hierarchyCommitDeadline!.getTime() + 60_000),
+        ),
+      );
+      await sweeper.runOnce();
+      expect(await reviewsOf(one.draft.id)).toHaveLength(1);
+    });
+  });
+
+  describe('a suspension in flight cannot finish on a stale answer (round 5, ruling 2)', () => {
+    const reviewsOf = (contractId: string) =>
+      runUnscoped('the suite reads the reviews', () =>
+        w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId } }),
+      );
+
+    it('claim → pause → move back → sign → move out → resume: the stale worker writes nothing, the task stays open, and the next sweep flags the intervening signature', async () => {
+      const union = newOrg();
+      const first = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, first.employer);
+      const employerToken = person(first.employer, ['ORGANIZATION_ADMIN']);
+
+      // A second contract of the same employer: the one signed while the worker is paused.
+      const award = newAward(first.employer, { winnerOrganizationId: newOrg() });
+      w.awards.serve(award);
+      await w.consumer.handle(tenderAwarded(award));
+      const second = (await runUnscoped('the suite reads back the second contract', () =>
+        w.contracts.findByTender(first.employer, award.tenderId),
+      ))!;
+
+      // 1. The employer leaves the union; the move queues a task …
+      api.hierarchy.adopt(newOrg(), first.employer);
+      await consumer.handle(moved(first.employer, new Date(), api.hierarchy.bump(first.employer)));
+      // 2. … and a sweeper claims it, and is paused after the lookup said "outside".
+      const queue = api.app.get(PolicyReconciliationRepository);
+      const claimed = (await queue.claimDue(100, 60, ulid())).filter(
+        (task) => task.policyId === policyId,
+      );
+      expect(claimed).toHaveLength(1);
+      const task = claimed[0]!;
+
+      // 3. Meanwhile the employer comes back, is signed under, and leaves again.
+      api.hierarchy.adopt(union, first.employer);
+      await consumer.handle(moved(first.employer, new Date(), api.hierarchy.bump(first.employer)));
+      await sign(second.id, employerToken).expect(200);
+      const recorded = await runUnscoped('the suite reads the signature', () =>
+        w.prisma.client.contractSignature.findFirstOrThrow({
+          where: { contractId: second.id, side: 'EMPLOYER' },
+        }),
+      );
+      api.hierarchy.adopt(newOrg(), first.employer);
+      const finalVersion = api.hierarchy.bump(first.employer);
+      await consumer.handle(moved(first.employer, new Date(), finalVersion));
+      expect(Number(recorded.hierarchyVersion)).toBeLessThan(finalVersion);
+
+      // 4. The paused worker resumes with its stale claim: nothing is written, nothing finished.
+      const suspension = api.app.get(PolicySuspensionService);
+      const result = await suspension.suspend(
+        { id: policyId, organizationId: first.employer },
+        {
+          reason: 'ORGANIZATION_MOVED',
+          eventId: task.sourceEventId,
+          movedOrganizationId: task.movedOrganizationId,
+          movedAt: task.movedAt,
+          movedVersion: task.movedVersion,
+          correlationId: task.correlationId,
+          callerService: 'organization-service',
+        },
+        queue.ownershipOf(task),
+      );
+      expect(result).toBe('STALE');
+      expect((await policyRow(policyId)).status).toBe('ACTIVE');
+      expect(await reviewsOf(second.id)).toEqual([]);
+      const open = (await tasksOf(policyId))[0]!;
+      expect(open.status).toBe('PENDING');
+      expect(open.generation).toBeGreaterThan(task.generation);
+
+      // 5. The task goes back; the next sweep asks afresh, suspends, and flags the signature made
+      //    while the worker was away — by the task's CURRENT version, not the claimed one.
+      await queue.release(task);
+      await sweeper.runOnce();
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      expect((await tasksOf(policyId))[0]!.status).toBe('DONE');
+      const reviews = await reviewsOf(second.id);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        movedVersion: BigInt(finalVersion),
+        recordedVersion: recorded.hierarchyVersion,
+      });
+    });
+
+    it('a worker that still holds the current generation suspends, with the version the locked row holds', async () => {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+      await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const version = api.hierarchy.bump(draft.employer);
+      await consumer.handle(moved(draft.employer, new Date(), version));
+      const outcome = await sweeper.runOnce();
+      expect(outcome.suspended).toBeGreaterThanOrEqual(1);
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      expect((await reviewsOf(draft.id))[0]!.movedVersion).toBe(BigInt(version));
+    });
+  });
+
+  describe('a failed release cannot mask the audit 503 (round 5, ruling 3)', () => {
+    it('answers the original 503, logs the release failure, holds the key until its lease lapses — then the same request is refused normally and recorded', async () => {
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const user = person(draft.employer, ['ORGANIZATION_ADMIN']);
+      const retryKey = key();
+      const attempt = () =>
+        http()
+          .post(`/v1/contracts/${draft.id}/sign`)
+          .set('authorization', `Bearer ${user}`)
+          .set('idempotency-key', retryKey)
+          .send({});
+
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const store = api.app.get(IdempotencyStore);
+      const releasing = jest.spyOn(store, 'release').mockRejectedValue(new Error('db down'));
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'CONTRACT_SIGNATURE_REFUSED') throw new Error('outbox down');
+          return original(...args);
+        });
+      try {
+        const down = await attempt().expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+        // Neither cause reaches the caller.
+        expect(JSON.stringify(down.body)).not.toMatch(/outbox|db down/);
+        expect(releasing).toHaveBeenCalled();
+      } finally {
+        failing.mockRestore();
+        releasing.mockRestore();
+      }
+      expect(await signaturesOf(draft.id)).toEqual([]);
+
+      // The claim is still held (release failed): the same key is "in flight" — 409 with Retry-After.
+      const held = await attempt().expect(409);
+      expect(held.body.code).toBe('CONFLICT');
+      expect(held.headers['retry-after']).toBe('1');
+
+      // Its lease lapses: the retry takes the key over, is refused normally, and leaves its trace.
+      await w.prisma.client.$executeRawUnsafe(
+        `UPDATE idempotency_key SET expires_at = now() - interval '1 second'
+          WHERE organization_id = $1 AND key = $2`,
+        draft.employer,
+        retryKey,
+      );
+      await attempt().expect(422);
+      expect(await eventsOf(api.prisma, draft.employer, 'CONTRACT_SIGNATURE_REFUSED')).toHaveLength(
+        1,
+      );
+    }, 30_000);
   });
 
   describe('a move in the very millisecond the first task was made is not lost (review round 3)', () => {

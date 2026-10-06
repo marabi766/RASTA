@@ -35,6 +35,7 @@ function build(tasks: ClaimedTask[] = []) {
     claimDue: jest.fn(async () => tasks),
     markDone: jest.fn(async () => true),
     ownershipOf: jest.fn(() => ({ verify: jest.fn(), finish: jest.fn() })),
+    release: jest.fn(async () => 1),
     retryLater: jest.fn(async () => 1),
     backlog: jest.fn(async () => ({ open: 1, due: 1, oldestDueAgeSeconds: 12.4 })),
   };
@@ -90,6 +91,16 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     expect(outcome).toMatchObject({ confirmed: 1, requeued: 1, suspended: 0 });
     // One question for the (union, organization) pair, whatever the number of tasks it answers.
     expect(directory.isWithin).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives a task back, open and due, when a move coalesced after the claim made the worker’s answer stale (round 5)', async () => {
+    const { sweeper, reconciliations, suspension } = build([task()]);
+    suspension.suspend.mockResolvedValue('STALE');
+
+    const outcome = await sweeper.runOnce();
+
+    expect(reconciliations.release).toHaveBeenCalledWith(expect.objectContaining({ id: 'PRT_1' }));
+    expect(outcome).toMatchObject({ requeued: 1, suspended: 0, confirmed: 0, notOwned: 0 });
   });
 
   it.each([

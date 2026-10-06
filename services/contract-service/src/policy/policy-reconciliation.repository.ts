@@ -51,8 +51,16 @@ export interface ClaimedTask {
  * What the suspension transaction asks of a task: is this worker still its owner (checked first,
  * with the row locked), and how to finish it there.
  */
+export type TaskCheck =
+  /** The lease was lost: nothing may be read or written. */
+  | { readonly kind: 'NOT_OWNER' }
+  /** A later move coalesced into the task after the claim: the lookup may predate it. */
+  | { readonly kind: 'STALE' }
+  /** Still the worker's, at the generation it claimed; the move's version and instant as the row holds them NOW. */
+  | { readonly kind: 'OWNED'; readonly movedVersion: number | null; readonly movedAt: Date };
+
 export interface TaskOwnership {
-  verify(tx: ExtendedPrismaClient): Promise<boolean>;
+  verify(tx: ExtendedPrismaClient): Promise<TaskCheck>;
   finish(tx: ExtendedPrismaClient): Promise<unknown>;
 }
 
@@ -235,22 +243,40 @@ export class PolicyReconciliationRepository {
    * re-claimed fails here, so it can neither suspend nor emit — the fence guards the effect, not
    * only the task.
    *
-   * The suspension needs only the lease, not the generation: "outside" is the safe direction
-   * whatever landed since, and a suspended policy has nothing left to re-look at, so its task is
-   * finished whatever the generation is.
+   * The suspension is fenced on the **generation** too (round 5): a move that coalesced into the
+   * task after the claim may have returned the employer, been signed under, and moved it out
+   * again — the worker's answer and its copy of the move's version are stale, and suspending on
+   * them would flag by the wrong version and finish a task that carries a later move. So under the
+   * row lock the task is re-read; a changed generation is `STALE` (nothing written, the task given
+   * back, due at once), and an unchanged one hands back the version and instant the row holds now.
    */
   ownershipOf(task: ClaimedTask): TaskOwnership {
     return {
       verify: async (tx) => {
-        const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
-          `SELECT id FROM policy_reconciliation_task
+        // The row is locked, so no later move can coalesce into it until this transaction ends:
+        // what is read here is final for the suspension it guards (round 5).
+        const rows = await tx.$queryRawUnsafe<
+          { generation: number; movedVersion: bigint | null; movedAt: Date }[]
+        >(
+          `SELECT generation, moved_version AS "movedVersion",
+                  COALESCE(moved_at, created_at) AS "movedAt"
+             FROM policy_reconciliation_task
             WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
               FOR UPDATE`,
           task.organizationId,
           task.id,
           task.leaseToken,
         );
-        return rows.length === 1;
+        const row = rows[0];
+        if (!row) return { kind: 'NOT_OWNER' };
+        // A move landed after the claim: the answer this worker holds may predate it, and the
+        // version it claimed is not the task's any more. Leave the task open for a fresh look.
+        if (row.generation !== task.generation) return { kind: 'STALE' };
+        return {
+          kind: 'OWNED',
+          movedVersion: row.movedVersion === null ? null : Number(row.movedVersion),
+          movedAt: row.movedAt,
+        };
       },
       finish: (tx) => this.complete(tx, task, { currentGeneration: false }),
     };

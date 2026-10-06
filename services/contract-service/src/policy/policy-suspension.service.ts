@@ -46,7 +46,7 @@ export type SuspensionCause =
   | { reason: 'SIGNING_RECHECK'; correlationId: string; callerService: string };
 
 /** `NOT_OWNER`: the sweeper's lease was lost; nothing was read or written. */
-export type SuspendResult = 'SUSPENDED' | 'NOTHING' | 'NOT_OWNER';
+export type SuspendResult = 'SUSPENDED' | 'NOTHING' | 'NOT_OWNER' | 'STALE';
 
 export interface MoveCause {
   eventId: string;
@@ -197,8 +197,20 @@ export class PolicySuspensionService {
     return runWithContext(context, () =>
       this.prisma.transaction(async (tx) => {
         // First: nothing below may run for a worker that no longer owns the task.
-        if (ownership && !(await ownership.verify(tx))) return 'NOT_OWNER' as const;
-        const suspended = await this.suspendIn(tx, candidate.id, cause);
+        let effective = cause;
+        if (ownership) {
+          const check = await ownership.verify(tx);
+          if (check.kind === 'NOT_OWNER') return 'NOT_OWNER' as const;
+          // A later move coalesced after the claim: nothing is written, the caller gives the
+          // task back and looks again (round 5).
+          if (check.kind === 'STALE') return 'STALE' as const;
+          // The move's version and instant as the locked row holds them now — never the copy
+          // taken at the claim.
+          if (cause.reason === 'ORGANIZATION_MOVED') {
+            effective = { ...cause, movedVersion: check.movedVersion, movedAt: check.movedAt };
+          }
+        }
+        const suspended = await this.suspendIn(tx, candidate.id, effective);
         await ownership?.finish(tx);
         return suspended ? ('SUSPENDED' as const) : ('NOTHING' as const);
       }),
