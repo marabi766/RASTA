@@ -182,7 +182,16 @@ describe('the dossier', () => {
       partsAndOrdersMinor: '30000000',
       entryCount: 7,
     },
-    documents: [{ id: 'DOC_1', documentId: 'DCM_1', kind: 'PHOTO', title: 'عکس' }],
+    documents: [
+      {
+        id: 'DOC_1',
+        documentId: 'DCM_1',
+        kind: 'PHOTO',
+        title: 'عکس',
+        // Not a field of the reference: nothing the portal does not render may stay.
+        storageKey: 'org/secret-object-key',
+      },
+    ],
     recentActivity: [
       {
         id: 'TL_1',
@@ -216,15 +225,26 @@ describe('the dossier', () => {
     expect(result.data.compliance.blockers).toEqual(['INSURANCE_EXPIRED', 'INSPECTION_EXPIRED']);
   });
 
-  it('drops the coordinate, the documents and the event detail', async () => {
+  it('drops the coordinate and the event detail, and keeps the documents’ references and nothing else of them', async () => {
     const { impl } = answering(DOSSIER);
     const result = await withFetch(impl, () => fetchDossier(SESSION, 'AST_1'));
     if (result.kind !== 'OK') throw new Error('expected a dossier');
 
     const serialised = JSON.stringify(result.data);
     expect(serialised).not.toContain('51.4');
-    expect(serialised).not.toContain('DCM_1');
     expect(serialised).not.toContain('workOrderId');
+    // The references are rendered (EXP-002 slice 7); a field beyond them is not kept.
+    expect(result.data.documents).toEqual([
+      {
+        id: 'DOC_1',
+        documentId: 'DCM_1',
+        kind: 'PHOTO',
+        title: 'عکس',
+        issuedAt: null,
+        expiresAt: null,
+      },
+    ]);
+    expect(serialised).not.toContain('secret-object-key');
     // And keeps what the screen actually renders.
     expect(result.data.costs.totalMinor).toBe('120000000');
     expect(result.data.recentActivity[0]!.title).toBe('سرویس دوره‌ای');

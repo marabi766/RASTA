@@ -183,6 +183,8 @@ export interface DispatchBlockFields {
 export interface DispatchBlock {
   cause: 'INSPECTION' | 'INSURANCE';
   detail: string;
+  /** The lapsed coverages, sorted, for an `INSURANCE` block. */
+  coverages?: string[];
 }
 
 /**
@@ -209,9 +211,11 @@ export function activeDispatchBlocks(
     (coverage) => coverage === UNKNOWN_COVERAGE || policy.blockingCoverages.includes(coverage),
   );
   if (lapses.length > 0) {
+    const sorted = lapses.sort();
     blocks.push({
       cause: 'INSURANCE',
-      detail: `The insurance policy has expired (${lapses.sort().join(', ')})`,
+      detail: `The insurance policy has expired (${sorted.join(', ')})`,
+      coverages: sorted,
     });
   }
   return blocks;

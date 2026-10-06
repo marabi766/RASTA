@@ -9,6 +9,7 @@ import {
   declareAvailabilitySchema,
   endAssignmentSchema,
   listAssignmentsQuerySchema,
+  listAvailabilityWindowsQuerySchema,
   listDriversQuerySchema,
   listUsageQuerySchema,
   recordUsageSchema,
@@ -52,6 +53,7 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/assignments': toJsonSchema(listAssignmentsQuerySchema),
   'GET /v1/usage-records': toJsonSchema(listUsageQuerySchema),
   'GET /v1/fleet/availability': toJsonSchema(availabilityQuerySchema),
+  'GET /v1/fleet/availability/windows': toJsonSchema(listAvailabilityWindowsQuerySchema),
   'GET /v1/fleet/utilization': toJsonSchema(utilizationQuerySchema),
 };
 
@@ -91,6 +93,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'DELETE /v1/internal/assets/{assetId}/transfer-clearance/{fenceId}': [...COMMON, 400],
   'POST /v1/usage-records': WRITE,
   'GET /v1/fleet/availability': COMMON,
+  'GET /v1/fleet/availability/windows': READ_ONE,
   'POST /v1/fleet/availability': WRITE,
   'POST /v1/fleet/availability/{id}/revoke': WRITE,
   'GET /v1/fleet/utilization': COMMON,

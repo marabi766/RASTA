@@ -1,22 +1,48 @@
-import { Body, Controller, Get, HttpCode, Inject, Param, Post, Query } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Inject,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles, zodPipe } from '@rasta/nest-common';
 import { UsageService } from './usage.service';
 import { AvailabilityService } from './availability.service';
+import { IdempotencyStore, requiredIdempotencyKey } from './idempotency';
 import { ENV } from '../tokens';
 import type { FleetEnv } from '../config/env';
 import {
   availabilityQuerySchema,
   declareAvailabilitySchema,
+  listAvailabilityWindowsQuerySchema,
   listUsageQuerySchema,
   recordUsageSchema,
   utilizationQuerySchema,
   type AvailabilityQuery,
+  type AvailabilityWindowView,
   type DeclareAvailabilityDto,
+  type ListAvailabilityWindowsQuery,
   type ListUsageQuery,
   type RecordUsageDto,
   type UtilizationQuery,
 } from './dto';
+
+/** The route template an Idempotency-Key is stored under (EXP-002 slice 7). */
+export const DECLARE_AVAILABILITY_ENDPOINT = 'POST /v1/fleet/availability';
+
+const IDEMPOTENCY_KEY_HEADER = {
+  name: 'Idempotency-Key',
+  required: true,
+  description:
+    '8 to 255 characters. Scoped to the organization: the same key in two organizations ' +
+    'is two requests. The machine in the body is part of the request, so the same key for ' +
+    'another machine is refused, not replayed.',
+} as const;
 
 /**
  * Usage records.
@@ -77,6 +103,7 @@ export class UsageController {
 export class FleetController {
   constructor(
     private readonly availability: AvailabilityService,
+    private readonly idempotency: IdempotencyStore,
     @Inject(ENV) private readonly env: FleetEnv,
   ) {}
 
@@ -92,6 +119,21 @@ export class FleetController {
     return this.availability.list(query);
   }
 
+  @Get('availability/windows')
+  @ApiOperation({
+    summary: "One machine's availability declarations, newest first, revoked ones included",
+    description:
+      '`assetId` is required. A machine of another organization is `404`, exactly as one that ' +
+      'does not exist. The `id` of a window is what `POST /v1/fleet/availability/{id}/revoke` ' +
+      'names; only a declaration is revocable here — a block the platform imposes (an expired ' +
+      'insurance policy, a failed inspection) is not a window and is never in this list.',
+  })
+  listWindows(
+    @Query(zodPipe(listAvailabilityWindowsQuerySchema)) query: ListAvailabilityWindowsQuery,
+  ) {
+    return this.availability.listWindows(query);
+  }
+
   @Post('availability')
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
   @ApiOperation({
@@ -100,10 +142,32 @@ export class FleetController {
       'A declaration supersedes the previous one for the same machine. It cannot make an ' +
       'otherwise-blocked machine dispatchable: declaring a machine free does not renew its ' +
       'insurance, so the declaration sits alongside the other blockers rather than overriding ' +
-      'them.',
+      'them. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside ' +
+      '8 to 255 characters, 400 VALIDATION_FAILED and nothing is declared. The same key with ' +
+      'the same body from the same user answers the original 201 — the same window id — ' +
+      'without declaring or publishing anything again, for 24 hours by default; the same key ' +
+      'with a different body or from another user answers 409 IDEMPOTENCY_KEY_REUSED; a ' +
+      'duplicate that arrives while the first is still being processed waits for its answer, ' +
+      'and past a few seconds answers 409 CONFLICT with Retry-After. A machine of another ' +
+      'organization is 404 — and a replay answers the same 404 once the machine has been ' +
+      'transferred away.',
   })
-  declare(@Body(zodPipe(declareAvailabilitySchema)) dto: DeclareAvailabilityDto) {
-    return this.availability.declare(dto);
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  async declare(
+    @Body(zodPipe(declareAvailabilitySchema)) dto: DeclareAvailabilityDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<AvailabilityWindowView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<AvailabilityWindowView>(
+      DECLARE_AVAILABILITY_ENDPOINT,
+      key,
+      dto,
+      201,
+      (fence) => this.availability.declare(dto, fence),
+      // The machine may have been transferred to another organization since.
+      (stored) => this.availability.assertAssetVisible(stored.assetId),
+    );
+    return result;
   }
 
   @Post('availability/:id/revoke')

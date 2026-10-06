@@ -4,6 +4,7 @@ import { ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId } from '@rasta/nest-common';
 import { assetsUnavailableTotal } from '../observability/metrics';
 import { FleetRepository } from './fleet.repository';
+import type { ClaimFence } from './idempotency';
 import { FLEET_EVENTS, validateFleetPayload } from './events';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
 import { ACTIVE_ASSET_STATUSES } from './constraints';
@@ -20,6 +21,7 @@ import type {
   AvailabilityView,
   AvailabilityWindowView,
   DeclareAvailabilityDto,
+  ListAvailabilityWindowsQuery,
   UtilizationQuery,
   UtilizationView,
 } from './dto';
@@ -124,25 +126,43 @@ export class AvailabilityService {
    * alongside the other blockers rather than overriding them, because
    * declaring a machine free does not renew its insurance.
    */
-  async declare(dto: DeclareAvailabilityDto): Promise<AvailabilityWindowView> {
+  async declare(
+    dto: DeclareAvailabilityDto,
+    fence?: ClaimFence<AvailabilityWindowView>,
+  ): Promise<AvailabilityWindowView> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? 'SYSTEM';
 
-    const asset = await this.repository.findAssetRef(dto.assetId);
-    if (!asset || asset.organizationId !== organizationId) {
-      throw RastaError.notFound('Asset', dto.assetId);
-    }
+    await this.assertAssetVisible(dto.assetId);
 
     const fromAt = dto.fromAt ? new Date(dto.fromAt) : new Date();
     const toAt = dto.toAt ? new Date(dto.toAt) : null;
     const id = `${ID_PREFIXES.availabilityWindow}_${ulid()}`;
 
-    const created = await this.repository.transaction(async (tx) => {
+    return this.repository.transaction(async (tx) => {
+      // The claim is locked by its token before anything else, so a declaration
+      // whose claim lapsed and was re-taken by a retry commits nothing.
+      if (fence) await fence.hold(tx);
+
+      // One declaration at a time per machine, and the machine's owner read
+      // under the same lock. The lock is the one the asset-sync consumer takes
+      // to apply a transfer, so a declaration either commits before the
+      // transfer is applied (and is then revoked by it) or finds the machine
+      // already another organization's and is refused like any foreign machine.
+      // Without it, two declarations with different keys each saw no live
+      // window to supersede and each created one (review #225 round 1).
+      await this.repository.lockAssetRef(tx, dto.assetId);
+      const asset = await this.repository.findAssetRef(dto.assetId, tx);
+      if (!asset || asset.organizationId !== organizationId) {
+        throw RastaError.notFound('Asset', dto.assetId);
+      }
+
       // A new declaration supersedes the previous one for the same machine
       // rather than stacking with it: two open-ended windows saying opposite
-      // things would make the composed answer depend on row order.
+      // things would make the composed answer depend on row order. The partial
+      // unique index `ux_availability_window_live` holds this at the database.
       await tx.availabilityWindow.updateMany({
-        where: { assetId: dto.assetId, revokedAt: null },
+        where: { organizationId, assetId: dto.assetId, revokedAt: null },
         data: { revokedAt: new Date(), revokedBy: actor },
       });
 
@@ -175,10 +195,37 @@ export class AvailabilityService {
         }),
       });
 
-      return window;
+      const view = toWindowView(window);
+      return fence ? fence.complete(tx, view) : view;
     });
+  }
 
-    return toWindowView(created);
+  /**
+   * The machine is one of the caller's organization's — or `404`, exactly as
+   * for one that does not exist. A replay passes this before it answers
+   * (`ReplayGuard`): a stored 201 must not outlive the machine leaving the
+   * caller's tenant.
+   */
+  async assertAssetVisible(assetId: string): Promise<void> {
+    const asset = await this.repository.findAssetRef(assetId);
+    if (!asset || asset.organizationId !== getOrganizationId()) {
+      throw RastaError.notFound('Asset', assetId);
+    }
+  }
+
+  /**
+   * A machine's declarations, newest first, revoked ones included — the
+   * history a fleet manager is asked about ("why was this machine unavailable
+   * last March?"), and the only way to learn the id a revoke names.
+   */
+  async listWindows(query: ListAvailabilityWindowsQuery) {
+    await this.assertAssetVisible(query.assetId);
+    const rows = await this.repository.listAvailabilityWindows(query);
+    return {
+      items: rows.items.map(toWindowView),
+      nextCursor: rows.nextCursor,
+      hasMore: rows.hasMore,
+    };
   }
 
   async revoke(id: string): Promise<AvailabilityWindowView> {
@@ -360,7 +407,13 @@ function describeBlockers(
   // versa. The code stays `DISPATCH_BLOCKED` — the contract ADR-026 published
   // — and each entry's detail names the cause.
   for (const block of activeDispatchBlocks(asset, new Date(), dispatchPolicy)) {
-    blockers.push({ code: 'DISPATCH_BLOCKED', owner: 'asset-service', detail: block.detail });
+    blockers.push({
+      code: 'DISPATCH_BLOCKED',
+      owner: 'asset-service',
+      detail: block.detail,
+      cause: block.cause,
+      ...(block.coverages ? { coverages: block.coverages } : {}),
+    });
   }
 
   if (asset.inMaintenance) {

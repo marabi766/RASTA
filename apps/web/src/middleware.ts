@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { webServerEnv } from '@/server/env';
+import { refuseBeforeBody } from '@/server/request-gate';
 import { renewSession, type SessionRenewal } from '@/server/session-refresh';
 import { SESSION_COOKIE, sessionCookieOptions } from '@/server/session';
 
@@ -26,6 +27,19 @@ import { SESSION_COOKIE, sessionCookieOptions } from '@/server/session';
  * for the next two years.
  */
 export async function middleware(request: NextRequest): Promise<NextResponse> {
+  const refusal = refuseBeforeBody({
+    method: request.method,
+    pathname: request.nextUrl.pathname,
+    headers: request.headers,
+    sessionCookie: request.cookies.get(SESSION_COOKIE)?.value,
+    maxBytesRaw: process.env.WEB_REQUEST_MAX_BYTES,
+    sessionConfig: () => {
+      const env = webServerEnv();
+      return { secret: env.WEB_SESSION_SECRET, maxAgeSeconds: env.WEB_SESSION_MAX_AGE_SECONDS };
+    },
+  });
+  if (refusal) return refused(refusal);
+
   const renewal = await renewSessionCookie(request);
 
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
@@ -65,6 +79,18 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  return response;
+}
+
+/**
+ * A refusal before the body is read (`request-gate.ts`): no body, no cache, no
+ * detail beyond a code, and the same security headers as any other response.
+ */
+function refused(refusal: { status: number; code: string }): NextResponse {
+  const response = NextResponse.json({ code: refusal.code }, { status: refusal.status });
+  response.headers.set('Cache-Control', 'no-store');
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Connection', 'close');
   return response;
 }
 

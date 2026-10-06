@@ -353,6 +353,16 @@ export interface AssetLocationView {
   recordedAt: string;
 }
 
+/** What `POST /v1/assets/{id}/documents` answers: the reference, not the file. */
+export interface AttachedDocumentView {
+  id: string;
+  documentId: string;
+  kind: string;
+  title: string;
+  issuedAt: string | null;
+  expiresAt: string | null;
+}
+
 export interface InsurancePolicyView {
   id: string;
   policyNumber: string;

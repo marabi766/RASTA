@@ -22,6 +22,7 @@ import {
   type TimelineCategory,
 } from './asset-fields';
 import type { PolicyCoverage } from './asset-record-fields';
+import type { DocumentKind } from './asset-document-fields';
 
 /** `ASSET_TYPES`, `./asset-fields.ts` — typed, so a type added there without a label does not compile. */
 const ASSET_TYPE_LABELS: Readonly<Record<AssetType, string>> = {
@@ -109,6 +110,18 @@ const TIMELINE_CATEGORY_LABELS: Readonly<Record<TimelineCategory, string>> = {
   COST: 'هزینه',
   PROJECT: 'پروژه',
   TRANSFER: 'انتقال',
+};
+
+/** `DOCUMENT_KINDS`, `./asset-document-fields.ts` — typed, so a kind added there without a label does not compile. */
+const DOCUMENT_KIND_LABELS: Readonly<Record<DocumentKind, string>> = {
+  OWNERSHIP_TITLE: 'سند مالکیت',
+  REGISTRATION_CARD: 'کارت ثبت (شناسنامهٔ ماشین)',
+  INSURANCE_POLICY: 'بیمه‌نامه',
+  TECHNICAL_INSPECTION: 'گواهی معاینهٔ فنی',
+  PURCHASE_INVOICE: 'فاکتور خرید',
+  MANUAL: 'دفترچهٔ راهنما',
+  PHOTO: 'عکس',
+  OTHER: 'سایر',
 };
 
 /** `docs/17-mvp-scope.md`: planned work versus a reported fault. */
@@ -233,6 +246,7 @@ export const assetStatusLabel = (value: string): string => lookup(ASSET_STATUS_L
 export const inspectionResultLabel = (value: string): string =>
   lookup(INSPECTION_RESULT_LABELS, value);
 export const policyCoverageLabel = (value: string): string => lookup(POLICY_COVERAGE_LABELS, value);
+export const documentKindLabel = (value: string): string => lookup(DOCUMENT_KIND_LABELS, value);
 export const timelineCategoryLabel = (value: string): string =>
   lookup(TIMELINE_CATEGORY_LABELS, value);
 

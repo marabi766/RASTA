@@ -40,6 +40,7 @@ import { DriverService } from './fleet/driver.service';
 import { AssignmentService } from './fleet/assignment.service';
 import { UsageService } from './fleet/usage.service';
 import { AvailabilityService } from './fleet/availability.service';
+import { IdempotencyStore } from './fleet/idempotency';
 import { DriverController } from './fleet/driver.controller';
 import { AssignmentController } from './fleet/assignment.controller';
 import { FleetController, UsageController } from './fleet/fleet.controller';
@@ -168,6 +169,12 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
         }),
     },
     AvailabilityService,
+    {
+      // Idempotency-Key on POST /v1/fleet/availability (EXP-002 slice 7).
+      provide: IdempotencyStore,
+      inject: [PrismaService, ENV],
+      useFactory: (prisma: PrismaService, env: FleetEnv) => new IdempotencyStore(prisma, env),
+    },
 
     {
       provide: AssetSyncConsumer,
@@ -283,6 +290,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly relay: OutboxRelay,
     private readonly store: PrismaOutboxStore,
     private readonly repository: FleetRepository,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -316,6 +324,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
           { service: SERVICE_NAME },
           await this.repository.countActiveAssignmentsAcrossTenants(),
         );
+        // Expired Idempotency-Key records, removed by age alone.
+        await this.idempotency.purgeExpired();
       } catch {
         // Metrics must never take the service down.
       }

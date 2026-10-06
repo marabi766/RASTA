@@ -44,6 +44,7 @@ import {
   type AttachDocumentDto,
   type ChangeStatusDto,
   type AssetView,
+  type AttachedDocumentView,
   type InspectionView,
   type InsurancePolicyView,
   type CreateAssetDto,
@@ -67,6 +68,8 @@ export const CREATE_ASSET_ENDPOINT = 'POST /v1/assets';
 /** Likewise for the two records an asset takes (EXP-002 slice 6); the asset id is part of what is hashed. */
 export const RECORD_POLICY_ENDPOINT = 'POST /v1/assets/{id}/insurance-policies';
 export const RECORD_INSPECTION_ENDPOINT = 'POST /v1/assets/{id}/inspections';
+/** And the document reference an asset takes (EXP-002 slice 7). */
+export const ATTACH_DOCUMENT_ENDPOINT = 'POST /v1/assets/{id}/documents';
 
 const IDEMPOTENCY_KEY_HEADER = {
   name: 'Idempotency-Key',
@@ -83,6 +86,17 @@ const IDEMPOTENT_RECORD_DESCRIPTION =
   'body for the same asset from the same user answers the original 201 — the same record id ' +
   '— without recording or publishing anything again, for 24 hours by default; the same key ' +
   'with a different body, for another asset or from another user answers 409 ' +
+  'IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being ' +
+  'processed waits for its answer, and past a few seconds answers 409 CONFLICT with ' +
+  'Retry-After. Returns 404 for an asset in another organization — never 403 — and a ' +
+  'replay answers the same 404 once the asset has been transferred to another organization.';
+
+const IDEMPOTENT_ATTACH_DESCRIPTION =
+  'Requires an `Idempotency-Key` (#169): without one, or with one outside 8 to 255 ' +
+  'characters, 400 VALIDATION_FAILED and nothing is attached. The same key with the same ' +
+  'body for the same asset from the same user answers the original 201 — the same reference ' +
+  'id — without attaching or publishing anything again, for 24 hours by default; the same ' +
+  'key with a different body, for another asset or from another user answers 409 ' +
   'IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being ' +
   'processed waits for its answer, and past a few seconds answers 409 CONFLICT with ' +
   'Retry-After. Returns 404 for an asset in another organization — never 403 — and a ' +
@@ -307,12 +321,29 @@ export class AssetController {
 
   @Post(':id/documents')
   @Roles('ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Attach a document held by document-service' })
-  attachDocument(
+  @ApiOperation({
+    summary: 'Attach a document held by document-service',
+    description: IDEMPOTENT_ATTACH_DESCRIPTION,
+  })
+  @ApiHeader(IDEMPOTENCY_KEY_HEADER)
+  async attachDocument(
     @Param('id') id: string,
     @Body(zodPipe(attachDocumentSchema)) dto: AttachDocumentDto,
-  ) {
-    return this.assets.attachDocument(id, dto);
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<AttachedDocumentView> {
+    const key = requiredIdempotencyKey(idempotencyKey);
+    const { result } = await this.idempotency.execute<AttachedDocumentView>(
+      ATTACH_DOCUMENT_ENDPOINT,
+      key,
+      // The asset is part of the request: the same key and body on another
+      // asset must be refused, not answered with the first asset's reference.
+      { assetId: id, ...dto },
+      201,
+      (fence) => this.assets.attachDocument(id, dto, fence),
+      // The asset may have been transferred to another organization since.
+      () => this.assets.assertVisible(id),
+    );
+    return result;
   }
 
   @Post(':id/insurance-policies')

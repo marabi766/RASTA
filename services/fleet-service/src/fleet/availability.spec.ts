@@ -32,6 +32,8 @@ describe('availability blockers', () => {
         code: 'DISPATCH_BLOCKED',
         owner: 'asset-service',
         detail: 'The most recent technical inspection failed',
+        // The structured cause the portal words, so it never parses `detail`.
+        cause: 'INSPECTION',
       });
     });
 
@@ -41,6 +43,8 @@ describe('availability blockers', () => {
         code: 'DISPATCH_BLOCKED',
         owner: 'asset-service',
         detail: insuranceDetail,
+        cause: 'INSURANCE',
+        coverages: ['THIRD_PARTY'],
       });
     });
 
@@ -60,8 +64,15 @@ describe('availability blockers', () => {
           code: 'DISPATCH_BLOCKED',
           owner: 'asset-service',
           detail: 'The most recent technical inspection failed',
+          cause: 'INSPECTION',
         },
-        { code: 'DISPATCH_BLOCKED', owner: 'asset-service', detail: insuranceDetail },
+        {
+          code: 'DISPATCH_BLOCKED',
+          owner: 'asset-service',
+          detail: insuranceDetail,
+          cause: 'INSURANCE',
+          coverages: ['THIRD_PARTY'],
+        },
       ]);
     });
 

@@ -1,3 +1,4 @@
+import type { DocumentLookup, ResolvedDocument } from './document-lookup';
 import {
   RastaError,
   currentUnscopedReason,
@@ -94,6 +95,7 @@ interface Harness {
   updates: Array<Record<string, unknown>>;
   tx: TxMock;
   clearance: FakeClearance;
+  documents: FakeDocuments;
 }
 
 /**
@@ -136,11 +138,39 @@ interface TxMock {
   asset: { create: jest.Mock; updateMany: jest.Mock };
   assetTransfer: { create: jest.Mock; updateMany: jest.Mock };
   assetLocation: { updateMany: jest.Mock };
-  assetDocumentRef: { updateMany: jest.Mock };
+  assetDocumentRef: { create: jest.Mock; updateMany: jest.Mock };
   assetTimelineEntry: { updateMany: jest.Mock };
   insurancePolicy: { updateMany: jest.Mock };
   insuranceClaim: { updateMany: jest.Mock };
   technicalInspection: { updateMany: jest.Mock };
+}
+
+/**
+ * document-service as asset-service asks it about a document (EXP-002 slice 7).
+ * By default the document is the asker's own, registered, with no owner
+ * reference; a test replaces `answer` to say otherwise.
+ */
+interface FakeDocuments extends DocumentLookup {
+  asked: Array<{ documentId: string; organizationId: string }>;
+  answer: (documentId: string, organizationId: string) => Promise<ResolvedDocument | null>;
+}
+
+function fakeDocuments(): FakeDocuments {
+  const fake: FakeDocuments = {
+    asked: [],
+    answer: async (documentId, organizationId) => ({
+      id: documentId,
+      organizationId,
+      status: 'REGISTERED',
+      ownerResourceType: null,
+      ownerResourceId: null,
+    }),
+    find: async (documentId, organizationId) => {
+      fake.asked.push({ documentId, organizationId });
+      return fake.answer(documentId, organizationId);
+    },
+  };
+  return fake;
 }
 
 function harness(
@@ -229,14 +259,16 @@ function harness(
       : row;
   }) as never;
 
+  const documents = fakeDocuments();
   return {
-    service: new AssetService(repository, undefined, clearance),
+    service: new AssetService(repository, undefined, clearance, documents),
     repository,
     enqueued,
     timeline,
     updates,
     tx: tx as unknown as TxMock,
     clearance,
+    documents,
   };
 }
 
@@ -1907,6 +1939,275 @@ describe('AssetService', () => {
         run(() => h.service.recordLocation(ASSET_ID, { source: 'MANUAL' })),
       ).rejects.toMatchObject({ code: 'NOT_FOUND' });
       expect(h.tx.assetLocation.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('attaching a document reference under an idempotency fence (EXP-002 slice 7)', () => {
+    const ATTACH = {
+      documentId: 'DOC_01JDOCUMENT00000000000001',
+      kind: 'OWNERSHIP_TITLE',
+      title: 'سند مالکیت',
+    } as const;
+
+    function fence(order: string[]) {
+      return {
+        hold: jest.fn(async () => {
+          order.push('hold');
+        }),
+        complete: jest.fn(async (_tx: unknown, result: unknown) => {
+          order.push('complete');
+          return result;
+        }),
+      } as never;
+    }
+
+    it('holds the claim before writing the reference and completes it last', async () => {
+      const order: string[] = [];
+      const h = harness({
+        lockAsset: jest.fn(async () => {
+          order.push('lock');
+          return { status: 'ACTIVE' };
+        }),
+      });
+      h.tx.assetDocumentRef.create.mockImplementation(async (args: { data: object }) => {
+        order.push('write');
+        return { ...args.data, issuedAt: null, expiresAt: null };
+      });
+
+      const view = await run(() => h.service.attachDocument(ASSET_ID, ATTACH, fence(order)));
+
+      expect(order[0]).toBe('hold');
+      expect(order[order.length - 1]).toBe('complete');
+      expect(order.indexOf('lock')).toBeLessThan(order.indexOf('write'));
+      expect(view).toMatchObject({ documentId: ATTACH.documentId, kind: 'OWNERSHIP_TITLE' });
+    });
+
+    it('still attaches without a fence (internal callers)', async () => {
+      const h = harness();
+      h.tx.assetDocumentRef.create.mockImplementation(async (args: { data: object }) => ({
+        ...args.data,
+        issuedAt: null,
+        expiresAt: null,
+      }));
+
+      await expect(run(() => h.service.attachDocument(ASSET_ID, ATTACH))).resolves.toMatchObject({
+        documentId: ATTACH.documentId,
+      });
+      expect(h.enqueued.map((event) => event.eventName)).toEqual([
+        ASSET_EVENTS.ASSET_DOCUMENT_ATTACHED,
+      ]);
+    });
+
+    it('writes nothing when the claim is no longer the caller’s', async () => {
+      const h = harness();
+      const lost = {
+        hold: jest.fn(async () => {
+          throw new RastaError('CONFLICT', 'claim lost');
+        }),
+        complete: jest.fn(),
+      } as never;
+
+      await expect(run(() => h.service.attachDocument(ASSET_ID, ATTACH, lost))).rejects.toThrow();
+      expect(h.tx.assetDocumentRef.create).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+    });
+
+    describe('whose document it is (Codex r1 on #225)', () => {
+      const nothingWritten = (h: Harness) => {
+        expect(h.repository.transaction).not.toHaveBeenCalled();
+        expect(h.tx.assetDocumentRef.create).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+        expect(h.timeline).toHaveLength(0);
+      };
+
+      it('asks document-service as the machine’s organization, and not inside the transaction', async () => {
+        const h = harness();
+        h.tx.assetDocumentRef.create.mockImplementation(async (args: { data: object }) => ({
+          ...args.data,
+          issuedAt: null,
+          expiresAt: null,
+        }));
+        const seen: string[] = [];
+        h.documents.answer = async (documentId, organizationId) => {
+          seen.push(`asked:${organizationId}:${h.repository.transaction.mock.calls.length}`);
+          return {
+            id: documentId,
+            organizationId,
+            status: 'REGISTERED',
+            ownerResourceType: null,
+            ownerResourceId: null,
+          };
+        };
+
+        await run(() => h.service.attachDocument(ASSET_ID, ATTACH));
+
+        // The organization is the asset's, and no transaction was open yet.
+        expect(seen).toEqual([`asked:${DEH1}:0`]);
+        expect(h.documents.asked).toEqual([
+          { documentId: ATTACH.documentId, organizationId: DEH1 },
+        ]);
+      });
+
+      it.each([
+        [
+          'another organization’s or a missing document (document-service says 404)',
+          async () => null,
+        ],
+        [
+          'a document deleted since',
+          async (id: string, org: string): Promise<ResolvedDocument> => ({
+            id,
+            organizationId: org,
+            status: 'DELETED',
+            ownerResourceType: null,
+            ownerResourceId: null,
+          }),
+        ],
+        [
+          'an answer naming another organization',
+          async (id: string): Promise<ResolvedDocument> => ({
+            id,
+            organizationId: 'ORG-OTHER',
+            status: 'REGISTERED',
+            ownerResourceType: null,
+            ownerResourceId: null,
+          }),
+        ],
+        [
+          'a document registered for another asset',
+          async (id: string, org: string): Promise<ResolvedDocument> => ({
+            id,
+            organizationId: org,
+            status: 'REGISTERED',
+            ownerResourceType: 'Asset',
+            ownerResourceId: 'AST_SOMEONE_ELSES',
+          }),
+        ],
+        [
+          'an answer about another document',
+          async (_id: string, org: string): Promise<ResolvedDocument> => ({
+            id: 'DOC_OTHER',
+            organizationId: org,
+            status: 'REGISTERED',
+            ownerResourceType: null,
+            ownerResourceId: null,
+          }),
+        ],
+      ])('answers 404 for %s, the same 404 for each, and writes nothing', async (_what, answer) => {
+        const h = harness();
+        h.documents.answer = answer;
+
+        const error = (await run(() =>
+          h.service.attachDocument(ASSET_ID, ATTACH).catch((e: RastaError) => e),
+        )) as RastaError;
+
+        expect(error).toBeInstanceOf(RastaError);
+        expect(error.code).toBe('NOT_FOUND');
+        // The id the caller sent is not in the words: nothing to confirm it by.
+        expect(error.message).toBe('Document not found');
+        nothingWritten(h);
+      });
+
+      it('gives every refusal the same words, whichever it was', async () => {
+        const words = new Set<string>();
+        for (const answer of [
+          async () => null,
+          async (id: string, org: string): Promise<ResolvedDocument> => ({
+            id,
+            organizationId: org,
+            status: 'DELETED',
+            ownerResourceType: null,
+            ownerResourceId: null,
+          }),
+          async (id: string, org: string): Promise<ResolvedDocument> => ({
+            id,
+            organizationId: org,
+            status: 'REGISTERED',
+            ownerResourceType: 'Asset',
+            ownerResourceId: 'AST_OTHER',
+          }),
+        ]) {
+          const h = harness();
+          h.documents.answer = answer;
+          const error = (await run(() =>
+            h.service.attachDocument(ASSET_ID, ATTACH).catch((e: RastaError) => e),
+          )) as RastaError;
+          words.add(`${error.code}|${error.message}`);
+        }
+        expect(words.size).toBe(1);
+      });
+
+      it.each([
+        [
+          'is unavailable',
+          () => RastaError.upstreamUnavailable('document-service'),
+          'UPSTREAM_UNAVAILABLE',
+        ],
+        [
+          'times out',
+          () => RastaError.upstreamTimeout('document-service', 3000),
+          'UPSTREAM_TIMEOUT',
+        ],
+      ])(
+        'fails closed when document-service %s: the upstream error, nothing attached',
+        async (_how, failure, code) => {
+          const h = harness();
+          h.documents.answer = async () => {
+            throw failure();
+          };
+
+          await expect(run(() => h.service.attachDocument(ASSET_ID, ATTACH))).rejects.toMatchObject(
+            {
+              code,
+            },
+          );
+          nothingWritten(h);
+        },
+      );
+
+      it('never attaches when no lookup was configured', async () => {
+        const h = harness();
+        const bare = new AssetService(h.repository);
+
+        await expect(run(() => bare.attachDocument(ASSET_ID, ATTACH))).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+        nothingWritten(h);
+      });
+
+      it('does not hold the idempotency claim for a refused document', async () => {
+        const h = harness();
+        h.documents.answer = async () => null;
+        const claim = fence([]) as { hold: jest.Mock };
+
+        await expect(
+          run(() => h.service.attachDocument(ASSET_ID, ATTACH, claim as never)),
+        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+        // Refused before the transaction: nothing was held, so the store, which
+        // releases the claim on any throw, leaves the key free for a corrected retry.
+        expect(claim.hold).not.toHaveBeenCalled();
+      });
+
+      it('accepts a document registered for this very asset', async () => {
+        const h = harness();
+        h.tx.assetDocumentRef.create.mockImplementation(async (args: { data: object }) => ({
+          ...args.data,
+          issuedAt: null,
+          expiresAt: null,
+        }));
+        h.documents.answer = async (id, org) => ({
+          id,
+          organizationId: org,
+          status: 'REGISTERED',
+          ownerResourceType: 'Asset',
+          ownerResourceId: ASSET_ID,
+        });
+
+        await expect(run(() => h.service.attachDocument(ASSET_ID, ATTACH))).resolves.toMatchObject({
+          documentId: ATTACH.documentId,
+        });
+      });
     });
   });
 });

@@ -165,6 +165,7 @@ describe('dispatch blocks', () => {
         {
           cause: 'INSURANCE',
           detail: 'The insurance policy has expired (COMPREHENSIVE, THIRD_PARTY)',
+          coverages: ['COMPREHENSIVE', 'THIRD_PARTY'],
         },
       ]);
     });
@@ -179,7 +180,11 @@ describe('dispatch blocks', () => {
         now,
       );
       expect(blocks).toEqual([
-        { cause: 'INSURANCE', detail: 'The insurance policy has expired (COMPREHENSIVE)' },
+        {
+          cause: 'INSURANCE',
+          detail: 'The insurance policy has expired (COMPREHENSIVE)',
+          coverages: ['COMPREHENSIVE'],
+        },
       ]);
     });
 

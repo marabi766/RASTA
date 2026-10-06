@@ -174,11 +174,11 @@ describe('an asset write carrying a bidi control (HTTP)', () => {
           .send({ ...body, documentId: 'DOC_01J9ZK7Q' });
 
         expect(response.status).toBeLessThan(300);
-        // The record routes pass the claim fence as a third argument.
+        // Every one of the three passes the claim fence as a third argument.
         expect(handler).toHaveBeenCalledWith(
           'AST_1',
           expect.objectContaining({ documentId: 'DOC_01J9ZK7Q' }),
-          ...(path.endsWith('/documents') ? [] : [expect.anything()]),
+          expect.anything(),
         );
       });
     });
