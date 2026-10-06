@@ -1,10 +1,11 @@
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { UnprocessableEventError } from '@rasta/nest-common';
+import { EventConsumer, UnprocessableEventError } from '@rasta/nest-common';
 import type { PolicySuspensionService } from '../policy/policy-suspension.service';
 import {
   ORGANIZATION_MOVES_CONSUMER,
   ORGANIZATION_MOVES_TOPICS,
   OrganizationMovedConsumer,
+  organizationMovesConsumerFactory,
 } from './organization-moved.consumer';
 
 const envelope = (overrides: Partial<EventEnvelope> = {}): EventEnvelope =>
@@ -35,9 +36,53 @@ function build() {
 }
 
 describe('OrganizationMovedConsumer (Q-83)', () => {
-  it('reads one topic under its own group, `<service>.<purpose>`', () => {
+  it('reads one topic under its own group, `<service>.<purpose>`, and dead-letters to its own topic', () => {
     expect(ORGANIZATION_MOVES_CONSUMER).toBe('contract-service.organization-moves');
     expect(ORGANIZATION_MOVES_TOPICS).toEqual(['rasta.organization.v1']);
+
+    const factory = organizationMovesConsumerFactory(
+      { brokers: ['localhost:19092'], clientId: 'test' },
+      { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+    );
+    expect(factory(async () => undefined)).toBeInstanceOf(EventConsumer);
+  });
+
+  it('builds its EventConsumer with its own handler on start, and stops it on stop; stopping first is safe', async () => {
+    const start = jest.fn(async () => undefined);
+    const stop = jest.fn(async () => undefined);
+    const factory = jest.fn(() => ({ start, stop }) as unknown as EventConsumer);
+    const consumer = new OrganizationMovedConsumer(factory, {} as PolicySuspensionService, {
+      info: jest.fn(),
+      warn: jest.fn(),
+      debug: jest.fn(),
+    });
+    await expect(consumer.stop()).resolves.toBeUndefined();
+
+    await consumer.start();
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    await consumer.stop();
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands the shared consumer a handler that is this consumer’s own', async () => {
+    const enqueueMove = jest.fn(async () => ({ candidates: 0, queued: 0 }));
+    let handler: ((envelope: EventEnvelope) => Promise<unknown>) | undefined;
+    const factory = jest.fn((h: (envelope: EventEnvelope) => Promise<unknown>) => {
+      handler = h;
+      return {
+        start: async () => undefined,
+        stop: async () => undefined,
+      } as unknown as EventConsumer;
+    });
+    const consumer = new OrganizationMovedConsumer(
+      factory as never,
+      { enqueueMove } as unknown as PolicySuspensionService,
+      { info: jest.fn(), warn: jest.fn(), debug: jest.fn() },
+    );
+    await consumer.start();
+    await handler?.(envelope());
+    expect(enqueueMove).toHaveBeenCalledTimes(1);
   });
 
   it('queues a re-check naming the event and the organization that moved — a trigger, not the answer', async () => {
