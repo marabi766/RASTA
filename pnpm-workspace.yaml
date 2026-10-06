@@ -34,13 +34,16 @@ overrides:
   # GHSA-535w-7cp7-47q4, GHSA-qfvm-cv95-jqjf, GHSA-wc9g-mqfw-jrwm — multipart
   # denial of service. @nestjs/platform-express pins multer 2.2.0 exactly, so
   # the patched release has to come from here.
-  'multer@<2.3.0': '2.3.0'
+  # GHSA-3pph-fpjx-jg34 (moderate, 2026-10-05) — 2.4.0 closes it as well.
+  'multer@<2.4.0': '2.4.0'
   # GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 — arbitrary file read and path
   # traversal through an attacker-controlled `sourceMappingURL` in a CSS
   # comment. Both are reached only through `next`, which still pins an affected
   # postcss, so the patched release has to come from here. 8.5.18 is the first
   # version that closes both.
-  'postcss@<8.5.18': '8.5.18'
+  # GHSA-fxqj-rqcc-2cmp (moderate, 2026-10-05) moves the floor to 8.5.23; 8.5.28
+  # is the newest release past the seven-day minimum age.
+  'postcss@<8.5.23': '8.5.28'
   # CVE-2026-84292 and CVE-2026-84394 — authority injection through an
   # unvalidated port, and host confusion through an unbalanced URI. Reached
   # through ajv 8 (Nest's schema tooling and the build chain), which still
@@ -59,6 +62,18 @@ overrides:
   # @opentelemetry/auto-instrumentations-node pulls in (packages/observability);
   # they still resolve an affected release of their range.
   '@grpc/grpc-js@>=1.14.0 <1.14.5': '1.14.5'
+  # GHSA-jqcg-44mw-7w3h (critical) — proxy-addr <2.0.8. Reached through express
+  # (@nestjs/platform-express) in every service and the gateway, where it decides
+  # the client address behind a proxy. Express still resolves 2.0.7.
+  'proxy-addr@<2.0.8': '2.0.8'
+  # GHSA-x5fp-wj9c-mxmx and GHSA-4mjr-xmp4-gh2g (moderate) — qs, reached through
+  # express and body-parser.
+  'qs@>=6.0.0 <6.16.0': '6.16.0'
+  # GHSA-r3ph-w7gj-g6xm (moderate) — js-yaml 5.x, reached through @nestjs/swagger.
+  'js-yaml@>=5.0.0 <5.4.1': '5.4.2'
+  # GHSA-jggr-w7fw-pc2j (moderate) — fast-copy 4.x, reached through pino-pretty
+  # (development log formatting).
+  'fast-copy@>=4.0.0 <4.1.0': '4.1.1'
 
 # Advisories with NO patched release yet, accepted for a fixed time only. Each
 # entry names the advisory, why it cannot be fixed by an override, where it is
@@ -75,6 +90,16 @@ auditConfig:
     # this repository, not by users. RE-CHECK BY 2026-10-17: if a patched
     # braces is out, pin it under overrides and delete this entry.
     - GHSA-vfj7-8cjw-p6xm
+    # GHSA-68fv-2mgg-jv7q (high) — source-map-js <1.2.2, event-loop denial of
+    # service through crafted source-map section offsets. The only patched
+    # release, 1.2.2, was published 2026-09-30 and is inside the seven-day
+    # minimum release age until 2026-10-07 14:08 UTC; this policy does not get
+    # an exception for a six-day-old release. Reached through next/postcss and
+    # tailwind at BUILD time and through the Temporal worker's webpack bundling
+    # (marketplace) — source maps written by this repository, not by users.
+    # REMOVE BY 2026-10-08: pin 'source-map-js@<1.2.2': '1.2.2' under overrides
+    # and delete this entry.
+    - GHSA-68fv-2mgg-jv7q
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.
