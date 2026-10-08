@@ -311,6 +311,12 @@ export class AmendmentRepository {
        * signatures could have raced any of them. Not recorded.
        */
       earliestMoveInstant: Date;
+      /**
+       * On a "within" answer, the employer's CURRENT hierarchy version: a signature whose recorded
+       * version is non-null and not below it read a tree nothing has changed since, and is left
+       * alone (#231 r13). Null signatures stay eligible; null here keeps the predicate as it is.
+       */
+      withinCurrentVersion?: number | null;
       /** The clock-skew allowance added to a signature's commit deadline (D-050); only adds reviews. */
       clockSkewMarginSeconds: number;
       at: Date;
@@ -336,6 +342,16 @@ export class AmendmentRepository {
                       OR: [
                         { hierarchyVersion: null },
                         { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
+                      ],
+                    },
+                  ]),
+              ...(input.withinCurrentVersion == null
+                ? []
+                : [
+                    {
+                      OR: [
+                        { hierarchyVersion: null },
+                        { hierarchyVersion: { lt: BigInt(input.withinCurrentVersion) } },
                       ],
                     },
                   ]),

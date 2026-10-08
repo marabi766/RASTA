@@ -522,6 +522,65 @@ describe('the authority an amendment is signed under', () => {
       expect(await flaggedEvents(c.employer)).toHaveLength(1);
     });
 
+    it('an UNRELATED organization’s move queues this policy too, but its "within" answer reviews no amendment signature: the employer’s current version is the one it recorded (#231 round 13)', async () => {
+      const mine = await signedUnderUnion();
+      await signAmendment(api, mine.id, mine.amendmentId, mine.employerToken).expect(200);
+      const mineEvidence = await evidenceOf(mine.amendmentId);
+      const other = await signedUnderUnion();
+      api.hierarchy.adopt(newOrg(), other.employer);
+      await consumer.handle(
+        moved(
+          other.employer,
+          new Date(mineEvidence.hierarchyCommitDeadline!.getTime() - 1),
+          api.hierarchy.bump(other.employer),
+        ),
+      );
+
+      await sweeper.runOnce();
+
+      expect((await policyRow(mine.policyId)).status).toBe('ACTIVE');
+      expect(await reviewsOf(mine.amendmentId)).toEqual([]);
+      expect(await flaggedEvents(mine.employer)).toEqual([]);
+    });
+
+    it('a pre-version amendment signature (no recorded version) stays eligible on "within": an unrelated move reviews it (#231 round 13)', async () => {
+      const raced = await signedUnderUnion();
+      await signAmendment(api, raced.id, raced.amendmentId, raced.employerToken).expect(200);
+      const template = await evidenceOf(raced.amendmentId);
+      const legacy = await signedUnderUnion();
+      const { id: _id, ...rest } = template;
+      // The service no longer writes one, so the row is inserted in the shape the evidence had then.
+      await runUnscoped('the suite inserts a pre-version amendment signature', () =>
+        w.prisma.client.amendmentSignature.create({
+          data: {
+            ...rest,
+            id: `AMS_${ulid()}`,
+            organizationId: legacy.employer,
+            contractId: legacy.id,
+            amendmentId: legacy.amendmentId,
+            signerOrganizationId: legacy.employer,
+            policyId: legacy.policyId,
+            hierarchyAuthorOrganizationId: legacy.union,
+            hierarchyVersion: null,
+          },
+        }),
+      );
+      api.hierarchy.adopt(newOrg(), raced.employer);
+      await consumer.handle(
+        moved(
+          raced.employer,
+          new Date(template.hierarchyCommitDeadline!.getTime() - 1),
+          api.hierarchy.bump(raced.employer),
+        ),
+      );
+
+      await sweeper.runOnce();
+
+      expect((await policyRow(legacy.policyId)).status).toBe('ACTIVE');
+      expect(await reviewsOf(legacy.amendmentId)).toHaveLength(1);
+      expect(await reviewsOf(raced.amendmentId)).toHaveLength(1);
+    });
+
     it('moves back without an amendment signature in the window: no review', async () => {
       const c = await signedUnderUnion();
       await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);

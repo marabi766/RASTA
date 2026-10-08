@@ -411,6 +411,7 @@ export class PolicySuspensionService {
       ...attribution,
       movedVersion: cause.movedVersion,
       earliestMoveInstant: cause.earliestMovedAt,
+      withinCurrentVersion,
       clockSkewMarginSeconds: this.env.CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
       at,
     });
