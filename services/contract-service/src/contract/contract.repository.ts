@@ -211,11 +211,13 @@ export class ContractRepository {
    * Flags the employer signatures under `policyId` that a move raced (D-050): the tree they
    * rested on is older than the move's — the hierarchy version they recorded is LOWER than the
    * move's, a number organization-service stamps in the move's own transaction, so no clock
-   * orders it — **and** the move's instant is at or before the signature's commit deadline
-   * (`moved_at ≤ hierarchy_commit_deadline`, exactly D-050): a signature that committed before the
-   * move was prepared cannot have raced it. The version decides which tree was read; the window
-   * only bounds which signatures are looked at, and its clock skew errs towards flagging. A
-   * signature without a deadline (from before evidence) cannot be bounded and is looked at.
+   * orders it — **and** the EARLIEST coalesced move's instant is at or before the signature's
+   * commit deadline plus the configured clock-skew margin
+   * (`earliest_moved_at ≤ hierarchy_commit_deadline + margin`, D-050): a signature that committed
+   * before every move was prepared cannot have raced one. The version decides which tree was
+   * read; the window only bounds which signatures are looked at, and the margin can only add
+   * reviews. A signature without a deadline (from before evidence) cannot be bounded and is
+   * looked at.
    * A signature that read the tree after the move recorded the move's version or more, and is not
    * flagged.
    * Never revokes: it writes one append-only review row each, once
@@ -233,11 +235,21 @@ export class ContractRepository {
       detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
       /** The move's hierarchy version; null for an event that predates versions. */
       movedVersion: number | null;
-      /** The move's own instant: the D-050 bound on which signatures could have raced it. Not recorded. */
-      moveInstant: Date;
+      /**
+       * The EARLIEST instant over the moves coalesced into the task: the D-050 bound on which
+       * signatures could have raced any of them. Not recorded.
+       */
+      earliestMoveInstant: Date;
+      /** The clock-skew allowance added to a signature's commit deadline (D-050); only adds reviews. */
+      clockSkewMarginSeconds: number;
       at: Date;
     },
   ): Promise<{ contractId: string; policyVersion: number }[]> {
+    // `deadline + margin >= earliest move`, written as `deadline >= earliest - margin`: the margin
+    // can only widen the set of signatures looked at (D-050).
+    const skewedBound = new Date(
+      input.earliestMoveInstant.getTime() - input.clockSkewMarginSeconds * 1000,
+    );
     return runUnscoped(
       'the reconciliation of a move flags the signatures of the policy it stranded, named by its organization and id',
       async () => {
@@ -252,8 +264,9 @@ export class ContractRepository {
             // them) orders nothing, so the version test is dropped: flagging too many is safe,
             // flagging too few is not.
             // The window (D-050) only bounds which signatures are looked at: one whose commit
-            // deadline precedes the move's instant committed before the move and cannot have
-            // raced it. No deadline, no bound.
+            // deadline plus the clock-skew margin precedes the EARLIEST coalesced move's instant
+            // committed before every move and cannot have raced any. No deadline, no bound: a
+            // signature without one stays eligible.
             AND: [
               ...(input.movedVersion === null
                 ? []
@@ -268,7 +281,7 @@ export class ContractRepository {
               {
                 OR: [
                   { hierarchyCommitDeadline: null },
-                  { hierarchyCommitDeadline: { gte: input.moveInstant } },
+                  { hierarchyCommitDeadline: { gte: skewedBound } },
                 ],
               },
             ],

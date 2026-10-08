@@ -1,11 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { SERVICE_NAME } from '../config/env';
+import { SERVICE_NAME, type ContractEnv } from '../config/env';
 import { ContractRepository } from '../contract/contract.repository';
 import { EventPublisher } from '../events/publisher';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { transactionNow } from '../shared/clock';
+import { ENV } from '../tokens';
 import { UNION_ROLE } from './policy.access';
 import {
   PolicyReconciliationRepository,
@@ -41,10 +42,11 @@ export type SuspensionCause =
       /** The basis signatures are compared with; null for an event without a version. */
       movedVersion: number | null;
       /**
-       * The queued move's instant — only the bound on which signatures could have committed after
-       * it (D-050); it is never recorded as a cause.
+       * The EARLIEST instant over the moves queued (coalesced) into the task — only the bound on
+       * which signatures could have committed after a move was prepared (D-050); never recorded
+       * as a cause.
        */
-      movedAt: Date;
+      earliestMovedAt: Date;
       correlationId: string;
       callerService: string;
     }
@@ -137,6 +139,7 @@ export class PolicySuspensionService {
     private readonly events: EventPublisher,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly contracts: ContractRepository,
+    @Inject(ENV) private readonly env: ContractEnv,
   ) {}
 
   /**
@@ -211,7 +214,11 @@ export class PolicySuspensionService {
           // The move's version and instant as the locked row holds them now — never the copy
           // taken at the claim.
           if (cause.reason === 'MOVE_RECHECK') {
-            effective = { ...cause, movedVersion: check.movedVersion, movedAt: check.movedAt };
+            effective = {
+              ...cause,
+              movedVersion: check.movedVersion,
+              earliestMovedAt: check.earliestMovedAt,
+            };
           }
         }
         const suspended = await this.suspendIn(tx, candidate.id, effective);
@@ -319,7 +326,8 @@ export class PolicySuspensionService {
       policyId: policy.id,
       ...attribution,
       movedVersion: cause.movedVersion,
-      moveInstant: cause.movedAt,
+      earliestMoveInstant: cause.earliestMovedAt,
+      clockSkewMarginSeconds: this.env.CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
       at,
     });
     for (const signature of flagged) {

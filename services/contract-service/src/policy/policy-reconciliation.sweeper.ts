@@ -166,7 +166,7 @@ export class PolicyReconciliationSweeper {
             {
               reason: 'MOVE_RECHECK',
               movedVersion: task.movedVersion,
-              movedAt: task.movedAt,
+              earliestMovedAt: task.earliestMovedAt,
               correlationId: task.correlationId,
               callerService: MOVE_PRODUCER,
             },

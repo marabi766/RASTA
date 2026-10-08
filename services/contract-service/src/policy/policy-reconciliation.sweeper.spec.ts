@@ -25,7 +25,7 @@ const task = (overrides: Partial<ClaimedTask> = {}): ClaimedTask => ({
   attempts: 0,
   generation: 0,
   leaseToken: 'TOKEN',
-  movedAt: new Date('2026-10-06T10:00:00.000Z'),
+  earliestMovedAt: new Date('2026-10-06T10:00:00.000Z'),
   movedVersion: 4,
   ...overrides,
 });
@@ -65,7 +65,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
       { id: 'APL_1', organizationId: 'ORG_E' },
       {
         reason: 'MOVE_RECHECK',
-        movedAt: new Date('2026-10-06T10:00:00.000Z'),
+        earliestMovedAt: new Date('2026-10-06T10:00:00.000Z'),
         movedVersion: 4,
         correlationId: 'COR_1',
         callerService: 'organization-service',
@@ -114,7 +114,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
       expect(cause).toEqual({
         reason: 'MOVE_RECHECK',
         movedVersion: queued.movedVersion,
-        movedAt: queued.movedAt,
+        earliestMovedAt: queued.earliestMovedAt,
         correlationId: 'COR_1',
         callerService: 'organization-service',
       });

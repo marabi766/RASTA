@@ -16,6 +16,7 @@ import {
   seedDraft,
   newAward,
   tenderAwarded,
+  testEnv,
   untilSessionsWaitOnALock,
   wire,
   type Wiring,
@@ -130,6 +131,9 @@ describe('a signing policy follows an organization move', () => {
     runUnscoped('the suite reads the signatures', () =>
       w.prisma.client.contractSignature.findMany({ where: { contractId } }),
     );
+
+  /** D-050: the clock-skew allowance added to a signature's commit deadline (the default, 300 s). */
+  const MARGIN_MS = testEnv().CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS * 1000;
 
   /** `hierarchyVersion` is what organization-service stamps on the move; omit it for an older event. */
   const moved = (
@@ -559,7 +563,9 @@ describe('a signing policy follows an organization move', () => {
         },
         {
           who: committedBefore,
-          movedAt: new Date(committedBefore.evidence.hierarchyCommitDeadline!.getTime() + 30_000),
+          movedAt: new Date(
+            committedBefore.evidence.hierarchyCommitDeadline!.getTime() + MARGIN_MS + 30_000,
+          ),
           stamp: 'new',
           flagged: false,
         },
@@ -894,10 +900,13 @@ describe('a signing policy follows an organization move', () => {
     it.each([
       ['30 s before the signature’s deadline', -30_000, true],
       ['exactly at the deadline', 0, true],
-      // moved_at > hierarchy_commit_deadline: the signature committed before the move was prepared.
-      ['30 s after its commit deadline', 30_000, false],
+      // Up to the clock-skew margin past the deadline still reviews: the two hosts' clocks may differ.
+      ['10 s after its commit deadline (inside the margin)', 10_000, true],
+      ['exactly deadline + margin', MARGIN_MS, true],
+      // moved_at > deadline + margin: the signature committed before the move was prepared.
+      ['30 s beyond deadline + margin', MARGIN_MS + 30_000, false],
     ])(
-      'a signature on the older tree is flagged only if the move is not after its commit deadline, and one that read the moved tree never is: move stamped %s',
+      'a signature on the older tree is flagged only if the move is not after its commit deadline plus the skew margin, and one that read the moved tree never is: move stamped %s',
       async (_label, skew, olderFlagged) => {
         const older = await signedOnce();
         const newer = await signedOnce();
@@ -927,6 +936,42 @@ describe('a signing policy follows an organization move', () => {
       },
     );
 
+    it('two moves coalesced around ONE signature — A before its commit, B (the higher version) after its deadline — still review it: the window is bounded by the EARLIEST move (round 10)', async () => {
+      const who = await signedOnce();
+      api.hierarchy.adopt(newOrg(), who.draft.employer);
+      const deadline = who.evidence.hierarchyCommitDeadline!.getTime();
+      const versionA = api.hierarchy.bump(who.draft.employer);
+      const a = moved(who.draft.employer, new Date(deadline - 1), versionA);
+      const versionB = api.hierarchy.bump(who.draft.employer);
+      // Beyond deadline + margin: on its own, B would exclude the signature.
+      const b = moved(who.draft.employer, new Date(deadline + MARGIN_MS + 60_000), versionB);
+      await consumer.handle(a);
+      await consumer.handle(b);
+
+      const [task] = await tasksOf(who.policyId);
+      expect(task).toMatchObject({ movedVersion: BigInt(versionB), generation: 1 });
+      expect(task!.earliestMovedAt!.getTime()).toBe(deadline - 1);
+
+      await sweeper.runOnce();
+      expect(await reviewsOf(who.draft.id)).toHaveLength(1);
+    });
+
+    it('the same two moves in the other order (B first, then A) keep the same earliest instant', async () => {
+      const who = await signedOnce();
+      api.hierarchy.adopt(newOrg(), who.draft.employer);
+      const deadline = who.evidence.hierarchyCommitDeadline!.getTime();
+      const versionA = api.hierarchy.bump(who.draft.employer);
+      const versionB = api.hierarchy.bump(who.draft.employer);
+      await consumer.handle(
+        moved(who.draft.employer, new Date(deadline + MARGIN_MS + 60_000), versionB),
+      );
+      await consumer.handle(moved(who.draft.employer, new Date(deadline - 1), versionA));
+      const [task] = await tasksOf(who.policyId);
+      expect(task!.earliestMovedAt!.getTime()).toBe(deadline - 1);
+      await sweeper.runOnce();
+      expect(await reviewsOf(who.draft.id)).toHaveLength(1);
+    });
+
     it('a move with no version orders nothing: every unreviewed signature inside its window is flagged (too many is safe), one that committed before it is not', async () => {
       const inside = await signedOnce();
       api.hierarchy.adopt(newOrg(), inside.draft.employer);
@@ -941,7 +986,7 @@ describe('a signing policy follows an organization move', () => {
       await consumer.handle(
         moved(
           before.draft.employer,
-          new Date(before.evidence.hierarchyCommitDeadline!.getTime() + 60_000),
+          new Date(before.evidence.hierarchyCommitDeadline!.getTime() + MARGIN_MS + 60_000),
         ),
       );
       await sweeper.runOnce();
@@ -1001,7 +1046,7 @@ describe('a signing policy follows an organization move', () => {
         { id: policyId, organizationId: first.employer },
         {
           reason: 'MOVE_RECHECK',
-          movedAt: task.movedAt,
+          earliestMovedAt: task.earliestMovedAt,
           movedVersion: task.movedVersion,
           correlationId: task.correlationId,
           callerService: 'organization-service',
@@ -1082,6 +1127,8 @@ describe('a signing policy follows an organization move', () => {
         generation: 1,
       });
       expect(task!.movedAt!.toISOString()).toBe(secondAt.toISOString());
+      // …while the window bound is the earliest of the two instants (round 10).
+      expect(task!.earliestMovedAt!.toISOString()).toBe('2026-10-06T10:00:00.000Z');
 
       // Two moves outside the union: which of them took the employer out cannot be said — neither
       // is named.
