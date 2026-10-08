@@ -493,6 +493,53 @@ describe('the authority an amendment is signed under', () => {
       expect(await flaggedEvents(c.employer)).toHaveLength(1);
     });
 
+    it('out → sign → back before the sweep: the answer is "within", yet the amendment signature committed while authority was absent is reviewed (MOVE_RECHECK), and the policy stays in force (#231 round 12)', async () => {
+      const c = await signedUnderUnion();
+      await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);
+      const evidence = await evidenceOf(c.amendmentId);
+      const deadline = evidence.hierarchyCommitDeadline!.getTime();
+      // The union is the policy's author: A takes the employer out, B returns it to that union.
+      const policy = await policyRow(c.policyId);
+      api.hierarchy.adopt(newOrg(), c.employer);
+      await consumer.handle(
+        moved(c.employer, new Date(deadline - 1), api.hierarchy.bump(c.employer)),
+      );
+      api.hierarchy.adopt(policy.authorOrganizationId, c.employer);
+      await consumer.handle(
+        moved(c.employer, new Date(deadline + 1), api.hierarchy.bump(c.employer)),
+      );
+
+      await sweeper.runOnce();
+
+      expect((await policyRow(c.policyId)).status).toBe('ACTIVE');
+      const reviews = await reviewsOf(c.amendmentId);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      });
+      expect(await flaggedEvents(c.employer)).toHaveLength(1);
+    });
+
+    it('moves back without an amendment signature in the window: no review', async () => {
+      const c = await signedUnderUnion();
+      await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);
+      const deadline = (await evidenceOf(c.amendmentId)).hierarchyCommitDeadline!.getTime();
+      const policy = await policyRow(c.policyId);
+      const at = deadline + MARGIN_MS + 60_000;
+      api.hierarchy.adopt(newOrg(), c.employer);
+      await consumer.handle(moved(c.employer, new Date(at), api.hierarchy.bump(c.employer)));
+      api.hierarchy.adopt(policy.authorOrganizationId, c.employer);
+      await consumer.handle(moved(c.employer, new Date(at + 1), api.hierarchy.bump(c.employer)));
+
+      await sweeper.runOnce();
+
+      expect((await policyRow(c.policyId)).status).toBe('ACTIVE');
+      expect(await reviewsOf(c.amendmentId)).toEqual([]);
+      expect(await flaggedEvents(c.employer)).toEqual([]);
+    });
+
     it('a signature that read the tree after the move recorded its version: not raced, not flagged', async () => {
       const union = newOrg();
       const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
