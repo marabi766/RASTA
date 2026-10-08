@@ -2795,19 +2795,123 @@ export function psqlRunner(url) {
 }
 
 /**
- * Runs one SQL **file** the way a rollback is run by hand:
- * `psql -v ON_ERROR_STOP=1 --file <file>` — no `--single-transaction`, no `-c`
- * around the file. That is the supported path for a `down.sql`
- * (docs/runbooks/database-bootstrap.md § «اجرای down.sql»).
+ * The first line of a down.sql that must run outside a transaction (`DROP INDEX
+ * CONCURRENTLY`, …). Such a file is run with plain `--file` and must be safe to
+ * run again — see `downFileProblems`.
+ */
+export const NO_TRANSACTION_MARKER = '-- rasta:no-transaction';
+
+/** SQL without comments and without dollar-quoted bodies (a `DO` block's own BEGIN … END is not transaction control). */
+function statementsOnly(sql) {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/--[^\n]*/g, '')
+    .replace(/(\$[A-Za-z_0-9]*\$)[\s\S]*?\1/g, '$$$$');
+}
+
+/** Every top-level statement of a down.sql, trimmed, in order (a `;` inside a quoted string is not split on). */
+function topLevelStatements(sql) {
+  return statementsOnly(sql)
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+}
+
+const TRANSACTION_CONTROL =
+  /^(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION)\b/i;
+const LEDGER_DELETE = /^DELETE\s+FROM\s+"_prisma_migrations"\s+WHERE\s+"migration_name"\s*=\s*''$/i;
+
+/**
+ * How a down.sql is to be run, and what is wrong with it for that mode.
+ * Returns `{ mode, problems }`, `mode` being one of
  *
- * Each statement the file does not itself wrap in BEGIN … COMMIT commits on its
- * own, and ON_ERROR_STOP ends the run at the first error, so a down that fails
- * half-way leaves the half-rolled-back schema behind — which is what the
- * verifier must be able to see. Handing the same text to `psql -c` (or to
- * Prisma's `db execute`) runs it as one implicit transaction that rolls
- * everything back on error, and so can never show that. `--single-transaction`
- * is not used: the down files open their own transaction, and a nested BEGIN
- * would only warn while the file's COMMIT ended the outer one early.
+ *   `single-transaction` — the default: `psql --single-transaction`, the whole file
+ *                          atomic, `SET LOCAL` effective, no partial rollback;
+ *   `own-transaction`    — the file is itself `BEGIN; … COMMIT;` as a whole. Run with
+ *                          plain `--file`: under `--single-transaction` its COMMIT would
+ *                          end psql's transaction early, and a statement after it would
+ *                          then run on its own;
+ *   `no-transaction`     — the first line is `-- rasta:no-transaction`: for a statement
+ *                          that cannot run in a transaction. Run with plain `--file`,
+ *                          so it must be safe to run again.
+ */
+export function downFileMode(sql) {
+  const problems = [];
+  const statements = topLevelStatements(sql);
+  const control = statements.filter((statement) => TRANSACTION_CONTROL.test(statement));
+  const marked = sql.split('\n', 1)[0].trim() === NO_TRANSACTION_MARKER;
+  if (/rasta:no-transaction/.test(sql) && !marked) {
+    problems.push(`the ${NO_TRANSACTION_MARKER} marker must be the first line of the file`);
+  }
+
+  if (marked) {
+    if (control.length > 0) {
+      problems.push(
+        'a no-transaction file must not contain transaction control (BEGIN, COMMIT, …)',
+      );
+    }
+    // Plain --file: a failure part-way leaves what ran, so what ran must be harmless to run again.
+    for (const statement of statements) {
+      if (LEDGER_DELETE.test(statement)) continue;
+      if (/^(DELETE|UPDATE|INSERT|TRUNCATE|DO|CALL|COPY)\b/i.test(statement)) {
+        problems.push(
+          `a no-transaction file must not change data (${statement.split(/\s+/)[0].toUpperCase()}): ` +
+            'only its one ledger DELETE',
+        );
+      }
+      if (/^DROP\b/i.test(statement) && !/\bIF\s+EXISTS\b/i.test(statement)) {
+        problems.push(
+          `a no-transaction file must be safe to re-run: "${statement.slice(0, 60)}" has no IF EXISTS`,
+        );
+      }
+      if (/^(CREATE|ALTER)\b/i.test(statement) && !/\bIF\s+(NOT\s+)?EXISTS\b/i.test(statement)) {
+        problems.push(
+          `a no-transaction file must be safe to re-run: "${statement.slice(0, 60)}" has no IF [NOT] EXISTS`,
+        );
+      }
+    }
+    const last = statements.at(-1);
+    if (!last || !LEDGER_DELETE.test(last)) {
+      problems.push(
+        'a no-transaction file must end with its ledger DELETE, so a failure leaves the row',
+      );
+    }
+    return { mode: 'no-transaction', problems };
+  }
+
+  if (control.length === 0) return { mode: 'single-transaction', problems };
+
+  const wrapped =
+    control.length === 2 &&
+    /^(BEGIN|START\s+TRANSACTION)\b/i.test(statements[0]) &&
+    /^(COMMIT|END)\b/i.test(statements.at(-1));
+  if (!wrapped) {
+    problems.push(
+      'transaction control is allowed only as one BEGIN first and one COMMIT last (the whole file), ' +
+        'or not at all; a file that must run outside a transaction declares ' +
+        `${NO_TRANSACTION_MARKER} on its first line`,
+    );
+  }
+  return { mode: 'own-transaction', problems };
+}
+
+/**
+ * Runs one SQL **file** the way the runbook runs a rollback by hand:
+ *
+ *   psql -X -v ON_ERROR_STOP=1 --single-transaction --file <down.sql>
+ *
+ * The whole file is one transaction: it applies completely or not at all, so a
+ * down that fails on a late statement cannot leave data deleted and the ledger
+ * row present, and `SET LOCAL lock_timeout` (which has no effect outside a
+ * transaction) works. `-X` keeps a user's `.psqlrc` from changing ON_ERROR_STOP
+ * or autocommit.
+ *
+ * Two kinds of file run with plain `--file` instead, decided by `downFileMode`
+ * from the file itself: one that is wrapped in its own `BEGIN … COMMIT` as a
+ * whole (its COMMIT would end psql's transaction early, and anything after it
+ * would run on its own), and one that declares `-- rasta:no-transaction` on its
+ * first line. A file that fits none of the shapes is refused, not run.
  *
  * `schema` becomes the session's `search_path`, as Prisma's `?schema=` does for
  * the commands it runs; psql has no such parameter, and an unqualified name in
@@ -2821,6 +2925,13 @@ export function psqlFileRunner(url, schema) {
   }
   const { target, env } = libpqInvocation(url);
   return (file) => {
+    const { mode, problems } = downFileMode(readFileSync(file, 'utf8'));
+    if (problems.length > 0) {
+      return {
+        ok: false,
+        output: `${file}: not a runnable down.sql:\n  ${problems.join('\n  ')}\n`,
+      };
+    }
     const result = spawnSync(
       'psql',
       [
@@ -2829,6 +2940,7 @@ export function psqlFileRunner(url, schema) {
         '-q',
         '-v',
         'ON_ERROR_STOP=1',
+        ...(mode === 'single-transaction' ? ['--single-transaction'] : []),
         '-c',
         `SET search_path TO "${schema}"`,
         '--file',
@@ -2837,7 +2949,7 @@ export function psqlFileRunner(url, schema) {
       { encoding: 'utf8', env: { ...process.env, ...env } },
     );
     const stderr = result.stderr ?? (result.error ? String(result.error) : '');
-    return { ok: result.status === 0, output: `${result.stdout ?? ''}${stderr}` };
+    return { ok: result.status === 0, output: `${result.stdout ?? ''}${stderr}`, mode };
   };
 }
 

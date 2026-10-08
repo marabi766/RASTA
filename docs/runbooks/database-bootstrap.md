@@ -121,7 +121,7 @@ pnpm --filter @rasta/asset-service exec prisma migrate resolve --rolled-back <mi
 هر `down.sql` را **این‌گونه** اجرا کن، با نقش مالک (مهاجر) سرویس، و نه راه دیگر:
 
 ```bash
-psql "<URL بی گذرواژه>" -v ON_ERROR_STOP=1 \
+psql "<URL بی گذرواژه>" -X -q -v ON_ERROR_STOP=1 --single-transaction \
   -c 'SET search_path TO "<schema>"' \
   --file services/<svc>-service/prisma/migrations/<migration>/down.sql
 ```
@@ -130,17 +130,25 @@ psql "<URL بی گذرواژه>" -v ON_ERROR_STOP=1 \
 **دقیقاً همین** را اجرا می‌کند (`psqlFileRunner` در `scripts/verify-migration-reversible-lib.mjs`)، پس چیزی که
 تأیید شده همان چیزی است که شب حادثه اجرا می‌شود.
 
+- **`-X` الزامی است.** `~/.psqlrc` کاربر می‌تواند `ON_ERROR_STOP` یا `AUTOCOMMIT` را عوض کند؛ `-X` آن را نمی‌خواند.
 - **`ON_ERROR_STOP=1` الزامی است.** بی آن `psql` پس از خطا ادامه می‌دهد و دستورهای بعدی را روی Schemaی نیمه‌برگشته
   اجرا می‌کند.
-- **`--single-transaction` نه.** `down.sql`ها خودشان `BEGIN … COMMIT` دارند؛ `BEGIN` تو در تو فقط هشدار می‌دهد و
-  `COMMIT` فایل تراکنش بیرونی را زودتر می‌بندد.
-- **`-c` به‌جای `--file` نه، و `prisma db execute` برای `down.sql` نه.** هر دو متن را یک تراکنش ضمنی اجرا می‌کنند
-  که با خطا کاملاً برمی‌گردد؛ پس رفتار «هر دستور خودش Commit می‌شود» را نمی‌بینند و نیمه‌ماندن را پنهان می‌کنند.
-  `db execute` فقط برای یک دستور تک‌خطی در همین runbook (مثل `DROP INDEX CONCURRENTLY`) مجاز است.
-- **قاعدهٔ نوشتن:** پیش‌شرط‌ها (`RAISE EXCEPTION`) پیش از **نخستین** دستور تغییردهنده بیایند، و فایل جز در
-  `CONCURRENTLY` یک `BEGIN … COMMIT` باشد؛ فایلی که بیرون از تراکنش چند دستور Commit می‌کند و وسطش شکست
-  می‌خورد، Schemaی نیمه‌برگشته به‌جا می‌گذارد. Verifier این را می‌گیرد: خطای `down.sql`، و نیز هر امتناعی که
-  Schema را تغییر دهد (`mustRefuseDown`)، بازگشت را رد می‌کند.
+- **`--single-transaction` الزامی است** (مگر دو استثنای پایین). کل فایل یک تراکنش است: یا کامل اعمال می‌شود یا
+  هیچ؛ پس `down.sql`ای که در دستور آخر شکست بخورد نه داده‌ای حذف‌شده با ردیف دفترِ باقی‌مانده به‌جا می‌گذارد و نه
+  Schemaی نیمه‌برگشته. `SET LOCAL lock_timeout` هم فقط داخل تراکنش اثر دارد.
+- **استثنا ۱ — فایلی که خودش یکسره `BEGIN … COMMIT` است** (نخستین دستور `BEGIN`، آخرین `COMMIT`، و هیچ کنترل
+  تراکنش دیگری): بی `--single-transaction` اجرا شود، چون `COMMIT` فایل تراکنش بیرونی را زودتر می‌بندد و دستور
+  بعد از آن تک‌به‌تک Commit می‌شود. اتمیک‌بودن را همان `BEGIN … COMMIT` فایل تأمین می‌کند.
+- **استثنا ۲ — فایلی که نباید در تراکنش اجرا شود** (مثل `DROP INDEX CONCURRENTLY`): نخستین سطرش دقیقاً
+  `-- rasta:no-transaction` است و بی `--single-transaction` اجرا می‌شود. چنین فایلی باید بی‌خطر قابل‌اجرای
+  دوباره باشد: همه‌جا `IF EXISTS` / `IF NOT EXISTS`، بی `DELETE`/`UPDATE`/`INSERT`/`DO` (جز تنها `DELETE` دفتر که
+  آخرین دستور است)، و بی کنترل تراکنش. تست کتابخانه (`downFileMode`) این قواعد را می‌پذیرد و رد می‌کند؛ Verifier
+  حالت را از خود فایل برمی‌دارد و فایلی را که با هیچ‌یک از سه شکل نخواند اجرا نمی‌کند.
+- **`-c` به‌جای `--file` نه، و `prisma db execute` برای `down.sql` نه.** `db execute` فقط برای یک دستور
+  تک‌خطی در همین runbook (مثل `DROP INDEX CONCURRENTLY`) مجاز است.
+- **قاعدهٔ نوشتن:** پیش‌شرط‌ها (`RAISE EXCEPTION`) پیش از **نخستین** دستور تغییردهنده بیایند. فایل یا بی کنترل
+  تراکنش است، یا یکسره `BEGIN … COMMIT`، یا نشانهٔ `-- rasta:no-transaction` دارد؛ `BEGIN`/`COMMIT` در میانهٔ
+  فایل پذیرفته نیست. Verifier خطای `down.sql`، و نیز هر امتناعی که Schema را تغییر دهد (`mustRefuseDown`)، رد می‌کند.
 - چند `down.sql` پشت‌سرهم: هرکدام یک `psql` جدا، از جدیدترین به قدیمی‌ترین، و با نخستین شکست بایست.
 
 <a id="marketplace-order-key-index"></a>
@@ -354,7 +362,8 @@ Prisma فقط Migration شکست‌خورده را دوباره اجرا می‌
 می‌کند:
 
 ```bash
-psql "<URL بی گذرواژه>" -v ON_ERROR_STOP=1 \
+psql "<URL بی گذرواژه>" -X -q -v ON_ERROR_STOP=1 --single-transaction \
+  -c 'SET search_path TO "public"' \
   --file prisma/migrations/20261004100000_membership_live_duplicates_guard/down.sql
 ```
 

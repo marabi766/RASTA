@@ -15,6 +15,8 @@ import {
   ledgerAssertionScript,
   libpqInvocation,
   libpqUrl,
+  NO_TRANSACTION_MARKER,
+  downFileMode,
   newScratchDatabase,
   psqlFileRunner,
   psqlRunner,
@@ -1661,20 +1663,26 @@ test('a migrator-verified service is verified only as exactly its migrator — n
 });
 
 // ---------------------------------------------------------------------------
-// A down.sql run as a file: `psql -v ON_ERROR_STOP=1 --file` (psqlFileRunner)
+// A down.sql run as a file (psqlFileRunner)
 //
-// The supported rollback path (docs/runbooks/database-bootstrap.md). A file
-// handed to `psql -c` or Prisma's `db execute` is one implicit transaction, so
-// an error rolls all of it back and a half-applied rollback can never be seen;
-// run as a file, every statement the file does not wrap in BEGIN … COMMIT
-// commits on its own, and the verifier has to catch what is left behind.
+// The supported rollback path (docs/runbooks/database-bootstrap.md):
+//
+//   psql -X -v ON_ERROR_STOP=1 --single-transaction --file <down.sql>
+//
+// The whole file is one transaction, so a rollback that fails late leaves
+// nothing behind — not a half-dropped schema, not deleted data with the ledger
+// row still present — and `SET LOCAL` works. A file that is its own
+// `BEGIN … COMMIT` as a whole, or that declares `-- rasta:no-transaction` on its
+// first line, runs with plain `--file` instead; `downFileMode` decides from the
+// file, and a file of no recognised shape is refused rather than run.
 // ---------------------------------------------------------------------------
 
 /**
  * Builds `setup` in schema `target` of a scratch database, records an empty
  * `target` as the state before it, then runs `down` as a file. Returns
- * `{ down, still, assertion }`: the file run's result, whether each named table
- * survives, and the verifier's exact-inverse assertion against the empty state.
+ * `{ down, still, rows, assertion }`: the file run's result, whether each named
+ * table survives, how many rows each surviving table holds, and the verifier's
+ * exact-inverse assertion against the empty state.
  */
 function downFileCase(setup, down, tables) {
   const scratch = newScratchDatabase(LIB_PURPOSE, 'down_file');
@@ -1701,17 +1709,23 @@ function downFileCase(setup, down, tables) {
     target.pathname = `/${scratch.name}`;
     const ran = psqlFileRunner(target.toString(), 'target')(file);
     const still = {};
+    const rows = {};
     for (const table of tables) {
       const seen = psqlRunner(target.toString())(
         `SELECT to_regclass('target.${table}') IS NOT NULL`,
       );
       assert.equal(seen.ok, true, seen.output);
       still[table] = seen.stdout.trim() === 't';
+      if (still[table]) {
+        const counted = psqlRunner(target.toString())(`SELECT count(*) FROM target.${table}`);
+        assert.equal(counted.ok, true, counted.output);
+        rows[table] = Number(counted.stdout.trim());
+      }
     }
     const assertion = run(
       assertSnapshotScript('meta', 'before', 'target', 'down: m1', undefined, {}),
     );
-    return { down: ran, still, assertion };
+    return { down: ran, still, rows, assertion };
   } catch (error) {
     primary = error;
     throw error;
@@ -1746,53 +1760,249 @@ test(
 );
 
 test(
-  'a non-transactional down that fails half-way leaves a half-rolled-back schema, and it is caught',
+  'a down that fails on a late statement leaves nothing behind: the file is one transaction',
   { skip: noDatabase },
   () => {
     const result = downFileCase(
       TWO_TABLES,
-      // `a` is dropped, and committed, before the statement that fails.
+      // Without --single-transaction `a` would be dropped, and committed, before the statement that fails.
       'DROP TABLE a;\nDROP TABLE no_such_table;\nDROP TABLE b;',
       ['a', 'b'],
     );
+    assert.equal(result.down.mode, 'single-transaction');
     assert.equal(result.down.ok, false);
     assert.match(result.down.output, /no_such_table/);
-    // The state a real rollback would leave: one table gone, the other not.
-    assert.deepEqual(result.still, { a: false, b: true });
-    // And the verifier's own assertion names what is left behind.
-    assert.notEqual(result.assertion.status, 0);
-    assert.match(
-      result.assertion.stderr,
-      /present but not expected:\s+column b\.x[^\n]*\n\s+relation b kind=r/,
+    assert.deepEqual(result.still, { a: true, b: true });
+  },
+);
+
+test('a down that deletes data and then fails does not lose the data', { skip: noDatabase }, () => {
+  const result = downFileCase(
+    TWO_TABLES,
+    'DELETE FROM a;\nDROP TABLE b;\nDROP TABLE no_such_table;',
+    ['a', 'b'],
+  );
+  assert.equal(result.down.ok, false);
+  assert.deepEqual(result.still, { a: true, b: true });
+  assert.deepEqual(result.rows, { a: 1, b: 0 });
+});
+
+test(
+  'SET LOCAL in a down takes effect: it runs inside the transaction',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      [
+        "SET LOCAL lock_timeout = '1234ms';",
+        "DO $$ BEGIN IF current_setting('lock_timeout') <> '1234ms' THEN RAISE EXCEPTION 'lock_timeout was not applied'; END IF; END $$;",
+        'DROP TABLE a;',
+        'DROP TABLE b;',
+      ].join('\n'),
+      ['a', 'b'],
     );
+    assert.equal(result.down.ok, true, result.down.output);
+    assert.deepEqual(result.still, { a: false, b: false });
   },
 );
 
 test(
-  'the same failing down inside BEGIN … COMMIT leaves the schema as it was',
+  'a down that is its own BEGIN … COMMIT runs as it is, and a failure leaves the schema as it was',
   { skip: noDatabase },
   () => {
-    const result = downFileCase(
+    const failing = downFileCase(
       TWO_TABLES,
       'BEGIN;\nDROP TABLE a;\nDROP TABLE no_such_table;\nDROP TABLE b;\nCOMMIT;',
       ['a', 'b'],
     );
+    assert.equal(failing.down.mode, 'own-transaction');
+    assert.equal(failing.down.ok, false);
+    assert.deepEqual(failing.still, { a: true, b: true });
+
+    const ok = downFileCase(TWO_TABLES, 'BEGIN;\nDROP TABLE a;\nDROP TABLE b;\nCOMMIT;', [
+      'a',
+      'b',
+    ]);
+    assert.equal(ok.down.mode, 'own-transaction');
+    assert.equal(ok.down.ok, true, ok.down.output);
+    assert.deepEqual(ok.still, { a: false, b: false });
+  },
+);
+
+test(
+  'a down with transaction control anywhere but around the whole file is refused, not run',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      'BEGIN;\nDROP TABLE a;\nCOMMIT;\nDROP TABLE no_such_table;\nDROP TABLE b;',
+      ['a', 'b'],
+    );
     assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /not a runnable down\.sql/);
     assert.deepEqual(result.still, { a: true, b: true });
   },
 );
 
 test(
-  'a down that succeeds as a file resolves unqualified names in the schema under test',
+  'a user psqlrc cannot turn ON_ERROR_STOP off: psql is started with -X',
   { skip: noDatabase },
   () => {
-    const result = downFileCase(TWO_TABLES, 'DROP TABLE a;\nDROP TABLE b;', ['a', 'b']);
-    assert.equal(result.down.ok, true, result.down.output);
-    assert.deepEqual(result.still, { a: false, b: false });
-    assert.equal(result.assertion.status, 0, result.assertion.stderr);
+    const home = mkdtempSync(join(tmpdir(), 'psqlrc-'));
+    const previous = process.env.HOME;
+    try {
+      writeFileSync(join(home, '.psqlrc'), '\\set ON_ERROR_STOP off\n');
+      process.env.HOME = home;
+      process.env.PSQLRC = join(home, '.psqlrc');
+      const result = downFileCase(TWO_TABLES, 'DROP TABLE no_such_table;\nDROP TABLE a;', ['a']);
+      assert.equal(result.down.ok, false);
+      // Had the psqlrc been read, the second statement would have run and been refused as
+      // "current transaction is aborted".
+      assert.doesNotMatch(result.down.output, /aborted/);
+      assert.deepEqual(result.still, { a: true });
+    } finally {
+      if (previous === undefined) delete process.env.HOME;
+      else process.env.HOME = previous;
+      delete process.env.PSQLRC;
+      rmSync(home, { recursive: true, force: true });
+    }
   },
 );
 
 test('a schema that is not a plain identifier is refused before psql is started', () => {
   assert.throws(() => psqlFileRunner('postgresql://u@h/d', 'x"; DROP SCHEMA y; --'), /plain/);
+});
+
+// ---------------------------------------------------------------------------
+// downFileMode: how a down.sql is run, and the rules a file must meet for it
+// ---------------------------------------------------------------------------
+
+const LEDGER = `DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260101000000_x';`;
+
+test('a file without transaction control is single-transaction', () => {
+  assert.deepEqual(downFileMode(`DROP TABLE a;\n${LEDGER}\n`), {
+    mode: 'single-transaction',
+    problems: [],
+  });
+});
+
+test('transaction words inside comments, strings and DO blocks are not transaction control', () => {
+  const sql = [
+    '-- BEGIN; COMMIT;',
+    '/* COMMIT; */',
+    "SELECT 'BEGIN; COMMIT;';",
+    'DO $guard$',
+    'BEGIN',
+    '  IF true THEN NULL; END IF;',
+    'END',
+    '$guard$;',
+    'DROP TABLE a;',
+    LEDGER,
+  ].join('\n');
+  assert.deepEqual(downFileMode(sql), { mode: 'single-transaction', problems: [] });
+});
+
+test('a file that is BEGIN … COMMIT as a whole is own-transaction', () => {
+  assert.deepEqual(downFileMode(`-- why\nBEGIN;\nDROP TABLE a;\n${LEDGER}\nCOMMIT;\n`), {
+    mode: 'own-transaction',
+    problems: [],
+  });
+});
+
+test('transaction control that is not exactly one BEGIN first and one COMMIT last is a problem', () => {
+  for (const sql of [
+    `BEGIN;\nDROP TABLE a;\nCOMMIT;\nDROP TABLE b;\n${LEDGER}`,
+    `DROP TABLE a;\nBEGIN;\nDROP TABLE b;\n${LEDGER}\nCOMMIT;`,
+    `DROP TABLE a;\nCOMMIT;`,
+    `BEGIN;\nDROP TABLE a;\nSAVEPOINT s;\nCOMMIT;`,
+    `BEGIN;\nDROP TABLE a;\nBEGIN;\nCOMMIT;\nCOMMIT;`,
+    `BEGIN;\nDROP TABLE a;`,
+    `BEGIN;\nDROP TABLE a;\nROLLBACK;`,
+  ]) {
+    const { problems } = downFileMode(sql);
+    assert.equal(problems.length, 1, sql);
+    assert.match(problems[0], /transaction control is allowed only as one BEGIN first/);
+  }
+});
+
+test('the no-transaction marker is only the first line, exactly', () => {
+  const ok = `${NO_TRANSACTION_MARKER}\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}\n`;
+  assert.deepEqual(downFileMode(ok), { mode: 'no-transaction', problems: [] });
+  const later = downFileMode(`-- why\n${ok}`);
+  assert.equal(later.mode, 'single-transaction');
+  assert.match(later.problems.join(), /must be the first line/);
+});
+
+test('a no-transaction file must be re-runnable, change no data, and end with its ledger DELETE', () => {
+  const m = NO_TRANSACTION_MARKER;
+  const problemsOf = (body) => downFileMode(`${m}\n${body}`).problems.join('\n');
+  assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`), '');
+  assert.equal(problemsOf(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (c);\n${LEDGER}`), '');
+  assert.match(problemsOf(`DROP INDEX CONCURRENTLY ix;\n${LEDGER}`), /no IF EXISTS/);
+  assert.match(
+    problemsOf(`CREATE INDEX CONCURRENTLY ix ON t (c);\n${LEDGER}`),
+    /no IF \[NOT\] EXISTS/,
+  );
+  assert.match(
+    problemsOf(`DELETE FROM t;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
+    /must not change data \(DELETE\)/,
+  );
+  assert.match(
+    problemsOf(`UPDATE t SET c = 1;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
+    /\(UPDATE\)/,
+  );
+  assert.match(
+    problemsOf(`INSERT INTO t VALUES (1);\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
+    /\(INSERT\)/,
+  );
+  assert.match(problemsOf(`TRUNCATE t;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`), /\(TRUNCATE\)/);
+  assert.match(
+    problemsOf(`DO $$ BEGIN NULL; END $$;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
+    /\(DO\)/,
+  );
+  assert.match(problemsOf(`DROP INDEX IF EXISTS ix;`), /must end with its ledger DELETE/);
+  assert.match(
+    problemsOf(`${LEDGER}\nDROP INDEX IF EXISTS ix;`),
+    /must end with its ledger DELETE/,
+  );
+  assert.match(
+    problemsOf(`BEGIN;\nDROP INDEX IF EXISTS ix;\n${LEDGER}\nCOMMIT;`),
+    /must not contain transaction control/,
+  );
+});
+
+test('every down.sql of every service has a mode, and is valid for it', () => {
+  const modes = {};
+  const marked = [];
+  for (const service of servicesWithMigrations()) {
+    for (const name of migrationNames(service)) {
+      const file = join(
+        ROOT,
+        'services',
+        `${service}-service`,
+        'prisma',
+        'migrations',
+        name,
+        'down.sql',
+      );
+      const { mode, problems } = downFileMode(readFileSync(file, 'utf8'));
+      assert.deepEqual(problems, [], `${service}/${name}/down.sql`);
+      modes[mode] = (modes[mode] ?? 0) + 1;
+      if (mode === 'no-transaction') marked.push(`${service}/${name}`);
+    }
+  }
+  // Marker files are an exception that has to be argued for: a new one is added here on purpose.
+  assert.deepEqual(marked, []);
+  assert.ok((modes['single-transaction'] ?? 0) > 0);
+});
+
+test('the runbook gives exactly the verifier command: -X and --single-transaction, rollback example included', () => {
+  const runbook = readFileSync(join(ROOT, 'docs', 'runbooks', 'database-bootstrap.md'), 'utf8');
+  const invocations = [...runbook.matchAll(/psql "<URL[^`]*?down\.sql/g)].map((m) => m[0]);
+  // The command of § «اجرای down.sql» and the guard's rollback example.
+  assert.ok(invocations.length >= 2);
+  for (const invocation of invocations) {
+    assert.match(invocation, /-X -q -v ON_ERROR_STOP=1 --single-transaction/, invocation);
+  }
+  assert.doesNotMatch(runbook, /خودشان `BEGIN … COMMIT` دارند/);
 });

@@ -16,7 +16,7 @@
 //   1. create the scratch schema, empty
 //   2. `prisma migrate deploy`          — up
 //   3. assert the schema is really there (tables, triggers, CHECK constraints)
-//   4. run `down.sql`                   — down, as `psql -v ON_ERROR_STOP=1 --file`
+//   4. run `down.sql`                   — down, as `psql -X -v ON_ERROR_STOP=1 --single-transaction --file`
 //                                         (the supported rollback path; see runDown)
 //   5. assert every one of those objects is gone
 //   6. `prisma migrate deploy` again    — up, a second time
@@ -303,10 +303,11 @@ function mustFail(label, script, expectedError) {
 
 /**
  * Runs the `down.sql` of each named migration, in order, as the supported
- * rollback path does: `psql -v ON_ERROR_STOP=1 --file` (psqlFileRunner), one
- * file at a time, stopping at the first that fails. Never through
- * `prisma db execute`, which wraps a file in one transaction and so hides a
- * half-applied rollback.
+ * rollback path does: `psql -X -v ON_ERROR_STOP=1 --single-transaction --file`
+ * (psqlFileRunner; plain `--file` for a file that is its own BEGIN … COMMIT or
+ * is marked `-- rasta:no-transaction`), one file at a time, stopping at the
+ * first that fails. Never through `prisma db execute`, which gives no say over
+ * the transaction mode.
  */
 function runDown(names) {
   const run = psqlFileRunner(scratchUrl(), targetSchema);
