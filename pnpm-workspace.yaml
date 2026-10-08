@@ -78,6 +78,11 @@ overrides:
   # optimisation in the portal). Next still resolves 0.35.4; 0.35.5 is past the
   # seven-day minimum release age.
   'sharp@<0.35.5': '0.35.5'
+  # GHSA-68fv-2mgg-jv7q (high) — source-map-js <1.2.2, reached through
+  # next/postcss, tailwind and the Temporal worker's bundling. 1.2.2 (published
+  # 2026-09-30) is now past the seven-day minimum release age, so the time-boxed
+  # audit ignore is replaced by this pin.
+  'source-map-js@<1.2.2': '1.2.2'
 
 # Advisories with NO patched release yet, accepted for a fixed time only. Each
 # entry names the advisory, why it cannot be fixed by an override, where it is
@@ -94,16 +99,6 @@ auditConfig:
     # this repository, not by users. RE-CHECK BY 2026-10-17: if a patched
     # braces is out, pin it under overrides and delete this entry.
     - GHSA-vfj7-8cjw-p6xm
-    # GHSA-68fv-2mgg-jv7q (high) — source-map-js <1.2.2, event-loop denial of
-    # service through crafted source-map section offsets. The only patched
-    # release, 1.2.2, was published 2026-09-30 and is inside the seven-day
-    # minimum release age until 2026-10-07 14:08 UTC; this policy does not get
-    # an exception for a six-day-old release. Reached through next/postcss and
-    # tailwind at BUILD time and through the Temporal worker's webpack bundling
-    # (marketplace) — source maps written by this repository, not by users.
-    # REMOVE BY 2026-10-08: pin 'source-map-js@<1.2.2': '1.2.2' under overrides
-    # and delete this entry.
-    - GHSA-68fv-2mgg-jv7q
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.

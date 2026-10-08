@@ -1187,6 +1187,18 @@ describe('a signing policy follows an organization move', () => {
       await expect(w.prisma.client.$executeRawUnsafe(row('NULL', 'NULL', 'GUESS'))).rejects.toThrow(
         /ck_review_detection/,
       );
+      // Exactly two cases — one of the two alone is neither (round 8).
+      for (const [cause, at, by] of [
+        ["'EVT_1'", 'NULL', 'ORGANIZATION_MOVED'],
+        ['NULL', 'now()', 'ORGANIZATION_MOVED'],
+        ["' '", 'now()', 'ORGANIZATION_MOVED'],
+        ["'EVT_1'", 'NULL', 'MOVE_RECHECK'],
+        ['NULL', 'now()', 'MOVE_RECHECK'],
+      ] as const) {
+        await expect(w.prisma.client.$executeRawUnsafe(row(cause, at, by))).rejects.toThrow(
+          /ck_review_detection/,
+        );
+      }
     });
   });
 
