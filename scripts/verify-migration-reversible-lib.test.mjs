@@ -13,9 +13,13 @@ import {
   createScratchDatabase,
   dropScratchDatabase,
   ledgerAssertionScript,
+  lexSql,
   libpqInvocation,
   libpqUrl,
+  NO_TRANSACTION_MARKER,
+  downFileMode,
   newScratchDatabase,
+  psqlFileRunner,
   psqlRunner,
   recordSnapshotScript,
   scratchDatabaseSql,
@@ -1657,4 +1661,584 @@ test('a migrator-verified service is verified only as exactly its migrator — n
   assert.match(verifierRoleProblem('construction', ''), /could not tell/);
   const runtimeService = Object.entries(EXPECTED).find(([, entry]) => !entry.connectAs)?.[0];
   if (runtimeService) assert.equal(verifierRoleProblem(runtimeService, 'rasta|rasta|t'), null);
+});
+
+// ---------------------------------------------------------------------------
+// A down.sql run as a file (psqlFileRunner)
+//
+// The supported rollback path (docs/runbooks/database-bootstrap.md):
+//
+//   psql -X -v ON_ERROR_STOP=1 --single-transaction --file <down.sql>
+//
+// The whole file is one transaction, so a rollback that fails late leaves
+// nothing behind — not a half-dropped schema, not deleted data with the ledger
+// row still present — and `SET LOCAL` works. A file that is its own
+// `BEGIN … COMMIT` as a whole, or that declares `-- rasta:no-transaction` on its
+// first line, runs with plain `--file` instead; `downFileMode` decides from the
+// file, and a file of no recognised shape is refused rather than run.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds `setup` in schema `target` of a scratch database, records an empty
+ * `target` as the state before it, then runs `down` as a file. Returns
+ * `{ down, still, rows, assertion }`: the file run's result, whether each named
+ * table survives, how many rows each surviving table holds, and the verifier's
+ * exact-inverse assertion against the empty state.
+ */
+function downFileCase(setup, down, tables) {
+  const scratch = newScratchDatabase(LIB_PURPOSE, 'down_file');
+  createAsOwner(scratch);
+  const dir = mkdtempSync(join(tmpdir(), 'down-file-'));
+  let primary = null;
+  try {
+    const run = (script) => psqlAt(libDatabaseUrl, script, scratch.name);
+    const must = (result, what) => {
+      if (result.status !== 0) throw new Error(`${what}: ${result.stderr}`);
+    };
+    must(
+      run(
+        'CREATE SCHEMA target;' +
+          snapshotStoreScript('meta') +
+          recordSnapshotScript('meta', 'before', 'target'),
+      ),
+      'record before',
+    );
+    must(run(`SET search_path TO target; ${setup}`), 'up');
+    const file = join(dir, 'down.sql');
+    writeFileSync(file, down);
+    const target = new URL(libDatabaseUrl);
+    target.pathname = `/${scratch.name}`;
+    const ran = psqlFileRunner(target.toString(), 'target')(file);
+    const still = {};
+    const rows = {};
+    for (const table of tables) {
+      const seen = psqlRunner(target.toString())(
+        `SELECT to_regclass('target.${table}') IS NOT NULL`,
+      );
+      assert.equal(seen.ok, true, seen.output);
+      still[table] = seen.stdout.trim() === 't';
+      if (still[table]) {
+        const counted = psqlRunner(target.toString())(`SELECT count(*) FROM target.${table}`);
+        assert.equal(counted.ok, true, counted.output);
+        rows[table] = Number(counted.stdout.trim());
+      }
+    }
+    const assertion = run(
+      assertSnapshotScript('meta', 'before', 'target', 'down: m1', undefined, {}),
+    );
+    return { down: ran, still, rows, assertion };
+  } catch (error) {
+    primary = error;
+    throw error;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    const dropped = dropAsOwner(scratch);
+    // eslint-disable-next-line no-unsafe-finally
+    if (!primary && !dropped.ok) throw new Error(`cleanup failed: ${dropped.output}`);
+  }
+}
+
+const TWO_TABLES = 'CREATE TABLE a (x int); CREATE TABLE b (x int); INSERT INTO a VALUES (1);';
+
+test(
+  'a down whose preflight raises stops there: nothing after it runs',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      [
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM a) THEN RAISE EXCEPTION 'refusing to roll back: a holds rows'; END IF; END $$;",
+        'DROP TABLE b;',
+        'DROP TABLE a;',
+      ].join('\n'),
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /refusing to roll back: a holds rows/);
+    // Not one later statement ran — psql did not carry on past the error.
+    assert.deepEqual(result.still, { a: true, b: true });
+  },
+);
+
+test(
+  'a down that fails on a late statement leaves nothing behind: the file is one transaction',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      // Without --single-transaction `a` would be dropped, and committed, before the statement that fails.
+      'DROP TABLE a;\nDROP TABLE no_such_table;\nDROP TABLE b;',
+      ['a', 'b'],
+    );
+    assert.equal(result.down.mode, 'single-transaction');
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /no_such_table/);
+    assert.deepEqual(result.still, { a: true, b: true });
+  },
+);
+
+test('a down that deletes data and then fails does not lose the data', { skip: noDatabase }, () => {
+  const result = downFileCase(
+    TWO_TABLES,
+    'DELETE FROM a;\nDROP TABLE b;\nDROP TABLE no_such_table;',
+    ['a', 'b'],
+  );
+  assert.equal(result.down.ok, false);
+  assert.deepEqual(result.still, { a: true, b: true });
+  assert.deepEqual(result.rows, { a: 1, b: 0 });
+});
+
+test(
+  'SET LOCAL in a down takes effect: it runs inside the transaction',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      [
+        "SET LOCAL lock_timeout = '1234ms';",
+        "DO $$ BEGIN IF current_setting('lock_timeout') <> '1234ms' THEN RAISE EXCEPTION 'lock_timeout was not applied'; END IF; END $$;",
+        'DROP TABLE a;',
+        'DROP TABLE b;',
+      ].join('\n'),
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, true, result.down.output);
+    assert.deepEqual(result.still, { a: false, b: false });
+  },
+);
+
+test(
+  'a down that is its own BEGIN … COMMIT runs as it is, and a failure leaves the schema as it was',
+  { skip: noDatabase },
+  () => {
+    const failing = downFileCase(
+      TWO_TABLES,
+      'BEGIN;\nDROP TABLE a;\nDROP TABLE no_such_table;\nDROP TABLE b;\nCOMMIT;',
+      ['a', 'b'],
+    );
+    assert.equal(failing.down.mode, 'own-transaction');
+    assert.equal(failing.down.ok, false);
+    assert.deepEqual(failing.still, { a: true, b: true });
+
+    const ok = downFileCase(TWO_TABLES, 'BEGIN;\nDROP TABLE a;\nDROP TABLE b;\nCOMMIT;', [
+      'a',
+      'b',
+    ]);
+    assert.equal(ok.down.mode, 'own-transaction');
+    assert.equal(ok.down.ok, true, ok.down.output);
+    assert.deepEqual(ok.still, { a: false, b: false });
+  },
+);
+
+test(
+  'a down with transaction control anywhere but around the whole file is refused, not run',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      'BEGIN;\nDROP TABLE a;\nCOMMIT;\nDROP TABLE no_such_table;\nDROP TABLE b;',
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /not a runnable down\.sql/);
+    assert.deepEqual(result.still, { a: true, b: true });
+  },
+);
+
+test(
+  'a user psqlrc cannot turn ON_ERROR_STOP off: psql is started with -X',
+  { skip: noDatabase },
+  () => {
+    const home = mkdtempSync(join(tmpdir(), 'psqlrc-'));
+    const previous = process.env.HOME;
+    try {
+      writeFileSync(join(home, '.psqlrc'), '\\set ON_ERROR_STOP off\n');
+      process.env.HOME = home;
+      process.env.PSQLRC = join(home, '.psqlrc');
+      const result = downFileCase(TWO_TABLES, 'DROP TABLE no_such_table;\nDROP TABLE a;', ['a']);
+      assert.equal(result.down.ok, false);
+      // Had the psqlrc been read, the second statement would have run and been refused as
+      // "current transaction is aborted".
+      assert.doesNotMatch(result.down.output, /aborted/);
+      assert.deepEqual(result.still, { a: true });
+    } finally {
+      if (previous === undefined) delete process.env.HOME;
+      else process.env.HOME = previous;
+      delete process.env.PSQLRC;
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+test('a schema that is not a plain identifier is refused before psql is started', () => {
+  assert.throws(() => psqlFileRunner('postgresql://u@h/d', 'x"; DROP SCHEMA y; --'), /plain/);
+});
+
+// ---------------------------------------------------------------------------
+// downFileMode: how a down.sql is run, and the rules a file must meet for it
+// ---------------------------------------------------------------------------
+
+const LEDGER = `DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20260101000000_x';`;
+
+test('a file without transaction control is single-transaction', () => {
+  assert.deepEqual(downFileMode(`DROP TABLE a;\n${LEDGER}\n`), {
+    mode: 'single-transaction',
+    problems: [],
+  });
+});
+
+test('transaction words inside comments, strings and DO blocks are not transaction control', () => {
+  const sql = [
+    '-- BEGIN; COMMIT;',
+    '/* COMMIT; */',
+    "SELECT 'BEGIN; COMMIT;';",
+    'DO $guard$',
+    'BEGIN',
+    '  IF true THEN NULL; END IF;',
+    'END',
+    '$guard$;',
+    'DROP TABLE a;',
+    LEDGER,
+  ].join('\n');
+  assert.deepEqual(downFileMode(sql), { mode: 'single-transaction', problems: [] });
+});
+
+test('a file that is BEGIN … COMMIT as a whole is own-transaction', () => {
+  assert.deepEqual(downFileMode(`-- why\nBEGIN;\nDROP TABLE a;\n${LEDGER}\nCOMMIT;\n`), {
+    mode: 'own-transaction',
+    problems: [],
+  });
+});
+
+test('transaction control that is not exactly one BEGIN first and one COMMIT last is a problem', () => {
+  for (const sql of [
+    `BEGIN;\nDROP TABLE a;\nCOMMIT;\nDROP TABLE b;\n${LEDGER}`,
+    `DROP TABLE a;\nBEGIN;\nDROP TABLE b;\n${LEDGER}\nCOMMIT;`,
+    `DROP TABLE a;\nCOMMIT;`,
+    `BEGIN;\nDROP TABLE a;\nSAVEPOINT s;\nCOMMIT;`,
+    `BEGIN;\nDROP TABLE a;\nBEGIN;\nCOMMIT;\nCOMMIT;`,
+    `BEGIN;\nDROP TABLE a;`,
+    `BEGIN;\nDROP TABLE a;\nROLLBACK;`,
+  ]) {
+    const { problems } = downFileMode(sql);
+    assert.equal(problems.length, 1, sql);
+    assert.match(problems[0], /transaction control is allowed only as one BEGIN first/);
+  }
+});
+
+test('the no-transaction marker is only the first line, exactly', () => {
+  const ok = `${NO_TRANSACTION_MARKER}\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}\n`;
+  assert.deepEqual(downFileMode(ok), { mode: 'no-transaction', problems: [] });
+  const later = downFileMode(`-- why\n${ok}`);
+  assert.equal(later.mode, 'single-transaction');
+  assert.match(later.problems.join(), /must be the first line/);
+});
+
+test('a no-transaction file holds only the allow-listed statements and ends with its ledger DELETE', () => {
+  const m = NO_TRANSACTION_MARKER;
+  const problemsOf = (body) => downFileMode(`${m}\n${body}`).problems.join('\n');
+  const allowed = /may hold only DROP INDEX CONCURRENTLY IF EXISTS/;
+  // What is allowed.
+  assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`), '');
+  assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS "s"."ix";\n${LEDGER}`), '');
+  assert.equal(problemsOf(LEDGER), '');
+  // No CREATE INDEX in any form (Codex on #237, round 3): a CONCURRENTLY build that fails leaves an
+  // INVALID index, a retry's IF NOT EXISTS skips it, and the ledger row is deleted all the same.
+  for (const create of [
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (c)',
+    'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (a, b)',
+    'CREATE INDEX CONCURRENTLY ix ON t (c)',
+    'CREATE UNIQUE INDEX CONCURRENTLY ix ON t (c)',
+    'CREATE INDEX IF NOT EXISTS ix ON t (c)',
+  ]) {
+    assert.match(problemsOf(`${create};\n${LEDGER}`), allowed, create);
+    assert.match(
+      problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;\n${create};\n${LEDGER}`),
+      /no CREATE INDEX of any form/,
+      create,
+    );
+  }
+  // Re-runnability: the IF [NOT] EXISTS forms only.
+  assert.match(problemsOf(`DROP INDEX CONCURRENTLY ix;\n${LEDGER}`), allowed);
+  assert.match(problemsOf(`CREATE INDEX CONCURRENTLY ix ON t (c);\n${LEDGER}`), allowed);
+  assert.match(problemsOf(`DROP INDEX IF EXISTS ix;\n${LEDGER}`), allowed);
+  // Codex on #237 (MED): a multi-action ALTER with one IF EXISTS is not re-runnable.
+  assert.match(
+    problemsOf(
+      `ALTER TABLE IF EXISTS t DROP COLUMN a, DROP COLUMN b;\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`,
+    ),
+    /"ALTER TABLE IF EXISTS t DROP COLUMN a, DROP COLUMN b" is none of them/,
+  );
+  assert.match(problemsOf(`ALTER TABLE t ADD COLUMN IF NOT EXISTS c int;\n${LEDGER}`), allowed);
+  // Everything else is refused: data, DDL of any other kind, a second ledger DELETE, a statement
+  // hiding behind an allowed one.
+  for (const statement of [
+    'DELETE FROM t',
+    'UPDATE t SET c = 1',
+    'INSERT INTO t VALUES (1)',
+    'TRUNCATE t',
+    'DO $$ BEGIN NULL; END $$',
+    'DROP TABLE IF EXISTS t',
+    'CREATE TABLE IF NOT EXISTS t (c int)',
+    'SELECT 1',
+    'DELETE FROM "_prisma_migrations" WHERE "migration_name" = \'other\' OR true',
+    `${LEDGER.slice(0, -1)}`,
+  ]) {
+    assert.match(
+      problemsOf(`${statement};\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`),
+      allowed,
+      statement,
+    );
+  }
+  assert.match(
+    problemsOf(
+      `DROP INDEX CONCURRENTLY IF EXISTS ix; DROP INDEX CONCURRENTLY IF EXISTS "a"; SELECT 1;\n${LEDGER}`,
+    ),
+    /"SELECT 1" is none of them/,
+  );
+  // The ledger DELETE: once, last.
+  assert.match(
+    problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;`),
+    /must end with its ledger DELETE/,
+  );
+  assert.match(
+    problemsOf(`${LEDGER}\nDROP INDEX CONCURRENTLY IF EXISTS ix;`),
+    /must end with its ledger DELETE/,
+  );
+  assert.match(
+    problemsOf(`BEGIN;\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}\nCOMMIT;`),
+    /must not contain transaction control/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// lexSql: what is code and what is not (Codex on #237, HIGH)
+// ---------------------------------------------------------------------------
+
+test('lexSql keeps a string, an identifier and a comment from hiding or faking a statement', () => {
+  const statementsOf = (sql) => lexSql(sql).statements;
+  // The case Codex found: the `--` is inside a string, so the COMMIT after it is code.
+  assert.deepEqual(statementsOf("SELECT '--'; COMMIT;"), ["SELECT ''", 'COMMIT']);
+  // Doubled quote, and a `;` / `--` / `/*` inside a string.
+  assert.deepEqual(statementsOf("SELECT 'it''s; -- /* x'; COMMIT;"), ["SELECT ''", 'COMMIT']);
+  // E'' strings: a backslash escapes the quote; a plain string's backslash escapes nothing.
+  assert.deepEqual(statementsOf("SELECT E'a\\'; COMMIT;'; ROLLBACK;"), ["SELECT E''", 'ROLLBACK']);
+  assert.deepEqual(statementsOf("SELECT 'a\\'; COMMIT;"), ["SELECT ''", 'COMMIT']);
+  assert.deepEqual(statementsOf("SELECT e'x\\\\'; COMMIT;"), ["SELECT e''", 'COMMIT']);
+  // A name that merely ends in E is not an escape-string prefix.
+  assert.deepEqual(statementsOf("SELECT name_E'a\\'; COMMIT;"), ["SELECT name_E''", 'COMMIT']);
+  // Double-quoted identifiers, kept verbatim; `""` for a quote; `;` and `--` inside are inert.
+  assert.deepEqual(statementsOf('DROP TABLE "a;--b"; COMMIT;'), ['DROP TABLE "a;--b"', 'COMMIT']);
+  assert.deepEqual(statementsOf('DROP TABLE "a""; COMMIT; --"; COMMIT;'), [
+    'DROP TABLE "a""; COMMIT; --"',
+    'COMMIT',
+  ]);
+  // Dollar quotes: $$ and $tag$, and a different tag inside does not close it.
+  assert.deepEqual(statementsOf("DO $$ BEGIN PERFORM 'x'; COMMIT; END $$; COMMIT;"), [
+    'DO $$',
+    'COMMIT',
+  ]);
+  assert.deepEqual(statementsOf('DO $t$ x $$; COMMIT; $$ y $t$; COMMIT;'), ['DO $$', 'COMMIT']);
+  // A `$` that continues an identifier is not a quote; a parameter is not one either.
+  assert.deepEqual(statementsOf('SELECT a$b$c; COMMIT;'), ['SELECT a$b$c', 'COMMIT']);
+  assert.deepEqual(statementsOf('SELECT $1; COMMIT;'), ['SELECT $1', 'COMMIT']);
+  // Two dollar quotes back to back are two quotes.
+  assert.deepEqual(statementsOf('DO $$a$$$$b$$; COMMIT;'), ['DO $$$$', 'COMMIT']);
+  // Block comments nest; a line comment ends at its newline and hides nothing after it.
+  assert.deepEqual(statementsOf('/* a /* b; COMMIT; */ c; COMMIT; */ SELECT 1; COMMIT;'), [
+    'SELECT 1',
+    'COMMIT',
+  ]);
+  assert.deepEqual(statementsOf('-- x; COMMIT;\nSELECT 1; COMMIT; -- y'), ['SELECT 1', 'COMMIT']);
+  assert.deepEqual(statementsOf('SELECT 1 /* \' */; COMMIT; /* " */'), ['SELECT 1', 'COMMIT']);
+  // No semicolon at the end is still a statement.
+  assert.deepEqual(statementsOf('DROP TABLE a; COMMIT'), ['DROP TABLE a', 'COMMIT']);
+  assert.deepEqual(lexSql('SELECT 1; COMMIT; -- done').problems, []);
+});
+
+test('lexSql refuses a backslash inside an ordinary string; an E-string keeps its explicit handling (Codex on #237, round 3, HIGH)', () => {
+  const problemsOf = (sql) => lexSql(sql).problems.join();
+  const plain = /a backslash inside an ordinary '…' string/;
+  // With standard_conforming_strings = off, `\'` is an escaped quote and the string runs on.
+  assert.match(problemsOf("SELECT 'a\\''; COMMIT; --';"), plain);
+  assert.match(problemsOf("SELECT 'a\\'; COMMIT;"), plain);
+  assert.match(problemsOf("SELECT 'C:\\dir';"), plain);
+  assert.match(problemsOf("SELECT 'a' || 'b\\n';"), plain);
+  // Not one: no backslash, an E-string, an identifier, a dollar quote, a comment.
+  assert.equal(problemsOf("SELECT 'a''b', E'a\\'b\\n', \"x\\y\", 'z';"), '');
+  assert.equal(problemsOf("DO $$ SELECT 'a\\n' $$; -- 'a\\n'\n/* 'a\\n' */ SELECT 1;"), '');
+  assert.match(downFileMode("DROP TABLE a;\nSELECT 'a\\'';\n").problems.join(), plain);
+});
+
+test('a down.sql may not touch standard_conforming_strings or backslash_quote, in any form (Codex on #237, round 3, HIGH)', () => {
+  const refused =
+    /must not SET, RESET or set_config standard_conforming_strings or backslash_quote/;
+  for (const sql of [
+    'SET standard_conforming_strings = off;\nDROP TABLE a;',
+    'set standard_conforming_strings to on;\nDROP TABLE a;',
+    'SET LOCAL standard_conforming_strings = off;\nDROP TABLE a;',
+    'RESET standard_conforming_strings;\nDROP TABLE a;',
+    "SELECT set_config('standard_conforming_strings', 'off', true);\nDROP TABLE a;",
+    "DO $$ BEGIN PERFORM set_config('standard_conforming_strings', 'off', true); END $$;",
+    'SET backslash_quote = on;\nDROP TABLE a;',
+    'RESET BACKSLASH_QUOTE;\nDROP TABLE a;',
+    'ALTER ROLE x SET standard_conforming_strings = off;',
+    'BEGIN;\nSET standard_conforming_strings = off;\nDROP TABLE a;\nCOMMIT;',
+    `${NO_TRANSACTION_MARKER}\nSET standard_conforming_strings = off;\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`,
+  ]) {
+    assert.match(downFileMode(sql).problems.join('\n'), refused, sql);
+  }
+  // Other settings, and the word in nothing, are fine.
+  assert.deepEqual(downFileMode("SET LOCAL lock_timeout = '2s';\nDROP TABLE a;").problems, []);
+});
+
+test('lexSql reports what is left open, and every psql meta-command', () => {
+  for (const [sql, what] of [
+    ["SELECT 'open; COMMIT;", /unterminated string/],
+    ['DROP TABLE "open; COMMIT;', /unterminated "identifier"/],
+    ['SELECT 1; /* open /* nested */ COMMIT;', /unterminated \/\* comment/],
+    ['DO $$ open; COMMIT;', /unterminated \$\$ quote/],
+    ['DO $tag$ open $$ COMMIT;', /unterminated \$tag\$ quote/],
+  ]) {
+    assert.match(lexSql(sql).problems.join(), what, sql);
+    assert.match(downFileMode(sql).problems.join(), /the file has an unterminated/, sql);
+  }
+  assert.deepEqual(lexSql('DROP TABLE a;\n\\echo hi\n').metaCommands, ['\\echo hi']);
+  assert.deepEqual(lexSql('  \\i other.sql').metaCommands, ['\\i other.sql']);
+  assert.deepEqual(lexSql('SELECT 1 \\gset').metaCommands, ['SELECT 1 \\gset']);
+  // A backslash in a string, an escape string, an identifier, a dollar quote or a comment is no command
+  // (a backslash in an ordinary string is refused as a problem instead, above).
+  assert.deepEqual(
+    lexSql(
+      ["SELECT '\\n', E'\\n', \"a\\b\";", 'DO $$ \\q $$;', '-- \\q', '/* \\q */ SELECT 1;'].join(
+        '\n',
+      ),
+    ).metaCommands,
+    [],
+  );
+  assert.match(
+    downFileMode('DROP TABLE a;\n\\set ON_ERROR_STOP off\n').problems.join(),
+    /a psql meta-command is not allowed in a down\.sql: "\\set ON_ERROR_STOP off"/,
+  );
+});
+
+test("a string cannot hide transaction control: SELECT '--'; COMMIT; is seen (Codex on #237, HIGH)", () => {
+  const sql = `BEGIN;\nDROP TABLE a;\nSELECT '--'; COMMIT;\nDROP TABLE b;\n${LEDGER}\nCOMMIT;`;
+  const { problems } = downFileMode(sql);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /transaction control is allowed only as one BEGIN first/);
+  // And the same trick in the marked mode.
+  assert.match(
+    downFileMode(`${NO_TRANSACTION_MARKER}\nSELECT '--'; COMMIT;\n${LEDGER}`).problems.join('\n'),
+    /transaction control/,
+  );
+});
+
+test(
+  'Codex’s example, run for real: the verifier refuses the file before running any of it',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      // Own-transaction on its face; the string hides a COMMIT that would make `DROP TABLE a`
+      // permanent before the statement that fails.
+      `BEGIN;\nDROP TABLE a;\nSELECT '--'; COMMIT;\nDROP TABLE no_such_table;\nDROP TABLE b;\n${LEDGER}\nCOMMIT;`,
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /not a runnable down\.sql/);
+    assert.match(result.down.output, /transaction control is allowed only/);
+    assert.equal(result.down.mode, undefined, 'psql was never started');
+    assert.deepEqual(result.still, { a: true, b: true });
+    assert.deepEqual(result.rows, { a: 1, b: 0 });
+  },
+);
+
+test(
+  'Codex’s standard_conforming_strings example, run for real: refused before psql runs, the tables untouched (round 3)',
+  { skip: noDatabase },
+  () => {
+    // With standard_conforming_strings = off the server reads `'x\\''` as one string, so the verifier's
+    // lexer saw the COMMIT inside it as text while it was code, and `DROP TABLE a` became permanent
+    // before the statement that fails.
+    const down = [
+      'BEGIN;',
+      'DROP TABLE a;',
+      'SET standard_conforming_strings = off;',
+      "SELECT 'x\\''; COMMIT; --';",
+      'DROP TABLE no_such_table;',
+      'DROP TABLE b;',
+      LEDGER,
+      'COMMIT;',
+    ].join('\n');
+    const result = downFileCase(TWO_TABLES, down, ['a', 'b']);
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /not a runnable down\.sql/);
+    assert.match(
+      result.down.output,
+      /must not SET, RESET or set_config standard_conforming_strings/,
+    );
+    assert.match(result.down.output, /a backslash inside an ordinary '…' string/);
+    assert.equal(result.down.mode, undefined, 'psql was never started');
+    assert.deepEqual(result.still, { a: true, b: true });
+    assert.deepEqual(result.rows, { a: 1, b: 0 });
+
+    // The backslash alone is enough, with no SET in the file: the session's own setting might be off.
+    const bare = downFileCase(
+      TWO_TABLES,
+      "BEGIN;\nDROP TABLE a;\nSELECT 'x\\''; COMMIT; --';\nDROP TABLE no_such_table;\nCOMMIT;",
+      ['a', 'b'],
+    );
+    assert.equal(bare.down.ok, false);
+    assert.match(bare.down.output, /a backslash inside an ordinary '…' string/);
+    assert.equal(bare.down.mode, undefined, 'psql was never started');
+    assert.deepEqual(bare.still, { a: true, b: true });
+  },
+);
+
+test(
+  'a psql meta-command in a down is refused before psql is started',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(TWO_TABLES, 'DROP TABLE a;\n\\set ON_ERROR_STOP off\n', ['a']);
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /a psql meta-command is not allowed/);
+    assert.deepEqual(result.still, { a: true });
+  },
+);
+
+test('every down.sql of every service has a mode, and is valid for it', () => {
+  const modes = {};
+  const marked = [];
+  for (const service of servicesWithMigrations()) {
+    for (const name of migrationNames(service)) {
+      const file = join(
+        ROOT,
+        'services',
+        `${service}-service`,
+        'prisma',
+        'migrations',
+        name,
+        'down.sql',
+      );
+      const { mode, problems } = downFileMode(readFileSync(file, 'utf8'));
+      assert.deepEqual(problems, [], `${service}/${name}/down.sql`);
+      modes[mode] = (modes[mode] ?? 0) + 1;
+      if (mode === 'no-transaction') marked.push(`${service}/${name}`);
+    }
+  }
+  // Marker files are an exception that has to be argued for: a new one is added here on purpose.
+  assert.deepEqual(marked, []);
+  assert.ok((modes['single-transaction'] ?? 0) > 0);
+});
+
+test('the runbook gives exactly the verifier command: -X and --single-transaction, rollback example included', () => {
+  const runbook = readFileSync(join(ROOT, 'docs', 'runbooks', 'database-bootstrap.md'), 'utf8');
+  const invocations = [...runbook.matchAll(/psql "<URL[^`]*?down\.sql/g)].map((m) => m[0]);
+  // The command of § «اجرای down.sql» and the guard's rollback example.
+  assert.ok(invocations.length >= 2);
+  for (const invocation of invocations) {
+    assert.match(invocation, /-X -q -v ON_ERROR_STOP=1 --single-transaction/, invocation);
+  }
+  assert.doesNotMatch(runbook, /خودشان `BEGIN … COMMIT` دارند/);
 });
