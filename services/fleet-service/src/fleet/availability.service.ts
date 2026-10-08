@@ -152,8 +152,8 @@ export class AvailabilityService {
       // Without it, two declarations with different keys each saw no live
       // window to supersede and each created one (review #225 round 1).
       await this.repository.lockAssetRef(tx, dto.assetId);
-      const asset = await this.repository.findAssetRef(dto.assetId, tx);
-      if (!asset || asset.organizationId !== organizationId) {
+      const asset = await this.repository.findAssetRef(organizationId, dto.assetId, tx);
+      if (!asset) {
         throw RastaError.notFound('Asset', dto.assetId);
       }
 
@@ -207,8 +207,8 @@ export class AvailabilityService {
    * caller's tenant.
    */
   async assertAssetVisible(assetId: string): Promise<void> {
-    const asset = await this.repository.findAssetRef(assetId);
-    if (!asset || asset.organizationId !== getOrganizationId()) {
+    const asset = await this.repository.findAssetRef(getOrganizationId(), assetId);
+    if (!asset) {
       throw RastaError.notFound('Asset', assetId);
     }
   }
@@ -329,7 +329,7 @@ export class AvailabilityService {
     // grows with the fleet rather than with the page.
     const [counts, assets] = await Promise.all([
       this.repository.assignmentCounts(organizationId, from, to, assetIds),
-      this.repository.findAssetRefs(assetIds),
+      this.repository.findAssetRefs(organizationId, assetIds),
     ]);
 
     const countByAsset = new Map(counts.map((row) => [row.asset_id, row.assignment_count]));

@@ -161,7 +161,7 @@ export class TransferClearanceService {
     // replica has never seen. Present elsewhere is either another tenant's
     // machine or a replica that has not caught up with a transfer; neither is
     // answered, and no fence on it is resolved.
-    const asset = await this.repository.findAssetRef(assetId);
+    const asset = await this.repository.findAssetRefUnscoped(assetId);
     if (asset && asset.organizationId !== organizationId) {
       throw RastaError.notFound('Asset', assetId);
     }
@@ -207,7 +207,7 @@ export class TransferClearanceService {
       // never seen, and the fence below still stops the first one. Present in
       // another organization is either another tenant's machine or a replica
       // that has not caught up with a transfer; neither is answered.
-      const asset = await this.repository.findAssetRef(assetId, tx);
+      const asset = await this.repository.findAssetRefUnscoped(assetId, tx);
       if (asset && asset.organizationId !== organizationId) {
         throw RastaError.notFound('Asset', assetId);
       }

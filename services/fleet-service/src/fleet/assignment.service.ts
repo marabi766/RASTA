@@ -322,8 +322,8 @@ export class AssignmentService {
    * organization's fleet.
    */
   private async assertAssetOwned(assetId: string, tx?: ExtendedPrismaClient) {
-    const asset = await this.repository.findAssetRef(assetId, tx);
-    if (!asset || asset.organizationId !== getOrganizationId()) {
+    const asset = await this.repository.findAssetRef(getOrganizationId(), assetId, tx);
+    if (!asset) {
       throw RastaError.notFound('Asset', assetId);
     }
     return asset;

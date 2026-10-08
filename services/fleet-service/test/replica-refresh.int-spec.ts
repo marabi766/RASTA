@@ -191,7 +191,7 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
       return repository.placeTransferFence(tx, assetId, organizationId, id('TRF'), 3600);
     });
 
-  const replica = (assetId: string) => repository.findAssetRef(assetId);
+  const replica = (assetId: string) => repository.findAssetRefUnscoped(assetId);
 
   const markers = (eventId: string) => prisma.client.processedEvent.count({ where: { eventId } });
 

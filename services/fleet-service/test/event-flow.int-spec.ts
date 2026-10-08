@@ -329,7 +329,7 @@ describeWithKafka('fleet event flow over Kafka', () => {
       };
 
       await sync.handle(event);
-      const afterFirst = await repository.findAssetRef(freshAsset);
+      const afterFirst = await repository.findAssetRefUnscoped(freshAsset);
       expect(afterFirst?.status).toBe('OUT_OF_SERVICE');
 
       // Replay the identical event, then a *newer* one, then the replay again —
@@ -342,7 +342,7 @@ describeWithKafka('fleet event flow over Kafka', () => {
       });
       await sync.handle(event);
 
-      const afterReplay = await repository.findAssetRef(freshAsset);
+      const afterReplay = await repository.findAssetRefUnscoped(freshAsset);
       // If the replay had been applied a second time, this would read
       // OUT_OF_SERVICE again — a stale event undoing a newer one.
       expect(afterReplay?.status).toBe('ACTIVE');

@@ -126,7 +126,7 @@ describe('dispatch blocks (L3-02)', () => {
     const created = await assign(org.a, assetId, driverId);
     expect(created.assetId).toBe(assetId);
 
-    const row = await repository.findAssetRef(assetId);
+    const row = await repository.findAssetRefUnscoped(assetId);
     expect(row!.insuranceLapsedCoverages).toEqual([]);
   });
 
@@ -154,7 +154,7 @@ describe('dispatch blocks (L3-02)', () => {
     await lapse(assetId);
     await consumer.handle(event('INSPECTION_FAILED', { assetId, inspectionId: id('INP') }));
 
-    const row = await repository.findAssetRef(assetId);
+    const row = await repository.findAssetRefUnscoped(assetId);
     expect(row!.inspectionBlockedReason).not.toBeNull();
     expect(row!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
   });
@@ -171,10 +171,14 @@ describe('dispatch blocks (L3-02)', () => {
 
     it('assigns while the policy is in force, refuses once valid_until has passed, allows after a renewal', async () => {
       const { assetId, driverId } = await insuredBriefly();
-      expect((await repository.findAssetRef(assetId))!.insuranceLapsedCoverages).toEqual([]);
+      expect((await repository.findAssetRefUnscoped(assetId))!.insuranceLapsedCoverages).toEqual(
+        [],
+      );
 
       await sleep(1700);
-      expect((await repository.findAssetRef(assetId))!.insuranceLapsedCoverages).toEqual([]);
+      expect((await repository.findAssetRefUnscoped(assetId))!.insuranceLapsedCoverages).toEqual(
+        [],
+      );
       await expect(assign(org.a, assetId, driverId)).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
         message: expect.stringContaining('withdrawn from dispatch'),
@@ -302,7 +306,7 @@ describe('dispatch blocks (L3-02)', () => {
       await release();
       await both;
 
-      const row = await repository.findAssetRef(assetId);
+      const row = await repository.findAssetRefUnscoped(assetId);
       expect([...row!.insuranceLapsedCoverages].sort()).toEqual(['COMPREHENSIVE', 'THIRD_PARTY']);
     });
 
@@ -341,6 +345,47 @@ describe('dispatch blocks (L3-02)', () => {
         ),
       );
       await expect(assign(org.a, assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('refuses an assignment whose transaction began while the policy was in force but locked after it ended (#2)', async () => {
+      const { assetId, driverId } = await fleet();
+      const validTo = new Date(Date.now() + 2_500);
+      await recordPolicy(assetId, new Date(Date.now() - 1000), validTo);
+
+      // The assignment starts in time — it passes the early checks and opens
+      // its transaction — then queues behind the lock across `validTo`. A
+      // check against the transaction's start (`now()`) would still call the
+      // policy in force; the clock is read after the lock is won.
+      const release = await holdAssetLock(assetId);
+      const attempt = assign(org.a, assetId, driverId);
+      attempt.catch(() => undefined);
+      await waitForBlocked(1);
+      while (Date.now() < validTo.getTime() + 200) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await release();
+
+      await expect(attempt).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
+      });
+      const active = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n FROM assignment WHERE asset_id = $1 AND ended_at IS NULL`,
+        assetId,
+      );
+      expect(active[0]!.n).toBe(0);
+    });
+
+    it('reads the replica by organization on the request path, and unscoped only by name', async () => {
+      const { assetId } = await fleet();
+
+      expect(await repository.findAssetRef(org.a, assetId)).toMatchObject({ id: assetId });
+      expect(await repository.findAssetRef(org.b, assetId)).toBeNull();
+      expect(await repository.findAssetRefs(org.b, [assetId])).toEqual([]);
+      expect(await repository.findAssetRefs(org.a, [assetId])).toHaveLength(1);
+      expect(await repository.findAssetRefUnscoped(assetId)).toMatchObject({
+        organizationId: org.a,
+      });
     });
 
     it('refuses an assignment when a dispatch block commits between its check and its insert (#3)', async () => {

@@ -246,7 +246,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
       await consumer.handle(
         insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
       );
-      expect(await repository.findAssetRef(assetId)).toMatchObject({
+      expect(await repository.findAssetRefUnscoped(assetId)).toMatchObject({
         organizationId: org.b,
         insuranceLapsedCoverages: ['THIRD_PARTY'],
       });

@@ -60,7 +60,7 @@ function buildConsumer(options: {
       });
       return 'OUTBOX-1';
     }),
-    findAssetRef: jest.fn(async () => options.existing ?? null),
+    findAssetRefUnscoped: jest.fn(async () => options.existing ?? null),
     lockAssetRef: jest.fn(async () => undefined),
     dropTransferFences: jest.fn(async () => 0),
     transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
@@ -986,7 +986,7 @@ describe('AssetSyncConsumer', () => {
       await consumer.handle(recordedPolicy('2020-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z'));
 
       const lockOrder = (repository.lockAssetRef as jest.Mock).mock.invocationCallOrder[0]!;
-      const reads = (repository.findAssetRef as jest.Mock).mock.invocationCallOrder;
+      const reads = (repository.findAssetRefUnscoped as jest.Mock).mock.invocationCallOrder;
       expect(repository.lockAssetRef).toHaveBeenCalledWith(expect.anything(), 'AST-SEED-0001');
       // The read the projection builds on comes after the lock.
       expect(reads[reads.length - 1]!).toBeGreaterThan(lockOrder);

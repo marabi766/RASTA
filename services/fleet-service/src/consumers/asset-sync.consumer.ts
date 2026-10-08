@@ -456,7 +456,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // to what the row already holds, and two events for one machine handled
         // at once must not each build on a copy that lacks the other's change.
         await this.repository.lockAssetRef(tx, assetId);
-        const current = await this.repository.findAssetRef(assetId, tx);
+        const current = await this.repository.findAssetRefUnscoped(assetId, tx);
 
         // An ordinary state event changes a row its tenant must own. One whose
         // (envelope and payload) tenant is not the replica's owner is refused

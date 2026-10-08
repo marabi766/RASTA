@@ -364,12 +364,14 @@ export class FleetRepository {
   }
 
   /**
-   * The database's clock. Inside a transaction `now()` is the transaction's
-   * start, so the insurance gate and the insert it guards agree on the time,
-   * and application hosts with skewed clocks do not decide who is insured.
+   * The database's clock *now*. `clock_timestamp()`, not `now()`: `now()` is
+   * the transaction's start, so an assignment whose transaction began before a
+   * policy ended but got the asset's lock after it would still pass. Read after
+   * {@link lockAssetRef}, as the last check before the insert. Application
+   * hosts with skewed clocks do not decide who is insured either.
    */
   async databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
-    const [row] = await tx.$queryRaw<[{ now: Date }]>`SELECT now() AS now`;
+    const [row] = await tx.$queryRaw<[{ now: Date }]>`SELECT clock_timestamp() AS now`;
     return row.now;
   }
 
@@ -732,9 +734,30 @@ export class FleetRepository {
   // Asset reference replica
   // -------------------------------------------------------------------------
 
-  async findAssetRef(id: string, tx?: ExtendedPrismaClient) {
-    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
-      (tx ?? this.client).assetRef.findFirst({ where: { id } }),
+  /**
+   * The replica row of a machine **of that organization**; absent and another
+   * tenant's are the same `null`. The read every request path uses (AGENTS.md
+   * A-04): the organization is part of the query, so a row of another tenant
+   * is never loaded into this one's request, whatever the caller then does
+   * with it.
+   */
+  async findAssetRef(organizationId: string, id: string, tx?: ExtendedPrismaClient) {
+    return runUnscoped(
+      'asset reference replica is platform-wide; the tenant filter is applied explicitly below',
+      () => (tx ?? this.client).assetRef.findFirst({ where: { id, organizationId } }),
+    );
+  }
+
+  /**
+   * The replica row of a machine whoever owns it. Not for a request that acts
+   * for a tenant: only the event consumer, which writes the replica for every
+   * tenant and must see a row it may not own, and the transfer clearance,
+   * which has to tell a machine that is elsewhere from one never seen.
+   */
+  async findAssetRefUnscoped(id: string, tx?: ExtendedPrismaClient) {
+    return runUnscoped(
+      'asset reference replica is platform-wide; the caller decides about ownership itself',
+      () => (tx ?? this.client).assetRef.findFirst({ where: { id } }),
     );
   }
 
@@ -746,10 +769,11 @@ export class FleetRepository {
    * a report with names — the textbook N+1, and the one query on this service
    * that grows with the size of the fleet rather than with the page.
    */
-  async findAssetRefs(ids: readonly string[]) {
+  async findAssetRefs(organizationId: string, ids: readonly string[]) {
     if (ids.length === 0) return [];
-    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
-      this.client.assetRef.findMany({ where: { id: { in: [...ids] } } }),
+    return runUnscoped(
+      'asset reference replica is platform-wide; the tenant filter is applied explicitly below',
+      () => this.client.assetRef.findMany({ where: { organizationId, id: { in: [...ids] } } }),
     );
   }
 
