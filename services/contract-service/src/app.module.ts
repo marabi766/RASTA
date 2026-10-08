@@ -53,6 +53,14 @@ import { ContractAccess } from './access/access';
 import { ContractRepository } from './contract/contract.repository';
 import { ContractService } from './contract/contract.service';
 import { ContractController } from './contract/contract.controller';
+import { AmendmentController } from './amendment/amendment.controller';
+import { AmendmentRepository } from './amendment/amendment.repository';
+import { AmendmentService } from './amendment/amendment.service';
+import { MilestoneController } from './milestone/milestone.controller';
+import { MilestoneRepository } from './milestone/milestone.repository';
+import { MilestoneService } from './milestone/milestone.service';
+import { AuthorityRefusals } from './signing/authority-refusals';
+import { SigningAuthority } from './signing/signing-authority';
 import { PolicyAccess } from './policy/policy.access';
 import { PolicyController } from './policy/policy.controller';
 import { PolicyRepository } from './policy/policy.repository';
@@ -78,7 +86,14 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * changes (ADR-068 § 9) and bring their own wiring.
  */
 @Module({
-  controllers: [ContractController, PolicyController, HealthController, MetricsController],
+  controllers: [
+    ContractController,
+    AmendmentController,
+    MilestoneController,
+    PolicyController,
+    HealthController,
+    MetricsController,
+  ],
   providers: [
     { provide: ENV, useFactory: () => loadContractEnv() },
 
@@ -116,7 +131,13 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     EventPublisher,
     ContractAccess,
     ContractRepository,
+    SigningAuthority,
+    AuthorityRefusals,
     ContractService,
+    AmendmentRepository,
+    AmendmentService,
+    MilestoneRepository,
+    MilestoneService,
     PolicyAccess,
     PolicyRepository,
     PolicyService,

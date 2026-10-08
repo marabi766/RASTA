@@ -34,6 +34,13 @@ export const CONTRACT_EVENTS = {
   APPROVAL_POLICY_SUSPENDED: 'APPROVAL_POLICY_SUSPENDED',
   CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
   CONTRACT_SIGNATURE_REFUSED: 'CONTRACT_SIGNATURE_REFUSED',
+  CONTRACT_AMENDMENT_PROPOSED: 'CONTRACT_AMENDMENT_PROPOSED',
+  CONTRACT_AMENDMENT_SIGNATURE_RECORDED: 'CONTRACT_AMENDMENT_SIGNATURE_RECORDED',
+  CONTRACT_AMENDED: 'CONTRACT_AMENDED',
+  CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED: 'CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED',
+  CONTRACT_MILESTONE_PLANNED: 'CONTRACT_MILESTONE_PLANNED',
+  CONTRACT_MILESTONE_CHANGED: 'CONTRACT_MILESTONE_CHANGED',
+  CONTRACT_AUTHORITY_REFUSED: 'CONTRACT_AUTHORITY_REFUSED',
 } as const;
 
 export type ContractEventName = keyof typeof CONTRACT_EVENTS;
@@ -299,6 +306,168 @@ export const contractSignatureRefusedPayload = z
   })
   .strict();
 
+/**
+ * An amendment of a signed contract was proposed by the employer (CON-003 PR 3). Identifiers, the
+ * closed reason code and instants only: **no amount** (the topic is shared, as for
+ * `CONTRACT_DRAFTED`) and **no reason text** (client free text, read through the API by the two
+ * parties).
+ */
+export const contractAmendmentProposedPayload = z
+  .object({
+    contractId: id,
+    amendmentId: id,
+    amendmentNumber: z.number().int().min(1),
+    /** The employer — the tender's owner and the tenant of the contract. */
+    organizationId: id,
+    contractorOrganizationId: id,
+    reasonCode: z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/),
+    proposedBy: id,
+    proposedAt: instant,
+  })
+  .strict();
+
+/** One side signed an amendment: the audit fact, for each of the two. **No amount.** */
+export const contractAmendmentSignatureRecordedPayload = z
+  .object({
+    contractId: id,
+    amendmentId: id,
+    organizationId: id,
+    side: z.enum(['EMPLOYER', 'CONTRACTOR']),
+    signerOrganizationId: id,
+    signedBy: id,
+    authorityRole: z.string().regex(/^[A-Z][A-Z_]*$/),
+    /** The `contract.signature` policy that authorised the employer's side; null for the contractor's. */
+    policyId: id.nullable(),
+    policyVersion: z.number().int().min(1).nullable(),
+    signedAt: instant,
+  })
+  .strict();
+
+/**
+ * Both parties signed the amendment and it is EFFECTIVE: the contract's price changed (the
+ * catalogue's `CONTRACT_AMENDED`, without its `deltaAmount` — the amount is read through the API, as
+ * for `CONTRACT_DRAFTED`). Published once, with the second signature, in the transaction that
+ * records it and moves the contract's amendments total.
+ */
+export const contractAmendedPayload = z
+  .object({
+    contractId: id,
+    amendmentId: id,
+    amendmentNumber: z.number().int().min(1),
+    organizationId: id,
+    contractorOrganizationId: id,
+    reasonCode: z.string().regex(/^[A-Z][A-Z0-9_]{1,63}$/),
+    employerSignedAt: instant,
+    contractorSignedAt: instant,
+    /** When the amendment became effective: the later of the two signatures. */
+    effectiveAt: instant,
+  })
+  .strict();
+
+/** An employer amendment signature a move may have raced (D-050): flagged for review, never revoked. */
+const amendmentSignatureAuthorityFlaggedBase = {
+  contractId: id,
+  amendmentId: id,
+  organizationId: id,
+  side: z.literal('EMPLOYER'),
+  policyId: id,
+  policyVersion: positive,
+  reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
+  movedVersion: positive.nullable(),
+  flaggedAt: instant,
+};
+
+/**
+ * What found it, in exactly one of two shapes: a move proven to be the cause (`ORGANIZATION_MOVED`,
+ * which names the event AND its instant) or a re-check a move queued without being shown to be its
+ * cause (`MOVE_RECHECK`, which names NEITHER). One of the two alone is not a published shape — the
+ * same rule the `ck_amendment_review_reason` constraint holds in the database.
+ */
+export const contractAmendmentSignatureAuthorityFlaggedPayload = z.discriminatedUnion(
+  'detectedBy',
+  [
+    z
+      .object({
+        ...amendmentSignatureAuthorityFlaggedBase,
+        detectedBy: z.literal('ORGANIZATION_MOVED'),
+        causeEventId: id,
+        movedAt: instant,
+      })
+      .strict(),
+    z
+      .object({
+        ...amendmentSignatureAuthorityFlaggedBase,
+        detectedBy: z.literal('MOVE_RECHECK'),
+        causeEventId: z.null(),
+        movedAt: z.null(),
+      })
+      .strict(),
+  ],
+);
+
+/** A milestone was planned on a signed contract. Identifiers and instants only — no title, no date, no share. */
+export const contractMilestonePlannedPayload = z
+  .object({
+    contractId: id,
+    milestoneId: id,
+    organizationId: id,
+    contractorOrganizationId: id,
+    plannedBy: id,
+    plannedAt: instant,
+  })
+  .strict();
+
+/** A milestone that no statement refers to was edited. `version` is the one it now has. */
+export const contractMilestoneChangedPayload = z
+  .object({
+    contractId: id,
+    milestoneId: id,
+    organizationId: id,
+    contractorOrganizationId: id,
+    version: positive,
+    changedBy: id,
+    changedAt: instant,
+  })
+  .strict();
+
+/**
+ * A party's attempt at an authority-bound action on a contract was refused for want of authority
+ * (the audit record of the refusal, written in a transaction of its own so it survives the request
+ * failing): proposing or signing an amendment, planning or editing a milestone. Who asked, for which
+ * contract, the closed action and reason — no free text. Never written for a caller who is not a
+ * party: such a caller is told the contract does not exist.
+ */
+export const AUTHORITY_REFUSED_ACTIONS = [
+  'PROPOSE_AMENDMENT',
+  'SIGN_AMENDMENT',
+  'PLAN_MILESTONE',
+  'CHANGE_MILESTONE',
+] as const;
+export const AUTHORITY_REFUSED_REASONS = [
+  /** The caller's role is not one the configuration or the policy in force names. */
+  'ROLE_NOT_PERMITTED',
+  /** The action is the employer's and the caller acts for the contractor. */
+  'NOT_EMPLOYER',
+  'SIGNATURE_POLICY_REQUIRED',
+  'POLICY_AUTHOR_NOT_GOVERNING',
+] as const;
+
+export const contractAuthorityRefusedPayload = z
+  .object({
+    contractId: id,
+    organizationId: id,
+    action: z.enum(AUTHORITY_REFUSED_ACTIONS),
+    side: z.enum(['EMPLOYER', 'CONTRACTOR']),
+    /** The amendment or milestone the action named; null when it created one. */
+    subjectId: id.nullable(),
+    reason: z.enum(AUTHORITY_REFUSED_REASONS),
+    /** The policy that was in force and stranded; null when none was or the reason is not a policy's. */
+    policyId: id.nullable(),
+    refusedBy: id,
+    refusedAt: instant,
+  })
+  .strict();
+
 export const CONTRACT_EVENT_SCHEMAS = {
   CONTRACT_DRAFTED: contractDraftedPayload,
   CONTRACT_SIGNATURE_RECORDED: contractSignatureRecordedPayload,
@@ -312,6 +481,13 @@ export const CONTRACT_EVENT_SCHEMAS = {
   APPROVAL_POLICY_SUSPENDED: approvalPolicySuspendedPayload,
   CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: contractSignatureAuthorityFlaggedPayload,
   CONTRACT_SIGNATURE_REFUSED: contractSignatureRefusedPayload,
+  CONTRACT_AMENDMENT_PROPOSED: contractAmendmentProposedPayload,
+  CONTRACT_AMENDMENT_SIGNATURE_RECORDED: contractAmendmentSignatureRecordedPayload,
+  CONTRACT_AMENDED: contractAmendedPayload,
+  CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED: contractAmendmentSignatureAuthorityFlaggedPayload,
+  CONTRACT_MILESTONE_PLANNED: contractMilestonePlannedPayload,
+  CONTRACT_MILESTONE_CHANGED: contractMilestoneChangedPayload,
+  CONTRACT_AUTHORITY_REFUSED: contractAuthorityRefusedPayload,
 } as const satisfies Record<ContractEventName, z.ZodTypeAny>;
 
 export type ContractEventPayload<N extends ContractEventName> = z.infer<

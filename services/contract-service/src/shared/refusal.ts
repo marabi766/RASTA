@@ -13,6 +13,8 @@ export const REFUSAL_AREAS = {
   signature: 'Contract cannot be signed',
   cancellation: 'Contract cannot be cancelled',
   policy: 'Approval policy cannot be written',
+  amendment: 'Amendment cannot be made',
+  milestone: 'Milestone cannot be planned',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -40,6 +42,31 @@ export const REFUSAL_REASONS = {
   },
   policy: {
     AUTHORITY_NOT_GOVERNED_ORGANIZATION: 422,
+  },
+  /** Proposing and signing an amendment (CON-003 PR 3, Q-100); the signing reasons are the contract's own. */
+  amendment: {
+    /** Only the employer proposes. */
+    PROPOSER_NOT_EMPLOYER: 403,
+    SIGNATURE_POLICY_REQUIRED: 422,
+    POLICY_AUTHOR_NOT_GOVERNING: 403,
+    MEMBER_OF_BOTH_PARTIES: 403,
+    SAME_PERSON_BOTH_SIDES: 403,
+    SIDE_ALREADY_SIGNED: 409,
+    ACTOR_IDENTITY_UNKNOWN: 422,
+    CONTRACT_NOT_SIGNED: 422,
+    AMENDMENT_NOT_PROPOSED: 422,
+    /** Zero or negative: no document allows a reduction (Q-100). */
+    AMENDMENT_DELTA_NOT_POSITIVE: 422,
+    /** The price plus the amendments would pass the largest amount a bigint stores. */
+    AMENDMENT_EXCEEDS_LIMIT: 422,
+    AMENDMENT_REASON_NOT_ALLOWED: 422,
+  },
+  /** Planning and editing a milestone. */
+  milestone: {
+    EDITOR_NOT_EMPLOYER: 403,
+    CONTRACT_NOT_SIGNED: 422,
+    MILESTONE_REFERENCED: 422,
+    MILESTONE_LIMIT_REACHED: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

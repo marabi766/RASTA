@@ -101,6 +101,13 @@ describe('overrides', () => {
     ['SYSTEM_ADMIN among the cancellers', { CONTRACT_CANCEL_ROLES: 'SYSTEM_ADMIN' }],
     ['an organization URL that is not a URL', { ORGANIZATION_SERVICE_URL: 'organization' }],
     ['an organization timeout under 100 ms', { CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '10' }],
+    ['SYSTEM_ADMIN among the amenders', { CONTRACT_AMENDMENT_ROLES: 'SYSTEM_ADMIN' }],
+    ['AUDITOR among the milestone planners', { CONTRACT_MILESTONE_ROLES: 'AUDITOR' }],
+    ['no amendment reason', { CONTRACT_AMENDMENT_REASON_CODES: '' }],
+    ['an amendment reason that is not a code', { CONTRACT_AMENDMENT_REASON_CODES: 'lower case' }],
+    ['an amendment reason twice', { CONTRACT_AMENDMENT_REASON_CODES: 'OTHER,OTHER' }],
+    ['a zero milestone limit', { CONTRACT_MILESTONE_LIMIT: '0' }],
+    ['an unbounded milestone limit', { CONTRACT_MILESTONE_LIMIT: '1001' }],
     ['no cancel reason', { CONTRACT_CANCEL_REASON_CODES: '' }],
     ['a reason that is not a code', { CONTRACT_CANCEL_REASON_CODES: 'lower case' }],
     ['a reason twice', { CONTRACT_CANCEL_REASON_CODES: 'OTHER,OTHER' }],
@@ -116,6 +123,27 @@ describe('overrides', () => {
     ['a construction URL that is not a URL', { CONSTRUCTION_SERVICE_URL: 'construction' }],
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
+  });
+});
+
+describe('amendments and milestones (CON-003 PR 3, Q-100)', () => {
+  it('default to the owner’s role set, a closed reason list and a bounded plan', () => {
+    const env = load();
+    expect(env.CONTRACT_AMENDMENT_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.CONTRACT_MILESTONE_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.CONTRACT_AMENDMENT_REASON_CODES).toEqual([
+      'SCOPE_CHANGE',
+      'PRICE_ADJUSTMENT',
+      'SCHEDULE_CHANGE',
+      'OTHER',
+    ]);
+    expect(env.CONTRACT_MILESTONE_LIMIT).toBe(100);
+  });
+
+  it('allow an empty role list, which means nobody — never everybody', () => {
+    const env = load({ CONTRACT_AMENDMENT_ROLES: '', CONTRACT_MILESTONE_ROLES: '' });
+    expect(env.CONTRACT_AMENDMENT_ROLES).toEqual([]);
+    expect(env.CONTRACT_MILESTONE_ROLES).toEqual([]);
   });
 });
 

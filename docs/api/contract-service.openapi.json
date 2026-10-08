@@ -73,6 +73,14 @@
                             "type": "string",
                             "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
                           },
+                          "amendmentsTotalMinor": {
+                            "type": "string",
+                            "description": "The sum of the amendments that are effective, in minor units, a decimal string (CON-003 PR 3). Zero until both parties have signed an amendment; it only grows (Q-100)."
+                          },
+                          "currentAmountMinor": {
+                            "type": "string",
+                            "description": "`amountMinor` plus `amendmentsTotalMinor`: the price the contract stands at now, and the cap approved statements are judged against (ADR-068 § 5)."
+                          },
                           "status": {
                             "type": "string",
                             "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
@@ -131,6 +139,8 @@
                           "winningBidId",
                           "contractorOrganizationId",
                           "amountMinor",
+                          "amendmentsTotalMinor",
+                          "currentAmountMinor",
                           "status",
                           "employerSignedAt",
                           "contractorSignedAt",
@@ -182,7 +192,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
             "content": {
               "application/json": {
                 "schema": {
@@ -257,6 +267,14 @@
                       "type": "string",
                       "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
                     },
+                    "amendmentsTotalMinor": {
+                      "type": "string",
+                      "description": "The sum of the amendments that are effective, in minor units, a decimal string (CON-003 PR 3). Zero until both parties have signed an amendment; it only grows (Q-100)."
+                    },
+                    "currentAmountMinor": {
+                      "type": "string",
+                      "description": "`amountMinor` plus `amendmentsTotalMinor`: the price the contract stands at now, and the cap approved statements are judged against (ADR-068 § 5)."
+                    },
                     "status": {
                       "type": "string",
                       "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
@@ -315,6 +333,8 @@
                     "winningBidId",
                     "contractorOrganizationId",
                     "amountMinor",
+                    "amendmentsTotalMinor",
+                    "currentAmountMinor",
                     "status",
                     "employerSignedAt",
                     "contractorSignedAt",
@@ -344,7 +364,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
             "content": {
               "application/json": {
                 "schema": {
@@ -440,6 +460,14 @@
                       "type": "string",
                       "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
                     },
+                    "amendmentsTotalMinor": {
+                      "type": "string",
+                      "description": "The sum of the amendments that are effective, in minor units, a decimal string (CON-003 PR 3). Zero until both parties have signed an amendment; it only grows (Q-100)."
+                    },
+                    "currentAmountMinor": {
+                      "type": "string",
+                      "description": "`amountMinor` plus `amendmentsTotalMinor`: the price the contract stands at now, and the cap approved statements are judged against (ADR-068 § 5)."
+                    },
                     "status": {
                       "type": "string",
                       "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
@@ -498,6 +526,8 @@
                     "winningBidId",
                     "contractorOrganizationId",
                     "amountMinor",
+                    "amendmentsTotalMinor",
+                    "currentAmountMinor",
                     "status",
                     "employerSignedAt",
                     "contractorSignedAt",
@@ -537,7 +567,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
             "content": {
               "application/json": {
                 "schema": {
@@ -594,7 +624,7 @@
             }
           },
           "409": {
-            "description": "On sign: another person for a side that has already signed (SIDE_ALREADY_SIGNED); on either command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIDE_ALREADY_SIGNED)",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIDE_ALREADY_SIGNED)",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -648,7 +678,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIGNATURE_POLICY_REQUIRED, CONTRACT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIGNATURE_POLICY_REQUIRED, CONTRACT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN)",
             "content": {
               "application/json": {
                 "schema": {
@@ -789,6 +819,14 @@
                       "type": "string",
                       "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
                     },
+                    "amendmentsTotalMinor": {
+                      "type": "string",
+                      "description": "The sum of the amendments that are effective, in minor units, a decimal string (CON-003 PR 3). Zero until both parties have signed an amendment; it only grows (Q-100)."
+                    },
+                    "currentAmountMinor": {
+                      "type": "string",
+                      "description": "`amountMinor` plus `amendmentsTotalMinor`: the price the contract stands at now, and the cap approved statements are judged against (ADR-068 § 5)."
+                    },
                     "status": {
                       "type": "string",
                       "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
@@ -847,6 +885,8 @@
                     "winningBidId",
                     "contractorOrganizationId",
                     "amountMinor",
+                    "amendmentsTotalMinor",
+                    "currentAmountMinor",
                     "status",
                     "employerSignedAt",
                     "contractorSignedAt",
@@ -886,7 +926,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
             "content": {
               "application/json": {
                 "schema": {
@@ -906,7 +946,7 @@
             }
           },
           "409": {
-            "description": "On sign: another person for a side that has already signed (SIDE_ALREADY_SIGNED); on either command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
             "headers": {
               "Retry-After": {
                 "required": false,
@@ -927,7 +967,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (cancellation: CANCEL_REASON_NOT_ALLOWED, CONTRACT_NOT_DRAFT, SIGNATURE_RECORDED)",
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (cancellation: CANCEL_REASON_NOT_ALLOWED, CONTRACT_NOT_DRAFT, SIGNATURE_RECORDED)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1017,6 +1057,1942 @@
                   }
                 },
                 "required": ["reasonCode"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/{id}/amendments": {
+      "get": {
+        "description": "Every amendment of the contract, proposed or effective, with its amount in minor units as a decimal string and when each side signed it (never by whom). Closed by default (S-02). Read by the same two parties as the contract: the employer’s organization — the roles of CONTRACT_READER_ROLES, and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract or amendment that does not exist and one of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused.",
+        "operationId": "AmendmentController_list_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,9}$",
+              "description": "Opaque, server-issued."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "contractId": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The employer: the tender’s owner and the contract’s tenant."
+                          },
+                          "amendmentNumber": {
+                            "type": "integer",
+                            "description": "1, 2, 3 … per contract."
+                          },
+                          "deltaMinor": {
+                            "type": "string",
+                            "description": "The change to the contract price in minor units, a decimal string; positive."
+                          },
+                          "reasonCode": {
+                            "type": "string"
+                          },
+                          "reasonText": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["PROPOSED", "EFFECTIVE"]
+                          },
+                          "employerSignedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When the employer signed it (ISO 8601, UTC), or null."
+                          },
+                          "contractorSignedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When the winning contractor signed it (ISO 8601, UTC), or null."
+                          },
+                          "authorityReviewRequired": {
+                            "type": "boolean",
+                            "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The amendment stays as it is — a flag is never a revocation."
+                          },
+                          "proposedAt": {
+                            "type": "string"
+                          },
+                          "effectiveAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When both had signed (ISO 8601, UTC), or null."
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "contractId",
+                          "organizationId",
+                          "amendmentNumber",
+                          "deltaMinor",
+                          "reasonCode",
+                          "reasonText",
+                          "status",
+                          "employerSignedAt",
+                          "contractorSignedAt",
+                          "authorityReviewRequired",
+                          "proposedAt",
+                          "effectiveAt",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the amendments of a contract, oldest first",
+        "tags": ["amendments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "description": "The employer proposes a change to the price of a SIGNED contract (422 `CONTRACT_NOT_SIGNED` otherwise): `deltaMinor` (a decimal string of minor units; it must be positive — a zero or negative change is 422 `AMENDMENT_DELTA_NOT_POSITIVE`, no document allows a reduction yet, Q-100), a `reasonCode` from the closed list CONTRACT_AMENDMENT_REASON_CODES names (422 `AMENDMENT_REASON_NOT_ALLOWED` otherwise) and a `reasonText`. It takes effect only when both parties have signed it (…/sign), and adds nothing to the price before. A price that with its amendments would pass the largest bigint is 422 `AMENDMENT_EXCEEDS_LIMIT`. Only the employer, with a role CONTRACT_AMENDMENT_ROLES names (default ORGANIZATION_ADMIN); the contractor is 403 `PROPOSER_NOT_EMPLOYER`. CONTRACT_AMENDMENT_PROPOSED carries the code, never the amount or the text. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. A contract of another organization, or one that does not exist, is 404 — never 403. A refusal of a party for want of authority is recorded (CONTRACT_AUTHORITY_REFUSED); when that record cannot be written the answer is 503 and nothing was done. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "AmendmentController_propose_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "amendmentNumber": {
+                      "type": "integer",
+                      "description": "1, 2, 3 … per contract."
+                    },
+                    "deltaMinor": {
+                      "type": "string",
+                      "description": "The change to the contract price in minor units, a decimal string; positive."
+                    },
+                    "reasonCode": {
+                      "type": "string"
+                    },
+                    "reasonText": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["PROPOSED", "EFFECTIVE"]
+                    },
+                    "employerSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the employer signed it (ISO 8601, UTC), or null."
+                    },
+                    "contractorSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the winning contractor signed it (ISO 8601, UTC), or null."
+                    },
+                    "authorityReviewRequired": {
+                      "type": "boolean",
+                      "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The amendment stays as it is — a flag is never a revocation."
+                    },
+                    "proposedAt": {
+                      "type": "string"
+                    },
+                    "effectiveAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When both had signed (ISO 8601, UTC), or null."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "amendmentNumber",
+                    "deltaMinor",
+                    "reasonCode",
+                    "reasonText",
+                    "status",
+                    "employerSignedAt",
+                    "contractorSignedAt",
+                    "authorityReviewRequired",
+                    "proposedAt",
+                    "effectiveAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: PROPOSER_NOT_EMPLOYER, POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "amendment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "PROPOSER_NOT_EMPLOYER",
+                              "POLICY_AUTHOR_NOT_GOVERNING",
+                              "MEMBER_OF_BOTH_PARTIES",
+                              "SAME_PERSON_BOTH_SIDES"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIDE_ALREADY_SIGNED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "amendment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["SIDE_ALREADY_SIGNED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIGNATURE_POLICY_REQUIRED, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, AMENDMENT_NOT_PROPOSED, AMENDMENT_DELTA_NOT_POSITIVE, AMENDMENT_EXCEEDS_LIMIT, AMENDMENT_REASON_NOT_ALLOWED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "amendment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "SIGNATURE_POLICY_REQUIRED",
+                              "ACTOR_IDENTITY_UNKNOWN",
+                              "CONTRACT_NOT_SIGNED",
+                              "AMENDMENT_NOT_PROPOSED",
+                              "AMENDMENT_DELTA_NOT_POSITIVE",
+                              "AMENDMENT_EXCEEDS_LIMIT",
+                              "AMENDMENT_REASON_NOT_ALLOWED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "On amendment and milestone commands: the refusal of a party for want of authority could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request; on signing an amendment, also organization-service could not confirm the hierarchy: the signature is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Propose an amendment of a signed contract, employer only",
+        "tags": ["amendments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "deltaMinor": {
+                    "type": "string",
+                    "pattern": "^-?\\d{1,30}$",
+                    "description": "The change to the contract price in minor units (rials), a decimal string; never a float. Within a bigint. It must be positive: no document allows a reduction yet, so zero or a negative amount is 422 AMENDMENT_DELTA_NOT_POSITIVE (Q-100)."
+                  },
+                  "reasonCode": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+                    "description": "One of the reasons CONTRACT_AMENDMENT_REASON_CODES names (an unlisted code is 422 AMENDMENT_REASON_NOT_ALLOWED)."
+                  },
+                  "reasonText": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 1,
+                    "maxLength": 1000,
+                    "description": "Why, in the proposer’s words: trimmed, 1 to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event."
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The contract’s `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "required": ["deltaMinor", "reasonCode", "reasonText"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/{id}/amendments/{amendmentId}": {
+      "get": {
+        "description": "One amendment of the contract. Closed by default (S-02). Read by the same two parties as the contract: the employer’s organization — the roles of CONTRACT_READER_ROLES, and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract or amendment that does not exist and one of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused.",
+        "operationId": "AmendmentController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "amendmentId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "amendmentNumber": {
+                      "type": "integer",
+                      "description": "1, 2, 3 … per contract."
+                    },
+                    "deltaMinor": {
+                      "type": "string",
+                      "description": "The change to the contract price in minor units, a decimal string; positive."
+                    },
+                    "reasonCode": {
+                      "type": "string"
+                    },
+                    "reasonText": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["PROPOSED", "EFFECTIVE"]
+                    },
+                    "employerSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the employer signed it (ISO 8601, UTC), or null."
+                    },
+                    "contractorSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the winning contractor signed it (ISO 8601, UTC), or null."
+                    },
+                    "authorityReviewRequired": {
+                      "type": "boolean",
+                      "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The amendment stays as it is — a flag is never a revocation."
+                    },
+                    "proposedAt": {
+                      "type": "string"
+                    },
+                    "effectiveAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When both had signed (ISO 8601, UTC), or null."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "amendmentNumber",
+                    "deltaMinor",
+                    "reasonCode",
+                    "reasonText",
+                    "status",
+                    "employerSignedAt",
+                    "contractorSignedAt",
+                    "authorityReviewRequired",
+                    "proposedAt",
+                    "effectiveAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one amendment",
+        "tags": ["amendments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/contracts/{id}/amendments/{amendmentId}/sign": {
+      "post": {
+        "description": "Each party signs separately, and the amendment becomes EFFECTIVE only when both have: the second signature, in the same transaction and under the contract’s lock, makes it effective, adds its amount to the contract’s amendments total and publishes CONTRACT_AMENDED (no amount); every signature is an audit record (CONTRACT_AMENDMENT_SIGNATURE_RECORDED). The same machinery as signing the contract: the employer’s side is signed by the roles the `contract.signature` approval policy in force for its organization names (with none in force, 422 `SIGNATURE_POLICY_REQUIRED`; a policy whose union no longer governs the employer is 403 `POLICY_AUTHOR_NOT_GOVERNING`), the contractor’s by the CONTRACTOR role of its own organization. One person cannot sign for both sides (403 `MEMBER_OF_BOTH_PARTIES`, 403 `SAME_PERSON_BOTH_SIDES`; identities that cannot be told apart are 422 `ACTOR_IDENTITY_UNKNOWN`). The same person signing the same side again changes nothing; another person for a side that has signed is 409 `SIDE_ALREADY_SIGNED`; an amendment that is no longer proposed is 422 `AMENDMENT_NOT_PROPOSED`, a contract that is not signed 422 `CONTRACT_NOT_SIGNED`. `expectedVersion` is optional. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. A contract of another organization, or one that does not exist, is 404 — never 403. A refusal of a party for want of authority is recorded (CONTRACT_AUTHORITY_REFUSED); when that record cannot be written the answer is 503 and nothing was done. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "AmendmentController_sign_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "amendmentId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "amendmentNumber": {
+                      "type": "integer",
+                      "description": "1, 2, 3 … per contract."
+                    },
+                    "deltaMinor": {
+                      "type": "string",
+                      "description": "The change to the contract price in minor units, a decimal string; positive."
+                    },
+                    "reasonCode": {
+                      "type": "string"
+                    },
+                    "reasonText": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["PROPOSED", "EFFECTIVE"]
+                    },
+                    "employerSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the employer signed it (ISO 8601, UTC), or null."
+                    },
+                    "contractorSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the winning contractor signed it (ISO 8601, UTC), or null."
+                    },
+                    "authorityReviewRequired": {
+                      "type": "boolean",
+                      "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The amendment stays as it is — a flag is never a revocation."
+                    },
+                    "proposedAt": {
+                      "type": "string"
+                    },
+                    "effectiveAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When both had signed (ISO 8601, UTC), or null."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "amendmentNumber",
+                    "deltaMinor",
+                    "reasonCode",
+                    "reasonText",
+                    "status",
+                    "employerSignedAt",
+                    "contractorSignedAt",
+                    "authorityReviewRequired",
+                    "proposedAt",
+                    "effectiveAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: PROPOSER_NOT_EMPLOYER, POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "amendment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "PROPOSER_NOT_EMPLOYER",
+                              "POLICY_AUTHOR_NOT_GOVERNING",
+                              "MEMBER_OF_BOTH_PARTIES",
+                              "SAME_PERSON_BOTH_SIDES"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIDE_ALREADY_SIGNED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "amendment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["SIDE_ALREADY_SIGNED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (amendment: SIGNATURE_POLICY_REQUIRED, ACTOR_IDENTITY_UNKNOWN, CONTRACT_NOT_SIGNED, AMENDMENT_NOT_PROPOSED, AMENDMENT_DELTA_NOT_POSITIVE, AMENDMENT_EXCEEDS_LIMIT, AMENDMENT_REASON_NOT_ALLOWED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "amendment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "SIGNATURE_POLICY_REQUIRED",
+                              "ACTOR_IDENTITY_UNKNOWN",
+                              "CONTRACT_NOT_SIGNED",
+                              "AMENDMENT_NOT_PROPOSED",
+                              "AMENDMENT_DELTA_NOT_POSITIVE",
+                              "AMENDMENT_EXCEEDS_LIMIT",
+                              "AMENDMENT_REASON_NOT_ALLOWED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "On amendment and milestone commands: the refusal of a party for want of authority could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request; on signing an amendment, also organization-service could not confirm the hierarchy: the signature is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT) while the employer’s signature of an amendment was being confirmed: nothing was signed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Sign an amendment for the side the caller acts for (PROPOSED → EFFECTIVE)",
+        "tags": ["amendments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The amendment’s `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/{id}/milestones": {
+      "get": {
+        "description": "The contract’s plan: title, planned day (a date, never an instant), the optional planned share in basis points, and whether a statement already refers to it. Closed by default (S-02). Read by the same two parties as the contract: the employer’s organization — the roles of CONTRACT_READER_ROLES, and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract or milestone that does not exist and one of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused.",
+        "operationId": "MilestoneController_list_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "contractId": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The employer: the tender’s owner and the contract’s tenant."
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "plannedDate": {
+                            "type": "string",
+                            "description": "The planned day, YYYY-MM-DD."
+                          },
+                          "plannedShareBp": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "referenced": {
+                            "type": "boolean",
+                            "description": "True once a statement refers to it: from then on it never changes."
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "contractId",
+                          "organizationId",
+                          "title",
+                          "plannedDate",
+                          "plannedShareBp",
+                          "referenced",
+                          "createdAt",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the planned milestones of a contract, by planned day",
+        "tags": ["milestones"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "description": "A title, a planned day (`YYYY-MM-DD`) and optionally a planned share in basis points (1 to 10000). Only on a SIGNED contract (422 `CONTRACT_NOT_SIGNED`); a contract holds at most CONTRACT_MILESTONE_LIMIT milestones (422 `MILESTONE_LIMIT_REACHED`). No sum of the shares is kept: no document defines one (Q-100). CONTRACT_MILESTONE_PLANNED carries identifiers and instants only. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. Only the employer, with a role CONTRACT_MILESTONE_ROLES names (default ORGANIZATION_ADMIN); the contractor is 403 `EDITOR_NOT_EMPLOYER`. A refusal of a party for want of authority is recorded (CONTRACT_AUTHORITY_REFUSED); when that record cannot be written the answer is 503 and nothing was done. A contract of another organization, or one that does not exist, is 404 — never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "MilestoneController_plan_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "plannedDate": {
+                      "type": "string",
+                      "description": "The planned day, YYYY-MM-DD."
+                    },
+                    "plannedShareBp": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "referenced": {
+                      "type": "boolean",
+                      "description": "True once a statement refers to it: from then on it never changes."
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "title",
+                    "plannedDate",
+                    "plannedShareBp",
+                    "referenced",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: EDITOR_NOT_EMPLOYER)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "milestone"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["EDITOR_NOT_EMPLOYER"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: CONTRACT_NOT_SIGNED, MILESTONE_REFERENCED, MILESTONE_LIMIT_REACHED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "milestone"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "CONTRACT_NOT_SIGNED",
+                              "MILESTONE_REFERENCED",
+                              "MILESTONE_LIMIT_REACHED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "On amendment and milestone commands: the refusal of a party for want of authority could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request; on signing an amendment, also organization-service could not confirm the hierarchy: the signature is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Plan a milestone on a signed contract, employer only",
+        "tags": ["milestones"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                  },
+                  "plannedDate": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "description": "The planned day, YYYY-MM-DD — a date, never an instant."
+                  },
+                  "plannedShareBp": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "The planned share of the contract price in basis points (1 to 10000). Optional; no sum across a contract’s milestones is kept, because no document defines one."
+                  }
+                },
+                "required": ["title", "plannedDate"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/{id}/milestones/{milestoneId}": {
+      "get": {
+        "description": "One milestone of the contract. Closed by default (S-02). Read by the same two parties as the contract: the employer’s organization — the roles of CONTRACT_READER_ROLES, and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract or milestone that does not exist and one of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused.",
+        "operationId": "MilestoneController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "milestoneId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "plannedDate": {
+                      "type": "string",
+                      "description": "The planned day, YYYY-MM-DD."
+                    },
+                    "plannedShareBp": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "referenced": {
+                      "type": "boolean",
+                      "description": "True once a statement refers to it: from then on it never changes."
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "title",
+                    "plannedDate",
+                    "plannedShareBp",
+                    "referenced",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one planned milestone",
+        "tags": ["milestones"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "description": "Changes the fields given (`plannedShareBp: null` clears the share); at least one is required. Only while no statement refers to the milestone (422 `MILESTONE_REFERENCED`) and only on a SIGNED contract (422 `CONTRACT_NOT_SIGNED`). A change that changes nothing answers with the milestone as it is and writes nothing. There is no delete (Q-100). `expectedVersion` is optional. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. Only the employer, with a role CONTRACT_MILESTONE_ROLES names (default ORGANIZATION_ADMIN); the contractor is 403 `EDITOR_NOT_EMPLOYER`. A refusal of a party for want of authority is recorded (CONTRACT_AUTHORITY_REFUSED); when that record cannot be written the answer is 503 and nothing was done. A contract of another organization, or one that does not exist, is 404 — never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "MilestoneController_change_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "milestoneId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "contractId": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "plannedDate": {
+                      "type": "string",
+                      "description": "The planned day, YYYY-MM-DD."
+                    },
+                    "plannedShareBp": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "referenced": {
+                      "type": "boolean",
+                      "description": "True once a statement refers to it: from then on it never changes."
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "contractId",
+                    "organizationId",
+                    "title",
+                    "plannedDate",
+                    "plannedShareBp",
+                    "referenced",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. On amendments and milestones: only the employer proposes an amendment (PROPOSER_NOT_EMPLOYER) or plans and changes a milestone (EDITOR_NOT_EMPLOYER), with a role CONTRACT_AMENDMENT_ROLES / CONTRACT_MILESTONE_ROLES names; signing an amendment is judged like signing the contract (including POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES and SAME_PERSON_BOTH_SIDES). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: EDITOR_NOT_EMPLOYER)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "milestone"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["EDITOR_NOT_EMPLOYER"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign (of the contract or of an amendment): another person for a side that has already signed (SIDE_ALREADY_SIGNED); on any command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). On amendments: a contract that is not signed (CONTRACT_NOT_SIGNED), an amendment that is no longer proposed (AMENDMENT_NOT_PROPOSED), a zero or negative change (AMENDMENT_DELTA_NOT_POSITIVE — no document allows a reduction, Q-100), a price with its amendments past the largest bigint (AMENDMENT_EXCEEDS_LIMIT), a reason outside the configured list (AMENDMENT_REASON_NOT_ALLOWED). On milestones: a contract that is not signed (CONTRACT_NOT_SIGNED), a milestone a statement refers to (MILESTONE_REFERENCED), a contract at its limit (MILESTONE_LIMIT_REACHED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (milestone: CONTRACT_NOT_SIGNED, MILESTONE_REFERENCED, MILESTONE_LIMIT_REACHED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "milestone"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "CONTRACT_NOT_SIGNED",
+                              "MILESTONE_REFERENCED",
+                              "MILESTONE_LIMIT_REACHED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "On amendment and milestone commands: the refusal of a party for want of authority could not be recorded (UPSTREAM_UNAVAILABLE) and nothing was done — retry the same request; on signing an amendment, also organization-service could not confirm the hierarchy: the signature is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Change a planned milestone no statement refers to, employer only",
+        "tags": ["milestones"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters."
+                  },
+                  "plannedDate": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "description": "The planned day, YYYY-MM-DD — a date, never an instant."
+                  },
+                  "plannedShareBp": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000,
+                    "description": "The planned share of the contract price in basis points (1 to 10000). Optional; no sum across a contract’s milestones is kept, because no document defines one.",
+                    "nullable": true
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The milestone’s `version` the caller read. When given, the edit applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
                 "additionalProperties": false
               }
             }
@@ -1244,7 +3220,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (policy: AUTHORITY_NOT_GOVERNED_ORGANIZATION)",
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy, amendment, milestone) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (policy: AUTHORITY_NOT_GOVERNED_ORGANIZATION)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3253,7 +5229,7 @@
   },
   "info": {
     "title": "Rasta — Contract Service",
-    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). Amendments, milestones, statements with their separate technical and financial approvals, and the settlement boundary with economic-service follow (ADR-068 § 9); no money is ever held here.",
+    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). A SIGNED contract is amended by its employer (a positive change to the price, with a closed reason code and a text), and the amendment takes effect only when both parties have signed it the way they signed the contract; the employer also plans milestones (a title, a planned day and an optional share in basis points) that both parties read. Statements with their separate technical and financial approvals, and the settlement boundary with economic-service follow (ADR-068 § 9); no money is ever held here.",
     "version": "0.1.0",
     "contact": {}
   },

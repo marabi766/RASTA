@@ -32,6 +32,8 @@ export function toContractView(
     winningBidId: row.winningBidId,
     contractorOrganizationId: row.contractorOrganizationId,
     amountMinor: row.amountMinor.toString(),
+    amendmentsTotalMinor: row.amendmentsTotalMinor.toString(),
+    currentAmountMinor: (row.amountMinor + row.amendmentsTotalMinor).toString(),
     status: row.status as ContractStateName,
     employerSignedAt: signedAt('EMPLOYER'),
     contractorSignedAt: signedAt('CONTRACTOR'),

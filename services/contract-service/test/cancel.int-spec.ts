@@ -395,8 +395,13 @@ describe('POST /v1/contracts/{id}/cancel', () => {
         cancel(id, employerCanceller(employer)),
         sign(id, contractorSigner(contractor)),
       ]);
-      await untilSessionsWaitOnALock(w.prisma, 2);
-      release();
+      try {
+        await untilSessionsWaitOnALock(w.prisma, 2);
+      } finally {
+        // A failed wait must not leave the row lock held for the tests after this one.
+        release();
+        await Promise.allSettled([holder, both]);
+      }
       await holder;
       const [cancelled, signed] = await both;
 

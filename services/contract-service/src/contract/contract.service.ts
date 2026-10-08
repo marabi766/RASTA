@@ -9,15 +9,16 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ClaimFence } from '../shared/idempotency';
-import { databaseClock, transactionNow } from '../shared/clock';
+import { transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
-import { OrganizationDirectory } from '../organization/organization-directory';
-import { UNION_ROLE, signingRoleUnder } from '../policy/policy.access';
-import { PolicyRepository } from '../policy/policy.repository';
 import { PolicySuspensionService } from '../policy/policy-suspension.service';
-import { SIGNATURE_WORKFLOW } from '../policy/policy.state-machine';
+import {
+  SigningAuthority,
+  SigningAuthorityDenied,
+  type SigningAuthorityResult,
+} from '../signing/signing-authority';
 import { ENV } from '../tokens';
-import { ContractRepository, type HierarchyEvidence } from './contract.repository';
+import { ContractRepository } from './contract.repository';
 import { transitionFor } from './contract.state-machine';
 import type {
   CancelContractDto,
@@ -103,8 +104,7 @@ export class ContractService {
 
   constructor(
     private readonly repository: ContractRepository,
-    private readonly policies: PolicyRepository,
-    private readonly directory: OrganizationDirectory,
+    private readonly authority: SigningAuthority,
     private readonly suspension: PolicySuspensionService,
     private readonly access: ContractAccess,
     private readonly prisma: PrismaService,
@@ -298,80 +298,45 @@ export class ContractService {
   }
 
   /**
-   * The authority a signature is accepted under, judged inside the signing transaction.
-   *
-   * The contractor's is its fixed role. The employer's is read from the `contract.signature`
-   * policy **in force** for the employer's organization, under the policy slot's advisory lock
-   * (after the contract's row lock — the one lock order, `PolicyRepository.lockPolicySlot`), so a
-   * policy approved or retired at the same moment is either entirely before this signature or
-   * entirely after it. No policy in force: `422 SIGNATURE_POLICY_REQUIRED` — the platform never
-   * defaults to granting that authority. A policy that does not name a role the caller holds: 403.
-   * The policy's id and version are recorded on the signature.
+   * The authority a signature is accepted under, judged inside the signing transaction
+   * (`SigningAuthority`, which the signature of an amendment asks as well). Each way it is denied
+   * is this command's own refusal: no policy in force and a policy whose union no longer governs
+   * the employer are audited and refused (`SigningAuthorityRefused`); a role the policy does not
+   * name is 403.
    */
   private async authorityOf(
     tx: ExtendedPrismaClient,
     contract: Contract,
     side: ContractSideName,
     contractorRole: string | undefined,
-  ): Promise<{
-    role: string;
-    policy: { id: string; version: number } | null;
-    evidence: HierarchyEvidence | null;
-  }> {
-    if (side === 'CONTRACTOR') {
-      return {
-        role: contractorRole ?? this.access.contractorSigningRole(),
-        policy: null,
-        evidence: null,
-      };
-    }
-    await this.policies.lockPolicySlot(tx, contract.organizationId, SIGNATURE_WORKFLOW);
-    const policy = await this.policies.findActivePolicyOf(
-      tx,
-      contract.organizationId,
-      SIGNATURE_WORKFLOW,
-    );
-    if (!policy) {
-      throw new SigningAuthorityRefused(
-        'SIGNATURE_POLICY_REQUIRED',
-        contract.id,
-        contract.organizationId,
-        null,
-        this.refused(
-          'sign',
-          ruleRefusal(
-            'No signing policy is in force for the employer: nobody may sign for it yet',
-            'signature',
-            ['SIGNATURE_POLICY_REQUIRED'],
-            { contractId: contract.id },
+  ): Promise<SigningAuthorityResult> {
+    try {
+      return await this.authority.resolve(tx, contract, side, contractorRole);
+    } catch (error) {
+      if (!(error instanceof SigningAuthorityDenied)) throw error;
+      if (error.reason === 'SIGNATURE_POLICY_REQUIRED') {
+        throw new SigningAuthorityRefused(
+          'SIGNATURE_POLICY_REQUIRED',
+          contract.id,
+          contract.organizationId,
+          null,
+          this.refused(
+            'sign',
+            ruleRefusal(
+              'No signing policy is in force for the employer: nobody may sign for it yet',
+              'signature',
+              ['SIGNATURE_POLICY_REQUIRED'],
+              { contractId: contract.id },
+            ),
           ),
-        ),
-      );
-    }
-    // The policy rests on a union governing the employer, and that is the hierarchy's to say, now
-    // (Q-70 (7), Q-83): a union-written policy keeps no authority once its union has lost the
-    // employer, however long ago it was approved. Asked here, under the slot's lock, so the
-    // answer and the signature are one decision — a policy approved, retired or suspended at the
-    // same moment is either entirely before this or entirely after it. "Could not confirm" is
-    // an upstream error that rolls this back: nothing is recorded on a relation that was not
-    // confirmed (fail closed). A platform administrator's policy needs no hierarchy.
-    let evidence: HierarchyEvidence | null = null;
-    if (policy.authorRole === UNION_ROLE) {
-      // The answer carries the hierarchy version of the employer, and that version — not a clock —
-      // is what a later move is ordered against (D-050). The instants are kept beside it: the
-      // question's, and the latest this signature could commit at, bound which signatures a move
-      // can have raced at all.
-      const askedAt = await databaseClock(tx);
-      const within = await this.directory.withinVersion(
-        policy.authorOrganizationId,
-        contract.organizationId,
-      );
-      if (!within) {
+        );
+      }
+      if (error.reason === 'POLICY_AUTHOR_NOT_GOVERNING') {
         throw new SigningAuthorityRefused(
           'POLICY_AUTHOR_NOT_GOVERNING',
           contract.id,
           contract.organizationId,
-          policy.id,
+          error.policyId,
           this.refused(
             'sign',
             forbiddenRefusal(
@@ -383,35 +348,16 @@ export class ContractService {
           ),
         );
       }
-      // The signing transaction's own timeout is the latest this signature can commit at
-      // (`sign`), so a move landing between `askedAt` and that deadline is one it may have raced.
-      evidence = {
-        authorOrganizationId: policy.authorOrganizationId,
-        // What orders this signature against a move: the version of the tree the answer came from.
-        hierarchyVersion: within.hierarchyVersion,
-        readAt: askedAt,
-        commitDeadline: new Date(
-          (await transactionNow(tx)).getTime() + this.signingTransactionTimeoutMs(),
-        ),
-      };
-    }
-    const roles = getContext().roles;
-    const role = signingRoleUnder(policy, roles);
-    if (!role) {
       throw this.refused(
         'sign',
-        RastaError.insufficientRole(
-          policy.steps.map((step) => step.authorityRole),
-          roles,
-        ),
+        RastaError.insufficientRole(error.requiredRoles, getContext().roles),
       );
     }
-    return { role, policy: { id: policy.id, version: policy.policyVersion }, evidence };
   }
 
   /** How long the signing transaction may run: the hierarchy question's deadline and some room. */
   private signingTransactionTimeoutMs(): number {
-    return this.env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + 10_000;
+    return this.authority.transactionTimeoutMs();
   }
 
   private async signLocked(
