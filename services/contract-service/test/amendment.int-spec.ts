@@ -156,6 +156,9 @@ describe('amendments of a signed contract', () => {
         expect(next.body).toMatchObject({ hasMore: false, nextCursor: null });
       }
       await list(c.id, c.employerToken, '?cursor=abc').expect(400);
+      // Ten digits that pass the shape but overflow the Int the number is stored as.
+      await list(c.id, c.employerToken, '?cursor=2147483648').expect(400);
+      await list(c.id, c.employerToken, '?cursor=2147483647').expect(200);
       await get(c.id, 'AMD_missing', c.employerToken).expect(404);
     });
 

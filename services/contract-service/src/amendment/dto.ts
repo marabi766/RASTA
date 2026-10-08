@@ -61,6 +61,8 @@ export const listAmendmentsQuerySchema = z
     cursor: z
       .string()
       .regex(/^[1-9][0-9]{0,9}$/)
+      // The amendment number is a Postgres/Prisma Int: ten digits can overflow it.
+      .refine((value) => Number(value) <= 2_147_483_647, 'cursor is out of range')
       .optional()
       .describe('Opaque, server-issued.'),
     limit: z.coerce.number().int().min(1).max(100).default(50),

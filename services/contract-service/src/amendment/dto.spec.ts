@@ -114,9 +114,18 @@ describe('listAmendmentsQuerySchema', () => {
       cursor: '12',
       limit: 100,
     });
-    for (const query of [{ cursor: '0' }, { cursor: 'abc' }, { cursor: '1.5' }, { limit: '101' }]) {
+    for (const query of [
+      { cursor: '0' },
+      { cursor: 'abc' },
+      { cursor: '1.5' },
+      { cursor: '2147483648' },
+      { cursor: '9999999999' },
+      { limit: '101' },
+    ]) {
       expect(listAmendmentsQuerySchema.safeParse(query).success).toBe(false);
     }
+    // The largest Int a number can be.
+    expect(listAmendmentsQuerySchema.parse({ cursor: '2147483647' }).cursor).toBe('2147483647');
   });
 });
 

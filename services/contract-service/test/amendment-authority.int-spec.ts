@@ -322,8 +322,11 @@ describe('the authority an amendment is signed under', () => {
         side: 'EMPLOYER',
         policyId: raced.policyId,
         reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
-        detectedBy: 'ORGANIZATION_MOVED',
-        causeEventId: event.eventId,
+        // The sweeper never names a cause (#231 r9, D-051), even for a move that carries the
+        // version the employer carries.
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
         movedVersion: BigInt(movedVersion),
         recordedVersion: evidence.hierarchyVersion,
       });
@@ -335,10 +338,12 @@ describe('the authority an amendment is signed under', () => {
         policyId: raced.policyId,
         policyVersion: 1,
         reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
-        detectedBy: 'ORGANIZATION_MOVED',
-        causeEventId: event.eventId,
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
         movedVersion,
       });
+      expect(JSON.stringify(events[0]!.payload)).not.toContain(event.eventId);
       // The contract's own signature (made under the same policy, before the move's window) is
       // judged by its own evidence and is not confused with the amendment's.
       expect(
@@ -397,6 +402,33 @@ describe('the authority an amendment is signed under', () => {
         movedAt: null,
       });
       expect(JSON.stringify(events[0]!.payload)).not.toContain(event.eventId);
+    });
+
+    it('a signature committed well before the move is not flagged even on an older tree; the same signature inside the window is (D-050 bound)', async () => {
+      const before = await signedUnderUnion();
+      await signAmendment(api, before.id, before.amendmentId, before.employerToken).expect(200);
+      const beforeEvidence = await evidenceOf(before.amendmentId);
+      const inside = await signedUnderUnion();
+      await signAmendment(api, inside.id, inside.amendmentId, inside.employerToken).expect(200);
+      const insideEvidence = await evidenceOf(inside.amendmentId);
+
+      for (const [c, at] of [
+        [before, new Date(beforeEvidence.hierarchyCommitDeadline!.getTime() + 30_000)],
+        [inside, new Date(insideEvidence.hierarchyCommitDeadline!.getTime() - 1)],
+      ] as const) {
+        api.hierarchy.adopt(newOrg(), c.employer);
+        await consumer.handle(moved(c.employer, at, api.hierarchy.bump(c.employer)));
+      }
+      await sweeper.runOnce();
+
+      expect(await reviewsOf(before.amendmentId)).toEqual([]);
+      expect(await flaggedEvents(before.employer)).toEqual([]);
+      expect(await reviewsOf(inside.amendmentId)).toHaveLength(1);
+      expect((await reviewsOf(inside.amendmentId))[0]).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      });
     });
 
     it('a signature that read the tree after the move recorded its version: not raced, not flagged', async () => {

@@ -290,9 +290,10 @@ export class AmendmentRepository {
   /**
    * Flags the employer amendment signatures under `policyId` that a move raced (D-050), as
    * `ContractRepository.flagRacedSignatures` does for the contract's own: the version they recorded
-   * is LOWER than the move's (or none) — **by the version alone**, no timestamp takes part (round 5
-   * of #231: two services' clocks cannot order a move); a move with no version flags every
-   * unreviewed one. Never revokes: one append-only review row each, once.
+   * is LOWER than the move's (or none), and the move's instant is at or before the signature's
+   * commit deadline (D-050, as there; no deadline, no bound); a move with no version flags every
+   * unreviewed one inside the window. The review names no cause (#231 r9, D-051). Never revokes:
+   * one append-only review row each, once.
    */
   async flagRacedSignatures(
     tx: ExtendedPrismaClient,
@@ -304,6 +305,8 @@ export class AmendmentRepository {
       movedAt: Date | null;
       detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
       movedVersion: number | null;
+      /** The move's own instant: the D-050 bound on which signatures could have raced it. Not recorded. */
+      moveInstant: Date;
       at: Date;
     },
   ): Promise<{ contractId: string; amendmentId: string; policyVersion: number }[]> {
@@ -315,14 +318,24 @@ export class AmendmentRepository {
             organizationId: input.organizationId,
             policyId: input.policyId,
             side: 'EMPLOYER',
-            ...(input.movedVersion === null
-              ? {}
-              : {
-                  OR: [
-                    { hierarchyVersion: null },
-                    { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
-                  ],
-                }),
+            AND: [
+              ...(input.movedVersion === null
+                ? []
+                : [
+                    {
+                      OR: [
+                        { hierarchyVersion: null },
+                        { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
+                      ],
+                    },
+                  ]),
+              {
+                OR: [
+                  { hierarchyCommitDeadline: null },
+                  { hierarchyCommitDeadline: { gte: input.moveInstant } },
+                ],
+              },
+            ],
             review: null,
           },
           orderBy: { id: 'asc' },

@@ -357,6 +357,7 @@ export class PolicySuspensionService {
       policyId: policy.id,
       ...attribution,
       movedVersion: cause.movedVersion,
+      moveInstant: cause.movedAt,
       at,
     });
     for (const signature of flaggedAmendments) {
@@ -373,17 +374,16 @@ export class PolicySuspensionService {
           policyVersion: signature.policyVersion,
           reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
           detectedBy: attribution.detectedBy,
-          causeEventId: attribution.causeEventId,
-          movedAt: attribution.movedAt?.toISOString() ?? null,
+          causeEventId: null,
+          movedAt: null,
           movedVersion: cause.movedVersion,
           flaggedAt: at.toISOString(),
         },
-        ...(proven ? { causationId: proven.eventId } : {}),
         occurredAt: at,
       });
       this.logger.warn(
         `Signature of amendment ${signature.amendmentId} flagged for review: the authority it rested ` +
-          `on changed while it was being made (${proven ? proven.eventId : 'no proven cause'})`,
+          `on changed while it was being made (no cause named)`,
       );
     }
   }
