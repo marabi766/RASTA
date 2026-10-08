@@ -2,6 +2,10 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ulid } from 'ulid';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { libpqInvocation } = require('../../../scripts/verify-migration-reversible-lib.mjs') as {
+  libpqInvocation: (url: string) => { target: string; env: Record<string, string> };
+};
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
 import { InsuranceService } from '../src/insurance/insurance.service';
@@ -30,16 +34,27 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     return match[1]!;
   };
 
-  /** The operator's session: `psql` as the migrator role, stopping at the first error. */
-  const psqlArgs = (): string[] => {
-    const url = new URL(ownerDatabaseUrl());
-    url.search = '';
-    return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|', url.toString()];
+  /**
+   * The operator's session: `psql` as the migrator role, stopping at the first error. The password
+   * travels in PGPASSWORD, never in argv (libpqInvocation, as the migration verifier does).
+   */
+  const psqlInvocation = () => {
+    const { target, env } = libpqInvocation(ownerDatabaseUrl());
+    return {
+      args: ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|', target],
+      env: { ...process.env, ...env },
+    };
   };
 
   /** A long-lived psql session: send text, wait for an `\echo` marker, finish. */
   function startPsql() {
-    const child = spawn('psql', psqlArgs(), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const invocation = psqlInvocation();
+    const child = spawn('psql', invocation.args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: invocation.env,
+    });
+    // psql may exit on the first error while text is still being sent.
+    child.stdin.on('error', () => undefined);
     let out = '';
     let err = '';
     const watchers: (() => void)[] = [];
@@ -60,6 +75,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       send: (text: string) => child.stdin.write(text + '\n'),
       end: () => child.stdin.end(),
       kill: () => child.kill(),
+      output: () => out,
       done,
       waitFor: (marker: string) =>
         new Promise<void>((resolveWait, reject) => {
@@ -160,21 +176,21 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
   };
 
   /** Step 1, as the operator runs it: the `candidates` block in a psql session of its own. */
-  const candidatesOf = async (assetId: string): Promise<Row[]> =>
-    (await runPsql(block('candidates')))
-      .split('\n')
-      .filter((line) => line !== '')
-      .map((line) => {
-        const [refId, rowAsset, , currentOrg, entryId, entryOrg] = line.split('|');
-        return {
-          ref_id: refId!,
-          asset_id: rowAsset!,
-          entry_id: entryId || null,
-          current_org: currentOrg!,
-          entry_org: entryOrg || null,
-        };
-      })
+  const candidateRows = (assetId: string, lines: string[][]): Row[] =>
+    lines
+      .map(([refId, rowAsset, , currentOrg, entryId, entryOrg]) => ({
+        ref_id: refId!,
+        asset_id: rowAsset!,
+        entry_id: entryId || null,
+        current_org: currentOrg!,
+        entry_org: entryOrg || null,
+      }))
       .filter((row) => refsOfAsset.get(row.ref_id) === assetId);
+  const candidatesOf = async (assetId: string): Promise<Row[]> =>
+    candidateRows(
+      assetId,
+      sections(await runPsql(['\\echo @@candidates', block('candidates')].join('\n'))).candidates!,
+    );
   const refsOfAsset = new Map<string, string>();
 
   const insertOwners = (rows: { ref: string; owner: string }[]) =>
@@ -186,29 +202,34 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       .join('\n');
 
   /**
-   * Runs the runbook's step 3 and 4 for `assetId` the way the operator would: one psql session, the
-   * blocks verbatim — read-only switched off, BEGIN, the lock fence, temp tables, repair, the three
-   * checks, COMMIT.
+   * Runs the runbook's steps 1, 3 and 4 for `assetId` exactly as the operator does: ONE long-lived
+   * psql session — the candidates block (which switches the session read-only), then, once step 2's
+   * owners are known, the blocks verbatim: read-only switched off, BEGIN, the lock fence, temp
+   * tables, repair, the cleared-marker list, the three checks, COMMIT. `begin` can be swapped to
+   * prove what a missing line does.
    */
-  async function repair(assetId: string) {
-    const candidates = await candidatesOf(assetId);
-    // Step 2: the owner of each document, from document-service.
-    const verified = candidates.map((row) => ({
-      ref: row.ref_id,
-      owner: owners.get(refDocument.get(row.ref_id)!)!,
-      current: row.current_org,
-    }));
-    const moved = verified.filter((v) => v.owner !== v.current);
-
-    const output = sections(
-      await runPsql(
+  async function operatorSession(assetId: string, begin: string = block('begin')) {
+    const session = startPsql();
+    try {
+      session.send(['\\echo @@candidates', block('candidates'), '\\echo @@step1-done'].join('\n'));
+      await session.waitFor('@@step1-done');
+      const candidates = candidateRows(assetId, sections(session.output()).candidates!);
+      // Step 2: the owner of each document, from document-service.
+      const verified = candidates.map((row) => ({
+        ref: row.ref_id,
+        owner: owners.get(refDocument.get(row.ref_id)!)!,
+        current: row.current_org,
+      }));
+      session.send(
         [
-          block('begin'),
+          begin,
           block('load'),
           block('load-returned'),
           insertOwners(verified),
           '\\echo @@repair',
           block('repair'),
+          '\\echo @@cleared',
+          block('cleared-list'),
           '\\echo @@pairs',
           block('verify-pairs'),
           '\\echo @@owners',
@@ -217,11 +238,22 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
           block('verify-markers'),
           block('commit'),
         ].join('\n'),
-      ),
-    );
+      );
+      session.end();
+      return { output: sections(await session.done), verified };
+    } finally {
+      session.kill();
+    }
+  }
+
+  /** The operator's whole procedure, reporting what it printed. */
+  async function repair(assetId: string) {
+    const { output, verified } = await operatorSession(assetId);
+    const moved = verified.filter((v) => v.owner !== v.current);
     const [refsFixed, entriesFixed, markersCleared, assetsReturned] =
       output.repair![0]!.map(Number);
     return {
+      clearedList: output.cleared!,
       counts: {
         refs_fixed: refsFixed,
         entries_fixed: entriesFixed,
@@ -444,8 +476,29 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       assets_returned: 1,
     });
     expect(result.markersLeft).toEqual([]);
+    // The operator is told which owner to notify: asset id + its current organization.
+    expect(result.clearedList).toEqual([[assetId, org.b]]);
     expect(await orgOfRef(refA)).toBe(org.a);
     expect(await markerOf(assetId)).toBeNull();
+  });
+
+  it('without the read-only reset line, step 3 fails in the step-1 session and changes nothing (#234 round 12)', async () => {
+    const assetId = await newAsset(org.a);
+    const refA = await attach(assetId, org.a);
+    await transfer(assetId, org.a, org.b);
+    await legacyCarry(assetId, org.b);
+    refsOfAsset.set(refA, assetId);
+
+    const reset = 'SET default_transaction_read_only = off;';
+    const withoutReset = block('begin').replace(reset, '');
+    expect(withoutReset).not.toBe(block('begin'));
+
+    await expect(operatorSession(assetId, withoutReset)).rejects.toThrow(/read-only transaction/);
+    expect(await orgOfRef(refA)).toBe(org.b);
+
+    // With the line, the same session repairs it.
+    expect((await repair(assetId)).counts.refs_fixed).toBe(1);
+    expect(await orgOfRef(refA)).toBe(org.a);
   });
 
   /** Step 4's marker check, as the operator runs it: in the repair's transaction, with its temporary tables. */
@@ -513,6 +566,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       assets_returned: 1,
     });
     expect(result.markersLeft).toEqual([]);
+    expect(result.clearedList).toEqual([]);
     expect(await orgOfRef(refA)).toBe(org.a);
     expect(await markerOf(assetId)).toBe(org.b);
     // Even told the returned reference was an ownership document, B's own title keeps the marker valid.

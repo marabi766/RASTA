@@ -118,6 +118,12 @@ CREATE TEMP TABLE returned_asset (
   asset_id text PRIMARY KEY,
   returned_ownership boolean NOT NULL
 ) ON COMMIT DROP;
+
+-- داراییِ هر نشانه‌ای که این اجرا پاک می‌کند، همراه با سازمان فعلی‌اش (برای اطلاع‌رسانی به مالک).
+CREATE TEMP TABLE cleared_asset (
+  asset_id text PRIMARY KEY,
+  organization_id text NOT NULL
+) ON COMMIT DROP;
 ```
 
 ```sql
@@ -156,7 +162,11 @@ WITH fixed_refs AS (
                       WHERE o.asset_id = a.id AND o.deleted_at IS NULL
                         AND o.kind IN ('OWNERSHIP_TITLE', 'REGISTRATION_CARD')
                         AND COALESCE(v.document_owner, o.organization_id) = a.organization_id)
-  RETURNING a.id
+  RETURNING a.id, a.organization_id
+), listed AS (
+  INSERT INTO cleared_asset (asset_id, organization_id)
+  SELECT c.id, c.organization_id FROM cleared_markers c
+  RETURNING asset_id
 ), recorded AS (
   INSERT INTO returned_asset (asset_id, returned_ownership)
   SELECT r.asset_id,
@@ -170,6 +180,15 @@ SELECT (SELECT count(*) FROM fixed_refs)::int AS refs_fixed,
        (SELECT count(*) FROM fixed_entries)::int AS entries_fixed,
        (SELECT count(*) FROM cleared_markers)::int AS markers_cleared,
        (SELECT count(*) FROM recorded)::int AS assets_returned;
+```
+
+پاک‌کردنِ نشانه **عمداً محافظه‌کارانه** است: در تاریخچهٔ مبهم (مثلاً سندِ A برگشته و ارجاعِ C هم برگشته، در حالی که B نشانهٔ خود را با
+سندی گرفته بود که بعداً برداشته شده) نشانه پاک می‌شود. بدترین پیامد این است که مالک فعلی دوباره سند مالکیتش را بچسباند؛ هیچ‌گاه مالکی
+که اثباتش نشده از بررسی مدرک معاف نمی‌ماند، و امروز API جداسازی (detach) وجود ندارد. فهرست همهٔ داراییِ پاک‌شده‌نشانه‌ها (شناسهٔ
+دارایی و سازمان فعلی) را همین نشست چاپ می‌کند؛ آن را در تیکت ثبت و به مالکان اعلام کن تا سند مالکیت را بچسبانند:
+
+```sql cleared-list
+SELECT c.asset_id, c.organization_id AS current_org FROM cleared_asset c ORDER BY c.asset_id;
 ```
 
 دو شمارش اول را با شمار ارجاع‌های جابه‌جاشدهٔ گام ۲ مقایسه کن (هر ارجاع جابه‌جاشده یک ارجاع و یک ردیف خط زمانی)؛ فقط در
@@ -232,5 +251,6 @@ SELECT a.id AS asset_id, a.commissioned_for_organization_id AS marker
 روش، پیش از هر استفاده، با تست یکپارچه روی تاریخچه‌های A→B→C و A→B→A اجرا می‌شود
 (`services/asset-service/test/document-ref-reconciliation-runbook.int-spec.ts`): بلوک‌های SQLِ همین سند را از همین فایل
 بیرون می‌کشد و **کلمه‌به‌کلمه، بدون حذف هیچ خط** (از جمله `SET default_transaction_read_only`، `BEGIN`، قفل و `COMMIT`) با
-`psql` در یک نشست اجرا می‌کند، پس آنچه مستند است همان است که آزموده شده. همان تست ثابت می‌کند که نشست دیگر تا `COMMIT`
+`psql` در **یک نشستِ پیوسته** (گام ۱، ۳ و ۴ پشت سر هم، دقیقاً رویهٔ اپراتور) اجرا می‌کند؛ حالتِ منفی ثابت می‌کند بدون خطِ
+خاموش‌کردنِ فقط‌خواندنی گام ۳ شکست می‌خورد، و فهرست `cleared-list` آزموده می‌شود، پس آنچه مستند است همان است که آزموده شده. همان تست ثابت می‌کند که نشست دیگر تا `COMMIT`
 نمی‌تواند `asset_document_ref` را بخواند.
