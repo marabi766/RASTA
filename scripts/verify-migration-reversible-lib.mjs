@@ -2847,6 +2847,330 @@ export function psqlRunner(url) {
   };
 }
 
+/**
+ * The first line of a down.sql that must run outside a transaction (`DROP INDEX
+ * CONCURRENTLY`, …). Such a file is run with plain `--file` and must be safe to
+ * run again — see `downFileProblems`.
+ */
+export const NO_TRANSACTION_MARKER = '-- rasta:no-transaction';
+
+const IDENTIFIER_CHAR = /[A-Za-z0-9_$\u0080-￿]/;
+const DOLLAR_QUOTE_OPEN = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
+
+/**
+ * Splits a SQL script into its top-level statements the way PostgreSQL's and psql's lexers see
+ * it, so that nothing inside a string, an identifier, a comment or a dollar-quoted body can be
+ * mistaken for code, and nothing that is code can hide in one.
+ *
+ *   - `'…'` strings, with `''` for a quote, and backslash escapes in an `E'…'` string only. A
+ *     backslash inside an ordinary `'…'` string is a **problem**: with
+ *     `standard_conforming_strings = off` it escapes the next character (`\'` is a quote), so the
+ *     server would read the string as closing later than this lexer does, and a COMMIT or `\q`
+ *     after it would be hidden (Codex on #237, round 3). The setting itself is refused too
+ *     (`downFileMode`), but the lexer does not rely on that;
+ *   - `"…"` identifiers, with `""` for a quote (kept verbatim: a name is part of a statement);
+ *   - `$$…$$` and `$tag$…$tag$` bodies (a `$` straight after an identifier character is part of
+ *     that identifier, not a quote);
+ *   - block comments (opened by slash-star), which nest, and `-- …` line comments.
+ *
+ * Returns `statements` (trimmed, in order: a string is reduced to `''`, a dollar-quoted body to
+ * `$$`, a comment to a space), `metaCommands` (every backslash met in code — psql would run it as
+ * a command, outside the server's SQL altogether) and `problems` (an unterminated string,
+ * identifier, comment or dollar quote). A script with a problem is never to be run.
+ */
+export function lexSql(sql) {
+  const statements = [];
+  const metaCommands = [];
+  const problems = [];
+  let current = '';
+  let i = 0;
+  let dollarEnd = -1;
+  const length = sql.length;
+  const flush = () => {
+    const statement = current.trim();
+    if (statement) statements.push(statement);
+    current = '';
+  };
+  const continuesIdentifier = (at) =>
+    at >= 0 && at !== dollarEnd - 1 && IDENTIFIER_CHAR.test(sql[at] ?? '');
+
+  while (i < length) {
+    const c = sql[i];
+    const next = sql[i + 1];
+
+    if (c === '-' && next === '-') {
+      while (i < length && sql[i] !== '\n') i += 1;
+      current += ' ';
+      continue;
+    }
+
+    if (c === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth += 1;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      if (depth > 0) problems.push('an unterminated /* comment');
+      current += ' ';
+      continue;
+    }
+
+    if (c === "'") {
+      const escapes = /[eE]/.test(sql[i - 1] ?? '') && !continuesIdentifier(i - 2);
+      let closed = false;
+      let backslash = false;
+      i += 1;
+      while (i < length) {
+        if (escapes && sql[i] === '\\') {
+          i += 2;
+        } else if (!escapes && sql[i] === '\\') {
+          backslash = true;
+          i += 1;
+        } else if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+        } else if (sql[i] === "'") {
+          i += 1;
+          closed = true;
+          break;
+        } else {
+          i += 1;
+        }
+      }
+      if (!closed) problems.push('an unterminated string');
+      if (backslash) {
+        problems.push(
+          "a backslash inside an ordinary '…' string (write E'…' if an escape is meant; the " +
+            'meaning of a plain string depends on standard_conforming_strings)',
+        );
+      }
+      current += "''";
+      continue;
+    }
+
+    if (c === '"') {
+      let name = '"';
+      let closed = false;
+      i += 1;
+      while (i < length) {
+        if (sql[i] === '"' && sql[i + 1] === '"') {
+          name += '""';
+          i += 2;
+        } else if (sql[i] === '"') {
+          name += '"';
+          i += 1;
+          closed = true;
+          break;
+        } else {
+          name += sql[i];
+          i += 1;
+        }
+      }
+      if (!closed) problems.push('an unterminated "identifier"');
+      current += name;
+      continue;
+    }
+
+    if (c === '$' && !continuesIdentifier(i - 1)) {
+      DOLLAR_QUOTE_OPEN.lastIndex = i;
+      const open = DOLLAR_QUOTE_OPEN.exec(sql);
+      if (open) {
+        const end = sql.indexOf(open[0], i + open[0].length);
+        if (end < 0) {
+          problems.push(`an unterminated ${open[0]} quote`);
+          i = length;
+        } else {
+          i = end + open[0].length;
+        }
+        dollarEnd = i;
+        current += '$$';
+        continue;
+      }
+    }
+
+    if (c === '\\') {
+      const lineStart = sql.lastIndexOf('\n', i) + 1;
+      const lineEnd = sql.indexOf('\n', i);
+      metaCommands.push(sql.slice(lineStart, lineEnd < 0 ? length : lineEnd).trim());
+    }
+
+    if (c === ';') {
+      flush();
+    } else {
+      current += c;
+    }
+    i += 1;
+  }
+  flush();
+  return { statements, metaCommands, problems };
+}
+
+const TRANSACTION_CONTROL =
+  /^(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION)\b/i;
+const LEDGER_DELETE = /^DELETE\s+FROM\s+"_prisma_migrations"\s+WHERE\s+"migration_name"\s*=\s*''$/i;
+/** An index name, plain or quoted, with an optional schema before it. */
+const INDEX_NAME = String.raw`(?:(?:[a-z_][a-z0-9_$]*|"[^"]+")\.)?(?:[a-z_][a-z0-9_$]*|"[^"]+")`;
+/**
+ * The only statements a no-transaction file may hold besides its one final ledger DELETE: one
+ * that does nothing, or finishes the job, when run again.
+ *
+ * No `CREATE INDEX`, in any form (Codex on #237, round 3): `CREATE INDEX CONCURRENTLY IF NOT
+ * EXISTS` that fails part-way leaves an INVALID index, a retry skips it as "already there", and
+ * the ledger row is deleted all the same — the index is then neither valid nor rebuilt.
+ */
+const NO_TRANSACTION_ALLOWED = [
+  new RegExp(`^DROP\\s+INDEX\\s+CONCURRENTLY\\s+IF\\s+EXISTS\\s+${INDEX_NAME}$`, 'i'),
+];
+
+/**
+ * The two settings that change how psql's and the server's lexers read a string. A down file has
+ * no business with either, so their names are refused anywhere in the file — in code, in a string
+ * or dollar-quoted body (`set_config(…)`), in a comment — rather than argued about case by case.
+ */
+const STRING_LEXING_SETTINGS = /\b(?:standard_conforming_strings|backslash_quote)\b/i;
+
+/**
+ * How a down.sql is to be run, and what is wrong with it for that mode.
+ * Returns `{ mode, problems }`, `mode` being one of
+ *
+ *   `single-transaction` — the default: `psql --single-transaction`, the whole file
+ *                          atomic, `SET LOCAL` effective, no partial rollback;
+ *   `own-transaction`    — the file is itself `BEGIN; … COMMIT;` as a whole. Run with
+ *                          plain `--file`: under `--single-transaction` its COMMIT would
+ *                          end psql's transaction early, and a statement after it would
+ *                          then run on its own;
+ *   `no-transaction`     — the first line is `-- rasta:no-transaction`: for a statement
+ *                          that cannot run in a transaction. Run with plain `--file`,
+ *                          so it must be safe to run again.
+ */
+export function downFileMode(sql) {
+  const lexed = lexSql(sql);
+  const { statements } = lexed;
+  const problems = [
+    ...lexed.problems.map((problem) => `the file has ${problem}`),
+    ...lexed.metaCommands.map(
+      (line) => `a psql meta-command is not allowed in a down.sql: "${line.slice(0, 60)}"`,
+    ),
+  ];
+  if (STRING_LEXING_SETTINGS.test(sql)) {
+    problems.push(
+      'a down.sql must not SET, RESET or set_config standard_conforming_strings or backslash_quote ' +
+        '(they change how a string is read, so what this check saw is not what would run)',
+    );
+  }
+  const control = statements.filter((statement) => TRANSACTION_CONTROL.test(statement));
+  const marked = sql.split('\n', 1)[0].trim() === NO_TRANSACTION_MARKER;
+  if (/rasta:no-transaction/.test(sql) && !marked) {
+    problems.push(`the ${NO_TRANSACTION_MARKER} marker must be the first line of the file`);
+  }
+
+  if (marked) {
+    if (control.length > 0) {
+      problems.push(
+        'a no-transaction file must not contain transaction control (BEGIN, COMMIT, …)',
+      );
+    }
+    // Plain --file: a failure part-way leaves what ran, so what ran must be harmless to run again.
+    // An allow-list, not a deny-list: anything not named here is refused.
+    const last = statements.at(-1);
+    const ledgerLast = last !== undefined && LEDGER_DELETE.test(last);
+    if (!ledgerLast) {
+      problems.push(
+        'a no-transaction file must end with its ledger DELETE, so a failure leaves the row',
+      );
+    }
+    for (const statement of ledgerLast ? statements.slice(0, -1) : statements) {
+      if (!NO_TRANSACTION_ALLOWED.some((allowed) => allowed.test(statement))) {
+        problems.push(
+          `a no-transaction file may hold only DROP INDEX CONCURRENTLY IF EXISTS <name> and its one ` +
+            `final ledger DELETE (no CREATE INDEX of any form: a retry would skip an INVALID leftover ` +
+            `while the ledger row is gone): "${statement.slice(0, 60)}" is none of them`,
+        );
+      }
+    }
+    return { mode: 'no-transaction', problems };
+  }
+
+  if (control.length === 0) return { mode: 'single-transaction', problems };
+
+  const wrapped =
+    control.length === 2 &&
+    /^(BEGIN|START\s+TRANSACTION)\b/i.test(statements[0]) &&
+    /^(COMMIT|END)\b/i.test(statements.at(-1));
+  if (!wrapped) {
+    problems.push(
+      'transaction control is allowed only as one BEGIN first and one COMMIT last (the whole file), ' +
+        'or not at all; a file that must run outside a transaction declares ' +
+        `${NO_TRANSACTION_MARKER} on its first line`,
+    );
+  }
+  return { mode: 'own-transaction', problems };
+}
+
+/**
+ * Runs one SQL **file** the way the runbook runs a rollback by hand:
+ *
+ *   psql -X -v ON_ERROR_STOP=1 --single-transaction --file <down.sql>
+ *
+ * The whole file is one transaction: it applies completely or not at all, so a
+ * down that fails on a late statement cannot leave data deleted and the ledger
+ * row present, and `SET LOCAL lock_timeout` (which has no effect outside a
+ * transaction) works. `-X` keeps a user's `.psqlrc` from changing ON_ERROR_STOP
+ * or autocommit.
+ *
+ * Two kinds of file run with plain `--file` instead, decided by `downFileMode`
+ * from the file itself: one that is wrapped in its own `BEGIN … COMMIT` as a
+ * whole (its COMMIT would end psql's transaction early, and anything after it
+ * would run on its own), and one that declares `-- rasta:no-transaction` on its
+ * first line. A file that fits none of the shapes is refused, not run.
+ *
+ * `schema` becomes the session's `search_path`, as Prisma's `?schema=` does for
+ * the commands it runs; psql has no such parameter, and an unqualified name in
+ * a down would otherwise resolve against `public`. A separate `-c`, run before
+ * the file in the same session, rather than `PGOPTIONS`, which a URL's own
+ * `options` parameter would silently override.
+ */
+export function psqlFileRunner(url, schema) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) {
+    throw new Error(`psqlFileRunner: "${schema}" is not a plain lowercase identifier`);
+  }
+  const { target, env } = libpqInvocation(url);
+  return (file) => {
+    const { mode, problems } = downFileMode(readFileSync(file, 'utf8'));
+    if (problems.length > 0) {
+      return {
+        ok: false,
+        output: `${file}: not a runnable down.sql:\n  ${problems.join('\n  ')}\n`,
+      };
+    }
+    const result = spawnSync(
+      'psql',
+      [
+        target,
+        '-X',
+        '-q',
+        '-v',
+        'ON_ERROR_STOP=1',
+        ...(mode === 'single-transaction' ? ['--single-transaction'] : []),
+        '-c',
+        `SET search_path TO "${schema}"`,
+        '--file',
+        file,
+      ],
+      { encoding: 'utf8', env: { ...process.env, ...env } },
+    );
+    const stderr = result.stderr ?? (result.error ? String(result.error) : '');
+    return { ok: result.status === 0, output: `${result.stdout ?? ''}${stderr}`, mode };
+  };
+}
+
 /** SQLSTATE 55006 — `object_in_use`: another backend is still in the database after PostgreSQL's own wait. */
 const OBJECT_IN_USE = '55006';
 
