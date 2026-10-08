@@ -114,6 +114,50 @@ pnpm --filter @rasta/asset-service exec prisma migrate resolve --rolled-back <mi
 
 **در Production هرگز `migrate reset` نزن.**
 
+<a id="running-down-sql"></a>
+
+### اجرای `down.sql` — مسیر پشتیبانی‌شدهٔ بازگشت
+
+هر `down.sql` را **این‌گونه** اجرا کن، با نقش مالک (مهاجر) سرویس، و نه راه دیگر:
+
+```bash
+psql "<URL بی گذرواژه>" -X -q -v ON_ERROR_STOP=1 --single-transaction \
+  -c 'SET search_path TO "<schema>"' \
+  --file services/<svc>-service/prisma/migrations/<migration>/down.sql
+```
+
+(گذرواژه در `PGPASSWORD`؛ در Schema پیش‌فرض `public`، همان `SET search_path` لازم است.) `pnpm test:migration`
+**دقیقاً همین** را اجرا می‌کند (`psqlFileRunner` در `scripts/verify-migration-reversible-lib.mjs`)، پس چیزی که
+تأیید شده همان چیزی است که شب حادثه اجرا می‌شود.
+
+- **`-X` الزامی است.** `~/.psqlrc` کاربر می‌تواند `ON_ERROR_STOP` یا `AUTOCOMMIT` را عوض کند؛ `-X` آن را نمی‌خواند.
+- **`ON_ERROR_STOP=1` الزامی است.** بی آن `psql` پس از خطا ادامه می‌دهد و دستورهای بعدی را روی Schemaی نیمه‌برگشته
+  اجرا می‌کند.
+- **`--single-transaction` الزامی است** (مگر دو استثنای پایین). کل فایل یک تراکنش است: یا کامل اعمال می‌شود یا
+  هیچ؛ پس `down.sql`ای که در دستور آخر شکست بخورد نه داده‌ای حذف‌شده با ردیف دفترِ باقی‌مانده به‌جا می‌گذارد و نه
+  Schemaی نیمه‌برگشته. `SET LOCAL lock_timeout` هم فقط داخل تراکنش اثر دارد.
+- **استثنا ۱ — فایلی که خودش یکسره `BEGIN … COMMIT` است** (نخستین دستور `BEGIN`، آخرین `COMMIT`، و هیچ کنترل
+  تراکنش دیگری): بی `--single-transaction` اجرا شود، چون `COMMIT` فایل تراکنش بیرونی را زودتر می‌بندد و دستور
+  بعد از آن تک‌به‌تک Commit می‌شود. اتمیک‌بودن را همان `BEGIN … COMMIT` فایل تأمین می‌کند.
+- **استثنا ۲ — فایلی که نباید در تراکنش اجرا شود** (مثل `DROP INDEX CONCURRENTLY`): نخستین سطرش دقیقاً
+  `-- rasta:no-transaction` است و بی `--single-transaction` اجرا می‌شود. چنین فایلی باید بی‌خطر قابل‌اجرای
+  دوباره باشد، پس فهرست مجاز بسته است: **فقط** `DROP INDEX CONCURRENTLY IF EXISTS <نام>;` و تنها `DELETE` دفتر
+  به‌عنوان آخرین دستور؛ بی کنترل تراکنش و بی هر دستور دیگر. **هیچ شکلی از `CREATE INDEX` مجاز نیست** (نه
+  `UNIQUE`، نه `IF NOT EXISTS`): ساخت `CONCURRENTLY`ای که نیمه‌کاره شکست بخورد Index نامعتبر (`INVALID`) به‌جا
+  می‌گذارد، اجرای دوباره آن را به‌خاطر `IF NOT EXISTS` رد می‌کند، و ردیف دفتر با این حال پاک شده است. تست کتابخانه
+  (`downFileMode`) این قواعد را می‌پذیرد و رد می‌کند؛ Verifier حالت را از خود فایل برمی‌دارد و فایلی را که با
+  هیچ‌یک از سه شکل نخواند اجرا نمی‌کند.
+- **رشته‌ها:** در `down.sql` پشت‌خط (`\`) داخل رشتهٔ معمولی `'…'` ممنوع است (معنای آن به
+  `standard_conforming_strings` بستگی دارد: با `off`، `\'` نقل‌قولِ فرار است و رشته دیرتر بسته می‌شود، پس
+  `COMMIT` یا `\q` پس از آن از دید Verifier پنهان می‌ماند)؛ اگر فرار لازم است `E'…'` بنویسید. هر `SET`/`RESET`/
+  `set_config` روی `standard_conforming_strings` یا `backslash_quote` در هر جای فایل رد می‌شود.
+- **`-c` به‌جای `--file` نه، و `prisma db execute` برای `down.sql` نه.** `db execute` فقط برای یک دستور
+  تک‌خطی در همین runbook (مثل `DROP INDEX CONCURRENTLY`) مجاز است.
+- **قاعدهٔ نوشتن:** پیش‌شرط‌ها (`RAISE EXCEPTION`) پیش از **نخستین** دستور تغییردهنده بیایند. فایل یا بی کنترل
+  تراکنش است، یا یکسره `BEGIN … COMMIT`، یا نشانهٔ `-- rasta:no-transaction` دارد؛ `BEGIN`/`COMMIT` در میانهٔ
+  فایل پذیرفته نیست. Verifier خطای `down.sql`، و نیز هر امتناعی که Schema را تغییر دهد (`mustRefuseDown`)، رد می‌کند.
+- چند `down.sql` پشت‌سرهم: هرکدام یک `psql` جدا، از جدیدترین به قدیمی‌ترین، و با نخستین شکست بایست.
+
 <a id="marketplace-order-key-index"></a>
 
 ### marketplace: شکست Migrationهای یکتایی کلید سفارش
@@ -325,7 +369,8 @@ Prisma فقط Migration شکست‌خورده را دوباره اجرا می‌
 می‌کند:
 
 ```bash
-$PRISMA db execute --schema prisma/schema.prisma \
+psql "<URL بی گذرواژه>" -X -q -v ON_ERROR_STOP=1 --single-transaction \
+  -c 'SET search_path TO "public"' \
   --file prisma/migrations/20261004100000_membership_live_duplicates_guard/down.sql
 ```
 
@@ -355,8 +400,7 @@ SELECT i.indisvalid FROM pg_index i
 #### ج) بازگرداندن: `down.sql` کلید قدیمی را بدون `CONCURRENTLY` می‌سازد
 
 `20261004100200_drop_membership_deleted_at_unique/down.sql` یک تراکنش است: باید ردیف دفتر خودش را هم حذف
-کند، و `CONCURRENTLY` نمی‌تواند با دستور دیگری در یک اسکریپت بنشیند (اجراکنندهٔ `down.sql` هر فایل را یک
-تراکنش ضمنی اجرا می‌کند). پس ساختش قفل `SHARE` روی `membership` می‌گیرد: **خواندن ادامه دارد، نوشتن —
+کند، و `CONCURRENTLY` نمی‌تواند با دستور دیگری در یک اسکریپت بنشیند (روش اجرای `down.sql`: [اجرای `down.sql`](#running-down-sql)). پس ساختش قفل `SHARE` روی `membership` می‌گیرد: **خواندن ادامه دارد، نوشتن —
 افزودن، لغو و تغییر نقش عضویت، و تأیید ثبت‌نام — تا پایان ساخت منتظر می‌ماند.** `lock_timeout = 5s` فقط
 انتظار برای گرفتن قفل را محدود می‌کند، نه طول ساخت را.
 
