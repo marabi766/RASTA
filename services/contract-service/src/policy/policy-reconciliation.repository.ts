@@ -244,19 +244,6 @@ export class PolicyReconciliationRepository {
     );
   }
 
-  /**
-   * Finishes a task whose lookup said "within", or gives it back if a later move landed since it
-   * was claimed: `true` = DONE, `false` = released and due again (or the lease was lost), so the
-   * next sweep asks once more.
-   */
-  async markDone(task: ClaimedTask): Promise<boolean> {
-    if ((await this.complete(this.prisma.client, task, { currentGeneration: true })) > 0) {
-      return true;
-    }
-    await this.release(task);
-    return false;
-  }
-
   /** Lets go of the lease without finishing: the task stays open and, if due, is claimable at once. */
   async release(task: ClaimedTask): Promise<number> {
     return this.prisma.client.$executeRawUnsafe(
@@ -314,20 +301,40 @@ export class PolicyReconciliationRepository {
     };
   }
 
-  /** One more attempt, later, with the reason as a closed code. Fenced on the lease. */
-  async retryLater(task: ClaimedTask, errorCode: string, backoffSeconds: number): Promise<number> {
-    return this.prisma.client.$executeRawUnsafe(
+  /**
+   * One more attempt, later, with the reason as a closed code. Fenced on the lease and on the
+   * **generation** claimed (round 12): a lookup that failed for generation g says nothing about a
+   * move that coalesced into the task since, and must not push that move's immediate due time out
+   * to a backoff. So when the generation changed the lease is released and the due time, attempts
+   * and error code are left as the newer move set them: `SUPERSEDED`. `LOST`: the lease was not
+   * this worker's. One statement, so no move can slip between the check and the write.
+   */
+  async retryLater(
+    task: ClaimedTask,
+    errorCode: string,
+    backoffSeconds: number,
+  ): Promise<'RETRIED' | 'SUPERSEDED' | 'LOST'> {
+    const rows = await this.prisma.client.$queryRawUnsafe<{ retried: boolean }[]>(
       `UPDATE policy_reconciliation_task
-          SET attempts = attempts + 1, last_error_code = $4, updated_at = now(),
-              next_attempt_at = now() + ($5::int * interval '1 second'),
+          SET attempts = CASE WHEN generation = $6::int THEN attempts + 1 ELSE attempts END,
+              last_error_code = CASE WHEN generation = $6::int THEN $4 ELSE last_error_code END,
+              next_attempt_at = CASE WHEN generation = $6::int
+                                     THEN now() + ($5::int * interval '1 second')
+                                     ELSE next_attempt_at END,
+              updated_at = now(),
               lease_until = NULL, lease_token = NULL
-        WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'`,
+        WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
+    RETURNING (generation = $6::int) AS retried`,
       task.organizationId,
       task.id,
       task.leaseToken,
       errorCode,
       backoffSeconds,
+      task.generation,
     );
+    const row = rows[0];
+    if (!row) return 'LOST';
+    return row.retried ? 'RETRIED' : 'SUPERSEDED';
   }
 
   /** Sampled for the gauges: what is waiting, and for how long. */

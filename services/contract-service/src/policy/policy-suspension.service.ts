@@ -192,6 +192,12 @@ export class PolicySuspensionService {
     candidate: { id: string; organizationId: string },
     cause: SuspensionCause,
     ownership?: TaskOwnership,
+    /**
+     * The current answer is "within": nothing is suspended, but the race window is still
+     * reviewed (D-050) — the answer decides suspension only, never whether a signature that
+     * committed while authority was absent is looked at (round 12).
+     */
+    options: { within?: boolean } = {},
   ): Promise<SuspendResult> {
     // The tenant is the policy's own organization, never the moved one: the event names one
     // organization, the stranded policies belong to others.
@@ -221,11 +227,39 @@ export class PolicySuspensionService {
             };
           }
         }
-        const suspended = await this.suspendIn(tx, candidate.id, effective);
+        const suspended = options.within
+          ? await this.reviewRaceIn(tx, candidate.id, effective)
+          : await this.suspendIn(tx, candidate.id, effective);
         await ownership?.finish(tx);
         return suspended ? ('SUSPENDED' as const) : ('NOTHING' as const);
       }),
     );
+  }
+
+  /**
+   * A re-check whose answer is "within": no status changes, but a signature that committed while
+   * the employer was out of the union (out, signed, back before the sweep) is reviewed all the same
+   * — same predicate, same `MOVE_RECHECK` attribution as a suspension (D-050). Always `false`:
+   * nothing was suspended.
+   */
+  private async reviewRaceIn(
+    tx: ExtendedPrismaClient,
+    policyId: string,
+    cause: SuspensionCause,
+  ): Promise<boolean> {
+    if (cause.reason === 'SIGNING_RECHECK') return false;
+    const at = await transactionNow(tx);
+    const found = await this.repository.findPolicy(tx, policyId);
+    if (!found) return false;
+    await this.repository.lockPolicySlot(
+      tx,
+      found.organizationId,
+      found.workflowKey as WorkflowKey,
+    );
+    const policy = await this.repository.findPolicy(tx, policyId);
+    if (!policy || policy.authorRole !== UNION_ROLE) return false;
+    await this.flagRaced(tx, policy, cause, at);
+    return false;
   }
 
   private async suspendIn(

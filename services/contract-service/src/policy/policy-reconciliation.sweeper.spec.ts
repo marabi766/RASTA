@@ -33,10 +33,9 @@ const task = (overrides: Partial<ClaimedTask> = {}): ClaimedTask => ({
 function build(tasks: ClaimedTask[] = []) {
   const reconciliations = {
     claimDue: jest.fn(async () => tasks),
-    markDone: jest.fn(async () => true),
     ownershipOf: jest.fn(() => ({ verify: jest.fn(), finish: jest.fn() })),
     release: jest.fn(async () => 1),
-    retryLater: jest.fn(async () => 1),
+    retryLater: jest.fn(async (): Promise<'RETRIED' | 'SUPERSEDED' | 'LOST'> => 'RETRIED'),
     backlog: jest.fn(async () => ({ open: 1, due: 1, oldestDueAgeSeconds: 12.4 })),
   };
   const suspension = {
@@ -71,6 +70,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
         callerService: 'organization-service',
       },
       expect.anything(),
+      { within: false },
     );
     expect(reconciliations.ownershipOf).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'PRT_1' }),
@@ -78,17 +78,24 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     expect(outcome).toMatchObject({ claimed: 1, suspended: 1, confirmed: 0, retried: 0 });
   });
 
-  it('finishes the task when the union still governs, and gives it back when a later move landed since the claim', async () => {
-    const { sweeper, reconciliations, suspension, directory } = build([
+  it('on "within" still takes the race-window review through the same call, without suspending (round 12)', async () => {
+    const { sweeper, suspension, directory } = build([
       task(),
       task({ id: 'PRT_2', policyId: 'APL_2' }),
     ]);
     directory.isWithin.mockResolvedValue(true);
-    reconciliations.markDone.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    suspension.suspend.mockResolvedValueOnce('NOTHING').mockResolvedValueOnce('STALE');
 
     const outcome = await sweeper.runOnce();
 
-    expect(suspension.suspend).not.toHaveBeenCalled();
+    expect(suspension.suspend).toHaveBeenCalledTimes(2);
+    expect(suspension.suspend).toHaveBeenNthCalledWith(
+      1,
+      { id: 'APL_1', organizationId: 'ORG_E' },
+      expect.objectContaining({ reason: 'MOVE_RECHECK', movedVersion: 4 }),
+      expect.anything(),
+      { within: true },
+    );
     expect(outcome).toMatchObject({ confirmed: 1, requeued: 1, suspended: 0 });
     // One question for the (union, organization) pair, whatever the number of tasks it answers.
     expect(directory.isWithin).toHaveBeenCalledTimes(1);
@@ -170,6 +177,17 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     // One task failing never stalls the batch.
     expect(suspension.suspend).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['SUPERSEDED', 'LOST'] as const)(
+    'counts a failed lookup as retried and logs no backoff when the put-back answers %s (round 12)',
+    async (answer) => {
+      const { sweeper, reconciliations, directory } = build([task()]);
+      directory.isWithin.mockRejectedValue(new Error('down'));
+      reconciliations.retryLater.mockResolvedValue(answer);
+      await expect(sweeper.runOnce()).resolves.toMatchObject({ retried: 1 });
+      expect(reconciliations.retryLater).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('survives a task it cannot even put back: the lease expires and it is taken again', async () => {
     const { sweeper, reconciliations, directory } = build([task()]);
