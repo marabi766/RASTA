@@ -74,6 +74,10 @@ overrides:
   # GHSA-jggr-w7fw-pc2j (moderate) — fast-copy 4.x, reached through pino-pretty
   # (development log formatting).
   'fast-copy@>=4.0.0 <4.1.0': '4.1.1'
+  # GHSA-wq5f-xc86-pv6w (high) — sharp <0.35.5, reached through next (image
+  # optimisation in the portal). Next still resolves 0.35.4; 0.35.5 is past the
+  # seven-day minimum release age.
+  'sharp@<0.35.5': '0.35.5'
 
 # Advisories with NO patched release yet, accepted for a fixed time only. Each
 # entry names the advisory, why it cannot be fixed by an override, where it is
