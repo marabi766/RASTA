@@ -9,8 +9,9 @@ import { clearingOwners } from './transfer-clearance.fake';
 /**
  * The demo seed's commissioned assets can go out of service and come back (#234 round 3). The REAL
  * seed (`prisma/seed.ts`, run as `pnpm db:seed` runs it) is executed against the test database —
- * a database the development bootstrap marked disposable — and the seeded assets are then taken
- * through OUT_OF_SERVICE → ACTIVE by the real service. Without `commissioned_for_organization_id`
+ * a database the development bootstrap marked disposable (the seed refuses any other) — and the
+ * seeded assets are then taken through OUT_OF_SERVICE → ACTIVE by the real service, and restored
+ * to their seeded status by the service too (no raw status writes). Without `commissioned_for_organization_id`
  * on the seeded rows the return would demand a dossier the seed never gave them.
  */
 describe('a seeded commissioned asset returns to service (#234 round 3)', () => {
@@ -59,13 +60,19 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
   }, 120_000);
 
   afterAll(async () => {
-    // Leave the seeded rows as the seed made them: this suite only exercised their status.
+    // Put each seeded asset back in the status the seed gave it — through the service, never a
+    // raw write: the outbox event, timeline entry and version bump of every step are real, so the
+    // read models downstream end in the state asset-service ends in. An asset a failed test left
+    // OUT_OF_SERVICE is returned to ACTIVE first; IDLE is reachable only from ACTIVE.
     for (const seeded of SEEDED) {
-      await prisma.client.$executeRawUnsafe(
-        `UPDATE asset SET status = $2::"OperationalStatus" WHERE id = $1`,
-        seeded.id,
-        seeded.status,
-      );
+      const status = async () =>
+        (await asActor(manager(seeded.organizationId), () => assets.get(seeded.id))).status;
+      if ((await status()) === 'OUT_OF_SERVICE') {
+        await changeStatus(seeded.organizationId, seeded.id, 'ACTIVE');
+      }
+      if (seeded.status === 'IDLE' && (await status()) === 'ACTIVE') {
+        await changeStatus(seeded.organizationId, seeded.id, 'IDLE');
+      }
     }
     await prisma.onModuleDestroy();
   });
