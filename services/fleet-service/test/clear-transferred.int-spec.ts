@@ -112,12 +112,57 @@ describe('insurance:clear-transferred (Q-101)', () => {
     // Nothing but the windows (and the sync stamp) changed.
     expect(after.insuranceLapsedCoverages).toEqual(before.insuranceLapsedCoverages);
     expect(after.ownershipGeneration).toBe(2);
-    expect(after.retainedCoverages).toEqual(COVERAGES);
+    // The retained list goes with the windows: see the delayed-event test below.
+    expect(after.retainedCoverages).toEqual([]);
     expect(after.organizationId).toBe(org.b);
     expect(after.status).toBe(before.status);
 
     // Nothing left to clear: a rerun is a no-op.
     await expect(run({ organizationId: org.b })).resolves.toMatchObject({ scanned: 0, cleared: 0 });
+  });
+
+  it('ignores a delayed old-owner event for a coverage that followed at transfer time, and takes the current owner’s', async () => {
+    const assetId = await insured();
+    // THIRD_PARTY followed the vehicle when it was transferred.
+    await transfer(assetId, { ownershipGeneration: 2, retainedCoverages: ['THIRD_PARTY'] });
+    expect(await windows(assetId)).toEqual(['THIRD_PARTY']);
+
+    await run({ organizationId: org.b });
+    const cleared = (await row(assetId))!;
+    expect(cleared.insuranceCover).toEqual({});
+    expect(cleared.retainedCoverages).toEqual([]);
+
+    const recorded = (organizationId: string, ownershipGeneration: number) =>
+      consumer.handle(
+        eventFor(organizationId, 'INSURANCE_RECORDED', {
+          assetId,
+          policyId: id('INS'),
+          insurerName: 'بیمه ایران',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - 1000).toISOString(),
+          validTo: new Date(Date.now() + year).toISOString(),
+          ownershipGeneration,
+        }),
+      );
+
+    // The previous owner's event, delivered late: the exemption is gone.
+    await recorded(org.a, 1);
+    expect(await windows(assetId)).toEqual([]);
+
+    // The re-projection names the current owner and generation: the window is back.
+    await recorded(org.b, 2);
+    expect(await windows(assetId)).toEqual(['THIRD_PARTY']);
+  });
+
+  it('clears a row that has no windows left but still retains coverages', async () => {
+    const assetId = id('AST');
+    await consumer.handle(eventFor(org.a, 'ASSET_CREATED', { assetId, status: 'ACTIVE' }));
+    await transfer(assetId, { ownershipGeneration: 2, retainedCoverages: ['THIRD_PARTY'] });
+    expect((await row(assetId))!.retainedCoverages).toEqual(['THIRD_PARTY']);
+
+    // Other tests of this suite leave rows for org.b too; this one must be among them.
+    expect((await run({ organizationId: org.b })).cleared).toBeGreaterThanOrEqual(1);
+    expect((await row(assetId))!.retainedCoverages).toEqual([]);
   });
 
   it('writes nothing in a dry run, and counts what a real run clears', async () => {

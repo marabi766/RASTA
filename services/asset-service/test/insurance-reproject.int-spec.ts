@@ -77,7 +77,7 @@ describe('insurance re-projection command (Q-101)', () => {
       dryRun?: boolean;
       organizationId?: string;
       pageSize?: number;
-      reissue?: string;
+      reissue?: boolean;
     } = {},
   ) =>
     reprojectInsurance(repository, {
@@ -85,7 +85,7 @@ describe('insurance re-projection command (Q-101)', () => {
       organizationId: options.organizationId ?? org.a,
       pageSize: options.pageSize ?? 200,
       transferRule: rule,
-      ...(options.reissue ? { reissue: options.reissue } : {}),
+      ...(options.reissue ? { reissue: true } : {}),
     });
 
   /** The re-emitted events in the outbox, newest policy first not guaranteed. */
@@ -251,7 +251,7 @@ describe('insurance re-projection command (Q-101)', () => {
     expect(reprojectEventId('INS_1', at, 1)).not.toBe(reprojectEventId('INS_1', at, 0));
   });
 
-  it('announces everything again under new ids when asked to reissue, once per label', async () => {
+  it('announces everything again under new ids on every reissue run, and prints the run id', async () => {
     const assetId = await machine(org.a);
     const policyId = await record(org.a, assetId, 'LIABILITY', -1, 100);
     const count = async () =>
@@ -271,17 +271,22 @@ describe('insurance re-projection command (Q-101)', () => {
     expect(await count()).toBe(2);
 
     // Fleet deduplicates by id: after it cleared its windows the same ids would be dropped.
-    const reissued = await run({ reissue: 'following-list-2026-10' });
+    const reissued = await run({ reissue: true });
     expect(reissued.emitted).toBeGreaterThanOrEqual(1);
+    expect(reissued.reissueRunId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(await count()).toBe(3);
-    const again = await run({ reissue: 'following-list-2026-10' });
-    expect(again.emitted).toBe(0);
-    expect(await count()).toBe(3);
-    await run({ reissue: 'following-list-2026-11' });
+    // A second reissue run has its own run id, so nothing is "already emitted".
+    const again = await run({ reissue: true });
+    expect(again.reissueRunId).not.toBe(reissued.reissueRunId);
+    expect(again.alreadyEmitted).toBe(0);
+    expect(again.emitted).toBeGreaterThanOrEqual(1);
+    expect(await count()).toBe(4);
+    // A plain run reproduces the earlier plain run's ids: nothing new.
+    expect((await run()).emitted).toBe(0);
     expect(await count()).toBe(4);
   });
 
-  it('derives another id for a reissue label, and the same one without', () => {
+  it('derives another id for a reissue run id, and the same one without', () => {
     const at = new Date('2026-10-08T12:00:00.000Z');
     expect(reprojectEventId('INS_1', at, 1, 'a')).not.toBe(reprojectEventId('INS_1', at, 1));
     expect(reprojectEventId('INS_1', at, 1, 'a')).not.toBe(reprojectEventId('INS_1', at, 1, 'b'));

@@ -1,7 +1,7 @@
 import { FleetRepository } from './fleet.repository';
 
 /**
- * Empties the insurance windows of every machine that has ever been
+ * Empties the insurance windows (and the retained-coverage list) of every machine that has ever been
  * transferred (docs/24 Q-101, runbook `insurance-reprojection.md`, "changing
  * the following-coverage list").
  *
@@ -14,14 +14,19 @@ import { FleetRepository } from './fleet.repository';
  * force for the new owner, and widening it would leave out ones it now lets
  * follow. Neither is a live code path: the change is an operational one, and
  * this command is its first half. The second is `insurance:reproject` in
- * asset-service, run straight after with a fresh `--reissue` label, which says
+ * asset-service, run straight after with `--reissue` (it generates its own fresh run id), which says
  * every window again under today's rule. Between the two the machines concerned
  * are refused for dispatch: fail closed.
  *
  * ## What makes it safe
  *
- *   - **Only windows.** Lapses, retained coverages, the ownership generation
- *     and every other column stay; `synced_at` moves. Nothing else is written.
+ *   - **Only windows and the retained list.** Lapses, the ownership generation
+ *     and every other column stay; `synced_at` moves. The retained list goes
+ *     with the windows: a delayed old-owner `INSURANCE_RECORDED` for a coverage
+ *     that followed at transfer time would otherwise still be exempted from the
+ *     owner check and restore a window for the new owner. After the clear only
+ *     the current owner's events (or ones at/after the replica's generation)
+ *     apply, and a re-projection emits with the current owner.
  *   - **Under the asset's lock.** The page only names candidates; each row is
  *     decided again under {@link FleetRepository.lockAssetRef}, in its own page
  *     transaction, so an event or a transfer that committed since is seen.

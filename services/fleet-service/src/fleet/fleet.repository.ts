@@ -801,8 +801,11 @@ export class FleetRepository {
   /**
    * Empties one replica row's insurance windows if it still qualifies. Under
    * {@link lockAssetRef} in the caller's transaction, so a transfer or an event
-   * committed since the page was read is seen. Lapses, retained coverages and
-   * the generation are left as they are. Returns whether the row was cleared.
+   * committed since the page was read is seen. The retained-coverage list is
+   * emptied in the same update: a delayed old-owner event for a coverage that
+   * followed at transfer time would otherwise still be exempted from the owner
+   * check and restore a window for the new owner. Lapses and the generation are
+   * left as they are. Returns whether the row was cleared.
    */
   async clearInsuranceCover(
     tx: ExtendedPrismaClient,
@@ -813,7 +816,7 @@ export class FleetRepository {
       'operator command over the platform-wide replica; the organization filter is applied in the predicate',
       () =>
         tx.$executeRaw`
-          UPDATE asset_ref r SET insurance_cover = '{}'::jsonb, synced_at = now()
+          UPDATE asset_ref r SET insurance_cover = '{}'::jsonb, retained_coverages = '{}', synced_at = now()
            WHERE r.id = ${assetId} AND ${clearablePredicate(options)}`,
     );
     return changed === 1;
@@ -904,7 +907,7 @@ export interface ClearableInsuranceOptions {
  */
 function clearablePredicate(options: ClearableInsuranceOptions): Prisma.Sql {
   return Prisma.sql`
-    r.insurance_cover <> '{}'::jsonb
+    (r.insurance_cover <> '{}'::jsonb OR cardinality(r.retained_coverages) > 0)
     AND (${options.organizationId ?? null}::text IS NULL OR r.organization_id = ${options.organizationId ?? null})
     AND (
       r.ownership_generation > 0
