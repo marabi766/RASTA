@@ -78,7 +78,7 @@ export class PolicyReconciliationSweeper {
   constructor(
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly suspension: PolicySuspensionService,
-    private readonly directory: Pick<OrganizationDirectory, 'isWithin'>,
+    private readonly directory: Pick<OrganizationDirectory, 'withinAnswer'>,
     private readonly options: SweeperOptions,
   ) {}
 
@@ -125,12 +125,12 @@ export class PolicyReconciliationSweeper {
     };
 
     // One question per (union, organization) pair in the batch.
-    const answers = new Map<string, Promise<boolean>>();
-    const ask = (task: ClaimedTask): Promise<boolean> => {
+    const answers = new Map<string, Promise<{ hierarchyVersion: number | null } | null>>();
+    const ask = (task: ClaimedTask) => {
       const key = `${task.unionId}\u0000${task.organizationId}`;
       let answer = answers.get(key);
       if (!answer) {
-        answer = this.directory.isWithin(task.unionId, task.organizationId);
+        answer = this.directory.withinAnswer(task.unionId, task.organizationId);
         answers.set(key, answer);
       }
       return answer;
@@ -144,7 +144,8 @@ export class PolicyReconciliationSweeper {
       });
       try {
         await runWithContext(context, async () => {
-          const within = await ask(task);
+          const answered = await ask(task);
+          const within = answered !== null;
           // The answer decides suspension only; the race window is reviewed either way (D-050,
           // round 12): a signature committed while the employer was out, before it came back and
           // before this sweep, rests on authority that was absent. The review is MOVE_RECHECK like
@@ -159,7 +160,7 @@ export class PolicyReconciliationSweeper {
               callerService: MOVE_PRODUCER,
             },
             this.reconciliations.ownershipOf(task),
-            { within },
+            { within, currentVersion: answered?.hierarchyVersion ?? null },
           );
           if (result === 'STALE') {
             // A move coalesced after the claim: give the task back, due at once, for a fresh look.
