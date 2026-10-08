@@ -263,6 +263,14 @@ export class FakeHierarchy {
     return within ? { hierarchyVersion: this.versionOf(organizationId) } : null;
   }
 
+  /** `withinVersion`, but a missing version is `null` rather than an error (the sweeper's question). */
+  async withinAnswer(
+    scope: string,
+    organizationId: string,
+  ): Promise<{ hierarchyVersion: number | null } | null> {
+    return this.withinVersion(scope, organizationId);
+  }
+
   async isWithin(scope: string, organizationId: string): Promise<boolean> {
     this.asked.push([scope, organizationId]);
     if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');

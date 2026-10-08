@@ -42,7 +42,7 @@ function build(tasks: ClaimedTask[] = []) {
     suspend: jest.fn(async (): Promise<SuspendResult> => 'SUSPENDED'),
   };
   const directory = {
-    isWithin: jest.fn(async () => false),
+    withinAnswer: jest.fn(async (): Promise<{ hierarchyVersion: number | null } | null> => null),
   };
   const sweeper = new PolicyReconciliationSweeper(
     reconciliations as unknown as PolicyReconciliationRepository,
@@ -59,7 +59,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
 
     const outcome = await sweeper.runOnce();
 
-    expect(directory.isWithin).toHaveBeenCalledWith('ORG_U', 'ORG_E');
+    expect(directory.withinAnswer).toHaveBeenCalledWith('ORG_U', 'ORG_E');
     expect(suspension.suspend).toHaveBeenCalledWith(
       { id: 'APL_1', organizationId: 'ORG_E' },
       {
@@ -70,7 +70,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
         callerService: 'organization-service',
       },
       expect.anything(),
-      { within: false },
+      { within: false, currentVersion: null },
     );
     expect(reconciliations.ownershipOf).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'PRT_1' }),
@@ -83,7 +83,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
       task(),
       task({ id: 'PRT_2', policyId: 'APL_2' }),
     ]);
-    directory.isWithin.mockResolvedValue(true);
+    directory.withinAnswer.mockResolvedValue({ hierarchyVersion: 3 });
     suspension.suspend.mockResolvedValueOnce('NOTHING').mockResolvedValueOnce('STALE');
 
     const outcome = await sweeper.runOnce();
@@ -94,11 +94,24 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
       { id: 'APL_1', organizationId: 'ORG_E' },
       expect.objectContaining({ reason: 'MOVE_RECHECK', movedVersion: 4 }),
       expect.anything(),
-      { within: true },
+      { within: true, currentVersion: 3 },
     );
     expect(outcome).toMatchObject({ confirmed: 1, requeued: 1, suspended: 0 });
     // One question for the (union, organization) pair, whatever the number of tasks it answers.
-    expect(directory.isWithin).toHaveBeenCalledTimes(1);
+    expect(directory.withinAnswer).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the employer’s current version on "within", and none when the answer names no version (round 13)', async () => {
+    const { sweeper, suspension, directory } = build([task()]);
+    directory.withinAnswer.mockResolvedValue({ hierarchyVersion: null });
+    suspension.suspend.mockResolvedValue('NOTHING');
+    await sweeper.runOnce();
+    expect(suspension.suspend).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      { within: true, currentVersion: null },
+    );
   });
 
   it.each([
@@ -116,7 +129,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
 
       await sweeper.runOnce();
 
-      expect(directory.isWithin).toHaveBeenCalledTimes(1);
+      expect(directory.withinAnswer).toHaveBeenCalledTimes(1);
       const cause = (suspension.suspend.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
       expect(cause).toEqual({
         reason: 'MOVE_RECHECK',
@@ -153,11 +166,11 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
       task({ id: 'PRT_2', policyId: 'APL_2', unionId: 'ORG_U2', attempts: 5 }),
       task({ id: 'PRT_3', policyId: 'APL_3', unionId: 'ORG_U3', attempts: 0 }),
     ]);
-    directory.isWithin.mockRejectedValueOnce(
+    directory.withinAnswer.mockRejectedValueOnce(
       RastaError.upstreamUnavailable('organization-service'),
     );
-    directory.isWithin.mockRejectedValueOnce(new Error('boom'));
-    directory.isWithin.mockResolvedValueOnce(false);
+    directory.withinAnswer.mockRejectedValueOnce(new Error('boom'));
+    directory.withinAnswer.mockResolvedValueOnce(null);
 
     const outcome = await sweeper.runOnce();
 
@@ -182,7 +195,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     'counts a failed lookup as retried and logs no backoff when the put-back answers %s (round 12)',
     async (answer) => {
       const { sweeper, reconciliations, directory } = build([task()]);
-      directory.isWithin.mockRejectedValue(new Error('down'));
+      directory.withinAnswer.mockRejectedValue(new Error('down'));
       reconciliations.retryLater.mockResolvedValue(answer);
       await expect(sweeper.runOnce()).resolves.toMatchObject({ retried: 1 });
       expect(reconciliations.retryLater).toHaveBeenCalledTimes(1);
@@ -191,7 +204,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
 
   it('survives a task it cannot even put back: the lease expires and it is taken again', async () => {
     const { sweeper, reconciliations, directory } = build([task()]);
-    directory.isWithin.mockRejectedValue(new Error('down'));
+    directory.withinAnswer.mockRejectedValue(new Error('down'));
     reconciliations.retryLater.mockRejectedValue(new Error('database down'));
     await expect(sweeper.runOnce()).resolves.toMatchObject({ retried: 1 });
   });
@@ -205,7 +218,7 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
   it('claims nothing, asks nothing, when nothing is due', async () => {
     const { sweeper, directory, reconciliations } = build([]);
     await expect(sweeper.runOnce()).resolves.toMatchObject({ claimed: 0 });
-    expect(directory.isWithin).not.toHaveBeenCalled();
+    expect(directory.withinAnswer).not.toHaveBeenCalled();
     expect(reconciliations.backlog).not.toHaveBeenCalled();
     expect(reconciliations.claimDue).toHaveBeenCalledWith(10, 60, expect.any(String));
   });

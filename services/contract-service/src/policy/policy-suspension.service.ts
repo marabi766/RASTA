@@ -197,9 +197,11 @@ export class PolicySuspensionService {
     /**
      * The current answer is "within": nothing is suspended, but the race window is still
      * reviewed (D-050) — the answer decides suspension only, never whether a signature that
-     * committed while authority was absent is looked at (round 12).
+     * committed while authority was absent is looked at (round 12). `currentVersion` is the
+     * employer's hierarchy version in that "within" answer: a signature that recorded it read a
+     * tree no move since has changed, so it is not reviewed (round 13).
      */
-    options: { within?: boolean } = {},
+    options: { within?: boolean; currentVersion?: number | null } = {},
   ): Promise<SuspendResult> {
     // The tenant is the policy's own organization, never the moved one: the event names one
     // organization, the stranded policies belong to others.
@@ -230,7 +232,7 @@ export class PolicySuspensionService {
           }
         }
         const suspended = options.within
-          ? await this.reviewRaceIn(tx, candidate.id, effective)
+          ? await this.reviewRaceIn(tx, candidate.id, effective, options.currentVersion ?? null)
           : await this.suspendIn(tx, candidate.id, effective);
         await ownership?.finish(tx);
         return suspended ? ('SUSPENDED' as const) : ('NOTHING' as const);
@@ -243,11 +245,17 @@ export class PolicySuspensionService {
    * the employer was out of the union (out, signed, back before the sweep) is reviewed all the same
    * — same predicate, same `MOVE_RECHECK` attribution as a suspension (D-050). Always `false`:
    * nothing was suspended.
+   *
+   * Narrowed by the employer's current version (round 13): a move of an unrelated organization
+   * queues every union policy, and a signature whose recorded version is the employer's current one
+   * saw its tree unchanged. Only a signature with a recorded version LOWER than the current one, or
+   * none, is reviewed.
    */
   private async reviewRaceIn(
     tx: ExtendedPrismaClient,
     policyId: string,
     cause: SuspensionCause,
+    currentVersion: number | null,
   ): Promise<boolean> {
     if (cause.reason === 'SIGNING_RECHECK') return false;
     const at = await transactionNow(tx);
@@ -260,7 +268,7 @@ export class PolicySuspensionService {
     );
     const policy = await this.repository.findPolicy(tx, policyId);
     if (!policy || policy.authorRole !== UNION_ROLE) return false;
-    await this.flagRaced(tx, policy, cause, at);
+    await this.flagRaced(tx, policy, cause, at, currentVersion);
     return false;
   }
 
@@ -351,6 +359,8 @@ export class PolicySuspensionService {
     policy: { id: string; organizationId: string },
     cause: Exclude<SuspensionCause, { reason: 'SIGNING_RECHECK' }>,
     at: Date,
+    /** Set only on a "within" answer: the employer's current hierarchy version (round 13). */
+    withinCurrentVersion: number | null = null,
   ): Promise<void> {
     const attribution = {
       causeEventId: null,
@@ -363,6 +373,7 @@ export class PolicySuspensionService {
       ...attribution,
       movedVersion: cause.movedVersion,
       earliestMoveInstant: cause.earliestMovedAt,
+      withinCurrentVersion,
       clockSkewMarginSeconds: this.env.CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
       at,
     });

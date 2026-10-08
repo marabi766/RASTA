@@ -896,6 +896,10 @@ describe('a signing policy follows an organization move', () => {
           where: { contractId, side: 'EMPLOYER' },
         }),
       );
+    const flaggedEventsOf = (employer: string) =>
+      eventsOf(api.prisma, employer, 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED');
+    const inWindow = (signature: { hierarchyCommitDeadline: Date | null }) =>
+      new Date(signature.hierarchyCommitDeadline!.getTime() - 1);
 
     /** A contract signed once by the employer under a union's policy. */
     async function signedOnce() {
@@ -1033,6 +1037,87 @@ describe('a signing policy follows an organization move', () => {
         causeEventId: null,
         movedAt: null,
       });
+    });
+
+    it('an UNRELATED organization’s move queues this policy too, but its "within" answer reviews nothing: the employer’s current version is the one the signature recorded (round 13)', async () => {
+      const mine = await signedOnce();
+      const other = await signedOnce();
+      // F (another employer) leaves its union: version 2 for F alone; E's tree is untouched.
+      api.hierarchy.adopt(newOrg(), other.draft.employer);
+      await consumer.handle(
+        moved(
+          other.draft.employer,
+          inWindow(mine.evidence),
+          api.hierarchy.bump(other.draft.employer),
+        ),
+      );
+      expect((await tasksOf(mine.policyId))[0]).toBeDefined();
+
+      await sweeper.runOnce();
+
+      expect((await policyRow(mine.policyId)).status).toBe('ACTIVE');
+      expect((await tasksOf(mine.policyId))[0]!.status).toBe('DONE');
+      expect(await reviewsOf(mine.draft.id)).toEqual([]);
+      expect(await flaggedEventsOf(mine.draft.employer)).toEqual([]);
+      // The mover's own policy is suspended, and its own signature is reviewed.
+      expect((await policyRow(other.policyId)).status).toBe('SUSPENDED');
+    });
+
+    it('out → sign → back still reviews when the signature recorded a version below the employer’s current one; a signature with no recorded version stays eligible on "within" (round 13)', async () => {
+      const raced = await signedOnce();
+      // A signature from before versions: no recorded version, so it cannot show it read any tree.
+      // The service no longer writes one, so the row is inserted in the shape the evidence had then:
+      // read instants and a deadline, no version.
+      const legacyUnion = newOrg();
+      const legacyDraft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const legacyPolicy = await activeUnionPolicy(legacyUnion, legacyDraft.employer);
+      const {
+        id: _id,
+        review: _review,
+        ...template
+      } = raced.evidence as typeof raced.evidence & {
+        review?: unknown;
+      };
+      await runUnscoped('the suite inserts a pre-version signature', () =>
+        w.prisma.client.contractSignature.create({
+          data: {
+            ...template,
+            id: `SIG_${ulid()}`,
+            organizationId: legacyDraft.employer,
+            contractId: legacyDraft.id,
+            signerOrganizationId: legacyDraft.employer,
+            policyId: legacyPolicy,
+            hierarchyAuthorOrganizationId: legacyUnion,
+            hierarchyVersion: null,
+          },
+        }),
+      );
+      const legacy = { draft: legacyDraft, policyId: legacyPolicy };
+
+      // The raced employer: out and back, one task carrying both moves.
+      const deadline = raced.evidence.hierarchyCommitDeadline!.getTime();
+      api.hierarchy.adopt(newOrg(), raced.draft.employer);
+      await consumer.handle(
+        moved(
+          raced.draft.employer,
+          new Date(deadline - 1),
+          api.hierarchy.bump(raced.draft.employer),
+        ),
+      );
+      api.hierarchy.adopt(raced.union, raced.draft.employer);
+      await consumer.handle(
+        moved(
+          raced.draft.employer,
+          new Date(deadline + 1),
+          api.hierarchy.bump(raced.draft.employer),
+        ),
+      );
+      await sweeper.runOnce();
+      expect(await reviewsOf(raced.draft.id)).toHaveLength(1);
+
+      // The legacy employer never moved; an unrelated move queued its policy, "within" answered.
+      expect(await reviewsOf(legacy.draft.id)).toHaveLength(1);
+      expect((await policyRow(legacy.policyId)).status).toBe('ACTIVE');
     });
 
     it('moves back without a signature in the window: no review, whether the signature committed before every move or none was made', async () => {

@@ -89,6 +89,18 @@ export class OrganizationDirectory {
     return answer === null ? null : { hierarchyVersion: answer.hierarchyVersion as number };
   }
 
+  /**
+   * The answer and, when it is "within", the organization's CURRENT hierarchy version — `null`
+   * version when the upstream names none (unlike `withinVersion`, never an error: a re-check can
+   * still answer; it just cannot narrow the race review by version).
+   */
+  async withinAnswer(
+    scopeOrganizationId: string,
+    organizationId: string,
+  ): Promise<{ hierarchyVersion: number | null } | null> {
+    return this.ask(scopeOrganizationId, organizationId, false);
+  }
+
   private async ask(
     scopeOrganizationId: string,
     organizationId: string,
