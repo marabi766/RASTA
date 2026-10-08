@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ulid } from 'ulid';
@@ -20,18 +21,77 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
   const orgs = [org.a, org.b, third];
   const RUNBOOK = resolve(__dirname, '../../../docs/runbooks/asset-document-ref-reconciliation.md');
 
+  /** A runbook SQL block, byte for byte: no line is stripped, nothing is reworded. */
   const block = (name: string): string => {
     const match = new RegExp('```sql ' + name + '\\n([\\s\\S]*?)```').exec(
       readFileSync(RUNBOOK, 'utf8'),
     );
     if (!match) throw new Error(`runbook has no \`sql ${name}\` block`);
-    // `SET default_transaction_read_only` is for the operator's read-only session.
-    return match[1]!
-      .split('\n')
-      .filter((line) => !line.startsWith('SET default_transaction_read_only'))
-      .join('\n')
-      .trim()
-      .replace(/;$/, '');
+    return match[1]!;
+  };
+
+  /** The operator's session: `psql` as the migrator role, stopping at the first error. */
+  const psqlArgs = (): string[] => {
+    const url = new URL(ownerDatabaseUrl());
+    url.search = '';
+    return ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-A', '-t', '-F', '|', url.toString()];
+  };
+
+  /** A long-lived psql session: send text, wait for an `\echo` marker, finish. */
+  function startPsql() {
+    const child = spawn('psql', psqlArgs(), { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const watchers: (() => void)[] = [];
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+      watchers.forEach((notify) => notify());
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      err += chunk.toString();
+    });
+    const done = new Promise<string>((resolveDone, reject) => {
+      child.on('error', reject);
+      child.on('close', (code) =>
+        code === 0 ? resolveDone(out) : reject(new Error(`psql exited ${code}: ${err}`)),
+      );
+    });
+    return {
+      send: (text: string) => child.stdin.write(text + '\n'),
+      end: () => child.stdin.end(),
+      kill: () => child.kill(),
+      done,
+      waitFor: (marker: string) =>
+        new Promise<void>((resolveWait, reject) => {
+          const check = () => {
+            if (out.includes(marker)) resolveWait();
+          };
+          watchers.push(check);
+          child.on('close', () => reject(new Error(`psql ended before ${marker}: ${err}`)));
+          check();
+        }),
+    };
+  }
+
+  const runPsql = (script: string): Promise<string> => {
+    const session = startPsql();
+    session.send(script);
+    session.end();
+    return session.done;
+  };
+
+  /** Splits psql output on the `\echo @@name` markers a script prints between its queries. */
+  const sections = (output: string): Record<string, string[][]> => {
+    const result: Record<string, string[][]> = {};
+    let current: string[][] | undefined;
+    for (const line of output.split('\n')) {
+      if (line.startsWith('@@')) {
+        current = result[line.slice(2)] = [];
+      } else if (line !== '' && current) {
+        current.push(line.split('|'));
+      }
+    }
+    return result;
   };
 
   let prisma: PrismaService;
@@ -99,13 +159,37 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     entry_org: string | null;
   };
 
-  const candidatesOf = async (assetId: string) =>
-    (await prisma.client.$queryRawUnsafe<Row[]>(block('candidates'))).filter(
-      (row) => row.ref_id && refsOfAsset.has(row.ref_id) && refsOfAsset.get(row.ref_id) === assetId,
-    );
+  /** Step 1, as the operator runs it: the `candidates` block in a psql session of its own. */
+  const candidatesOf = async (assetId: string): Promise<Row[]> =>
+    (await runPsql(block('candidates')))
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => {
+        const [refId, rowAsset, , currentOrg, entryId, entryOrg] = line.split('|');
+        return {
+          ref_id: refId!,
+          asset_id: rowAsset!,
+          entry_id: entryId || null,
+          current_org: currentOrg!,
+          entry_org: entryOrg || null,
+        };
+      })
+      .filter((row) => refsOfAsset.get(row.ref_id) === assetId);
   const refsOfAsset = new Map<string, string>();
 
-  /** Runs the runbook's steps 2–4 for `assetId` in one transaction, like the operator would. */
+  const insertOwners = (rows: { ref: string; owner: string }[]) =>
+    rows
+      .map(
+        (v) =>
+          `INSERT INTO verified_owner (ref_id, document_owner) VALUES ('${v.ref}', '${v.owner}');`,
+      )
+      .join('\n');
+
+  /**
+   * Runs the runbook's step 3 and 4 for `assetId` the way the operator would: one psql session, the
+   * blocks verbatim — read-only switched off, BEGIN, the lock fence, temp tables, repair, the three
+   * checks, COMMIT.
+   */
   async function repair(assetId: string) {
     const candidates = await candidatesOf(assetId);
     // Step 2: the owner of each document, from document-service.
@@ -116,29 +200,40 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     }));
     const moved = verified.filter((v) => v.owner !== v.current);
 
-    return owner.client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(block('load'));
-      await tx.$executeRawUnsafe(block('load-returned'));
-      for (const v of verified) {
-        await tx.$executeRawUnsafe(
-          `INSERT INTO verified_owner (ref_id, document_owner) VALUES ($1, $2)`,
-          v.ref,
-          v.owner,
-        );
-      }
-      const [counts] = await tx.$queryRawUnsafe<
-        {
-          refs_fixed: number;
-          entries_fixed: number;
-          markers_cleared: number;
-          assets_returned: number;
-        }[]
-      >(block('repair'));
-      const pairs = await tx.$queryRawUnsafe<unknown[]>(block('verify-pairs'));
-      const ownersLeft = await tx.$queryRawUnsafe<unknown[]>(block('verify-owners'));
-      const markersLeft = await tx.$queryRawUnsafe<{ asset_id: string }[]>(block('verify-markers'));
-      return { counts: counts!, pairs, ownersLeft, markersLeft, moved: moved.length, verified };
-    });
+    const output = sections(
+      await runPsql(
+        [
+          block('begin'),
+          block('load'),
+          block('load-returned'),
+          insertOwners(verified),
+          '\\echo @@repair',
+          block('repair'),
+          '\\echo @@pairs',
+          block('verify-pairs'),
+          '\\echo @@owners',
+          block('verify-owners'),
+          '\\echo @@markers',
+          block('verify-markers'),
+          block('commit'),
+        ].join('\n'),
+      ),
+    );
+    const [refsFixed, entriesFixed, markersCleared, assetsReturned] =
+      output.repair![0]!.map(Number);
+    return {
+      counts: {
+        refs_fixed: refsFixed,
+        entries_fixed: entriesFixed,
+        markers_cleared: markersCleared,
+        assets_returned: assetsReturned,
+      },
+      pairs: output.pairs!,
+      ownersLeft: output.owners!,
+      markersLeft: output.markers!.map((row) => row[0]!),
+      moved: moved.length,
+      verified,
+    };
   }
 
   const markerOf = async (assetId: string) =>
@@ -354,17 +449,43 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
   });
 
   /** Step 4's marker check, as the operator runs it: in the repair's transaction, with its temporary tables. */
-  const markerCheck = (returned: string[]) =>
-    owner.client.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(block('load'));
-      await tx.$executeRawUnsafe(block('load-returned'));
-      for (const assetId of returned) {
-        await tx.$executeRawUnsafe(`INSERT INTO returned_asset (asset_id) VALUES ($1)`, assetId);
-      }
-      return (await tx.$queryRawUnsafe<{ asset_id: string }[]>(block('verify-markers'))).map(
-        (row) => row.asset_id,
-      );
-    });
+  const markerCheck = async (
+    returned: { assetId: string; ownership: boolean }[],
+  ): Promise<string[]> => {
+    const output = sections(
+      await runPsql(
+        [
+          block('begin'),
+          block('load'),
+          block('load-returned'),
+          ...returned.map(
+            (r) =>
+              `INSERT INTO returned_asset (asset_id, returned_ownership) VALUES ('${r.assetId}', ${r.ownership});`,
+          ),
+          '\\echo @@markers',
+          block('verify-markers'),
+          block('commit'),
+        ].join('\n'),
+      ),
+    );
+    return output.markers!.map((row) => row[0]!);
+  };
+
+  /** B’s own title and A’s misplaced other-kind reference: B’s marker is B’s (#234 round 11). */
+  async function misplacedOtherWithOwnTitle(ownTitle: boolean) {
+    const assetId = await newAsset(org.a);
+    const refA = await attach(assetId, org.a); // OTHER
+    await transfer(assetId, org.a, org.b);
+    await legacyCarry(assetId, org.b);
+    const refB = ownTitle ? await attach(assetId, org.b, 'OWNERSHIP_TITLE') : undefined;
+    for (const r of [refA, refB]) if (r) refsOfAsset.set(r, assetId);
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset SET commissioned_for_organization_id = $2 WHERE id = $1`,
+      assetId,
+      org.b,
+    );
+    return { assetId, refA };
+  }
 
   it('the post-check names a returned asset that still has a marker', async () => {
     const assetId = await newAsset(org.a);
@@ -377,7 +498,63 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       org.b,
     );
 
-    expect(await markerCheck([assetId])).toContain(assetId);
+    expect(await markerCheck([{ assetId, ownership: true }])).toContain(assetId);
+  });
+
+  it('A’s misplaced OTHER reference returned and B holds its own title: B’s marker is kept and the post-check accepts it (#234 round 11)', async () => {
+    const { assetId, refA } = await misplacedOtherWithOwnTitle(true);
+
+    const result = await repair(assetId);
+
+    expect(result.counts).toEqual({
+      refs_fixed: 1,
+      entries_fixed: 1,
+      markers_cleared: 0,
+      assets_returned: 1,
+    });
+    expect(result.markersLeft).toEqual([]);
+    expect(await orgOfRef(refA)).toBe(org.a);
+    expect(await markerOf(assetId)).toBe(org.b);
+    // Even told the returned reference was an ownership document, B's own title keeps the marker valid.
+    expect(await markerCheck([{ assetId, ownership: true }])).toEqual([]);
+  });
+
+  it('only an other-kind reference returned and B has no title of its own: the marker is kept (rule (a)) (#234 round 11)', async () => {
+    const { assetId } = await misplacedOtherWithOwnTitle(false);
+
+    const result = await repair(assetId);
+
+    expect(result.counts.markers_cleared).toBe(0);
+    expect(result.markersLeft).toEqual([]);
+    expect(await markerOf(assetId)).toBe(org.b);
+  });
+
+  it('the repair’s lock fence: no other session can read asset_document_ref or asset between BEGIN and COMMIT (#234 round 11)', async () => {
+    const session = startPsql();
+    try {
+      session.send([block('begin'), '\\echo @@locked'].join('\n'));
+      await session.waitFor('@@locked');
+
+      for (const table of ['asset_document_ref', 'asset']) {
+        await expect(
+          prisma.client.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '500ms'`);
+            return tx.$queryRawUnsafe(`SELECT count(*) FROM ${table}`);
+          }),
+        ).rejects.toThrow(/lock timeout/);
+      }
+
+      session.send(block('commit'));
+      session.end();
+      await session.done;
+    } finally {
+      session.kill();
+    }
+
+    // Released at COMMIT.
+    await expect(
+      prisma.client.$queryRawUnsafe(`SELECT count(*) FROM asset_document_ref`),
+    ).resolves.toBeDefined();
   });
 
   it('the post-check leaves alone a marker legitimately earned and whose document was later removed (not returned in this run) (#234 round 10)', async () => {
