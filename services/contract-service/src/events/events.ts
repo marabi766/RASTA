@@ -333,23 +333,45 @@ export const contractAmendedPayload = z
   .strict();
 
 /** An employer amendment signature a move may have raced (D-050): flagged for review, never revoked. */
-export const contractAmendmentSignatureAuthorityFlaggedPayload = z
-  .object({
-    contractId: id,
-    amendmentId: id,
-    organizationId: id,
-    side: z.literal('EMPLOYER'),
-    policyId: id,
-    policyVersion: positive,
-    reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
-    /** What found it: a proven cause (names the event and instant) or a re-check (names neither). */
-    detectedBy: z.enum(['ORGANIZATION_MOVED', 'MOVE_RECHECK']),
-    causeEventId: id.nullable(),
-    movedAt: instant.nullable(),
-    movedVersion: positive.nullable(),
-    flaggedAt: instant,
-  })
-  .strict();
+const amendmentSignatureAuthorityFlaggedBase = {
+  contractId: id,
+  amendmentId: id,
+  organizationId: id,
+  side: z.literal('EMPLOYER'),
+  policyId: id,
+  policyVersion: positive,
+  reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
+  movedVersion: positive.nullable(),
+  flaggedAt: instant,
+};
+
+/**
+ * What found it, in exactly one of two shapes: a move proven to be the cause (`ORGANIZATION_MOVED`,
+ * which names the event AND its instant) or a re-check a move queued without being shown to be its
+ * cause (`MOVE_RECHECK`, which names NEITHER). One of the two alone is not a published shape — the
+ * same rule the `ck_amendment_review_reason` constraint holds in the database.
+ */
+export const contractAmendmentSignatureAuthorityFlaggedPayload = z.discriminatedUnion(
+  'detectedBy',
+  [
+    z
+      .object({
+        ...amendmentSignatureAuthorityFlaggedBase,
+        detectedBy: z.literal('ORGANIZATION_MOVED'),
+        causeEventId: id,
+        movedAt: instant,
+      })
+      .strict(),
+    z
+      .object({
+        ...amendmentSignatureAuthorityFlaggedBase,
+        detectedBy: z.literal('MOVE_RECHECK'),
+        causeEventId: z.null(),
+        movedAt: z.null(),
+      })
+      .strict(),
+  ],
+);
 
 /** A milestone was planned on a signed contract. Identifiers and instants only — no title, no date, no share. */
 export const contractMilestonePlannedPayload = z

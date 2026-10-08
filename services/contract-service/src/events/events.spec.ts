@@ -406,6 +406,38 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
     }
   });
 
+  it('an amendment review event names its cause in exactly two shapes: event AND instant, or neither (#235 round 2)', () => {
+    const proven = payloads.CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED;
+    const recheck = { ...proven, detectedBy: 'MOVE_RECHECK', causeEventId: null, movedAt: null };
+    const name = 'CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED';
+
+    expect(validateContractPayload(name, proven)).toEqual(proven);
+    expect(validateContractPayload(name, recheck)).toEqual(recheck);
+
+    const refused: [string, Record<string, unknown>][] = [
+      ['MOVE_RECHECK naming an event only', { ...recheck, causeEventId: 'EVT_1' }],
+      ['MOVE_RECHECK naming an instant only', { ...recheck, movedAt: at }],
+      ['MOVE_RECHECK naming both', { ...recheck, causeEventId: 'EVT_1', movedAt: at }],
+      ['ORGANIZATION_MOVED without its event', { ...proven, causeEventId: null }],
+      ['ORGANIZATION_MOVED without its instant', { ...proven, movedAt: null }],
+      ['ORGANIZATION_MOVED naming neither', { ...proven, causeEventId: null, movedAt: null }],
+      ['a detectedBy outside the closed pair', { ...proven, detectedBy: 'GUESS' }],
+    ];
+    for (const [what, payload] of refused) {
+      const outcome = (() => {
+        try {
+          validateContractPayload(name, payload);
+          return 'accepted';
+        } catch (error) {
+          return /does not match its published contract/.test((error as Error).message)
+            ? 'refused'
+            : 'other';
+        }
+      })();
+      expect({ what, outcome }).toEqual({ what, outcome: 'refused' });
+    }
+  });
+
   it('names a refusal’s action and reason from closed lists, and nothing else', () => {
     const refused = payloads.CONTRACT_AUTHORITY_REFUSED;
     for (const action of [

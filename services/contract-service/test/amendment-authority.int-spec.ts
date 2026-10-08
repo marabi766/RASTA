@@ -434,6 +434,37 @@ describe('the authority an amendment is signed under', () => {
       expect(await flaggedEvents(draft.employer)).toEqual([]);
     });
 
+    it('the database holds the exact two-case rule: an event AND an instant with ORGANIZATION_MOVED, neither with MOVE_RECHECK (#235 round 2)', async () => {
+      const c = await signedUnderUnion();
+      await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);
+      const row = (cause: string, at: string, by: string) =>
+        `INSERT INTO amendment_signature_review
+           (id, organization_id, contract_id, amendment_id, side, policy_id, reason, cause_event_id,
+            moved_at, detected_by, flagged_at)
+         SELECT 'ASR_x' || substr(md5(random()::text), 1, 8), organization_id, contract_id,
+                amendment_id, side, '${c.policyId}', 'AUTHORITY_CHANGED_DURING_SIGNING', ${cause},
+                ${at}, '${by}', now()
+           FROM amendment_signature WHERE amendment_id = '${c.amendmentId}' AND side = 'EMPLOYER'`;
+      for (const [what, cause, at, by] of [
+        ['ORGANIZATION_MOVED naming neither', 'NULL', 'NULL', 'ORGANIZATION_MOVED'],
+        ['ORGANIZATION_MOVED without its instant', "'EVT_1'", 'NULL', 'ORGANIZATION_MOVED'],
+        ['ORGANIZATION_MOVED without its event', 'NULL', 'now()', 'ORGANIZATION_MOVED'],
+        ['ORGANIZATION_MOVED with a blank event', "' '", 'now()', 'ORGANIZATION_MOVED'],
+        ['MOVE_RECHECK naming an event only', "'EVT_1'", 'NULL', 'MOVE_RECHECK'],
+        ['MOVE_RECHECK naming an instant only', 'NULL', 'now()', 'MOVE_RECHECK'],
+        ['MOVE_RECHECK naming both', "'EVT_1'", 'now()', 'MOVE_RECHECK'],
+        ['a detectedBy outside the pair', 'NULL', 'NULL', 'GUESS'],
+      ] as const) {
+        const refusedBy = await w.prisma.client.$executeRawUnsafe(row(cause, at, by)).then(
+          () => 'accepted',
+          (error: Error) =>
+            /ck_amendment_review_reason/.test(error.message) ? 'ck' : error.message,
+        );
+        expect({ what, refusedBy }).toEqual({ what, refusedBy: 'ck' });
+      }
+      expect(await reviewsOf(c.amendmentId)).toEqual([]);
+    });
+
     it('a review is append-only: the database refuses to change or remove it', async () => {
       const c = await signedUnderUnion();
       await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);

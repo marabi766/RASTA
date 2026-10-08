@@ -408,12 +408,14 @@ ALTER TABLE "amendment_signature_review"
 ALTER TABLE "amendment_signature_review" ADD CONSTRAINT "ck_amendment_review_reason"
   CHECK ("reason" = 'AUTHORITY_CHANGED_DURING_SIGNING'
          AND "side" = 'EMPLOYER'
-         -- A review names a move only when one is shown to be the cause (#231 round 6): with
-         -- `ORGANIZATION_MOVED` the event and its instant are both there, with `MOVE_RECHECK` neither.
-         AND "detected_by" IN ('ORGANIZATION_MOVED', 'MOVE_RECHECK')
-         AND (("detected_by" = 'ORGANIZATION_MOVED')
-              = ("cause_event_id" IS NOT NULL AND "moved_at" IS NOT NULL))
-         AND ("cause_event_id" IS NULL OR btrim("cause_event_id") <> '')
+         -- A review names a move only when one is shown to be the cause (#231 rounds 6–7), and the
+         -- combination is exactly one of two: `ORGANIZATION_MOVED` with the event AND its instant,
+         -- or `MOVE_RECHECK` with NEITHER — never one of the two alone.
+         AND (("detected_by" = 'ORGANIZATION_MOVED'
+               AND "cause_event_id" IS NOT NULL AND btrim("cause_event_id") <> ''
+               AND "moved_at" IS NOT NULL)
+              OR ("detected_by" = 'MOVE_RECHECK'
+                  AND "cause_event_id" IS NULL AND "moved_at" IS NULL))
          AND ("moved_version" IS NULL OR "moved_version" >= 1)
          AND ("recorded_version" IS NULL OR "recorded_version" >= 1));
 
