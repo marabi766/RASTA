@@ -363,6 +363,16 @@ export class FleetRepository {
     return rows.length > 0;
   }
 
+  /**
+   * The database's clock. Inside a transaction `now()` is the transaction's
+   * start, so the insurance gate and the insert it guards agree on the time,
+   * and application hosts with skewed clocks do not decide who is insured.
+   */
+  async databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
+    const [row] = await tx.$queryRaw<[{ now: Date }]>`SELECT now() AS now`;
+    return row.now;
+  }
+
   /** The machine's fence, if any, and whether it has expired by the database's clock. */
   async findTransferFence(
     assetId: string,

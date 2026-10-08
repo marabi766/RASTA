@@ -1,6 +1,7 @@
 import {
   UNKNOWN_COVERAGE,
   activeDispatchBlocks,
+  expiredCoverages,
   parseCover,
   unresolvedLapses,
   withRecordedPolicy,
@@ -116,15 +117,69 @@ describe('dispatch blocks', () => {
       expect(cover.THIRD_PARTY).toEqual([amended]);
     });
 
-    it('drops windows that have already ended, so the column does not grow for ever', () => {
+    it('keeps only the latest-ending ended window, so the column does not grow for ever', () => {
       const ended = {
         policyId: 'INS_OLD',
         validFrom: '2025-01-01T00:00:00.000Z',
         validTo: '2026-01-01T00:00:00.000Z',
       };
+      const older = {
+        policyId: 'INS_OLDER',
+        validFrom: '2024-01-01T00:00:00.000Z',
+        validTo: '2025-01-01T00:00:00.000Z',
+      };
       const cover = withRecordedPolicy({ THIRD_PARTY: [ended] }, 'THIRD_PARTY', current, now);
-      expect(cover.THIRD_PARTY).toEqual([current]);
-      expect(withRecordedPolicy({}, 'THIRD_PARTY', ended, now)).toEqual({});
+      expect(cover.THIRD_PARTY).toEqual([current, ended]);
+      expect(withRecordedPolicy({ THIRD_PARTY: [ended] }, 'THIRD_PARTY', older, now)).toEqual({
+        THIRD_PARTY: [ended],
+      });
+      expect(withRecordedPolicy({}, 'THIRD_PARTY', ended, now)).toEqual({ THIRD_PARTY: [ended] });
+    });
+  });
+
+  describe('expiry with no INSURANCE_EXPIRED yet', () => {
+    const ended = thirdParty('2025-09-01T00:00:00.000Z', '2026-09-25T12:00:00.000Z');
+
+    it('names a coverage from the instant valid_until is reached (end exclusive)', () => {
+      expect(expiredCoverages(ended, new Date('2026-09-25T11:59:59.999Z'))).toEqual([]);
+      expect(expiredCoverages(ended, now)).toEqual(['THIRD_PARTY']);
+    });
+
+    it('blocks dispatch with the insurance reason although nothing was recorded as lapsed', () => {
+      const blocks = activeDispatchBlocks({ ...clean, insuranceCover: ended }, now);
+      expect(blocks).toEqual([
+        {
+          cause: 'INSURANCE',
+          detail: 'The insurance policy has expired (THIRD_PARTY)',
+          coverages: ['THIRD_PARTY'],
+        },
+      ]);
+    });
+
+    it('does not name a coverage that a renewal in force covers, or one never recorded', () => {
+      const renewed: InsuranceCover = {
+        THIRD_PARTY: [
+          ...ended.THIRD_PARTY,
+          {
+            policyId: 'INS_B',
+            validFrom: '2026-09-01T00:00:00.000Z',
+            validTo: '2027-09-01T00:00:00.000Z',
+          },
+        ],
+      };
+      expect(expiredCoverages(renewed, now)).toEqual([]);
+      expect(expiredCoverages({}, now)).toEqual([]);
+      expect(
+        expiredCoverages(thirdParty('2026-10-01T00:00:00.000Z', '2027-10-01T00:00:00.000Z'), now),
+      ).toEqual([]);
+    });
+
+    it('respects the configured blocking coverages', () => {
+      expect(
+        activeDispatchBlocks({ ...clean, insuranceCover: ended }, now, {
+          blockingCoverages: ['COMPREHENSIVE'],
+        }),
+      ).toEqual([]);
     });
   });
 

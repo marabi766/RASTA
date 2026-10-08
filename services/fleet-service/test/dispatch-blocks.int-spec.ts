@@ -159,6 +159,77 @@ describe('dispatch blocks (L3-02)', () => {
     expect(row!.insuranceLapsedCoverages).toEqual(['THIRD_PARTY']);
   });
 
+  describe('a policy that ran out before the expiry sweep (INSURANCE_EXPIRED not received)', () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    /** A policy recorded valid for a moment, then left to run out with no lapse event. */
+    async function insuredBriefly(): Promise<{ assetId: string; driverId: string }> {
+      const ids = await fleet();
+      await recordPolicy(ids.assetId, new Date(Date.now() - 60_000), new Date(Date.now() + 1500));
+      return ids;
+    }
+
+    it('assigns while the policy is in force, refuses once valid_until has passed, allows after a renewal', async () => {
+      const { assetId, driverId } = await insuredBriefly();
+      expect((await repository.findAssetRef(assetId))!.insuranceLapsedCoverages).toEqual([]);
+
+      await sleep(1700);
+      expect((await repository.findAssetRef(assetId))!.insuranceLapsedCoverages).toEqual([]);
+      await expect(assign(org.a, assetId, driverId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
+        internalContext: expect.objectContaining({
+          rule: 'ASSET_DISPATCH_BLOCKED',
+          detail: expect.stringContaining('insurance policy has expired (THIRD_PARTY)'),
+        }),
+      });
+
+      await recordPolicy(assetId, new Date(Date.now() - 1000), new Date(Date.now() + year));
+      expect((await assign(org.a, assetId, driverId)).assetId).toBe(assetId);
+    });
+
+    it('keeps the ended window through a gap-spanning renewal that has not started', async () => {
+      const { assetId, driverId } = await insuredBriefly();
+      await sleep(1700);
+      await recordPolicy(assetId, new Date(Date.now() + 86_400_000), new Date(Date.now() + year));
+
+      await expect(assign(org.a, assetId, driverId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+    });
+
+    it("is per machine and per tenant: another machine and another tenant's caller are unaffected", async () => {
+      const expired = await insuredBriefly();
+      const insured = await fleet();
+      await recordPolicy(insured.assetId, new Date(Date.now() - 1000), new Date(Date.now() + year));
+      await sleep(1700);
+
+      await expect(assign(org.a, expired.assetId, expired.driverId)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+      });
+      expect((await assign(org.a, insured.assetId, insured.driverId)).assetId).toBe(
+        insured.assetId,
+      );
+
+      // Another tenant is told the machine does not exist, not that it is uninsured.
+      const outsider = id('DRV');
+      await asActor({ organizationId: org.b }, () =>
+        prisma.client.driver.create({
+          data: {
+            organizationId: org.b,
+            id: outsider,
+            userId: `USR-${outsider}`,
+            createdBy: 'ITEST',
+            updatedBy: 'ITEST',
+          },
+        }),
+      );
+      await expect(assign(org.b, expired.assetId, outsider)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    });
+  });
+
   it("does not let another tenant assign, or even find, a tenant's machine", async () => {
     const { assetId } = await fleet();
     const outsider = id('DRV');

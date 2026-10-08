@@ -19,6 +19,11 @@
  *   configuration (`FLEET_DISPATCH_BLOCKING_COVERAGES`, AGENTS.md § 9). The
  *   default is all four, which is how it behaved before this change.
  *
+ * A recorded policy whose window has ended blocks the same way with no
+ * `INSURANCE_EXPIRED`: that event follows a periodic sweep in asset-service,
+ * and a machine must not be dispatched in the hours between a policy ending
+ * and the sweep.
+ *
  * The insurance answer is worked out when it is asked, not stored, because
  * the event that ends a lapse does not always arrive after it. A policy is
  * normally renewed *before* the old one runs out: the new policy's
@@ -112,10 +117,13 @@ function parseWindow(window: unknown): CoverWindow | null {
 /**
  * Adds a recorded policy to the map, one window per policy.
  *
- * A policy recorded again replaces its own window. Windows that have already
- * ended are dropped: they can never answer a lapse again, and keeping them
- * would grow the column for ever. Order-independent: two policies of one
- * coverage can arrive in either order, and the result is the same set.
+ * A policy recorded again replaces its own window. Of the windows that have
+ * already ended only the latest-ending one is kept: the rest can never answer
+ * a lapse again and would grow the column for ever, but the last one is the
+ * evidence that the coverage existed and ran out, which `expiredCoverages`
+ * needs when no `INSURANCE_EXPIRED` has arrived. Order-independent: two
+ * policies of one coverage can arrive in either order, and the result is the
+ * same set.
  */
 export function withRecordedPolicy(
   cover: InsuranceCover,
@@ -123,15 +131,21 @@ export function withRecordedPolicy(
   window: CoverWindow,
   now: Date,
 ): InsuranceCover {
-  const others = (cover[coverage] ?? []).filter(
-    (existing) => existing.policyId !== window.policyId && !hasEnded(existing, now),
-  );
-  const windows = hasEnded(window, now) ? others : [...others, window];
+  const all = [...(cover[coverage] ?? []).filter((e) => e.policyId !== window.policyId), window];
+  const latestEnded = all
+    .filter((w) => hasEnded(w, now))
+    .sort((a, b) => endTime(b) - endTime(a) || a.policyId.localeCompare(b.policyId))[0];
+  const windows = [...all.filter((w) => !hasEnded(w, now)), ...(latestEnded ? [latestEnded] : [])];
   const sorted = windows.sort((a, b) => a.policyId.localeCompare(b.policyId));
   const next = { ...cover };
   if (sorted.length > 0) next[coverage] = sorted;
   else delete next[coverage];
   return next;
+}
+
+function endTime(window: CoverWindow): number {
+  const to = Date.parse(window.validTo);
+  return Number.isNaN(to) ? Number.NEGATIVE_INFINITY : to;
 }
 
 function hasEnded(window: CoverWindow, now: Date): boolean {
@@ -172,6 +186,21 @@ export function unresolvedLapses(
   );
 }
 
+/**
+ * Coverages whose recorded policy has run out with nothing in force: a window
+ * has ended and no window of the coverage covers `now`. Needs no
+ * `INSURANCE_EXPIRED`, which only follows asset-service's periodic sweep. A
+ * coverage never recorded, or whose only window starts later, is not named:
+ * nothing has lapsed there.
+ */
+export function expiredCoverages(cover: InsuranceCover, now: Date): string[] {
+  return Object.entries(cover)
+    .filter(
+      ([, windows]) => !isCovered(windows, now) && windows.some((window) => hasEnded(window, now)),
+    )
+    .map(([coverage]) => coverage);
+}
+
 /** The replica fields the two causes live in. */
 export interface DispatchBlockFields {
   inspectionBlockedReason: string | null;
@@ -203,11 +232,13 @@ export function activeDispatchBlocks(
   }
   // A lapse of a coverage that does not gate dispatch stays recorded, so that
   // widening the configuration later brings it back, but it blocks nothing.
-  const lapses = unresolvedLapses(
-    asset.insuranceLapsedCoverages,
-    parseCover(asset.insuranceCover),
-    now,
-  ).filter(
+  const cover = parseCover(asset.insuranceCover);
+  const lapses = [
+    ...new Set([
+      ...unresolvedLapses(asset.insuranceLapsedCoverages, cover, now),
+      ...expiredCoverages(cover, now),
+    ]),
+  ].filter(
     (coverage) => coverage === UNKNOWN_COVERAGE || policy.blockingCoverages.includes(coverage),
   );
   if (lapses.length > 0) {
