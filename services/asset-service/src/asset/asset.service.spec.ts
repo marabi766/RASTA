@@ -576,6 +576,22 @@ describe('AssetService', () => {
       );
     });
 
+    it('refuses IDLE → ACTIVE with no insurance in force, and writes and publishes nothing', async () => {
+      const h = harness({ findById: jest.fn(async () => assetRow({ status: 'IDLE' })) });
+
+      await expect(
+        run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'ACTIVE',
+            reason: 'بازگشت',
+            expectedVersion: 1,
+          }),
+        ),
+      ).rejects.toThrow(/insurance policy currently in force/);
+      expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+    });
+
     it('names everything that is missing, not just the first thing', async () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
@@ -904,6 +920,7 @@ describe('AssetService', () => {
       let row = assetRow({ version: 1, status: 'ACTIVE' });
       const h = harness({
         findById: jest.fn(async () => row),
+        findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
         compareAndSetStatus: jest.fn(
           async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
             row = { ...row, ...data, version: row.version + 1 } as typeof row;
@@ -1388,7 +1405,10 @@ describe('AssetService', () => {
       'asks nobody when the asset is only marked %s: that does not leave service',
       async (target) => {
         const from = target === 'IDLE' ? 'ACTIVE' : 'IDLE';
-        const h = at(from, fakeClearance());
+        // IDLE → ACTIVE needs a policy in force like every way into ACTIVE (#234 round 8).
+        const h = at(from, fakeClearance(), {
+          findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        });
 
         await run(() =>
           h.service.changeStatus(ASSET_ID, {

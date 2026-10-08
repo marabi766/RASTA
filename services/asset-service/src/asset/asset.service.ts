@@ -547,8 +547,9 @@ export class AssetService {
    * operable state from an asset the current owner has not commissioned: REGISTERED → ACTIVE
    * (`activate`) and OUT_OF_SERVICE → ACTIVE, which is how a transferred asset could otherwise
    * be put into service without its own paperwork (REGISTERED → OUT_OF_SERVICE → ACTIVE). IDLE →
-   * ACTIVE needs none: IDLE is reachable only from ACTIVE, so an IDLE asset was commissioned by the
-   * owner it has now (a transfer always lands in REGISTERED).
+   * ACTIVE needs no ownership document: IDLE is reachable only from ACTIVE, so an IDLE asset was
+   * commissioned by the owner it has now (a transfer always lands in REGISTERED) — but it needs
+   * the insurance, like every way into ACTIVE (round 8).
    *
    * Round 2: the dossier is needed only when the asset is not **commissioned for its current owner**
    * (`commissionedForOrganizationId`, set on activation, cleared by a transfer). OUT_OF_SERVICE →
@@ -604,14 +605,18 @@ export class AssetService {
     // Returning from OUT_OF_SERVICE is a way into service like any other: an asset the current owner
     // has not commissioned (one that came from a transfer and was withdrawn before it was ever
     // activated) goes through the same dossier check as `activate`.
-    // Every return to service needs an insurance policy in force now: a policy that lapsed while
-    // the asset was withdrawn blocks it. The commissioning marker waives only the ownership
-    // document — a seeded active asset, or one a runbook repaired, has none to show. A transfer
-    // clears the marker, so the new owner (and A in A→B→A) commissions with its own documents.
-    const returning = asset.status === 'OUT_OF_SERVICE' && dto.status === 'ACTIVE';
-    if (returning) {
+    // Every transition into ACTIVE (IDLE and OUT_OF_SERVICE here, `activate` for REGISTERED) goes
+    // through the one guard and needs an insurance policy in force now: a policy that lapsed while
+    // the asset was idle or withdrawn blocks it. The ownership document is asked only of a return
+    // from OUT_OF_SERVICE, and the commissioning marker waives it — a seeded active asset, or one a
+    // runbook repaired, has none to show. A transfer clears the marker, so the new owner (and A in
+    // A→B→A) commissions with its own documents. An IDLE asset was commissioned by its owner.
+    const intoActive = dto.status === 'ACTIVE';
+    const returning = intoActive && asset.status === 'OUT_OF_SERVICE';
+    if (intoActive) {
       await this.assertCommissioningDossier(id, {
-        ownershipDocument: asset.commissionedForOrganizationId !== asset.organizationId,
+        ownershipDocument:
+          returning && asset.commissionedForOrganizationId !== asset.organizationId,
       });
     }
 

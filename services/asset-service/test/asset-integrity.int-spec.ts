@@ -1278,6 +1278,16 @@ describe('asset integrity', () => {
     it('applies a status change once, and a stale one cannot apply it again after the machine moved back', async () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
+      // IDLE → ACTIVE needs a policy in force, like every way into ACTIVE.
+      await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - day).toISOString(),
+          validTo: new Date(Date.now() + 300 * day).toISOString(),
+        }),
+      );
       const first = await versionOf(assetId);
       const idle = { status: 'IDLE' as const, reason: 'فصل غیرکاری', expectedVersion: first };
 

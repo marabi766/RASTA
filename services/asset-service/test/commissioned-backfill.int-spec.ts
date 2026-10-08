@@ -7,12 +7,14 @@ import { id, ownerDatabaseUrl, tenants } from './helpers';
 /**
  * The backfill of migration 20261007120000_asset_commissioned_for_organization against rows made
  * the OLD way (#234 round 4): `commissioned_at` set, `commissioned_for_organization_id` NULL.
- * Round 7: a TRANSFERRED asset gets its owner only where its own timeline proves the current owner
- * activated it after the latest transfer (`ASSET_ACTIVATED`, `recorded_at` > `transferred_at`).
+ * Round 8: only a NEVER-transferred commissioned asset gets its owner. A transferred asset stays
+ * NULL even when its timeline holds an `ASSET_ACTIVATED` line for the current owner after the
+ * transfer: under the old transfer code the previous owner's document reference moved with the
+ * asset, so that line proves when the recipient activated, not whose document it used.
  *
- * The migration's own UPDATE statements — read from the shipped file, not restated here — are run as
+ * The migration's own UPDATE statement — read from the shipped file, not restated here — is run as
  * the owner against ISOLATED copies of the tables: inside one transaction a throwaway schema is
- * created, `asset`, `asset_transfer` and `asset_timeline_entry` are cloned into it (LIKE public.… INCLUDING ALL), the five
+ * created, `asset`, `asset_transfer` and `asset_timeline_entry` are cloned into it (LIKE public.… INCLUDING ALL), the
  * fixture rows go there, and `SET LOCAL search_path` points the unqualified statement at the
  * copies. The transaction is rolled back. The statement is UNSCOPED (it rewrites every matching
  * row), so it must never run against public.asset on the shared dev database: that would lock and
@@ -50,25 +52,15 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
   const orphanTransfer = id('AST'); // generation 0 but a transfer row exists
   const advancedGeneration = id('AST'); // a transfer row is missing but the generation moved
   const neverCommissioned = id('AST');
-  // Transferred to org.a two hours ago; what the timeline says about the activation decides.
-  const proven = id('AST'); // ASSET_ACTIVATED for the owner, recorded after the transfer
-  const beforeTransfer = id('AST'); // ASSET_ACTIVATED recorded before the transfer (re-stamped)
-  const forgedInstant = id('AST'); // recorded before, but occurred_at claims after
-  const otherOwner = id('AST'); // activated after the transfer, but for another organization
-  const statusOnly = id('AST'); // a status change to ACTIVE after the transfer, no ASSET_ACTIVATED
-  const noTransferRow = id('AST'); // generation moved, no transfer row: no instant to compare with
+  // Transferred to org.a two hours ago and activated by it an hour ago (`ASSET_ACTIVATED`).
+  const transferredActivated = id('AST');
   const ids = [
     old,
     transferred,
     orphanTransfer,
     advancedGeneration,
     neverCommissioned,
-    proven,
-    beforeTransfer,
-    forgedInstant,
-    otherOwner,
-    statusOnly,
-    noTransferRow,
+    transferredActivated,
   ];
 
   let owner: PrismaService;
@@ -103,11 +95,11 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
   });
 
   it('the shipped statement is unscoped and names its tables unqualified, so the scratch search_path decides what it touches', () => {
-    expect(backfills).toHaveLength(2);
+    expect(backfills).toHaveLength(1);
     for (const statement of backfills) expect(escapesTheScratchSchema(statement)).toBe(false);
   });
 
-  it('gives a never-transferred commissioned row its owner, and a transferred row only when its history proves the current owner activated it; every other row stays NULL', async () => {
+  it('gives a never-transferred commissioned row its owner; every transferred row stays NULL, activated after the transfer or not', async () => {
     const scratch = `backfill_test_${randomBytes(6).toString('hex')}`;
     const ROLLBACK = new Error('rolled back on purpose');
     let seen: Record<string, string | null> = {};
@@ -149,29 +141,6 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
             org.a,
           );
 
-        const insertEntry = (
-          assetId: string,
-          organizationId: string,
-          eventName: string,
-          recordedAgo: string,
-          occurredAgo: string,
-          detail = '{}',
-        ) =>
-          tx.$executeRawUnsafe(
-            `INSERT INTO ${scratch}.asset_timeline_entry
-               (id, asset_id, organization_id, event_name, source_service, source_event_id,
-                category, title, detail, occurred_at, recorded_at)
-             VALUES ($1, $2, $3, $4, 'asset-service', $1, 'LIFECYCLE'::"TimelineCategory", 'itest',
-                     $5::jsonb, now() - $7::interval, now() - $6::interval)`,
-            id('ATL'),
-            assetId,
-            organizationId,
-            eventName,
-            detail,
-            recordedAgo,
-            occurredAgo,
-          );
-
         await insertAsset(old, true, 0);
         await insertAsset(transferred, true, 1);
         await insertTransfer(transferred);
@@ -180,25 +149,20 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
         await insertAsset(advancedGeneration, true, 1);
         await insertAsset(neverCommissioned, false, 0);
 
-        // The transferred rows: one transfer to org.a two hours ago each (generation 1).
-        for (const assetId of [proven, beforeTransfer, forgedInstant, otherOwner, statusOnly]) {
-          await insertAsset(assetId, false, 1);
-          await insertTransfer(assetId);
-        }
-        await insertAsset(noTransferRow, false, 1);
-        await insertEntry(proven, org.a, 'ASSET_ACTIVATED', '1 hour', '1 hour');
-        await insertEntry(beforeTransfer, org.a, 'ASSET_ACTIVATED', '3 hours', '3 hours');
-        await insertEntry(forgedInstant, org.a, 'ASSET_ACTIVATED', '3 hours', '1 hour');
-        await insertEntry(otherOwner, org.b, 'ASSET_ACTIVATED', '1 hour', '1 hour');
-        await insertEntry(
-          statusOnly,
+        // Transferred two hours ago, then activated by the recipient an hour ago.
+        await insertAsset(transferredActivated, true, 1);
+        await insertTransfer(transferredActivated);
+        await tx.$executeRawUnsafe(
+          `INSERT INTO ${scratch}.asset_timeline_entry
+             (id, asset_id, organization_id, event_name, source_service, source_event_id,
+              category, title, detail, occurred_at, recorded_at)
+           VALUES ($1, $2, $3, 'ASSET_ACTIVATED', 'asset-service', $1,
+                   'LIFECYCLE'::"TimelineCategory", 'itest', '{}'::jsonb,
+                   now() - interval '1 hour', now() - interval '1 hour')`,
+          id('ATL'),
+          transferredActivated,
           org.a,
-          'ASSET_STATUS_CHANGED',
-          '1 hour',
-          '1 hour',
-          '{"previousStatus":"OUT_OF_SERVICE","newStatus":"ACTIVE"}',
         );
-        await insertEntry(noTransferRow, org.a, 'ASSET_ACTIVATED', '1 hour', '1 hour');
 
         const read = () =>
           tx.$queryRawUnsafe<{ id: string; c: string | null }[]>(
@@ -217,8 +181,8 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
         await tx.$executeRawUnsafe(`SET LOCAL search_path = ${scratch}`);
         const updated = [];
         for (const statement of backfills) updated.push(await tx.$executeRawUnsafe(statement));
-        // One never-transferred commissioned row; one transferred row with proof.
-        expect(updated).toEqual([1, 1]);
+        // Exactly the one never-transferred commissioned row.
+        expect(updated).toEqual([1]);
         await tx.$executeRawUnsafe(`SET LOCAL search_path = public`);
 
         seen = Object.fromEntries((await read()).map((row) => [row.id, row.c]));
@@ -233,12 +197,7 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
     expect(seen[orphanTransfer]).toBeNull();
     expect(seen[advancedGeneration]).toBeNull();
     expect(seen[neverCommissioned]).toBeNull();
-    // Transferred: proven gets the current owner; every unproven one stays NULL.
-    expect(seen[proven]).toBe(org.a);
-    expect(seen[beforeTransfer]).toBeNull();
-    expect(seen[forgedInstant]).toBeNull();
-    expect(seen[otherOwner]).toBeNull();
-    expect(seen[statusOnly]).toBeNull();
-    expect(seen[noTransferRow]).toBeNull();
+    // Transferred and activated afterwards: still NULL — the recipient attaches its own dossier.
+    expect(seen[transferredActivated]).toBeNull();
   });
 });

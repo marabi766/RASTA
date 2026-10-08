@@ -336,7 +336,7 @@ describe('document references on an ownership transfer (Q-99)', () => {
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
     });
 
-    it('an owner that commissioned its own asset withdraws and returns it with its dossier complete; IDLE → ACTIVE asks nothing more', async () => {
+    it('an owner that commissioned its own asset withdraws and returns it with its dossier complete; IDLE → ACTIVE asks no ownership document', async () => {
       const { assetId } = await machineWithDocument(org.a);
       await record(org.a, assetId);
       expect((await withdraw(org.a, assetId)).status).toBe('OUT_OF_SERVICE');
@@ -344,6 +344,7 @@ describe('document references on an ownership transfer (Q-99)', () => {
 
       // IDLE is reachable only from ACTIVE, so an IDLE asset was commissioned by its current owner.
       const idle = await machineWithDocument(org.a);
+      await record(org.a, idle.assetId);
       await asActor(manager(org.a), async () =>
         assets.changeStatus(idle.assetId, {
           status: 'IDLE',
@@ -500,6 +501,70 @@ describe('document references on an ownership transfer (Q-99)', () => {
       );
       await record(org.a, assetId);
       expect((await putBack(org.a, assetId)).status).toBe('ACTIVE');
+    });
+  });
+
+  describe('every transition into ACTIVE checks the insurance (#234 round 8)', () => {
+    it('IDLE → ACTIVE is refused once the policy has expired, and allowed again when it is renewed; no status event is published for the refusal', async () => {
+      const DAY = 24 * 60 * 60 * 1000;
+      const { assetId } = await machineWithDocument(org.a);
+      const setStatus = async (status: 'IDLE' | 'ACTIVE') =>
+        asActor(manager(org.a), async () =>
+          assets.changeStatus(assetId, {
+            status,
+            reason: 'آزمون',
+            expectedVersion: (await assets.get(assetId)).version,
+          }),
+        );
+      const statusEvents = async () =>
+        Number(
+          (
+            await prisma.client.$queryRawUnsafe<{ n: bigint }[]>(
+              `SELECT count(*) AS n FROM outbox_message
+                WHERE aggregate_id = $1 AND payload->>'newStatus' = 'ACTIVE'`,
+              assetId,
+            )
+          )[0]!.n,
+        );
+
+      await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - DAY).toISOString(),
+          validTo: new Date(Date.now() + 300 * DAY).toISOString(),
+        }),
+      );
+      expect((await setStatus('IDLE')).status).toBe('IDLE');
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE insurance_policy SET valid_from = now() - interval '20 days',
+                valid_to = now() - interval '1 day' WHERE asset_id = $1`,
+        assetId,
+      );
+
+      const published = await statusEvents();
+      const refused = await setStatus('ACTIVE').catch((error: unknown) => error);
+      expect(refused).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        internalContext: expect.objectContaining({
+          rule: 'INCOMPLETE_DOSSIER',
+          missing: ['an insurance policy currently in force'],
+        }),
+      });
+      expect((await asActor(manager(org.a), () => assets.get(assetId))).status).toBe('IDLE');
+      expect(await statusEvents()).toBe(published);
+
+      await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - DAY).toISOString(),
+          validTo: new Date(Date.now() + 300 * DAY).toISOString(),
+        }),
+      );
+      expect((await setStatus('ACTIVE')).status).toBe('ACTIVE');
     });
   });
 
