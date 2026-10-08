@@ -133,6 +133,22 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     });
   });
 
+  it('names no cause for a coalesced task, though the employer carries its version: two moves outside the union (round 7)', async () => {
+    // The employer left the union with a first move and moved again within the outside branch; the
+    // task holds the later, higher-versioned move, and the hierarchy would "prove" it the cause.
+    const { sweeper, suspension, directory } = build([task({ generation: 1 })]);
+
+    await sweeper.runOnce();
+
+    expect(directory.withinVersion).not.toHaveBeenCalled();
+    expect((suspension.suspend.mock.calls[0] as unknown[])[1]).toEqual({
+      reason: 'MOVE_RECHECK',
+      movedVersion: 4,
+      correlationId: 'COR_1',
+      callerService: 'organization-service',
+    });
+  });
+
   it('retries the task when the proof cannot be had, rather than naming a cause it did not confirm', async () => {
     const { sweeper, reconciliations, suspension, directory } = build([task()]);
     directory.withinVersion.mockRejectedValue(new Error('organization-service down'));

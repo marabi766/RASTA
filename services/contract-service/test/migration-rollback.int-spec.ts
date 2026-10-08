@@ -129,6 +129,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const DETECTION = '20261006160000_review_detection_provenance';
   const VERSION = '20261006140000_signature_hierarchy_version';
   const REVIEW = '20261006120000_signature_authority_review';
   const SUSPENSION = '20261006100000_policy_suspension';
@@ -218,7 +219,7 @@ describe('each down.sql, run whole with psql --file', () => {
     }
   });
 
-  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW, VERSION])(
+  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW, VERSION, DETECTION])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
       const statements = readFileSync(down(migration), 'utf8')
@@ -421,6 +422,53 @@ describe('each down.sql, run whole with psql --file', () => {
       expect(shape(unused)).toBe(shape(previous));
     },
   );
+
+  // Review round 6: a review may be detected without a proven cause. The previous schema cannot hold one.
+  const detectionReview = (cause: string, at: string, by: string) =>
+    `INSERT INTO "signature_authority_review"
+      ("id", "organization_id", "contract_id", "side", "policy_id", "reason", "cause_event_id",
+       "moved_at", "detected_by", "flagged_at", "moved_version", "recorded_version")
+    VALUES ('SAR_rb', 'ORG_E', 'CTR_rb', 'EMPLOYER', 'APL_rb', 'AUTHORITY_CHANGED_DURING_SIGNING',
+            ${cause}, ${at}, '${by}', now(), 5, 4)`;
+
+  it('review_detection_provenance: over a review detected without a proven cause it refuses and changes nothing, with ON_ERROR_STOP and without it; over reviews that all name their cause it restores the previous schema', () => {
+    const schema = scratch(DETECTION);
+    mustRun(schema, [
+      '-c',
+      `${policyRow}; ${contractRow}; ${evidencedSignature}; ${detectionReview('NULL', 'NULL', 'MOVE_RECHECK')}`,
+    ]);
+    const before = shape(schema);
+    for (const stop of [true, false]) {
+      const refused = psql(schema, ['--file', down(DETECTION)], stop);
+      if (stop) expect(refused.ok).toBe(false);
+      expect(refused.out).toMatch(
+        /down refused: 1 review\(s\) were detected without a proven cause event; nothing was changed/,
+      );
+      expect(shape(schema)).toBe(before);
+    }
+    expect(mustRun(schema, ['-c', `SELECT count(*) FROM "signature_authority_review"`])).toBe('1');
+
+    // Every review names its cause: the file runs whole, the ledger row goes, and the schema is the
+    // previous migration's — `detected_by` dropped, the two columns NOT NULL again.
+    const unused = scratch(DETECTION);
+    mustRun(unused, [
+      '-c',
+      `${policyRow}; ${contractRow}; ${evidencedSignature}; ${detectionReview("'EVT_1'", 'now()', 'ORGANIZATION_MOVED')}`,
+    ]);
+    const result = psql(unused, ['--file', down(DETECTION)]);
+    expect(result.out).toBe('');
+    expect(result.ok).toBe(true);
+    expect(shape(unused)).toBe(shape(scratch(VERSION)));
+    expect(
+      mustRun(unused, [
+        '-c',
+        `SELECT string_agg(column_name || ':' || is_nullable, ',' ORDER BY column_name)
+           FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'signature_authority_review'
+            AND column_name IN ('cause_event_id', 'moved_at', 'detected_by')`,
+      ]),
+    ).toBe('cause_event_id:NO,moved_at:NO');
+  });
 
   it('signing_policy: over a policy that exists it refuses and changes nothing, with ON_ERROR_STOP and without it; over none it succeeds', () => {
     const schema = scratch(SIGNING_POLICY);

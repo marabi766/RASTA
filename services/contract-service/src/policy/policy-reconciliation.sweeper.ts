@@ -219,15 +219,25 @@ export class PolicyReconciliationSweeper {
   }
 
   /**
-   * Whether the move this task carries is shown to be why the union lost the employer: the employer
-   * is in the moved organization's subtree **and** carries that move's hierarchy version — a move
-   * stamps the moved organization and every descendant with its version in its own transaction, so
-   * a different (later or earlier) version means another move last touched the employer, and a
-   * missing one means there is nothing to prove it by. An organization that is not within the moved
-   * one — an unrelated move that merely queued this re-check — proves nothing. Fail closed: no
-   * proof is "not shown", and a question that cannot be answered is retried like any other.
+   * Whether the move this task carries is shown to be why the union lost the employer. Two things
+   * must hold (round 7):
+   *
+   * 1. **Exactly one move is on the task** — it was never coalesced into (`generation` 0; the
+   *    suspension is fenced on the generation, so it is still 0 when the review is written). A
+   *    coalesced task holds the highest-versioned of several moves, and the hierarchy cannot say
+   *    which of them took the employer out: the employer may have left the union with an earlier
+   *    one and then moved again within the outside branch, and the later move would be named.
+   * 2. The employer is in the moved organization's subtree **and** carries that move's hierarchy
+   *    version — a move stamps the moved organization and every descendant with its version in its
+   *    own transaction, so a different version means another move last touched the employer, and a
+   *    missing one means there is nothing to prove it by.
+   *
+   * An organization that is not within the moved one — an unrelated move that merely queued this
+   * re-check — proves nothing. Fail closed: no proof is "not shown" (`MOVE_RECHECK`, no cause), and
+   * a question that cannot be answered is retried like any other.
    */
   private async isCause(task: ClaimedTask): Promise<boolean> {
+    if (task.generation !== 0) return false;
     if (task.movedVersion === null) return false;
     const answer = await this.directory.withinVersion(
       task.movedOrganizationId,

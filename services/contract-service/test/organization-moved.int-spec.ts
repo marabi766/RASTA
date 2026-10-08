@@ -1053,7 +1053,7 @@ describe('a signing policy follows an organization move', () => {
       return { union, draft, policyId };
     }
 
-    it('a move that coalesces into an open task with a HIGHER version takes over its whole provenance: event, organization, instant and version together', async () => {
+    it('a move that coalesces into an open task with a HIGHER version takes over its whole provenance (event, organization, instant, version together), yet a task with two moves names no cause', async () => {
       const { draft, policyId } = await signedOnce();
       api.hierarchy.adopt(newOrg(), draft.employer);
       const firstVersion = api.hierarchy.bump(draft.employer);
@@ -1075,25 +1075,29 @@ describe('a signing policy follows an organization move', () => {
       });
       expect(task!.movedAt!.toISOString()).toBe(secondAt.toISOString());
 
+      // Two moves outside the union, the employer carrying the second's version: the hierarchy
+      // would "prove" the second the cause, but it cannot say which of the two took the employer
+      // out — so neither is named (round 7).
       await sweeper.runOnce();
       const [review] = await reviewsOf(draft.id);
       expect(review).toMatchObject({
-        detectedBy: 'ORGANIZATION_MOVED',
-        causeEventId: second.eventId,
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
         movedVersion: BigInt(secondVersion),
       });
-      expect(review!.movedAt!.toISOString()).toBe(secondAt.toISOString());
       const [event] = await flagged(draft.employer);
       expect(event!.payload).toMatchObject({
-        detectedBy: 'ORGANIZATION_MOVED',
-        causeEventId: second.eventId,
-        movedAt: secondAt.toISOString(),
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
         movedVersion: secondVersion,
       });
-      expect(event!.payload.causeEventId).not.toBe(first.eventId);
+      expect(JSON.stringify(event)).not.toContain(first.eventId);
+      expect(JSON.stringify(event)).not.toContain(second.eventId);
     });
 
-    it('a move with a LOWER (or no) version coalescing later changes nothing of the provenance', async () => {
+    it('a move with a LOWER (or no) version coalescing later changes nothing of the task’s provenance', async () => {
       const { draft, policyId } = await signedOnce();
       api.hierarchy.adopt(newOrg(), draft.employer);
       const lowerVersion = api.hierarchy.bump(draft.employer);
@@ -1113,12 +1117,14 @@ describe('a signing policy follows an organization move', () => {
         generation: 2,
       });
       await sweeper.runOnce();
+      // Three moves were on the task: none is provably the cause (round 7).
       expect((await reviewsOf(draft.id))[0]).toMatchObject({
-        detectedBy: 'ORGANIZATION_MOVED',
-        causeEventId: higher.eventId,
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
         movedVersion: BigInt(higherVersion),
       });
-      expect((await flagged(draft.employer))[0]!.payload.causeEventId).toBe(higher.eventId);
+      expect((await flagged(draft.employer))[0]!.payload.causeEventId).toBeNull();
     });
 
     it('an unrelated move that queues an employer already outside the union is not named as the cause: the review and its event carry a closed detectedBy and no event, no instant', async () => {
