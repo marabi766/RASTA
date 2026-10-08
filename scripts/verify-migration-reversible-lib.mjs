@@ -2809,7 +2809,12 @@ const DOLLAR_QUOTE_OPEN = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y
  * it, so that nothing inside a string, an identifier, a comment or a dollar-quoted body can be
  * mistaken for code, and nothing that is code can hide in one.
  *
- *   - `'…'` strings, with `''` for a quote, and backslash escapes in an `E'…'` string only;
+ *   - `'…'` strings, with `''` for a quote, and backslash escapes in an `E'…'` string only. A
+ *     backslash inside an ordinary `'…'` string is a **problem**: with
+ *     `standard_conforming_strings = off` it escapes the next character (`\'` is a quote), so the
+ *     server would read the string as closing later than this lexer does, and a COMMIT or `\q`
+ *     after it would be hidden (Codex on #237, round 3). The setting itself is refused too
+ *     (`downFileMode`), but the lexer does not rely on that;
  *   - `"…"` identifiers, with `""` for a quote (kept verbatim: a name is part of a statement);
  *   - `$$…$$` and `$tag$…$tag$` bodies (a `$` straight after an identifier character is part of
  *     that identifier, not a quote);
@@ -2868,10 +2873,14 @@ export function lexSql(sql) {
     if (c === "'") {
       const escapes = /[eE]/.test(sql[i - 1] ?? '') && !continuesIdentifier(i - 2);
       let closed = false;
+      let backslash = false;
       i += 1;
       while (i < length) {
         if (escapes && sql[i] === '\\') {
           i += 2;
+        } else if (!escapes && sql[i] === '\\') {
+          backslash = true;
+          i += 1;
         } else if (sql[i] === "'" && sql[i + 1] === "'") {
           i += 2;
         } else if (sql[i] === "'") {
@@ -2883,6 +2892,12 @@ export function lexSql(sql) {
         }
       }
       if (!closed) problems.push('an unterminated string');
+      if (backslash) {
+        problems.push(
+          "a backslash inside an ordinary '…' string (write E'…' if an escape is meant; the " +
+            'meaning of a plain string depends on standard_conforming_strings)',
+        );
+      }
       current += "''";
       continue;
     }
@@ -2950,16 +2965,23 @@ const LEDGER_DELETE = /^DELETE\s+FROM\s+"_prisma_migrations"\s+WHERE\s+"migratio
 /** An index name, plain or quoted, with an optional schema before it. */
 const INDEX_NAME = String.raw`(?:(?:[a-z_][a-z0-9_$]*|"[^"]+")\.)?(?:[a-z_][a-z0-9_$]*|"[^"]+")`;
 /**
- * The only statements a no-transaction file may hold besides its one final ledger DELETE: each
- * either does nothing or finishes the job when run again.
+ * The only statements a no-transaction file may hold besides its one final ledger DELETE: one
+ * that does nothing, or finishes the job, when run again.
+ *
+ * No `CREATE INDEX`, in any form (Codex on #237, round 3): `CREATE INDEX CONCURRENTLY IF NOT
+ * EXISTS` that fails part-way leaves an INVALID index, a retry skips it as "already there", and
+ * the ledger row is deleted all the same — the index is then neither valid nor rebuilt.
  */
 const NO_TRANSACTION_ALLOWED = [
   new RegExp(`^DROP\\s+INDEX\\s+CONCURRENTLY\\s+IF\\s+EXISTS\\s+${INDEX_NAME}$`, 'i'),
-  new RegExp(
-    `^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+CONCURRENTLY\\s+IF\\s+NOT\\s+EXISTS\\s+${INDEX_NAME}\\s+ON\\s+\\S[\\s\\S]*$`,
-    'i',
-  ),
 ];
+
+/**
+ * The two settings that change how psql's and the server's lexers read a string. A down file has
+ * no business with either, so their names are refused anywhere in the file — in code, in a string
+ * or dollar-quoted body (`set_config(…)`), in a comment — rather than argued about case by case.
+ */
+const STRING_LEXING_SETTINGS = /\b(?:standard_conforming_strings|backslash_quote)\b/i;
 
 /**
  * How a down.sql is to be run, and what is wrong with it for that mode.
@@ -2984,6 +3006,12 @@ export function downFileMode(sql) {
       (line) => `a psql meta-command is not allowed in a down.sql: "${line.slice(0, 60)}"`,
     ),
   ];
+  if (STRING_LEXING_SETTINGS.test(sql)) {
+    problems.push(
+      'a down.sql must not SET, RESET or set_config standard_conforming_strings or backslash_quote ' +
+        '(they change how a string is read, so what this check saw is not what would run)',
+    );
+  }
   const control = statements.filter((statement) => TRANSACTION_CONTROL.test(statement));
   const marked = sql.split('\n', 1)[0].trim() === NO_TRANSACTION_MARKER;
   if (/rasta:no-transaction/.test(sql) && !marked) {
@@ -3008,9 +3036,9 @@ export function downFileMode(sql) {
     for (const statement of ledgerLast ? statements.slice(0, -1) : statements) {
       if (!NO_TRANSACTION_ALLOWED.some((allowed) => allowed.test(statement))) {
         problems.push(
-          `a no-transaction file may hold only DROP INDEX CONCURRENTLY IF EXISTS, ` +
-            `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS and its one final ledger DELETE: ` +
-            `"${statement.slice(0, 60)}" is none of them`,
+          `a no-transaction file may hold only DROP INDEX CONCURRENTLY IF EXISTS <name> and its one ` +
+            `final ledger DELETE (no CREATE INDEX of any form: a retry would skip an INVALID leftover ` +
+            `while the ledger row is gone): "${statement.slice(0, 60)}" is none of them`,
         );
       }
     }

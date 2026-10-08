@@ -1941,12 +1941,23 @@ test('a no-transaction file holds only the allow-listed statements and ends with
   // What is allowed.
   assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`), '');
   assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS "s"."ix";\n${LEDGER}`), '');
-  assert.equal(problemsOf(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (c);\n${LEDGER}`), '');
-  assert.equal(
-    problemsOf(`CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (a, b);\n${LEDGER}`),
-    '',
-  );
   assert.equal(problemsOf(LEDGER), '');
+  // No CREATE INDEX in any form (Codex on #237, round 3): a CONCURRENTLY build that fails leaves an
+  // INVALID index, a retry's IF NOT EXISTS skips it, and the ledger row is deleted all the same.
+  for (const create of [
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (c)',
+    'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (a, b)',
+    'CREATE INDEX CONCURRENTLY ix ON t (c)',
+    'CREATE UNIQUE INDEX CONCURRENTLY ix ON t (c)',
+    'CREATE INDEX IF NOT EXISTS ix ON t (c)',
+  ]) {
+    assert.match(problemsOf(`${create};\n${LEDGER}`), allowed, create);
+    assert.match(
+      problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;\n${create};\n${LEDGER}`),
+      /no CREATE INDEX of any form/,
+      create,
+    );
+  }
   // Re-runnability: the IF [NOT] EXISTS forms only.
   assert.match(problemsOf(`DROP INDEX CONCURRENTLY ix;\n${LEDGER}`), allowed);
   assert.match(problemsOf(`CREATE INDEX CONCURRENTLY ix ON t (c);\n${LEDGER}`), allowed);
@@ -2045,6 +2056,42 @@ test('lexSql keeps a string, an identifier and a comment from hiding or faking a
   assert.deepEqual(lexSql('SELECT 1; COMMIT; -- done').problems, []);
 });
 
+test('lexSql refuses a backslash inside an ordinary string; an E-string keeps its explicit handling (Codex on #237, round 3, HIGH)', () => {
+  const problemsOf = (sql) => lexSql(sql).problems.join();
+  const plain = /a backslash inside an ordinary '…' string/;
+  // With standard_conforming_strings = off, `\'` is an escaped quote and the string runs on.
+  assert.match(problemsOf("SELECT 'a\\''; COMMIT; --';"), plain);
+  assert.match(problemsOf("SELECT 'a\\'; COMMIT;"), plain);
+  assert.match(problemsOf("SELECT 'C:\\dir';"), plain);
+  assert.match(problemsOf("SELECT 'a' || 'b\\n';"), plain);
+  // Not one: no backslash, an E-string, an identifier, a dollar quote, a comment.
+  assert.equal(problemsOf("SELECT 'a''b', E'a\\'b\\n', \"x\\y\", 'z';"), '');
+  assert.equal(problemsOf("DO $$ SELECT 'a\\n' $$; -- 'a\\n'\n/* 'a\\n' */ SELECT 1;"), '');
+  assert.match(downFileMode("DROP TABLE a;\nSELECT 'a\\'';\n").problems.join(), plain);
+});
+
+test('a down.sql may not touch standard_conforming_strings or backslash_quote, in any form (Codex on #237, round 3, HIGH)', () => {
+  const refused =
+    /must not SET, RESET or set_config standard_conforming_strings or backslash_quote/;
+  for (const sql of [
+    'SET standard_conforming_strings = off;\nDROP TABLE a;',
+    'set standard_conforming_strings to on;\nDROP TABLE a;',
+    'SET LOCAL standard_conforming_strings = off;\nDROP TABLE a;',
+    'RESET standard_conforming_strings;\nDROP TABLE a;',
+    "SELECT set_config('standard_conforming_strings', 'off', true);\nDROP TABLE a;",
+    "DO $$ BEGIN PERFORM set_config('standard_conforming_strings', 'off', true); END $$;",
+    'SET backslash_quote = on;\nDROP TABLE a;',
+    'RESET BACKSLASH_QUOTE;\nDROP TABLE a;',
+    'ALTER ROLE x SET standard_conforming_strings = off;',
+    'BEGIN;\nSET standard_conforming_strings = off;\nDROP TABLE a;\nCOMMIT;',
+    `${NO_TRANSACTION_MARKER}\nSET standard_conforming_strings = off;\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`,
+  ]) {
+    assert.match(downFileMode(sql).problems.join('\n'), refused, sql);
+  }
+  // Other settings, and the word in nothing, are fine.
+  assert.deepEqual(downFileMode("SET LOCAL lock_timeout = '2s';\nDROP TABLE a;").problems, []);
+});
+
 test('lexSql reports what is left open, and every psql meta-command', () => {
   for (const [sql, what] of [
     ["SELECT 'open; COMMIT;", /unterminated string/],
@@ -2059,7 +2106,8 @@ test('lexSql reports what is left open, and every psql meta-command', () => {
   assert.deepEqual(lexSql('DROP TABLE a;\n\\echo hi\n').metaCommands, ['\\echo hi']);
   assert.deepEqual(lexSql('  \\i other.sql').metaCommands, ['\\i other.sql']);
   assert.deepEqual(lexSql('SELECT 1 \\gset').metaCommands, ['SELECT 1 \\gset']);
-  // A backslash in a string, an escape string, an identifier, a dollar quote or a comment is no command.
+  // A backslash in a string, an escape string, an identifier, a dollar quote or a comment is no command
+  // (a backslash in an ordinary string is refused as a problem instead, above).
   assert.deepEqual(
     lexSql(
       ["SELECT '\\n', E'\\n', \"a\\b\";", 'DO $$ \\q $$;', '-- \\q', '/* \\q */ SELECT 1;'].join(
@@ -2103,6 +2151,48 @@ test(
     assert.equal(result.down.mode, undefined, 'psql was never started');
     assert.deepEqual(result.still, { a: true, b: true });
     assert.deepEqual(result.rows, { a: 1, b: 0 });
+  },
+);
+
+test(
+  'Codex’s standard_conforming_strings example, run for real: refused before psql runs, the tables untouched (round 3)',
+  { skip: noDatabase },
+  () => {
+    // With standard_conforming_strings = off the server reads `'x\\''` as one string, so the verifier's
+    // lexer saw the COMMIT inside it as text while it was code, and `DROP TABLE a` became permanent
+    // before the statement that fails.
+    const down = [
+      'BEGIN;',
+      'DROP TABLE a;',
+      'SET standard_conforming_strings = off;',
+      "SELECT 'x\\''; COMMIT; --';",
+      'DROP TABLE no_such_table;',
+      'DROP TABLE b;',
+      LEDGER,
+      'COMMIT;',
+    ].join('\n');
+    const result = downFileCase(TWO_TABLES, down, ['a', 'b']);
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /not a runnable down\.sql/);
+    assert.match(
+      result.down.output,
+      /must not SET, RESET or set_config standard_conforming_strings/,
+    );
+    assert.match(result.down.output, /a backslash inside an ordinary '…' string/);
+    assert.equal(result.down.mode, undefined, 'psql was never started');
+    assert.deepEqual(result.still, { a: true, b: true });
+    assert.deepEqual(result.rows, { a: 1, b: 0 });
+
+    // The backslash alone is enough, with no SET in the file: the session's own setting might be off.
+    const bare = downFileCase(
+      TWO_TABLES,
+      "BEGIN;\nDROP TABLE a;\nSELECT 'x\\''; COMMIT; --';\nDROP TABLE no_such_table;\nCOMMIT;",
+      ['a', 'b'],
+    );
+    assert.equal(bare.down.ok, false);
+    assert.match(bare.down.output, /a backslash inside an ordinary '…' string/);
+    assert.equal(bare.down.mode, undefined, 'psql was never started');
+    assert.deepEqual(bare.still, { a: true, b: true });
   },
 );
 
