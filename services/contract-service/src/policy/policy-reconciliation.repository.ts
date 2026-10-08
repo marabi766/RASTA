@@ -41,8 +41,12 @@ export interface ClaimedTask {
   /** The generation at claim: what `complete` must still find for a "nothing to do" verdict. */
   generation: number;
   leaseToken: string;
-  /** When the move took effect (the event's instant); the task's creation for an older task. */
-  movedAt: Date;
+  /**
+   * The EARLIEST instant over every move coalesced into the task (D-050): the bound on which
+   * signatures could have committed after a move was prepared. Never the instant of the move whose
+   * version the task keeps — that one is the latest, not the earliest.
+   */
+  earliestMovedAt: Date;
   /** The move's hierarchy version (the highest of the moves coalesced); null for an older task. */
   movedVersion: number | null;
 }
@@ -57,7 +61,11 @@ export type TaskCheck =
   /** A later move coalesced into the task after the claim: the lookup may predate it. */
   | { readonly kind: 'STALE' }
   /** Still the worker's, at the generation it claimed; the move's version and instant as the row holds them NOW. */
-  | { readonly kind: 'OWNED'; readonly movedVersion: number | null; readonly movedAt: Date };
+  | {
+      readonly kind: 'OWNED';
+      readonly movedVersion: number | null;
+      readonly earliestMovedAt: Date;
+    };
 
 export interface TaskOwnership {
   verify(tx: ExtendedPrismaClient): Promise<TaskCheck>;
@@ -103,7 +111,10 @@ export class PolicyReconciliationRepository {
     // replace the first's together with the version — never a version with another move's event, or
     // a review would claim a cause that is not the one its version came from. A move without a
     // version, or a lower one, changes none of them. A signature that read the tree between the
-    // moves is still flagged, against the higher version (D-050). `xmax = 0` is what PostgreSQL gives
+    // moves is still flagged, against the higher version (D-050). The task keeps the EARLIEST
+    // instant of all the moves coalesced into it (`LEAST`) beside the highest version: the window
+    // is bounded by the earliest, so a later move can only add signatures, never drop one the
+    // earlier move raced (round 10). `xmax = 0` is what PostgreSQL gives
     // a row this statement inserted rather than updated, so the count is of tasks created, whatever
     // instant either carries — a second move in the very millisecond the first task was made included.
     const result = await runUnscoped(
@@ -113,10 +124,10 @@ export class PolicyReconciliationRepository {
           `INSERT INTO policy_reconciliation_task
                   (id, organization_id, policy_id, union_id, source_event_id,
                    moved_organization_id, correlation_id, moved_at, moved_version,
-                   next_attempt_at, created_at, updated_at)
+                   earliest_moved_at, next_attempt_at, created_at, updated_at)
            SELECT t.id, t.organization_id, t.policy_id, t.union_id, t.source_event_id,
                   t.moved_organization_id, t.correlation_id, $8::timestamptz, $10::bigint,
-                  $9::timestamptz, $9::timestamptz, $9::timestamptz
+                  $8::timestamptz, $9::timestamptz, $9::timestamptz, $9::timestamptz
              FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
                   AS t(id, organization_id, policy_id, union_id, source_event_id,
                        moved_organization_id, correlation_id)
@@ -140,6 +151,11 @@ export class PolicyReconciliationRepository {
                                    OR EXCLUDED.moved_version > policy_reconciliation_task.moved_version)
                               THEN EXCLUDED.moved_at ELSE policy_reconciliation_task.moved_at END,
                          moved_version = GREATEST(policy_reconciliation_task.moved_version, EXCLUDED.moved_version),
+                         earliest_moved_at = LEAST(
+                              COALESCE(policy_reconciliation_task.earliest_moved_at,
+                                       policy_reconciliation_task.moved_at,
+                                       policy_reconciliation_task.created_at),
+                              EXCLUDED.earliest_moved_at),
                          updated_at = $9::timestamptz
            RETURNING (xmax = 0) AS inserted`,
           rows.map((row) => row.id),
@@ -194,7 +210,7 @@ export class PolicyReconciliationRepository {
                   attempts,
                   generation,
                   lease_token AS "leaseToken",
-                  COALESCE(moved_at, created_at) AS "movedAt",
+                  COALESCE(earliest_moved_at, moved_at, created_at) AS "earliestMovedAt",
                   moved_version AS "movedVersion"`,
           limit,
           leaseSeconds,
@@ -275,10 +291,10 @@ export class PolicyReconciliationRepository {
         // The row is locked, so no later move can coalesce into it until this transaction ends:
         // what is read here is final for the suspension it guards (round 5).
         const rows = await tx.$queryRawUnsafe<
-          { generation: number; movedVersion: bigint | null; movedAt: Date }[]
+          { generation: number; movedVersion: bigint | null; earliestMovedAt: Date }[]
         >(
           `SELECT generation, moved_version AS "movedVersion",
-                  COALESCE(moved_at, created_at) AS "movedAt"
+                  COALESCE(earliest_moved_at, moved_at, created_at) AS "earliestMovedAt"
              FROM policy_reconciliation_task
             WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
               FOR UPDATE`,
@@ -294,7 +310,7 @@ export class PolicyReconciliationRepository {
         return {
           kind: 'OWNED',
           movedVersion: row.movedVersion === null ? null : Number(row.movedVersion),
-          movedAt: row.movedAt,
+          earliestMovedAt: row.earliestMovedAt,
         };
       },
       finish: (tx) => this.complete(tx, task, { currentGeneration: false }),

@@ -290,8 +290,9 @@ export class AmendmentRepository {
   /**
    * Flags the employer amendment signatures under `policyId` that a move raced (D-050), as
    * `ContractRepository.flagRacedSignatures` does for the contract's own: the version they recorded
-   * is LOWER than the move's (or none), and the move's instant is at or before the signature's
-   * commit deadline (D-050, as there; no deadline, no bound); a move with no version flags every
+   * is LOWER than the move's (or none), and the EARLIEST coalesced move's instant is at or before
+   * the signature's commit deadline plus the clock-skew margin (D-050, as there; no deadline, no
+   * bound: it stays eligible); a move with no version flags every
    * unreviewed one inside the window. The review names no cause (#231 r9, D-051). Never revokes:
    * one append-only review row each, once.
    */
@@ -305,11 +306,20 @@ export class AmendmentRepository {
       movedAt: Date | null;
       detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
       movedVersion: number | null;
-      /** The move's own instant: the D-050 bound on which signatures could have raced it. Not recorded. */
-      moveInstant: Date;
+      /**
+       * The EARLIEST instant over the moves coalesced into the task: the D-050 bound on which
+       * signatures could have raced any of them. Not recorded.
+       */
+      earliestMoveInstant: Date;
+      /** The clock-skew allowance added to a signature's commit deadline (D-050); only adds reviews. */
+      clockSkewMarginSeconds: number;
       at: Date;
     },
   ): Promise<{ contractId: string; amendmentId: string; policyVersion: number }[]> {
+    // `deadline + margin >= earliest move`, written as `deadline >= earliest - margin`.
+    const skewedBound = new Date(
+      input.earliestMoveInstant.getTime() - input.clockSkewMarginSeconds * 1000,
+    );
     return runUnscoped(
       'the reconciliation of a move flags the amendment signatures of the policy it stranded, named by its organization and id',
       async () => {
@@ -332,7 +342,7 @@ export class AmendmentRepository {
               {
                 OR: [
                   { hierarchyCommitDeadline: null },
-                  { hierarchyCommitDeadline: { gte: input.moveInstant } },
+                  { hierarchyCommitDeadline: { gte: skewedBound } },
                 ],
               },
             ],

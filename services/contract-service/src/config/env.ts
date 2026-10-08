@@ -140,6 +140,11 @@ function optionalRoleList(name: string) {
  *                                       How often the `TENDER_AWARDED` consumer retries an
  *                                       award that could not be read before it dead-letters
  *                                       the event as UPSTREAM_UNAVAILABLE.
+ *   CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS
+ *                                       D-050. The clock-skew allowance added to a signature's
+ *                                       commit deadline before the earliest move's instant is
+ *                                       compared with it. Only ever adds reviews; default 300,
+ *                                       must be a number >= 0 (startup fails otherwise).
  *   CONTRACT_RECONCILE_INTERVAL_MS / _BATCH_SIZE / _LEASE_SECONDS / _BACKOFF_SECONDS /
  *   _BACKOFF_MAX_SECONDS                The sweeper that suspends signing policies a moved
  *                                       organization stranded (Q-83), as construction-service's.
@@ -248,6 +253,20 @@ export const contractEnvSchema = baseEnvSchema
 
     CONTRACT_CONSUMER_MAX_RETRIES: z.coerce.number().int().min(1).max(20).default(5),
     CONTRACT_CONSUMER_RETRY_BACKOFF_MS: z.coerce.number().int().min(10).max(60_000).default(1000),
+
+    /**
+     * D-050: ORGANIZATION_MOVED's instant is the organization service host's clock, the commit
+     * deadline is this service's PostgreSQL clock. The window comparison is made against
+     * `deadline + margin`, so skew in either direction can only add a review, never drop one.
+     * A value that is not a finite number >= 0 refuses to start (fail closed).
+     */
+    CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: z
+      .string()
+      .trim()
+      .regex(/^\d+(\.\d+)?$/, 'CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS must be a number >= 0')
+      .default('300')
+      .transform(Number)
+      .pipe(z.number().finite().max(86_400)),
 
     /**
      * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041), construction-service's

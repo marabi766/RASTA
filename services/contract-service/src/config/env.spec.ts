@@ -147,6 +147,27 @@ describe('amendments and milestones (CON-003 PR 3, Q-100)', () => {
   });
 });
 
+describe('the clock-skew margin of the D-050 window', () => {
+  it('defaults to 300 seconds and accepts 0 and a decimal', () => {
+    expect(load().CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS).toBe(300);
+    expect(
+      load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '0' })
+        .CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
+    ).toBe(0);
+    expect(
+      load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '12.5' })
+        .CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
+    ).toBe(12.5);
+  });
+
+  it.each(['-1', 'abc', '', ' ', 'NaN', 'Infinity', '1e3', '999999999'])(
+    'refuses to start with %j (fail closed)',
+    (bad) => {
+      expect(() => load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: bad })).toThrow();
+    },
+  );
+});
+
 describe('corsOrigins', () => {
   it('splits, trims and drops empties', () => {
     expect(corsOrigins(load({ CORS_ORIGINS: ' https://a.test , ,https://b.test ' }))).toEqual([

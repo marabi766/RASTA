@@ -17,7 +17,7 @@ import {
   reasons,
   signAmendment,
 } from './amendment-helpers';
-import { asPlatform, cleanup, eventsOf, seedDraft, wire, type Wiring } from './helpers';
+import { asPlatform, cleanup, eventsOf, seedDraft, testEnv, wire, type Wiring } from './helpers';
 
 /**
  * CON-003 PR 3: the authority an amendment is signed under is the contract signature's own
@@ -32,6 +32,12 @@ describe('the authority an amendment is signed under', () => {
   const organizations: string[] = [];
 
   const key = (): string => idemKey('authority');
+  /** D-050: the clock-skew allowance added to a signature's commit deadline (the default, 300 s). */
+  const MARGIN_MS = testEnv().CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS * 1000;
+  const tasksOf = (policyId: string) =>
+    runUnscoped('the suite reads the queue', () =>
+      w.prisma.client.policyReconciliationTask.findMany({ where: { policyId } }),
+    );
   const platform = (): string => person('ORG-ITEST-PLATFORM', ['SYSTEM_ADMIN']);
   const newOrg = (): string => {
     const id = `ORG_${ulid()}`;
@@ -405,20 +411,35 @@ describe('the authority an amendment is signed under', () => {
     });
 
     it('a signature committed well before the move is not flagged even on an older tree; the same signature inside the window is (D-050 bound)', async () => {
-      const before = await signedUnderUnion();
-      await signAmendment(api, before.id, before.amendmentId, before.employerToken).expect(200);
-      const beforeEvidence = await evidenceOf(before.amendmentId);
+      // The move that races: stamped inside the signature's window, handled first.
       const inside = await signedUnderUnion();
       await signAmendment(api, inside.id, inside.amendmentId, inside.employerToken).expect(200);
       const insideEvidence = await evidenceOf(inside.amendmentId);
+      api.hierarchy.adopt(newOrg(), inside.employer);
+      await consumer.handle(
+        moved(
+          inside.employer,
+          new Date(insideEvidence.hierarchyCommitDeadline!.getTime() - 1),
+          api.hierarchy.bump(inside.employer),
+        ),
+      );
+      await sweeper.runOnce();
 
-      for (const [c, at] of [
-        [before, new Date(beforeEvidence.hierarchyCommitDeadline!.getTime() + 30_000)],
-        [inside, new Date(insideEvidence.hierarchyCommitDeadline!.getTime() - 1)],
-      ] as const) {
-        api.hierarchy.adopt(newOrg(), c.employer);
-        await consumer.handle(moved(c.employer, at, api.hierarchy.bump(c.employer)));
-      }
+      // A move queues a re-check for every union policy, so the second move is made only after the
+      // first is finished: otherwise it would coalesce into the same task and (rightly, D-050 round
+      // 10) pull the window back to the earlier instant. This signature is made later, and its move
+      // is beyond deadline + the skew margin: committed before the move was prepared.
+      const before = await signedUnderUnion();
+      await signAmendment(api, before.id, before.amendmentId, before.employerToken).expect(200);
+      const beforeEvidence = await evidenceOf(before.amendmentId);
+      api.hierarchy.adopt(newOrg(), before.employer);
+      await consumer.handle(
+        moved(
+          before.employer,
+          new Date(beforeEvidence.hierarchyCommitDeadline!.getTime() + MARGIN_MS + 30_000),
+          api.hierarchy.bump(before.employer),
+        ),
+      );
       await sweeper.runOnce();
 
       expect(await reviewsOf(before.amendmentId)).toEqual([]);
@@ -429,6 +450,47 @@ describe('the authority an amendment is signed under', () => {
         causeEventId: null,
         movedAt: null,
       });
+    });
+
+    it.each([
+      ['inside the margin (10 s after the deadline)', 10_000, true],
+      ['exactly deadline + margin', MARGIN_MS, true],
+      ['beyond deadline + margin', MARGIN_MS + 30_000, false],
+    ])(
+      'a move stamped %s: the amendment signature is reviewed only up to the clock-skew margin (D-050)',
+      async (_label, skew, flagged) => {
+        const c = await signedUnderUnion();
+        await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);
+        const evidence = await evidenceOf(c.amendmentId);
+        api.hierarchy.adopt(newOrg(), c.employer);
+        const version = api.hierarchy.bump(c.employer);
+        await consumer.handle(
+          moved(c.employer, new Date(evidence.hierarchyCommitDeadline!.getTime() + skew), version),
+        );
+        await sweeper.runOnce();
+        expect(await reviewsOf(c.amendmentId)).toHaveLength(flagged ? 1 : 0);
+        expect(await flaggedEvents(c.employer)).toHaveLength(flagged ? 1 : 0);
+      },
+    );
+
+    it('two moves coalesced around ONE amendment signature — A before its commit, B (the higher version) after its deadline — still review it: the bound is the EARLIEST move (#231 round 10)', async () => {
+      const c = await signedUnderUnion();
+      await signAmendment(api, c.id, c.amendmentId, c.employerToken).expect(200);
+      const evidence = await evidenceOf(c.amendmentId);
+      const deadline = evidence.hierarchyCommitDeadline!.getTime();
+      api.hierarchy.adopt(newOrg(), c.employer);
+      const versionA = api.hierarchy.bump(c.employer);
+      const versionB = api.hierarchy.bump(c.employer);
+      await consumer.handle(moved(c.employer, new Date(deadline - 1), versionA));
+      // Beyond deadline + margin: on its own, B would exclude the signature.
+      await consumer.handle(moved(c.employer, new Date(deadline + MARGIN_MS + 60_000), versionB));
+      const [task] = await tasksOf(c.policyId);
+      expect(task).toMatchObject({ movedVersion: BigInt(versionB), generation: 1 });
+      expect(task!.earliestMovedAt!.getTime()).toBe(deadline - 1);
+
+      await sweeper.runOnce();
+      expect(await reviewsOf(c.amendmentId)).toHaveLength(1);
+      expect(await flaggedEvents(c.employer)).toHaveLength(1);
     });
 
     it('a signature that read the tree after the move recorded its version: not raced, not flagged', async () => {
