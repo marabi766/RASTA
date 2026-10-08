@@ -330,9 +330,8 @@ model PolicyReconciliationTask {
   /// coalesces into the open task keeps the higher. NULL on a task from before versions.
   movedVersion BigInt? @map("moved_version")
   /// The EARLIEST instant over every move coalesced into the task: the D-050 window is bounded by
-  /// it, never by the (later) instant of the move whose version the task keeps. NULL on a task from
-  /// before it existed; `moved_at`, then `created_at`, stand in.
-  earliestMovedAt DateTime? @map("earliest_moved_at") @db.Timestamptz(3)
+  /// it, never by the (later) instant of the move whose version the task keeps.
+  earliestMovedAt DateTime @map("earliest_moved_at") @db.Timestamptz(3)
 
   policy ApprovalPolicy @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 

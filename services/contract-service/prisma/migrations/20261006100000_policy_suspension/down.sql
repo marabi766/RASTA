@@ -29,7 +29,9 @@ DECLARE
 BEGIN
   SELECT count(*) INTO suspended FROM "approval_policy" WHERE "status"::text = 'SUSPENDED';
   -- An open task is a re-check a move asked for and nobody has done yet: dropping it would
-  -- leave a stranded policy in force with nothing left to find it (review round 3).
+  -- leave a stranded policy in force with nothing left to find it (review round 3). A task that
+  -- coalesced several moves also holds the earliest of their instants (`earliest_moved_at`), which
+  -- the D-050 window needs and nothing else records (round 11).
   SELECT count(*) INTO open_tasks FROM "policy_reconciliation_task" WHERE "status"::text = 'PENDING';
   IF suspended > 0 OR open_tasks > 0 THEN
     RAISE EXCEPTION 'down refused: % suspended approval polic(ies) and % open reconciliation task(s) exist; nothing was changed', suspended, open_tasks
