@@ -13,6 +13,7 @@ import {
   createScratchDatabase,
   dropScratchDatabase,
   ledgerAssertionScript,
+  lexSql,
   libpqInvocation,
   libpqUrl,
   NO_TRANSACTION_MARKER,
@@ -1933,43 +1934,188 @@ test('the no-transaction marker is only the first line, exactly', () => {
   assert.match(later.problems.join(), /must be the first line/);
 });
 
-test('a no-transaction file must be re-runnable, change no data, and end with its ledger DELETE', () => {
+test('a no-transaction file holds only the allow-listed statements and ends with its ledger DELETE', () => {
   const m = NO_TRANSACTION_MARKER;
   const problemsOf = (body) => downFileMode(`${m}\n${body}`).problems.join('\n');
+  const allowed = /may hold only DROP INDEX CONCURRENTLY IF EXISTS/;
+  // What is allowed.
   assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`), '');
+  assert.equal(problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS "s"."ix";\n${LEDGER}`), '');
   assert.equal(problemsOf(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (c);\n${LEDGER}`), '');
-  assert.match(problemsOf(`DROP INDEX CONCURRENTLY ix;\n${LEDGER}`), /no IF EXISTS/);
-  assert.match(
-    problemsOf(`CREATE INDEX CONCURRENTLY ix ON t (c);\n${LEDGER}`),
-    /no IF \[NOT\] EXISTS/,
+  assert.equal(
+    problemsOf(`CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ix ON t (a, b);\n${LEDGER}`),
+    '',
   );
+  assert.equal(problemsOf(LEDGER), '');
+  // Re-runnability: the IF [NOT] EXISTS forms only.
+  assert.match(problemsOf(`DROP INDEX CONCURRENTLY ix;\n${LEDGER}`), allowed);
+  assert.match(problemsOf(`CREATE INDEX CONCURRENTLY ix ON t (c);\n${LEDGER}`), allowed);
+  assert.match(problemsOf(`DROP INDEX IF EXISTS ix;\n${LEDGER}`), allowed);
+  // Codex on #237 (MED): a multi-action ALTER with one IF EXISTS is not re-runnable.
   assert.match(
-    problemsOf(`DELETE FROM t;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
-    /must not change data \(DELETE\)/,
+    problemsOf(
+      `ALTER TABLE IF EXISTS t DROP COLUMN a, DROP COLUMN b;\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`,
+    ),
+    /"ALTER TABLE IF EXISTS t DROP COLUMN a, DROP COLUMN b" is none of them/,
   );
+  assert.match(problemsOf(`ALTER TABLE t ADD COLUMN IF NOT EXISTS c int;\n${LEDGER}`), allowed);
+  // Everything else is refused: data, DDL of any other kind, a second ledger DELETE, a statement
+  // hiding behind an allowed one.
+  for (const statement of [
+    'DELETE FROM t',
+    'UPDATE t SET c = 1',
+    'INSERT INTO t VALUES (1)',
+    'TRUNCATE t',
+    'DO $$ BEGIN NULL; END $$',
+    'DROP TABLE IF EXISTS t',
+    'CREATE TABLE IF NOT EXISTS t (c int)',
+    'SELECT 1',
+    'DELETE FROM "_prisma_migrations" WHERE "migration_name" = \'other\' OR true',
+    `${LEDGER.slice(0, -1)}`,
+  ]) {
+    assert.match(
+      problemsOf(`${statement};\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}`),
+      allowed,
+      statement,
+    );
+  }
   assert.match(
-    problemsOf(`UPDATE t SET c = 1;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
-    /\(UPDATE\)/,
+    problemsOf(
+      `DROP INDEX CONCURRENTLY IF EXISTS ix; DROP INDEX CONCURRENTLY IF EXISTS "a"; SELECT 1;\n${LEDGER}`,
+    ),
+    /"SELECT 1" is none of them/,
   );
+  // The ledger DELETE: once, last.
   assert.match(
-    problemsOf(`INSERT INTO t VALUES (1);\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
-    /\(INSERT\)/,
-  );
-  assert.match(problemsOf(`TRUNCATE t;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`), /\(TRUNCATE\)/);
-  assert.match(
-    problemsOf(`DO $$ BEGIN NULL; END $$;\nDROP INDEX IF EXISTS ix;\n${LEDGER}`),
-    /\(DO\)/,
-  );
-  assert.match(problemsOf(`DROP INDEX IF EXISTS ix;`), /must end with its ledger DELETE/);
-  assert.match(
-    problemsOf(`${LEDGER}\nDROP INDEX IF EXISTS ix;`),
+    problemsOf(`DROP INDEX CONCURRENTLY IF EXISTS ix;`),
     /must end with its ledger DELETE/,
   );
   assert.match(
-    problemsOf(`BEGIN;\nDROP INDEX IF EXISTS ix;\n${LEDGER}\nCOMMIT;`),
+    problemsOf(`${LEDGER}\nDROP INDEX CONCURRENTLY IF EXISTS ix;`),
+    /must end with its ledger DELETE/,
+  );
+  assert.match(
+    problemsOf(`BEGIN;\nDROP INDEX CONCURRENTLY IF EXISTS ix;\n${LEDGER}\nCOMMIT;`),
     /must not contain transaction control/,
   );
 });
+
+// ---------------------------------------------------------------------------
+// lexSql: what is code and what is not (Codex on #237, HIGH)
+// ---------------------------------------------------------------------------
+
+test('lexSql keeps a string, an identifier and a comment from hiding or faking a statement', () => {
+  const statementsOf = (sql) => lexSql(sql).statements;
+  // The case Codex found: the `--` is inside a string, so the COMMIT after it is code.
+  assert.deepEqual(statementsOf("SELECT '--'; COMMIT;"), ["SELECT ''", 'COMMIT']);
+  // Doubled quote, and a `;` / `--` / `/*` inside a string.
+  assert.deepEqual(statementsOf("SELECT 'it''s; -- /* x'; COMMIT;"), ["SELECT ''", 'COMMIT']);
+  // E'' strings: a backslash escapes the quote; a plain string's backslash escapes nothing.
+  assert.deepEqual(statementsOf("SELECT E'a\\'; COMMIT;'; ROLLBACK;"), ["SELECT E''", 'ROLLBACK']);
+  assert.deepEqual(statementsOf("SELECT 'a\\'; COMMIT;"), ["SELECT ''", 'COMMIT']);
+  assert.deepEqual(statementsOf("SELECT e'x\\\\'; COMMIT;"), ["SELECT e''", 'COMMIT']);
+  // A name that merely ends in E is not an escape-string prefix.
+  assert.deepEqual(statementsOf("SELECT name_E'a\\'; COMMIT;"), ["SELECT name_E''", 'COMMIT']);
+  // Double-quoted identifiers, kept verbatim; `""` for a quote; `;` and `--` inside are inert.
+  assert.deepEqual(statementsOf('DROP TABLE "a;--b"; COMMIT;'), ['DROP TABLE "a;--b"', 'COMMIT']);
+  assert.deepEqual(statementsOf('DROP TABLE "a""; COMMIT; --"; COMMIT;'), [
+    'DROP TABLE "a""; COMMIT; --"',
+    'COMMIT',
+  ]);
+  // Dollar quotes: $$ and $tag$, and a different tag inside does not close it.
+  assert.deepEqual(statementsOf("DO $$ BEGIN PERFORM 'x'; COMMIT; END $$; COMMIT;"), [
+    'DO $$',
+    'COMMIT',
+  ]);
+  assert.deepEqual(statementsOf('DO $t$ x $$; COMMIT; $$ y $t$; COMMIT;'), ['DO $$', 'COMMIT']);
+  // A `$` that continues an identifier is not a quote; a parameter is not one either.
+  assert.deepEqual(statementsOf('SELECT a$b$c; COMMIT;'), ['SELECT a$b$c', 'COMMIT']);
+  assert.deepEqual(statementsOf('SELECT $1; COMMIT;'), ['SELECT $1', 'COMMIT']);
+  // Two dollar quotes back to back are two quotes.
+  assert.deepEqual(statementsOf('DO $$a$$$$b$$; COMMIT;'), ['DO $$$$', 'COMMIT']);
+  // Block comments nest; a line comment ends at its newline and hides nothing after it.
+  assert.deepEqual(statementsOf('/* a /* b; COMMIT; */ c; COMMIT; */ SELECT 1; COMMIT;'), [
+    'SELECT 1',
+    'COMMIT',
+  ]);
+  assert.deepEqual(statementsOf('-- x; COMMIT;\nSELECT 1; COMMIT; -- y'), ['SELECT 1', 'COMMIT']);
+  assert.deepEqual(statementsOf('SELECT 1 /* \' */; COMMIT; /* " */'), ['SELECT 1', 'COMMIT']);
+  // No semicolon at the end is still a statement.
+  assert.deepEqual(statementsOf('DROP TABLE a; COMMIT'), ['DROP TABLE a', 'COMMIT']);
+  assert.deepEqual(lexSql('SELECT 1; COMMIT; -- done').problems, []);
+});
+
+test('lexSql reports what is left open, and every psql meta-command', () => {
+  for (const [sql, what] of [
+    ["SELECT 'open; COMMIT;", /unterminated string/],
+    ['DROP TABLE "open; COMMIT;', /unterminated "identifier"/],
+    ['SELECT 1; /* open /* nested */ COMMIT;', /unterminated \/\* comment/],
+    ['DO $$ open; COMMIT;', /unterminated \$\$ quote/],
+    ['DO $tag$ open $$ COMMIT;', /unterminated \$tag\$ quote/],
+  ]) {
+    assert.match(lexSql(sql).problems.join(), what, sql);
+    assert.match(downFileMode(sql).problems.join(), /the file has an unterminated/, sql);
+  }
+  assert.deepEqual(lexSql('DROP TABLE a;\n\\echo hi\n').metaCommands, ['\\echo hi']);
+  assert.deepEqual(lexSql('  \\i other.sql').metaCommands, ['\\i other.sql']);
+  assert.deepEqual(lexSql('SELECT 1 \\gset').metaCommands, ['SELECT 1 \\gset']);
+  // A backslash in a string, an escape string, an identifier, a dollar quote or a comment is no command.
+  assert.deepEqual(
+    lexSql(
+      ["SELECT '\\n', E'\\n', \"a\\b\";", 'DO $$ \\q $$;', '-- \\q', '/* \\q */ SELECT 1;'].join(
+        '\n',
+      ),
+    ).metaCommands,
+    [],
+  );
+  assert.match(
+    downFileMode('DROP TABLE a;\n\\set ON_ERROR_STOP off\n').problems.join(),
+    /a psql meta-command is not allowed in a down\.sql: "\\set ON_ERROR_STOP off"/,
+  );
+});
+
+test("a string cannot hide transaction control: SELECT '--'; COMMIT; is seen (Codex on #237, HIGH)", () => {
+  const sql = `BEGIN;\nDROP TABLE a;\nSELECT '--'; COMMIT;\nDROP TABLE b;\n${LEDGER}\nCOMMIT;`;
+  const { problems } = downFileMode(sql);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /transaction control is allowed only as one BEGIN first/);
+  // And the same trick in the marked mode.
+  assert.match(
+    downFileMode(`${NO_TRANSACTION_MARKER}\nSELECT '--'; COMMIT;\n${LEDGER}`).problems.join('\n'),
+    /transaction control/,
+  );
+});
+
+test(
+  'Codex’s example, run for real: the verifier refuses the file before running any of it',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(
+      TWO_TABLES,
+      // Own-transaction on its face; the string hides a COMMIT that would make `DROP TABLE a`
+      // permanent before the statement that fails.
+      `BEGIN;\nDROP TABLE a;\nSELECT '--'; COMMIT;\nDROP TABLE no_such_table;\nDROP TABLE b;\n${LEDGER}\nCOMMIT;`,
+      ['a', 'b'],
+    );
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /not a runnable down\.sql/);
+    assert.match(result.down.output, /transaction control is allowed only/);
+    assert.equal(result.down.mode, undefined, 'psql was never started');
+    assert.deepEqual(result.still, { a: true, b: true });
+    assert.deepEqual(result.rows, { a: 1, b: 0 });
+  },
+);
+
+test(
+  'a psql meta-command in a down is refused before psql is started',
+  { skip: noDatabase },
+  () => {
+    const result = downFileCase(TWO_TABLES, 'DROP TABLE a;\n\\set ON_ERROR_STOP off\n', ['a']);
+    assert.equal(result.down.ok, false);
+    assert.match(result.down.output, /a psql meta-command is not allowed/);
+    assert.deepEqual(result.still, { a: true });
+  },
+);
 
 test('every down.sql of every service has a mode, and is valid for it', () => {
   const modes = {};

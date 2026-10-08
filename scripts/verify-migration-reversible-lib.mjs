@@ -2801,26 +2801,165 @@ export function psqlRunner(url) {
  */
 export const NO_TRANSACTION_MARKER = '-- rasta:no-transaction';
 
-/** SQL without comments and without dollar-quoted bodies (a `DO` block's own BEGIN … END is not transaction control). */
-function statementsOnly(sql) {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/--[^\n]*/g, '')
-    .replace(/(\$[A-Za-z_0-9]*\$)[\s\S]*?\1/g, '$$$$');
-}
+const IDENTIFIER_CHAR = /[A-Za-z0-9_$\u0080-￿]/;
+const DOLLAR_QUOTE_OPEN = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
 
-/** Every top-level statement of a down.sql, trimmed, in order (a `;` inside a quoted string is not split on). */
-function topLevelStatements(sql) {
-  return statementsOnly(sql)
-    .replace(/'(?:[^']|'')*'/g, "''")
-    .split(';')
-    .map((statement) => statement.trim())
-    .filter(Boolean);
+/**
+ * Splits a SQL script into its top-level statements the way PostgreSQL's and psql's lexers see
+ * it, so that nothing inside a string, an identifier, a comment or a dollar-quoted body can be
+ * mistaken for code, and nothing that is code can hide in one.
+ *
+ *   - `'…'` strings, with `''` for a quote, and backslash escapes in an `E'…'` string only;
+ *   - `"…"` identifiers, with `""` for a quote (kept verbatim: a name is part of a statement);
+ *   - `$$…$$` and `$tag$…$tag$` bodies (a `$` straight after an identifier character is part of
+ *     that identifier, not a quote);
+ *   - block comments (opened by slash-star), which nest, and `-- …` line comments.
+ *
+ * Returns `statements` (trimmed, in order: a string is reduced to `''`, a dollar-quoted body to
+ * `$$`, a comment to a space), `metaCommands` (every backslash met in code — psql would run it as
+ * a command, outside the server's SQL altogether) and `problems` (an unterminated string,
+ * identifier, comment or dollar quote). A script with a problem is never to be run.
+ */
+export function lexSql(sql) {
+  const statements = [];
+  const metaCommands = [];
+  const problems = [];
+  let current = '';
+  let i = 0;
+  let dollarEnd = -1;
+  const length = sql.length;
+  const flush = () => {
+    const statement = current.trim();
+    if (statement) statements.push(statement);
+    current = '';
+  };
+  const continuesIdentifier = (at) =>
+    at >= 0 && at !== dollarEnd - 1 && IDENTIFIER_CHAR.test(sql[at] ?? '');
+
+  while (i < length) {
+    const c = sql[i];
+    const next = sql[i + 1];
+
+    if (c === '-' && next === '-') {
+      while (i < length && sql[i] !== '\n') i += 1;
+      current += ' ';
+      continue;
+    }
+
+    if (c === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth += 1;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      if (depth > 0) problems.push('an unterminated /* comment');
+      current += ' ';
+      continue;
+    }
+
+    if (c === "'") {
+      const escapes = /[eE]/.test(sql[i - 1] ?? '') && !continuesIdentifier(i - 2);
+      let closed = false;
+      i += 1;
+      while (i < length) {
+        if (escapes && sql[i] === '\\') {
+          i += 2;
+        } else if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2;
+        } else if (sql[i] === "'") {
+          i += 1;
+          closed = true;
+          break;
+        } else {
+          i += 1;
+        }
+      }
+      if (!closed) problems.push('an unterminated string');
+      current += "''";
+      continue;
+    }
+
+    if (c === '"') {
+      let name = '"';
+      let closed = false;
+      i += 1;
+      while (i < length) {
+        if (sql[i] === '"' && sql[i + 1] === '"') {
+          name += '""';
+          i += 2;
+        } else if (sql[i] === '"') {
+          name += '"';
+          i += 1;
+          closed = true;
+          break;
+        } else {
+          name += sql[i];
+          i += 1;
+        }
+      }
+      if (!closed) problems.push('an unterminated "identifier"');
+      current += name;
+      continue;
+    }
+
+    if (c === '$' && !continuesIdentifier(i - 1)) {
+      DOLLAR_QUOTE_OPEN.lastIndex = i;
+      const open = DOLLAR_QUOTE_OPEN.exec(sql);
+      if (open) {
+        const end = sql.indexOf(open[0], i + open[0].length);
+        if (end < 0) {
+          problems.push(`an unterminated ${open[0]} quote`);
+          i = length;
+        } else {
+          i = end + open[0].length;
+        }
+        dollarEnd = i;
+        current += '$$';
+        continue;
+      }
+    }
+
+    if (c === '\\') {
+      const lineStart = sql.lastIndexOf('\n', i) + 1;
+      const lineEnd = sql.indexOf('\n', i);
+      metaCommands.push(sql.slice(lineStart, lineEnd < 0 ? length : lineEnd).trim());
+    }
+
+    if (c === ';') {
+      flush();
+    } else {
+      current += c;
+    }
+    i += 1;
+  }
+  flush();
+  return { statements, metaCommands, problems };
 }
 
 const TRANSACTION_CONTROL =
   /^(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT|SAVEPOINT|RELEASE|PREPARE\s+TRANSACTION)\b/i;
 const LEDGER_DELETE = /^DELETE\s+FROM\s+"_prisma_migrations"\s+WHERE\s+"migration_name"\s*=\s*''$/i;
+/** An index name, plain or quoted, with an optional schema before it. */
+const INDEX_NAME = String.raw`(?:(?:[a-z_][a-z0-9_$]*|"[^"]+")\.)?(?:[a-z_][a-z0-9_$]*|"[^"]+")`;
+/**
+ * The only statements a no-transaction file may hold besides its one final ledger DELETE: each
+ * either does nothing or finishes the job when run again.
+ */
+const NO_TRANSACTION_ALLOWED = [
+  new RegExp(`^DROP\\s+INDEX\\s+CONCURRENTLY\\s+IF\\s+EXISTS\\s+${INDEX_NAME}$`, 'i'),
+  new RegExp(
+    `^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+CONCURRENTLY\\s+IF\\s+NOT\\s+EXISTS\\s+${INDEX_NAME}\\s+ON\\s+\\S[\\s\\S]*$`,
+    'i',
+  ),
+];
 
 /**
  * How a down.sql is to be run, and what is wrong with it for that mode.
@@ -2837,8 +2976,14 @@ const LEDGER_DELETE = /^DELETE\s+FROM\s+"_prisma_migrations"\s+WHERE\s+"migratio
  *                          so it must be safe to run again.
  */
 export function downFileMode(sql) {
-  const problems = [];
-  const statements = topLevelStatements(sql);
+  const lexed = lexSql(sql);
+  const { statements } = lexed;
+  const problems = [
+    ...lexed.problems.map((problem) => `the file has ${problem}`),
+    ...lexed.metaCommands.map(
+      (line) => `a psql meta-command is not allowed in a down.sql: "${line.slice(0, 60)}"`,
+    ),
+  ];
   const control = statements.filter((statement) => TRANSACTION_CONTROL.test(statement));
   const marked = sql.split('\n', 1)[0].trim() === NO_TRANSACTION_MARKER;
   if (/rasta:no-transaction/.test(sql) && !marked) {
@@ -2852,30 +2997,22 @@ export function downFileMode(sql) {
       );
     }
     // Plain --file: a failure part-way leaves what ran, so what ran must be harmless to run again.
-    for (const statement of statements) {
-      if (LEDGER_DELETE.test(statement)) continue;
-      if (/^(DELETE|UPDATE|INSERT|TRUNCATE|DO|CALL|COPY)\b/i.test(statement)) {
-        problems.push(
-          `a no-transaction file must not change data (${statement.split(/\s+/)[0].toUpperCase()}): ` +
-            'only its one ledger DELETE',
-        );
-      }
-      if (/^DROP\b/i.test(statement) && !/\bIF\s+EXISTS\b/i.test(statement)) {
-        problems.push(
-          `a no-transaction file must be safe to re-run: "${statement.slice(0, 60)}" has no IF EXISTS`,
-        );
-      }
-      if (/^(CREATE|ALTER)\b/i.test(statement) && !/\bIF\s+(NOT\s+)?EXISTS\b/i.test(statement)) {
-        problems.push(
-          `a no-transaction file must be safe to re-run: "${statement.slice(0, 60)}" has no IF [NOT] EXISTS`,
-        );
-      }
-    }
+    // An allow-list, not a deny-list: anything not named here is refused.
     const last = statements.at(-1);
-    if (!last || !LEDGER_DELETE.test(last)) {
+    const ledgerLast = last !== undefined && LEDGER_DELETE.test(last);
+    if (!ledgerLast) {
       problems.push(
         'a no-transaction file must end with its ledger DELETE, so a failure leaves the row',
       );
+    }
+    for (const statement of ledgerLast ? statements.slice(0, -1) : statements) {
+      if (!NO_TRANSACTION_ALLOWED.some((allowed) => allowed.test(statement))) {
+        problems.push(
+          `a no-transaction file may hold only DROP INDEX CONCURRENTLY IF EXISTS, ` +
+            `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS and its one final ledger DELETE: ` +
+            `"${statement.slice(0, 60)}" is none of them`,
+        );
+      }
     }
     return { mode: 'no-transaction', problems };
   }
