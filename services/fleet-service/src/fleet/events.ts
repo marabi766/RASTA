@@ -274,6 +274,12 @@ export const insuranceRecordedFields = assetSourceSchema.extend({
   coverage: z.string().min(1),
   validFrom: isoInstant,
   validTo: isoInstant,
+  /**
+   * The asset's ownership generation when the policy was recorded (additive,
+   * #240 round 2). Optional: an event that predates it reads as the previous
+   * owner's after a transfer, unless its coverage follows the vehicle.
+   */
+  ownershipGeneration: z.number().int().nonnegative().optional(),
 });
 
 /**
@@ -309,6 +315,11 @@ export const assetTransferredSchema = z
     fromOrganizationId: z.string().min(1),
     toOrganizationId: z.string().min(1),
     transferredAt: z.string().datetime({ offset: true }),
+    // Additive (#240 round 2). The asset's new ownership generation and the
+    // coverages that follow the vehicle, computed by asset-service at transfer
+    // time. Absent on an older event: the projection then keeps no window.
+    ownershipGeneration: z.number().int().nonnegative().optional(),
+    retainedCoverages: z.array(z.string().min(1)).optional(),
   })
   .passthrough()
   .refine((payload) => payload.fromOrganizationId !== payload.toOrganizationId, {

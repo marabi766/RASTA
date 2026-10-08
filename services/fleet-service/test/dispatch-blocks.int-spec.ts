@@ -348,6 +348,154 @@ describe('dispatch blocks (L3-02)', () => {
     });
   });
 
+  describe('insurance across a transfer (#240 round 2, docs/24 Q-66 + Q-101)', () => {
+    const COVERAGES = ['THIRD_PARTY', 'COMPREHENSIVE', 'PASSENGER_ACCIDENT', 'LIABILITY'];
+    const refused = {
+      code: 'BUSINESS_RULE_VIOLATION',
+      message: expect.stringContaining('withdrawn from dispatch'),
+    };
+
+    /** An event as the given tenant's asset-service stream carries it. */
+    const eventFor = (
+      tenantId: string,
+      eventName: string,
+      payload: Record<string, unknown>,
+    ): EventEnvelope => ({
+      ...event(eventName, { ...payload, organizationId: tenantId }),
+      tenantId,
+    });
+
+    /** org.a's machine, fully insured under generation 1 by its first owner. */
+    async function insuredByFirstOwner(): Promise<string> {
+      const { assetId } = await fleet();
+      for (const coverage of COVERAGES) {
+        await consumer.handle(
+          event('INSURANCE_RECORDED', {
+            assetId,
+            policyId: id('INS'),
+            insurerName: 'بیمه ایران',
+            coverage,
+            validFrom: new Date(Date.now() - 1000).toISOString(),
+            validTo: new Date(Date.now() + year).toISOString(),
+            ownershipGeneration: 1,
+          }),
+        );
+      }
+      return assetId;
+    }
+
+    /** Moves the machine to org.b and commissions it there. */
+    async function transferTo(assetId: string, extra: Record<string, unknown>) {
+      await consumer.handle(
+        eventFor(org.b, 'ASSET_TRANSFERRED', {
+          assetId,
+          fromOrganizationId: org.a,
+          toOrganizationId: org.b,
+          transferredAt: new Date().toISOString(),
+          reason: 'واگذاری',
+          ...extra,
+        }),
+      );
+      await consumer.handle(eventFor(org.b, 'ASSET_ACTIVATED', { assetId }));
+    }
+
+    async function newOwnerDriver(): Promise<string> {
+      const driverId = id('DRV');
+      await asActor({ organizationId: org.b }, () =>
+        prisma.client.driver.create({
+          data: {
+            organizationId: org.b,
+            id: driverId,
+            userId: `USR-${driverId}`,
+            createdBy: 'ITEST',
+            updatedBy: 'ITEST',
+          },
+        }),
+      );
+      return driverId;
+    }
+
+    const dispatchForNewOwner = (assetId: string, driverId: string) =>
+      asActor({ organizationId: org.b }, () => strict.create({ driverId, assetId }));
+
+    it('refuses the new owner a coverage that does not follow the vehicle, until it records its own', async () => {
+      const assetId = await insuredByFirstOwner();
+      const driverId = await newOwnerDriver();
+      await transferTo(assetId, {
+        ownershipGeneration: 2,
+        retainedCoverages: ['THIRD_PARTY', 'LIABILITY'],
+      });
+
+      const row = await repository.findAssetRefUnscoped(assetId);
+      expect(Object.keys(row!.insuranceCover as object).sort()).toEqual([
+        'LIABILITY',
+        'THIRD_PARTY',
+      ]);
+      expect(row!.ownershipGeneration).toBe(2);
+      expect(row!.retainedCoverages).toEqual(['THIRD_PARTY', 'LIABILITY']);
+      await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
+
+      for (const coverage of ['COMPREHENSIVE', 'PASSENGER_ACCIDENT']) {
+        await consumer.handle(
+          eventFor(org.b, 'INSURANCE_RECORDED', {
+            assetId,
+            policyId: id('INS'),
+            insurerName: 'بیمه ایران',
+            coverage,
+            validFrom: new Date(Date.now() - 1000).toISOString(),
+            validTo: new Date(Date.now() + year).toISOString(),
+            ownershipGeneration: 2,
+          }),
+        );
+      }
+      await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('keeps every window of a coverage that follows the vehicle', async () => {
+      const assetId = await insuredByFirstOwner();
+      const driverId = await newOwnerDriver();
+      await transferTo(assetId, { ownershipGeneration: 2, retainedCoverages: COVERAGES });
+
+      await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('drops every window when the transfer event carries no retainedCoverages (an older event)', async () => {
+      const assetId = await insuredByFirstOwner();
+      const driverId = await newOwnerDriver();
+      await transferTo(assetId, {});
+
+      const row = await repository.findAssetRefUnscoped(assetId);
+      expect(row!.insuranceCover).toEqual({});
+      await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
+    });
+
+    it('ignores a late INSURANCE_RECORDED of the previous owner after the transfer', async () => {
+      const { assetId } = await fleet();
+      const driverId = await newOwnerDriver();
+      await transferTo(assetId, { ownershipGeneration: 2, retainedCoverages: [] });
+
+      for (const coverage of COVERAGES) {
+        // Recorded by the first owner (generation 1), consumed after the transfer.
+        await consumer.handle(
+          event('INSURANCE_RECORDED', {
+            assetId,
+            policyId: id('INS'),
+            insurerName: 'بیمه ایران',
+            coverage,
+            validFrom: new Date(Date.now() - 1000).toISOString(),
+            validTo: new Date(Date.now() + year).toISOString(),
+            ownershipGeneration: 1,
+          }),
+        );
+      }
+
+      const row = await repository.findAssetRefUnscoped(assetId);
+      expect(row!.insuranceCover).toEqual({});
+      expect(row!.organizationId).toBe(org.b);
+      await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Review round 1 on #103. The races are made deterministic: a transaction
   // holds the asset's lock while the contenders queue behind it, the test

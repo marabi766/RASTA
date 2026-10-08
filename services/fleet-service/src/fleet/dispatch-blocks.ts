@@ -44,6 +44,8 @@ export type CoverWindow = {
   policyId: string;
   validFrom: string;
   validTo: string;
+  /** The ownership generation the policy was recorded under; absent on an older event. */
+  generation?: number;
 };
 
 /**
@@ -119,10 +121,12 @@ export function parseCover(value: unknown): InsuranceCover {
 
 function parseWindow(window: unknown): CoverWindow | null {
   if (!window || typeof window !== 'object') return null;
-  const { policyId, validFrom, validTo } = window as Record<string, unknown>;
+  const { policyId, validFrom, validTo, generation } = window as Record<string, unknown>;
   if (typeof policyId !== 'string' || typeof validFrom !== 'string') return null;
   if (typeof validTo !== 'string') return null;
-  return { policyId, validFrom, validTo };
+  return Number.isInteger(generation)
+    ? { policyId, validFrom, validTo, generation: generation as number }
+    : { policyId, validFrom, validTo };
 }
 
 /**
@@ -152,6 +156,57 @@ export function withRecordedPolicy(
   if (sorted.length > 0) next[coverage] = sorted;
   else delete next[coverage];
   return next;
+}
+
+/**
+ * The windows a transfer leaves the new owner (#240 round 2).
+ *
+ * Only the coverages asset-service lets follow the vehicle keep their windows;
+ * the previous owner's policy of any other coverage must not authorize the new
+ * owner's dispatch. A window recorded under the transfer's generation or a later
+ * one is the new owner's own — its event may have been consumed before the
+ * transfer's, the topics being separate — and stays. `retained` absent (an
+ * event that predates the field) retains nothing: fail closed, and the
+ * re-projection command restores the valid windows.
+ */
+export function afterTransfer(
+  cover: InsuranceCover,
+  retained: readonly string[] | undefined,
+  generation: number | undefined,
+): InsuranceCover {
+  const kept = new Set(retained ?? []);
+  const next: InsuranceCover = {};
+  for (const [coverage, windows] of Object.entries(cover)) {
+    const own = kept.has(coverage)
+      ? windows
+      : windows.filter(
+          (window) =>
+            generation !== undefined &&
+            window.generation !== undefined &&
+            window.generation >= generation,
+        );
+    if (own.length > 0) next[coverage] = own;
+  }
+  return next;
+}
+
+/**
+ * Whether an `INSURANCE_RECORDED` is the previous owner's and so ignored.
+ *
+ * Needs the generation of the latest transfer the replica saw
+ * (`replicaGeneration`); with none there is nothing to compare against and the
+ * event applies. Otherwise it is stale when it carries a lower generation, or
+ * none (an older event), unless its coverage follows the vehicle.
+ */
+export function isStaleInsurance(
+  eventGeneration: number | undefined,
+  coverage: string,
+  replicaGeneration: number | null | undefined,
+  retained: readonly string[],
+): boolean {
+  if (replicaGeneration === null || replicaGeneration === undefined) return false;
+  if (retained.includes(coverage)) return false;
+  return eventGeneration === undefined || eventGeneration < replicaGeneration;
 }
 
 function endTime(window: CoverWindow): number {

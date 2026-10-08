@@ -142,6 +142,7 @@ export class InsuranceService {
           coverage: dto.coverage,
           validFrom: validFrom.toISOString(),
           validTo: validTo.toISOString(),
+          ownershipGeneration,
         }),
       });
 

@@ -397,6 +397,14 @@ model AssetRef {
   insuranceLapsedAt        DateTime? @map("insurance_lapsed_at")
   /// Recorded policy windows per coverage, one per policy (`INSURANCE_RECORDED`).
   insuranceCover           Json      @default("{}") @map("insurance_cover")
+  /// The asset's ownership generation as the latest `ASSET_TRANSFERRED` stated
+  /// it; NULL until a generation-bearing transfer is seen. An insurance event
+  /// stamped with a lower generation is the previous owner's.
+  ownershipGeneration      Int?      @map("ownership_generation")
+  /// The coverages that latest transfer let follow the vehicle (asset-service's
+  /// `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` at transfer time). Empty when the
+  /// transfer did not say: fail closed.
+  retainedCoverages        String[]  @default([]) @map("retained_coverages")
 
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")

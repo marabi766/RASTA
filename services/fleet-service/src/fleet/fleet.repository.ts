@@ -793,6 +793,8 @@ export class FleetRepository {
       insuranceLapsedCoverages?: string[];
       insuranceLapsedAt?: Date | null;
       insuranceCover?: InsuranceCover;
+      ownershipGeneration?: number | null;
+      retainedCoverages?: string[];
       sourceEvent: string;
     },
   ) {

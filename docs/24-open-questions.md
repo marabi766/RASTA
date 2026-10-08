@@ -1742,7 +1742,15 @@ Migration. Lapse پوشش‌های حذف‌شده ثبت‌شده می‌مان
 [insurance-reprojection](runbooks/insurance-reprojection.md)): `INSURANCE_RECORDED` را از Outbox خودِ `asset-service` برای هر بیمه‌نامهٔ برقرار یا شروع‌نشده دوباره می‌فرستد.
 هیچ استقرار تولیدی هنوز نیست، پس همین ترتیب راه‌اندازی است.
 
-**اثر پاسخ.** فقط مقدار `FLEET_DISPATCH_REQUIRED_COVERAGES` (و در صورت نیاز فهرست Q-65)؛ بدون Migration.
+**پس از انتقال مالکیت (#240 دور ۲، حکم مدیر پروژه 2026-10-08).** با قاعدهٔ «پوشش الزامی باید برقرار باشد»، پنجرهٔ مالک قبلی نباید مالک جدید را مجاز
+کند مگر پوششش طبق Q-66 (`INSURANCE_COVERAGES_FOLLOWING_VEHICLE`) همراه خودرو برود. `ASSET_TRANSFERRED` دو فیلد افزایشی می‌گیرد
+(`ownershipGeneration`، `retainedCoverages` — محاسبه‌شده در asset-service) و `INSURANCE_RECORDED` فیلد `ownershipGeneration`
+(`docs/07` § ۷٫۸: فیلد اختیاریِ افزوده → همان `eventVersion`). fleet در Projectionِ انتقال فقط پنجره‌های پوشش‌های نگه‌داشته‌شده را می‌ماند و
+مجموعهٔ آن‌ها و نسل را روی Replica ذخیره می‌کند (`asset_ref.retained_coverages`، `asset_ref.ownership_generation`)؛ نبودِ `retainedCoverages`
+(رویداد قدیمی) همهٔ پنجره‌ها را حذف می‌کند و `insurance:reproject` معتبرها را برمی‌گرداند. `INSURANCE_RECORDED` با نسل کمتر از نسل Replica
+(یا بدون نسل) نادیده می‌شود مگر پوشش آن نگه‌داشته‌شده باشد.
+
+**اثر پاسخ.** مقدار `FLEET_DISPATCH_REQUIRED_COVERAGES` (و در صورت نیاز فهرست Q-65)؛ دو ستون افزایشی روی `asset_ref` (Migration `20261008230000`، برگشت‌پذیر).
 
 **وضعیت (2026-10-08).** با PR #240 ثبت و پیاده شد؛ پرسش برای صاحب محصول باز است.
 

@@ -1097,6 +1097,10 @@ export class AssetService {
               reason: dto.reason,
               referenceNo: dto.referenceNo ?? null,
               transferredAt: transferredAt.toISOString(),
+              // The generation this compare-and-set just wrote, and the
+              // coverages that follow the vehicle under the configuration now.
+              ownershipGeneration: row.ownershipGeneration,
+              retainedCoverages: [...this.transferInsurance.coveragesFollowingVehicle],
             }),
           });
 

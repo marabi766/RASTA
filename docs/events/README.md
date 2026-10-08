@@ -100,35 +100,46 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 
 ## Asset — `rasta.asset.v1`
 
-| رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                     |
-| ------------------------- | ---------------------------------- | ----------------------------------------------------------------- |
-| `ASSET_CREATED`           | fleet · analytics · audit · search | `assetId`, `organizationId`, `name`, `type`, `assetTag`, `status` |
-| `ASSET_ACTIVATED`         | fleet · analytics                  | `assetId`, `organizationId`, `commissionedAt`                     |
-| `ASSET_UPDATED`           | fleet · search · analytics         | `assetId`, `organizationId`, `changedFields`                      |
-| `ASSET_TRANSFERRED`       | fleet · analytics · audit          | `assetId`, `fromOrganizationId`, `toOrganizationId`, `reason`     |
-| `ASSET_STATUS_CHANGED`    | fleet · construction · analytics   | `assetId`, `previousStatus`, `newStatus`, `reason`                |
-| `ASSET_DECOMMISSIONED`    | fleet · maintenance · analytics    | `assetId`, `reason`, `decommissionedAt`                           |
-| `ASSET_LOCATION_RECORDED` | fleet · construction · analytics   | `assetId`, `locationId`, `hasCoordinate`, `source`                |
-| `ASSET_DOCUMENT_ATTACHED` | document · analytics               | `assetId`, `documentId`, `kind`, `expiresAt`                      |
+| رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                                                             |
+| ------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `ASSET_CREATED`           | fleet · analytics · audit · search | `assetId`, `organizationId`, `name`, `type`, `assetTag`, `status`                                         |
+| `ASSET_ACTIVATED`         | fleet · analytics                  | `assetId`, `organizationId`, `commissionedAt`                                                             |
+| `ASSET_UPDATED`           | fleet · search · analytics         | `assetId`, `organizationId`, `changedFields`                                                              |
+| `ASSET_TRANSFERRED`       | fleet · analytics · audit          | `assetId`, `fromOrganizationId`, `toOrganizationId`, `reason`, `ownershipGeneration`, `retainedCoverages` |
+| `ASSET_STATUS_CHANGED`    | fleet · construction · analytics   | `assetId`, `previousStatus`, `newStatus`, `reason`                                                        |
+| `ASSET_DECOMMISSIONED`    | fleet · maintenance · analytics    | `assetId`, `reason`, `decommissionedAt`                                                                   |
+| `ASSET_LOCATION_RECORDED` | fleet · construction · analytics   | `assetId`, `locationId`, `hasCoordinate`, `source`                                                        |
+| `ASSET_DOCUMENT_ATTACHED` | document · analytics               | `assetId`, `documentId`, `kind`, `expiresAt`                                                              |
 
 `ASSET_UPDATED` حمل نام فیلدهای تغییریافته است، نه مقدار پیشین آن‌ها: یک تغییر نام
 نباید مقدار قدیمی را روی Topic‌ای بگذارد که همه سرویس‌ها می‌خوانند و نگه می‌دارند.
 
 ## Insurance — `rasta.insurance.v1`
 
-| رویداد                | مصرف‌کنندگان                         | Payload کلیدی                                                            |
-| --------------------- | ------------------------------------ | ------------------------------------------------------------------------ |
-| `INSURANCE_RECORDED`  | **fleet** · notification · analytics | `assetId`, `policyId`, `insurerName`, `coverage`, `validFrom`, `validTo` |
-| `INSURANCE_EXPIRING`  | **notification** · analytics         | `assetId`, `policyId`, `insurerName`, `daysRemaining`                    |
-| `INSURANCE_EXPIRED`   | fleet · notification · analytics     | `assetId`, `policyId`, `coverage`, `validTo`                             |
-| `INSPECTION_RECORDED` | analytics                            | `assetId`, `inspectionId`, `certificateNo`, `result`                     |
-| `INSPECTION_EXPIRING` | notification                         | `assetId`, `inspectionId`, `daysRemaining`                               |
-| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics  | `assetId`, `inspectionId`, `notes`                                       |
+| رویداد                | مصرف‌کنندگان                         | Payload کلیدی                                                                                   |
+| --------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `INSURANCE_RECORDED`  | **fleet** · notification · analytics | `assetId`, `policyId`, `insurerName`, `coverage`, `validFrom`, `validTo`, `ownershipGeneration` |
+| `INSURANCE_EXPIRING`  | **notification** · analytics         | `assetId`, `policyId`, `insurerName`, `daysRemaining`                                           |
+| `INSURANCE_EXPIRED`   | fleet · notification · analytics     | `assetId`, `policyId`, `coverage`, `validTo`                                                    |
+| `INSPECTION_RECORDED` | analytics                            | `assetId`, `inspectionId`, `certificateNo`, `result`                                            |
+| `INSPECTION_EXPIRING` | notification                         | `assetId`, `inspectionId`, `daysRemaining`                                                      |
+| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics  | `assetId`, `inspectionId`, `notes`                                                              |
 
 `INSPECTION_FAILED` رویدادی ایمنی است، نه اداری: `fleet` باید بلافاصله دستگاه را از
 فهرست قابل اعزام بردارد، و نباید مجبور باشد برای فهمیدن این موضوع فیلد `result` یک
 رویداد عمومی «ثبت شد» را بازرسی کند. `daysRemaining` در رویدادهای انقضا حمل می‌شود تا
 `notification` بتواند بدون محاسبه دوباره تاریخ، یادآور ۳۰ روزه را از ۳ روزه تشخیص دهد.
+
+**فیلدهای افزایشیِ مالکیت (#240 دور ۲، Q-66 و Q-101).** `ASSET_TRANSFERRED.ownershipGeneration`
+نسلِ مالکیتِ دارایی پس از انتقال است و `ASSET_TRANSFERRED.retainedCoverages` پوشش‌هایی که طبق
+پیکربندیِ `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` در لحظهٔ انتقال همراه خودرو می‌روند
+(asset-service آن‌ها را محاسبه می‌کند). `INSURANCE_RECORDED.ownershipGeneration` نسلِ دارایی در لحظهٔ
+انتشار است. هر سه **فیلد اختیاریِ افزوده** هستند، پس طبق `docs/07` § ۷٫۸ همان `eventVersion` ۱ می‌ماند
+(تغییر شکننده نیست؛ Consumer قدیمی آن‌ها را نادیده می‌گیرد). `fleet` در Projectionِ انتقال فقط پنجره‌های
+پوشش‌های `retainedCoverages` را نگه می‌دارد و بقیه را حذف می‌کند؛ نبودِ فیلد (رویداد قدیمی) یعنی **همهٔ**
+پنجره‌ها حذف شوند (بسته‌ماندن در خطا؛ فرمان `insurance:reproject` پنجره‌های معتبر را برمی‌گرداند).
+`INSURANCE_RECORDED`ای که نسلش از نسلِ ثبت‌شدهٔ Replica کمتر است (یا نسل ندارد) نادیده گرفته می‌شود، مگر
+پوشش آن در `retainedCoverages`ِ آخرین انتقال باشد.
 
 **`fleet` اکنون `INSURANCE_RECORDED` را هم مصرف می‌کند (L3-02).** ممنوعیت اعزام
 Causeهای مستقل دارد و هیچ‌کدام دیگری را پاک یا بازنویسی نمی‌کند. `INSPECTION_FAILED`

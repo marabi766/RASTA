@@ -27,6 +27,8 @@ import { FleetRepository } from '../fleet/fleet.repository';
 import {
   INSPECTION_BLOCK_REASON,
   UNKNOWN_COVERAGE,
+  afterTransfer,
+  isStaleInsurance,
   parseCover,
   unresolvedLapses,
   withRecordedPolicy,
@@ -98,6 +100,8 @@ interface CurrentAssetRef {
   insuranceLapsedCoverages: string[];
   insuranceLapsedAt: Date | null;
   insuranceCover: unknown;
+  ownershipGeneration: number | null;
+  retainedCoverages: string[];
 }
 
 interface AssetRefPatch {
@@ -113,6 +117,8 @@ interface AssetRefPatch {
   insuranceLapsedCoverages?: string[];
   insuranceLapsedAt?: Date | null;
   insuranceCover?: InsuranceCover;
+  ownershipGeneration?: number | null;
+  retainedCoverages?: string[];
 }
 
 const PROJECTIONS: Record<ConsumedEventName, Projection> = {
@@ -140,19 +146,33 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     patch: (payload) => ({ status: str(payload.newStatus) ?? undefined }),
   },
   [CONSUMED_EVENTS.ASSET_TRANSFERRED]: {
-    patch: (payload) => ({
-      // The machine moved to another organization. Following it matters: a
-      // replica that kept the old owner would keep offering the machine in
-      // the wrong organization's availability listing.
-      organizationId: str(payload.toOrganizationId),
-      // Its new owner must re-commission it, exactly as asset-service records.
-      // Any assignment still open on it is ended by the handler, below.
-      status: 'REGISTERED',
-      // The insurance state is deliberately left as it is. The policy follows
-      // the vehicle: the previous owner's policy counts for the new owner
-      // until its own validTo, lapses included (docs/24 Q-66, project owner's
-      // decision 2026-09-25).
-    }),
+    patch: (payload, current) => {
+      const retained = strList(payload.retainedCoverages);
+      const generation = int(payload.ownershipGeneration);
+      return {
+        // The machine moved to another organization. Following it matters: a
+        // replica that kept the old owner would keep offering the machine in
+        // the wrong organization's availability listing.
+        organizationId: str(payload.toOrganizationId),
+        // Its new owner must re-commission it, exactly as asset-service records.
+        // Any assignment still open on it is ended by the handler, below.
+        status: 'REGISTERED',
+        // The policy follows the vehicle only for the coverages asset-service
+        // lets follow it (docs/24 Q-66, INSURANCE_COVERAGES_FOLLOWING_VEHICLE),
+        // which the event states. The others' windows are dropped: with a
+        // required-coverage dispatch rule a stale window would authorize the
+        // new owner. No `retainedCoverages` (an older event) drops them all —
+        // fail closed; the re-projection command restores the valid ones.
+        // Lapses are left as they are: they only ever withhold.
+        insuranceCover: afterTransfer(parseCover(current?.insuranceCover), retained, generation),
+        retainedCoverages: retained ?? [],
+        // Kept when the event carries none (an older event) rather than lowered.
+        ownershipGeneration:
+          generation === undefined
+            ? undefined
+            : Math.max(generation, current?.ownershipGeneration ?? generation),
+      };
+    },
   },
   [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: {
     patch: () => ({ status: 'DECOMMISSIONED' }),
@@ -213,10 +233,28 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       // this guard only narrows the types and never guesses a validity.
       if (!coverage || !policyId || !validFrom || !validTo) return {};
 
+      // The previous owner's policy, recorded before a transfer and consumed
+      // after it, answers nothing for the new owner unless its coverage follows
+      // the vehicle (#240 round 2). Acknowledged and not applied: it is a
+      // judgement about the event, not a defect a replay would fix.
+      const generation = int(payload.ownershipGeneration);
+      if (
+        isStaleInsurance(
+          generation,
+          coverage,
+          current?.ownershipGeneration,
+          current?.retainedCoverages ?? [],
+        )
+      ) {
+        return {};
+      }
+
       const cover = withRecordedPolicy(
         parseCover(current?.insuranceCover),
         coverage,
-        { policyId, validFrom, validTo },
+        generation === undefined
+          ? { policyId, validFrom, validTo }
+          : { policyId, validFrom, validTo, generation },
         now,
       );
       // Resolved lapses are dropped from the set so it does not grow for
@@ -490,6 +528,21 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           patch = refresh.viaTransfer
             ? refresh.patch
             : { ...withoutStateFields(patch), ...refresh.patch };
+          // The snapshot shows a new owner this replica missed the transfer to.
+          // It states neither the generation nor the coverages that follow the
+          // vehicle, so none is retained: fail closed, as for an older transfer.
+          // The re-projection command restores the valid windows.
+          if (current && current.organizationId !== refresh.organizationId) {
+            patch = {
+              ...patch,
+              insuranceCover: afterTransfer(
+                parseCover(current.insuranceCover),
+                undefined,
+                undefined,
+              ),
+              retainedCoverages: [],
+            };
+          }
         }
 
         // The row's organization: the one an ASSET_CREATED or a transfer
@@ -787,6 +840,17 @@ function assertTransferEnvelope(envelope: EventEnvelope): void {
         'disagrees with the transferred asset or its new owner',
     );
   }
+}
+
+/** A non-negative integer field, or undefined. */
+function int(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** A list of non-empty strings, or undefined when the field is absent or not one. */
+function strList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((v): v is string => typeof v === 'string' && v.length > 0);
 }
 
 /** Reads a string field, tolerating the absence the loose schema allows. */
