@@ -145,22 +145,10 @@ export class PolicyReconciliationSweeper {
       try {
         await runWithContext(context, async () => {
           const within = await ask(task);
-          if (within) {
-            // Nothing about the policy changes: the task alone is finished — unless a later move
-            // coalesced into it after the claim, in which case this answer may predate that move
-            // and the task is given back, due at once, to be looked at again.
-            if (await this.reconciliations.markDone(task)) {
-              outcome.confirmed += 1;
-              policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'confirmed' });
-            } else {
-              outcome.requeued += 1;
-              policyReconciliationTotal.inc({ service: SERVICE_NAME, result: 'requeued' });
-            }
-            return;
-          }
-          // The union no longer governs the employer. Which move is why is never named: events are
-          // partitioned by moved organization, so no order across aggregates exists and the
-          // hierarchy as it is now cannot prove it (round 9; docs/23 D-051).
+          // The answer decides suspension only; the race window is reviewed either way (D-050,
+          // round 12): a signature committed while the employer was out, before it came back and
+          // before this sweep, rests on authority that was absent. The review is MOVE_RECHECK like
+          // the rest, and the lookup never names a move (D-051).
           const result = await this.suspension.suspend(
             { id: task.policyId, organizationId: task.organizationId },
             {
@@ -171,6 +159,7 @@ export class PolicyReconciliationSweeper {
               callerService: MOVE_PRODUCER,
             },
             this.reconciliations.ownershipOf(task),
+            { within },
           );
           if (result === 'STALE') {
             // A move coalesced after the claim: give the task back, due at once, for a fresh look.
@@ -184,7 +173,14 @@ export class PolicyReconciliationSweeper {
           else outcome.notOwned += 1;
           policyReconciliationTotal.inc({
             service: SERVICE_NAME,
-            result: result === 'SUSPENDED' ? 'suspended' : result === 'NOTHING' ? 'noop' : 'lost',
+            result:
+              result === 'SUSPENDED'
+                ? 'suspended'
+                : result === 'NOTHING'
+                  ? within
+                    ? 'confirmed'
+                    : 'noop'
+                  : 'lost',
           });
         });
       } catch (error) {
@@ -216,7 +212,15 @@ export class PolicyReconciliationSweeper {
       this.options.backoffSeconds * 2 ** Math.min(task.attempts, 20),
     );
     try {
-      await this.reconciliations.retryLater(task, code, Math.round(backoff));
+      const outcome = await this.reconciliations.retryLater(task, code, Math.round(backoff));
+      if (outcome !== 'RETRIED') {
+        // A later move coalesced after the claim (or the lease is gone): the failure belongs to a
+        // generation that no longer is the task's, so its backoff is not applied (round 12).
+        this.logger.warn(
+          `Reconciliation task ${task.id} failed: ${code}; ${outcome === 'SUPERSEDED' ? 'a later move is queued, due at once' : 'lease lost'}`,
+        );
+        return;
+      }
       this.logger.warn(
         `Reconciliation task ${task.id} (attempt ${task.attempts + 1}) failed: ${code}; ` +
           `retrying in ${Math.round(backoff)}s`,

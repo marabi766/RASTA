@@ -505,6 +505,7 @@ describe('a signing policy follows an organization move', () => {
       return { union, draft, policyId, evidence: await evidenceOf(draft.id) };
     }
     /** An instant inside the signature's window: after it began, before its commit deadline. */
+    type Evidence = Awaited<ReturnType<typeof signedUnderUnion>>['evidence'];
     const inWindow = (signature: { hierarchyCommitDeadline: Date | null }) =>
       new Date(signature.hierarchyCommitDeadline!.getTime() - 1);
 
@@ -540,40 +541,48 @@ describe('a signing policy follows an organization move', () => {
     });
 
     it('flags exactly the signatures that recorded a LOWER hierarchy version than the move’s AND whose commit window reaches the move (D-050): one committed well before the move is not flagged', async () => {
-      // Read the tree before the move, within the window: raced.
-      const raced = await signedUnderUnion();
-      // Read the tree AFTER the move (the version was already stamped): not raced.
-      const answeredAfter = await signedUnderUnion((employer) => {
-        api.hierarchy.bump(employer);
-      });
-      // Read the old tree, and committed long before the move: its deadline precedes the move's
-      // instant (moved_at > hierarchy_commit_deadline), so it cannot have raced it — no review.
-      const committedBefore = await signedUnderUnion();
-      // An event from before versions: nothing to order by, so the window alone decides.
-      const unversioned = await signedUnderUnion();
-
+      // Each signature is made just before its own move is handled: a move queues a re-check for
+      // every union policy, and (round 12) a "within" re-check reviews the window too, so a
+      // signature made earlier than another case's move would be reviewed by that move.
       const cases = [
-        { who: raced, movedAt: inWindow(raced.evidence), stamp: 'new', flagged: true },
         {
-          // The move committed before this signature read: its version is the one it recorded.
-          who: answeredAfter,
-          movedAt: inWindow(answeredAfter.evidence),
+          // Read the tree before the move, within the window: raced.
+          make: () => signedUnderUnion(),
+          movedAt: (evidence: Evidence) => inWindow(evidence),
+          stamp: 'new',
+          flagged: true,
+        },
+        {
+          // Read the tree AFTER the move (the version was already stamped): not raced. The move
+          // committed before this signature read: its version is the one it recorded.
+          make: () =>
+            signedUnderUnion((employer) => {
+              api.hierarchy.bump(employer);
+            }),
+          movedAt: (evidence: Evidence) => inWindow(evidence),
           stamp: 'existing',
           flagged: false,
         },
         {
-          who: committedBefore,
-          movedAt: new Date(
-            committedBefore.evidence.hierarchyCommitDeadline!.getTime() + MARGIN_MS + 30_000,
-          ),
+          // Read the old tree, and committed long before the move: its deadline precedes the move's
+          // instant (moved_at > hierarchy_commit_deadline), so it cannot have raced it — no review.
+          make: () => signedUnderUnion(),
+          movedAt: (evidence: Evidence) =>
+            new Date(evidence.hierarchyCommitDeadline!.getTime() + MARGIN_MS + 30_000),
           stamp: 'new',
           flagged: false,
         },
-        { who: unversioned, movedAt: inWindow(unversioned.evidence), stamp: 'none', flagged: true },
+        {
+          // An event from before versions: nothing to order by, so the window alone decides.
+          make: () => signedUnderUnion(),
+          movedAt: (evidence: Evidence) => inWindow(evidence),
+          stamp: 'none',
+          flagged: true,
+        },
       ] as const;
-      for (const { who, movedAt, stamp, flagged } of cases) {
-        // The employer left the union: a move stamps a version above every earlier one in its own
-        // transaction, and its event carries it.
+      for (const { make, movedAt: movedAtOf, stamp, flagged } of cases) {
+        const who = await make();
+        const movedAt = movedAtOf(who.evidence);
         api.hierarchy.adopt(newOrg(), who.draft.employer);
         const movedVersion =
           stamp === 'new'
@@ -894,7 +903,7 @@ describe('a signing policy follows an organization move', () => {
       const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
       const policyId = await activeUnionPolicy(union, draft.employer);
       await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN'])).expect(200);
-      return { draft, policyId, evidence: await evidenceOf(draft.id) };
+      return { draft, union, policyId, evidence: await evidenceOf(draft.id) };
     }
 
     it.each([
@@ -919,20 +928,23 @@ describe('a signing policy follows an organization move', () => {
           api.hierarchy.versionOf(newer.draft.employer),
         );
 
+        // The one that read the moved tree first: a move queues a re-check for every union
+        // policy and a "within" one reviews the window too (round 12), so the other's move, handled
+        // later, is kept out of this assertion.
         for (const [who, version] of [
-          [older, api.hierarchy.versionOf(older.draft.employer)],
           [newer, Number(read.hierarchyVersion)],
+          [older, api.hierarchy.versionOf(older.draft.employer)],
         ] as const) {
           api.hierarchy.adopt(newOrg(), who.draft.employer);
           const at = new Date(who.evidence.hierarchyCommitDeadline!.getTime() + skew);
           await consumer.handle(moved(who.draft.employer, at, version));
           await sweeper.runOnce();
+          // Equal to the move's version: not flagged by its own move.
+          if (who === newer) expect(await reviewsOf(newer.draft.id)).toEqual([]);
         }
         expect(movedVersion).toBeGreaterThan(0);
         // Older: its recorded version is below the move's → flagged, if the window reaches it.
-        // Newer: equal → not.
         expect(await reviewsOf(older.draft.id)).toHaveLength(olderFlagged ? 1 : 0);
-        expect(await reviewsOf(newer.draft.id)).toEqual([]);
       },
     );
 
@@ -992,6 +1004,119 @@ describe('a signing policy follows an organization move', () => {
       await sweeper.runOnce();
       expect(await reviewsOf(inside.draft.id)).toHaveLength(1);
       expect(await reviewsOf(before.draft.id)).toEqual([]);
+    });
+
+    it('out → sign → back before the sweep: the answer is "within", yet the signature committed while authority was absent is reviewed (MOVE_RECHECK), and the policy stays in force (round 12)', async () => {
+      const who = await signedOnce();
+      const deadline = who.evidence.hierarchyCommitDeadline!.getTime();
+      // A takes the employer out (its instant inside the signature's window) …
+      api.hierarchy.adopt(newOrg(), who.draft.employer);
+      await consumer.handle(
+        moved(who.draft.employer, new Date(deadline - 1), api.hierarchy.bump(who.draft.employer)),
+      );
+      // … B returns it before any sweep: one task now carries both moves.
+      api.hierarchy.adopt(who.union, who.draft.employer);
+      await consumer.handle(
+        moved(who.draft.employer, new Date(deadline + 1), api.hierarchy.bump(who.draft.employer)),
+      );
+      expect((await tasksOf(who.policyId))[0]).toMatchObject({ generation: 1 });
+
+      const outcome = await sweeper.runOnce();
+
+      expect(outcome.suspended).toBe(0);
+      expect((await policyRow(who.policyId)).status).toBe('ACTIVE');
+      expect((await tasksOf(who.policyId))[0]!.status).toBe('DONE');
+      const reviews = await reviewsOf(who.draft.id);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      });
+    });
+
+    it('moves back without a signature in the window: no review, whether the signature committed before every move or none was made', async () => {
+      // The scenario with no signature first: the other's signature is made after its moves, and a
+      // move queues a re-check for every union policy.
+      const none = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const noneUnion = newOrg();
+      const nonePolicy = await activeUnionPolicy(noneUnion, none.employer);
+      api.hierarchy.adopt(newOrg(), none.employer);
+      await consumer.handle(moved(none.employer, new Date(), api.hierarchy.bump(none.employer)));
+      api.hierarchy.adopt(noneUnion, none.employer);
+      await consumer.handle(
+        moved(none.employer, new Date(Date.now() + 1), api.hierarchy.bump(none.employer)),
+      );
+      await sweeper.runOnce();
+
+      // A signature that committed before every move was prepared.
+      const early = await signedOnce();
+      const at = early.evidence.hierarchyCommitDeadline!.getTime() + MARGIN_MS + 60_000;
+      api.hierarchy.adopt(newOrg(), early.draft.employer);
+      await consumer.handle(
+        moved(early.draft.employer, new Date(at), api.hierarchy.bump(early.draft.employer)),
+      );
+      api.hierarchy.adopt(early.union, early.draft.employer);
+      await consumer.handle(
+        moved(early.draft.employer, new Date(at + 1), api.hierarchy.bump(early.draft.employer)),
+      );
+      await sweeper.runOnce();
+
+      expect(await reviewsOf(early.draft.id)).toEqual([]);
+      expect(await reviewsOf(none.id)).toEqual([]);
+      expect((await policyRow(early.policyId)).status).toBe('ACTIVE');
+      expect((await policyRow(nonePolicy)).status).toBe('ACTIVE');
+    });
+  });
+
+  describe('a failed lookup cannot push out a newer move’s due time (round 12)', () => {
+    async function claimedAfterOneMove() {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      await consumer.handle(moved(draft.employer, new Date(), api.hierarchy.bump(draft.employer)));
+      const queue = api.app.get(PolicyReconciliationRepository);
+      const task = (await queue.claimDue(100, 60, ulid())).find((t) => t.policyId === policyId)!;
+      return { queue, task, policyId, employer: draft.employer };
+    }
+
+    it('claim → a move coalesces → the lookup fails: the lease is released, the due time, attempts and error stay the newer move’s, and the task is claimable at once', async () => {
+      const { queue, task, policyId, employer } = await claimedAfterOneMove();
+      await consumer.handle(moved(employer, new Date(), api.hierarchy.bump(employer)));
+      const before = (await tasksOf(policyId))[0]!;
+      expect(before.generation).toBeGreaterThan(task.generation);
+
+      expect(await queue.retryLater(task, 'UPSTREAM_UNAVAILABLE', 900)).toBe('SUPERSEDED');
+
+      const after = (await tasksOf(policyId))[0]!;
+      expect(after.leaseToken).toBeNull();
+      expect(after.attempts).toBe(before.attempts);
+      expect(after.lastErrorCode).toBeNull();
+      expect(after.nextAttemptAt.getTime()).toBe(before.nextAttemptAt.getTime());
+      expect(after.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
+      const again = (await queue.claimDue(100, 60, ulid())).filter((t) => t.policyId === policyId);
+      expect(again).toHaveLength(1);
+    });
+
+    it('the claimed generation is still the task’s: the backoff, the attempt and the error code are applied', async () => {
+      const { queue, task, policyId } = await claimedAfterOneMove();
+
+      expect(await queue.retryLater(task, 'UPSTREAM_UNAVAILABLE', 900)).toBe('RETRIED');
+
+      const after = (await tasksOf(policyId))[0]!;
+      expect(after).toMatchObject({ attempts: 1, lastErrorCode: 'UPSTREAM_UNAVAILABLE' });
+      expect(after.nextAttemptAt.getTime()).toBeGreaterThan(Date.now() + 800_000);
+      expect(after.leaseToken).toBeNull();
+    });
+
+    it('a lease that is no longer this worker’s changes nothing', async () => {
+      const { queue, task, policyId } = await claimedAfterOneMove();
+      const before = (await tasksOf(policyId))[0]!;
+      expect(await queue.retryLater({ ...task, leaseToken: 'OTHER' }, 'INTERNAL', 900)).toBe(
+        'LOST',
+      );
+      expect((await tasksOf(policyId))[0]).toEqual(before);
     });
   });
 
