@@ -71,6 +71,11 @@ model Asset {
   /// When the asset entered service with its current owner.
   commissionedAt DateTime? @map("commissioned_at")
 
+  /// The organization the asset was commissioned for: set on activation (or on a return to service
+  /// that passed the dossier), cleared by a transfer. Return to service needs no fresh dossier when
+  /// it equals the current owner (#234 round 2). NULL = not commissioned for anyone yet / undecidable.
+  commissionedForOrganizationId String? @map("commissioned_for_organization_id")
+
   /// Set once, terminally. A decommissioned asset is never deleted: financial
   /// and audit records still reference it.
   decommissionedAt     DateTime? @map("decommissioned_at")

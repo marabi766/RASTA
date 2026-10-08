@@ -284,6 +284,9 @@ async function main(): Promise<void> {
         serialNumber: asset.serialNumber ?? null,
         specifications: (asset.specifications ?? {}) as object,
         commissionedAt: asset.commissionedAt ?? null,
+        // A commissioned asset was commissioned for its organization: without this it could never
+        // return to service from OUT_OF_SERVICE. Set on create only — a later transfer clears it.
+        commissionedForOrganizationId: asset.commissionedAt ? asset.organizationId : null,
         createdBy: 'SEED',
         updatedBy: 'SEED',
       },
@@ -291,6 +294,18 @@ async function main(): Promise<void> {
       // rewind a status somebody changed while exploring the system.
       update: { name: asset.name, model: asset.model ?? null },
     });
+
+    // A database seeded before the column existed: the migration's own backfill rule (commissioned,
+    // never transferred), written only where the record is still empty — never over a transfer's.
+    if (asset.commissionedAt) {
+      await prisma.$executeRawUnsafe(
+        `UPDATE asset a SET commissioned_for_organization_id = a.organization_id
+          WHERE a.id = $1 AND a.commissioned_for_organization_id IS NULL
+            AND a.commissioned_at IS NOT NULL AND a.ownership_generation = 0
+            AND NOT EXISTS (SELECT 1 FROM asset_transfer t WHERE t.asset_id = a.id)`,
+        asset.id,
+      );
+    }
 
     if (asset.location) {
       const locationId = `ALC-SEED-${asset.id.slice(-4)}`;

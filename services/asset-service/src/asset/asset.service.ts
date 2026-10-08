@@ -163,7 +163,7 @@ export class AssetService {
     const [policy, inspection, costRows, transferCount, recent, organization] = await Promise.all([
       this.findCountingPolicy(id),
       this.repository.findLatestInspection(id),
-      this.repository.costSummary(id),
+      this.repository.costSummary(id, asset.organizationId),
       this.repository.countTransfers(id),
       this.repository.listTimeline(id, { limit: 10 } as TimelineQuery),
       this.repository.findOrganizationRef(asset.organizationId),
@@ -188,7 +188,10 @@ export class AssetService {
             id: currentLocation.id,
             siteName: currentLocation.siteName,
             addressLine: currentLocation.addressLine,
-            coordinate: await this.repository.readCoordinate(currentLocation.id),
+            coordinate: await this.repository.readCoordinate(
+              currentLocation.id,
+              asset.organizationId,
+            ),
             source: currentLocation.source,
             recordedAt: currentLocation.recordedAt.toISOString(),
           }
@@ -486,30 +489,7 @@ export class AssetService {
     this.assertVersion(asset, dto.expectedVersion);
     this.assertTransition(asset.status as AssetStatus, 'ACTIVE', 'USER');
 
-    // Any in-force policy that counts for the current owner: under the project
-    // owner's decision the previous owner's policy follows the vehicle
-    // (docs/24 Q-66).
-    const [policy, ownershipDoc] = await Promise.all([
-      this.findCountingPolicy(id),
-      this.repository.client.assetDocumentRef.findFirst({
-        where: {
-          assetId: id,
-          deletedAt: null,
-          kind: { in: ['OWNERSHIP_TITLE', 'REGISTRATION_CARD'] },
-        },
-      }),
-    ]);
-
-    const missing: string[] = [];
-    if (!policy) missing.push('an insurance policy currently in force');
-    if (!ownershipDoc) missing.push('an ownership title or registration card');
-
-    if (missing.length > 0) {
-      throw RastaError.businessRule(
-        `The asset cannot be activated without ${missing.join(' and ')}.`,
-        { rule: 'INCOMPLETE_DOSSIER', assetId: id, missing },
-      );
-    }
+    await this.assertCommissioningDossier(id);
 
     const commissionedAt = dto.commissionedAt ? new Date(dto.commissionedAt) : new Date();
     const actor = getContext().userId ?? 'SYSTEM';
@@ -522,6 +502,7 @@ export class AssetService {
         {
           status: 'ACTIVE',
           commissionedAt,
+          commissionedForOrganizationId: asset.organizationId,
           updatedBy: actor,
         },
         { version: dto.expectedVersion },
@@ -557,6 +538,54 @@ export class AssetService {
     return toView(updated);
   }
 
+  /**
+   * What "commissioned for the current owner" means (#234 round 1): the CURRENT owner holds the
+   * commissioning dossier now — an insurance policy that counts for it (Q-66: the previous owner's
+   * in-force policy follows the vehicle) **and** an ownership title or registration card that is its
+   * own row (`organization_id` is the current owner's; the previous owner's references stay with
+   * it, Q-99, so they never satisfy this). The check is made on every user transition into an
+   * operable state from an asset the current owner has not commissioned: REGISTERED → ACTIVE
+   * (`activate`) and OUT_OF_SERVICE → ACTIVE, which is how a transferred asset could otherwise
+   * be put into service without its own paperwork (REGISTERED → OUT_OF_SERVICE → ACTIVE). IDLE →
+   * ACTIVE follows the same rule (round 9): a legacy transferred asset can sit IDLE with no marker,
+   * so insurance is always needed and the ownership document is waived only by the marker.
+   *
+   * Round 2: the dossier is needed only when the asset is not **commissioned for its current owner**
+   * (`commissionedForOrganizationId`, set on activation, cleared by a transfer). OUT_OF_SERVICE →
+   * ACTIVE for an asset its owner commissioned — seeded, or repaired by the reconciliation runbook —
+   * needs none; after a transfer (A→B, A→B→A) the new owner commissions with its own documents (A's
+   * retained rows are A's own, so they suffice when the asset is back with A).
+   */
+  private async assertCommissioningDossier(
+    id: string,
+    /** False when the current owner already commissioned the asset: only insurance is checked. */
+    options: { ownershipDocument: boolean } = { ownershipDocument: true },
+  ): Promise<void> {
+    const [policy, ownershipDoc] = await Promise.all([
+      this.findCountingPolicy(id),
+      options.ownershipDocument
+        ? this.repository.client.assetDocumentRef.findFirst({
+            where: {
+              assetId: id,
+              deletedAt: null,
+              kind: { in: ['OWNERSHIP_TITLE', 'REGISTRATION_CARD'] },
+            },
+          })
+        : Promise.resolve(true),
+    ]);
+
+    const missing: string[] = [];
+    if (!policy) missing.push('an insurance policy currently in force');
+    if (!ownershipDoc) missing.push('an ownership title or registration card');
+
+    if (missing.length > 0) {
+      throw RastaError.businessRule(
+        `The asset cannot be activated without ${missing.join(' and ')}.`,
+        { rule: 'INCOMPLETE_DOSSIER', assetId: id, missing },
+      );
+    }
+  }
+
   async changeStatus(id: string, dto: ChangeStatusDto): Promise<AssetView> {
     const asset = await this.repository.findById(id);
     if (!asset) throw RastaError.notFound('Asset', id);
@@ -572,6 +601,23 @@ export class AssetService {
 
     this.assertTransition(asset.status as AssetStatus, dto.status as AssetStatus, 'USER');
 
+    // Returning from OUT_OF_SERVICE is a way into service like any other: an asset the current owner
+    // has not commissioned (one that came from a transfer and was withdrawn before it was ever
+    // activated) goes through the same dossier check as `activate`.
+    // Every transition into ACTIVE (IDLE and OUT_OF_SERVICE here, `activate` for REGISTERED) goes
+    // through the one guard and needs an insurance policy in force now: a policy that lapsed while
+    // the asset was idle or withdrawn blocks it. The ownership document is asked only of a return
+    // from IDLE or OUT_OF_SERVICE (one rule, round 9), and the commissioning marker waives it — a
+    // seeded active asset, or one a runbook repaired, has none to show. A transfer clears the marker,
+    // so the new owner (and A in A→B→A) commissions with its own documents. A legacy transferred
+    // asset left IDLE has no marker, so it too must show the current owner's own document.
+    const intoActive = dto.status === 'ACTIVE';
+    if (intoActive) {
+      await this.assertCommissioningDossier(id, {
+        ownershipDocument: asset.commissionedForOrganizationId !== asset.organizationId,
+      });
+    }
+
     const write = (assertWithinDeadline: () => void = () => undefined) =>
       this.repository.transaction(async (tx) => {
         const row = await this.writeStatusChange(
@@ -581,6 +627,7 @@ export class AssetService {
           dto.status,
           dto.reason,
           dto.expectedVersion,
+          intoActive ? { commissionedForOrganizationId: asset.organizationId } : {},
         );
         // Still inside the transaction: too late rolls it back.
         assertWithinDeadline();
@@ -971,6 +1018,8 @@ export class AssetService {
               // A new ownership generation, under the row lock this takes.
               // Policies recorded from here on carry it (PR #108 round 2 #5).
               ownershipGeneration: { increment: 1 },
+              // The new owner has commissioned nothing yet (#234 round 2).
+              commissionedForOrganizationId: null,
               updatedBy: actor,
             },
             { organizationId: from },
@@ -1014,9 +1063,18 @@ export class AssetService {
           // (audit L3-08), and the earlier transfer records too. A table left
           // out here stays with the previous owner.
           const moved = { where: { assetId: id }, data: { organizationId: dto.toOrganizationId } };
-          await tx.assetTimelineEntry.updateMany(moved);
+          // The previous owner's documents do NOT go with the asset (docs/24 Q-99, provisional):
+          // document-service keeps those files owned by the previous owner, so a reference moved
+          // here would be one the new owner cannot read (404), and a later grant would hand it
+          // private data nobody decided to share. The references stay the previous owner's rows —
+          // its history, reachable by no read path of the new owner — and so do the timeline
+          // entries that name them (`DOCUMENT`: the title is in the description). The new owner
+          // starts with an empty documents list and attaches its own.
+          await tx.assetTimelineEntry.updateMany({
+            where: { assetId: id, category: { not: 'DOCUMENT' } },
+            data: { organizationId: dto.toOrganizationId },
+          });
           await tx.assetLocation.updateMany(moved);
-          await tx.assetDocumentRef.updateMany(moved);
           // A policy or claim holding a negative amount from before the
           // constraints (NOT VALID, L7-36) is refused by the database on any
           // UPDATE of its row: the transfer is refused as a closed 422, not a
@@ -1112,7 +1170,7 @@ export class AssetService {
       id: row.id,
       siteName: row.siteName,
       addressLine: row.addressLine,
-      coordinate: await this.repository.readCoordinate(row.id),
+      coordinate: await this.repository.readCoordinate(row.id, row.organizationId),
       source: row.source,
       recordedAt: row.recordedAt.toISOString(),
     };
@@ -1321,6 +1379,7 @@ export class AssetService {
     newStatus: AssetStatus,
     reason: string,
     expectedVersion?: number,
+    extra: Record<string, unknown> = {},
   ) {
     const actor = getContext().userId ?? 'SYSTEM';
     const previousStatus = asset.status;
@@ -1329,7 +1388,7 @@ export class AssetService {
       tx,
       id,
       previousStatus,
-      { status: newStatus, updatedBy: actor },
+      { status: newStatus, ...extra, updatedBy: actor },
       // A user's command names the version it was made against; an event from
       // another service has none and is judged on the status alone.
       expectedVersion === undefined ? {} : { version: expectedVersion },
@@ -1456,6 +1515,7 @@ export class AssetService {
       await this.repository.setLocationPoint(
         tx,
         locationId,
+        organizationId,
         dto.coordinate.latitude,
         dto.coordinate.longitude,
       );

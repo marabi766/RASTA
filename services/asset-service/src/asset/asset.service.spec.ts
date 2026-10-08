@@ -576,6 +576,77 @@ describe('AssetService', () => {
       );
     });
 
+    it('refuses IDLE → ACTIVE with no insurance in force, and writes and publishes nothing', async () => {
+      const h = harness({ findById: jest.fn(async () => assetRow({ status: 'IDLE' })) });
+
+      await expect(
+        run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'ACTIVE',
+            reason: 'بازگشت',
+            expectedVersion: 1,
+          }),
+        ),
+      ).rejects.toThrow(/insurance policy currently in force/);
+      expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+      expect(h.enqueued).toHaveLength(0);
+    });
+
+    describe('IDLE → ACTIVE uses the OUT_OF_SERVICE → ACTIVE rule (#234 round 9)', () => {
+      const idle = (extra: object = {}) =>
+        harness({
+          findById: jest.fn(async () => assetRow({ status: 'IDLE', ...extra })),
+          findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        });
+      const back = (h: Harness) =>
+        run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'ACTIVE',
+            reason: 'بازگشت',
+            expectedVersion: 1,
+          }),
+        );
+
+      it('refuses a legacy transferred IDLE asset (no marker) that holds no ownership document of its own', async () => {
+        const h = idle();
+
+        await expect(back(h)).rejects.toThrow(/ownership title/);
+        expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+      });
+
+      it('allows it once the current owner holds its own document, and records the marker', async () => {
+        const h = idle();
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'DOC_1',
+        });
+
+        await expect(back(h)).resolves.toMatchObject({ status: 'ACTIVE' });
+        expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+          h.tx,
+          ASSET_ID,
+          'IDLE',
+          expect.objectContaining({ commissionedForOrganizationId: assetRow().organizationId }),
+          { version: 1 },
+        );
+      });
+
+      it('waives the document only for the marker of the current organization, never the insurance', async () => {
+        const marked = idle({ commissionedForOrganizationId: assetRow().organizationId });
+        await expect(back(marked)).resolves.toMatchObject({ status: 'ACTIVE' });
+
+        const lapsed = harness({
+          findById: jest.fn(async () =>
+            assetRow({
+              status: 'IDLE',
+              commissionedForOrganizationId: assetRow().organizationId,
+            }),
+          ),
+        });
+        await expect(back(lapsed)).rejects.toThrow(/insurance policy currently in force/);
+      });
+    });
+
     it('names everything that is missing, not just the first thing', async () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
@@ -901,9 +972,11 @@ describe('AssetService', () => {
     it('a status change sent twice does not apply again after the asset moved back', async () => {
       // ACTIVE → IDLE (v1 → v2), somebody returns it IDLE → ACTIVE (v3). A bare
       // status check would let the stale ACTIVE → IDLE form land a second time.
-      let row = assetRow({ version: 1, status: 'ACTIVE' });
+      // Commissioned by its owner: the marker waives the ownership document on the way back.
+      let row = assetRow({ version: 1, status: 'ACTIVE', commissionedForOrganizationId: DEH1 });
       const h = harness({
         findById: jest.fn(async () => row),
+        findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
         compareAndSetStatus: jest.fn(
           async (_tx: unknown, _id: string, _expected: string, data: Record<string, unknown>) => {
             row = { ...row, ...data, version: row.version + 1 } as typeof row;
@@ -1388,7 +1461,14 @@ describe('AssetService', () => {
       'asks nobody when the asset is only marked %s: that does not leave service',
       async (target) => {
         const from = target === 'IDLE' ? 'ACTIVE' : 'IDLE';
-        const h = at(from, fakeClearance());
+        // IDLE → ACTIVE needs a policy in force like every way into ACTIVE (#234 round 8).
+        const h = at(from, fakeClearance(), {
+          findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        });
+        // Legacy asset without a marker: the current owner's own document stands in for it (round 9).
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'DOC_1',
+        });
 
         await run(() =>
           h.service.changeStatus(ASSET_ID, {
@@ -1449,19 +1529,19 @@ describe('AssetService', () => {
       const h = harness();
       await run(() => h.service.transfer(ASSET_ID, dto));
 
-      // Timeline, locations and documents all follow the asset — otherwise the
-      // new owner sees a machine with no past, and the old owner keeps rows
-      // for a machine they no longer hold.
+      // Timeline and locations follow the asset — otherwise the new owner sees
+      // a machine with no past, and the old owner keeps rows for a machine they
+      // no longer hold. The previous owner's DOCUMENTS do not (Q-99): not the
+      // references, and not the timeline entries that carry their titles.
       const moved = { organizationId: DEH2 };
-      expect(h.tx.assetTimelineEntry.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ data: moved }),
-      );
+      expect(h.tx.assetTimelineEntry.updateMany).toHaveBeenCalledWith({
+        where: { assetId: ASSET_ID, category: { not: 'DOCUMENT' } },
+        data: moved,
+      });
       expect(h.tx.assetLocation.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ data: moved }),
       );
-      expect(h.tx.assetDocumentRef.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ data: moved }),
-      );
+      expect(h.tx.assetDocumentRef.updateMany).not.toHaveBeenCalled();
       // Audit L3-08: the insurance and inspection record, and the earlier
       // transfers, are part of that history too.
       for (const table of [

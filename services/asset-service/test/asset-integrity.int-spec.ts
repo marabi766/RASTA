@@ -698,8 +698,6 @@ describe('asset integrity', () => {
         'technical_inspection',
         'asset_transfer',
         'asset_location',
-        'asset_document_ref',
-        'asset_timeline_entry',
       ]) {
         const left = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
           `SELECT count(*)::int AS n FROM ${table} WHERE asset_id = $1 AND organization_id = $2`,
@@ -707,6 +705,21 @@ describe('asset integrity', () => {
           org.a,
         );
         expect({ table, n: left[0]!.n }).toEqual({ table, n: 0 });
+      }
+      // The documents are the exception (docs/24 Q-99): the previous owner's reference, and the
+      // timeline entry that names it, stay its own rows. The rest of the timeline moved.
+      for (const [table, extra, expected] of [
+        ['asset_document_ref', '', 1],
+        ['asset_timeline_entry', `AND category = 'DOCUMENT'`, 1],
+        ['asset_timeline_entry', `AND category <> 'DOCUMENT'`, 0],
+      ] as const) {
+        const left = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+          `SELECT count(*)::int AS n FROM ${table}
+            WHERE asset_id = $1 AND organization_id = $2 ${extra}`,
+          assetId,
+          org.a,
+        );
+        expect({ table, extra, n: left[0]!.n }).toEqual({ table, extra, n: expected });
       }
 
       // docs/24 Q-66, the project owner's decision (2026-09-25): the insurance
@@ -729,7 +742,11 @@ describe('asset integrity', () => {
         code: 'BUSINESS_RULE_VIOLATION',
         internalContext: expect.objectContaining({
           rule: 'INCOMPLETE_DOSSIER',
-          missing: ['an insurance policy currently in force'],
+          // The ownership title is the previous owner's (docs/24 Q-99): the new owner's own is missing too.
+          missing: [
+            'an insurance policy currently in force',
+            'an ownership title or registration card',
+          ],
         }),
       });
       expect(
@@ -808,6 +825,14 @@ describe('asset integrity', () => {
         [own.id]: 1,
       });
 
+      // The new owner attaches its own ownership document: the previous owner's did not follow.
+      await asActor(manager(org.b), () =>
+        assets.attachDocument(assetId, {
+          documentId: id('DOC'),
+          kind: 'OWNERSHIP_TITLE',
+          title: 'سند مالکیت مالک جدید',
+        }),
+      );
       const activated = await asActor(manager(org.b), async () =>
         assets.activate(assetId, { expectedVersion: await versionOf(assetId) }),
       );
@@ -1253,6 +1278,21 @@ describe('asset integrity', () => {
     it('applies a status change once, and a stale one cannot apply it again after the machine moved back', async () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
+      // An asset its owner commissioned: the marker waives the ownership document on the way back.
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset SET commissioned_for_organization_id = organization_id WHERE id = $1`,
+        assetId,
+      );
+      // IDLE → ACTIVE needs a policy in force, like every way into ACTIVE.
+      await asActor(manager(org.a), () =>
+        insurance.recordPolicy(assetId, {
+          policyNumber: `POL-${ulid().slice(-8)}`,
+          insurerName: 'بیمه نمونه',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - day).toISOString(),
+          validTo: new Date(Date.now() + 300 * day).toISOString(),
+        }),
+      );
       const first = await versionOf(assetId);
       const idle = { status: 'IDLE' as const, reason: 'فصل غیرکاری', expectedVersion: first };
 
