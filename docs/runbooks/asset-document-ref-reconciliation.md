@@ -28,7 +28,7 @@ SELECT r.id AS ref_id, r.asset_id, r.document_id, r.organization_id AS current_o
   LEFT JOIN asset_timeline_entry e
          ON e.asset_id = r.asset_id AND e.source_event_id = r.id AND e.category = 'DOCUMENT'
  WHERE EXISTS (SELECT 1 FROM asset_transfer t
-                WHERE t.asset_id = r.asset_id AND r.created_at < t.transferred_at)
+                WHERE t.asset_id = r.asset_id AND r.created_at <= t.transferred_at)
  ORDER BY r.asset_id, r.created_at, r.id;
 ```
 

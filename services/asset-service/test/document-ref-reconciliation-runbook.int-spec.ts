@@ -247,6 +247,34 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     expect(await orgOfEntry(assetId, refB)).toBe(org.b);
   });
 
+  it('a reference created in the very millisecond of the transfer is a candidate too, and is repaired (#234 round 3)', async () => {
+    const assetId = await newAsset(org.a);
+    const refA = await attach(assetId, org.a);
+    await transfer(assetId, org.a, org.b);
+    await legacyCarry(assetId, org.b);
+    // Both columns are TIMESTAMP(3): the owner comparison decides, not the order of two equal instants.
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset_document_ref r SET created_at = t.transferred_at
+         FROM asset_transfer t WHERE r.id = $1 AND t.asset_id = r.asset_id`,
+      refA,
+    );
+    refsOfAsset.set(refA, assetId);
+    const [equal] = await prisma.client.$queryRawUnsafe<{ same: boolean }[]>(
+      `SELECT r.created_at = t.transferred_at AS same
+         FROM asset_document_ref r JOIN asset_transfer t ON t.asset_id = r.asset_id WHERE r.id = $1`,
+      refA,
+    );
+    expect(equal!.same).toBe(true);
+
+    expect((await candidatesOf(assetId)).map((row) => row.ref_id)).toEqual([refA]);
+    const result = await repair(assetId);
+
+    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1 });
+    expect(result.pairs).toEqual([]);
+    expect(await orgOfRef(refA)).toBe(org.a);
+    expect(await orgOfEntry(assetId, refA)).toBe(org.a);
+  });
+
   it('running it twice changes nothing the second time, and no row is deleted', async () => {
     const assetId = await newAsset(org.a);
     const refA = await attach(assetId, org.a);
