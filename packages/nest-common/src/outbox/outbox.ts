@@ -65,7 +65,17 @@ export interface OutboxMessageInput<TPayload = unknown> {
    * allocate against one key and label the envelope with another.
    */
   streamKey?: string;
+  /**
+   * The event's id, when it must be reproducible. Omitted (every ordinary
+   * call site): a fresh ULID. Supplied only by an operator-run re-emission of
+   * a fact that already exists, so that running it twice yields the same id and
+   * a consumer's idempotency marker makes the second run a no-op. Must be a
+   * ULID: the id is also the outbox primary key and the consumers' marker.
+   */
+  eventId?: string;
 }
+
+const ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
 export interface OutboxRow {
   id: string;
@@ -179,7 +189,10 @@ export function buildOutboxRow<TPayload>(
       );
     }
   }
-  const eventId = ulid();
+  if (input.eventId !== undefined && !ULID_PATTERN.test(input.eventId)) {
+    throw new Error('buildOutboxRow: eventId must be a ULID when supplied.');
+  }
+  const eventId = input.eventId ?? ulid();
   const occurredAt = input.occurredAt ?? new Date();
   const correlationId = context?.correlationId ?? eventId;
   // `null` is an explicit "no tenant"; only an omitted value falls back.

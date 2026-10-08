@@ -1,10 +1,12 @@
 import {
   UNKNOWN_COVERAGE,
+  INSURANCE_COVERAGES,
   activeDispatchBlocks,
   expiredCoverages,
   parseCover,
   unresolvedLapses,
   withRecordedPolicy,
+  type DispatchPolicy,
   type InsuranceCover,
 } from './dispatch-blocks';
 
@@ -18,6 +20,17 @@ describe('dispatch blocks', () => {
     THIRD_PARTY: [{ policyId, validFrom, validTo }],
   });
   const clean = { inspectionBlockedReason: null, insuranceLapsedCoverages: [], insuranceCover: {} };
+  // The lapse rules on their own: nothing is required to be in force. The
+  // required-coverage rule (Q-101) has its own describe below.
+  const lapseRules: DispatchPolicy = {
+    blockingCoverages: INSURANCE_COVERAGES,
+    requiredCoverages: [],
+  };
+  const blocksOf = (
+    asset: Parameters<typeof activeDispatchBlocks>[0],
+    at: Date,
+    policy: DispatchPolicy = lapseRules,
+  ) => activeDispatchBlocks(asset, at, policy);
 
   it('blocks on a lapse no recorded policy answers', () => {
     expect(unresolvedLapses(['THIRD_PARTY'], {}, now)).toEqual(['THIRD_PARTY']);
@@ -146,7 +159,7 @@ describe('dispatch blocks', () => {
     });
 
     it('blocks dispatch with the insurance reason although nothing was recorded as lapsed', () => {
-      const blocks = activeDispatchBlocks({ ...clean, insuranceCover: ended }, now);
+      const blocks = blocksOf({ ...clean, insuranceCover: ended }, now);
       expect(blocks).toEqual([
         {
           cause: 'INSURANCE',
@@ -176,8 +189,9 @@ describe('dispatch blocks', () => {
 
     it('respects the configured blocking coverages', () => {
       expect(
-        activeDispatchBlocks({ ...clean, insuranceCover: ended }, now, {
+        blocksOf({ ...clean, insuranceCover: ended }, now, {
           blockingCoverages: ['COMPREHENSIVE'],
+          requiredCoverages: [],
         }),
       ).toEqual([]);
     });
@@ -200,14 +214,82 @@ describe('dispatch blocks', () => {
     expect(parseCover({ THIRD_PARTY: window })).toEqual({ THIRD_PARTY: [window] });
   });
 
+  describe('required coverages (docs/24 Q-101)', () => {
+    const inForce = (policyId: string) => [
+      { policyId, validFrom: '2026-01-01T00:00:00.000Z', validTo: '2027-01-01T00:00:00.000Z' },
+    ];
+    const all: InsuranceCover = {
+      THIRD_PARTY: inForce('A'),
+      COMPREHENSIVE: inForce('B'),
+      PASSENGER_ACCIDENT: inForce('C'),
+      LIABILITY: inForce('D'),
+    };
+    const failClosed: DispatchPolicy = {
+      blockingCoverages: INSURANCE_COVERAGES,
+      requiredCoverages: INSURANCE_COVERAGES,
+    };
+
+    it('refuses a machine with no recorded window for a required coverage', () => {
+      expect(activeDispatchBlocks(clean, now, failClosed)).toEqual([
+        {
+          cause: 'INSURANCE',
+          detail:
+            'The insurance policy has expired (COMPREHENSIVE, LIABILITY, PASSENGER_ACCIDENT, THIRD_PARTY)',
+          coverages: ['COMPREHENSIVE', 'LIABILITY', 'PASSENGER_ACCIDENT', 'THIRD_PARTY'],
+        },
+      ]);
+    });
+
+    it('refuses when the only window of a required coverage starts later', () => {
+      const cover = {
+        ...all,
+        LIABILITY: thirdParty('2026-10-01T00:00:00.000Z', '2027-10-01T00:00:00.000Z').THIRD_PARTY,
+      };
+      expect(activeDispatchBlocks({ ...clean, insuranceCover: cover }, now, failClosed)).toEqual([
+        expect.objectContaining({ coverages: ['LIABILITY'] }),
+      ]);
+    });
+
+    it('allows a machine with every required coverage in force', () => {
+      expect(activeDispatchBlocks({ ...clean, insuranceCover: all }, now, failClosed)).toEqual([]);
+    });
+
+    it('requires only the configured coverages, and none for an empty list', () => {
+      const cover = { THIRD_PARTY: inForce('A') };
+      const only: DispatchPolicy = { ...failClosed, requiredCoverages: ['THIRD_PARTY'] };
+      expect(activeDispatchBlocks({ ...clean, insuranceCover: cover }, now, only)).toEqual([]);
+      expect(activeDispatchBlocks(clean, now, only)).toHaveLength(1);
+      expect(activeDispatchBlocks(clean, now, { ...failClosed, requiredCoverages: [] })).toEqual(
+        [],
+      );
+    });
+
+    it('names a coverage once when it is both lapsed and absent', () => {
+      const blocks = activeDispatchBlocks(
+        {
+          ...clean,
+          insuranceLapsedCoverages: ['THIRD_PARTY'],
+          insuranceCover: { ...all, THIRD_PARTY: [] },
+        },
+        now,
+        failClosed,
+      );
+      expect(blocks).toEqual([expect.objectContaining({ coverages: ['THIRD_PARTY'] })]);
+    });
+
+    it('fails closed by default', () => {
+      expect(activeDispatchBlocks(clean, now)).toHaveLength(1);
+    });
+  });
+
   describe('activeDispatchBlocks', () => {
     it('reports nothing for a clean machine', () => {
-      expect(activeDispatchBlocks(clean, now)).toEqual([]);
+      expect(blocksOf(clean, now)).toEqual([]);
     });
 
     it('reports each cause separately, never merged', () => {
       expect(
-        activeDispatchBlocks(
+        blocksOf(
           {
             inspectionBlockedReason: 'The most recent technical inspection failed',
             insuranceLapsedCoverages: ['THIRD_PARTY', 'COMPREHENSIVE'],
@@ -226,7 +308,7 @@ describe('dispatch blocks', () => {
     });
 
     it('names only the coverages still unanswered', () => {
-      const blocks = activeDispatchBlocks(
+      const blocks = blocksOf(
         {
           ...clean,
           insuranceLapsedCoverages: ['THIRD_PARTY', 'COMPREHENSIVE'],
@@ -247,29 +329,21 @@ describe('dispatch blocks', () => {
       const lapsed = { ...clean, insuranceLapsedCoverages: ['PASSENGER_ACCIDENT'] };
 
       it('blocks on every coverage by default, the behaviour before Q-65', () => {
-        expect(activeDispatchBlocks(lapsed, now)).toHaveLength(1);
+        expect(blocksOf(lapsed, now)).toHaveLength(1);
       });
 
       it('ignores a lapse of a coverage the configuration does not list', () => {
-        const policy = { blockingCoverages: ['THIRD_PARTY'] };
-        expect(activeDispatchBlocks(lapsed, now, policy)).toEqual([]);
+        const policy = { blockingCoverages: ['THIRD_PARTY'], requiredCoverages: [] };
+        expect(blocksOf(lapsed, now, policy)).toEqual([]);
         expect(
-          activeDispatchBlocks(
-            { ...clean, insuranceLapsedCoverages: ['THIRD_PARTY'] },
-            now,
-            policy,
-          ),
+          blocksOf({ ...clean, insuranceLapsedCoverages: ['THIRD_PARTY'] }, now, policy),
         ).toHaveLength(1);
       });
 
       it('still blocks on an UNKNOWN lapse, which might be any coverage', () => {
-        const policy = { blockingCoverages: ['THIRD_PARTY'] };
+        const policy = { blockingCoverages: ['THIRD_PARTY'], requiredCoverages: [] };
         expect(
-          activeDispatchBlocks(
-            { ...clean, insuranceLapsedCoverages: [UNKNOWN_COVERAGE] },
-            now,
-            policy,
-          ),
+          blocksOf({ ...clean, insuranceLapsedCoverages: [UNKNOWN_COVERAGE] }, now, policy),
         ).toHaveLength(1);
       });
     });

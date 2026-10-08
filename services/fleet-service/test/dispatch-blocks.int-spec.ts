@@ -3,7 +3,15 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
-import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
+import {
+  LAPSE_RULES_ONLY,
+  asActor,
+  cleanup,
+  id,
+  newPrisma,
+  tenants,
+  producerShaped,
+} from './helpers';
 
 /**
  * L3-02, end to end against PostgreSQL: the audit's own proof. An insurance
@@ -21,13 +29,16 @@ describe('dispatch blocks (L3-02)', () => {
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
   let assignments: AssignmentService;
+  /** The fail-closed default: every coverage must be in force (docs/24 Q-101). */
+  let strict: AssignmentService;
 
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
     consumer = new AssetSyncConsumer(null, repository);
-    assignments = new AssignmentService(repository);
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
+    strict = new AssignmentService(repository);
     await cleanup(prisma, [org.a, org.b]);
   });
 
@@ -250,6 +261,91 @@ describe('dispatch blocks (L3-02)', () => {
     );
 
     await expect(assign(org.b, assetId, outsider)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  describe('required coverages and the re-projection (docs/24 Q-101)', () => {
+    const COVERAGES = ['THIRD_PARTY', 'COMPREHENSIVE', 'PASSENGER_ACCIDENT', 'LIABILITY'];
+    const refused = {
+      code: 'BUSINESS_RULE_VIOLATION',
+      message: expect.stringContaining('withdrawn from dispatch'),
+    };
+
+    /**
+     * The `INSURANCE_RECORDED` asset-service's `insurance:reproject` writes to
+     * its outbox, as the relay publishes it: the envelope's id is the
+     * deterministic one, so a redelivery is the same event.
+     */
+    const reprojected = (assetId: string, coverage: string, validFrom: Date, validTo: Date) =>
+      ({
+        ...event('INSURANCE_RECORDED', {
+          assetId,
+          policyId: `INS_${coverage}_${assetId}`,
+          insurerName: 'بیمه ایران',
+          coverage,
+          validFrom: validFrom.toISOString(),
+          validTo: validTo.toISOString(),
+        }),
+        eventId: `EVT-REPROJECT-${coverage}-${assetId}`,
+      }) as EventEnvelope;
+
+    /** A legacy row: the replica exists and holds no window at all. */
+    async function legacy() {
+      const machine = await fleet();
+      const row = await repository.findAssetRefUnscoped(machine.assetId);
+      expect(row!.insuranceCover).toEqual({});
+      return machine;
+    }
+
+    it('refuses a legacy machine with no recorded window, however clean the rest', async () => {
+      const { assetId, driverId } = await legacy();
+      await expect(assign(org.a, assetId, driverId)).resolves.toMatchObject({ assetId });
+      await expect(
+        asActor({ organizationId: org.a }, () => strict.create({ driverId, assetId })),
+      ).rejects.toMatchObject(refused);
+    });
+
+    it('refuses a machine whose only window starts next week, and one covered only in part', async () => {
+      const { assetId, driverId } = await legacy();
+      const week = 7 * 86_400_000;
+      await recordPolicy(assetId, new Date(Date.now() + week), new Date(Date.now() + week + year));
+      const create = () =>
+        asActor({ organizationId: org.a }, () => strict.create({ driverId, assetId }));
+      await expect(create()).rejects.toMatchObject(refused);
+
+      for (const coverage of COVERAGES.slice(1)) {
+        await recordPolicy(
+          assetId,
+          new Date(Date.now() - 1000),
+          new Date(Date.now() + year),
+          coverage,
+        );
+      }
+      // THIRD_PARTY still has only the upcoming window.
+      await expect(create()).rejects.toMatchObject(refused);
+    });
+
+    it('applies the command’s events: an insured machine is dispatched, an uninsured one still refused, a rerun is a no-op', async () => {
+      const insured = await legacy();
+      const uninsured = await legacy();
+      const from = new Date(Date.now() - 1000);
+      const to = new Date(Date.now() + year);
+      const strictAssign = (m: { assetId: string; driverId: string }) =>
+        asActor({ organizationId: org.a }, () => strict.create(m));
+
+      const envelopes = COVERAGES.map((coverage) =>
+        reprojected(insured.assetId, coverage, from, to),
+      );
+      for (const envelope of envelopes) await consumer.handle(envelope);
+      // The command ran again: the same ids come back and change nothing.
+      const before = await repository.findAssetRefUnscoped(insured.assetId);
+      for (const envelope of envelopes) await consumer.handle(envelope);
+      const after = await repository.findAssetRefUnscoped(insured.assetId);
+      expect(after!.insuranceCover).toEqual(before!.insuranceCover);
+      expect(after!.syncedAt).toEqual(before!.syncedAt);
+
+      await expect(strictAssign(insured)).resolves.toMatchObject({ assetId: insured.assetId });
+      await expect(strictAssign(uninsured)).rejects.toMatchObject(refused);
+    });
   });
 
   // ---------------------------------------------------------------------------

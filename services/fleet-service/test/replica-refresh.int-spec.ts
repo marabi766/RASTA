@@ -10,7 +10,16 @@ import type {
   MaintenanceStateSource,
 } from '../src/consumers/replica-sources';
 import type { TransferRecordSource } from '../src/fleet/transfer-record';
-import { asActor, cleanup, databaseUrl, id, newPrisma, tenants, producerShaped } from './helpers';
+import {
+  asActor,
+  cleanup,
+  databaseUrl,
+  id,
+  newPrisma,
+  tenants,
+  producerShaped,
+  LAPSE_RULES_ONLY,
+} from './helpers';
 
 /**
  * D-039 — a state event replayed on `<topic>.retry` never applies its payload:
@@ -199,7 +208,7 @@ describe('asset replica: a state event replayed on .retry refreshes from the sou
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    assignments = new AssignmentService(repository);
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     consumer = new AssetSyncConsumer(
       null,
       repository,

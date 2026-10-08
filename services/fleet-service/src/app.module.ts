@@ -65,7 +65,7 @@ import { AssetWorkStateService } from './fleet/asset-work-state';
 import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
-import { loadFleetEnv, SERVICE_NAME, type FleetEnv } from './config/env';
+import { dispatchPolicyFromEnv, loadFleetEnv, SERVICE_NAME, type FleetEnv } from './config/env';
 
 /**
  * Topics the asset replica is built from.
@@ -135,9 +135,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     {
       provide: DISPATCH_POLICY,
       inject: [ENV],
-      useFactory: (env: FleetEnv): DispatchPolicy => ({
-        blockingCoverages: env.FLEET_DISPATCH_BLOCKING_COVERAGES,
-      }),
+      useFactory: (env: FleetEnv): DispatchPolicy => dispatchPolicyFromEnv(env),
     },
 
     PrismaOutboxStore,

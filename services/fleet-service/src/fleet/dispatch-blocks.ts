@@ -73,10 +73,21 @@ export const INSURANCE_COVERAGES = [
  */
 export interface DispatchPolicy {
   readonly blockingCoverages: readonly string[];
+  /**
+   * The coverages that must have a policy **in force** for a machine to be
+   * dispatched (docs/24 Q-101), whether or not a lapse was ever seen. A
+   * machine with no recorded window for one of them, or whose only window
+   * starts later, is refused: "in force" cannot depend on having seen a policy
+   * end. Which coverages are required is a business decision nobody has made,
+   * so by default it is the blocking set — if a lapse blocks, absence blocks
+   * too — and an empty list switches the check off.
+   */
+  readonly requiredCoverages: readonly string[];
 }
 
 export const DEFAULT_DISPATCH_POLICY: DispatchPolicy = {
   blockingCoverages: INSURANCE_COVERAGES,
+  requiredCoverages: INSURANCE_COVERAGES,
 };
 
 /** Nest injection token for the {@link DispatchPolicy}. */
@@ -241,6 +252,11 @@ export function activeDispatchBlocks(
   ].filter(
     (coverage) => coverage === UNKNOWN_COVERAGE || policy.blockingCoverages.includes(coverage),
   );
+  // A required coverage with nothing in force blocks whether or not anything
+  // was ever recorded for it (Q-101).
+  for (const coverage of policy.requiredCoverages) {
+    if (!isCovered(cover[coverage], now) && !lapses.includes(coverage)) lapses.push(coverage);
+  }
   if (lapses.length > 0) {
     const sorted = lapses.sort();
     blocks.push({

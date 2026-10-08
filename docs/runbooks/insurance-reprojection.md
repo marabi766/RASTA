@@ -1,0 +1,81 @@
+# Runbook: بازتاب بیمه‌نامه‌ها به fleet (Q-101)
+
+**شدت:** ⚪ عملیاتی
+**هشدار محرک:** ندارد — با دستور صریح اپراتور.
+**چه زمانی.** **یک بار، پیش از استقرار #240 و پیش از روشن‌کردن `FLEET_DISPATCH_REQUIRED_COVERAGES`** در هر محیطی که ردیف `asset_ref` دارد. بعد از آن هم هر وقت
+ردیف‌هایی با رویدادِ ازدست‌رفته پیدا شد. هیچ استقرار تولیدی هنوز نیست؛ پس این ترتیب راه‌اندازی است.
+
+## چرا
+
+`fleet-service` از #240 به بعد اعزام را فقط وقتی می‌پذیرد که **هر پوشش الزامی** (پیش‌فرض: همان `FLEET_DISPATCH_BLOCKING_COVERAGES`) در `asset_ref.insurance_cover`
+یک پنجرهٔ برقرار داشته باشد (docs/24 Q-101). ردیف‌هایی که با `20260925000000` با `insurance_cover = {}` ساخته شدند، یا رویداد بیمه‌شان گم شده، هیچ پنجره‌ای ندارند
+و همه رد می‌شوند — حتی ماشین بیمه‌دار. واقعیت بیمه در `asset-service` است؛ این دستور همان را دوباره **از Outbox خودِ asset-service** می‌گوید.
+
+## دستور چه می‌کند — و چه نمی‌کند
+
+| کار                                                                                                          | انجام می‌شود؟      |
+| ------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `INSURANCE_RECORDED` برای هر بیمه‌نامهٔ `ACTIVE` که هنوز تمام نشده (برقرار یا شروع‌نشده)                     | ✅                 |
+| نوشتن فقط با `enqueueEvent` (Outbox خود asset-service؛ Relay همان Producer، Header و ترتیب را می‌دهد)        | ✅                 |
+| `organizationId` رویداد = مالک **جاری** دارایی؛ بیمه‌نامه‌ای که طبق Q-66 برای مالک جاری حساب نمی‌شود نمی‌رود | ✅                 |
+| نوشتن مستقیم روی Kafka یا پایگاه fleet                                                                       | ❌ هرگز            |
+| بیمه‌نامهٔ تمام‌شده، `EXPIRED`، `CANCELLED` یا حذف‌شده                                                       | ❌ فرستاده نمی‌شود |
+| تغییر هر ردیف asset-service به جز افزودن ردیف Outbox                                                         | ❌ هرگز            |
+
+**شناسهٔ رویداد قطعی است.** `SHA-256("asset-service/insurance-reproject/v1|<policyId>|<updated_at>")`، ۱۲۸ بیت اول، به‌صورت ULID (۲۶ نویسه، الفبای Crockford) —
+همان قالبی که مصرف‌کننده‌ها و کلید اصلی Outbox انتظار دارند. اجرای دوباره همان شناسه را می‌سازد: طرف asset-service ردیف Outbox موجود را می‌بیند و **چیزی
+نمی‌نویسد** (پیش از تخصیص `stream_seq`، پس شکافی نمی‌ماند)؛ طرف fleet علامت `processed_event` همان شناسه را دارد و اثری نمی‌گذارد (حتی اگر ردیف Outbox بعداً پاک شده باشد).
+بیمه‌نامهٔ ویرایش‌شده `updated_at` تازه و شناسهٔ تازه می‌گیرد و دوباره فرستاده می‌شود.
+
+## پیش‌نیاز و اعتبارنامه
+
+- **نقش Runtime** asset-service (`DATABASE_URL_ASSET`) — نه Migrator (D-045). دستور همان پیش‌پروازِ نقش را اجرا می‌کند و با Migrator با کد خروج ۲ امتناع می‌کند (نام نقش، نه URL).
+- محیط شل **نباید** هیچ متغیر `*_MIGRATOR` یا `POSTGRES_PASSWORD_*` داشته باشد؛ دستور (مثل خود سرویس) با آن‌ها شروع نمی‌کند. در توسعه که `.env` همه را دارد، پیش از اجرا
+  `unset` کن یا با `env -i` فقط متغیرهای Runtime را بده.
+- همهٔ اعتبارنامه‌ها **فقط از Environment** می‌آیند (`.env` یا Secret Store)؛ آرگومان‌ها هیچ رازی ندارند.
+- Relay asset-service باید در حال اجرا باشد (دستور فقط Outbox می‌نویسد) و `fleet-service` (مصرف‌کنندهٔ `rasta.asset.v1`/Topic بیمه) بالا یا حداقل Lag قابل‌تحمل داشته باشد.
+
+## گام‌ها
+
+1. **Dry-run** (چیزی نمی‌نویسد؛ شمارش می‌دهد):
+
+   ```bash
+   pnpm --filter @rasta/asset-service insurance:reproject -- --dry-run
+   ```
+
+   خروجی یک خط JSON است: `scanned`، `emitted` (آنچه فرستاده می‌شد)، `alreadyEmitted`، `notCounting` و `byOrganization`. شناسهٔ سازمان و شمارش؛ هیچ شماره‌بیمه‌نامه، بیمه‌گر یا مبلغی چاپ نمی‌شود.
+
+2. **اجرا.** برای یک سازمان: `--organization <id>`؛ اندازهٔ صفحه: `--page-size <n>` (۱ تا ۱۰۰۰؛ پیش‌فرض ۲۰۰، هر صفحه یک تراکنش):
+
+   ```bash
+   pnpm --filter @rasta/asset-service insurance:reproject
+   ```
+
+3. **صبر برای Relay و مصرف.** `rasta_outbox_pending_age_seconds` در asset-service به پایین برگردد و Lag گروه `fleet-service.main` صفر شود ([outbox-stuck](outbox-stuck.md)).
+
+4. **راستی‌آزمایی در پایگاه fleet** (فقط‌خواندنی). ماشینی که بیمهٔ برقرار دارد دیگر `{}` نیست:
+
+   ```sql
+   SELECT count(*) FILTER (WHERE insurance_cover = '{}'::jsonb) AS without_windows, count(*) AS total
+     FROM asset_ref;
+   ```
+
+   ردیف‌های باقی‌مانده با `{}` یا واقعاً بی‌بیمه‌اند (رد‌شدنشان درست است) یا رویدادشان مصرف نشده — DLQ را ببین ([replay-dlq](replay-dlq.md)).
+
+5. **اجرای دوباره** باید `emitted: 0` بدهد، با `alreadyEmitted` برابر شمارش گام ۱:
+
+   ```bash
+   pnpm --filter @rasta/asset-service insurance:reproject -- --dry-run
+   ```
+
+6. **سپس** #240 را مستقر کن / `FLEET_DISPATCH_REQUIRED_COVERAGES` را روشن بگذار.
+
+## بازگشت
+
+لازم نیست: رویدادها واقعیتی را می‌گویند که از پیش درست بود و مصرف آن‌ها خودخوان است (`withRecordedPolicy` یک پنجره به ازای هر `policyId`). برای شل‌کردن قاعده:
+`FLEET_DISPATCH_REQUIRED_COVERAGES=` (خالی)، یا فقط پوشش‌های الزامی، و `fleet-service` را دوباره راه بینداز.
+
+## آزمون
+
+`services/asset-service/test/insurance-reproject.int-spec.ts` (چه بیمه‌نامه‌هایی، برای چه سازمانی، اجرای دوم بی‌اثر، شناسهٔ قطعی) و
+`services/fleet-service/test/dispatch-blocks.int-spec.ts` (ردیف قدیمی بدون پنجره ← رویدادهای دستور ← ماشین بیمه‌دار اعزام می‌شود، بی‌بیمه رد می‌ماند، تکرار بی‌اثر).

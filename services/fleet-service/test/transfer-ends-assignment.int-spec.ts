@@ -3,7 +3,15 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
-import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
+import {
+  asActor,
+  cleanup,
+  id,
+  newPrisma,
+  tenants,
+  producerShaped,
+  LAPSE_RULES_ONLY,
+} from './helpers';
 
 /**
  * ASSET_TRANSFERRED ends the assignments still open on the machine (the
@@ -31,7 +39,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
     consumer = new AssetSyncConsumer(null, repository);
-    assignments = new AssignmentService(repository);
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     await cleanup(prisma, [org.a, org.b]);
   });
 

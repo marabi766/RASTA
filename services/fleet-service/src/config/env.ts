@@ -7,7 +7,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
-import { INSURANCE_COVERAGES } from '../fleet/dispatch-blocks';
+import { INSURANCE_COVERAGES, type DispatchPolicy } from '../fleet/dispatch-blocks';
 
 /**
  * fleet-service configuration.
@@ -84,6 +84,31 @@ export const fleetEnvSchema = baseEnvSchema
       .pipe(z.array(z.enum(INSURANCE_COVERAGES)).min(1)),
 
     /**
+     * Insurance coverages that must have a policy **in force** for a machine to
+     * be dispatched, comma-separated (docs/24 Q-101; temporary decision).
+     *
+     * Not the same question as the blocking list above: that decides which
+     * *lapses* block, this which coverages are *required*. Unset: the same
+     * set as `FLEET_DISPATCH_BLOCKING_COVERAGES` (if a lapse blocks, absence
+     * blocks too), failing closed. Set to the empty string to require none.
+     * An unknown name stops the service at startup. Machines whose replica
+     * predates the recorded windows need `insurance:reproject` in
+     * asset-service run before this is on (runbooks/insurance-reprojection.md).
+     */
+    FLEET_DISPATCH_REQUIRED_COVERAGES: z
+      .string()
+      .optional()
+      .transform((value) =>
+        value === undefined
+          ? undefined
+          : value
+              .split(',')
+              .map((coverage) => coverage.trim())
+              .filter((coverage) => coverage.length > 0),
+      )
+      .pipe(z.array(z.enum(INSURANCE_COVERAGES)).optional()),
+
+    /**
      * How long a **completed** `POST /v1/fleet/availability` under an
      * `Idempotency-Key` is replayed, in hours (EXP-002 slice 7). Past it the
      * key is free again. Counted from the response, not from the claim.
@@ -99,6 +124,17 @@ export const fleetEnvSchema = baseEnvSchema
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;
+
+/** The dispatch rule the environment asks for; required defaults to the blocking set. */
+export function dispatchPolicyFromEnv(
+  env: Pick<FleetEnv, 'FLEET_DISPATCH_BLOCKING_COVERAGES' | 'FLEET_DISPATCH_REQUIRED_COVERAGES'>,
+): DispatchPolicy {
+  return {
+    blockingCoverages: env.FLEET_DISPATCH_BLOCKING_COVERAGES,
+    requiredCoverages:
+      env.FLEET_DISPATCH_REQUIRED_COVERAGES ?? env.FLEET_DISPATCH_BLOCKING_COVERAGES,
+  };
+}
 
 export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv {
   return loadEnv(fleetEnvSchema, {

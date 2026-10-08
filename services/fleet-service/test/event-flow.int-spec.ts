@@ -8,7 +8,16 @@ import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import { FLEET_TOPIC } from '../src/config/env';
-import { asActor, brokers, cleanup, id, newPrisma, tenants, waitFor } from './helpers';
+import {
+  asActor,
+  brokers,
+  cleanup,
+  id,
+  newPrisma,
+  tenants,
+  waitFor,
+  LAPSE_RULES_ONLY,
+} from './helpers';
 
 /**
  * The event path, end to end, over a real broker.
@@ -57,7 +66,7 @@ describeWithKafka('fleet event flow over Kafka', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    assignments = new AssignmentService(repository);
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
 
     // As fleet-service, the only principal the broker lets write its topic.
     publisher = new KafkaEventPublisher(
