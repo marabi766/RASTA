@@ -278,8 +278,10 @@ describe('each down.sql, run whole with psql --file', () => {
 
   const openTask = `INSERT INTO "policy_reconciliation_task"
       ("id", "organization_id", "policy_id", "union_id", "source_event_id",
-       "moved_organization_id", "correlation_id", "next_attempt_at", "created_at", "updated_at")
-    VALUES ('PRT_rb', 'ORG_E', 'APL_rb', 'ORG_U', 'EVT_1', 'ORG_E', 'COR_1', now(), now(), now())`;
+       "moved_organization_id", "correlation_id", "earliest_moved_at", "next_attempt_at",
+       "created_at", "updated_at")
+    VALUES ('PRT_rb', 'ORG_E', 'APL_rb', 'ORG_U', 'EVT_1', 'ORG_E', 'COR_1',
+            now() - interval '1 hour', now(), now(), now())`;
 
   const contractRow = `INSERT INTO "contract"
       ("id", "organization_id", "tender_id", "project_id", "winning_bid_id",
@@ -308,9 +310,20 @@ describe('each down.sql, run whole with psql --file', () => {
     VALUES ('SAR_rb', 'ORG_E', 'CTR_rb', 'EMPLOYER', 'APL_rb', 'AUTHORITY_CHANGED_DURING_SIGNING',
             'EVT_1', now(), now())`;
 
-  it('policy_suspension: an open reconciliation task alone refuses it (review round 3): nothing changes, with ON_ERROR_STOP and without it', () => {
+  it('policy_suspension: an open (coalesced) reconciliation task alone refuses it (review rounds 3, 11): nothing changes, with ON_ERROR_STOP and without it; once the task completes it succeeds', () => {
     const schema = scratch(SUSPENSION);
-    mustRun(schema, ['-c', `${policyRow}; ${openTask}`]);
+    // A second move coalesced into the task: generation advanced, the earliest instant kept.
+    mustRun(schema, [
+      '-c',
+      `${policyRow}; ${openTask};
+       UPDATE "policy_reconciliation_task" SET "generation" = 1 WHERE "id" = 'PRT_rb'`,
+    ]);
+    expect(
+      mustRun(schema, [
+        '-c',
+        `SELECT "earliest_moved_at" < "created_at" FROM "policy_reconciliation_task"`,
+      ]),
+    ).toBe('t');
     const before = shape(schema);
     for (const stop of [true, false]) {
       const refused = psql(schema, ['--file', down(SUSPENSION)], stop);

@@ -151,11 +151,8 @@ export class PolicyReconciliationRepository {
                                    OR EXCLUDED.moved_version > policy_reconciliation_task.moved_version)
                               THEN EXCLUDED.moved_at ELSE policy_reconciliation_task.moved_at END,
                          moved_version = GREATEST(policy_reconciliation_task.moved_version, EXCLUDED.moved_version),
-                         earliest_moved_at = LEAST(
-                              COALESCE(policy_reconciliation_task.earliest_moved_at,
-                                       policy_reconciliation_task.moved_at,
-                                       policy_reconciliation_task.created_at),
-                              EXCLUDED.earliest_moved_at),
+                         earliest_moved_at = LEAST(policy_reconciliation_task.earliest_moved_at,
+                                                   EXCLUDED.earliest_moved_at),
                          updated_at = $9::timestamptz
            RETURNING (xmax = 0) AS inserted`,
           rows.map((row) => row.id),
@@ -210,7 +207,7 @@ export class PolicyReconciliationRepository {
                   attempts,
                   generation,
                   lease_token AS "leaseToken",
-                  COALESCE(earliest_moved_at, moved_at, created_at) AS "earliestMovedAt",
+                  earliest_moved_at AS "earliestMovedAt",
                   moved_version AS "movedVersion"`,
           limit,
           leaseSeconds,
@@ -294,7 +291,7 @@ export class PolicyReconciliationRepository {
           { generation: number; movedVersion: bigint | null; earliestMovedAt: Date }[]
         >(
           `SELECT generation, moved_version AS "movedVersion",
-                  COALESCE(earliest_moved_at, moved_at, created_at) AS "earliestMovedAt"
+                  earliest_moved_at AS "earliestMovedAt"
              FROM policy_reconciliation_task
             WHERE organization_id = $1 AND id = $2 AND lease_token = $3 AND status = 'PENDING'
               FOR UPDATE`,

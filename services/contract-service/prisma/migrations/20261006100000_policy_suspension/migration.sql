@@ -20,6 +20,10 @@
 -- organization-service and suspends. One open task per policy, so a replayed or `.retry` delivery
 -- coalesces into the task already there.
 --
+-- `earliest_moved_at` is the least instant over every move coalesced into the task (set on insert,
+-- `LEAST` on conflict; docs/23 D-050): the window "could this signature have committed after ANY
+-- of the moves was prepared" is bounded by the earliest of them, whichever move holds the version.
+--
 -- ## The enum value and the constraints that name it
 --
 -- PostgreSQL allows ADD VALUE inside a transaction, but the new value cannot be *used* in it — and
@@ -136,6 +140,7 @@ CREATE TABLE "policy_reconciliation_task" (
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "generation" INTEGER NOT NULL DEFAULT 0,
     "next_attempt_at" TIMESTAMPTZ(3) NOT NULL,
+    "earliest_moved_at" TIMESTAMPTZ(3) NOT NULL,
     "lease_until" TIMESTAMPTZ(3),
     "lease_token" TEXT,
     "last_error_code" TEXT,
