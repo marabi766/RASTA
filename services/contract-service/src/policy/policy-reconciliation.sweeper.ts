@@ -78,7 +78,7 @@ export class PolicyReconciliationSweeper {
   constructor(
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly suspension: PolicySuspensionService,
-    private readonly directory: Pick<OrganizationDirectory, 'isWithin' | 'withinVersion'>,
+    private readonly directory: Pick<OrganizationDirectory, 'isWithin'>,
     private readonly options: SweeperOptions,
   ) {}
 
@@ -158,27 +158,18 @@ export class PolicyReconciliationSweeper {
             }
             return;
           }
-          // The union no longer governs the employer. Whether THIS move is why is a separate
-          // question, answered from the hierarchy and never assumed (round 6).
-          const proven = await this.isCause(task);
+          // The union no longer governs the employer. Which move is why is never named: events are
+          // partitioned by moved organization, so no order across aggregates exists and the
+          // hierarchy as it is now cannot prove it (round 9; docs/23 D-051).
           const result = await this.suspension.suspend(
             { id: task.policyId, organizationId: task.organizationId },
-            proven
-              ? {
-                  reason: 'ORGANIZATION_MOVED',
-                  eventId: task.sourceEventId,
-                  movedOrganizationId: task.movedOrganizationId,
-                  movedAt: task.movedAt,
-                  movedVersion: task.movedVersion,
-                  correlationId: task.correlationId,
-                  callerService: MOVE_PRODUCER,
-                }
-              : {
-                  reason: 'MOVE_RECHECK',
-                  movedVersion: task.movedVersion,
-                  correlationId: task.correlationId,
-                  callerService: MOVE_PRODUCER,
-                },
+            {
+              reason: 'MOVE_RECHECK',
+              movedVersion: task.movedVersion,
+              movedAt: task.movedAt,
+              correlationId: task.correlationId,
+              callerService: MOVE_PRODUCER,
+            },
             this.reconciliations.ownershipOf(task),
           );
           if (result === 'STALE') {
@@ -216,34 +207,6 @@ export class PolicyReconciliationSweeper {
       );
     }
     return outcome;
-  }
-
-  /**
-   * Whether the move this task carries is shown to be why the union lost the employer. Two things
-   * must hold (round 7):
-   *
-   * 1. **Exactly one move is on the task** — it was never coalesced into (`generation` 0; the
-   *    suspension is fenced on the generation, so it is still 0 when the review is written). A
-   *    coalesced task holds the highest-versioned of several moves, and the hierarchy cannot say
-   *    which of them took the employer out: the employer may have left the union with an earlier
-   *    one and then moved again within the outside branch, and the later move would be named.
-   * 2. The employer is in the moved organization's subtree **and** carries that move's hierarchy
-   *    version — a move stamps the moved organization and every descendant with its version in its
-   *    own transaction, so a different version means another move last touched the employer, and a
-   *    missing one means there is nothing to prove it by.
-   *
-   * An organization that is not within the moved one — an unrelated move that merely queued this
-   * re-check — proves nothing. Fail closed: no proof is "not shown" (`MOVE_RECHECK`, no cause), and
-   * a question that cannot be answered is retried like any other.
-   */
-  private async isCause(task: ClaimedTask): Promise<boolean> {
-    if (task.generation !== 0) return false;
-    if (task.movedVersion === null) return false;
-    const answer = await this.directory.withinVersion(
-      task.movedOrganizationId,
-      task.organizationId,
-    );
-    return answer !== null && answer.hierarchyVersion === task.movedVersion;
   }
 
   private async retryLater(task: ClaimedTask, error: unknown): Promise<void> {

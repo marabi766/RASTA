@@ -245,7 +245,7 @@ describe('a signing policy follows an organization move', () => {
       const row = await policyRow(policyId);
       expect(row.status).toBe('SUSPENDED');
       expect(row.suspendedBy).toBe('system:contract-service');
-      expect(row.suspensionReason).toMatch(/^ORGANIZATION_MOVED: /);
+      expect(row.suspensionReason).toMatch(/^MOVE_RECHECK: /);
       expect(row.suspendedAt).toBeInstanceOf(Date);
       expect((await tasksOf(policyId))[0]!.status).toBe('DONE');
 
@@ -258,9 +258,10 @@ describe('a signing policy follows an organization move', () => {
         organizationId: draft.employer,
         authorOrganizationId: union,
         fromStatus: 'ACTIVE',
-        reason: 'ORGANIZATION_MOVED',
-        causeEventId: event.eventId,
-        movedOrganizationId: draft.employer,
+        // The sweeper never names a cause (round 9, docs/23 D-051).
+        reason: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedOrganizationId: null,
         suspendedBy: 'system:contract-service',
       });
 
@@ -534,15 +535,15 @@ describe('a signing policy follows an organization move', () => {
       expect(platformSigned.hierarchyVersion).toBeNull();
     });
 
-    it('flags exactly the signatures that recorded a LOWER hierarchy version than the move’s — by the version alone, whatever instant the move carries (round 5)', async () => {
+    it('flags exactly the signatures that recorded a LOWER hierarchy version than the move’s AND whose commit window reaches the move (D-050): one committed well before the move is not flagged', async () => {
       // Read the tree before the move, within the window: raced.
       const raced = await signedUnderUnion();
       // Read the tree AFTER the move (the version was already stamped): not raced.
       const answeredAfter = await signedUnderUnion((employer) => {
         api.hierarchy.bump(employer);
       });
-      // Read the old tree; the move's event is stamped LONG after this signature's deadline — a
-      // skewed clock in organization-service. No timestamp decides: the version does, so it is flagged.
+      // Read the old tree, and committed long before the move: its deadline precedes the move's
+      // instant (moved_at > hierarchy_commit_deadline), so it cannot have raced it — no review.
       const committedBefore = await signedUnderUnion();
       // An event from before versions: nothing to order by, so the window alone decides.
       const unversioned = await signedUnderUnion();
@@ -560,7 +561,7 @@ describe('a signing policy follows an organization move', () => {
           who: committedBefore,
           movedAt: new Date(committedBefore.evidence.hierarchyCommitDeadline!.getTime() + 30_000),
           stamp: 'new',
-          flagged: true,
+          flagged: false,
         },
         { who: unversioned, movedAt: inWindow(unversioned.evidence), stamp: 'none', flagged: true },
       ] as const;
@@ -582,33 +583,30 @@ describe('a signing policy follows an organization move', () => {
         const reviews = await reviewsOf(who.draft.id);
         const events = await flaggedEventsOf(who.draft.employer);
         if (flagged) {
-          // A move that carries a version the employer carries too is proven to be the cause; one
-          // with no version proves nothing, and the review names no event (round 6).
-          const proven = movedVersion !== undefined;
+          // The sweeper never names a cause (round 9, docs/23 D-051).
           expect(reviews).toHaveLength(1);
           expect(reviews[0]).toMatchObject({
             side: 'EMPLOYER',
             policyId: who.policyId,
             reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
-            detectedBy: proven ? 'ORGANIZATION_MOVED' : 'MOVE_RECHECK',
-            causeEventId: proven ? event.eventId : null,
+            detectedBy: 'MOVE_RECHECK',
+            causeEventId: null,
+            movedAt: null,
             movedVersion: movedVersion === undefined ? null : BigInt(movedVersion),
             recordedVersion: who.evidence.hierarchyVersion,
           });
-          expect(reviews[0]!.movedAt?.toISOString() ?? null).toBe(
-            proven ? movedAt.toISOString() : null,
-          );
           expect(events).toHaveLength(1);
           expect(events[0]!.payload).toMatchObject({
             contractId: who.draft.id,
             policyId: who.policyId,
             policyVersion: 1,
             reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
-            detectedBy: proven ? 'ORGANIZATION_MOVED' : 'MOVE_RECHECK',
-            causeEventId: proven ? event.eventId : null,
-            movedAt: proven ? movedAt.toISOString() : null,
+            detectedBy: 'MOVE_RECHECK',
+            causeEventId: null,
+            movedAt: null,
             movedVersion: movedVersion ?? null,
           });
+          expect(JSON.stringify(events[0])).not.toContain(event.eventId);
         } else {
           expect(reviews).toEqual([]);
           expect(events).toEqual([]);
@@ -642,7 +640,8 @@ describe('a signing policy follows an organization move', () => {
       const reviews = await reviewsOf(draft.id);
       expect(reviews).toHaveLength(1);
       expect(reviews[0]).toMatchObject({
-        causeEventId: event.eventId,
+        causeEventId: null,
+        detectedBy: 'MOVE_RECHECK',
         movedVersion: BigInt(stamped),
         recordedVersion: BigInt(before),
       });
@@ -871,7 +870,7 @@ describe('a signing policy follows an organization move', () => {
     });
   });
 
-  describe('flagging is decided by the version alone: skewed clocks change nothing (round 5, ruling 1)', () => {
+  describe('flagging: the version decides which tree was read, the D-050 window bounds which signatures are looked at', () => {
     const reviewsOf = (contractId: string) =>
       runUnscoped('the suite reads the reviews', () =>
         w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId } }),
@@ -893,12 +892,13 @@ describe('a signing policy follows an organization move', () => {
     }
 
     it.each([
-      ['30 s before the signature', -30_000],
-      ['30 s after its commit deadline', 30_000],
-      ['exactly at the deadline', 0],
+      ['30 s before the signature’s deadline', -30_000, true],
+      ['exactly at the deadline', 0, true],
+      // moved_at > hierarchy_commit_deadline: the signature committed before the move was prepared.
+      ['30 s after its commit deadline', 30_000, false],
     ])(
-      'a signature on the older tree is flagged, and one that read the moved tree is not, with the move stamped %s',
-      async (_label, skew) => {
+      'a signature on the older tree is flagged only if the move is not after its commit deadline, and one that read the moved tree never is: move stamped %s',
+      async (_label, skew, olderFlagged) => {
         const older = await signedOnce();
         const newer = await signedOnce();
         // The newer read the tree after the move stamped its version.
@@ -920,23 +920,33 @@ describe('a signing policy follows an organization move', () => {
           await sweeper.runOnce();
         }
         expect(movedVersion).toBeGreaterThan(0);
-        // Older: its recorded version is below the move's → flagged. Newer: equal → not.
-        expect(await reviewsOf(older.draft.id)).toHaveLength(1);
+        // Older: its recorded version is below the move's → flagged, if the window reaches it.
+        // Newer: equal → not.
+        expect(await reviewsOf(older.draft.id)).toHaveLength(olderFlagged ? 1 : 0);
         expect(await reviewsOf(newer.draft.id)).toEqual([]);
       },
     );
 
-    it('a move with no version orders nothing: every unreviewed signature under the policy is flagged (too many is safe)', async () => {
-      const one = await signedOnce();
-      api.hierarchy.adopt(newOrg(), one.draft.employer);
+    it('a move with no version orders nothing: every unreviewed signature inside its window is flagged (too many is safe), one that committed before it is not', async () => {
+      const inside = await signedOnce();
+      api.hierarchy.adopt(newOrg(), inside.draft.employer);
       await consumer.handle(
         moved(
-          one.draft.employer,
-          new Date(one.evidence.hierarchyCommitDeadline!.getTime() + 60_000),
+          inside.draft.employer,
+          new Date(inside.evidence.hierarchyCommitDeadline!.getTime() - 1),
+        ),
+      );
+      const before = await signedOnce();
+      api.hierarchy.adopt(newOrg(), before.draft.employer);
+      await consumer.handle(
+        moved(
+          before.draft.employer,
+          new Date(before.evidence.hierarchyCommitDeadline!.getTime() + 60_000),
         ),
       );
       await sweeper.runOnce();
-      expect(await reviewsOf(one.draft.id)).toHaveLength(1);
+      expect(await reviewsOf(inside.draft.id)).toHaveLength(1);
+      expect(await reviewsOf(before.draft.id)).toEqual([]);
     });
   });
 
@@ -990,9 +1000,7 @@ describe('a signing policy follows an organization move', () => {
       const result = await suspension.suspend(
         { id: policyId, organizationId: first.employer },
         {
-          reason: 'ORGANIZATION_MOVED',
-          eventId: task.sourceEventId,
-          movedOrganizationId: task.movedOrganizationId,
+          reason: 'MOVE_RECHECK',
           movedAt: task.movedAt,
           movedVersion: task.movedVersion,
           correlationId: task.correlationId,
@@ -1036,7 +1044,7 @@ describe('a signing policy follows an organization move', () => {
     });
   });
 
-  describe('a review names the move that caused it, and only that one (round 6, ruling 1)', () => {
+  describe('a review never names the move that caused it (round 9; the schema still allows a cause, D-051)', () => {
     const reviewsOf = (contractId: string) =>
       runUnscoped('the suite reads the reviews', () =>
         w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId } }),
@@ -1075,9 +1083,8 @@ describe('a signing policy follows an organization move', () => {
       });
       expect(task!.movedAt!.toISOString()).toBe(secondAt.toISOString());
 
-      // Two moves outside the union, the employer carrying the second's version: the hierarchy
-      // would "prove" the second the cause, but it cannot say which of the two took the employer
-      // out — so neither is named (round 7).
+      // Two moves outside the union: which of them took the employer out cannot be said — neither
+      // is named.
       await sweeper.runOnce();
       const [review] = await reviewsOf(draft.id);
       expect(review).toMatchObject({
@@ -1167,6 +1174,47 @@ describe('a signing policy follows an organization move', () => {
         movedOrganizationId: null,
       });
       expect((await policyRow(policyId)).suspensionReason).not.toContain(event.eventId);
+    });
+
+    it('moves delivered out of order — employer leaves the union in move A, a later move B of an ancestor arrives first — name no cause: generation 0 is one event handled, not no earlier move (round 9)', async () => {
+      const { draft, policyId } = await signedOnce();
+      const ancestor = newOrg();
+      // A: the employer leaves the union (its version is stamped); B: the ancestor, already
+      // outside the union, moves later and stamps the employer's subtree with a higher version.
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      api.hierarchy.bump(draft.employer);
+      const bVersion = api.hierarchy.bump(draft.employer);
+      // Only B is delivered (A is on another partition, still in flight): a generation-0 task whose
+      // moved organization contains the employer and whose version the employer carries.
+      const b = moved(ancestor, new Date('2026-10-06T12:00:00.000Z'), bVersion);
+      await consumer.handle(b);
+      const [task] = await tasksOf(policyId);
+      expect(task).toMatchObject({ generation: 0, movedOrganizationId: ancestor });
+
+      await sweeper.runOnce();
+
+      expect((await policyRow(policyId)).status).toBe('SUSPENDED');
+      const [review] = await reviewsOf(draft.id);
+      expect(review).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      });
+      const [event] = await flagged(draft.employer);
+      expect(event!.payload).toMatchObject({
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedAt: null,
+      });
+      expect(JSON.stringify(event)).not.toContain(b.eventId);
+      const [suspended] = (await policyEventsOf(api.prisma, draft.employer)).filter(
+        (e) => e.eventName === 'APPROVAL_POLICY_SUSPENDED',
+      );
+      expect(suspended!.payload).toMatchObject({
+        reason: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedOrganizationId: null,
+      });
     });
 
     it('the database holds the same rule: a review names an event and an instant exactly when a move is its proven cause', async () => {
