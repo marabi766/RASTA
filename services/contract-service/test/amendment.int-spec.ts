@@ -714,8 +714,14 @@ describe('amendments of a signed contract', () => {
           signAmendment(api, c.id, id, c.contractorToken),
         ]),
       );
-      await untilSessionsWaitOnALock(w.prisma, 6);
-      release();
+      try {
+        await untilSessionsWaitOnALock(w.prisma, 6);
+      } finally {
+        // Whatever the wait saw, the lock goes back and the requests finish, so a failure here
+        // cannot leave a held row lock or a pending transaction behind for the tests after it.
+        release();
+        await Promise.allSettled([holder, running]);
+      }
       await holder;
       const results = await running;
       expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200, 200]);
