@@ -336,13 +336,41 @@ describe('document references on an ownership transfer (Q-99)', () => {
       ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
     });
 
-    it('an owner that commissioned its own asset withdraws and returns it with its dossier complete; IDLE → ACTIVE asks no ownership document', async () => {
+    it('a legacy transferred asset left IDLE (no marker) returns to ACTIVE only with the current owner’s own document (round 9)', async () => {
+      const { assetId } = await machineWithDocument(org.a);
+      await record(org.a, assetId);
+      await transfer(assetId, org.a, org.b);
+      // What a legacy transfer left: IDLE under the receiver, the marker never set.
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset SET status = 'IDLE'::"OperationalStatus",
+                commissioned_for_organization_id = NULL WHERE id = $1`,
+        assetId,
+      );
+      await record(org.b, assetId);
+
+      const refused = await putBack(org.b, assetId).catch((error: unknown) => error);
+      expect(refused).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        internalContext: expect.objectContaining({ rule: 'INCOMPLETE_DOSSIER' }),
+      });
+      expect(missingOf(refused)).toEqual(['an ownership title or registration card']);
+      expect((await asActor(manager(org.b), () => assets.get(assetId))).status).toBe('IDLE');
+
+      const documentId = id('DOC');
+      documents.ownedBy(documentId, org.b);
+      await asActor(manager(org.b), () =>
+        assets.attachDocument(assetId, { documentId, kind: 'OWNERSHIP_TITLE', title: TITLE_B }),
+      );
+      expect((await putBack(org.b, assetId)).status).toBe('ACTIVE');
+    });
+
+    it('an owner that commissioned its own asset withdraws and returns it with its dossier complete; IDLE → ACTIVE follows the same marker rule', async () => {
       const { assetId } = await machineWithDocument(org.a);
       await record(org.a, assetId);
       expect((await withdraw(org.a, assetId)).status).toBe('OUT_OF_SERVICE');
       expect((await putBack(org.a, assetId)).status).toBe('ACTIVE');
 
-      // IDLE is reachable only from ACTIVE, so an IDLE asset was commissioned by its current owner.
+      // This one holds its owner's own ownership title, so the return needs only the policy.
       const idle = await machineWithDocument(org.a);
       await record(org.a, idle.assetId);
       await asActor(manager(org.a), async () =>

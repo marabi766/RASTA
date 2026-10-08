@@ -91,13 +91,23 @@ WITH fixed_refs AS (
    WHERE e.asset_id = r2.asset_id AND e.source_event_id = v.ref_id
      AND e.category = 'DOCUMENT' AND e.organization_id <> v.document_owner
   RETURNING e.id
+), cleared_markers AS (
+  -- دارایی‌ای که ارجاعش به سازمان دیگری برگشت، دیگر نشانهٔ «فعال‌شده برای مالک فعلی» را ندارد: گیرنده ممکن است میان
+  -- مهاجرت و این آشتی با همان ارجاعِ جابه‌جاشده فعال شده باشد و نشانه را گرفته باشد (#234 دور ۹).
+  UPDATE asset a
+     SET commissioned_for_organization_id = NULL
+   WHERE a.commissioned_for_organization_id IS NOT NULL
+     AND a.id IN (SELECT r.asset_id FROM asset_document_ref r JOIN fixed_refs f ON f.id = r.id)
+  RETURNING a.id
 )
 SELECT (SELECT count(*) FROM fixed_refs)::int AS refs_fixed,
-       (SELECT count(*) FROM fixed_entries)::int AS entries_fixed;
+       (SELECT count(*) FROM fixed_entries)::int AS entries_fixed,
+       (SELECT count(*) FROM cleared_markers)::int AS markers_cleared;
 ```
 
-دو شمارش را با شمار ارجاع‌های جابه‌جاشدهٔ گام ۲ مقایسه کن (هر ارجاع جابه‌جاشده یک ارجاع و یک ردیف خط زمانی)؛ فقط در
-صورت برابری `COMMIT` بزن، وگرنه `ROLLBACK`. پیش از `COMMIT` همین تراکنش دو بررسی گام ۴ را هم اجرا کن.
+دو شمارش اول را با شمار ارجاع‌های جابه‌جاشدهٔ گام ۲ مقایسه کن (هر ارجاع جابه‌جاشده یک ارجاع و یک ردیف خط زمانی)؛ فقط در
+صورت برابری `COMMIT` بزن، وگرنه `ROLLBACK`. `markers_cleared` شمار دارایی‌هایی است که نشانه‌شان پاک شد؛ در تیکت ثبت
+شود. پیش از `COMMIT` همین تراکنش سه بررسی گام ۴ را هم اجرا کن.
 
 - هیچ ردیفی پاک نمی‌شود. اگر ارجاعی به دارایی‌ای اشاره می‌کند که اکنون مالک دیگری دارد، پس از بازگشت دیگر در پروندهٔ مالک
   جدید دیده نمی‌شود (درست همان رفتار Q-99) و مالک جدید مدرک خودش را می‌چسباند.
@@ -112,9 +122,10 @@ SELECT (SELECT count(*) FROM fixed_refs)::int AS refs_fixed,
 
 ## ۴. تأیید و ثبت
 
-دو بررسی، هر دو باید **خالی** باشند. گام ۱ دیگر معیار نیست: رفت‌وبرگشتِ مشروعِ A→B→A ردیف‌هایی دارد که هنوز در فهرست
+سه بررسی، هر سه باید **خالی** باشند. گام ۱ دیگر معیار نیست: رفت‌وبرگشتِ مشروعِ A→B→A ردیف‌هایی دارد که هنوز در فهرست
 نامزدها می‌آیند ولی درست‌اند. (الف) هر ردیف خط زمانیِ مدرک نزد همان سازمانِ ارجاعِ جفتش است؛ (ب) هر ارجاعِ تأییدشده نزد
-مالک مدرک است:
+مالک مدرک است؛ (پ) هیچ دارایی‌ِ منتقل‌شده‌ای نشانهٔ فعال‌سازی برای سازمانی ندارد که برای آن دارایی سند مالکیت یا کارت
+نگه نمی‌دارد (دارایی‌ای که هرگز منتقل نشده، نشانه‌اش از پیش و به‌درستی بدون مدرک است):
 
 ```sql verify-pairs
 SELECT e.id AS entry_id, e.organization_id AS entry_org, r.organization_id AS ref_org
@@ -128,6 +139,17 @@ SELECT r.id AS ref_id, r.organization_id AS current_org, v.document_owner
   FROM asset_document_ref r
   JOIN verified_owner v ON v.ref_id = r.id
  WHERE r.organization_id <> v.document_owner;
+```
+
+```sql verify-markers
+SELECT a.id AS asset_id, a.commissioned_for_organization_id AS marker
+  FROM asset a
+ WHERE a.commissioned_for_organization_id IS NOT NULL
+   AND EXISTS (SELECT 1 FROM asset_transfer t WHERE t.asset_id = a.id)
+   AND NOT EXISTS (SELECT 1 FROM asset_document_ref r
+                    WHERE r.asset_id = a.id AND r.organization_id = a.commissioned_for_organization_id
+                      AND r.deleted_at IS NULL
+                      AND r.kind IN ('OWNERSHIP_TITLE', 'REGISTRATION_CARD'));
 ```
 
 پس از `COMMIT` گام ۲ را برای همهٔ ارجاع‌های گام ۱ دوباره بگیر و مطمئن شو `current_org` هر یک برابر `document_owner` است. شمار

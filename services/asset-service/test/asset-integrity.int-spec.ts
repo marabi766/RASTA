@@ -1278,6 +1278,11 @@ describe('asset integrity', () => {
     it('applies a status change once, and a stale one cannot apply it again after the machine moved back', async () => {
       const assetId = await machine(org.a);
       await setStatus(assetId, 'ACTIVE');
+      // An asset its owner commissioned: the marker waives the ownership document on the way back.
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE asset SET commissioned_for_organization_id = organization_id WHERE id = $1`,
+        assetId,
+      );
       // IDLE → ACTIVE needs a policy in force, like every way into ACTIVE.
       await asActor(manager(org.a), () =>
         insurance.recordPolicy(assetId, {

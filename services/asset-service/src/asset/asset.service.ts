@@ -547,9 +547,8 @@ export class AssetService {
    * operable state from an asset the current owner has not commissioned: REGISTERED → ACTIVE
    * (`activate`) and OUT_OF_SERVICE → ACTIVE, which is how a transferred asset could otherwise
    * be put into service without its own paperwork (REGISTERED → OUT_OF_SERVICE → ACTIVE). IDLE →
-   * ACTIVE needs no ownership document: IDLE is reachable only from ACTIVE, so an IDLE asset was
-   * commissioned by the owner it has now (a transfer always lands in REGISTERED) — but it needs
-   * the insurance, like every way into ACTIVE (round 8).
+   * ACTIVE follows the same rule (round 9): a legacy transferred asset can sit IDLE with no marker,
+   * so insurance is always needed and the ownership document is waived only by the marker.
    *
    * Round 2: the dossier is needed only when the asset is not **commissioned for its current owner**
    * (`commissionedForOrganizationId`, set on activation, cleared by a transfer). OUT_OF_SERVICE →
@@ -608,15 +607,14 @@ export class AssetService {
     // Every transition into ACTIVE (IDLE and OUT_OF_SERVICE here, `activate` for REGISTERED) goes
     // through the one guard and needs an insurance policy in force now: a policy that lapsed while
     // the asset was idle or withdrawn blocks it. The ownership document is asked only of a return
-    // from OUT_OF_SERVICE, and the commissioning marker waives it — a seeded active asset, or one a
-    // runbook repaired, has none to show. A transfer clears the marker, so the new owner (and A in
-    // A→B→A) commissions with its own documents. An IDLE asset was commissioned by its owner.
+    // from IDLE or OUT_OF_SERVICE (one rule, round 9), and the commissioning marker waives it — a
+    // seeded active asset, or one a runbook repaired, has none to show. A transfer clears the marker,
+    // so the new owner (and A in A→B→A) commissions with its own documents. A legacy transferred
+    // asset left IDLE has no marker, so it too must show the current owner's own document.
     const intoActive = dto.status === 'ACTIVE';
-    const returning = intoActive && asset.status === 'OUT_OF_SERVICE';
     if (intoActive) {
       await this.assertCommissioningDossier(id, {
-        ownershipDocument:
-          returning && asset.commissionedForOrganizationId !== asset.organizationId,
+        ownershipDocument: asset.commissionedForOrganizationId !== asset.organizationId,
       });
     }
 
@@ -629,7 +627,7 @@ export class AssetService {
           dto.status,
           dto.reason,
           dto.expectedVersion,
-          returning ? { commissionedForOrganizationId: asset.organizationId } : {},
+          intoActive ? { commissionedForOrganizationId: asset.organizationId } : {},
         );
         // Still inside the transaction: too late rolls it back.
         assertWithinDeadline();

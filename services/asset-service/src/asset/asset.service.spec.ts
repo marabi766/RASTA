@@ -592,6 +592,61 @@ describe('AssetService', () => {
       expect(h.enqueued).toHaveLength(0);
     });
 
+    describe('IDLE → ACTIVE uses the OUT_OF_SERVICE → ACTIVE rule (#234 round 9)', () => {
+      const idle = (extra: object = {}) =>
+        harness({
+          findById: jest.fn(async () => assetRow({ status: 'IDLE', ...extra })),
+          findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        });
+      const back = (h: Harness) =>
+        run(() =>
+          h.service.changeStatus(ASSET_ID, {
+            status: 'ACTIVE',
+            reason: 'بازگشت',
+            expectedVersion: 1,
+          }),
+        );
+
+      it('refuses a legacy transferred IDLE asset (no marker) that holds no ownership document of its own', async () => {
+        const h = idle();
+
+        await expect(back(h)).rejects.toThrow(/ownership title/);
+        expect(h.repository.compareAndSetStatus).not.toHaveBeenCalled();
+        expect(h.enqueued).toHaveLength(0);
+      });
+
+      it('allows it once the current owner holds its own document, and records the marker', async () => {
+        const h = idle();
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'DOC_1',
+        });
+
+        await expect(back(h)).resolves.toMatchObject({ status: 'ACTIVE' });
+        expect(h.repository.compareAndSetStatus).toHaveBeenCalledWith(
+          h.tx,
+          ASSET_ID,
+          'IDLE',
+          expect.objectContaining({ commissionedForOrganizationId: assetRow().organizationId }),
+          { version: 1 },
+        );
+      });
+
+      it('waives the document only for the marker of the current organization, never the insurance', async () => {
+        const marked = idle({ commissionedForOrganizationId: assetRow().organizationId });
+        await expect(back(marked)).resolves.toMatchObject({ status: 'ACTIVE' });
+
+        const lapsed = harness({
+          findById: jest.fn(async () =>
+            assetRow({
+              status: 'IDLE',
+              commissionedForOrganizationId: assetRow().organizationId,
+            }),
+          ),
+        });
+        await expect(back(lapsed)).rejects.toThrow(/insurance policy currently in force/);
+      });
+    });
+
     it('names everything that is missing, not just the first thing', async () => {
       const h = harness({ findById: jest.fn(async () => registered()) });
 
@@ -917,7 +972,8 @@ describe('AssetService', () => {
     it('a status change sent twice does not apply again after the asset moved back', async () => {
       // ACTIVE → IDLE (v1 → v2), somebody returns it IDLE → ACTIVE (v3). A bare
       // status check would let the stale ACTIVE → IDLE form land a second time.
-      let row = assetRow({ version: 1, status: 'ACTIVE' });
+      // Commissioned by its owner: the marker waives the ownership document on the way back.
+      let row = assetRow({ version: 1, status: 'ACTIVE', commissionedForOrganizationId: DEH1 });
       const h = harness({
         findById: jest.fn(async () => row),
         findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
@@ -1408,6 +1464,10 @@ describe('AssetService', () => {
         // IDLE → ACTIVE needs a policy in force like every way into ACTIVE (#234 round 8).
         const h = at(from, fakeClearance(), {
           findActivePolicy: jest.fn(async () => policyRow(new Date(Date.now() + 86_400_000))),
+        });
+        // Legacy asset without a marker: the current owner's own document stands in for it (round 9).
+        (h.repository.client.assetDocumentRef.findFirst as jest.Mock).mockResolvedValue({
+          id: 'DOC_1',
         });
 
         await run(() =>

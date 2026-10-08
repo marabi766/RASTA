@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { ulid } from 'ulid';
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
+import { InsuranceService } from '../src/insurance/insurance.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FakeDocuments, asActor, id, newPrisma, ownerDatabaseUrl, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
@@ -52,14 +53,18 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
   /** reference id → document id */
   const refDocument = new Map<string, string>();
 
-  async function attach(assetId: string, organizationId: string): Promise<string> {
+  async function attach(
+    assetId: string,
+    organizationId: string,
+    kind: 'OTHER' | 'OWNERSHIP_TITLE' = 'OTHER',
+  ): Promise<string> {
     const documentId = id('DOC');
     documents.ownedBy(documentId, organizationId);
     owners.set(documentId, organizationId);
     const view = await asActor(manager(organizationId), () =>
       assets.attachDocument(assetId, {
         documentId,
-        kind: 'OTHER',
+        kind,
         title: `سند ${organizationId.slice(-4)}`,
       }),
     );
@@ -125,10 +130,20 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       );
       const pairs = await tx.$queryRawUnsafe<unknown[]>(block('verify-pairs'));
       const ownersLeft = await tx.$queryRawUnsafe<unknown[]>(block('verify-owners'));
-      return { counts: counts!, pairs, ownersLeft, moved: moved.length, verified };
+      const markersLeft = (
+        await tx.$queryRawUnsafe<{ asset_id: string }[]>(block('verify-markers'))
+      ).filter((row) => row.asset_id === assetId);
+      return { counts: counts!, pairs, ownersLeft, markersLeft, moved: moved.length, verified };
     });
   }
 
+  const markerOf = async (assetId: string) =>
+    (
+      await prisma.client.$queryRawUnsafe<{ marker: string | null }[]>(
+        `SELECT commissioned_for_organization_id AS marker FROM asset WHERE id = $1`,
+        assetId,
+      )
+    )[0]!.marker;
   const orgOfRef = async (refId: string) =>
     (
       await prisma.client.$queryRawUnsafe<{ organization_id: string }[]>(
@@ -177,6 +192,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       orgs,
     );
     for (const table of [
+      'insurance_policy',
       'asset_document_ref',
       'asset_timeline_entry',
       'asset_transfer',
@@ -211,7 +227,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     const result = await repair(assetId);
 
     expect(result.verified).toHaveLength(2);
-    expect(result.counts).toEqual({ refs_fixed: 2, entries_fixed: 2 });
+    expect(result.counts).toEqual({ refs_fixed: 2, entries_fixed: 2, markers_cleared: 0 });
     expect(result.pairs).toEqual([]);
     expect(result.ownersLeft).toEqual([]);
     // The previous procedure restored the reference to A but the entry to B: here both are paired.
@@ -238,7 +254,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     const result = await repair(assetId);
 
     // … but only B's was wrong.
-    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1 });
+    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1, markers_cleared: 0 });
     expect(result.pairs).toEqual([]);
     expect(result.ownersLeft).toEqual([]);
     expect(await orgOfRef(refA)).toBe(org.a);
@@ -269,10 +285,66 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     expect((await candidatesOf(assetId)).map((row) => row.ref_id)).toEqual([refA]);
     const result = await repair(assetId);
 
-    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1 });
+    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1, markers_cleared: 0 });
     expect(result.pairs).toEqual([]);
     expect(await orgOfRef(refA)).toBe(org.a);
     expect(await orgOfEntry(assetId, refA)).toBe(org.a);
+  });
+
+  it('the recipient activated with the legacy moved reference before the reconciliation: the repair clears its marker and the post-check is empty (#234 round 9)', async () => {
+    const assetId = await newAsset(org.a);
+    const refA = await attach(assetId, org.a, 'OWNERSHIP_TITLE');
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset SET status = 'ACTIVE'::"OperationalStatus", commissioned_at = now() WHERE id = $1`,
+      assetId,
+    );
+    await transfer(assetId, org.a, org.b);
+    // The legacy transfer moved A's ownership title to B …
+    await legacyCarry(assetId, org.b);
+    refsOfAsset.set(refA, assetId);
+    // … and B, before the runbook ran, put the asset into service with it: the marker is B's.
+    const insurance = new InsuranceService(repository, assets, 30);
+    await asActor(manager(org.b), () =>
+      insurance.recordPolicy(assetId, {
+        policyNumber: `POL-${ulid().slice(-8)}`,
+        insurerName: 'بیمه نمونه',
+        coverage: 'THIRD_PARTY',
+        validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+        validTo: new Date(Date.now() + 86_400_000 * 300).toISOString(),
+      }),
+    );
+    await asActor(manager(org.b), async () =>
+      assets.activate(assetId, {
+        expectedVersion: (await assets.get(assetId)).version,
+      }),
+    );
+    expect(await markerOf(assetId)).toBe(org.b);
+
+    const result = await repair(assetId);
+
+    // The reference went back to A, and with it the marker B earned from it.
+    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1, markers_cleared: 1 });
+    expect(result.markersLeft).toEqual([]);
+    expect(await orgOfRef(refA)).toBe(org.a);
+    expect(await markerOf(assetId)).toBeNull();
+  });
+
+  it('the post-check names an asset whose marker is for an organization holding no ownership document for it', async () => {
+    const assetId = await newAsset(org.a);
+    const refA = await attach(assetId, org.a);
+    await transfer(assetId, org.a, org.b);
+    refsOfAsset.set(refA, assetId);
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset SET commissioned_for_organization_id = $2 WHERE id = $1`,
+      assetId,
+      org.b,
+    );
+
+    const rows = await owner.client.$queryRawUnsafe<{ asset_id: string }[]>(
+      block('verify-markers'),
+    );
+
+    expect(rows.map((row) => row.asset_id)).toContain(assetId);
   });
 
   it('running it twice changes nothing the second time, and no row is deleted', async () => {
@@ -291,8 +363,16 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
         )
       )[0]!.n;
     const before = await count();
-    expect((await repair(assetId)).counts).toEqual({ refs_fixed: 1, entries_fixed: 1 });
-    expect((await repair(assetId)).counts).toEqual({ refs_fixed: 0, entries_fixed: 0 });
+    expect((await repair(assetId)).counts).toEqual({
+      refs_fixed: 1,
+      entries_fixed: 1,
+      markers_cleared: 0,
+    });
+    expect((await repair(assetId)).counts).toEqual({
+      refs_fixed: 0,
+      entries_fixed: 0,
+      markers_cleared: 0,
+    });
     expect(await count()).toBe(before);
     expect(await orgOfRef(refA)).toBe(org.a);
   });
