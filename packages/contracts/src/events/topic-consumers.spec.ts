@@ -52,9 +52,10 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.organization.v1', 'rasta.supplier.v1'],
         deadLetterTopic: 'rasta.construction.v1.dlq',
       },
-      // CON-003: the draft contract of an awarded tender (TENDER_AWARDED, confirmed by the owner).
+      // CON-003: the draft contract of an awarded tender (TENDER_AWARDED, confirmed by the owner),
+      // and the signing policy's follow-up to an organization move (ORGANIZATION_MOVED, Q-83).
       'contract-service': {
-        subscribes: ['rasta.construction.v1'],
+        subscribes: ['rasta.construction.v1', 'rasta.organization.v1'],
         deadLetterTopic: 'rasta.contract.v1.dlq',
       },
       'supplier-service': {

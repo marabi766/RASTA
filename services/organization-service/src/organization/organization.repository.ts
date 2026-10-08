@@ -237,6 +237,22 @@ export class OrganizationRepository {
     return rows[0]?.ok ?? false;
   }
 
+  /**
+   * The hierarchy version of `id` when it is `ancestorId` or beneath it, `null` otherwise — one
+   * statement, so "is within" and the version describe the same tree.
+   */
+  async withinVersion(
+    ancestorId: string,
+    id: string,
+    db: PrismaTransactionClient,
+  ): Promise<bigint | null> {
+    const rows = await db.$queryRaw<{ hierarchy_version: bigint }[]>`
+      SELECT d.hierarchy_version FROM organization a, organization d
+      WHERE a.id = ${ancestorId} AND d.id = ${id} AND d.path <@ a.path
+    `;
+    return rows[0]?.hierarchy_version ?? null;
+  }
+
   async getPath(id: string, tx?: PrismaTransactionClient): Promise<string | null> {
     const rows = await (tx ?? this.client).$queryRaw<{ path: string | null }[]>`
       SELECT path::text AS path FROM organization WHERE id = ${id}
@@ -282,6 +298,7 @@ export class OrganizationRepository {
     tx: PrismaTransactionClient,
     oldPath: string,
     newPath: string,
+    hierarchyVersion: bigint,
   ): Promise<number> {
     // The moved root is special-cased: `subpath(path, nlevel(path))` asks for
     // an offset equal to the path's own length, which ltree rejects with
@@ -292,10 +309,23 @@ export class OrganizationRepository {
       UPDATE organization
       SET path  = CASE WHEN path = ${oldPath}::ltree THEN ${newPath}::ltree
                        ELSE ${newPath}::ltree || subpath(path, nlevel(${oldPath}::ltree)) END,
-          depth = nlevel(${newPath}::ltree) - 1 + (nlevel(path) - nlevel(${oldPath}::ltree))
+          depth = nlevel(${newPath}::ltree) - 1 + (nlevel(path) - nlevel(${oldPath}::ltree)),
+          hierarchy_version = ${hierarchyVersion}::bigint
       WHERE path <@ ${oldPath}::ltree
     `;
     return affected;
+  }
+
+  /**
+   * The version a move stamps on the moved root and every descendant: one above every version any
+   * organization has. Computed under `lockHierarchy`, which serialises moves, so two moves never
+   * take the same value and a later move's is always higher (D-050).
+   */
+  async nextHierarchyVersion(tx: PrismaTransactionClient): Promise<bigint> {
+    const rows = await tx.$queryRaw<{ next: bigint }[]>`
+      SELECT COALESCE(max(hierarchy_version), 0) + 1 AS next FROM organization
+    `;
+    return rows[0]?.next ?? 1n;
   }
 
   // -------------------------------------------------------------------------

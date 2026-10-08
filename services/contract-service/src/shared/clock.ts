@@ -19,6 +19,21 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
  * It does not weaken a constraint: what changed is that both sides of every comparison come
  * from one clock, so the comparison measures the domain rather than the infrastructure.
  */
+/**
+ * The database's clock **now**, advancing inside a transaction — `clock_timestamp()` — for the one
+ * thing that must not be the transaction's start: the instant a question was asked of another
+ * service in the middle of it (`ContractService.authorityOf`, D-050). Never stamped on a row beside
+ * `transactionNow`'s instant as if they were one reading (D-5).
+ */
+export async function databaseClock(tx: ExtendedPrismaClient): Promise<Date> {
+  const rows = await tx.$queryRawUnsafe<{ now: Date }[]>('SELECT clock_timestamp() AS now');
+  const now = rows[0]?.now;
+  if (!(now instanceof Date)) {
+    throw new Error('SELECT clock_timestamp() did not return a timestamp');
+  }
+  return now;
+}
+
 export async function transactionNow(tx: ExtendedPrismaClient): Promise<Date> {
   const rows = await tx.$queryRawUnsafe<{ now: Date }[]>('SELECT now() AS now');
   const now = rows[0]?.now;

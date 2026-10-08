@@ -1,8 +1,58 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
-import type { Contract } from '../generated/prisma';
+import { ulid } from 'ulid';
+import type { Contract, ContractSignature } from '../generated/prisma';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { INITIAL_CONTRACT_STATE, type ContractStateName } from './contract.state-machine';
+import type { SignatureFact } from './views';
+
+/** One side's acceptance, as it is written. */
+export interface SignatureInput {
+  readonly id: string;
+  /** The contract's organization — the employer's — for both sides. */
+  readonly organizationId: string;
+  readonly contractId: string;
+  readonly side: 'EMPLOYER' | 'CONTRACTOR';
+  /** The organization the signer acted for. */
+  readonly signerOrganizationId: string;
+  readonly signedBy: string;
+  readonly signedByIssuer: string | null;
+  readonly signedBySubject: string | null;
+  readonly authorityRole: string;
+  /** The policy that authorised the employer's side (id and version); null for the contractor's. */
+  readonly policyId: string | null;
+  readonly policyVersion: number | null;
+  /**
+   * What the hierarchy said when a union-written policy authorised the employer's side (D-050);
+   * null for the contractor's side and for a platform-written policy, which needs none.
+   */
+  readonly hierarchyEvidence: HierarchyEvidence | null;
+  readonly correlationId: string;
+  readonly at: Date;
+}
+
+/** The organization-service answer a signature rested on, and the window it could have committed in. */
+export interface HierarchyEvidence {
+  /** The author organization asked about. */
+  readonly authorOrganizationId: string;
+  /** The employer's hierarchy version in the tree the answer came from (organization-service). */
+  readonly hierarchyVersion: number;
+  /** When the question was asked (the database's clock). */
+  readonly readAt: Date;
+  /** The latest instant the signing transaction could commit at: its own deadline. */
+  readonly commitDeadline: Date;
+}
+
+export interface TransitionInput {
+  readonly organizationId: string;
+  readonly id: string;
+  readonly from: ContractStateName;
+  readonly to: ContractStateName;
+  readonly version: number;
+  readonly actor: string;
+  readonly at: Date;
+  readonly cancellation?: { readonly reasonCode: string; readonly note?: string | undefined };
+}
 
 export interface ContractListFilter {
   readonly status?: ContractStateName;
@@ -81,6 +131,274 @@ export class ContractRepository {
         updatedAt: input.at,
       },
     });
+  }
+
+  // -- the commands (sign, cancel): both parties, one contract, written under its lock ------
+  //
+  // The caller of a command may be the contractor, whose organization is not the contract's
+  // tenant, so these statements cross the boundary on purpose — and each says so. Every one
+  // names the contract's `organizationId` and `id` explicitly, taken from a row the service has
+  // already shown the caller to be a party to (`assertPartyOf`); none takes either from a request.
+
+  /**
+   * Takes the contract's row lock and reads it as it now stands. Every command on one contract
+   * runs under it, one at a time: two signatures at once are ordered, so the second sees the
+   * first's and is the one that completes the contract, and a cancellation cannot interleave
+   * with a signature. `null` when there is no such contract in that organization.
+   */
+  async lockContract(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    id: string,
+  ): Promise<Contract | null> {
+    await tx.$queryRaw`SELECT 1 FROM contract WHERE organization_id = ${organizationId} AND id = ${id} FOR UPDATE`;
+    return runUnscoped(
+      'a command reads the contract it holds the lock of, by the organization and id of a row its caller is a party to',
+      () => tx.contract.findFirst({ where: { organizationId, id } }),
+    );
+  }
+
+  /** The signatures of one contract, as they stand in the transaction that holds its lock. */
+  listSignatures(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    contractId: string,
+  ): Promise<(ContractSignature & { review?: { id: string } | null })[]> {
+    return runUnscoped(
+      'a command reads the signatures of the contract it holds the lock of, by its organization and id',
+      () =>
+        tx.contractSignature.findMany({
+          where: { organizationId, contractId },
+          include: { review: { select: { id: true } } },
+        }),
+    );
+  }
+
+  insertSignature(tx: ExtendedPrismaClient, input: SignatureInput): Promise<ContractSignature> {
+    return runUnscoped(
+      'the contractor’s signature is written for the contract’s own organization, named explicitly',
+      () =>
+        tx.contractSignature.create({
+          data: {
+            id: input.id,
+            organizationId: input.organizationId,
+            contractId: input.contractId,
+            side: input.side,
+            signerOrganizationId: input.signerOrganizationId,
+            signedBy: input.signedBy,
+            signedByIssuer: input.signedByIssuer,
+            signedBySubject: input.signedBySubject,
+            authorityRole: input.authorityRole,
+            policyId: input.policyId,
+            policyVersion: input.policyVersion,
+            ...(input.hierarchyEvidence
+              ? {
+                  hierarchyAuthorOrganizationId: input.hierarchyEvidence.authorOrganizationId,
+                  hierarchyAnswer: 'WITHIN',
+                  hierarchyVersion: BigInt(input.hierarchyEvidence.hierarchyVersion),
+                  hierarchyReadAt: input.hierarchyEvidence.readAt,
+                  hierarchyCommitDeadline: input.hierarchyEvidence.commitDeadline,
+                }
+              : {}),
+            signedAt: input.at,
+            correlationId: input.correlationId,
+          },
+        }),
+    );
+  }
+
+  /**
+   * Flags the employer signatures under `policyId` that a move raced (D-050): the tree they
+   * rested on is older than the move's — the hierarchy version they recorded is LOWER than the
+   * move's, a number organization-service stamps in the move's own transaction, so no clock
+   * orders it — **and** the EARLIEST coalesced move's instant is at or before the signature's
+   * commit deadline plus the configured clock-skew margin
+   * (`earliest_moved_at ≤ hierarchy_commit_deadline + margin`, D-050): a signature that committed
+   * before every move was prepared cannot have raced one. The version decides which tree was
+   * read; the window only bounds which signatures are looked at, and the margin can only add
+   * reviews. A signature without a deadline (from before evidence) cannot be bounded and is
+   * looked at.
+   * A signature that read the tree after the move recorded the move's version or more, and is not
+   * flagged.
+   * Never revokes: it writes one append-only review row each, once
+   * (`ux_signature_authority_review_signature`), and returns the ones it newly flagged. Runs under
+   * the policy slot's lock, so no signature is recorded under the policy meanwhile.
+   */
+  async flagRacedSignatures(
+    tx: ExtendedPrismaClient,
+    input: {
+      organizationId: string;
+      policyId: string;
+      /** The move proven to be the cause; null (with `movedAt`) when none is (`detectedBy` MOVE_RECHECK). */
+      causeEventId: string | null;
+      movedAt: Date | null;
+      detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
+      /** The move's hierarchy version; null for an event that predates versions. */
+      movedVersion: number | null;
+      /**
+       * The EARLIEST instant over the moves coalesced into the task: the D-050 bound on which
+       * signatures could have raced any of them. Not recorded.
+       */
+      earliestMoveInstant: Date;
+      /**
+       * On a "within" answer, the employer's CURRENT hierarchy version: a signature whose recorded
+       * version is non-null and not below it read a tree nothing has changed since, and is left
+       * alone. Null signatures stay eligible. Null here (an "outside" answer, or none given) keeps
+       * the predicate as it is.
+       */
+      withinCurrentVersion?: number | null;
+      /** The clock-skew allowance added to a signature's commit deadline (D-050); only adds reviews. */
+      clockSkewMarginSeconds: number;
+      at: Date;
+    },
+  ): Promise<{ contractId: string; policyVersion: number }[]> {
+    // `deadline + margin >= earliest move`, written as `deadline >= earliest - margin`: the margin
+    // can only widen the set of signatures looked at (D-050).
+    const skewedBound = new Date(
+      input.earliestMoveInstant.getTime() - input.clockSkewMarginSeconds * 1000,
+    );
+    return runUnscoped(
+      'the reconciliation of a move flags the signatures of the policy it stranded, named by its organization and id',
+      async () => {
+        const raced = await tx.contractSignature.findMany({
+          where: {
+            organizationId: input.organizationId,
+            policyId: input.policyId,
+            side: 'EMPLOYER',
+            // The version decides which tree was read: a signature rests on a tree older than the
+            // move's when it recorded a lower version, or none (a signature from before versions
+            // cannot show it read the moved tree). A move with no version (an event from before
+            // them) orders nothing, so the version test is dropped: flagging too many is safe,
+            // flagging too few is not.
+            // The window (D-050) only bounds which signatures are looked at: one whose commit
+            // deadline plus the clock-skew margin precedes the EARLIEST coalesced move's instant
+            // committed before every move and cannot have raced any. No deadline, no bound: a
+            // signature without one stays eligible.
+            AND: [
+              ...(input.movedVersion === null
+                ? []
+                : [
+                    {
+                      OR: [
+                        { hierarchyVersion: null },
+                        { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
+                      ],
+                    },
+                  ]),
+              ...(input.withinCurrentVersion == null
+                ? []
+                : [
+                    {
+                      OR: [
+                        { hierarchyVersion: null },
+                        { hierarchyVersion: { lt: BigInt(input.withinCurrentVersion) } },
+                      ],
+                    },
+                  ]),
+              {
+                OR: [
+                  { hierarchyCommitDeadline: null },
+                  { hierarchyCommitDeadline: { gte: skewedBound } },
+                ],
+              },
+            ],
+            review: null,
+          },
+          orderBy: { id: 'asc' },
+        });
+        const flagged: { contractId: string; policyVersion: number }[] = [];
+        for (const signature of raced) {
+          await tx.signatureAuthorityReview.create({
+            data: {
+              id: `SAR_${ulid()}`,
+              organizationId: signature.organizationId,
+              contractId: signature.contractId,
+              side: 'EMPLOYER',
+              policyId: input.policyId,
+              reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+              causeEventId: input.causeEventId,
+              movedAt: input.movedAt,
+              detectedBy: input.detectedBy,
+              movedVersion: input.movedVersion === null ? null : BigInt(input.movedVersion),
+              recordedVersion: signature.hierarchyVersion,
+              flaggedAt: input.at,
+            },
+          });
+          flagged.push({
+            contractId: signature.contractId,
+            policyVersion: signature.policyVersion ?? 1,
+          });
+        }
+        return flagged;
+      },
+    );
+  }
+
+  /**
+   * The one way a contract changes status: a compare-and-set on `organization_id`, `id`, the
+   * status it was read in and its `version`, which it increments. `false` when the row is no
+   * longer that — the caller turns it into `409 OPTIMISTIC_LOCK_FAILED`.
+   */
+  async transition(tx: ExtendedPrismaClient, input: TransitionInput): Promise<boolean> {
+    const { count } = await runUnscoped(
+      'a command moves the contract it holds the lock of, matched on its organization, id, status and version',
+      () =>
+        tx.contract.updateMany({
+          where: {
+            organizationId: input.organizationId,
+            id: input.id,
+            status: input.from,
+            version: input.version,
+          },
+          data: {
+            status: input.to,
+            statusChangedAt: input.at,
+            statusChangedBy: input.actor,
+            updatedAt: input.at,
+            version: { increment: 1 },
+            ...(input.cancellation
+              ? {
+                  cancelReasonCode: input.cancellation.reasonCode,
+                  cancelNote: input.cancellation.note ?? null,
+                }
+              : {}),
+          },
+        }),
+    );
+    return count === 1;
+  }
+
+  /**
+   * When each side accepted, for contracts the caller has been shown to be a party to — by
+   * explicit (organization, contract) pairs, whichever side the caller is.
+   */
+  async signatureFacts(contracts: readonly Contract[]): Promise<Map<string, SignatureFact[]>> {
+    const facts = new Map<string, SignatureFact[]>();
+    if (contracts.length === 0) return facts;
+    const rows = await runUnscoped(
+      'a party sees when each side accepted its contract, by the organization and id of contracts it is a party to',
+      () =>
+        this.prisma.client.contractSignature.findMany({
+          where: {
+            OR: contracts.map((contract) => ({
+              organizationId: contract.organizationId,
+              contractId: contract.id,
+            })),
+          },
+          select: {
+            contractId: true,
+            side: true,
+            signedAt: true,
+            review: { select: { id: true } },
+          },
+        }),
+    );
+    for (const row of rows) {
+      const list = facts.get(row.contractId) ?? [];
+      list.push({ side: row.side, signedAt: row.signedAt, reviewRequired: row.review !== null });
+      facts.set(row.contractId, list);
+    }
+    return facts;
   }
 
   // -- the employer's side (through the tenant guard) --------------------------

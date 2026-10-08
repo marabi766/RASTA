@@ -2723,6 +2723,18 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 (§ ۹)؛ E2E. ADR-068 عمداً از `docs/04` و `docs/08` فاصله می‌گیرد (بی Temporal؛ economic می‌کشد، contract `createPayment` را صدا نمی‌زند؛
 `CONTRACT_DRAFTED` به‌جای `CONTRACT_CREATED`) و پذیرفتنش با مدیر پروژه است.
 
+**CON-003 PR 2 — امضا و لغو (شاخهٔ `feat/contract-service-con003-pr2`، پیش‌نویس، انباشته روی PR 1):** `POST /v1/contracts/{id}/sign` و
+`/cancel` با `Idempotency-Key` (انبار خود سرویس: بستن به hash درخواست، تصاحب محدود، آزادسازی در خطا). دو امضا جدا و با هویت پایدار
+(#188)؛ `SIGNED` فقط با امضای دوم؛ اختیار امضای کارفرما **سیاست `contract.signature` سازمان خودش** است (جدول `approval_policy` همین سرویس،
+`/v1/approval-policies`، سازوکار construction: اتحادیه یا پلتفرم می‌نویسد، `SYSTEM_ADMIN`ِ غیر از نویسنده/ارسال‌کننده برقرار می‌کند، نسخهٔ تغییرناپذیر؛
+بدون سیاستِ برقرار ⇒ ۴۲۲ `SIGNATURE_POLICY_REQUIRED`؛ شناسهٔ سیاست و نسخه روی امضا) — نه فهرست نقش در محیط اجرا (دور اول #231)؛ تفکیک وظایف بستهٔ در
+شکست؛ لغو فقط کارفرما و فقط `DRAFT` و تا پیش از نخستین امضا (مگر `CONTRACT_CANCEL_AFTER_SIGNATURE`)؛ رویدادهای
+`CONTRACT_SIGNATURE_RECORDED`، `CONTRACT_SIGNED`، `CONTRACT_CANCELLED` بی مبلغ در همان تراکنش؛ دلیل ردها در `details[].code`.
+`down.sql` هر دو Migration تا وقتی امضا، لغو یا سیاستی ثبت شده باشد **رد می‌کند و چیزی را پاک نمی‌کند** (سابقهٔ #208/#222).
+`organization-service` اکنون پرسش سلسله‌مراتب را از `contract-service` هم می‌پذیرد (`@AllowService`). Q-95 همچنان باز است و پاسخ‌ها موقت و
+پیکربندی‌پذیرند. ساخته نشده: تعلیق سیاست هنگام `ORGANIZATION_MOVED`، Gateway، الحاقیه، Milestone، صورت‌وضعیت، تسویه.
+**دور ۴ (D-050):** `organization.hierarchy_version` (bigint) در همان تراکنش جابه‌جایی روی سازمان و نوادگانش به `max+1` می‌رسد؛ پاسخ سرویس‌به‌سرویس `{ id, hierarchyVersion }` و `ORGANIZATION_MOVED.hierarchyVersion` آن را می‌برد؛ امضای کارفرما نسخهٔ خوانده‌شده را ثبت می‌کند و امضای با نسخهٔ **کمتر** از نسخهٔ جابه‌جایی (در بازهٔ پنجره) علامت می‌خورد — مهر زمانی دیگر ترتیب نمی‌دهد. سیاست `SUSPENDED` هم در صف جابه‌جایی می‌آید؛ تکرار `sign` با همان کلید، قرارداد **فعلی** را برمی‌گرداند؛ شکست ثبت رد امضا ⇒ ۵۰۳ قابل‌تکرار (کلید آزاد).
+
 ---
 
 ## ۸. Domain Ownership

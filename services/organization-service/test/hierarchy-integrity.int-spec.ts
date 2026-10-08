@@ -682,7 +682,12 @@ describe('organization hierarchy integrity', () => {
     const oldPath = await repository.getPath(id, tx);
     const parentPath = await repository.getPath(newParentId, tx);
     if (!oldPath || !parentPath) throw new Error('test tree is missing a path');
-    await repository.rewriteSubtreePath(tx, oldPath, `${parentPath}.${toLabel(id)}`);
+    await repository.rewriteSubtreePath(
+      tx,
+      oldPath,
+      `${parentPath}.${toLabel(id)}`,
+      await repository.nextHierarchyVersion(tx),
+    );
     await tx.organization.update({ where: { id }, data: { parentId: newParentId } });
   };
 

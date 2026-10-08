@@ -159,6 +159,8 @@ function harness(
     getPath: jest.fn(async (id: string) => toLabel(id)),
     setPath: jest.fn(async () => ({ path: 'p', depth: 1 })),
     rewriteSubtreePath: jest.fn(async () => 3),
+    nextHierarchyVersion: jest.fn(async () => 7n),
+    withinVersion: jest.fn(async () => 4n),
     readLocationPoints: jest.fn(async () => new Map()),
     list: jest.fn(async () => ({ items: [], nextCursor: null, hasMore: false })),
     findNearby: jest.fn(async () => []),
@@ -427,6 +429,58 @@ describe('hierarchy integrity', () => {
     // the tree inconsistent if it failed partway.
     expect(h.repository.rewriteSubtreePath).toHaveBeenCalledTimes(1);
     expect(h.enqueued.map((e) => e.eventName)).toContain(ORGANIZATION_EVENTS.ORGANIZATION_MOVED);
+  });
+
+  it('stamps one hierarchy version on the subtree, in the move transaction, and publishes it (D-050)', async () => {
+    const h = harness();
+    h.repository.findById.mockImplementation(async (id: string) => orgRow(id) as never);
+    (
+      h.repository.client as unknown as { organization: { update: jest.Mock } }
+    ).organization.update.mockResolvedValue(orgRow(DEH2, { parentId: PROVINCE }));
+
+    await runWithContext(operatorContext(), () =>
+      h.service.move(DEH2, { parentId: PROVINCE, reason: 'county dissolved' }),
+    );
+
+    // Taken under the hierarchy lock, handed to the rewrite in the same transaction, and the very
+    // value the event carries: a reader's version and the event's are comparable by number.
+    expect(h.repository.nextHierarchyVersion).toHaveBeenCalledWith(h.tx);
+    expect(h.repository.rewriteSubtreePath.mock.calls[0]?.[3]).toBe(7n);
+    const lock = h.repository.lockHierarchy.mock.invocationCallOrder[0] ?? Infinity;
+    const next = h.repository.nextHierarchyVersion.mock.invocationCallOrder[0] ?? -Infinity;
+    expect(lock).toBeLessThan(next);
+    const moved = h.enqueued.find((e) => e.eventName === ORGANIZATION_EVENTS.ORGANIZATION_MOVED);
+    expect(moved?.payload).toMatchObject({ organizationId: DEH2, hierarchyVersion: 7 });
+  });
+
+  it('a refused move takes no version and publishes nothing', async () => {
+    const h = harness();
+    h.repository.findById.mockResolvedValue(orgRow(PROVINCE, { depth: 0 }) as never);
+
+    await runWithContext(operatorContext(), () =>
+      h.service.move(PROVINCE, { parentId: DEH1, reason: 'cycle attempt' }).catch(() => undefined),
+    );
+
+    expect(h.repository.rewriteSubtreePath).not.toHaveBeenCalled();
+    expect(h.enqueued).toHaveLength(0);
+  });
+
+  it('answers a service caller { id, hierarchyVersion } from one snapshot, and 404 outside the subtree', async () => {
+    const h = harness();
+    const within = await runWithContext(
+      context({ organizationId: COUNTY, authType: 'SERVICE' } as never),
+      () => h.service.confirmWithinCaller(DEH1),
+    );
+    expect(within).toEqual({ id: DEH1, hierarchyVersion: 4 });
+    expect(h.repository.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(h.repository.withinVersion).toHaveBeenCalledWith(COUNTY, DEH1, h.tx);
+
+    h.repository.withinVersion.mockResolvedValue(null);
+    await expect(
+      runWithContext(context({ organizationId: COUNTY, authType: 'SERVICE' } as never), () =>
+        h.service.confirmWithinCaller(DEH2),
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('refuses a move by a non-operator, even within their own subtree', async () => {

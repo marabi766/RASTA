@@ -25,6 +25,35 @@ describe('the provisional defaults (Q-95)', () => {
     expect(env.CONTRACT_CONSUMER_RETRY_BACKOFF_MS).toBe(1000);
   });
 
+  it('has no signer setting at all: the employer’s signature is a policy, not an environment value (Q-95 (1))', () => {
+    expect(Object.keys(env).filter((name) => /SIGNER/.test(name))).toEqual([]);
+    // Even if one is supplied, it is not read: an environment value cannot grant authority.
+    expect(load({ CONTRACT_OWNER_SIGNER_ROLES: 'ORGANIZATION_ADMIN' })).not.toHaveProperty(
+      'CONTRACT_OWNER_SIGNER_ROLES',
+    );
+  });
+
+  it('asks organization-service on its port within three seconds, and keeps four eyes on', () => {
+    expect(env.ORGANIZATION_SERVICE_URL).toBe('http://localhost:3102');
+    expect(env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS).toBe(3000);
+    expect(env.CONTRACT_POLICY_FOUR_EYES).toBe(true);
+  });
+
+  it('lets the reader role cancel a draft, for a reason from a closed list (Q-95 (4))', () => {
+    expect(env.CONTRACT_CANCEL_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.CONTRACT_CANCEL_REASON_CODES).toEqual([
+      'TERMS_NOT_AGREED',
+      'CONTRACTOR_WITHDREW',
+      'AWARD_ERROR',
+      'OTHER',
+    ]);
+  });
+
+  it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
+    expect(env.CONTRACT_IDEMPOTENCY_TTL_HOURS).toBe(24);
+    expect(env.CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(120);
+  });
+
   it('names itself, and listens on 3111', () => {
     expect(env.SERVICE_NAME).toBe('contract-service');
     expect(env.PORT).toBe(3111);
@@ -61,8 +90,22 @@ describe('overrides', () => {
     ).toEqual(['ORGANIZATION_ADMIN', 'PROCUREMENT_USER']);
   });
 
+  it('accepts an empty cancel list (nobody) and four eyes switched off', () => {
+    const env = load({ CONTRACT_CANCEL_ROLES: '', CONTRACT_POLICY_FOUR_EYES: 'false' });
+    expect(env.CONTRACT_CANCEL_ROLES).toEqual([]);
+    expect(env.CONTRACT_POLICY_FOUR_EYES).toBe(false);
+  });
+
   it.each([
     ['AUDITOR among the readers', { CONTRACT_READER_ROLES: 'AUDITOR' }],
+    ['SYSTEM_ADMIN among the cancellers', { CONTRACT_CANCEL_ROLES: 'SYSTEM_ADMIN' }],
+    ['an organization URL that is not a URL', { ORGANIZATION_SERVICE_URL: 'organization' }],
+    ['an organization timeout under 100 ms', { CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '10' }],
+    ['no cancel reason', { CONTRACT_CANCEL_REASON_CODES: '' }],
+    ['a reason that is not a code', { CONTRACT_CANCEL_REASON_CODES: 'lower case' }],
+    ['a reason twice', { CONTRACT_CANCEL_REASON_CODES: 'OTHER,OTHER' }],
+    ['a zero idempotency lifetime', { CONTRACT_IDEMPOTENCY_TTL_HOURS: '0' }],
+    ['a lease under ten seconds', { CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
     ['an empty reader list', { CONTRACT_READER_ROLES: '' }],
     ['an unknown role', { CONTRACT_READER_ROLES: 'WIZARD' }],
     ['a timeout under 100 ms', { CONTRACT_AWARD_REQUEST_TIMEOUT_MS: '10' }],
@@ -74,6 +117,27 @@ describe('overrides', () => {
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
   });
+});
+
+describe('the clock-skew margin of the D-050 window', () => {
+  it('defaults to 300 seconds and accepts 0 and a decimal', () => {
+    expect(load().CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS).toBe(300);
+    expect(
+      load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '0' })
+        .CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
+    ).toBe(0);
+    expect(
+      load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: '12.5' })
+        .CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
+    ).toBe(12.5);
+  });
+
+  it.each(['-1', 'abc', '', ' ', 'NaN', 'Infinity', '1e3', '999999999'])(
+    'refuses to start with %j (fail closed)',
+    (bad) => {
+      expect(() => load({ CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: bad })).toThrow();
+    },
+  );
 });
 
 describe('corsOrigins', () => {

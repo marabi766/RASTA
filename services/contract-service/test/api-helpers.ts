@@ -14,7 +14,10 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { TenderAwardedConsumer } from '../src/events/tender-awarded.consumer';
-import { databaseUrl } from './helpers';
+import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
+import { PolicyReconciliationSweeper } from '../src/policy/policy-reconciliation.sweeper';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
+import { FakeHierarchy, databaseUrl } from './helpers';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness construction-service
@@ -32,12 +35,20 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** The organization hierarchy the application sees instead of organization-service. */
+  hierarchy: FakeHierarchy;
   close(): Promise<void>;
 }
 
 export interface TestClaims {
   sub: string;
   rastaUserId?: string;
+  /**
+   * The verified issuer. Absent means the configured one (`OIDC_ISSUER_URL`), as the real
+   * verifier accepts no other; a suite sets it only to model an identity that cannot be compared
+   * with another's (#188).
+   */
+  iss?: string;
   organizationId?: string;
   organizationIds?: string[];
   roles: string[];
@@ -60,6 +71,36 @@ export function actor(organizationId: string, roles: string[]): string {
     rastaUserId: `USR-APITEST-${ulid().slice(-8)}`,
     organizationId,
     organizationIds: [organizationId],
+    roles,
+    username: `api-test-${organizationId}`,
+  });
+}
+
+/**
+ * A person with the identity the suite chooses, acting for `organizationId` with `roles` and a
+ * member of every organization in `memberships` — for the separation-of-duties cases, where two
+ * tokens must be one person (same `sub`) or one token a member of both parties.
+ */
+export function person(
+  organizationId: string,
+  roles: string[],
+  options: {
+    sub?: string;
+    rastaUserId?: string | undefined;
+    iss?: string;
+    memberships?: string[];
+  } = {},
+): string {
+  return bearer({
+    sub: options.sub ?? `sub-${ulid()}`,
+    ...('rastaUserId' in options
+      ? options.rastaUserId === undefined
+        ? {}
+        : { rastaUserId: options.rastaUserId }
+      : { rastaUserId: `USR-APITEST-${ulid().slice(-8)}` }),
+    ...(options.iss === undefined ? {} : { iss: options.iss }),
+    organizationId,
+    organizationIds: [organizationId, ...(options.memberships ?? [])],
     roles,
     username: `api-test-${organizationId}`,
   });
@@ -120,7 +161,10 @@ export function internalToken(
   );
 }
 
-function applyEnvironment(): void {
+function applyEnvironment(overrides: Record<string, string>): () => void {
+  const wanted = { ...overrides };
+  const before = new Map(Object.keys(wanted).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, wanted);
   process.env.DATABASE_URL = databaseUrl();
   process.env.SERVICE_NAME ??= SERVICE_NAME;
   process.env.PORT ??= '3111';
@@ -132,14 +176,21 @@ function applyEnvironment(): void {
   // Nothing built here reaches the broker, so the app may be built without this service's
   // credential: the explicit opt-out, honoured only under NODE_ENV test (RUN-006).
   process.env.KAFKA_ALLOW_PLAINTEXT ??= 'true';
+  return () => {
+    for (const [name, value] of before) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
 }
 
 const inert = { start: () => undefined, stop: async () => undefined };
 
-export async function startApi(): Promise<ApiHarness> {
-  applyEnvironment();
+export async function startApi(env: Record<string, string> = {}): Promise<ApiHarness> {
+  const restoreEnvironment = applyEnvironment(env);
 
   const publisher = new InMemoryEventPublisher();
+  const hierarchy = new FakeHierarchy();
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(KafkaEventPublisher)
@@ -148,6 +199,17 @@ export async function startApi(): Promise<ApiHarness> {
     .useValue(inert)
     .overrideProvider(TenderAwardedConsumer)
     .useValue(inert)
+    // The move consumer and the sweeper behind it are proven in organization-moved.int-spec.ts,
+    // driven directly: booted here they would subscribe to a broker and sweep rows other suites
+    // assert on.
+    .overrideProvider(OrganizationMovedConsumer)
+    .useValue(inert)
+    .overrideProvider(PolicyReconciliationSweeper)
+    .useValue(inert)
+    // The HTTP client to organization-service is proven against its contract in
+    // organization-directory.int-spec.ts; here the hierarchy is given.
+    .overrideProvider(OrganizationDirectory)
+    .useValue(hierarchy)
     .overrideProvider(AUTH_OPTIONS)
     .useFactory({
       factory: (): AuthGuardOptions => ({
@@ -162,7 +224,7 @@ export async function startApi(): Promise<ApiHarness> {
             return {
               sub: claims.sub,
               rastaUserId: claims.rastaUserId,
-              issuer: process.env.OIDC_ISSUER_URL,
+              issuer: claims.iss ?? process.env.OIDC_ISSUER_URL,
               organizationId: claims.organizationId,
               ...projectedClaims(claims),
               roles: claims.roles,
@@ -188,8 +250,10 @@ export async function startApi(): Promise<ApiHarness> {
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    hierarchy,
     close: async () => {
       await app.close();
+      restoreEnvironment();
     },
   };
 }

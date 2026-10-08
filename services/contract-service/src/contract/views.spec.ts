@@ -24,6 +24,8 @@ function row(overrides: Partial<Contract> = {}): Contract {
     createdBy: 'service:contract-service',
     createdCorrelationId: 'COR_01',
     updatedAt: AT,
+    cancelReasonCode: null,
+    cancelNote: null,
     version: 1,
     ...overrides,
   };
@@ -52,6 +54,36 @@ describe('toContractView', () => {
     ]) {
       expect(view).not.toHaveProperty(hidden);
     }
+  });
+
+  it('shows when each side accepted and never who', () => {
+    const EMPLOYER_AT = new Date('2026-10-05T09:00:00.000Z');
+    const CONTRACTOR_AT = new Date('2026-10-05T10:00:00.000Z');
+    expect(toContractView(row())).toMatchObject({
+      employerSignedAt: null,
+      contractorSignedAt: null,
+    });
+    const view = toContractView(row(), [
+      { side: 'CONTRACTOR', signedAt: CONTRACTOR_AT },
+      { side: 'EMPLOYER', signedAt: EMPLOYER_AT },
+    ]);
+    expect(view).toMatchObject({
+      employerSignedAt: '2026-10-05T09:00:00.000Z',
+      contractorSignedAt: '2026-10-05T10:00:00.000Z',
+    });
+    expect(JSON.stringify(view)).not.toMatch(/signedBy|signer/i);
+  });
+
+  it('shows why a cancelled draft was cancelled', () => {
+    const view = toContractView(
+      row({ status: 'CANCELLED', cancelReasonCode: 'TERMS_NOT_AGREED', cancelNote: 'No deal' }),
+    );
+    expect(view).toMatchObject({
+      status: 'CANCELLED',
+      cancelReasonCode: 'TERMS_NOT_AGREED',
+      cancelNote: 'No deal',
+    });
+    expect(contractViewSchema.safeParse(view).success).toBe(true);
   });
 
   it('is exactly what the published schema accepts, and no more', () => {

@@ -51,6 +51,12 @@ export const organizationMovedPayload = z.object({
   previousPath: z.string().nullable(),
   newPath: z.string().nullable(),
   affectedCount: z.number().int(),
+  /**
+   * The hierarchy version of the moved organization and every descendant after this move,
+   * committed in the move's own transaction and above every earlier one. A reader that recorded a
+   * lower version read the tree before it (D-050).
+   */
+  hierarchyVersion: z.number().int().min(1),
   reason: z.string(),
 });
 
