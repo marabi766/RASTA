@@ -14,9 +14,24 @@ import { id, ownerDatabaseUrl, tenants } from './helpers';
  * fixture rows go there, and `SET LOCAL search_path` points the unqualified statement at the
  * copies. The transaction is rolled back. The statement is UNSCOPED (it rewrites every matching
  * row), so it must never run against public.asset on the shared dev database: that would lock and
- * rewrite every real commissioned asset until the rollback. The test therefore also refuses a
- * statement that schema-qualifies a table, which could escape the scratch schema.
+ * rewrite every real commissioned asset until the rollback. The executing test therefore checks the
+ * guard (`escapesTheScratchSchema`) on the statement immediately before running it, so a failing
+ * guard means the statement never runs; a separate test shows the guard does reject qualified SQL.
  */
+
+/**
+ * Whether a statement could reach a table outside the scratch schema: a relation after UPDATE /
+ * FROM / JOIN / INTO that carries a schema prefix ("public"."asset", public.asset), or the word
+ * `public` at all.
+ */
+function escapesTheScratchSchema(sql: string | undefined): boolean {
+  if (sql === undefined) return true;
+  return (
+    /\b(?:UPDATE|FROM|JOIN|INTO)\s+(?:ONLY\s+)?(?:"[^"]+"|\w+)\s*\./i.test(sql) ||
+    /\bpublic\b/i.test(sql)
+  );
+}
+
 describe('commissioned_for_organization_id backfill (20261007120000)', () => {
   const org = tenants();
   const migration = readFileSync(
@@ -46,11 +61,29 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
     await owner.onModuleDestroy();
   });
 
-  it('is unscoped and names its tables unqualified, so the scratch search_path decides what it touches', () => {
+  it('the guard rejects schema-qualified SQL, so it cannot pass vacuously', () => {
+    expect(escapesTheScratchSchema(undefined)).toBe(true);
+    for (const qualified of [
+      'UPDATE "asset" a SET x = 1 WHERE NOT EXISTS (SELECT 1 FROM public.asset_transfer t)',
+      'UPDATE "asset" a SET x = 1 FROM public.asset_transfer t',
+      'UPDATE "public"."asset" a SET x = 1',
+      'UPDATE "asset" a SET x = 1 FROM "public"."asset_transfer" t',
+      'UPDATE asset a SET x = 1 JOIN other.asset_transfer t ON true',
+      'INSERT INTO other.asset SELECT 1',
+      'UPDATE "asset" a SET x = (SELECT 1 FROM "asset_transfer" t WHERE t.n = public.f())',
+    ]) {
+      expect(escapesTheScratchSchema(qualified)).toBe(true);
+    }
+    expect(
+      escapesTheScratchSchema(
+        'UPDATE "asset" a SET x = 1 WHERE NOT EXISTS (SELECT 1 FROM "asset_transfer" t WHERE t.asset_id = a.id)',
+      ),
+    ).toBe(false);
+  });
+
+  it('the shipped statement is unscoped and names its tables unqualified, so the scratch search_path decides what it touches', () => {
     expect(backfill).toBeDefined();
-    // A relation after UPDATE / FROM / JOIN / INTO must not carry a schema prefix ("public"."asset").
-    expect(backfill).not.toMatch(/\b(?:UPDATE|FROM|JOIN|INTO)\s+(?:ONLY\s+)?(?:"[^"]+"|\w+)\s*\./i);
-    expect(backfill).not.toMatch(/\bpublic\b/i);
+    expect(escapesTheScratchSchema(backfill)).toBe(false);
   });
 
   it('gives a never-transferred commissioned row its owner; every other row stays NULL', async () => {
@@ -110,6 +143,9 @@ describe('commissioned_for_organization_id backfill (20261007120000)', () => {
         expect(before).toHaveLength(ids.length);
         expect(before.every((row) => row.c === null)).toBe(true);
 
+        // The guard, immediately before the statement runs: if it fails the statement is never
+        // executed (the throw rolls the transaction back).
+        expect(escapesTheScratchSchema(backfill)).toBe(false);
         // Only the scratch schema is on the path: the unqualified statement cannot reach public.
         await tx.$executeRawUnsafe(`SET LOCAL search_path = ${scratch}`);
         const updated = await tx.$executeRawUnsafe(backfill!);
