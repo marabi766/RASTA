@@ -556,16 +556,22 @@ export class AssetService {
    * needs none; after a transfer (A→B, A→B→A) the new owner commissions with its own documents (A's
    * retained rows are A's own, so they suffice when the asset is back with A).
    */
-  private async assertCommissioningDossier(id: string): Promise<void> {
+  private async assertCommissioningDossier(
+    id: string,
+    /** False when the current owner already commissioned the asset: only insurance is checked. */
+    options: { ownershipDocument: boolean } = { ownershipDocument: true },
+  ): Promise<void> {
     const [policy, ownershipDoc] = await Promise.all([
       this.findCountingPolicy(id),
-      this.repository.client.assetDocumentRef.findFirst({
-        where: {
-          assetId: id,
-          deletedAt: null,
-          kind: { in: ['OWNERSHIP_TITLE', 'REGISTRATION_CARD'] },
-        },
-      }),
+      options.ownershipDocument
+        ? this.repository.client.assetDocumentRef.findFirst({
+            where: {
+              assetId: id,
+              deletedAt: null,
+              kind: { in: ['OWNERSHIP_TITLE', 'REGISTRATION_CARD'] },
+            },
+          })
+        : Promise.resolve(true),
     ]);
 
     const missing: string[] = [];
@@ -598,12 +604,15 @@ export class AssetService {
     // Returning from OUT_OF_SERVICE is a way into service like any other: an asset the current owner
     // has not commissioned (one that came from a transfer and was withdrawn before it was ever
     // activated) goes through the same dossier check as `activate`.
-    // An asset commissioned for its CURRENT owner returns without a new dossier: a seeded active
-    // asset, or one a runbook repaired, has none to show. A transfer clears the record, so the new
-    // owner (and A in A→B→A) commissions with its own documents.
+    // Every return to service needs an insurance policy in force now: a policy that lapsed while
+    // the asset was withdrawn blocks it. The commissioning marker waives only the ownership
+    // document — a seeded active asset, or one a runbook repaired, has none to show. A transfer
+    // clears the marker, so the new owner (and A in A→B→A) commissions with its own documents.
     const returning = asset.status === 'OUT_OF_SERVICE' && dto.status === 'ACTIVE';
-    if (returning && asset.commissionedForOrganizationId !== asset.organizationId) {
-      await this.assertCommissioningDossier(id);
+    if (returning) {
+      await this.assertCommissioningDossier(id, {
+        ownershipDocument: asset.commissionedForOrganizationId !== asset.organizationId,
+      });
     }
 
     const write = (assertWithinDeadline: () => void = () => undefined) =>

@@ -376,6 +376,11 @@ describe('document references on an ownership transfer (Q-99)', () => {
         expect(await refsOf(created.id)).toEqual([]);
 
         expect((await withdraw(org.a, created.id)).status).toBe('OUT_OF_SERVICE');
+        // Insurance is checked on every return to service (round 7): without a policy in force the
+        // return is refused, and only the policy is named — the marker waives the ownership document.
+        const refused = await putBack(org.a, created.id).catch((error: unknown) => error);
+        expect(missingOf(refused)).toEqual(['an insurance policy currently in force']);
+        await record(org.a, created.id);
         expect((await putBack(org.a, created.id)).status).toBe('ACTIVE');
         expect(await commissionedFor(created.id)).toBe(org.a);
       });
@@ -451,6 +456,50 @@ describe('document references on an ownership transfer (Q-99)', () => {
       await withdraw(org.a, assetId);
       const refused = await putBack(org.a, assetId).catch((error: unknown) => error);
       expect(missingOf(refused)).toEqual(['an insurance policy currently in force']);
+    });
+
+    it('the commissioning marker waives only the ownership document: a policy that expired while the asset was withdrawn still blocks the return (#234 round 7)', async () => {
+      const created = await asActor(manager(org.a), () =>
+        assets.create({ name: 'لودر بیمهٔ منقضی', type: 'LOADER', specifications: {} } as never),
+      );
+      const assetId = created.id;
+      const documentId = id('DOC');
+      documents.ownedBy(documentId, org.a);
+      await asActor(manager(org.a), () =>
+        assets.attachDocument(assetId, { documentId, kind: 'OWNERSHIP_TITLE', title: TITLE_A }),
+      );
+      await record(org.a, assetId);
+      // Commissioned through `activate`, with a valid policy: the marker names the owner.
+      await asActor(manager(org.a), async () =>
+        assets.activate(assetId, { expectedVersion: await version(org.a, assetId) }),
+      );
+      expect(await commissionedFor(assetId)).toBe(org.a);
+
+      await withdraw(org.a, assetId);
+      await prisma.client.$executeRawUnsafe(
+        `UPDATE insurance_policy SET valid_from = now() - interval '20 days',
+                valid_to = now() - interval '1 day' WHERE asset_id = $1`,
+        assetId,
+      );
+
+      const refused = await putBack(org.a, assetId).catch((error: unknown) => error);
+      expect(refused).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        internalContext: expect.objectContaining({ rule: 'INCOMPLETE_DOSSIER' }),
+      });
+      // Only the policy is named: the ownership document is waived by the marker.
+      expect(missingOf(refused)).toEqual(['an insurance policy currently in force']);
+      expect((await asActor(manager(org.a), () => assets.get(assetId))).status).toBe(
+        'OUT_OF_SERVICE',
+      );
+
+      // Renewed: allowed, still with no ownership document check (it is deleted to show that).
+      await prisma.client.$executeRawUnsafe(
+        `DELETE FROM asset_document_ref WHERE asset_id = $1`,
+        assetId,
+      );
+      await record(org.a, assetId);
+      expect((await putBack(org.a, assetId)).status).toBe('ACTIVE');
     });
   });
 

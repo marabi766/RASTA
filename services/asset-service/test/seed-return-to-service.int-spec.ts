@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
+import { InsuranceService } from '../src/insurance/insurance.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { FakeDocuments, asActor, newPrisma } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
@@ -12,7 +13,9 @@ import { clearingOwners } from './transfer-clearance.fake';
  * a database the development bootstrap marked disposable (the seed refuses any other) — and the
  * seeded assets are then taken through OUT_OF_SERVICE → ACTIVE by the real service, and restored
  * to their seeded status by the service too (no raw status writes). Without `commissioned_for_organization_id`
- * on the seeded rows the return would demand a dossier the seed never gave them.
+ * on the seeded rows the return would demand a dossier the seed never gave them. Insurance is still
+ * checked on every return (round 7): a seeded asset the seed gave no policy in force is refused with
+ * only the policy named, and returns once one is recorded (removed again afterwards).
  */
 describe('a seeded commissioned asset returns to service (#234 round 3)', () => {
   const SERVICE_DIR = join(__dirname, '..');
@@ -26,6 +29,8 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
 
   let prisma: PrismaService;
   let assets: AssetService;
+  let insurance: InsuranceService;
+  const POLICY_PREFIX = 'POL-SEEDTEST-';
 
   const manager = (organizationId: string) => ({ organizationId, roles: ['FLEET_MANAGER'] });
   const version = async (organizationId: string, assetId: string) =>
@@ -39,6 +44,19 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
       } as never),
     );
 
+  const recordPolicy = (organizationId: string, assetId: string) =>
+    asActor(manager(organizationId), () =>
+      insurance.recordPolicy(assetId, {
+        policyNumber: `${POLICY_PREFIX}${assetId}`,
+        insurerName: 'بیمه نمونه',
+        coverage: 'THIRD_PARTY',
+        validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+        validTo: new Date(Date.now() + 300 * 86_400_000).toISOString(),
+      }),
+    );
+  const missingOf = (error: unknown) =>
+    (error as { internalContext?: { missing?: string[] } }).internalContext?.missing;
+
   beforeAll(async () => {
     jest.setTimeout(120_000);
     const seeded = spawnSync(process.execPath, ['-r', '@swc-node/register', 'prisma/seed.ts'], {
@@ -51,12 +69,9 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
 
     prisma = newPrisma();
     await prisma.onModuleInit();
-    assets = new AssetService(
-      new AssetRepository(prisma),
-      undefined,
-      clearingOwners(),
-      new FakeDocuments(),
-    );
+    const repository = new AssetRepository(prisma);
+    assets = new AssetService(repository, undefined, clearingOwners(), new FakeDocuments());
+    insurance = new InsuranceService(repository, assets, 30);
   }, 120_000);
 
   afterAll(async () => {
@@ -68,12 +83,20 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
       const status = async () =>
         (await asActor(manager(seeded.organizationId), () => assets.get(seeded.id))).status;
       if ((await status()) === 'OUT_OF_SERVICE') {
-        await changeStatus(seeded.organizationId, seeded.id, 'ACTIVE');
+        await changeStatus(seeded.organizationId, seeded.id, 'ACTIVE').catch(async () => {
+          await recordPolicy(seeded.organizationId, seeded.id);
+          await changeStatus(seeded.organizationId, seeded.id, 'ACTIVE');
+        });
       }
       if (seeded.status === 'IDLE' && (await status()) === 'ACTIVE') {
         await changeStatus(seeded.organizationId, seeded.id, 'IDLE');
       }
     }
+    // The policies this spec recorded for seeded assets that had none.
+    await prisma.client.$executeRawUnsafe(
+      `DELETE FROM insurance_policy WHERE policy_number LIKE $1`,
+      `${POLICY_PREFIX}%`,
+    );
     await prisma.onModuleDestroy();
   });
 
@@ -96,12 +119,23 @@ describe('a seeded commissioned asset returns to service (#234 round 3)', () => 
   });
 
   it.each(SEEDED)(
-    '$id ($status): OUT_OF_SERVICE and back to ACTIVE, with no document references and no dossier work',
+    '$id ($status): OUT_OF_SERVICE and back to ACTIVE, with no document references; only a missing policy can refuse it',
     async ({ id, organizationId }) => {
       expect((await changeStatus(organizationId, id, 'OUT_OF_SERVICE')).status).toBe(
         'OUT_OF_SERVICE',
       );
-      expect((await changeStatus(organizationId, id, 'ACTIVE')).status).toBe('ACTIVE');
+      const outcome = await changeStatus(organizationId, id, 'ACTIVE').catch(
+        (error: unknown) => error,
+      );
+      if (outcome instanceof Error) {
+        // The seed gave this asset no policy in force: that alone refuses it — the ownership
+        // document is waived by the marker.
+        expect(missingOf(outcome)).toEqual(['an insurance policy currently in force']);
+        await recordPolicy(organizationId, id);
+        expect((await changeStatus(organizationId, id, 'ACTIVE')).status).toBe('ACTIVE');
+      } else {
+        expect((outcome as { status: string }).status).toBe('ACTIVE');
+      }
     },
   );
 });
