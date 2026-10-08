@@ -22,6 +22,22 @@ export function databaseUrl(): string {
   return withUtcSession(url);
 }
 
+/**
+ * The owner of rasta_fleet (`DATABASE_URL_FLEET_MIGRATOR`), for the suite that
+ * runs a shipped migration file. **Required, with no fallback** to the runtime
+ * URL: since D-045 the runtime role owns nothing and can create nothing.
+ */
+export function ownerDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL_FLEET_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_FLEET_MIGRATOR is not set. Migration files run as the owner, never the ' +
+        'runtime role; see .env.migrator.example (docs/23 D-045).',
+    );
+  }
+  return withUtcSession(url);
+}
+
 export function brokers(): string[] | null {
   const raw = process.env.KAFKA_BROKERS;
   if (!raw) return null;

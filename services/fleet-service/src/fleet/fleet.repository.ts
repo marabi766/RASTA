@@ -9,6 +9,7 @@ import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
@@ -777,6 +778,47 @@ export class FleetRepository {
     );
   }
 
+  /**
+   * One keyset page of replica rows `insurance:clear-transferred` may clear, by
+   * id after `after`. Candidates only: {@link clearInsuranceCover} decides each
+   * under the asset's lock.
+   */
+  async listClearableInsuranceRefs(
+    options: ClearableInsuranceOptions & { after: string; limit: number },
+  ): Promise<string[]> {
+    const rows = await runUnscoped(
+      'operator command over the platform-wide replica; the organization filter is applied in the predicate',
+      () =>
+        this.client.$queryRaw<{ id: string }[]>`
+          SELECT r.id FROM asset_ref r
+           WHERE r.id > ${options.after} AND ${clearablePredicate(options)}
+           ORDER BY r.id
+           LIMIT ${options.limit}`,
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * Empties one replica row's insurance windows if it still qualifies. Under
+   * {@link lockAssetRef} in the caller's transaction, so a transfer or an event
+   * committed since the page was read is seen. Lapses, retained coverages and
+   * the generation are left as they are. Returns whether the row was cleared.
+   */
+  async clearInsuranceCover(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    options: ClearableInsuranceOptions,
+  ): Promise<boolean> {
+    const changed = await runUnscoped(
+      'operator command over the platform-wide replica; the organization filter is applied in the predicate',
+      () =>
+        tx.$executeRaw`
+          UPDATE asset_ref r SET insurance_cover = '{}'::jsonb, synced_at = now()
+           WHERE r.id = ${assetId} AND ${clearablePredicate(options)}`,
+    );
+    return changed === 1;
+  }
+
   async upsertAssetRef(
     tx: ExtendedPrismaClient,
     data: {
@@ -844,6 +886,33 @@ export class FleetRepository {
       throw error;
     }
   }
+}
+
+export interface ClearableInsuranceOptions {
+  /** Also the rows whose ownership generation is NULL (after a rollback of the generation migration). */
+  includeUnknownGeneration: boolean;
+  /** Only machines this organization owns **now**. */
+  organizationId?: string;
+}
+
+/**
+ * Which replica rows `insurance:clear-transferred` clears: those that have ever
+ * been transferred and still hold a window. A stated ownership generation above
+ * zero, a latest event that was a transfer, or a window revoked by one (all a
+ * transfer without a generation leaves), and optionally every row whose
+ * generation is unknown.
+ */
+function clearablePredicate(options: ClearableInsuranceOptions): Prisma.Sql {
+  return Prisma.sql`
+    r.insurance_cover <> '{}'::jsonb
+    AND (${options.organizationId ?? null}::text IS NULL OR r.organization_id = ${options.organizationId ?? null})
+    AND (
+      r.ownership_generation > 0
+      OR r.source_event = 'ASSET_TRANSFERRED'
+      OR EXISTS (SELECT 1 FROM availability_window w
+                  WHERE w.asset_id = r.id AND w.revoke_reason = 'ASSET_TRANSFERRED')
+      OR (${options.includeUnknownGeneration}::boolean AND r.ownership_generation IS NULL)
+    )`;
 }
 
 export function isUniqueViolation(error: unknown): boolean {

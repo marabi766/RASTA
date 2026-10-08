@@ -68,7 +68,12 @@ describe('a transfer ends the assignments still open on the machine', () => {
 
   // Tenant = the new owner, as asset-service stamps it; the consumer now
   // dead-letters anything else (review #127 #5).
-  const transfer = (assetId: string, from = org.a, to = org.b) =>
+  const transfer = (
+    assetId: string,
+    from = org.a,
+    to = org.b,
+    extra: Record<string, unknown> = {},
+  ) =>
     event('ASSET_TRANSFERRED', to, {
       assetId,
       fromOrganizationId: from,
@@ -76,6 +81,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
       reason: 'واگذاری',
       referenceNo: null,
       transferredAt: new Date().toISOString(),
+      ...extra,
     });
 
   async function machine(organizationId: string): Promise<string> {
@@ -244,9 +250,11 @@ describe('a transfer ends the assignments still open on the machine', () => {
       event(eventName, owner, { assetId, organizationId: owner, ...fields });
     const year = 365 * 86_400_000;
 
-    it("blocks and then clears the new owner's dispatch", async () => {
+    it("blocks and then clears the new owner's dispatch, for a coverage that follows the vehicle", async () => {
       const assetId = await machine(org.a);
-      await consumer.handle(transfer(assetId));
+      await consumer.handle(
+        transfer(assetId, org.a, org.b, { retainedCoverages: ['THIRD_PARTY'] }),
+      );
       await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
       const driverB = await driver(org.b);
 
@@ -276,6 +284,31 @@ describe('a transfer ends the assignments still open on the machine', () => {
       await expect(assign(org.b, assetId, driverB)).resolves.toMatchObject({
         assetId,
         organizationId: org.b,
+      });
+    });
+
+    it('ignores the previous owner’s renewal of a coverage that does not follow the vehicle, and keeps the lapse', async () => {
+      const assetId = await machine(org.a);
+      // A transfer that states no generation and retains nothing.
+      await consumer.handle(transfer(assetId));
+      await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
+      const driverB = await driver(org.b);
+      await consumer.handle(
+        insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
+      );
+
+      await consumer.handle(
+        insurance('INSURANCE_RECORDED', assetId, org.a, {
+          policyId: id('INS'),
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - 1000).toISOString(),
+          validTo: new Date(Date.now() + year).toISOString(),
+        }),
+      );
+
+      await expect(assign(org.b, assetId, driverB)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
       });
     });
 

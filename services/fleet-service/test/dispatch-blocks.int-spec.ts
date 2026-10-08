@@ -469,6 +469,49 @@ describe('dispatch blocks (L3-02)', () => {
       await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
     });
 
+    it('after a legacy transfer (no generation) ignores the previous owner’s delayed event, and takes the current owner’s re-projected one', async () => {
+      const assetId = await insuredByFirstOwner();
+      const driverId = await newOwnerDriver();
+      await transferTo(assetId, {});
+      expect((await repository.findAssetRefUnscoped(assetId))!.ownershipGeneration).toBeNull();
+
+      // Recorded by the first owner, consumed after the transfer: whatever it
+      // says about its generation, it is not the replica's owner's.
+      for (const generation of [undefined, 1, 5]) {
+        for (const coverage of COVERAGES) {
+          await consumer.handle(
+            event('INSURANCE_RECORDED', {
+              assetId,
+              policyId: id('INS'),
+              insurerName: 'بیمه ایران',
+              coverage,
+              validFrom: new Date(Date.now() - 1000).toISOString(),
+              validTo: new Date(Date.now() + year).toISOString(),
+              ...(generation === undefined ? {} : { ownershipGeneration: generation }),
+            }),
+          );
+        }
+      }
+      expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+      await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
+
+      // asset-service's re-projection says it again under the current owner.
+      for (const coverage of COVERAGES) {
+        await consumer.handle(
+          eventFor(org.b, 'INSURANCE_RECORDED', {
+            assetId,
+            policyId: id('INS'),
+            insurerName: 'بیمه ایران',
+            coverage,
+            validFrom: new Date(Date.now() - 1000).toISOString(),
+            validTo: new Date(Date.now() + year).toISOString(),
+            ownershipGeneration: 2,
+          }),
+        );
+      }
+      await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
     it('ignores a late INSURANCE_RECORDED of the previous owner after the transfer', async () => {
       const { assetId } = await fleet();
       const driverId = await newOwnerDriver();

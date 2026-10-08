@@ -50,19 +50,26 @@ const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
  * that is what every other event id is — the consumers key their idempotency
  * marker on the string and the outbox uses it as the primary key — and the
  * digest cannot collide with a random ULID in practice. Same policy, same
- * version, same id; an edited policy is a new fact and gets a new one.
+ * version, same id; an edited policy is a new fact and gets a new one. An
+ * operator-chosen `reissue` label is part of the digest: fleet deduplicates by
+ * id, so announcing again after it cleared its windows (runbook, "changing the
+ * following-coverage list") needs ids it has not seen. Without a label the id is
+ * the one earlier runs made.
  */
 export function reprojectEventId(
   policyId: string,
   updatedAt: Date,
   ownershipGeneration: number,
+  reissue?: string,
 ): string {
   // The asset's generation is part of the fact: the same policy announced after
   // a transfer carries another owner and generation, and a consumer that
   // deduplicates by id must see it as a new event, not as the earlier one.
   const digest = createHash('sha256')
     .update(
-      `asset-service/insurance-reproject/v2|${policyId}|${updatedAt.toISOString()}|${ownershipGeneration}`,
+      `asset-service/insurance-reproject/v2|${policyId}|${updatedAt.toISOString()}|${ownershipGeneration}${
+        reissue ? `|${reissue}` : ''
+      }`,
     )
     .digest();
   let bits = BigInt(`0x${digest.subarray(0, 16).toString('hex')}`);
@@ -83,6 +90,8 @@ export interface ReprojectOptions {
   readonly pageSize: number;
   /** The transfer rule (Q-66), as the service runs it. */
   readonly transferRule: TransferInsurancePolicy;
+  /** Makes this run's event ids new ones; see {@link reprojectEventId}. */
+  readonly reissue?: string;
 }
 
 export interface ReprojectCounts {
@@ -103,7 +112,7 @@ export interface ReprojectReport extends ReprojectCounts {
 
 export const MAX_PAGE_SIZE = 1000;
 
-interface PolicyRow {
+export interface PolicyRow {
   id: string;
   asset_id: string;
   owner_organization_id: string;
@@ -133,12 +142,15 @@ type PolicyOutcome = 'NOT_ELIGIBLE' | { result: 'EMITTED' | 'ALREADY'; organizat
  * transaction (stream sequence included) rolls back without touching the rest
  * of the run.
  */
-async function reprojectOne(
+export async function reprojectOne(
   repository: AssetRepository,
   candidate: PolicyRow,
   options: ReprojectOptions,
   now: Date,
 ): Promise<PolicyOutcome> {
+  // The owner this run read inside its transaction, kept for the conflict path:
+  // the transaction is gone by then, and the candidate's owner is from the page.
+  let owner: string | undefined;
   try {
     return await repository.transaction(async (tx): Promise<PolicyOutcome> => {
       await tx.$queryRaw`SELECT id FROM asset WHERE id = ${candidate.asset_id} FOR SHARE`;
@@ -161,7 +173,13 @@ async function reprojectOne(
       }
 
       const organizationId = row.owner_organization_id;
-      const eventId = reprojectEventId(row.id, row.updated_at, row.asset_generation);
+      owner = organizationId;
+      const eventId = reprojectEventId(
+        row.id,
+        row.updated_at,
+        row.asset_generation,
+        options.reissue,
+      );
       const exists = await tx.outboxMessage.findUnique({
         where: { id: eventId },
         select: { id: true },
@@ -192,8 +210,9 @@ async function reprojectOne(
     });
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
-    // The concurrent run's row won; its owner is the one this run's read saw.
-    return { result: 'ALREADY', organizationId: candidate.owner_organization_id };
+    // The concurrent run's row won. Attributed to the owner re-read under the
+    // lock, which is the one that row names, not the page's.
+    return { result: 'ALREADY', organizationId: owner ?? candidate.owner_organization_id };
   }
 }
 

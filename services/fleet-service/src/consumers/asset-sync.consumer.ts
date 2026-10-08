@@ -90,11 +90,13 @@ interface Projection {
     current: CurrentAssetRef | null,
     now: Date,
     occurredAt: Date,
+    eventOrganization: string | undefined,
   ) => AssetRefPatch;
 }
 
 /** The fields of the current row a projection may build on. */
 interface CurrentAssetRef {
+  organizationId: string;
   inspectionBlockedAt: Date | null;
   inspectionResolvedAt: Date | null;
   insuranceLapsedCoverages: string[];
@@ -222,7 +224,7 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     // policy's `validFrom`/`validTo` (asset-service `insuranceRecordedPayload`),
     // so the window is stored rather than assumed: a renewal that starts next
     // week answers the lapse from next week, not from now.
-    patch: (payload, current, now) => {
+    patch: (payload, current, now, _occurredAt, eventOrganization) => {
       const coverage = str(payload.coverage);
       const policyId = str(payload.policyId);
       const validFrom = str(payload.validFrom);
@@ -242,8 +244,9 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
         isStaleInsurance(
           generation,
           coverage,
-          current?.ownershipGeneration,
+          { generation: current?.ownershipGeneration, owner: current?.organizationId },
           current?.retainedCoverages ?? [],
+          eventOrganization,
         )
       ) {
         return {};
@@ -515,7 +518,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // transfer, is applied to the row as it now stands, under its current
         // owner: the policy is the vehicle's, not the organization's (docs/24
         // Q-66). The tenant below comes from the row, never from such an event.
-        let patch = projection.patch(payload, current, now, occurredAt);
+        let patch = projection.patch(payload, current, now, occurredAt, organizationId);
         const refresh = replayed
           ? await this.readAuthoritativeState(envelope, assetId, organizationId)
           : undefined;

@@ -9,7 +9,7 @@ import { MAX_PAGE_SIZE, reprojectInsurance } from './reproject.command';
 
 /**
  * `pnpm --filter @rasta/asset-service insurance:reproject [--dry-run]
- * [--organization <id>] [--page-size <n>]` (docs/runbooks/insurance-reprojection.md).
+ * [--organization <id>] [--page-size <n>] [--reissue <label>]` (docs/runbooks/insurance-reprojection.md).
  *
  * Built by hand rather than by booting the Nest application, for the reason
  * identity-service's projection CLI gives: the application starts the outbox
@@ -27,6 +27,7 @@ interface Args {
   dryRun: boolean;
   organizationId?: string;
   pageSize: number;
+  reissue?: string;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -36,10 +37,14 @@ function parseArgs(argv: readonly string[]): Args {
     if (flag === '--dry-run') args.dryRun = true;
     else if (flag === '--organization') args.organizationId = argv[++i];
     else if (flag === '--page-size') args.pageSize = Number(argv[++i]);
+    else if (flag === '--reissue') args.reissue = argv[++i];
     else throw new Error(`unknown argument ${String(flag)}`);
   }
   if (args.organizationId !== undefined && args.organizationId.length === 0) {
     throw new Error('--organization needs an organization id');
+  }
+  if (args.reissue !== undefined && !/^[A-Za-z0-9._-]{1,64}$/.test(args.reissue)) {
+    throw new Error('--reissue needs a label of 1 to 64 letters, digits, dot, dash or underscore');
   }
   if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > MAX_PAGE_SIZE) {
     throw new Error(`--page-size must be an integer from 1 to ${MAX_PAGE_SIZE}`);
@@ -66,6 +71,7 @@ async function main(): Promise<number> {
       pageSize: args.pageSize,
       transferRule: { coveragesFollowingVehicle: env.INSURANCE_COVERAGES_FOLLOWING_VEHICLE },
       ...(args.organizationId ? { organizationId: args.organizationId } : {}),
+      ...(args.reissue ? { reissue: args.reissue } : {}),
     });
     // Organization ids and counts only: no policy numbers, insurers or amounts (S-09).
     logger.info(

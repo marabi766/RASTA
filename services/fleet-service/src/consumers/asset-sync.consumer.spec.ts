@@ -633,15 +633,76 @@ describe('AssetSyncConsumer', () => {
         });
       });
 
-      it('is applied as before when the replica has seen no generation-bearing transfer', async () => {
-        const { consumer, recorded } = buildConsumer({
-          existing: { ...afterTransferMachine, ownershipGeneration: null, retainedCoverages: [] },
+      describe('when the replica does not know the generation (a legacy transfer, or a row the migration initialised)', () => {
+        const unknown = {
+          ...afterTransferMachine,
+          ownershipGeneration: null,
+          retainedCoverages: [],
+        };
+        // The previous owner's tenant, the owner now being ORG-DEH-0002.
+        const fromCurrentOwner = (coverage: string, generation?: number) => {
+          const event = recordedWith(coverage, generation);
+          return {
+            ...event,
+            tenantId: 'ORG-DEH-0002',
+            payload: {
+              ...(event.payload as Record<string, unknown>),
+              organizationId: 'ORG-DEH-0002',
+            },
+          };
+        };
+
+        it('ignores a delayed event of the previous owner, whatever it carries (fail closed)', async () => {
+          const { consumer, recorded } = buildConsumer({ existing: unknown });
+
+          await consumer.handle(recordedWith('COMPREHENSIVE'));
+          await consumer.handle({ ...recordedWith('COMPREHENSIVE', 9), eventId: 'EVT-LATE-2' });
+
+          expect(recorded.processed).toHaveLength(2);
+          for (const upsert of recorded.upserts)
+            expect(upsert).not.toHaveProperty('insuranceCover');
         });
 
-        await consumer.handle(recordedWith('COMPREHENSIVE'));
+        it('applies the current owner’s event, a re-projected one included, and restores the coverage', async () => {
+          const { consumer, recorded } = buildConsumer({ existing: unknown });
 
-        expect(recorded.upserts[0]!.insuranceCover).toMatchObject({
-          COMPREHENSIVE: [{ policyId: 'INS-LATE' }],
+          await consumer.handle(fromCurrentOwner('COMPREHENSIVE', 2));
+
+          expect(recorded.upserts[0]!.insuranceCover).toMatchObject({
+            COMPREHENSIVE: [{ policyId: 'INS-LATE', generation: 2 }],
+          });
+        });
+
+        it('applies the current owner’s event that states no generation', async () => {
+          const { consumer, recorded } = buildConsumer({ existing: unknown });
+
+          await consumer.handle(fromCurrentOwner('COMPREHENSIVE'));
+
+          expect(recorded.upserts[0]!.insuranceCover).toMatchObject({
+            COMPREHENSIVE: [{ policyId: 'INS-LATE' }],
+          });
+        });
+
+        it('still applies the previous owner’s event for a coverage that follows the vehicle', async () => {
+          const { consumer, recorded } = buildConsumer({
+            existing: { ...unknown, retainedCoverages: ['THIRD_PARTY'] },
+          });
+
+          await consumer.handle(recordedWith('THIRD_PARTY'));
+
+          expect(recorded.upserts[0]!.insuranceCover).toMatchObject({
+            THIRD_PARTY: [{ policyId: 'INS-LATE' }],
+          });
+        });
+
+        it('has no owner to disagree with on the first sighting of a machine', async () => {
+          const { consumer, recorded } = buildConsumer({ existing: null });
+
+          await consumer.handle(recordedWith('COMPREHENSIVE'));
+
+          expect(recorded.upserts[0]!.insuranceCover).toMatchObject({
+            COMPREHENSIVE: [{ policyId: 'INS-LATE' }],
+          });
         });
       });
     });
@@ -1152,7 +1213,14 @@ describe('AssetSyncConsumer', () => {
     // Insurance and asset events travel on different topics, so the inherited
     // policy's event can be consumed after the transfer, under the previous
     // owner's tenant. It applies to the machine, which now has a new owner.
-    const afterTransfer = { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0002' };
+    // THIRD_PARTY is the coverage the transfer let follow the vehicle: with the
+    // generation unknown, only a retained coverage of the previous owner applies.
+    const afterTransfer = {
+      id: 'AST-SEED-0001',
+      organizationId: 'ORG-DEH-0002',
+      ownershipGeneration: null,
+      retainedCoverages: ['THIRD_PARTY'],
+    };
     const fromPreviousOwner = (eventName: string, fields: Record<string, unknown>) =>
       envelope({
         eventName,
@@ -1654,7 +1722,12 @@ describe('AssetSyncConsumer', () => {
     it('still applies the previous owner’s insurance events to the vehicle after a transfer (docs/24 Q-66)', async () => {
       // The machine now belongs to B; A's policy follows the vehicle.
       const { consumer, recorded, repository } = buildConsumer({
-        existing: { ...ownedByA, organizationId: B },
+        existing: {
+          ...ownedByA,
+          organizationId: B,
+          ownershipGeneration: null,
+          retainedCoverages: ['THIRD_PARTY'],
+        },
       });
       transactionalLedger(repository);
 

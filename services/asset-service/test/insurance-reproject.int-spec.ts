@@ -4,7 +4,12 @@ import { AssetRepository } from '../src/asset/asset.repository';
 import { AssetService } from '../src/asset/asset.service';
 import { InsuranceService } from '../src/insurance/insurance.service';
 import { INSURANCE_COVERAGES } from '../src/insurance/ownership';
-import { reprojectEventId, reprojectInsurance } from '../src/insurance/reproject.command';
+import {
+  reprojectEventId,
+  reprojectInsurance,
+  reprojectOne,
+  type PolicyRow,
+} from '../src/insurance/reproject.command';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, newPrisma, ownerDatabaseUrl, tenants } from './helpers';
 import { clearingOwners } from './transfer-clearance.fake';
@@ -67,12 +72,20 @@ describe('insurance re-projection command (Q-101)', () => {
       )
     ).id;
 
-  const run = (options: { dryRun?: boolean; organizationId?: string; pageSize?: number } = {}) =>
+  const run = (
+    options: {
+      dryRun?: boolean;
+      organizationId?: string;
+      pageSize?: number;
+      reissue?: string;
+    } = {},
+  ) =>
     reprojectInsurance(repository, {
       dryRun: options.dryRun ?? false,
       organizationId: options.organizationId ?? org.a,
       pageSize: options.pageSize ?? 200,
       transferRule: rule,
+      ...(options.reissue ? { reissue: options.reissue } : {}),
     });
 
   /** The re-emitted events in the outbox, newest policy first not guaranteed. */
@@ -238,6 +251,44 @@ describe('insurance re-projection command (Q-101)', () => {
     expect(reprojectEventId('INS_1', at, 1)).not.toBe(reprojectEventId('INS_1', at, 0));
   });
 
+  it('announces everything again under new ids when asked to reissue, once per label', async () => {
+    const assetId = await machine(org.a);
+    const policyId = await record(org.a, assetId, 'LIABILITY', -1, 100);
+    const count = async () =>
+      Number(
+        (
+          await owner.client.$queryRawUnsafe<{ n: bigint }[]>(
+            `SELECT count(*) AS n FROM outbox_message
+              WHERE event_name = 'INSURANCE_RECORDED' AND payload->'payload'->>'policyId' = $1`,
+            policyId,
+          )
+        )[0]!.n,
+      );
+    expect(await count()).toBe(1); // the recording's own event
+    await run();
+    expect(await count()).toBe(2);
+    await run();
+    expect(await count()).toBe(2);
+
+    // Fleet deduplicates by id: after it cleared its windows the same ids would be dropped.
+    const reissued = await run({ reissue: 'following-list-2026-10' });
+    expect(reissued.emitted).toBeGreaterThanOrEqual(1);
+    expect(await count()).toBe(3);
+    const again = await run({ reissue: 'following-list-2026-10' });
+    expect(again.emitted).toBe(0);
+    expect(await count()).toBe(3);
+    await run({ reissue: 'following-list-2026-11' });
+    expect(await count()).toBe(4);
+  });
+
+  it('derives another id for a reissue label, and the same one without', () => {
+    const at = new Date('2026-10-08T12:00:00.000Z');
+    expect(reprojectEventId('INS_1', at, 1, 'a')).not.toBe(reprojectEventId('INS_1', at, 1));
+    expect(reprojectEventId('INS_1', at, 1, 'a')).not.toBe(reprojectEventId('INS_1', at, 1, 'b'));
+    expect(reprojectEventId('INS_1', at, 1, 'a')).toBe(reprojectEventId('INS_1', at, 1, 'a'));
+    expect(reprojectEventId('INS_1', at, 1, '')).toBe(reprojectEventId('INS_1', at, 1));
+  });
+
   it('stamps each event with the asset’s ownership generation', async () => {
     const assetId = await machine(org.a);
     const policyId = await record(org.a, assetId, 'LIABILITY', -1, 100);
@@ -356,6 +407,43 @@ describe('insurance re-projection command (Q-101)', () => {
       expect(emittedHere).toEqual(expect.arrayContaining([firstId, secondId]));
       expect(report.emitted + report.alreadyEmitted).toBeGreaterThanOrEqual(2);
       expect(report.alreadyEmitted).toBeGreaterThanOrEqual(1);
+    });
+
+    it('attributes an event a concurrent run committed first to the owner read under the lock, not the page’s', async () => {
+      const assetId = await machine(org.a);
+      const policyId = await record(org.a, assetId, 'THIRD_PARTY', -1, 100);
+      // The candidate as a page read before the transfer saw it: owned by org.a.
+      const [page] = await owner.client.$queryRawUnsafe<PolicyRow[]>(
+        `SELECT p.id, p.asset_id, a.organization_id AS owner_organization_id,
+                p.insurer_name, p.coverage::text AS coverage, p.valid_from, p.valid_to,
+                p.updated_at, p.ownership_generation AS policy_generation,
+                a.ownership_generation AS asset_generation
+           FROM insurance_policy p JOIN asset a ON a.id = p.asset_id WHERE p.id = $1`,
+        policyId,
+      );
+      expect(page!.owner_organization_id).toBe(org.a);
+      await transferAway(assetId);
+
+      // The other run commits this event, under the new owner, between the
+      // existence check and this run's insert.
+      const original = repository.enqueueEvent.bind(repository);
+      let raced = false;
+      jest.spyOn(repository, 'enqueueEvent').mockImplementation(async (tx, input) => {
+        if (!raced) {
+          raced = true;
+          await repository.transaction((other) => original(other, input));
+        }
+        return original(tx, input);
+      });
+
+      const outcome = await reprojectOne(
+        repository,
+        page!,
+        { dryRun: false, pageSize: 1, transferRule: rule },
+        new Date(),
+      );
+
+      expect(outcome).toEqual({ result: 'ALREADY', organizationId: org.b });
     });
 
     it('runs concurrently with itself without losing or duplicating an event', async () => {
