@@ -1,10 +1,15 @@
 import { withUtcSession } from '@rasta/config';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
+import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
 import { ContractRepository } from '../src/contract/contract.repository';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
+import { PolicyAccess } from '../src/policy/policy.access';
+import { PolicyRepository } from '../src/policy/policy.repository';
+import { PolicyService } from '../src/policy/policy.service';
 import { TenderAwardedConsumer } from '../src/events/tender-awarded.consumer';
 import type { AwardSource } from '../src/award/award-source.client';
 import type { AwardFact } from '../src/award/award-confirm';
@@ -167,10 +172,127 @@ export class FakeAwards implements AwardSource {
   }
 }
 
+/** The issuer the suites' people carry, so two of them compare as different people (#188). */
+export const TEST_ISSUER = 'http://test.invalid/realms/rasta';
+
+export const newUserId = (): string => `USR-ITEST-${ulid().slice(-10)}`;
+
+/** A request context for a person: a stable identity (issuer and subject) and a platform user id. */
+export function context(overrides: Partial<RequestContext>): RequestContext {
+  const userId = overrides.userId;
+  return {
+    requestId: ulid(),
+    correlationId: ulid(),
+    authType: 'USER',
+    roles: [],
+    startedAt: Date.now(),
+    ...(userId !== undefined && (overrides.authType ?? 'USER') === 'USER'
+      ? { issuer: TEST_ISSUER, subject: `sub-${userId}`, platformUserId: true }
+      : {}),
+    ...overrides,
+  } as RequestContext;
+}
+
+/** Runs `fn` as a user of `organizationId` with the given roles. */
+export function asUser<T>(
+  organizationId: string,
+  roles: string[],
+  fn: () => T,
+  userId = newUserId(),
+): T {
+  return runWithContext(
+    context({ organizationId, organizationIds: [organizationId], userId, roles }),
+    fn,
+  );
+}
+
+/** A union administrator acting for `organizationId`: the decided writer of its policies (Q-70 (7)). */
+export const asSetter = <T>(organizationId: string, fn: () => T): T =>
+  asUser(organizationId, ['UNION_ADMIN'], fn);
+
+/** The platform organization the suites' SYSTEM_ADMIN acts for. */
+export const PLATFORM_ORG = 'ORG-ITEST-PLATFORM';
+
+/** Runs `fn` as a platform administrator — a different person each call unless `userId` is given. */
+export const asPlatform = <T>(fn: () => T, userId = newUserId()): T =>
+  asUser(PLATFORM_ORG, ['SYSTEM_ADMIN'], fn, userId);
+
+/**
+ * organization-service's hierarchy, as these suites need it: an organization is within itself and
+ * within every ancestor registered with `adopt`. The contract this stands in for is proven for the
+ * HTTP client in `organization-directory.int-spec.ts`. `unavailable` makes every answer fail as an
+ * unreachable service would; `timedOut`, as a service that does not answer in time.
+ *
+ * By default **every** organization is treated as the suites' own union's child (`everyoneIsMine`),
+ * so a suite that does not care about the hierarchy can write a policy; one that does turns it off.
+ */
+export class FakeHierarchy {
+  private readonly parents = new Map<string, string>();
+  unavailable = false;
+  timedOut = false;
+  everyoneIsMine = true;
+  readonly asked: [string, string][] = [];
+
+  adopt(parent: string, child: string): void {
+    this.parents.set(child, parent);
+  }
+
+  /**
+   * organization-service's hierarchy version (D-050): 1 until an organization's ancestry changes,
+   * then the value a move stamped — one above every version there was, the same for the organizations
+   * the move touched.
+   */
+  private readonly versions = new Map<string, number>();
+
+  versionOf(organizationId: string): number {
+    return this.versions.get(organizationId) ?? 1;
+  }
+
+  /** A move: stamps one new, higher version on every organization named, and returns it. */
+  bump(...organizationIds: string[]): number {
+    const next = Math.max(1, ...this.versions.values()) + 1;
+    for (const id of organizationIds) this.versions.set(id, next);
+    return next;
+  }
+
+  async withinVersion(
+    scope: string,
+    organizationId: string,
+  ): Promise<{ hierarchyVersion: number } | null> {
+    const within = await this.isWithin(scope, organizationId);
+    return within ? { hierarchyVersion: this.versionOf(organizationId) } : null;
+  }
+
+  /** `withinVersion`, but a missing version is `null` rather than an error (the sweeper's question). */
+  async withinAnswer(
+    scope: string,
+    organizationId: string,
+  ): Promise<{ hierarchyVersion: number | null } | null> {
+    return this.withinVersion(scope, organizationId);
+  }
+
+  async isWithin(scope: string, organizationId: string): Promise<boolean> {
+    this.asked.push([scope, organizationId]);
+    if (this.unavailable) throw RastaError.upstreamUnavailable('organization-service');
+    if (this.timedOut) throw RastaError.upstreamTimeout('organization-service', 3000);
+    if (this.everyoneIsMine) return true;
+    for (
+      let current: string | undefined = organizationId;
+      current;
+      current = this.parents.get(current)
+    ) {
+      if (current === scope) return true;
+    }
+    return false;
+  }
+}
+
 export interface Wiring {
   prisma: PrismaService;
   env: ContractEnv;
   contracts: ContractRepository;
+  policies: PolicyService;
+  hierarchy: FakeHierarchy;
   awards: FakeAwards;
   /** The consumer's handler, without a broker: `consumer.handle(envelope)`. */
   consumer: TenderAwardedConsumer;
@@ -183,6 +305,15 @@ export function wire(env: ContractEnv = testEnv()): Wiring {
   const prisma = new PrismaService(databaseUrl());
   const contracts = new ContractRepository(prisma);
   const awards = new FakeAwards();
+  const hierarchy = new FakeHierarchy();
+  const policies = new PolicyService(
+    prisma,
+    new PolicyRepository(prisma),
+    new EventPublisher(env),
+    new PolicyAccess(env),
+    hierarchy as unknown as OrganizationDirectory,
+    env,
+  );
   const consumer = new TenderAwardedConsumer(
     () => {
       throw new Error('these suites drive handle(); nothing subscribes');
@@ -197,10 +328,144 @@ export function wire(env: ContractEnv = testEnv()): Wiring {
     prisma,
     env,
     contracts,
+    policies,
+    hierarchy,
     awards,
     consumer,
     close: () => prisma.onModuleDestroy(),
   };
+}
+
+/**
+ * A `contract.signature` policy in force for `organizationId`, written the decided way (Q-70 (7)): a
+ * union administrator writes and submits it, a different platform administrator approves it. One
+ * step per role, each a role of the organization itself. Returns the policy's id; replaces the one
+ * in force, as an approval does.
+ */
+export async function activateSigningPolicy(
+  w: Wiring,
+  organizationId: string,
+  roles: string[] = ['ORGANIZATION_ADMIN'],
+): Promise<string> {
+  const policy = await asSetter(organizationId, () =>
+    w.policies.create({
+      organizationId,
+      workflowKey: 'contract.signature',
+      label: 'Who signs for the employer',
+      rationale: 'Written by the integration suite to exercise the signature',
+      isSample: true,
+      steps: roles.map((role, index) => ({
+        authorityOrganizationId: organizationId,
+        authorityRole: role as 'ORGANIZATION_ADMIN',
+        authorityLabel: `Signer ${index + 1}`,
+      })),
+    }),
+  );
+  await asSetter(organizationId, () => w.policies.submit(policy.id, { expectedVersion: 1 }));
+  await asPlatform(() => w.policies.approve(policy.id, { expectedVersion: 2 }));
+  return policy.id;
+}
+
+/**
+ * A draft contract made the way the system makes one: the consumer, from an award its owner
+ * confirms. Returns the contract, and the two parties' organizations.
+ */
+export async function seedDraft(
+  w: Wiring,
+  organizations: string[],
+  overrides: Partial<AwardFixture> = {},
+  options: {
+    /**
+     * The `contract.signature` policy put in force for the employer: its roles, `true` for the
+     * default (`ORGANIZATION_ADMIN`), or `false` for none — an employer nobody may sign for yet.
+     */
+    signingPolicy?: boolean | string[];
+  } = {},
+): Promise<{
+  id: string;
+  employer: string;
+  contractor: string;
+  award: AwardFixture;
+}> {
+  const employer = newOrganizationId();
+  const contractor = overrides.winnerOrganizationId ?? newOrganizationId();
+  organizations.push(employer, contractor);
+  const policy = options.signingPolicy ?? true;
+  if (policy !== false) {
+    await activateSigningPolicy(w, employer, policy === true ? undefined : policy);
+  }
+  const award = newAward(employer, { winnerOrganizationId: contractor, ...overrides });
+  w.awards.serve(award);
+  await w.consumer.handle(tenderAwarded(award));
+  const row = await runUnscoped('the suite reads back the contract it just seeded', () =>
+    w.contracts.findByTender(employer, award.tenderId),
+  );
+  return { id: row!.id, employer, contractor, award };
+}
+
+/**
+ * The envelope `payload`s of the events a contract's organization has in the outbox, oldest first.
+ * Without a name: the contract's own (`CONTRACT_*`) — the approval policy's are `policyEventsOf`,
+ * because an employer's signing policy is written in the same organization's outbox.
+ */
+export async function eventsOf(
+  prisma: PrismaService,
+  organizationId: string,
+  eventName?: string,
+): Promise<{ eventName: string; payload: Record<string, unknown>; occurredAt: string }[]> {
+  const rows = await prisma.client.outboxMessage.findMany({
+    where: {
+      organizationId,
+      ...(eventName ? { eventName } : { NOT: { eventName: { startsWith: 'APPROVAL_POLICY_' } } }),
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return rows.map((row) => {
+    const envelope = row.payload as { payload: Record<string, unknown>; occurredAt: string };
+    return { eventName: row.eventName, payload: envelope.payload, occurredAt: envelope.occurredAt };
+  });
+}
+
+/** The approval policy events (`APPROVAL_POLICY_*`) of an organization, oldest first. */
+export async function policyEventsOf(
+  prisma: PrismaService,
+  organizationId: string,
+): Promise<{ eventName: string; payload: Record<string, unknown>; occurredAt: string }[]> {
+  const rows = await prisma.client.outboxMessage.findMany({
+    where: { organizationId, eventName: { startsWith: 'APPROVAL_POLICY_' } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return rows.map((row) => {
+    const envelope = row.payload as { payload: Record<string, unknown>; occurredAt: string };
+    return { eventName: row.eventName, payload: envelope.payload, occurredAt: envelope.occurredAt };
+  });
+}
+
+/**
+ * Waits until `count` database sessions are blocked on a lock — proof, not hope, that the
+ * commands started while a lock is held are really queued behind it (the #186 pattern). Bounded
+ * by wall clock, not by turns; suites run in band, so a waiting session is one the test started.
+ */
+export async function untilSessionsWaitOnALock(
+  prisma: PrismaService,
+  count: number,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const rows = await prisma.client.$queryRawUnsafe<{ waiting: bigint }[]>(
+      `SELECT count(*) AS waiting
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND pid <> pg_backend_pid()`,
+    );
+    if (Number(rows[0]?.waiting ?? 0) >= count) return;
+    if (Date.now() > deadline) {
+      throw new Error(`Fewer than ${count} sessions were waiting on a lock after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 /**
@@ -214,10 +479,54 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
+      // A review of a signature (D-050) names its signature and its policy, and is never deleted
+      // by the service either: it goes first of all.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "signature_authority_review" DISABLE TRIGGER "tg_signature_authority_review_immutable"',
+      );
+      await tx.signatureAuthorityReview.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "signature_authority_review" ENABLE TRIGGER "tg_signature_authority_review_immutable"',
+      );
+      // A signature is never deleted by the service either (`tg_contract_signature_immutable`);
+      // it goes first, because it references its contract.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "contract_signature" DISABLE TRIGGER "tg_contract_signature_immutable"',
+      );
+      await tx.contractSignature.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "contract_signature" ENABLE TRIGGER "tg_contract_signature_immutable"',
+      );
       await tx.$executeRawUnsafe('ALTER TABLE "contract" DISABLE TRIGGER "tg_contract_guard"');
       await tx.contract.deleteMany({ where: { organizationId: { in: organizationIds } } });
       await tx.$executeRawUnsafe('ALTER TABLE "contract" ENABLE TRIGGER "tg_contract_guard"');
+      // The policies (and their steps) the suite wrote for these organizations: written once and
+      // never deleted by the service, so they go the same way, after the signatures that name them.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "approval_policy_step" DISABLE TRIGGER "tg_approval_policy_step_immutable"',
+      );
+      await tx.approvalPolicyStep.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "approval_policy_step" ENABLE TRIGGER "tg_approval_policy_step_immutable"',
+      );
+      // The reconciliation queue is work, not a record, and names its policy by foreign key.
+      await tx.policyReconciliationTask.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "approval_policy" DISABLE TRIGGER "tg_approval_policy_guard"',
+      );
+      await tx.approvalPolicy.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "approval_policy" ENABLE TRIGGER "tg_approval_policy_guard"',
+      );
     });
+    // The idempotency keys are the calling organization's — either party's.
+    await owner.idempotencyKey.deleteMany({ where: { organizationId: { in: organizationIds } } });
     await owner.outboxMessage.deleteMany({ where: { organizationId: { in: organizationIds } } });
   } finally {
     await owner.$disconnect();

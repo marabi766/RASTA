@@ -3,7 +3,7 @@
   "paths": {
     "/v1/contracts": {
       "get": {
-        "description": "As the employer: the contracts of the organization the request acts for. As the winning contractor: the contracts awarded to it. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that writes one (ADR-068).",
+        "description": "As the employer: the contracts of the organization the request acts for. As the winning contractor: the contracts awarded to it. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that creates one (ADR-068).",
         "operationId": "ContractController_list_v1",
         "parameters": [
           {
@@ -77,6 +77,35 @@
                             "type": "string",
                             "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
                           },
+                          "employerSignedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When the employer accepted the draft (ISO 8601, UTC), or null."
+                          },
+                          "contractorSignedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When the winning contractor accepted the draft (ISO 8601, UTC), or null."
+                          },
+                          "authorityReviewRequired": {
+                            "type": "boolean",
+                            "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The contract stays as it is — a flag is never a revocation or a cancellation."
+                          },
+                          "authorityReviewReason": {
+                            "const": "AUTHORITY_CHANGED_DURING_SIGNING",
+                            "nullable": true,
+                            "description": "The closed reason of the flag, or null when there is none."
+                          },
+                          "cancelReasonCode": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Why the employer cancelled the draft: a code from the closed list, or null."
+                          },
+                          "cancelNote": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "The optional note that came with the cancellation."
+                          },
                           "awardedAt": {
                             "type": "string",
                             "description": "When the tender was awarded (ISO 8601, UTC)."
@@ -103,6 +132,12 @@
                           "contractorOrganizationId",
                           "amountMinor",
                           "status",
+                          "employerSignedAt",
+                          "contractorSignedAt",
+                          "authorityReviewRequired",
+                          "authorityReviewReason",
+                          "cancelReasonCode",
+                          "cancelNote",
                           "awardedAt",
                           "statusChangedAt",
                           "createdAt",
@@ -127,7 +162,7 @@
             }
           },
           "400": {
-            "description": "The query does not match the published schema. Unknown parameters are refused rather than ignored.",
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
             "content": {
               "application/json": {
                 "schema": {
@@ -147,7 +182,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.",
             "content": {
               "application/json": {
                 "schema": {
@@ -178,7 +213,7 @@
     },
     "/v1/contracts/{id}": {
       "get": {
-        "description": "The contract, with its amount in minor units as a decimal string. The amount is the winning bid’s price as construction-service states it; it is never on an event. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that writes one (ADR-068).",
+        "description": "The contract, with its amount in minor units as a decimal string, when each side accepted it (never by whom) and, once cancelled, why. The amount is the winning bid’s price as construction-service states it; it is never on an event. Closed by default (S-02). Read by the employer’s organization — the roles of CONTRACT_READER_ROLES (default ORGANIZATION_ADMIN), and SYSTEM_ADMIN acting for an organization it selected with X-Organization-Id — and by the winning contractor’s organization (the CONTRACTOR role, in its own organization). Any other organization, a contract that does not exist and a contract of someone else are all 404, never 403 (S-03). AUDITOR and a service token are refused. Contracts are created by the system when a tender is awarded; there is no route that creates one (ADR-068).",
         "operationId": "ContractController_get_v1",
         "parameters": [
           {
@@ -226,6 +261,35 @@
                       "type": "string",
                       "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
                     },
+                    "employerSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the employer accepted the draft (ISO 8601, UTC), or null."
+                    },
+                    "contractorSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the winning contractor accepted the draft (ISO 8601, UTC), or null."
+                    },
+                    "authorityReviewRequired": {
+                      "type": "boolean",
+                      "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The contract stays as it is — a flag is never a revocation or a cancellation."
+                    },
+                    "authorityReviewReason": {
+                      "const": "AUTHORITY_CHANGED_DURING_SIGNING",
+                      "nullable": true,
+                      "description": "The closed reason of the flag, or null when there is none."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Why the employer cancelled the draft: a code from the closed list, or null."
+                    },
+                    "cancelNote": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The optional note that came with the cancellation."
+                    },
                     "awardedAt": {
                       "type": "string",
                       "description": "When the tender was awarded (ISO 8601, UTC)."
@@ -252,6 +316,12 @@
                     "contractorOrganizationId",
                     "amountMinor",
                     "status",
+                    "employerSignedAt",
+                    "contractorSignedAt",
+                    "authorityReviewRequired",
+                    "authorityReviewReason",
+                    "cancelReasonCode",
+                    "cancelNote",
                     "awardedAt",
                     "statusChangedAt",
                     "createdAt",
@@ -274,7 +344,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.",
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.",
             "content": {
               "application/json": {
                 "schema": {
@@ -312,11 +382,2878 @@
           }
         ]
       }
+    },
+    "/v1/contracts/{id}/sign": {
+      "post": {
+        "description": "Each party accepts separately, and the contract becomes SIGNED only when both have: the second acceptance, in the same transaction, moves the contract (compare-and-set on its version) and publishes CONTRACT_SIGNED; every acceptance is an audit record (CONTRACT_SIGNATURE_RECORDED). It is a recorded acceptance of both parties — not a legal signature (Q-95 (1)). The employer’s side is signed by the roles the `contract.signature` approval policy in force for its organization names (/v1/approval-policies; the signature records the policy’s id and version): with none in force nobody signs for the employer, 422 `SIGNATURE_POLICY_REQUIRED`. The contractor’s side is signed by the CONTRACTOR role of its own organization. One person cannot sign for both sides — a caller who is a member of both organizations is refused (403 `MEMBER_OF_BOTH_PARTIES`) and so is one who already signed the other side (403 `SAME_PERSON_BOTH_SIDES`); two signers whose identities cannot be told apart are 422 `ACTOR_IDENTITY_UNKNOWN`. The same person signing the same side again changes nothing and answers with the contract as it is; another person for a side that has signed is 409 `SIDE_ALREADY_SIGNED`; a contract that is not a draft is 422 `CONTRACT_NOT_DRAFT`. `expectedVersion` is optional. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. A contract of another organization, or one that does not exist, is 404 — never 403 — and nothing is said of which roles the caller lacked. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ContractController_sign_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "tenderId": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "winningBidId": {
+                      "type": "string"
+                    },
+                    "contractorOrganizationId": {
+                      "type": "string",
+                      "description": "The winning contractor."
+                    },
+                    "amountMinor": {
+                      "type": "string",
+                      "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
+                    },
+                    "employerSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the employer accepted the draft (ISO 8601, UTC), or null."
+                    },
+                    "contractorSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the winning contractor accepted the draft (ISO 8601, UTC), or null."
+                    },
+                    "authorityReviewRequired": {
+                      "type": "boolean",
+                      "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The contract stays as it is — a flag is never a revocation or a cancellation."
+                    },
+                    "authorityReviewReason": {
+                      "const": "AUTHORITY_CHANGED_DURING_SIGNING",
+                      "nullable": true,
+                      "description": "The closed reason of the flag, or null when there is none."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Why the employer cancelled the draft: a code from the closed list, or null."
+                    },
+                    "cancelNote": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The optional note that came with the cancellation."
+                    },
+                    "awardedAt": {
+                      "type": "string",
+                      "description": "When the tender was awarded (ISO 8601, UTC)."
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "tenderId",
+                    "projectId",
+                    "winningBidId",
+                    "contractorOrganizationId",
+                    "amountMinor",
+                    "status",
+                    "employerSignedAt",
+                    "contractorSignedAt",
+                    "authorityReviewRequired",
+                    "authorityReviewReason",
+                    "cancelReasonCode",
+                    "cancelNote",
+                    "awardedAt",
+                    "statusChangedAt",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides. When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: POLICY_AUTHOR_NOT_GOVERNING, MEMBER_OF_BOTH_PARTIES, SAME_PERSON_BOTH_SIDES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "signature"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "POLICY_AUTHOR_NOT_GOVERNING",
+                              "MEMBER_OF_BOTH_PARTIES",
+                              "SAME_PERSON_BOTH_SIDES"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign: another person for a side that has already signed (SIDE_ALREADY_SIGNED); on either command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIDE_ALREADY_SIGNED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "signature"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["SIDE_ALREADY_SIGNED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (signature: SIGNATURE_POLICY_REQUIRED, CONTRACT_NOT_DRAFT, ACTOR_IDENTITY_UNKNOWN)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "signature"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "SIGNATURE_POLICY_REQUIRED",
+                              "CONTRACT_NOT_DRAFT",
+                              "ACTOR_IDENTITY_UNKNOWN"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Accept the draft contract for the side the caller acts for (DRAFT → SIGNED)",
+        "tags": ["contracts"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise). A draft’s version moves only with its status: the terms it is signed on never change, and a signature does not move it."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/contracts/{id}/cancel": {
+      "post": {
+        "description": "The employer ends a draft, for a `reasonCode` from the closed list CONTRACT_CANCEL_REASON_CODES names (422 `CANCEL_REASON_NOT_ALLOWED` otherwise) and an optional bounded note without bidirectional control characters; CONTRACT_CANCELLED carries the code, never the note. The roles are CONTRACT_CANCEL_ROLES (default ORGANIZATION_ADMIN); the contractor is told 403. Only a draft is cancelled — a SIGNED contract is ended by no route (422 `CONTRACT_NOT_DRAFT`; termination is a legal decision the platform does not make, Q-95 (4)) — and, by default, not a draft one side has already signed (422 `SIGNATURE_RECORDED`, unless CONTRACT_CANCEL_AFTER_SIGNATURE is set). `expectedVersion` is optional. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id (403 otherwise); the platform administrator, the oversight role and a service token are refused. A contract of another organization, or one that does not exist, is 404 — never 403 — and nothing is said of which roles the caller lacked. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ContractController_cancel_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The employer: the tender’s owner and the contract’s tenant."
+                    },
+                    "tenderId": {
+                      "type": "string"
+                    },
+                    "projectId": {
+                      "type": "string"
+                    },
+                    "winningBidId": {
+                      "type": "string"
+                    },
+                    "contractorOrganizationId": {
+                      "type": "string",
+                      "description": "The winning contractor."
+                    },
+                    "amountMinor": {
+                      "type": "string",
+                      "description": "The contract amount in minor units (rials), a decimal string; never a float. It is the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5))."
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["DRAFT", "SIGNED", "COMPLETED", "SETTLED", "CANCELLED"]
+                    },
+                    "employerSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the employer accepted the draft (ISO 8601, UTC), or null."
+                    },
+                    "contractorSignedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the winning contractor accepted the draft (ISO 8601, UTC), or null."
+                    },
+                    "authorityReviewRequired": {
+                      "type": "boolean",
+                      "description": "True when the employer’s signature is flagged for review: an organization move that stranded the signing policy landed while it was being made (D-050). The contract stays as it is — a flag is never a revocation or a cancellation."
+                    },
+                    "authorityReviewReason": {
+                      "const": "AUTHORITY_CHANGED_DURING_SIGNING",
+                      "nullable": true,
+                      "description": "The closed reason of the flag, or null when there is none."
+                    },
+                    "cancelReasonCode": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Why the employer cancelled the draft: a code from the closed list, or null."
+                    },
+                    "cancelNote": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The optional note that came with the cancellation."
+                    },
+                    "awardedAt": {
+                      "type": "string",
+                      "description": "When the tender was awarded (ISO 8601, UTC)."
+                    },
+                    "statusChangedAt": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "tenderId",
+                    "projectId",
+                    "winningBidId",
+                    "contractorOrganizationId",
+                    "amountMinor",
+                    "status",
+                    "employerSignedAt",
+                    "contractorSignedAt",
+                    "authorityReviewRequired",
+                    "authorityReviewReason",
+                    "cancelReasonCode",
+                    "cancelNote",
+                    "awardedAt",
+                    "statusChangedAt",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "On sign: another person for a side that has already signed (SIDE_ALREADY_SIGNED); on either command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (cancellation: CANCEL_REASON_NOT_ALLOWED, CONTRACT_NOT_DRAFT, SIGNATURE_RECORDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "cancellation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "CANCEL_REASON_NOT_ALLOWED",
+                              "CONTRACT_NOT_DRAFT",
+                              "SIGNATURE_RECORDED"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Cancel a draft contract (DRAFT → CANCELLED), employer only",
+        "tags": ["contracts"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reasonCode": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+                    "description": "One of the reasons CONTRACT_CANCEL_REASON_CODES names (the closed list is the client’s; an unlisted code is 422 CANCEL_REASON_NOT_ALLOWED)."
+                  },
+                  "note": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 1,
+                    "maxLength": 1000,
+                    "description": "Optional free text, trimmed, up to 1000 characters, without bidirectional control characters. Read by the two parties; never on an event."
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise). A draft’s version moves only with its status: the terms it is signed on never change, and a signature does not move it."
+                  }
+                },
+                "required": ["reasonCode"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-policies": {
+      "post": {
+        "description": "For `contract.signature`, each step names a role of the governed organization itself that may accept a contract for it (alternatives: any one of them may sign); another organization’s role is 422 `AUTHORITY_NOT_GOVERNED_ORGANIZATION`. The authority is never the oversight role or the platform operator. A DRAFT governs nothing until a platform administrator approves it. Requires an Idempotency-Key. Q-70 (7), decided 2026-09-26: a UNION_ADMIN writes for its own organization or one beneath it (confirmed with organization-service; an unconfirmable answer refuses, 503), a SYSTEM_ADMIN for any existing organization. An ORGANIZATION_ADMIN never writes its own policy (403). The platform stores the authority it is told and creates none (ADR-023).",
+        "operationId": "PolicyController_create_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["contract.signature"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED",
+                        "SUSPENDED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed). When refused for a closed reason, `details` names it: one entry, `path` the area (signature, cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. A refusal without a closed reason (a role the configuration does not grant) carries no `details`. (policy: AUTHORITY_NOT_GOVERNED_ORGANIZATION)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "policy"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["AUTHORITY_NOT_GOVERNED_ORGANIZATION"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "organization-service could not confirm the hierarchy (UPSTREAM_UNAVAILABLE): the write is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Write an approval policy version (DRAFT) for an organization",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "organizationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "workflowKey": {
+                    "type": "string",
+                    "enum": ["contract.signature"]
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 200
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 2000
+                  },
+                  "isSample": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "authorityOrganizationId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 64
+                        },
+                        "authorityRole": {
+                          "type": "string",
+                          "enum": [
+                            "UNION_ADMIN",
+                            "ORGANIZATION_ADMIN",
+                            "FLEET_MANAGER",
+                            "DRIVER",
+                            "OPERATOR",
+                            "PROCUREMENT_USER",
+                            "SUPPLIER",
+                            "WORKSHOP",
+                            "CONTRACTOR"
+                          ]
+                        },
+                        "authorityLabel": {
+                          "type": "string",
+                          "minLength": 2,
+                          "maxLength": 200
+                        }
+                      },
+                      "required": ["authorityOrganizationId", "authorityRole", "authorityLabel"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 20
+                  }
+                },
+                "required": ["organizationId", "workflowKey", "label", "rationale", "steps"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "PolicyController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "workflowKey",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["contract.signature"]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string"
+                          },
+                          "authorOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorRole": {
+                            "type": "string",
+                            "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                          },
+                          "workflowKey": {
+                            "type": "string",
+                            "enum": ["contract.signature"]
+                          },
+                          "policyVersion": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "DRAFT",
+                              "PENDING_PLATFORM_APPROVAL",
+                              "ACTIVE",
+                              "REJECTED",
+                              "RETIRED",
+                              "SUSPENDED"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "type": "string"
+                          },
+                          "isSample": {
+                            "type": "boolean"
+                          },
+                          "steps": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "stepOrder": {
+                                  "type": "integer"
+                                },
+                                "authorityOrganizationId": {
+                                  "type": "string"
+                                },
+                                "authorityRole": {
+                                  "type": "string"
+                                },
+                                "authorityLabel": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "stepOrder",
+                                "authorityOrganizationId",
+                                "authorityRole",
+                                "authorityLabel"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "submittedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "submittedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "activatedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "activatedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectionReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "retiredAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "retiredBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "authorOrganizationId",
+                          "authorRole",
+                          "workflowKey",
+                          "policyVersion",
+                          "status",
+                          "label",
+                          "rationale",
+                          "isSample",
+                          "steps",
+                          "createdAt",
+                          "createdBy",
+                          "submittedAt",
+                          "submittedBy",
+                          "activatedAt",
+                          "activatedBy",
+                          "rejectedAt",
+                          "rejectedBy",
+                          "rejectionReason",
+                          "retiredAt",
+                          "retiredBy",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the policies governing, or written by, the organization the request acts for",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/approval-policies/pending-platform-approval": {
+      "get": {
+        "description": "SYSTEM_ADMIN only.",
+        "operationId": "PolicyController_platformQueue_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "workflowKey",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["contract.signature"]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "DRAFT",
+                "PENDING_PLATFORM_APPROVAL",
+                "ACTIVE",
+                "REJECTED",
+                "RETIRED",
+                "SUSPENDED"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string"
+                          },
+                          "authorOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorRole": {
+                            "type": "string",
+                            "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                          },
+                          "workflowKey": {
+                            "type": "string",
+                            "enum": ["contract.signature"]
+                          },
+                          "policyVersion": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "DRAFT",
+                              "PENDING_PLATFORM_APPROVAL",
+                              "ACTIVE",
+                              "REJECTED",
+                              "RETIRED",
+                              "SUSPENDED"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "type": "string"
+                          },
+                          "isSample": {
+                            "type": "boolean"
+                          },
+                          "steps": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "stepOrder": {
+                                  "type": "integer"
+                                },
+                                "authorityOrganizationId": {
+                                  "type": "string"
+                                },
+                                "authorityRole": {
+                                  "type": "string"
+                                },
+                                "authorityLabel": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "stepOrder",
+                                "authorityOrganizationId",
+                                "authorityRole",
+                                "authorityLabel"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "submittedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "submittedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "activatedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "activatedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectedBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "rejectionReason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "retiredAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "retiredBy": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "authorOrganizationId",
+                          "authorRole",
+                          "workflowKey",
+                          "policyVersion",
+                          "status",
+                          "label",
+                          "rationale",
+                          "isSample",
+                          "steps",
+                          "createdAt",
+                          "createdBy",
+                          "submittedAt",
+                          "submittedBy",
+                          "activatedAt",
+                          "activatedBy",
+                          "rejectedAt",
+                          "rejectedBy",
+                          "rejectionReason",
+                          "retiredAt",
+                          "retiredBy",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The platform administrator's queue: every organization's policies awaiting approval",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/approval-policies/{id}": {
+      "get": {
+        "description": "Visible to its author organization, to the governed organization's contract readers and to a platform administrator; anyone else gets 404.",
+        "operationId": "PolicyController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["contract.signature"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED",
+                        "SUSPENDED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one approval policy with its steps",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/approval-policies/{id}/submit": {
+      "post": {
+        "description": "By the organization that wrote it. The hierarchy is confirmed again with organization-service.",
+        "operationId": "PolicyController_submit_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["contract.signature"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED",
+                        "SUSPENDED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "organization-service could not confirm the hierarchy (UPSTREAM_UNAVAILABLE): the write is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Send a DRAFT policy for platform approval",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-policies/{id}/approve": {
+      "post": {
+        "description": "Retires the policy in force for the same organization and workflow in the same transaction. Signatures already recorded keep the policy they were made under. SYSTEM_ADMIN only, for any organization. With CONTRACT_POLICY_FOUR_EYES (default on) the approver must be neither the author nor the submitter (403).",
+        "operationId": "PolicyController_approve_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["contract.signature"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED",
+                        "SUSPENDED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "organization-service could not confirm the hierarchy (UPSTREAM_UNAVAILABLE): the write is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Approve a pending policy: it comes into force",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-policies/{id}/reject": {
+      "post": {
+        "description": "A rejected policy never governs anything. The reason stays with the policy and is not published on the event. SYSTEM_ADMIN only.",
+        "operationId": "PolicyController_reject_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["contract.signature"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED",
+                        "SUSPENDED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Reject a pending policy, with a reason",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 500
+                  }
+                },
+                "required": ["expectedVersion", "reason"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-policies/{id}/retire": {
+      "post": {
+        "description": "By its author organization or a platform administrator. From then on the employer’s side of its contracts cannot be signed (422 SIGNATURE_POLICY_REQUIRED): no policy never means \"anyone may sign\".",
+        "operationId": "PolicyController_retire_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string"
+                    },
+                    "authorOrganizationId": {
+                      "type": "string"
+                    },
+                    "authorRole": {
+                      "type": "string",
+                      "enum": ["UNION_ADMIN", "SYSTEM_ADMIN"]
+                    },
+                    "workflowKey": {
+                      "type": "string",
+                      "enum": ["contract.signature"]
+                    },
+                    "policyVersion": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_PLATFORM_APPROVAL",
+                        "ACTIVE",
+                        "REJECTED",
+                        "RETIRED",
+                        "SUSPENDED"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "rationale": {
+                      "type": "string"
+                    },
+                    "isSample": {
+                      "type": "boolean"
+                    },
+                    "steps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "stepOrder": {
+                            "type": "integer"
+                          },
+                          "authorityOrganizationId": {
+                            "type": "string"
+                          },
+                          "authorityRole": {
+                            "type": "string"
+                          },
+                          "authorityLabel": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "stepOrder",
+                          "authorityOrganizationId",
+                          "authorityRole",
+                          "authorityLabel"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "submittedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "submittedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "activatedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectedBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "rejectionReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "retiredBy": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "authorOrganizationId",
+                    "authorRole",
+                    "workflowKey",
+                    "policyVersion",
+                    "status",
+                    "label",
+                    "rationale",
+                    "isSample",
+                    "steps",
+                    "createdAt",
+                    "createdBy",
+                    "submittedAt",
+                    "submittedBy",
+                    "activatedAt",
+                    "activatedBy",
+                    "rejectedAt",
+                    "rejectedBy",
+                    "rejectionReason",
+                    "retiredAt",
+                    "retiredBy",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Take an ACTIVE policy out of force with no replacement",
+        "tags": ["approval-policies"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                  }
+                },
+                "required": ["expectedVersion"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
     }
   },
   "info": {
     "title": "Rasta — Contract Service",
-    "description": "The contract boundary (CON-003, ADR-068). This release offers reading the draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Amounts are decimal strings of minor units (rials). Amendments, milestones, statements with their separate technical and financial approvals, and the settlement boundary with economic-service follow (ADR-068 § 9); no money is ever held here.",
+    "description": "The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: the system makes it when construction-service publishes TENDER_AWARDED, after reading the award — and its amount, which is on no event — from construction-service itself (ADR-061 § 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its two parties only: the employer’s organization and the winning contractor’s; anyone else gets 404. Each party signs separately — a recorded acceptance, not a legal signature (Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft for a closed reason. Who may sign for the employer is the `contract.signature` approval policy of its own organization (/v1/approval-policies): written by a union or the platform, put in force by a platform administrator who is not its author, and never an environment setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). Amendments, milestones, statements with their separate technical and financial approvals, and the settlement boundary with economic-service follow (ADR-068 § 9); no money is ever held here.",
     "version": "0.1.0",
     "contact": {}
   },

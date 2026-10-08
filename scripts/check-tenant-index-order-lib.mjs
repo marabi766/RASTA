@@ -466,6 +466,10 @@ export const TABLE_EXEMPTIONS = {
     policy_reconciliation_task:
       'a work queue the reconciliation sweeper drains across tenants (D-041): claimed by next_attempt_at for every tenant at once (PolicyReconciliationRepository.claimDue, runUnscoped, ix_policy_reconciliation_due), counted across tenants for its gauge (backlog), coalesced by policy_id, whose ids are unique (enqueue, ux_policy_reconciliation_open); every write to one task names its primary key id with organization_id beside it (complete, release, retryLater), so a leading organization_id would narrow nothing',
   },
+  contract: {
+    policy_reconciliation_task:
+      "a work queue the reconciliation sweeper drains across tenants (D-041), construction-service's design for the signing policies of this service (#231 r2): claimed by next_attempt_at for every tenant at once (PolicyReconciliationRepository.claimDue, runUnscoped, ix_policy_reconciliation_due), counted across tenants for its gauge (backlog), coalesced by policy_id, whose ids are unique (enqueue, ux_policy_reconciliation_open); every write to one task names its primary key id with organization_id beside it (complete, release, retryLater), so a leading organization_id would narrow nothing",
+  },
   supplier: {
     supplier_capability: `a child of one supplier, and a supplier is one organization (supplier.organization_id is unique): read only by its supplier id, as the capabilities relation of SUPPLIER_INCLUDE and as the directory's capability filter (SupplierRepository.searchDirectory, runUnscoped), both served by ux_supplier_capability; ${PARENT_LOAD}`,
     qualification_evidence: `a child of one qualification, read only by its qualification id as the evidence relation (SUPPLIER_INCLUDE, SupplierRepository.findQualification and listForReview), served by ux_qualification_evidence_document; ${PARENT_LOAD}`,

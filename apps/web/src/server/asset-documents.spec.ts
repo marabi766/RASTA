@@ -6,6 +6,7 @@ import {
   FILE_FIELD,
   type DocumentKind,
 } from '@/lib/asset-document-fields';
+import { withForgedMac } from '@/test/forged-token';
 
 import {
   DOCUMENT_CLASS_BY_KIND,
@@ -233,7 +234,7 @@ describe('the tokens a form carries', () => {
     );
     expect(openAssetDocumentBaseline({ ...SESSION, subject: 'someone-else' }, token)).toBeNull();
     expect(openAssetDocumentBaseline({ ...SESSION, csrfToken: 'earlier-login' }, token)).toBeNull();
-    expect(openAssetDocumentBaseline(SESSION, `${token.slice(0, -2)}AA`)).toBeNull();
+    expect(openAssetDocumentBaseline(SESSION, withForgedMac(token))).toBeNull();
     expect(openAssetDocumentBaseline(SESSION, null)).toBeNull();
   });
 

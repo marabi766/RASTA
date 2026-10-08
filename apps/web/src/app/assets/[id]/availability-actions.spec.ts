@@ -7,6 +7,7 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
+import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_AVAILABILITY_FORM } from './availability-form-state';
 
@@ -213,7 +214,7 @@ describe.each(CASES)('$name', (testCase) => {
       for (const baseline of [
         null,
         'chosen-by-the-client',
-        `${genuine.slice(0, -2)}AA`,
+        withForgedMac(genuine),
         baselineFor(testCase, ASSET_ID, WINDOW_ID, { ...SESSION, subject: 'someone-else' }),
         baselineFor(testCase, ASSET_ID, WINDOW_ID, {
           ...SESSION,

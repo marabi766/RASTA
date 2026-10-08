@@ -24,8 +24,13 @@ import {
   type UpdateOrganizationDto,
 } from './dto';
 
-/** The one service that may ask `GET /v1/organizations/:id` (Q-70 (7)). */
+/** A service that may ask `GET /v1/organizations/:id` (Q-70 (7)). */
 export const CONSTRUCTION_SERVICE = 'construction-service';
+/**
+ * The second: contract-service confirms the union hierarchy when it writes the signing policy of
+ * an employer, with the same question and the same answer (ADR-068 § 5).
+ */
+export const CONTRACT_SERVICE = 'contract-service';
 
 const subtreeQuerySchema = z
   .object({ maxDepth: z.coerce.number().int().min(1).max(10).optional() })
@@ -59,20 +64,21 @@ export class OrganizationController {
   }
 
   /**
-   * One organization, for a person; for construction-service, only a yes.
+   * One organization, for a person; for construction-service and
+   * contract-service, only a yes.
    *
-   * construction-service asks one question here (Q-70 (7), decided
-   * 2026-09-26): is this organization the one its service token is signed
-   * for, or beneath it? It calls with an `X-Internal-Token` signed for the
-   * union's organization, and gets `{ id }` or 404 — never the organization's
-   * record, locations or contacts. A person's request is unchanged.
+   * Each asks one question here (Q-70 (7), decided 2026-09-26): is this
+   * organization the one its service token is signed for, or beneath it? It
+   * calls with an `X-Internal-Token` signed for the union's organization, and
+   * gets `{ id }` or 404 — never the organization's record, locations or
+   * contacts. A person's request is unchanged.
    */
   @Get(':id')
-  @AllowService(CONSTRUCTION_SERVICE)
+  @AllowService(CONSTRUCTION_SERVICE, CONTRACT_SERVICE)
   @ApiOperation({
     summary: 'Get one organization with locations and contacts',
     description:
-      'Service callers (construction-service only) receive `{ id }` when the organization is ' +
+      'Service callers (construction-service and contract-service only) receive `{ id }` when the organization is ' +
       'the one their token is signed for or beneath it, and 404 otherwise.',
   })
   get(@Param('id') id: string) {

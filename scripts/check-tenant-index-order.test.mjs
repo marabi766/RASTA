@@ -490,6 +490,7 @@ test('asset-service: every tenant table already has an index leading with organi
 // each is load-bearing; construction's was classified in #208 (review round 2).
 const TABLES_CLASSIFIED = {
   construction: ['policy_reconciliation_task'],
+  contract: ['policy_reconciliation_task'],
   supplier: ['qualification_evidence', 'supplier_capability', 'suspension'],
   notification: ['delivery_attempt'],
   audit: [

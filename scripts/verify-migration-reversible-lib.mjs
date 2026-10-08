@@ -1833,22 +1833,75 @@ export const EXPECTED = {
    * The domain objects listed are the ones carrying a claim a reader would otherwise
    * take on trust: the price is positive, the parties are two organizations, and what a
    * contract was made from never changes and the contract is never erased.
+   *
+   * CON-003 PR 2 adds `contract_sign_cancel` (signatures, the cancellation, the idempotency
+   * store; the lifecycle the database keeps) and `signing_policy` (the approval policy a
+   * signature rests on). Both `down.sql` refuse once their data exists, so the whole-chain
+   * check here is on an unused database; the refusals are proven by
+   * `services/contract-service/test/migration-rollback.int-spec.ts`.
    */
   contract: {
     // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is
     // created — and migrated — as the migrator, which owns rasta_contract.
     connectAs: 'migrator',
-    tables: ['contract', 'outbox_message', 'outbox_stream_sequence'],
-    types: ['ContractStatus'],
-    triggers: ['tg_contract_guard', 'tg_contract_no_truncate'],
-    functions: ['contract_guard'],
+    tables: [
+      'contract',
+      'contract_signature',
+      'approval_policy',
+      'approval_policy_step',
+      'idempotency_key',
+      'outbox_message',
+      'outbox_stream_sequence',
+    ],
+    types: ['ContractStatus', 'ContractSide', 'ApprovalPolicyStatus'],
+    triggers: [
+      'tg_contract_guard',
+      'tg_contract_no_truncate',
+      'tg_contract_signature_insert',
+      'tg_contract_signature_immutable',
+      'tg_contract_signature_no_truncate',
+      'tg_approval_policy_guard',
+      'tg_approval_policy_no_truncate',
+      'tg_approval_policy_step_insert',
+      'tg_approval_policy_step_immutable',
+      'tg_approval_policy_step_no_truncate',
+    ],
+    functions: [
+      'contract_guard',
+      'contract_signature_guard',
+      'approval_policy_guard',
+      'approval_policy_step_guard',
+    ],
     indexes: [
       'ux_contract_org_tender',
       'ux_contract_org_id',
       'ix_contract_org_status',
       'ix_contract_contractor',
+      'ux_contract_signature_side',
+      'ux_approval_policy_org_id',
+      'ux_approval_policy_version',
+      'ux_approval_policy_active',
+      'ux_approval_policy_step_order',
+      'ux_approval_policy_step_authority',
     ],
     constraints: [
+      'ck_contract_cancellation',
+      'ck_signature_text_not_blank',
+      'ck_signature_identity',
+      'ck_signature_authority_role',
+      'ck_signature_policy',
+      'ck_policy_text_not_blank',
+      'ck_policy_author_role',
+      'ck_policy_workflow_key',
+      'ck_policy_versions_positive',
+      'ck_policy_identity',
+      'ck_policy_submission_complete',
+      'ck_policy_activation_complete',
+      'ck_policy_rejection_complete',
+      'ck_policy_retirement_complete',
+      'ck_step_order_positive',
+      'ck_step_text_not_blank',
+      'ck_step_authority_not_oversight',
       'ck_contract_text_not_blank',
       'ck_contract_amount_positive',
       'ck_contract_parties_distinct',

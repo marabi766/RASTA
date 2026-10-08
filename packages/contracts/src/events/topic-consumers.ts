@@ -90,8 +90,11 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // CON-003 (ADR-068 § 3): drafts the contract an awarded tender calls for. Reads only
   // TENDER_AWARDED, as a claim: the award — and its amount, which is on no event — is
   // asked of construction-service before anything is written (ADR-061 § 4, A-13).
+  // And ORGANIZATION_MOVED (Q-83, #231 round 2): a signing policy a union wrote must stop
+  // governing an employer that left the union's subtree. Reads only that event, as a trigger:
+  // the answer is asked of organization-service on every delivery.
   'contract-service': Object.freeze({
-    subscribes: Object.freeze(['rasta.construction.v1'] as const),
+    subscribes: Object.freeze(['rasta.construction.v1', 'rasta.organization.v1'] as const),
     deadLetterTopic: 'rasta.contract.v1.dlq',
   }),
   'supplier-service': Object.freeze({

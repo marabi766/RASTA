@@ -50,12 +50,100 @@ export interface ReadingParties {
   readonly contractor: boolean;
 }
 
+export type ContractSideName = 'EMPLOYER' | 'CONTRACTOR';
+
+/** Who is acting on a contract: the organization the signed token names, and nothing else. */
+export interface Acting {
+  readonly organizationId: string;
+}
+
+/**
+ * Which side of `contract` the organization is, or `null` when it is neither. The two are never
+ * one organization (`ck_contract_parties_distinct`).
+ */
+export function sideOf(
+  contract: { organizationId: string; contractorOrganizationId: string },
+  organizationId: string,
+): ContractSideName | null {
+  if (contract.organizationId === organizationId) return 'EMPLOYER';
+  if (contract.contractorOrganizationId === organizationId) return 'CONTRACTOR';
+  return null;
+}
+
 @Injectable()
 export class ContractAccess {
   private readonly employerReaders: readonly string[];
+  private readonly cancellers: readonly string[];
 
   constructor(@Inject(ENV) env: ContractEnv) {
     this.employerReaders = [SUPER_ROLE, ...env.CONTRACT_READER_ROLES];
+    this.cancellers = env.CONTRACT_CANCEL_ROLES;
+  }
+
+  /**
+   * The caller of a command (`sign`, `cancel`): a signed-in person acting for an organization.
+   * Not the oversight role, not a service, and **never the platform administrator** — whatever
+   * else the token holds, the operator does not accept or end a contract for a party (Q-95 (1)).
+   * Which party, and whether that party's roles suffice, is judged after the contract is found
+   * and the caller shown to be a party to it: another organization's caller is told `404`, not
+   * which roles it lacked.
+   */
+  assertCanCommand(): Acting {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (context.roles.includes(SUPER_ROLE)) {
+      throw RastaError.forbidden(
+        'The platform administrator does not sign or cancel a contract for a party',
+      );
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('A contract is signed or cancelled for an organization');
+    }
+    return { organizationId: context.organizationId };
+  }
+
+  /**
+   * The contractor's signing role: the `CONTRACTOR` role of its own organization, which is not
+   * configurable (Q-95 (1)). The employer's side has no role here: who signs for it is the
+   * `contract.signature` policy of the employer's organization (`employerSigningRole`), read
+   * under the contract's lock — never a service-wide list, which would let one role sign for
+   * every employer.
+   */
+  contractorSigningRole(): string {
+    const roles = getContext().roles;
+    if (!roles.includes(CONTRACTOR_ROLE)) {
+      throw RastaError.insufficientRole([CONTRACTOR_ROLE], roles);
+    }
+    return CONTRACTOR_ROLE;
+  }
+
+  /** Only the employer cancels, with a role `CONTRACT_CANCEL_ROLES` names (Q-95 (4)). */
+  assertMayCancel(side: ContractSideName): void {
+    if (side !== 'EMPLOYER') {
+      throw RastaError.forbidden('Only the employer cancels a draft contract');
+    }
+    const roles = getContext().roles;
+    if (!this.cancellers.some((role) => roles.includes(role))) {
+      throw RastaError.insufficientRole(this.cancellers, roles);
+    }
+  }
+
+  /**
+   * Whether the caller is a member of the employer's **and** the contractor's organization: one
+   * person is never both parties, so the service refuses such a caller whichever side they act
+   * for. Judged on the memberships the identity provider signed, never on the tenant the caller
+   * selects.
+   */
+  isMemberOfBothParties(contract: {
+    organizationId: string;
+    contractorOrganizationId: string;
+  }): boolean {
+    const memberships = getContext().organizationIds;
+    return (
+      memberships.includes(contract.organizationId) &&
+      memberships.includes(contract.contractorOrganizationId)
+    );
   }
 
   /**

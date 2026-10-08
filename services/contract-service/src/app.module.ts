@@ -37,11 +37,28 @@ import {
   TenderAwardedConsumer,
   tenderAwardedConsumerFactory,
 } from './events/tender-awarded.consumer';
+import {
+  OrganizationMovedConsumer,
+  organizationMovesConsumerFactory,
+} from './events/organization-moved.consumer';
+import { PolicyReconciliationRepository } from './policy/policy-reconciliation.repository';
+import { PolicyReconciliationSweeper } from './policy/policy-reconciliation.sweeper';
+import { PolicySuspensionService } from './policy/policy-suspension.service';
+import {
+  policyReconciliationBacklog,
+  policyReconciliationOldestDueAgeSeconds,
+} from './observability/metrics';
 import { AwardSourceClient } from './award/award-source.client';
 import { ContractAccess } from './access/access';
 import { ContractRepository } from './contract/contract.repository';
 import { ContractService } from './contract/contract.service';
 import { ContractController } from './contract/contract.controller';
+import { PolicyAccess } from './policy/policy.access';
+import { PolicyController } from './policy/policy.controller';
+import { PolicyRepository } from './policy/policy.repository';
+import { PolicyService } from './policy/policy.service';
+import { OrganizationDirectory } from './organization/organization-directory';
+import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
 import { AWARD_SOURCE, ENV, LOGGER } from './tokens';
 import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
@@ -49,17 +66,19 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
 /**
  * contract-service wiring (CON-003 PR 1, ADR-068).
  *
- * ## One consumer, no workflow — by decision
+ * ## Two consumers, one sweeper, no workflow — by decision
  *
- * The contract boundary starts with a draft the system makes from an awarded tender: one
- * consumer (`TENDER_AWARDED`, which reads the award from construction-service before it
- * writes anything) and a read API for the two parties. No Temporal (nothing here has a
- * deadline; silence is never consent, ADR-043), no sweeper, no write route a user can call.
- * Statements, their separate technical and financial approvals and the settlement boundary
- * with economic-service are later changes (ADR-068 § 9) and bring their own wiring.
+ * The contract boundary starts with a draft the system makes from an awarded tender: a consumer
+ * (`TENDER_AWARDED`, which reads the award from construction-service before it writes anything)
+ * and a read API for the two parties. No Temporal (nothing here has a deadline; silence is never
+ * consent, ADR-043). Since PR 2 a second consumer (`ORGANIZATION_MOVED`, a trigger that queues a
+ * re-check — Q-83) and the sweeper that works that queue suspend a signing policy whose union has
+ * lost the employer; nothing a user calls writes through either. Statements, their separate
+ * technical and financial approvals and the settlement boundary with economic-service are later
+ * changes (ADR-068 § 9) and bring their own wiring.
  */
 @Module({
-  controllers: [ContractController, HealthController, MetricsController],
+  controllers: [ContractController, PolicyController, HealthController, MetricsController],
   providers: [
     { provide: ENV, useFactory: () => loadContractEnv() },
 
@@ -98,6 +117,50 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     ContractAccess,
     ContractRepository,
     ContractService,
+    PolicyAccess,
+    PolicyRepository,
+    PolicyService,
+    OrganizationDirectory,
+    PolicyReconciliationRepository,
+    PolicySuspensionService,
+    {
+      provide: PolicyReconciliationSweeper,
+      inject: [PolicyReconciliationRepository, PolicySuspensionService, OrganizationDirectory, ENV],
+      useFactory: (
+        repository: PolicyReconciliationRepository,
+        suspension: PolicySuspensionService,
+        directory: OrganizationDirectory,
+        env: ContractEnv,
+      ) =>
+        new PolicyReconciliationSweeper(repository, suspension, directory, {
+          intervalMs: env.CONTRACT_RECONCILE_INTERVAL_MS,
+          batchSize: env.CONTRACT_RECONCILE_BATCH_SIZE,
+          leaseSeconds: env.CONTRACT_RECONCILE_LEASE_SECONDS,
+          backoffSeconds: env.CONTRACT_RECONCILE_BACKOFF_SECONDS,
+          backoffMaxSeconds: env.CONTRACT_RECONCILE_BACKOFF_MAX_SECONDS,
+        }),
+    },
+
+    {
+      provide: OrganizationMovedConsumer,
+      inject: [ENV, LOGGER, PolicySuspensionService],
+      useFactory: (env: ContractEnv, logger: Logger, suspension: PolicySuspensionService) =>
+        new OrganizationMovedConsumer(
+          organizationMovesConsumerFactory(
+            kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-organization-moves`),
+            logger,
+          ),
+          suspension,
+          logger,
+        ),
+    },
+
+    // Idempotent commands (docs/06 § 6.8): this service's own store for `sign` and `cancel`.
+    {
+      provide: IdempotencyStore,
+      inject: [PrismaService, ENV],
+      useFactory: (prisma: PrismaService, env: ContractEnv) => new IdempotencyStore(prisma, env),
+    },
 
     {
       provide: InternalTokenService,
@@ -210,7 +273,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly awarded: TenderAwardedConsumer,
+    private readonly moves: OrganizationMovedConsumer,
+    private readonly sweeper: PolicyReconciliationSweeper,
+    private readonly reconciliations: PolicyReconciliationRepository,
     private readonly store: PrismaOutboxStore,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -228,6 +295,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // The consumer first: a topic it cannot subscribe to must stop the boot (`EventConsumer`
     // never auto-creates topics), not leave a service that looks healthy and never hears an award.
     await this.awarded.start();
+    await this.moves.start();
+    this.sweeper.start();
     this.relay.start();
 
     const sample = async () => {
@@ -238,9 +307,24 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
           { service: SERVICE_NAME },
           await this.store.oldestPendingAgeSeconds(),
         );
+        // The queue behind ORGANIZATION_MOVED, from the database (docs/23 D-041): alert when the
+        // oldest due task keeps ageing.
+        const backlog = await this.reconciliations.backlog();
+        policyReconciliationBacklog.set({ service: SERVICE_NAME }, backlog.open);
+        policyReconciliationOldestDueAgeSeconds.set(
+          { service: SERVICE_NAME },
+          backlog.oldestDueAgeSeconds,
+        );
       } catch {
         // Upkeep must never take the service down. The relay's own logging covers a
         // persistent database problem.
+      }
+      try {
+        // Expired Idempotency-Key records, removed by age alone: unscoped by necessity, safe
+        // because they are already unusable.
+        await this.idempotency.purgeExpired();
+      } catch {
+        // Upkeep must never take the service down either.
       }
     };
 
@@ -252,6 +336,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     await this.awarded.stop();
+    await this.moves.stop();
+    await this.sweeper.stop();
     await this.relay.stop();
   }
 }

@@ -20,6 +20,7 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { readFlash } from '@/server/flash';
 import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
+import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_DOCUMENT_FORM } from './document-form-state';
 
@@ -209,7 +210,7 @@ describe('what is refused before anything is uploaded or sent', () => {
     for (const baseline of [
       null,
       'chosen-by-the-client',
-      `${genuine.slice(0, -2)}AA`,
+      withForgedMac(genuine),
       sealAssetDocumentBaseline({ ...SESSION, subject: 'someone-else' }, { assetId: ASSET_ID }),
       sealAssetDocumentBaseline(
         { ...SESSION, csrfToken: 'the-token-before-re-login' },
@@ -250,7 +251,7 @@ describe('what is refused before anything is uploaded or sent', () => {
     });
     for (const uploaded of [
       'chosen-by-the-client',
-      `${genuine.slice(0, -2)}AA`,
+      withForgedMac(genuine),
       // Genuine, but minted for another submission of this person's.
       sealUploadedDocument(SESSION, {
         assetId: ASSET_ID,

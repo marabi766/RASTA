@@ -4,9 +4,26 @@ import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swag
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import { toJsonSchema } from './zod-schema';
+import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { ContractController } from '../contract/contract.controller';
 import { ContractService } from '../contract/contract.service';
-import { contractViewSchema, listContractsQuerySchema } from '../contract/dto';
+import {
+  cancelContractSchema,
+  contractViewSchema,
+  listContractsQuerySchema,
+  signContractSchema,
+} from '../contract/dto';
+import { PolicyController } from '../policy/policy.controller';
+import { PolicyService } from '../policy/policy.service';
+import {
+  createPolicySchema,
+  listPoliciesQuerySchema,
+  policyRejectionSchema,
+  policyTransitionSchema,
+  policyViewSchema,
+} from '../policy/dto';
+import { IdempotencyStore } from '../shared/idempotency';
+import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
 /**
  * The published contract of contract-service — **OpenAPI first**.
@@ -53,27 +70,130 @@ const cursorPageOf = (item: z.ZodTypeAny) =>
 export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.ZodTypeAny }> = {
   'GET /v1/contracts': { status: '200', schema: cursorPageOf(contractViewSchema) },
   'GET /v1/contracts/{id}': { status: '200', schema: contractViewSchema },
+  'POST /v1/contracts/{id}/sign': { status: '200', schema: contractViewSchema },
+  'POST /v1/contracts/{id}/cancel': { status: '200', schema: contractViewSchema },
+  'POST /v1/approval-policies': { status: '201', schema: policyViewSchema },
+  'GET /v1/approval-policies': { status: '200', schema: cursorPageOf(policyViewSchema) },
+  'GET /v1/approval-policies/pending-platform-approval': {
+    status: '200',
+    schema: cursorPageOf(policyViewSchema),
+  },
+  'GET /v1/approval-policies/{id}': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/submit': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/approve': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/reject': { status: '200', schema: policyViewSchema },
+  'POST /v1/approval-policies/{id}/retire': { status: '200', schema: policyViewSchema },
 };
+
+/** Every command takes a strict body. */
+const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
+  'POST /v1/contracts/{id}/sign': signContractSchema,
+  'POST /v1/contracts/{id}/cancel': cancelContractSchema,
+  'POST /v1/approval-policies': createPolicySchema,
+  'POST /v1/approval-policies/{id}/submit': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/approve': policyTransitionSchema,
+  'POST /v1/approval-policies/{id}/reject': policyRejectionSchema,
+  'POST /v1/approval-policies/{id}/retire': policyTransitionSchema,
+};
+
+/** The commands that require an `Idempotency-Key` (docs/06 § 6.8). */
+const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/contracts/{id}/sign',
+  'POST /v1/contracts/{id}/cancel',
+  'POST /v1/approval-policies',
+]);
+
+/** The policy commands that confirm the union's hierarchy with organization-service. */
+const HIERARCHY_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/approval-policies',
+  'POST /v1/approval-policies/{id}/submit',
+  'POST /v1/approval-policies/{id}/approve',
+]);
+
+/** The area whose closed reasons a command's refusals carry in `details[].code` (docs/06 § 6.7). */
+const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
+  'POST /v1/contracts/{id}/sign': 'signature',
+  'POST /v1/contracts/{id}/cancel': 'cancellation',
+  'POST /v1/approval-policies': 'policy',
+};
+
+/** `Retry-After` on a command's in-flight 409: optional, only that 409 carries it. */
+const RETRY_AFTER_HEADER = {
+  required: false,
+  description:
+    'Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to ' +
+    'wait before retrying with the same key. Absent on every other 409.',
+  schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
+};
+
+/** One status of a command: `details[]` typed by area, with the closed codes answered with it. */
+function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | undefined {
+  const codes = Object.entries(REFUSAL_REASONS[area])
+    .filter(([, answered]) => answered === status)
+    .map(([code]) => code);
+  if (codes.length === 0) return undefined;
+  return apiErrorSchema.extend({
+    details: z
+      .array(
+        z
+          .object({
+            path: z.literal(area),
+            code: z.enum(codes as [string, ...string[]]),
+            message: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+  });
+}
+
+const REFUSAL_DETAILS_NOTE =
+  ' When refused for a closed reason, `details` names it: one entry, `path` the area (signature, ' +
+  'cancellation, policy) and `code` the reason, one of those listed here. Branch on `code` and ' +
+  '`details[].code`, never on `message`. A refusal without a closed reason (a role the ' +
+  'configuration does not grant) carries no `details`.';
 
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/contracts': listContractsQuerySchema,
+  'GET /v1/approval-policies': listPoliciesQuerySchema,
+  'GET /v1/approval-policies/pending-platform-approval': listPoliciesQuerySchema,
 };
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
-  400: 'The query does not match the published schema. Unknown parameters are refused rather than ignored.',
+  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.',
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
-  403: 'Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id.',
+  403: 'Authenticated, but not permitted: a role neither the configuration (CONTRACT_READER_ROLES) nor the contractor side grants (INSUFFICIENT_ROLE), the oversight role, a service-to-service token, or a SYSTEM_ADMIN that has not selected an organization with X-Organization-Id. On sign and cancel: a role the employer’s `contract.signature` policy (sign), CONTRACT_CANCEL_ROLES (cancel) or the CONTRACTOR side does not grant, the platform administrator (never, whatever else the token holds), a user token without the platform user id, the contractor cancelling, and the separation of duties — a member of both parties, one person on both sides.',
   404: 'Not found — also returned for a contract of which the caller’s organization is neither the employer nor the winning contractor, so its existence is never disclosed.',
+  409: 'On sign: another person for a side that has already signed (SIDE_ALREADY_SIGNED); on either command, `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
+  422: 'Well-formed but refused by the lifecycle or by configuration (BUSINESS_RULE_VIOLATION): a contract that is not a draft (CONTRACT_NOT_DRAFT; a SIGNED contract is ended by no route); no `contract.signature` policy in force for the employer, so nobody may sign for it yet (SIGNATURE_POLICY_REQUIRED); two signers whose identities cannot be told apart (ACTOR_IDENTITY_UNKNOWN, fail closed); a cancellation reason outside the configured list (CANCEL_REASON_NOT_ALLOWED) or of a draft a party has signed (SIGNATURE_RECORDED).',
   500: 'Unexpected server error.',
 };
 
+/** The same statuses on the approval-policy routes, which answer for other reasons (Q-70 (7)). */
+export const POLICY_ERROR_DESCRIPTIONS: Record<number, string> = {
+  400: 'The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a create, a missing or malformed Idempotency-Key is a 400 too.',
+  401: ERROR_DESCRIPTIONS[401] as string,
+  403: 'Authenticated, but not permitted: writing a policy is a UNION_ADMIN for its own organization or one beneath it, or a SYSTEM_ADMIN (an ORGANIZATION_ADMIN never writes its own); approving, rejecting and the platform queue are SYSTEM_ADMIN only, and with CONTRACT_POLICY_FOUR_EYES the approver is neither the author nor the submitter (a union-written policy is never approved by the person who wrote or submitted it); submitting and retiring belong to the organization that wrote the policy. Also: the oversight role, a service-to-service token, a user token without the platform user id where one is required, and a union acting outside its own organization.',
+  404: 'Not found — also returned for a policy the caller may not see (neither its author organization, nor a contract reader of the organization it governs, nor a platform administrator).',
+  409: 'The `expectedVersion` is not the policy’s current version, or another version of the same policy line was written at the same moment (OPTIMISTIC_LOCK_FAILED / CONFLICT — reload and retry); on a create, an Idempotency-Key reused with a different request or user (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT, with Retry-After).',
+  422: 'Well-formed but refused (BUSINESS_RULE_VIOLATION): a transition the lifecycle does not have (DRAFT → PENDING_PLATFORM_APPROVAL → ACTIVE | REJECTED; ACTIVE → RETIRED), a step that names another organization’s role (AUTHORITY_NOT_GOVERNED_ORGANIZATION), or an author or submitter whose identity was not recorded (ACTOR_IDENTITY_UNKNOWN, fail closed).',
+  500: 'Unexpected server error.',
+  503: 'organization-service could not confirm the hierarchy (UPSTREAM_UNAVAILABLE): the write is refused, never assumed.',
+  504: 'organization-service did not answer in time (UPSTREAM_TIMEOUT): the write is refused, never assumed.',
+};
+
 const DESCRIPTION =
-  'The contract boundary (CON-003, ADR-068). This release offers reading the draft contract ' +
-  'that a tender award creates: the system makes it when construction-service publishes ' +
-  'TENDER_AWARDED, after reading the award — and its amount, which is on no event — from ' +
-  'construction-service itself (ADR-061 § 4); no user creates one. A contract is read by its ' +
+  'The contract boundary (CON-003, ADR-068). The draft contract that a tender award creates: ' +
+  'the system makes it when construction-service publishes TENDER_AWARDED, after reading the ' +
+  'award — and its amount, which is on no event — from construction-service itself (ADR-061 ' +
+  '§ 4); no user creates one. A contract is read, signed and (while a draft) cancelled by its ' +
   'two parties only: the employer’s organization and the winning contractor’s; anyone else ' +
-  'gets 404. Amounts are decimal strings of minor units (rials). Amendments, milestones, ' +
+  'gets 404. Each party signs separately — a recorded acceptance, not a legal signature ' +
+  '(Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft ' +
+  'for a closed reason. Who may sign for the employer is the `contract.signature` approval ' +
+  'policy of its own organization (/v1/approval-policies): written by a union or the platform, ' +
+  'put in force by a platform administrator who is not its author, and never an environment ' +
+  'setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). Amendments, milestones, ' +
   'statements with their separate technical and financial approvals, and the settlement ' +
   'boundary with economic-service follow (ADR-068 § 9); no money is ever held here.';
 
@@ -96,8 +216,12 @@ export function buildContractOpenApiDocument(app: INestApplication): OpenAPIObje
  * endpoint and produces the same bytes on every machine.
  */
 @Module({
-  controllers: [ContractController],
-  providers: [{ provide: ContractService, useValue: {} }],
+  controllers: [ContractController, PolicyController],
+  providers: [
+    { provide: ContractService, useValue: {} },
+    { provide: PolicyService, useValue: {} },
+    { provide: IdempotencyStore, useValue: {} },
+  ],
 })
 class DocumentationModule {}
 
@@ -124,15 +248,38 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       operation.security ??= [{ bearer: [] }];
 
       const query = QUERY_SCHEMAS[key];
+      const body = REQUEST_BODIES[key];
       operation.parameters = operation.parameters ?? [];
       if (query) {
         operation.parameters = [...operation.parameters, ...toQueryParameters(query)];
+      }
+      if (body) {
+        operation.requestBody = {
+          required: true,
+          content: { 'application/json': { schema: toJsonSchema(body) } },
+        };
+      }
+      const idempotent = IDEMPOTENT_COMMANDS.has(key);
+      if (idempotent) {
+        // Nest's `@ApiHeader` has no schema; replaced with the truth: required, bounded.
+        operation.parameters = operation.parameters.filter(
+          (parameter) => !isHeader(parameter, 'idempotency-key'),
+        );
+        operation.parameters.push({
+          name: 'Idempotency-Key',
+          in: 'header',
+          required: true,
+          description:
+            'Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for CONTRACT_IDEMPOTENCY_TTL_HOURS (24 by default).',
+          schema: { type: 'string', minLength: 8, maxLength: 255 },
+        });
       }
 
       const response = RESPONSE_BODIES[key];
       operation.responses ??= {};
       if (response) {
-        // Nest publishes a default `200` for every GET; only the status the handler answers is kept.
+        // Nest publishes a default `200` for every GET and `201` for every POST; only the status
+        // the handler answers is kept.
         delete operation.responses['200'];
         delete operation.responses['201'];
         operation.responses[response.status] = {
@@ -141,15 +288,44 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
       }
 
-      for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
+      const descriptions = path.startsWith('/v1/approval-policies')
+        ? POLICY_ERROR_DESCRIPTIONS
+        : ERROR_DESCRIPTIONS;
+      for (const [status, description] of Object.entries(descriptions)) {
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
-        // Only a route with a query can answer 400 (the id is an opaque string).
-        if (status === '400' && !query) continue;
+        // Only a route with a query or a body can answer 400 (the id is an opaque string).
+        if (status === '400' && !query && !body) continue;
+        // 409 and 422 are a command's: a read has no state to move and no rule to refuse.
+        if ((status === '409' || status === '422') && !body) continue;
+        // 503 and 504: only the commands that ask organization-service.
+        if ((status === '503' || status === '504') && !HIERARCHY_COMMANDS.has(key)) continue;
         operation.responses[status] ??= {
           description,
+          ...(status === '409' && idempotent
+            ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
+            : {}),
           content: { 'application/json': { schema: { $ref: '#/components/schemas/ApiError' } } },
         };
+      }
+
+      // The closed reasons of a command, as an enum per status.
+      const area = REFUSAL_AREA_OF[key];
+      if (area) {
+        for (const status of [403, 409, 422]) {
+          const typed = refusalErrorSchema(area, status);
+          if (!typed) continue;
+          const existing = operation.responses[String(status)] as { description?: string };
+          const listed = Object.entries(REFUSAL_REASONS[area])
+            .filter(([, answered]) => answered === status)
+            .map(([code]) => code)
+            .join(', ');
+          operation.responses[String(status)] = {
+            ...existing,
+            description: `${existing.description ?? ''}${REFUSAL_DETAILS_NOTE} (${area}: ${listed})`,
+            content: { 'application/json': { schema: toJsonSchema(typed) } },
+          };
+        }
       }
     }
   }
@@ -179,6 +355,11 @@ interface MutableOperation {
   parameters?: unknown[];
   responses?: Record<string, unknown>;
   security?: Record<string, string[]>[];
+}
+
+function isHeader(parameter: unknown, name: string): boolean {
+  const candidate = parameter as { in?: string; name?: string };
+  return candidate.in === 'header' && candidate.name?.toLowerCase() === name;
 }
 
 function isOperation(value: unknown): value is MutableOperation {

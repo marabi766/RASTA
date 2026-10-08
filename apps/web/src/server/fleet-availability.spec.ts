@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import { EMPTY_DECLARE_AVAILABILITY_FORM, type WindowState } from '@/lib/fleet-availability-fields';
+import { withForgedMac } from '@/test/forged-token';
 
 import { RECORD_KEY_REUSED_MESSAGE } from './asset-records';
 import {
@@ -187,7 +188,7 @@ describe('the baselines a form carries', () => {
     for (const bad of [
       null,
       'chosen-by-the-client',
-      `${token.slice(0, -2)}AA`,
+      withForgedMac(token),
       sealAvailabilityBaseline(
         { ...SESSION, subject: 'someone-else' },
         { assetId: ASSET, command: 'declare' },
