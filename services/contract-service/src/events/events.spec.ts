@@ -262,6 +262,56 @@ describe('the authority events (D-050, review round 3)', () => {
     },
   );
 
+  it('FLAGGED is exactly one of two shapes: the cause event AND instant, or neither', () => {
+    const recheck = { ...flagged, detectedBy: 'MOVE_RECHECK', causeEventId: null, movedAt: null };
+    for (const bad of [
+      { ...flagged, causeEventId: null },
+      { ...flagged, movedAt: null },
+      { ...flagged, causeEventId: null, movedAt: null },
+      { ...recheck, causeEventId: 'EVT_1' },
+      { ...recheck, movedAt: '2026-10-06T10:00:00.000Z' },
+      { ...recheck, causeEventId: 'EVT_1', movedAt: '2026-10-06T10:00:00.000Z' },
+      { ...flagged, detectedBy: 'SOMETHING_ELSE' },
+      { ...flagged, flaggedAt: undefined },
+      { ...recheck, flaggedAt: undefined },
+    ]) {
+      expect(() => validateContractPayload('CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', bad)).toThrow();
+    }
+  });
+
+  it('SUSPENDED is exactly one of two shapes: the cause event AND organization, or neither', () => {
+    const moved = {
+      policyId: 'APL_1',
+      organizationId: 'ORG_OWNER',
+      workflowKey: 'contract.signature',
+      policyVersion: 2,
+      authorOrganizationId: 'ORG_UNION',
+      fromStatus: 'ACTIVE',
+      reason: 'ORGANIZATION_MOVED',
+      causeEventId: 'EVT_1',
+      movedOrganizationId: 'ORG_OWNER',
+      suspendedBy: 'system:contract-service',
+      suspendedAt: '2026-10-05T10:00:00.000Z',
+    };
+    const none = { ...moved, causeEventId: null, movedOrganizationId: null };
+    for (const reason of ['MOVE_RECHECK', 'SIGNING_RECHECK']) {
+      expect(
+        validateContractPayload('APPROVAL_POLICY_SUSPENDED', { ...none, reason }),
+      ).toBeTruthy();
+    }
+    for (const bad of [
+      { ...moved, causeEventId: null },
+      { ...moved, movedOrganizationId: null },
+      { ...none, reason: 'ORGANIZATION_MOVED' },
+      { ...none, reason: 'MOVE_RECHECK', causeEventId: 'EVT_1' },
+      { ...none, reason: 'SIGNING_RECHECK', movedOrganizationId: 'ORG_OWNER' },
+      { ...moved, reason: 'MOVE_RECHECK' },
+      { ...moved, reason: 'OTHER' },
+    ]) {
+      expect(() => validateContractPayload('APPROVAL_POLICY_SUSPENDED', bad)).toThrow();
+    }
+  });
+
   it('name only closed reasons', () => {
     expect(() =>
       validateContractPayload('CONTRACT_SIGNATURE_AUTHORITY_FLAGGED', { ...flagged, reason: 'X' }),

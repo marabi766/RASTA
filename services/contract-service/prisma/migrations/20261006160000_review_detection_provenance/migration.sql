@@ -37,7 +37,8 @@ ALTER TABLE "signature_authority_review" ADD CONSTRAINT "ck_review_reason"
   CHECK ("reason" = 'AUTHORITY_CHANGED_DURING_SIGNING' AND "side" = 'EMPLOYER');
 
 ALTER TABLE "signature_authority_review" ADD CONSTRAINT "ck_review_detection"
-  CHECK ("detected_by" IN ('ORGANIZATION_MOVED', 'MOVE_RECHECK')
-         AND (("detected_by" = 'ORGANIZATION_MOVED')
-              = ("cause_event_id" IS NOT NULL AND "moved_at" IS NOT NULL))
-         AND ("cause_event_id" IS NULL OR btrim("cause_event_id") <> ''));
+  CHECK (("detected_by" = 'ORGANIZATION_MOVED'
+          AND "cause_event_id" IS NOT NULL AND btrim("cause_event_id") <> ''
+          AND "moved_at" IS NOT NULL)
+         OR ("detected_by" = 'MOVE_RECHECK'
+             AND "cause_event_id" IS NULL AND "moved_at" IS NULL));

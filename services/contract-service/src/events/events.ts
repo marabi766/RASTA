@@ -200,24 +200,42 @@ export const approvalPolicyRetiredPayload = z
  * actor; the cause is the ORGANIZATION_MOVED event and the organization it moved, or a signature
  * being attempted on it. No free text: the reason is a closed code.
  */
-export const approvalPolicySuspendedPayload = z
-  .object({
-    policyId: id,
-    organizationId: id,
-    authorOrganizationId: id,
-    workflowKey,
-    policyVersion: positive,
-    /** In force, or still waiting for the platform approval, when it was suspended. */
-    fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
-    /** A move found it (the sweeper), or a signature being attempted on it did. */
-    reason: z.enum(['ORGANIZATION_MOVED', 'MOVE_RECHECK', 'SIGNING_RECHECK']),
-    /** The ORGANIZATION_MOVED event and the organization it moved; null when a signature found it. */
-    causeEventId: id.nullable(),
-    movedOrganizationId: id.nullable(),
-    suspendedBy: id,
-    suspendedAt: instant,
-  })
-  .strict();
+const approvalPolicySuspendedBase = {
+  policyId: id,
+  organizationId: id,
+  authorOrganizationId: id,
+  workflowKey,
+  policyVersion: positive,
+  /** In force, or still waiting for the platform approval, when it was suspended. */
+  fromStatus: z.enum(['ACTIVE', 'PENDING_PLATFORM_APPROVAL']),
+  suspendedBy: id,
+  suspendedAt: instant,
+};
+
+/**
+ * In exactly two shapes: a move proven to be the cause (`ORGANIZATION_MOVED`, which names the event
+ * AND the organization it moved) or a finding that is not one (`MOVE_RECHECK`, a re-check a move
+ * queued; `SIGNING_RECHECK`, a signature being attempted), which names NEITHER. One of the two
+ * alone is not a published shape.
+ */
+export const approvalPolicySuspendedPayload = z.discriminatedUnion('reason', [
+  z
+    .object({
+      ...approvalPolicySuspendedBase,
+      reason: z.literal('ORGANIZATION_MOVED'),
+      causeEventId: id,
+      movedOrganizationId: id,
+    })
+    .strict(),
+  z
+    .object({
+      ...approvalPolicySuspendedBase,
+      reason: z.enum(['MOVE_RECHECK', 'SIGNING_RECHECK']),
+      causeEventId: z.null(),
+      movedOrganizationId: z.null(),
+    })
+    .strict(),
+]);
 
 /**
  * An employer signature may rest on authority that changed while it was being made (D-050): an
@@ -225,28 +243,42 @@ export const approvalPolicySuspendedPayload = z
  * answer and the commit. Flagged for review, never revoked. Identifiers, a closed code and
  * instants only.
  */
-export const contractSignatureAuthorityFlaggedPayload = z
-  .object({
-    contractId: id,
-    organizationId: id,
-    side: z.literal('EMPLOYER'),
-    policyId: id,
-    policyVersion: positive,
-    reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
-    /** The ORGANIZATION_MOVED event that stranded the policy, and when the move took effect. */
-    /**
-     * What found it: a move proven to be the cause (`ORGANIZATION_MOVED`, which names the event and
-     * its instant) or a re-check a move queued without being shown to be its cause (`MOVE_RECHECK`,
-     * which names neither — never a wrong event).
-     */
-    detectedBy: z.enum(['ORGANIZATION_MOVED', 'MOVE_RECHECK']),
-    causeEventId: id.nullable(),
-    movedAt: instant.nullable(),
-    /** The move's hierarchy version, which the signature's recorded one was lower than (D-050). */
-    movedVersion: positive.nullable(),
-    flaggedAt: instant,
-  })
-  .strict();
+const contractSignatureAuthorityFlaggedBase = {
+  contractId: id,
+  organizationId: id,
+  side: z.literal('EMPLOYER'),
+  policyId: id,
+  policyVersion: positive,
+  reason: z.literal('AUTHORITY_CHANGED_DURING_SIGNING'),
+  /** The move's hierarchy version, which the signature's recorded one was lower than (D-050). */
+  movedVersion: positive.nullable(),
+  flaggedAt: instant,
+};
+
+/**
+ * What found it, in exactly one of two shapes: a move proven to be the cause (`ORGANIZATION_MOVED`,
+ * which names the event AND its instant) or a re-check a move queued without being shown to be its
+ * cause (`MOVE_RECHECK`, which names NEITHER — never a wrong event). One of the two alone is not a
+ * published shape — the same rule the `ck_review_detection` constraint holds in the database.
+ */
+export const contractSignatureAuthorityFlaggedPayload = z.discriminatedUnion('detectedBy', [
+  z
+    .object({
+      ...contractSignatureAuthorityFlaggedBase,
+      detectedBy: z.literal('ORGANIZATION_MOVED'),
+      causeEventId: id,
+      movedAt: instant,
+    })
+    .strict(),
+  z
+    .object({
+      ...contractSignatureAuthorityFlaggedBase,
+      detectedBy: z.literal('MOVE_RECHECK'),
+      causeEventId: z.null(),
+      movedAt: z.null(),
+    })
+    .strict(),
+]);
 
 /**
  * A signature was refused for want of authority (the audit record of the refusal, written in a
