@@ -118,6 +118,7 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
 
     return owner.client.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(block('load'));
+      await tx.$executeRawUnsafe(block('load-returned'));
       for (const v of verified) {
         await tx.$executeRawUnsafe(
           `INSERT INTO verified_owner (ref_id, document_owner) VALUES ($1, $2)`,
@@ -125,14 +126,17 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
           v.owner,
         );
       }
-      const [counts] = await tx.$queryRawUnsafe<{ refs_fixed: number; entries_fixed: number }[]>(
-        block('repair'),
-      );
+      const [counts] = await tx.$queryRawUnsafe<
+        {
+          refs_fixed: number;
+          entries_fixed: number;
+          markers_cleared: number;
+          assets_returned: number;
+        }[]
+      >(block('repair'));
       const pairs = await tx.$queryRawUnsafe<unknown[]>(block('verify-pairs'));
       const ownersLeft = await tx.$queryRawUnsafe<unknown[]>(block('verify-owners'));
-      const markersLeft = (
-        await tx.$queryRawUnsafe<{ asset_id: string }[]>(block('verify-markers'))
-      ).filter((row) => row.asset_id === assetId);
+      const markersLeft = await tx.$queryRawUnsafe<{ asset_id: string }[]>(block('verify-markers'));
       return { counts: counts!, pairs, ownersLeft, markersLeft, moved: moved.length, verified };
     });
   }
@@ -227,7 +231,12 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     const result = await repair(assetId);
 
     expect(result.verified).toHaveLength(2);
-    expect(result.counts).toEqual({ refs_fixed: 2, entries_fixed: 2, markers_cleared: 0 });
+    expect(result.counts).toEqual({
+      refs_fixed: 2,
+      entries_fixed: 2,
+      markers_cleared: 0,
+      assets_returned: 1,
+    });
     expect(result.pairs).toEqual([]);
     expect(result.ownersLeft).toEqual([]);
     // The previous procedure restored the reference to A but the entry to B: here both are paired.
@@ -254,7 +263,12 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     const result = await repair(assetId);
 
     // … but only B's was wrong.
-    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1, markers_cleared: 0 });
+    expect(result.counts).toEqual({
+      refs_fixed: 1,
+      entries_fixed: 1,
+      markers_cleared: 0,
+      assets_returned: 1,
+    });
     expect(result.pairs).toEqual([]);
     expect(result.ownersLeft).toEqual([]);
     expect(await orgOfRef(refA)).toBe(org.a);
@@ -285,7 +299,12 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     expect((await candidatesOf(assetId)).map((row) => row.ref_id)).toEqual([refA]);
     const result = await repair(assetId);
 
-    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1, markers_cleared: 0 });
+    expect(result.counts).toEqual({
+      refs_fixed: 1,
+      entries_fixed: 1,
+      markers_cleared: 0,
+      assets_returned: 1,
+    });
     expect(result.pairs).toEqual([]);
     expect(await orgOfRef(refA)).toBe(org.a);
     expect(await orgOfEntry(assetId, refA)).toBe(org.a);
@@ -323,13 +342,31 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
     const result = await repair(assetId);
 
     // The reference went back to A, and with it the marker B earned from it.
-    expect(result.counts).toEqual({ refs_fixed: 1, entries_fixed: 1, markers_cleared: 1 });
+    expect(result.counts).toEqual({
+      refs_fixed: 1,
+      entries_fixed: 1,
+      markers_cleared: 1,
+      assets_returned: 1,
+    });
     expect(result.markersLeft).toEqual([]);
     expect(await orgOfRef(refA)).toBe(org.a);
     expect(await markerOf(assetId)).toBeNull();
   });
 
-  it('the post-check names an asset whose marker is for an organization holding no ownership document for it', async () => {
+  /** Step 4's marker check, as the operator runs it: in the repair's transaction, with its temporary tables. */
+  const markerCheck = (returned: string[]) =>
+    owner.client.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(block('load'));
+      await tx.$executeRawUnsafe(block('load-returned'));
+      for (const assetId of returned) {
+        await tx.$executeRawUnsafe(`INSERT INTO returned_asset (asset_id) VALUES ($1)`, assetId);
+      }
+      return (await tx.$queryRawUnsafe<{ asset_id: string }[]>(block('verify-markers'))).map(
+        (row) => row.asset_id,
+      );
+    });
+
+  it('the post-check names a returned asset that still has a marker', async () => {
     const assetId = await newAsset(org.a);
     const refA = await attach(assetId, org.a);
     await transfer(assetId, org.a, org.b);
@@ -340,11 +377,21 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       org.b,
     );
 
-    const rows = await owner.client.$queryRawUnsafe<{ asset_id: string }[]>(
-      block('verify-markers'),
+    expect(await markerCheck([assetId])).toContain(assetId);
+  });
+
+  it('the post-check leaves alone a marker legitimately earned and whose document was later removed (not returned in this run) (#234 round 10)', async () => {
+    const assetId = await newAsset(org.a);
+    await transfer(assetId, org.a, org.b);
+    // B earned the marker with its own title, then removed it: no document is left, yet it is B's to keep.
+    await prisma.client.$executeRawUnsafe(
+      `UPDATE asset SET commissioned_for_organization_id = $2 WHERE id = $1`,
+      assetId,
+      org.b,
     );
 
-    expect(rows.map((row) => row.asset_id)).toContain(assetId);
+    expect(await markerCheck([])).not.toContain(assetId);
+    expect(await markerOf(assetId)).toBe(org.b);
   });
 
   it('running it twice changes nothing the second time, and no row is deleted', async () => {
@@ -367,13 +414,40 @@ describe('runbook: asset document reference reconciliation (#234 round 2)', () =
       refs_fixed: 1,
       entries_fixed: 1,
       markers_cleared: 0,
+      assets_returned: 1,
     });
     expect((await repair(assetId)).counts).toEqual({
       refs_fixed: 0,
       entries_fixed: 0,
       markers_cleared: 0,
+      assets_returned: 0,
     });
     expect(await count()).toBe(before);
     expect(await orgOfRef(refA)).toBe(org.a);
+  });
+
+  it('the preflight refuses while another session is on the asset database, and passes once it is alone (#234 round 10)', async () => {
+    // The runtime pool and this suite's own owner pool are other sessions: the check refuses.
+    await expect(owner.client.$executeRawUnsafe(block('preflight'))).rejects.toThrow(
+      /not quiesced/,
+    );
+
+    // Alone: close every other connection of this suite, keep one connection as the operator's session.
+    await prisma.onModuleDestroy();
+    await owner.onModuleDestroy();
+    const url = new URL(ownerDatabaseUrl());
+    url.searchParams.set('connection_limit', '1');
+    const operator = new PrismaService(url.toString());
+    await operator.onModuleInit();
+    try {
+      await expect(operator.client.$executeRawUnsafe(block('preflight'))).resolves.toBeDefined();
+    } finally {
+      await operator.onModuleDestroy();
+      // afterAll cleans up through these two.
+      prisma = newPrisma();
+      await prisma.onModuleInit();
+      owner = new PrismaService(ownerDatabaseUrl());
+      await owner.onModuleInit();
+    }
   });
 });

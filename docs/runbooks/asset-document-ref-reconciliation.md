@@ -4,6 +4,30 @@
 > انتقال مالکیت دارایی داشته است. هشدار ندارد؛ با دستور صریح اپراتور اجرا می‌شود. در پایگاه توسعه شمارش `۰` بود و هنوز
 > هیچ استقرار تولیدی نیست؛ پس برای محیط‌های موجود هیچ کاری لازم نیست، و این Runbook پیش‌شرط ورود نخستین دادهٔ واقعی است.
 
+## پیش‌شرط سخت: توقف نوشتن در asset-service
+
+از آغاز گام ۱ تا پس از گذشتن بررسی‌های گام ۴ و `COMMIT` **هیچ نوشتنی از سوی asset-service نباید رخ دهد**. پیش از گام ۱ همهٔ
+نسخه‌های asset-service (و مصرف‌کننده‌های Kafka آن) را متوقف کن؛ فقط پس از گذشتن بررسی‌های پایانی دوباره راه بینداز. دلیل:
+فعال‌سازیِ همزمانِ یک دارایی ارجاعی را می‌خواند که آشتی در حال برگرداندن آن است و نشانه‌اش را می‌گیرد، در حالی که
+آشتی نه وضعیت و نه نسخهٔ دارایی را عوض می‌کند و نوشتن وضعیت بی‌تعارض تأیید می‌شود؛ نتیجه نشانه‌ای است برای مالکی که هرگز
+مدرکی نداشته است (#234 دور ۱۰). قفل یا کد تازه‌ای برای این کار نیست؛ توقف عملیاتی است و این بررسی آن را اجباری می‌کند.
+
+پیش از گام ۱ و دوباره درست پیش از `COMMIT` گام ۳، در **همان یک نشست** اپراتور اجرا کن (نشست دوم نگشا)؛ اگر نشست دیگری
+روی همین پایگاه باشد با خطا متوقف می‌شود و نباید ادامه دهی (`psql -v ON_ERROR_STOP=1`):
+
+```sql preflight
+DO $$
+DECLARE others int;
+BEGIN
+  SELECT count(*) INTO others FROM pg_stat_activity
+   WHERE datname = current_database() AND usename IS NOT NULL AND pid <> pg_backend_pid();
+  IF others > 0 THEN
+    RAISE EXCEPTION 'asset-service writes are not quiesced: % other session(s) on this database', others;
+  END IF;
+END
+$$;
+```
+
 ## زمینه
 
 انتقال A→B تا پیش از Q-99 ردیف‌های `asset_document_ref` (و ردیف‌های خط زمانی با `category = 'DOCUMENT'`) را به B می‌برد
@@ -71,6 +95,14 @@ CREATE TEMP TABLE verified_owner (
 ) ON COMMIT DROP;
 ```
 
+داراییِ هر ارجاعی که همین اجرا برمی‌گرداند در جدول موقت دوم ثبت می‌شود؛ بررسی نشانهٔ گام ۴ فقط به همین‌ها نگاه می‌کند:
+
+```sql load-returned
+CREATE TEMP TABLE returned_asset (
+  asset_id text PRIMARY KEY
+) ON COMMIT DROP;
+```
+
 ```sql
 -- مقدارها را از خروجی گام ۲ بساز؛ هر ارجاعِ تأییدشده یک سطر (برابر با مالک فعلی هم می‌تواند بیاید: بی‌اثر است).
 INSERT INTO verified_owner (ref_id, document_owner) VALUES ('ADR_…', 'ORG_…'), …;
@@ -99,15 +131,21 @@ WITH fixed_refs AS (
    WHERE a.commissioned_for_organization_id IS NOT NULL
      AND a.id IN (SELECT r.asset_id FROM asset_document_ref r JOIN fixed_refs f ON f.id = r.id)
   RETURNING a.id
+), recorded AS (
+  INSERT INTO returned_asset (asset_id)
+  SELECT DISTINCT r.asset_id FROM asset_document_ref r JOIN fixed_refs f ON f.id = r.id
+  ON CONFLICT DO NOTHING
+  RETURNING asset_id
 )
 SELECT (SELECT count(*) FROM fixed_refs)::int AS refs_fixed,
        (SELECT count(*) FROM fixed_entries)::int AS entries_fixed,
-       (SELECT count(*) FROM cleared_markers)::int AS markers_cleared;
+       (SELECT count(*) FROM cleared_markers)::int AS markers_cleared,
+       (SELECT count(*) FROM recorded)::int AS assets_returned;
 ```
 
 دو شمارش اول را با شمار ارجاع‌های جابه‌جاشدهٔ گام ۲ مقایسه کن (هر ارجاع جابه‌جاشده یک ارجاع و یک ردیف خط زمانی)؛ فقط در
 صورت برابری `COMMIT` بزن، وگرنه `ROLLBACK`. `markers_cleared` شمار دارایی‌هایی است که نشانه‌شان پاک شد؛ در تیکت ثبت
-شود. پیش از `COMMIT` همین تراکنش سه بررسی گام ۴ را هم اجرا کن.
+شود. پیش از `COMMIT` همین تراکنش، `preflight` را دوباره و سه بررسی گام ۴ را اجرا کن.
 
 - هیچ ردیفی پاک نمی‌شود. اگر ارجاعی به دارایی‌ای اشاره می‌کند که اکنون مالک دیگری دارد، پس از بازگشت دیگر در پروندهٔ مالک
   جدید دیده نمی‌شود (درست همان رفتار Q-99) و مالک جدید مدرک خودش را می‌چسباند.
@@ -124,8 +162,8 @@ SELECT (SELECT count(*) FROM fixed_refs)::int AS refs_fixed,
 
 سه بررسی، هر سه باید **خالی** باشند. گام ۱ دیگر معیار نیست: رفت‌وبرگشتِ مشروعِ A→B→A ردیف‌هایی دارد که هنوز در فهرست
 نامزدها می‌آیند ولی درست‌اند. (الف) هر ردیف خط زمانیِ مدرک نزد همان سازمانِ ارجاعِ جفتش است؛ (ب) هر ارجاعِ تأییدشده نزد
-مالک مدرک است؛ (پ) هیچ دارایی‌ِ منتقل‌شده‌ای نشانهٔ فعال‌سازی برای سازمانی ندارد که برای آن دارایی سند مالکیت یا کارت
-نگه نمی‌دارد (دارایی‌ای که هرگز منتقل نشده، نشانه‌اش از پیش و به‌درستی بدون مدرک است):
+مالک مدرک است؛ (پ) دارایی‌ای که همین اجرا ارجاعش را برگرداند (`returned_asset`) دیگر نشانهٔ فعال‌سازی ندارد. فقط همین‌ها بررسی
+می‌شوند: نشانهٔ دارایی‌ای که ارجاعش برنگشت، حتی اگر مدرک مشروعش بعدها حذف شده باشد، درست و دست‌نخورده است:
 
 ```sql verify-pairs
 SELECT e.id AS entry_id, e.organization_id AS entry_org, r.organization_id AS ref_org
@@ -144,12 +182,8 @@ SELECT r.id AS ref_id, r.organization_id AS current_org, v.document_owner
 ```sql verify-markers
 SELECT a.id AS asset_id, a.commissioned_for_organization_id AS marker
   FROM asset a
- WHERE a.commissioned_for_organization_id IS NOT NULL
-   AND EXISTS (SELECT 1 FROM asset_transfer t WHERE t.asset_id = a.id)
-   AND NOT EXISTS (SELECT 1 FROM asset_document_ref r
-                    WHERE r.asset_id = a.id AND r.organization_id = a.commissioned_for_organization_id
-                      AND r.deleted_at IS NULL
-                      AND r.kind IN ('OWNERSHIP_TITLE', 'REGISTRATION_CARD'));
+  JOIN returned_asset x ON x.asset_id = a.id
+ WHERE a.commissioned_for_organization_id IS NOT NULL;
 ```
 
 پس از `COMMIT` گام ۲ را برای همهٔ ارجاع‌های گام ۱ دوباره بگیر و مطمئن شو `current_org` هر یک برابر `document_owner` است. شمار
