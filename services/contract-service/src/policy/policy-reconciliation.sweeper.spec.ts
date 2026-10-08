@@ -44,10 +44,6 @@ function build(tasks: ClaimedTask[] = []) {
   };
   const directory = {
     isWithin: jest.fn(async () => false),
-    // The employer is in the moved organization's subtree and carries the task's move version.
-    withinVersion: jest.fn(async (): Promise<{ hierarchyVersion: number } | null> => ({
-      hierarchyVersion: 4,
-    })),
   };
   const sweeper = new PolicyReconciliationSweeper(
     reconciliations as unknown as PolicyReconciliationRepository,
@@ -67,14 +63,13 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
     expect(directory.isWithin).toHaveBeenCalledWith('ORG_U', 'ORG_E');
     expect(suspension.suspend).toHaveBeenCalledWith(
       { id: 'APL_1', organizationId: 'ORG_E' },
-      expect.objectContaining({
-        reason: 'ORGANIZATION_MOVED',
-        eventId: 'EVT_1',
-        movedOrganizationId: 'ORG_E',
+      {
+        reason: 'MOVE_RECHECK',
         movedAt: new Date('2026-10-06T10:00:00.000Z'),
         movedVersion: 4,
+        correlationId: 'COR_1',
         callerService: 'organization-service',
-      }),
+      },
       expect.anything(),
     );
     expect(reconciliations.ownershipOf).toHaveBeenCalledWith(
@@ -100,65 +95,31 @@ describe('PolicyReconciliationSweeper (Q-83)', () => {
   });
 
   it.each([
-    ['an employer that is not within the moved organization (an unrelated move)', null],
-    ['an employer that carries another move’s version', { hierarchyVersion: 9 }],
+    ['a first delivery', task()],
+    [
+      'a task never coalesced into, whose employer carries its version (the A/B out-of-order case)',
+      task({ movedOrganizationId: 'ORG_B' }),
+    ],
+    ['a coalesced task', task({ generation: 1 })],
+    ['a move that carries no version', task({ movedVersion: null })],
   ])(
-    'names no cause for %s: MOVE_RECHECK, no event, no instant (round 6)',
-    async (_what, answer) => {
-      const { sweeper, suspension, directory } = build([task()]);
-      directory.withinVersion.mockResolvedValue(answer);
+    'never names a cause for %s: MOVE_RECHECK, no event, no moved organization, and no extra question (round 9)',
+    async (_what, queued) => {
+      const { sweeper, suspension, directory } = build([queued]);
 
       await sweeper.runOnce();
 
-      expect(directory.withinVersion).toHaveBeenCalledWith('ORG_E', 'ORG_E');
+      expect(directory.isWithin).toHaveBeenCalledTimes(1);
       const cause = (suspension.suspend.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
       expect(cause).toEqual({
         reason: 'MOVE_RECHECK',
-        movedVersion: 4,
+        movedVersion: queued.movedVersion,
+        movedAt: queued.movedAt,
         correlationId: 'COR_1',
         callerService: 'organization-service',
       });
     },
   );
-
-  it('names no cause for a move that carries no version: nothing to prove it by, and no question asked', async () => {
-    const { sweeper, suspension, directory } = build([task({ movedVersion: null })]);
-
-    await sweeper.runOnce();
-
-    expect(directory.withinVersion).not.toHaveBeenCalled();
-    expect((suspension.suspend.mock.calls[0] as unknown[])[1]).toMatchObject({
-      reason: 'MOVE_RECHECK',
-      movedVersion: null,
-    });
-  });
-
-  it('names no cause for a coalesced task, though the employer carries its version: two moves outside the union (round 7)', async () => {
-    // The employer left the union with a first move and moved again within the outside branch; the
-    // task holds the later, higher-versioned move, and the hierarchy would "prove" it the cause.
-    const { sweeper, suspension, directory } = build([task({ generation: 1 })]);
-
-    await sweeper.runOnce();
-
-    expect(directory.withinVersion).not.toHaveBeenCalled();
-    expect((suspension.suspend.mock.calls[0] as unknown[])[1]).toEqual({
-      reason: 'MOVE_RECHECK',
-      movedVersion: 4,
-      correlationId: 'COR_1',
-      callerService: 'organization-service',
-    });
-  });
-
-  it('retries the task when the proof cannot be had, rather than naming a cause it did not confirm', async () => {
-    const { sweeper, reconciliations, suspension, directory } = build([task()]);
-    directory.withinVersion.mockRejectedValue(new Error('organization-service down'));
-
-    const outcome = await sweeper.runOnce();
-
-    expect(suspension.suspend).not.toHaveBeenCalled();
-    expect(reconciliations.retryLater).toHaveBeenCalled();
-    expect(outcome.retried).toBe(1);
-  });
 
   it('gives a task back, open and due, when a move coalesced after the claim made the worker’s answer stale (round 5)', async () => {
     const { sweeper, reconciliations, suspension } = build([task()]);

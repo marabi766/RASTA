@@ -212,9 +212,13 @@ export class ContractRepository {
    * Flags the employer signatures under `policyId` that a move raced (D-050): the tree they
    * rested on is older than the move's — the hierarchy version they recorded is LOWER than the
    * move's, a number organization-service stamps in the move's own transaction, so no clock
-   * orders it. **Only the version decides**: the commit deadline and the move's `occurredAt` are
-   * two services' clocks and take no part. A signature that read the tree after the move recorded
-   * the move's version or more, and is not flagged.
+   * orders it — **and** the move's instant is at or before the signature's commit deadline
+   * (`moved_at ≤ hierarchy_commit_deadline`, exactly D-050): a signature that committed before the
+   * move was prepared cannot have raced it. The version decides which tree was read; the window
+   * only bounds which signatures are looked at, and its clock skew errs towards flagging. A
+   * signature without a deadline (from before evidence) cannot be bounded and is looked at.
+   * A signature that read the tree after the move recorded the move's version or more, and is not
+   * flagged.
    * Never revokes: it writes one append-only review row each, once
    * (`ux_signature_authority_review_signature`), and returns the ones it newly flagged. Runs under
    * the policy slot's lock, so no signature is recorded under the policy meanwhile.
@@ -230,6 +234,8 @@ export class ContractRepository {
       detectedBy: 'ORGANIZATION_MOVED' | 'MOVE_RECHECK';
       /** The move's hierarchy version; null for an event that predates versions. */
       movedVersion: number | null;
+      /** The move's own instant: the D-050 bound on which signatures could have raced it. Not recorded. */
+      moveInstant: Date;
       at: Date;
     },
   ): Promise<{ contractId: string; policyVersion: number }[]> {
@@ -241,21 +247,32 @@ export class ContractRepository {
             organizationId: input.organizationId,
             policyId: input.policyId,
             side: 'EMPLOYER',
-            // Decided by the version alone — no timestamp takes part (round 5): the move's
-            // instant is organization-service's clock and the deadline this database's, and two
-            // clocks cannot order a move against a signature. A signature rests on a tree older
-            // than the move's when it recorded a lower version, or none (a signature from before
-            // versions cannot show it read the moved tree). A move with no version (an event from
-            // before them) orders nothing, so every unreviewed signature under the policy is
-            // flagged: flagging too many is safe, flagging too few is not.
-            ...(input.movedVersion === null
-              ? {}
-              : {
-                  OR: [
-                    { hierarchyVersion: null },
-                    { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
-                  ],
-                }),
+            // The version decides which tree was read: a signature rests on a tree older than the
+            // move's when it recorded a lower version, or none (a signature from before versions
+            // cannot show it read the moved tree). A move with no version (an event from before
+            // them) orders nothing, so the version test is dropped: flagging too many is safe,
+            // flagging too few is not.
+            // The window (D-050) only bounds which signatures are looked at: one whose commit
+            // deadline precedes the move's instant committed before the move and cannot have
+            // raced it. No deadline, no bound.
+            AND: [
+              ...(input.movedVersion === null
+                ? []
+                : [
+                    {
+                      OR: [
+                        { hierarchyVersion: null },
+                        { hierarchyVersion: { lt: BigInt(input.movedVersion) } },
+                      ],
+                    },
+                  ]),
+              {
+                OR: [
+                  { hierarchyCommitDeadline: null },
+                  { hierarchyCommitDeadline: { gte: input.moveInstant } },
+                ],
+              },
+            ],
             review: null,
           },
           orderBy: { id: 'asc' },

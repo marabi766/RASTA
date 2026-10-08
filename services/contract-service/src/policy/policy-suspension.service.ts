@@ -28,30 +28,24 @@ export const RECONCILIATION_TASK_ID_PREFIX = 'PRT';
 /** Why a policy was suspended: a closed code, on the row and on the event. */
 export type SuspensionReason = 'ORGANIZATION_MOVED' | 'MOVE_RECHECK' | 'SIGNING_RECHECK';
 
-/** What made the system look: a move, or a signature being attempted under the policy. */
+/**
+ * What made the system look: a move's re-check, or a signature being attempted under the policy.
+ *
+ * The sweeper never names a cause (round 9, final): the event stream gives no cross-aggregate
+ * order, so which move took the employer out of the union cannot be proven from the hierarchy as
+ * it is now (docs/23 D-051). A move only *queued* the re-check; the detection is recorded as
+ * `MOVE_RECHECK` with no event id and no instant on the review.
+ */
 export type SuspensionCause =
   | {
-      reason: 'ORGANIZATION_MOVED';
-      /** The ORGANIZATION_MOVED event, for the record. */
-      eventId: string;
-      /** The organization that moved — a trigger, never the answer. */
-      movedOrganizationId: string;
-      /** When the move took effect: the event's own instant (D-050). */
-      movedAt: Date;
-      /** The move's hierarchy version (organization-service's); null for an event without one. */
-      movedVersion: number | null;
-      correlationId: string;
-      callerService: string;
-    }
-  /**
-   * A move queued the re-check but is **not shown to be its cause** (round 6): an unrelated
-   * organization moved, or the event carries no version to prove anything by. The detection is
-   * real — the union no longer governs the employer — and is recorded without naming an event or an
-   * instant that did not cause it. `movedVersion` is only the basis signatures are compared with.
-   */
-  | {
       reason: 'MOVE_RECHECK';
+      /** The basis signatures are compared with; null for an event without a version. */
       movedVersion: number | null;
+      /**
+       * The queued move's instant — only the bound on which signatures could have committed after
+       * it (D-050); it is never recorded as a cause.
+       */
+      movedAt: Date;
       correlationId: string;
       callerService: string;
     }
@@ -218,10 +212,8 @@ export class PolicySuspensionService {
           if (check.kind === 'STALE') return 'STALE' as const;
           // The move's version and instant as the locked row holds them now — never the copy
           // taken at the claim.
-          if (cause.reason === 'ORGANIZATION_MOVED') {
+          if (cause.reason === 'MOVE_RECHECK') {
             effective = { ...cause, movedVersion: check.movedVersion, movedAt: check.movedAt };
-          } else if (cause.reason === 'MOVE_RECHECK') {
-            effective = { ...cause, movedVersion: check.movedVersion };
           }
         }
         const suspended = await this.suspendIn(tx, candidate.id, effective);
@@ -270,12 +262,8 @@ export class PolicySuspensionService {
         suspendedAt: at,
         suspendedBy: SYSTEM_ACTOR,
         suspensionReason:
-          cause.reason === 'ORGANIZATION_MOVED'
-            ? `${cause.reason}: ${policy.authorOrganizationId} no longer governs ` +
-              `${policy.organizationId} (event ${cause.eventId}, organization ` +
-              `${cause.movedOrganizationId})`
-            : `${cause.reason}: ${policy.authorOrganizationId} no longer governs ` +
-              `${policy.organizationId}`,
+          `${cause.reason}: ${policy.authorOrganizationId} no longer governs ` +
+          `${policy.organizationId}`,
       },
     });
     if (matched === 0) return false;
@@ -292,13 +280,11 @@ export class PolicySuspensionService {
         policyVersion: policy.policyVersion,
         fromStatus: from,
         reason: cause.reason,
-        causeEventId: cause.reason === 'ORGANIZATION_MOVED' ? cause.eventId : null,
-        movedOrganizationId:
-          cause.reason === 'ORGANIZATION_MOVED' ? cause.movedOrganizationId : null,
+        causeEventId: null,
+        movedOrganizationId: null,
         suspendedBy: SYSTEM_ACTOR,
         suspendedAt: at.toISOString(),
       },
-      ...(cause.reason === 'ORGANIZATION_MOVED' ? { causationId: cause.eventId } : {}),
       occurredAt: at,
     });
     if (cause.reason !== 'SIGNING_RECHECK') await this.flagRaced(tx, policy, cause, at);
@@ -315,6 +301,9 @@ export class PolicySuspensionService {
    * could still have committed after the move was prepared.
    * Never revokes or cancels anything; one review row and one audit event per signature, in the
    * transaction that found the policy stranded, under the policy slot's lock.
+   *
+   * The review names no cause: `detectedBy` is always `MOVE_RECHECK`, with a null event id and
+   * instant (round 9; docs/23 D-051).
    */
   private async flagRaced(
     tx: ExtendedPrismaClient,
@@ -322,19 +311,17 @@ export class PolicySuspensionService {
     cause: Exclude<SuspensionCause, { reason: 'SIGNING_RECHECK' }>,
     at: Date,
   ): Promise<void> {
-    // Only a proven cause is named: otherwise the review and its event carry no event id and no
-    // instant — the detection is recorded, a wrong attribution is not (round 6).
-    const proven = cause.reason === 'ORGANIZATION_MOVED' ? cause : null;
     const attribution = {
-      causeEventId: proven?.eventId ?? null,
-      movedAt: proven?.movedAt ?? null,
-      detectedBy: proven ? ('ORGANIZATION_MOVED' as const) : ('MOVE_RECHECK' as const),
+      causeEventId: null,
+      movedAt: null,
+      detectedBy: 'MOVE_RECHECK' as const,
     };
     const flagged = await this.contracts.flagRacedSignatures(tx, {
       organizationId: policy.organizationId,
       policyId: policy.id,
       ...attribution,
       movedVersion: cause.movedVersion,
+      moveInstant: cause.movedAt,
       at,
     });
     for (const signature of flagged) {
@@ -350,17 +337,16 @@ export class PolicySuspensionService {
           policyVersion: signature.policyVersion,
           reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
           detectedBy: attribution.detectedBy,
-          causeEventId: attribution.causeEventId,
-          movedAt: attribution.movedAt?.toISOString() ?? null,
+          causeEventId: null,
+          movedAt: null,
           movedVersion: cause.movedVersion,
           flaggedAt: at.toISOString(),
         },
-        ...(proven ? { causationId: proven.eventId } : {}),
         occurredAt: at,
       });
       this.logger.warn(
         `Signature of contract ${signature.contractId} flagged for review: the authority it rested ` +
-          `on changed while it was being made (${proven ? proven.eventId : 'no proven cause'})`,
+          `on changed while it was being made (no cause named)`,
       );
     }
 
