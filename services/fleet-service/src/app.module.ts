@@ -60,7 +60,11 @@ import {
 } from './fleet/transfer-record';
 import { UsageFactService } from './fleet/source-fact';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
-import { AssetSnapshotClient, MaintenanceStateClient } from './consumers/replica-sources';
+import {
+  AssetSnapshotClient,
+  InsurancePolicyClient,
+  MaintenanceStateClient,
+} from './consumers/replica-sources';
 import { AssetWorkStateService } from './fleet/asset-work-state';
 import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
@@ -229,6 +233,13 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
             tokens: internalTokens(env),
           }),
           transferRecords,
+          // ADR-061 § 4: every INSURANCE_RECORDED is verified at its source.
+          new InsurancePolicyClient({
+            from: SERVICE_NAME,
+            baseUrl: env.ASSET_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: internalTokens(env),
+          }),
         ),
     },
 

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { EventEnvelope } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
+import { FakePolicySource, echoing } from './policy-source.fake';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -44,6 +45,7 @@ describe('rollback of the ownership generation (#240 round 3)', () => {
   let prisma: PrismaService;
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
+  let policies: FakePolicySource;
   let strict: AssignmentService;
 
   /** What psql connects with, as the PG* environment, so no password is on a command line. */
@@ -79,7 +81,12 @@ describe('rollback of the ownership generation (#240 round 3)', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    consumer = new AssetSyncConsumer(null, repository);
+    // asset-service confirms each policy as its event states it, unless a test says otherwise.
+    policies = new FakePolicySource();
+    consumer = echoing(
+      new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+      policies,
+    );
     strict = new AssignmentService(repository);
     await cleanup(prisma, [org.a, org.b]);
   });

@@ -17,6 +17,12 @@ import { flushOutbox } from './flush.command';
  * (default 300) ran out first; 2 on an error. Run with every asset-service
  * replica stopped.
  *
+ * `--max-seconds` is a **deadline checked between ticks**, not a bound on the
+ * run: a tick that is publishing a batch when the time runs out is allowed to
+ * finish (its rows are then acknowledged, never left half-claimed), so the
+ * command can outlast the value by one batch's publish time. The deadline
+ * decides whether another tick starts or the command waits for a lease.
+ *
  * Built by hand rather than by booting the Nest application, as
  * `insurance:reproject` is — and for the opposite reason to it: that command
  * only writes rows and leaves publishing to the service; this is the publishing

@@ -18,7 +18,11 @@ export interface FlushOptions {
   tick: () => Promise<number>;
   /** Rows with no `published_at`, whatever their claim or backoff state. */
   unpublished: () => Promise<number>;
-  /** Gives up after this long: a row in backoff or under another process's lease may take that long to become claimable. */
+  /**
+   * Gives up after this long: a row in backoff or under another process's lease may take that long to become claimable.
+   * A deadline checked between ticks, not a bound on the run: a tick in progress
+   * when it passes is finished, so the loop can overrun by one batch's publish.
+   */
   maxSeconds: number;
   /** How long to wait when a tick published nothing. */
   pollMs: number;

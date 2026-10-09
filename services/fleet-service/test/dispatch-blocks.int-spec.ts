@@ -3,6 +3,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
+import { FakePolicySource, echoing } from './policy-source.fake';
 import {
   LAPSE_RULES_ONLY,
   asActor,
@@ -30,6 +31,7 @@ describe('dispatch blocks (L3-02)', () => {
   let prisma: PrismaService;
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
+  let policies: FakePolicySource;
   let assignments: AssignmentService;
   /** The fail-closed default: every coverage must be in force (docs/24 Q-101). */
   let strict: AssignmentService;
@@ -38,7 +40,12 @@ describe('dispatch blocks (L3-02)', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    consumer = new AssetSyncConsumer(null, repository);
+    // asset-service confirms each policy as its event states it, unless a test says otherwise.
+    policies = new FakePolicySource();
+    consumer = echoing(
+      new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+      policies,
+    );
     assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     strict = new AssignmentService(repository);
     await cleanup(prisma, [org.a, org.b, orgC]);
@@ -589,6 +596,137 @@ describe('dispatch blocks (L3-02)', () => {
       expect(row!.insuranceCover).toEqual({});
       expect(row!.organizationId).toBe(org.b);
       await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
+    });
+  });
+
+  /**
+   * #240 round 6 (ADR-061 § 4): an `INSURANCE_RECORDED` is applied only as
+   * asset-service confirms it now. The routes that used to slip a stale policy
+   * past the owner and generation checks — a dead-letter replay after the
+   * following list was narrowed, a delayed first-tenure event after A→B→A with
+   * no generation — now meet the source, which says no.
+   */
+  describe('verified at its source (#240 round 6)', () => {
+    const refused = {
+      code: 'BUSINESS_RULE_VIOLATION',
+      message: expect.stringContaining('withdrawn from dispatch'),
+    };
+    const day = 86_400_000;
+    /** Dispatch needs COMPREHENSIVE in force and nothing else. */
+    let comprehensive: AssignmentService;
+
+    beforeAll(() => {
+      comprehensive = new AssignmentService(repository, {
+        blockingCoverages: ['COMPREHENSIVE'],
+        requiredCoverages: ['COMPREHENSIVE'],
+      });
+    });
+
+    const dispatch = (assetId: string, driverId: string) =>
+      asActor({ organizationId: org.a }, () => comprehensive.create({ driverId, assetId }));
+
+    const policyEvent = (assetId: string, policyId: string, generation?: number): EventEnvelope =>
+      event('INSURANCE_RECORDED', {
+        assetId,
+        policyId,
+        insurerName: 'بیمه ایران',
+        coverage: 'COMPREHENSIVE',
+        validFrom: new Date(Date.now() - day).toISOString(),
+        validTo: new Date(Date.now() + 100 * day).toISOString(),
+        ...(generation === undefined ? {} : { ownershipGeneration: generation }),
+      });
+
+    const confirmed = (validUntil: Date, ownershipGeneration: number) => ({
+      counts: true as const,
+      organizationId: org.a,
+      coverage: 'COMPREHENSIVE',
+      validFrom: new Date(Date.now() - day).toISOString(),
+      validUntil: validUntil.toISOString(),
+      ownershipGeneration,
+    });
+
+    it('DLQ replay after narrowing: the source says no, so the event is ignored and dispatch stays refused', async () => {
+      const { assetId, driverId } = await fleet();
+      const policyId = id('INS');
+      policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
+      const replayed = policyEvent(assetId, policyId, 1);
+
+      // The event passes every cheap check — the owner is its tenant — and is
+      // acknowledged, not applied.
+      await consumer.handle(replayed);
+      await consumer.handle(replayed, { topic: 'rasta.insurance.v1.retry' } as never);
+
+      const row = await repository.findAssetRefUnscoped(assetId);
+      expect(row!.insuranceCover).toEqual({});
+      expect(policies.asked).toContainEqual({ organizationId: org.a, assetId, policyId });
+      await expect(dispatch(assetId, driverId)).rejects.toMatchObject(refused);
+    });
+
+    it('A→B→A with no generation: a delayed first-tenure event of A is not applied; one the source confirms is, with its window', async () => {
+      const { assetId, driverId } = await fleet();
+      const transfer = (from: string, to: string) =>
+        consumer.handle({
+          ...event('ASSET_TRANSFERRED', {
+            assetId,
+            fromOrganizationId: from,
+            toOrganizationId: to,
+            transferredAt: new Date().toISOString(),
+            reason: 'واگذاری',
+          }),
+          tenantId: to,
+          payload: {
+            assetId,
+            organizationId: to,
+            fromOrganizationId: from,
+            toOrganizationId: to,
+            transferredAt: new Date().toISOString(),
+            reason: 'واگذاری',
+          },
+        });
+      await transfer(org.a, org.b);
+      await transfer(org.b, org.a);
+      await consumer.handle(event('ASSET_ACTIVATED', { assetId }));
+      expect((await repository.findAssetRefUnscoped(assetId))!.ownershipGeneration).toBeNull();
+
+      const stale = id('INS');
+      policies.deny(stale);
+      await consumer.handle(policyEvent(assetId, stale, 1));
+      expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+      await expect(dispatch(assetId, driverId)).rejects.toMatchObject(refused);
+
+      // A policy of the current tenure: stored with the source's window (not the
+      // event's, which ran 100 days).
+      const current = id('INS');
+      const until = new Date(Date.now() + 30 * day);
+      policies.set(current, confirmed(until, 2));
+      await consumer.handle(policyEvent(assetId, current, 2));
+      const row = await repository.findAssetRefUnscoped(assetId);
+      expect(row!.insuranceCover).toEqual({
+        COMPREHENSIVE: [
+          expect.objectContaining({
+            policyId: current,
+            validTo: until.toISOString(),
+            generation: 2,
+          }),
+        ],
+      });
+      await expect(dispatch(assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('asset-service down: the event fails and leaves no marker, nothing is applied; once it is up, the same event applies', async () => {
+      const { assetId, driverId } = await fleet();
+      const policyId = id('INS');
+      const event1 = policyEvent(assetId, policyId, 0);
+      policies.set(policyId, confirmed(new Date(Date.now() + 50 * day), 0));
+
+      policies.unreachable();
+      await expect(consumer.handle(event1)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+      await expect(dispatch(assetId, driverId)).rejects.toMatchObject(refused);
+
+      policies.unreachable(false);
+      await consumer.handle(event1);
+      await expect(dispatch(assetId, driverId)).resolves.toMatchObject({ assetId });
     });
   });
 

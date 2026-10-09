@@ -3,6 +3,8 @@ import { tryGetContext, type OutboxMessageInput } from '@rasta/nest-common';
 import { AssetSyncConsumer, CONSUMER_NAME } from './asset-sync.consumer';
 import type { FleetRepository } from '../fleet/fleet.repository';
 import { CONSUMED_EVENTS, CONSUMED_PAYLOADS } from '../fleet/events';
+import { FakePolicySource, echoing } from '../../test/policy-source.fake';
+import { activeDispatchBlocks } from '../fleet/dispatch-blocks';
 
 /**
  * The consumer drives the replica that every availability answer is built on,
@@ -37,6 +39,8 @@ function buildConsumer(options: {
   alreadyProcessed?: boolean;
   open?: OpenAssignment[];
   windows?: LiveWindow[];
+  /** asset-service's answers about policies; by default it confirms what each event states. */
+  policies?: FakePolicySource;
 }) {
   const recorded: Recorded = { upserts: [], processed: [], events: [] };
 
@@ -75,7 +79,12 @@ function buildConsumer(options: {
     }),
   } as unknown as FleetRepository;
 
-  return { consumer: new AssetSyncConsumer(null, repository), repository, recorded };
+  const policies = options.policies ?? new FakePolicySource();
+  const consumer = echoing(
+    new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+    policies,
+  );
+  return { consumer, repository, recorded, policies };
 }
 
 function envelope(overrides: Partial<EventEnvelope> & { eventName: string }): EventEnvelope {
@@ -1803,6 +1812,190 @@ describe('AssetSyncConsumer', () => {
 
       expect(marked.has('EVT-TRANSFER-9')).toBe(true);
       expect(recorded.upserts[0]).toMatchObject({ organizationId: B, status: 'REGISTERED' });
+    });
+  });
+
+  /**
+   * ADR-061 § 4 (#240 r6): an `INSURANCE_RECORDED` is applied only as
+   * asset-service confirms it now, by whatever route it was delivered.
+   */
+  describe('INSURANCE_RECORDED is verified at its source', () => {
+    const OWNER = 'ORG-DEH-0001';
+    const machine = {
+      id: 'AST-SEED-0001',
+      organizationId: OWNER,
+      inspectionBlockedAt: null,
+      insuranceLapsedCoverages: [],
+      insuranceCover: {},
+      ownershipGeneration: 3,
+      retainedCoverages: [],
+    };
+    const recordedPolicy = (overrides: Record<string, unknown> = {}) =>
+      envelope({
+        eventName: 'INSURANCE_RECORDED',
+        payload: {
+          assetId: 'AST-SEED-0001',
+          organizationId: OWNER,
+          policyId: 'INS-1',
+          insurerName: 'بیمه ایران',
+          coverage: 'COMPREHENSIVE',
+          validFrom: '2026-01-01T00:00:00.000Z',
+          validTo: '2999-01-01T00:00:00.000Z',
+          ownershipGeneration: 3,
+          ...overrides,
+        },
+      });
+    const blocks = (cover: unknown) =>
+      activeDispatchBlocks(
+        {
+          inspectionBlockedReason: null,
+          insuranceLapsedCoverages: [],
+          insuranceCover: cover,
+        },
+        new Date('2026-10-01T00:00:00.000Z'),
+        { blockingCoverages: ['COMPREHENSIVE'], requiredCoverages: ['COMPREHENSIVE'] },
+      );
+
+    it('stores the window and generation the source states, not the event’s', async () => {
+      const policies = new FakePolicySource().set('INS-1', {
+        counts: true,
+        organizationId: OWNER,
+        coverage: 'COMPREHENSIVE',
+        validFrom: '2026-02-01T00:00:00.000Z',
+        validUntil: '2027-02-01T00:00:00.000Z',
+        ownershipGeneration: 4,
+      });
+      const { consumer, recorded } = buildConsumer({ existing: machine, policies });
+
+      await consumer.handle(recordedPolicy());
+
+      expect(recorded.upserts[0]!.insuranceCover).toEqual({
+        COMPREHENSIVE: [
+          {
+            policyId: 'INS-1',
+            validFrom: '2026-02-01T00:00:00.000Z',
+            validTo: '2027-02-01T00:00:00.000Z',
+            generation: 4,
+          },
+        ],
+      });
+      expect(policies.asked).toEqual([
+        { organizationId: OWNER, assetId: 'AST-SEED-0001', policyId: 'INS-1' },
+      ]);
+    });
+
+    it('ignores, as processed, a policy the source says does not count — a replay after the list was narrowed', async () => {
+      // The event carries the current generation, so no owner or generation
+      // check can refuse it: only the source knows the rule was narrowed.
+      const policies = new FakePolicySource().deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
+      const { consumer, recorded } = buildConsumer({ existing: machine, policies });
+
+      await consumer.handle(recordedPolicy());
+
+      expect(recorded.processed).toHaveLength(1);
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+      // Dispatch is refused: nothing in force for the required coverage.
+      expect(blocks(machine.insuranceCover)).toEqual([
+        expect.objectContaining({ cause: 'INSURANCE', coverages: ['COMPREHENSIVE'] }),
+      ]);
+    });
+
+    it('ignores a policy the source does not know', async () => {
+      const policies = new FakePolicySource().deny('INS-GHOST', 'UNKNOWN_POLICY');
+      const { consumer, recorded } = buildConsumer({ existing: machine, policies });
+
+      await consumer.handle(recordedPolicy({ policyId: 'INS-GHOST' }));
+
+      expect(recorded.processed).toHaveLength(1);
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    });
+
+    it('A→B→A: a delayed first-tenure event of A with an unknown generation is not applied', async () => {
+      // The replica owner is A again, its generation unknown (a generation-less
+      // transfer): the owner check cannot tell A's first tenure from this one.
+      const policies = new FakePolicySource().deny('INS-OLD');
+      const { consumer, recorded } = buildConsumer({
+        existing: { ...machine, ownershipGeneration: null },
+        policies,
+      });
+
+      await consumer.handle(recordedPolicy({ policyId: 'INS-OLD', ownershipGeneration: 1 }));
+
+      expect(policies.asked).toHaveLength(1);
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    });
+
+    it('A→B→A: a policy of the current tenure is stored with the source’s window and generation', async () => {
+      const policies = new FakePolicySource().set('INS-NEW', {
+        counts: true,
+        organizationId: OWNER,
+        coverage: 'COMPREHENSIVE',
+        validFrom: '2026-09-01T00:00:00.000Z',
+        validUntil: '2027-09-01T00:00:00.000Z',
+        ownershipGeneration: 3,
+      });
+      const { consumer, recorded } = buildConsumer({
+        existing: { ...machine, ownershipGeneration: null },
+        policies,
+      });
+
+      await consumer.handle(recordedPolicy({ policyId: 'INS-NEW', ownershipGeneration: 3 }));
+
+      expect(recorded.upserts[0]).toMatchObject({
+        insuranceCover: {
+          COMPREHENSIVE: [
+            { policyId: 'INS-NEW', validTo: '2027-09-01T00:00:00.000Z', generation: 3 },
+          ],
+        },
+      });
+      // The replica's own generation is the transfer events' to set.
+      expect(recorded.upserts[0]).not.toHaveProperty('ownershipGeneration');
+    });
+
+    it('does not ask when the owner pre-filter already refuses the event', async () => {
+      const policies = new FakePolicySource();
+      const { consumer, recorded } = buildConsumer({
+        existing: { ...machine, organizationId: 'ORG-DEH-0002' },
+        policies,
+      });
+
+      await consumer.handle(recordedPolicy({ ownershipGeneration: 1 }));
+
+      expect(policies.asked).toHaveLength(0);
+      expect(recorded.processed).toHaveLength(1);
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    });
+
+    it('with asset-service down: the event fails (retry), the policy is never applied', async () => {
+      const policies = new FakePolicySource().unreachable();
+      const { consumer, recorded } = buildConsumer({ existing: machine, policies });
+
+      await expect(consumer.handle(recordedPolicy())).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+
+      expect(recorded.upserts).toHaveLength(0);
+    });
+
+    it('a service built without asset-service applies nothing', async () => {
+      const { repository } = buildConsumer({ existing: machine });
+      const unwired = new AssetSyncConsumer(null, repository);
+
+      await expect(unwired.handle(recordedPolicy())).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+    });
+
+    it('asks on a .retry delivery too, whatever the topic', async () => {
+      const policies = new FakePolicySource().deny('INS-1');
+      const { consumer, recorded } = buildConsumer({ existing: machine, policies });
+
+      await consumer.handle(recordedPolicy(), {
+        topic: 'rasta.insurance.v1.retry',
+      } as never);
+
+      expect(policies.asked).toHaveLength(1);
+      expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
     });
   });
 });

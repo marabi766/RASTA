@@ -18,8 +18,10 @@ import {
 } from '../fleet/transfer-record';
 import {
   UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
+  UNCONFIGURED_INSURANCE_POLICY_SOURCE,
   UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
   type AssetSnapshotSource,
+  type InsurancePolicySource,
   type MaintenanceStateSource,
 } from './replica-sources';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
@@ -400,6 +402,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly maintenanceSource: MaintenanceStateSource = UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
     /** Whether a stale fence's transfer was recorded (ADR-062 § 3b); read under the lock. */
     private readonly transferRecords: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+    /** Asked about every `INSURANCE_RECORDED` before it is applied (ADR-061 § 4); without it none is applied. */
+    private readonly insurancePolicies: InsurancePolicySource = UNCONFIGURED_INSURANCE_POLICY_SOURCE,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -521,7 +525,18 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // transfer, is applied to the row as it now stands, under its current
         // owner: the policy is the vehicle's, not the organization's (docs/24
         // Q-66). The tenant below comes from the row, never from such an event.
-        let patch = projection.patch(payload, current, now, occurredAt, organizationId);
+        let patch =
+          envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
+            ? await this.verifiedInsurancePatch(
+                projection,
+                envelope,
+                payload,
+                current,
+                now,
+                occurredAt,
+                organizationId,
+              )
+            : projection.patch(payload, current, now, occurredAt, organizationId);
         const refresh = replayed
           ? await this.readAuthoritativeState(envelope, assetId, organizationId)
           : undefined;
@@ -602,7 +617,85 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           }
         }
       },
-      replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
+      replayed || envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
+        ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS }
+        : undefined,
+    );
+  }
+
+  /**
+   * The patch an `INSURANCE_RECORDED` makes — from what asset-service confirms,
+   * never from the event alone (ADR-061 § 4, #240 r6).
+   *
+   * Whatever route delivered the event (live, `.retry`, a dead-letter replay, a
+   * re-projection), it is a statement about the past: after the following list
+   * is narrowed, or from a previous tenure (A→B→A), it can name a policy that
+   * no longer counts. So the policy is asked about, under the machine's lock,
+   * and only a policy that counts for the CURRENT owner under asset-service's
+   * CURRENT rule is stored — with the window and generation the source states.
+   * One that does not (or is unknown) is acknowledged and not applied, with the
+   * reason logged. No answer throws: the marker rolls back, the event is
+   * retried, and nothing is applied unverified.
+   *
+   * The owner and generation checks stay as a pre-filter that spares the
+   * source a question whose answer is already "no"; they decide nothing the
+   * source would allow.
+   */
+  private async verifiedInsurancePatch(
+    projection: Projection,
+    envelope: EventEnvelope,
+    payload: Record<string, unknown>,
+    current: CurrentAssetRef | null,
+    now: Date,
+    occurredAt: Date,
+    eventOrganization: string | undefined,
+  ): Promise<AssetRefPatch> {
+    const coverage = str(payload.coverage);
+    const policyId = str(payload.policyId);
+    const assetId = str(payload.assetId);
+    if (!coverage || !policyId || !assetId) return {};
+
+    if (
+      isStaleInsurance(
+        int(payload.ownershipGeneration),
+        coverage,
+        { generation: current?.ownershipGeneration, owner: current?.organizationId },
+        current?.retainedCoverages ?? [],
+        eventOrganization,
+      )
+    ) {
+      this.logger.log(
+        `INSURANCE_RECORDED ${envelope.eventId} ignored: not the current owner's tenure (pre-filter)`,
+      );
+      return {};
+    }
+
+    const asked = current?.organizationId ?? eventOrganization;
+    if (!asked) return {};
+    const verdict = await this.insurancePolicies.verify(asked, assetId, policyId);
+    if (!verdict.counts) {
+      this.logger.log(
+        `INSURANCE_RECORDED ${envelope.eventId} ignored: asset-service says policy ${policyId} ` +
+          `does not count (${verdict.reason})`,
+      );
+      return {};
+    }
+
+    // The event's own coverage, window and generation are replaced by the
+    // source's. The replica's owner and generation stay the transfer events' to
+    // set: this only ever adds a window the source stands behind.
+    return projection.patch(
+      {
+        ...payload,
+        coverage: verdict.coverage,
+        validFrom: verdict.validFrom,
+        validTo: verdict.validUntil,
+        ownershipGeneration: verdict.ownershipGeneration,
+      },
+      current,
+      now,
+      occurredAt,
+      eventOrganization,
     );
   }
 

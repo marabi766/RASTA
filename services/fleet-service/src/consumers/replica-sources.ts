@@ -122,6 +122,130 @@ export class AssetSnapshotClient implements AssetSnapshotSource {
   }
 }
 
+/**
+ * What asset-service says about one recorded policy, now (ADR-061 § 4, #240 r6).
+ *
+ * `counts: true` is the only answer fleet stores anything from: the window and
+ * the ownership generation are the source's, not the event's, so an event that
+ * is replayed, late, or from a previous tenure cannot carry a stale one in.
+ */
+export type PolicyVerdict =
+  | {
+      readonly counts: true;
+      /** The asset's current owner. */
+      readonly organizationId: string;
+      readonly coverage: string;
+      readonly validFrom: string;
+      readonly validUntil: string;
+      /** The asset's current ownership generation. */
+      readonly ownershipGeneration: number;
+    }
+  | { readonly counts: false; readonly reason: string };
+
+export interface InsurancePolicySource {
+  /**
+   * Whether the policy counts for the asset's current owner under asset-service's
+   * current following rule. `organizationId` is the caller's best knowledge of the
+   * owner (the replica's, else the event's tenant); a machine that has since
+   * been transferred is followed to its current owner once. An unknown policy
+   * is `counts: false`. Throws when there is no answer.
+   */
+  verify(organizationId: string, assetId: string, policyId: string): Promise<PolicyVerdict>;
+}
+
+/** What a service built without asset-service gets: no policy is applied unverified. */
+export const UNCONFIGURED_INSURANCE_POLICY_SOURCE: InsurancePolicySource = {
+  verify: async () => {
+    throw RastaError.upstreamUnavailable(ASSET_SERVICE);
+  },
+};
+
+const instant = z.string().refine((value) => !Number.isNaN(Date.parse(value)));
+const countingSchema = z.object({
+  transferred: z.literal(false),
+  assetId: z.string(),
+  policyId: z.string(),
+  organizationId: z.string().min(1),
+  counts: z.literal(true),
+  coverage: z.string().min(1),
+  validFrom: instant,
+  validUntil: instant,
+  ownershipGeneration: z.number().int().nonnegative(),
+});
+const notCountingSchema = z.object({
+  transferred: z.literal(false),
+  assetId: z.string(),
+  policyId: z.string(),
+  organizationId: z.string().min(1),
+  counts: z.literal(false),
+  reason: z.string().min(1),
+});
+const movedSchema = z.object({
+  transferred: z.literal(true),
+  assetId: z.string(),
+  organizationId: z.string().min(1),
+});
+
+type PolicyAnswer =
+  { kind: 'verdict'; verdict: PolicyVerdict } | { kind: 'moved'; organizationId: string };
+
+/** asset-service's `GET /v1/internal/assets/{assetId}/insurance-policies/{policyId}`. */
+export class InsurancePolicyClient implements InsurancePolicySource {
+  constructor(private readonly options: Options) {}
+
+  async verify(organizationId: string, assetId: string, policyId: string): Promise<PolicyVerdict> {
+    // At most one hop, as for the snapshot: a previous owner is told who owns
+    // the machine now, and that owner is asked. A second `transferred` is no answer.
+    const first = await this.ask(organizationId, assetId, policyId);
+    if (first.kind === 'verdict') return first.verdict;
+    const second = await this.ask(first.organizationId, assetId, policyId);
+    if (second.kind === 'moved') throw RastaError.upstreamUnavailable(ASSET_SERVICE);
+    return second.verdict;
+  }
+
+  private async ask(
+    organizationId: string,
+    assetId: string,
+    policyId: string,
+  ): Promise<PolicyAnswer> {
+    const { status, body } = await internalGet(
+      { ...this.options, to: ASSET_SERVICE },
+      `/v1/internal/assets/${encodeURIComponent(assetId)}/insurance-policies/${encodeURIComponent(policyId)}`,
+      organizationId,
+    );
+    if (status === 200) {
+      const counting = countingSchema.safeParse(body);
+      if (
+        counting.success &&
+        counting.data.assetId === assetId &&
+        counting.data.policyId === policyId
+      ) {
+        const {
+          transferred: _transferred,
+          assetId: _asset,
+          policyId: _policy,
+          ...verdict
+        } = counting.data;
+        return { kind: 'verdict', verdict };
+      }
+      const not = notCountingSchema.safeParse(body);
+      if (not.success && not.data.assetId === assetId && not.data.policyId === policyId) {
+        return { kind: 'verdict', verdict: { counts: false, reason: not.data.reason } };
+      }
+      const moved = movedSchema.safeParse(body);
+      if (moved.success && moved.data.assetId === assetId) {
+        return { kind: 'moved', organizationId: moved.data.organizationId };
+      }
+    } else if (status === 404) {
+      const parsed = platformErrorSchema.safeParse(body);
+      if (parsed.success && parsed.data.code === 'NOT_FOUND') {
+        return { kind: 'verdict', verdict: { counts: false, reason: 'UNKNOWN_POLICY' } };
+      }
+    }
+    throw RastaError.upstreamUnavailable(ASSET_SERVICE);
+  }
+}
+
 /** maintenance-service's `GET /v1/internal/assets/{assetId}/maintenance-state`. */
 export class MaintenanceStateClient implements MaintenanceStateSource {
   constructor(private readonly options: Options) {}

@@ -2,6 +2,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
+import { FakePolicySource, echoing } from './policy-source.fake';
 import { clearTransferredInsurance } from '../src/fleet/clear-transferred.command';
 import { cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
 
@@ -21,12 +22,18 @@ describe('insurance:clear-transferred (Q-101)', () => {
   let prisma: PrismaService;
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
+  let policies: FakePolicySource;
 
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    consumer = new AssetSyncConsumer(null, repository);
+    // asset-service confirms each policy as its event states it, unless a test says otherwise.
+    policies = new FakePolicySource();
+    consumer = echoing(
+      new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+      policies,
+    );
     await cleanup(prisma, [org.a, org.b]);
   });
 

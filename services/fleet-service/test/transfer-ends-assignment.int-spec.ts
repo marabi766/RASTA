@@ -3,6 +3,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
+import { FakePolicySource, echoing } from './policy-source.fake';
 import {
   asActor,
   cleanup,
@@ -32,13 +33,19 @@ describe('a transfer ends the assignments still open on the machine', () => {
   let prisma: PrismaService;
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
+  let policies: FakePolicySource;
   let assignments: AssignmentService;
 
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    consumer = new AssetSyncConsumer(null, repository);
+    // asset-service confirms each policy as its event states it, unless a test says otherwise.
+    policies = new FakePolicySource();
+    consumer = echoing(
+      new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+      policies,
+    );
     assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     await cleanup(prisma, [org.a, org.b]);
   });
