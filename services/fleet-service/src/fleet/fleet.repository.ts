@@ -9,6 +9,7 @@ import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
@@ -361,6 +362,29 @@ export class FleetRepository {
     const rows = await tx.$queryRaw<{ fence_id: string }[]>`
       SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId}`;
     return rows.length > 0;
+  }
+
+  /**
+   * Which of these machines have a transfer fence standing, live or expired —
+   * the same test assignment applies (ADR-062 § 3b), for a listing.
+   */
+  async findFencedAssetIds(assetIds: readonly string[]): Promise<Set<string>> {
+    if (assetIds.length === 0) return new Set();
+    const rows = await this.client.$queryRaw<{ asset_id: string }[]>`
+      SELECT asset_id FROM asset_transfer_fence WHERE asset_id = ANY(${[...assetIds]}::text[])`;
+    return new Set(rows.map((row) => row.asset_id));
+  }
+
+  /**
+   * The database's clock *now*. `clock_timestamp()`, not `now()`: `now()` is
+   * the transaction's start, so an assignment whose transaction began before a
+   * policy ended but got the asset's lock after it would still pass. Read after
+   * {@link lockAssetRef}, as the last check before the insert. Application
+   * hosts with skewed clocks do not decide who is insured either.
+   */
+  async databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
+    const [row] = await tx.$queryRaw<[{ now: Date }]>`SELECT clock_timestamp() AS now`;
+    return row.now;
   }
 
   /** The machine's fence, if any, and whether it has expired by the database's clock. */
@@ -722,9 +746,30 @@ export class FleetRepository {
   // Asset reference replica
   // -------------------------------------------------------------------------
 
-  async findAssetRef(id: string, tx?: ExtendedPrismaClient) {
-    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
-      (tx ?? this.client).assetRef.findFirst({ where: { id } }),
+  /**
+   * The replica row of a machine **of that organization**; absent and another
+   * tenant's are the same `null`. The read every request path uses (AGENTS.md
+   * A-04): the organization is part of the query, so a row of another tenant
+   * is never loaded into this one's request, whatever the caller then does
+   * with it.
+   */
+  async findAssetRef(organizationId: string, id: string, tx?: ExtendedPrismaClient) {
+    return runUnscoped(
+      'asset reference replica is platform-wide; the tenant filter is applied explicitly below',
+      () => (tx ?? this.client).assetRef.findFirst({ where: { id, organizationId } }),
+    );
+  }
+
+  /**
+   * The replica row of a machine whoever owns it. Not for a request that acts
+   * for a tenant: only the event consumer, which writes the replica for every
+   * tenant and must see a row it may not own, and the transfer clearance,
+   * which has to tell a machine that is elsewhere from one never seen.
+   */
+  async findAssetRefUnscoped(id: string, tx?: ExtendedPrismaClient) {
+    return runUnscoped(
+      'asset reference replica is platform-wide; the caller decides about ownership itself',
+      () => (tx ?? this.client).assetRef.findFirst({ where: { id } }),
     );
   }
 
@@ -736,11 +781,56 @@ export class FleetRepository {
    * a report with names — the textbook N+1, and the one query on this service
    * that grows with the size of the fleet rather than with the page.
    */
-  async findAssetRefs(ids: readonly string[]) {
+  async findAssetRefs(organizationId: string, ids: readonly string[]) {
     if (ids.length === 0) return [];
-    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
-      this.client.assetRef.findMany({ where: { id: { in: [...ids] } } }),
+    return runUnscoped(
+      'asset reference replica is platform-wide; the tenant filter is applied explicitly below',
+      () => this.client.assetRef.findMany({ where: { organizationId, id: { in: [...ids] } } }),
     );
+  }
+
+  /**
+   * One keyset page of replica rows `insurance:clear-transferred` may clear, by
+   * id after `after`. Candidates only: {@link clearInsuranceCover} decides each
+   * under the asset's lock.
+   */
+  async listClearableInsuranceRefs(
+    options: ClearableInsuranceOptions & { after: string; limit: number },
+  ): Promise<string[]> {
+    const rows = await runUnscoped(
+      'operator command over the platform-wide replica; the organization filter is applied in the predicate',
+      () =>
+        this.client.$queryRaw<{ id: string }[]>`
+          SELECT r.id FROM asset_ref r
+           WHERE r.id > ${options.after} AND ${clearablePredicate(options)}
+           ORDER BY r.id
+           LIMIT ${options.limit}`,
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * Empties one replica row's insurance windows if it still qualifies. Under
+   * {@link lockAssetRef} in the caller's transaction, so a transfer or an event
+   * committed since the page was read is seen. The retained-coverage list is
+   * emptied in the same update: a delayed old-owner event for a coverage that
+   * followed at transfer time would otherwise still be exempted from the owner
+   * check and restore a window for the new owner. Lapses and the generation are
+   * left as they are. Returns whether the row was cleared.
+   */
+  async clearInsuranceCover(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    options: ClearableInsuranceOptions,
+  ): Promise<boolean> {
+    const changed = await runUnscoped(
+      'operator command over the platform-wide replica; the organization filter is applied in the predicate',
+      () =>
+        tx.$executeRaw`
+          UPDATE asset_ref r SET insurance_cover = '{}'::jsonb, retained_coverages = '{}', synced_at = now()
+           WHERE r.id = ${assetId} AND ${clearablePredicate(options)}`,
+    );
+    return changed === 1;
   }
 
   async upsertAssetRef(
@@ -759,6 +849,8 @@ export class FleetRepository {
       insuranceLapsedCoverages?: string[];
       insuranceLapsedAt?: Date | null;
       insuranceCover?: InsuranceCover;
+      ownershipGeneration?: number | null;
+      retainedCoverages?: string[];
       sourceEvent: string;
     },
   ) {
@@ -808,6 +900,33 @@ export class FleetRepository {
       throw error;
     }
   }
+}
+
+export interface ClearableInsuranceOptions {
+  /** Also the rows whose ownership generation is NULL (after a rollback of the generation migration). */
+  includeUnknownGeneration: boolean;
+  /** Only machines this organization owns **now**. */
+  organizationId?: string;
+}
+
+/**
+ * Which replica rows `insurance:clear-transferred` clears: those that have ever
+ * been transferred and still hold a window. A stated ownership generation above
+ * zero, a latest event that was a transfer, or a window revoked by one (all a
+ * transfer without a generation leaves), and optionally every row whose
+ * generation is unknown.
+ */
+function clearablePredicate(options: ClearableInsuranceOptions): Prisma.Sql {
+  return Prisma.sql`
+    (r.insurance_cover <> '{}'::jsonb OR cardinality(r.retained_coverages) > 0)
+    AND (${options.organizationId ?? null}::text IS NULL OR r.organization_id = ${options.organizationId ?? null})
+    AND (
+      r.ownership_generation > 0
+      OR r.source_event = 'ASSET_TRANSFERRED'
+      OR EXISTS (SELECT 1 FROM availability_window w
+                  WHERE w.asset_id = r.id AND w.revoke_reason = 'ASSET_TRANSFERRED')
+      OR (${options.includeUnknownGeneration}::boolean AND r.ownership_generation IS NULL)
+    )`;
 }
 
 export function isUniqueViolation(error: unknown): boolean {

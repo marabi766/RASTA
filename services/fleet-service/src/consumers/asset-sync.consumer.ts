@@ -18,8 +18,10 @@ import {
 } from '../fleet/transfer-record';
 import {
   UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
+  UNCONFIGURED_INSURANCE_POLICY_SOURCE,
   UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
   type AssetSnapshotSource,
+  type InsurancePolicySource,
   type MaintenanceStateSource,
 } from './replica-sources';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
@@ -27,6 +29,7 @@ import { FleetRepository } from '../fleet/fleet.repository';
 import {
   INSPECTION_BLOCK_REASON,
   UNKNOWN_COVERAGE,
+  afterTransfer,
   parseCover,
   unresolvedLapses,
   withRecordedPolicy,
@@ -88,16 +91,20 @@ interface Projection {
     current: CurrentAssetRef | null,
     now: Date,
     occurredAt: Date,
+    eventOrganization: string | undefined,
   ) => AssetRefPatch;
 }
 
 /** The fields of the current row a projection may build on. */
 interface CurrentAssetRef {
+  organizationId: string;
   inspectionBlockedAt: Date | null;
   inspectionResolvedAt: Date | null;
   insuranceLapsedCoverages: string[];
   insuranceLapsedAt: Date | null;
   insuranceCover: unknown;
+  ownershipGeneration: number | null;
+  retainedCoverages: string[];
 }
 
 interface AssetRefPatch {
@@ -113,6 +120,8 @@ interface AssetRefPatch {
   insuranceLapsedCoverages?: string[];
   insuranceLapsedAt?: Date | null;
   insuranceCover?: InsuranceCover;
+  ownershipGeneration?: number | null;
+  retainedCoverages?: string[];
 }
 
 const PROJECTIONS: Record<ConsumedEventName, Projection> = {
@@ -140,19 +149,36 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     patch: (payload) => ({ status: str(payload.newStatus) ?? undefined }),
   },
   [CONSUMED_EVENTS.ASSET_TRANSFERRED]: {
-    patch: (payload) => ({
-      // The machine moved to another organization. Following it matters: a
-      // replica that kept the old owner would keep offering the machine in
-      // the wrong organization's availability listing.
-      organizationId: str(payload.toOrganizationId),
-      // Its new owner must re-commission it, exactly as asset-service records.
-      // Any assignment still open on it is ended by the handler, below.
-      status: 'REGISTERED',
-      // The insurance state is deliberately left as it is. The policy follows
-      // the vehicle: the previous owner's policy counts for the new owner
-      // until its own validTo, lapses included (docs/24 Q-66, project owner's
-      // decision 2026-09-25).
-    }),
+    patch: (payload, current) => {
+      const retained = strList(payload.retainedCoverages);
+      const generation = int(payload.ownershipGeneration);
+      return {
+        // The machine moved to another organization. Following it matters: a
+        // replica that kept the old owner would keep offering the machine in
+        // the wrong organization's availability listing.
+        organizationId: str(payload.toOrganizationId),
+        // Its new owner must re-commission it, exactly as asset-service records.
+        // Any assignment still open on it is ended by the handler, below.
+        status: 'REGISTERED',
+        // The policy follows the vehicle only for the coverages asset-service
+        // lets follow it (docs/24 Q-66, INSURANCE_COVERAGES_FOLLOWING_VEHICLE),
+        // which the event states. The others' windows are dropped: with a
+        // required-coverage dispatch rule a stale window would authorize the
+        // new owner. No `retainedCoverages` (an older event) drops them all —
+        // fail closed; the re-projection command restores the valid ones.
+        // Lapses are left as they are: they only ever withhold.
+        insuranceCover: afterTransfer(parseCover(current?.insuranceCover), retained, generation),
+        retainedCoverages: retained ?? [],
+        // Never lowered by a late transfer. An event that states none (an older
+        // one) leaves the generation UNKNOWN (NULL), not the previous owner's:
+        // keeping it would let a delayed event of the departing owner, at that
+        // generation, pass for the new one's. Unknown applies the owner check.
+        ownershipGeneration:
+          generation === undefined
+            ? null
+            : Math.max(generation, current?.ownershipGeneration ?? generation),
+      };
+    },
   },
   [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: {
     patch: () => ({ status: 'DECOMMISSIONED' }),
@@ -213,10 +239,17 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       // this guard only narrows the types and never guesses a validity.
       if (!coverage || !policyId || !validFrom || !validTo) return {};
 
+      // Whether the policy is the current owner's and counts is not decided
+      // here: `verifiedInsurancePatch` asks asset-service and passes this patch
+      // the source's own coverage, window and generation (#240 r7).
+      const generation = int(payload.ownershipGeneration);
+
       const cover = withRecordedPolicy(
         parseCover(current?.insuranceCover),
         coverage,
-        { policyId, validFrom, validTo },
+        generation === undefined
+          ? { policyId, validFrom, validTo }
+          : { policyId, validFrom, validTo, generation },
         now,
       );
       // Resolved lapses are dropped from the set so it does not grow for
@@ -343,6 +376,25 @@ const TRANSFER_END_NOTES = 'پایان خودکار: ماشین به سازما�
  */
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
+/**
+ * Where asset-service's answer stands against the replica it is applied to, by
+ * ownership generation. With the replica's generation unknown only the owner
+ * can be compared; any disagreement then, or at an equal generation, is treated
+ * as the source being ahead (the transfer has not been consumed): retried, never
+ * guessed.
+ */
+function sourceOrder(
+  verdict: { organizationId: string; ownershipGeneration: number },
+  replica: { organizationId: string; ownershipGeneration?: number | null },
+): 'SAME' | 'AHEAD' | 'BEHIND' {
+  const known = replica.ownershipGeneration;
+  if (known !== null && known !== undefined) {
+    if (verdict.ownershipGeneration > known) return 'AHEAD';
+    if (verdict.ownershipGeneration < known) return 'BEHIND';
+  }
+  return verdict.organizationId === replica.organizationId ? 'SAME' : 'AHEAD';
+}
+
 @Injectable()
 export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AssetSyncConsumer.name);
@@ -356,6 +408,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly maintenanceSource: MaintenanceStateSource = UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
     /** Whether a stale fence's transfer was recorded (ADR-062 § 3b); read under the lock. */
     private readonly transferRecords: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
+    /** Asked about every `INSURANCE_RECORDED` before it is applied (ADR-061 § 4); without it none is applied. */
+    private readonly insurancePolicies: InsurancePolicySource = UNCONFIGURED_INSURANCE_POLICY_SOURCE,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -456,7 +510,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // to what the row already holds, and two events for one machine handled
         // at once must not each build on a copy that lacks the other's change.
         await this.repository.lockAssetRef(tx, assetId);
-        const current = await this.repository.findAssetRef(assetId, tx);
+        const current = await this.repository.findAssetRefUnscoped(assetId, tx);
 
         // An ordinary state event changes a row its tenant must own. One whose
         // (envelope and payload) tenant is not the replica's owner is refused
@@ -477,7 +531,18 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // transfer, is applied to the row as it now stands, under its current
         // owner: the policy is the vehicle's, not the organization's (docs/24
         // Q-66). The tenant below comes from the row, never from such an event.
-        let patch = projection.patch(payload, current, now, occurredAt);
+        let patch =
+          envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
+            ? await this.verifiedInsurancePatch(
+                projection,
+                envelope,
+                payload,
+                current,
+                now,
+                occurredAt,
+                organizationId,
+              )
+            : projection.patch(payload, current, now, occurredAt, organizationId);
         const refresh = replayed
           ? await this.readAuthoritativeState(envelope, assetId, organizationId)
           : undefined;
@@ -490,6 +555,23 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           patch = refresh.viaTransfer
             ? refresh.patch
             : { ...withoutStateFields(patch), ...refresh.patch };
+          // The snapshot shows a new owner this replica missed the transfer to.
+          // It states neither the generation nor the coverages that follow the
+          // vehicle, so none is retained and the generation is unknown: fail
+          // closed, as for an older transfer.
+          // The re-projection command restores the valid windows.
+          if (current && current.organizationId !== refresh.organizationId) {
+            patch = {
+              ...patch,
+              insuranceCover: afterTransfer(
+                parseCover(current.insuranceCover),
+                undefined,
+                undefined,
+              ),
+              retainedCoverages: [],
+              ownershipGeneration: null,
+            };
+          }
         }
 
         // The row's organization: the one an ASSET_CREATED or a transfer
@@ -541,7 +623,105 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           }
         }
       },
-      replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
+      replayed || envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
+        ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS }
+        : undefined,
+    );
+  }
+
+  /**
+   * The patch an `INSURANCE_RECORDED` makes — from what asset-service confirms,
+   * never from the event alone (ADR-061 § 4, #240 r6–r7).
+   *
+   * Whatever route delivered the event (live, `.retry`, a dead-letter replay, a
+   * re-projection), it is a statement about the past: after the following list
+   * is narrowed, or from a previous tenure (A→B→A), it can name a policy that
+   * no longer counts. So the policy is asked about, under the machine's lock,
+   * and only a policy that counts for the CURRENT owner under asset-service's
+   * CURRENT rule is stored — with the window and generation the source states.
+   *
+   * **No permanent decision is made without the source.** Every event is
+   * verified, however old its generation or foreign its tenant looks from the
+   * replica: a policy the current rule counts must never be lost to a guess made
+   * from a retained list (a legacy transfer retains none). A source that says
+   * the policy does not count, or does not know it, ends the event (acknowledged,
+   * reason logged). No answer throws: the marker rolls back, the event is
+   * retried, and nothing is applied unverified.
+   *
+   * The source is asked as the owner the replica shows, and answers the current
+   * owner only. `NOT_CURRENT_OWNER` means the asset has moved on and this replica
+   * has not consumed the transfer yet: not a verdict on the policy, so the event
+   * is failed and retried until the transfer arrives (then DLQ as usual).
+   *
+   * The answer is a snapshot: a transfer can commit at the source before this
+   * transaction does. Under this asset's lock the source's ownership generation
+   * and owner are compared with the replica's — equal, apply; the source ahead,
+   * fail for retry (the transfer event will arrive, and the policy is then
+   * verified again); the source behind, the answer is stale and ignored.
+   */
+  private async verifiedInsurancePatch(
+    projection: Projection,
+    envelope: EventEnvelope,
+    payload: Record<string, unknown>,
+    current: CurrentAssetRef | null,
+    now: Date,
+    occurredAt: Date,
+    eventOrganization: string | undefined,
+  ): Promise<AssetRefPatch> {
+    const coverage = str(payload.coverage);
+    const policyId = str(payload.policyId);
+    const assetId = str(payload.assetId);
+    if (!coverage || !policyId || !assetId) return {};
+
+    const asked = current?.organizationId ?? eventOrganization;
+    if (!asked) return {};
+    const verdict = await this.insurancePolicies.verify(asked, assetId, policyId);
+    if (!verdict.counts) {
+      if (verdict.reason === 'NOT_CURRENT_OWNER') {
+        throw new Error(
+          `INSURANCE_RECORDED ${envelope.eventId}: asset-service says the asset is no longer ` +
+            `the replica's owner's; retried once the transfer has been consumed`,
+        );
+      }
+      this.logger.log(
+        `INSURANCE_RECORDED ${envelope.eventId} ignored: asset-service says policy ${policyId} ` +
+          `does not count (${verdict.reason})`,
+      );
+      return {};
+    }
+
+    if (current) {
+      const order = sourceOrder(verdict, current);
+      if (order === 'AHEAD') {
+        throw new Error(
+          `INSURANCE_RECORDED ${envelope.eventId}: asset-service is ahead of the replica ` +
+            `(ownership generation ${verdict.ownershipGeneration}); retried once the transfer has been consumed`,
+        );
+      }
+      if (order === 'BEHIND') {
+        this.logger.log(
+          `INSURANCE_RECORDED ${envelope.eventId} ignored: the answer for policy ${policyId} is older ` +
+            `than the replica (ownership generation ${verdict.ownershipGeneration})`,
+        );
+        return {};
+      }
+    }
+
+    // The event's own coverage, window and generation are replaced by the
+    // source's. The replica's owner and generation stay the transfer events' to
+    // set: this only ever adds a window the source stands behind.
+    return projection.patch(
+      {
+        ...payload,
+        coverage: verdict.coverage,
+        validFrom: verdict.validFrom,
+        validTo: verdict.validUntil,
+        ownershipGeneration: verdict.ownershipGeneration,
+      },
+      current,
+      now,
+      occurredAt,
+      eventOrganization,
     );
   }
 
@@ -787,6 +967,17 @@ function assertTransferEnvelope(envelope: EventEnvelope): void {
         'disagrees with the transferred asset or its new owner',
     );
   }
+}
+
+/** A non-negative integer field, or undefined. */
+function int(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** A list of non-empty strings, or undefined when the field is absent or not one. */
+function strList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((v): v is string => typeof v === 'string' && v.length > 0);
 }
 
 /** Reads a string field, tolerating the absence the loose schema allows. */

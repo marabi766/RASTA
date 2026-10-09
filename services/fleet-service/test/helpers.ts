@@ -1,6 +1,7 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
+import { INSURANCE_COVERAGES, type DispatchPolicy } from '../src/fleet/dispatch-blocks';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -16,6 +17,22 @@ export function databaseUrl(): string {
     throw new Error(
       'DATABASE_URL_FLEET is not set. These tests run against a real PostgreSQL; ' +
         'start it with `pnpm infra:up` and copy .env.example to .env.',
+    );
+  }
+  return withUtcSession(url);
+}
+
+/**
+ * The owner of rasta_fleet (`DATABASE_URL_FLEET_MIGRATOR`), for the suite that
+ * runs a shipped migration file. **Required, with no fallback** to the runtime
+ * URL: since D-045 the runtime role owns nothing and can create nothing.
+ */
+export function ownerDatabaseUrl(): string {
+  const url = process.env.DATABASE_URL_FLEET_MIGRATOR;
+  if (!url) {
+    throw new Error(
+      'DATABASE_URL_FLEET_MIGRATOR is not set. Migration files run as the owner, never the ' +
+        'runtime role; see .env.migrator.example (docs/23 D-045).',
     );
   }
   return withUtcSession(url);
@@ -176,6 +193,18 @@ export const ASSET_CREATED_FIELDS = {
   assetTag: null,
   serialNumber: null,
 } as const;
+
+/**
+ * The lapse rules on their own: nothing is *required* to be in force. For the
+ * suites about assignment mechanics (races, fences, transfers), whose machines
+ * carry no insurance windows; the required-coverage rule (docs/24 Q-101) has
+ * its own tests in dispatch-blocks.int-spec.ts, which build the service with
+ * the fail-closed default instead.
+ */
+export const LAPSE_RULES_ONLY: DispatchPolicy = {
+  blockingCoverages: INSURANCE_COVERAGES,
+  requiredCoverages: [],
+};
 
 /** Spreads {@link ASSET_CREATED_FIELDS} under an ASSET_CREATED fixture's payload; other events pass through. */
 export function producerShaped(

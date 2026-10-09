@@ -1,5 +1,5 @@
 import { Controller, Get, Injectable, Param } from '@nestjs/common';
-import { ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { z } from 'zod';
 import {
   AllowService,
@@ -14,6 +14,11 @@ import {
   SNAPSHOT_CALLERS,
   type AssetSnapshotResponse,
 } from './asset-snapshot';
+import {
+  InsurancePolicyStandingService,
+  POLICY_STANDING_CALLERS,
+  type PolicyStandingResponse,
+} from '../insurance/policy-standing';
 
 /**
  * Whether a transfer was recorded, for the owners of a machine's work who hold
@@ -55,6 +60,8 @@ export const assetIdParamSchema = z
 
 export const transferIdParamSchema = z.string().regex(/^TRF_[0-9A-HJKMNP-TV-Z]{26}$/);
 
+export const policyIdParamSchema = z.string().regex(/^INS_[0-9A-HJKMNP-TV-Z]{26}$/);
+
 export interface TransferRecordView {
   assetId: string;
   transferId: string;
@@ -94,7 +101,33 @@ export class AssetInternalController {
   constructor(
     private readonly records: TransferRecordService,
     private readonly snapshots: AssetSnapshotService,
+    private readonly policies: InsurancePolicyStandingService,
   ) {}
+
+  @Get(':assetId/insurance-policies/:policyId')
+  @AllowService(...POLICY_STANDING_CALLERS)
+  @ApiParam({ name: 'assetId', schema: { type: 'string', maxLength: 64 } })
+  @ApiParam({ name: 'policyId', schema: { type: 'string', pattern: '^INS_[0-9A-Z]{26}$' } })
+  @ApiOperation({
+    summary: 'Whether a policy counts for the asset’s current owner, and its window (internal)',
+    description:
+      'Reserved for fleet-service service tokens; every other service and every user token is ' +
+      'refused. The organization is the one signed into the token. The current owner gets ' +
+      '`counts: true` with the coverage, `validFrom`, `validUntil` and the asset’s current ' +
+      '`ownershipGeneration` when the policy is active and counts under the current ' +
+      'following-coverage rule (Q-66), else `counts: false` with a reason. A previous owner gets ' +
+      'only `transferred: true` and the current owner. Any other organization, an unknown asset ' +
+      'and a policy that is not the asset’s get the same `404`.',
+  })
+  @ApiResponse({ status: 200, description: 'The standing of the policy, or the current owner.' })
+  @ApiResponse({ status: 403, description: 'Not fleet-service, or a user token.' })
+  @ApiResponse({ status: 404, description: 'No such policy for this organization.' })
+  insurancePolicy(
+    @Param('assetId', zodPipe(assetIdParamSchema)) assetId: string,
+    @Param('policyId', zodPipe(policyIdParamSchema)) policyId: string,
+  ): Promise<PolicyStandingResponse> {
+    return this.policies.standing(assetId, policyId);
+  }
 
   @Get(':assetId/snapshot')
   @AllowService(...SNAPSHOT_CALLERS)

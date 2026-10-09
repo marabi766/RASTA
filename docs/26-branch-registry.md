@@ -62,13 +62,14 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                      | Worktree                          | نشست          | PR                                                  | ahead / behind | وضعیت                                                                        |
-| ----------------------------------------- | --------------------------------- | ------------- | --------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
-| `demo/investor-preview`                   | `F:\Rasta-Parallel\investor-demo` | —             | —                                                   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`                    | پوشهٔ موقت در `%TEMP%`            | —             | —                                                   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
-| `feat/web-exp-002-documents-availability` | نشست ابری (cloud-sonnet6)         | cloud-sonnet6 | [#225](https://github.com/marabi766/RASTA/pull/225) | —              | EXP-002 برش ۷: مدارک دارایی و آمادگی اعزام در `/assets/[id]`؛ ADR-069 و Q-98 |
-| `fix/construction-refusal-reason-field`   | سرور (کارگر) — از Cloud 3         | server-worker | [#227](https://github.com/marabi766/RASTA/pull/227) | —              | دلیل بستهٔ ردهای `construction-service` در `details[].code`                  |
-| `feat/contract-service-con003-pr2`        | سرور (کارگر)                      | server-worker | —                                                   | —              | CON-003 PR 2: امضا و ابطال قرارداد (روی شاخهٔ PR 1 ساخته می‌شود)             |
+| شاخه                                      | Worktree                          | نشست          | PR                                                  | ahead / behind | وضعیت                                                                                                 |
+| ----------------------------------------- | --------------------------------- | ------------- | --------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
+| `demo/investor-preview`                   | `F:\Rasta-Parallel\investor-demo` | —             | —                                                   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید                          |
+| `design/claude-design`                    | پوشهٔ موقت در `%TEMP%`            | —             | —                                                   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                                                 |
+| `feat/web-exp-002-documents-availability` | نشست ابری (cloud-sonnet6)         | cloud-sonnet6 | [#225](https://github.com/marabi766/RASTA/pull/225) | —              | EXP-002 برش ۷: مدارک دارایی و آمادگی اعزام در `/assets/[id]`؛ ADR-069 و Q-98                          |
+| `fix/construction-refusal-reason-field`   | سرور (کارگر) — از Cloud 3         | server-worker | [#227](https://github.com/marabi766/RASTA/pull/227) | —              | دلیل بستهٔ ردهای `construction-service` در `details[].code`                                           |
+| `feat/contract-service-con003-pr2`        | سرور (کارگر)                      | server-worker | —                                                   | —              | CON-003 PR 2: امضا و ابطال قرارداد (روی شاخهٔ PR 1 ساخته می‌شود)                                      |
+| `fix/fleet-dispatch-insurance-in-force`   | سرور (کارگر)                      | server-worker | —                                                   | —              | دروازهٔ اعزام: بیمهٔ منقضی‌شده بدون انتظار برای `INSURANCE_EXPIRED` مانع تخصیص است (ساعت پایگاه داده) |
 
 ## شاخه‌های بازنشسته
 

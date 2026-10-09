@@ -60,12 +60,23 @@ import {
 } from './fleet/transfer-record';
 import { UsageFactService } from './fleet/source-fact';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
-import { AssetSnapshotClient, MaintenanceStateClient } from './consumers/replica-sources';
+import {
+  AssetSnapshotClient,
+  InsurancePolicyClient,
+  MaintenanceStateClient,
+} from './consumers/replica-sources';
 import { AssetWorkStateService } from './fleet/asset-work-state';
 import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
-import { loadFleetEnv, SERVICE_NAME, type FleetEnv } from './config/env';
+import {
+  ASSET_SYNC_GROUP,
+  ASSET_SYNC_TOPICS,
+  dispatchPolicyFromEnv,
+  loadFleetEnv,
+  SERVICE_NAME,
+  type FleetEnv,
+} from './config/env';
 
 /**
  * Topics the asset replica is built from.
@@ -86,7 +97,7 @@ const internalTokens = (env: FleetEnv): InternalTokenService =>
     env.INTERNAL_TOKEN_TTL_SECONDS,
   );
 
-const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintenance.v1'];
+const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
 
 @Module({
   controllers: [
@@ -135,9 +146,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     {
       provide: DISPATCH_POLICY,
       inject: [ENV],
-      useFactory: (env: FleetEnv): DispatchPolicy => ({
-        blockingCoverages: env.FLEET_DISPATCH_BLOCKING_COVERAGES,
-      }),
+      useFactory: (env: FleetEnv): DispatchPolicy => dispatchPolicyFromEnv(env),
     },
 
     PrismaOutboxStore,
@@ -193,7 +202,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
                 // One group per (service, purpose), never shared: a second
                 // consumer on the same group would steal partitions and each
                 // would see half the stream (docs/07 § 7.10).
-                groupId: 'fleet-service.asset-sync',
+                groupId: ASSET_SYNC_GROUP,
                 topics: CONSUMED_TOPICS,
                 deadLetterTopic: 'rasta.fleet.v1.dlq',
                 // The replica reads from the start. A fleet that only knows
@@ -224,6 +233,13 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
             tokens: internalTokens(env),
           }),
           transferRecords,
+          // ADR-061 § 4: every INSURANCE_RECORDED is verified at its source.
+          new InsurancePolicyClient({
+            from: SERVICE_NAME,
+            baseUrl: env.ASSET_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: internalTokens(env),
+          }),
         ),
     },
 

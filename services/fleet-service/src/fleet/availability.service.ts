@@ -68,9 +68,10 @@ export class AvailabilityService {
     // Two batched reads rather than one per asset. The N+1 version of this is
     // the query behind every fleet dashboard, so it would be the first thing
     // to fall over.
-    const [assignments, windows] = await Promise.all([
+    const [assignments, windows, fenced] = await Promise.all([
       this.repository.findActiveAssignments(assetIds),
       this.repository.findWindowsInForce(at, assetIds),
+      this.repository.findFencedAssetIds(assetIds),
     ]);
 
     const assignmentByAsset = new Map(assignments.map((a) => [a.assetId, a]));
@@ -84,7 +85,13 @@ export class AvailabilityService {
     const items: AvailabilityView[] = assets.items.map((asset) => {
       const assignment = assignmentByAsset.get(asset.id);
       const window = windowByAsset.get(asset.id);
-      const blockers = describeBlockers(asset, assignment, window, this.dispatchPolicy);
+      const blockers = describeBlockers(
+        asset,
+        assignment,
+        window,
+        this.dispatchPolicy,
+        fenced.has(asset.id),
+      );
 
       return {
         assetId: asset.id,
@@ -152,8 +159,8 @@ export class AvailabilityService {
       // Without it, two declarations with different keys each saw no live
       // window to supersede and each created one (review #225 round 1).
       await this.repository.lockAssetRef(tx, dto.assetId);
-      const asset = await this.repository.findAssetRef(dto.assetId, tx);
-      if (!asset || asset.organizationId !== organizationId) {
+      const asset = await this.repository.findAssetRef(organizationId, dto.assetId, tx);
+      if (!asset) {
         throw RastaError.notFound('Asset', dto.assetId);
       }
 
@@ -207,8 +214,8 @@ export class AvailabilityService {
    * caller's tenant.
    */
   async assertAssetVisible(assetId: string): Promise<void> {
-    const asset = await this.repository.findAssetRef(assetId);
-    if (!asset || asset.organizationId !== getOrganizationId()) {
+    const asset = await this.repository.findAssetRef(getOrganizationId(), assetId);
+    if (!asset) {
       throw RastaError.notFound('Asset', assetId);
     }
   }
@@ -329,7 +336,7 @@ export class AvailabilityService {
     // grows with the fleet rather than with the page.
     const [counts, assets] = await Promise.all([
       this.repository.assignmentCounts(organizationId, from, to, assetIds),
-      this.repository.findAssetRefs(assetIds),
+      this.repository.findAssetRefs(organizationId, assetIds),
     ]);
 
     const countByAsset = new Map(counts.map((row) => [row.asset_id, row.assignment_count]));
@@ -399,8 +406,22 @@ function describeBlockers(
   assignment: { id: string; driverId: string } | undefined,
   window: { available: boolean; reason: string } | undefined,
   dispatchPolicy: DispatchPolicy = DEFAULT_DISPATCH_POLICY,
+  transferPending = false,
 ): AvailabilityBlocker[] {
   const blockers: AvailabilityBlocker[] = [];
+
+  // A transfer asked whether the machine is free and was told yes (ADR-062):
+  // assignment refuses it, so the listing must not call it available. Any
+  // fence counts, an expired one too — expiry is not an answer. Reported as
+  // `ASSET_STATUS`, the code the portal already has a sentence for: a new code
+  // would be one it cannot word (its contract spec lists every code).
+  if (transferPending) {
+    blockers.push({
+      code: 'ASSET_STATUS',
+      owner: 'asset-service',
+      detail: 'The machine is being transferred to another organization',
+    });
+  }
 
   // One blocker per cause, never merged (L3-02): a fleet manager clearing
   // the inspection must still be told the insurance has lapsed, and vice

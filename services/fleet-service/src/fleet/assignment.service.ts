@@ -322,8 +322,8 @@ export class AssignmentService {
    * organization's fleet.
    */
   private async assertAssetOwned(assetId: string, tx?: ExtendedPrismaClient) {
-    const asset = await this.repository.findAssetRef(assetId, tx);
-    if (!asset || asset.organizationId !== getOrganizationId()) {
+    const asset = await this.repository.findAssetRef(getOrganizationId(), assetId, tx);
+    if (!asset) {
       throw RastaError.notFound('Asset', assetId);
     }
     return asset;
@@ -344,7 +344,10 @@ export class AssignmentService {
     // insurance, or both, and each ends independently. Insurance is decided
     // now, against the recorded policy windows, not read from a stored flag
     // (dispatch-blocks.ts). Joined here only for the refusal's detail text.
-    const blocks = activeDispatchBlocks(asset, new Date(), this.dispatchPolicy);
+    // The window's end is judged by the database's clock, in the transaction
+    // that creates the assignment, not by whichever application host asked.
+    const now = await this.repository.databaseNow(tx ?? this.repository.client);
+    const blocks = activeDispatchBlocks(asset, now, this.dispatchPolicy);
     if (blocks.length > 0) {
       throw RastaError.businessRule(
         'This machine has been withdrawn from dispatch and cannot be assigned.',
