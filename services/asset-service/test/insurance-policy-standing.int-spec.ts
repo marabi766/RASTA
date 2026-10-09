@@ -217,28 +217,66 @@ describe('insurance policy standing (internal)', () => {
     ).resolves.toMatchObject({ counts: true, ownershipGeneration: await generationOf(assetId) });
   });
 
-  it('tells a previous owner only that the machine moved, and to whom', async () => {
+  it('tells a previous owner only NOT_CURRENT_OWNER: no organization id, nothing of the policy', async () => {
     const assetId = await machine(org.a);
     const policy = await record(org.a, assetId, 'COMPREHENSIVE');
     await transfer(assetId, org.a, org.b);
 
     const seen = await asService(() => standing.standing(assetId, policy.id));
 
-    expect(seen).toEqual({ transferred: true, assetId, organizationId: org.b });
+    expect(seen).toEqual({
+      transferred: false,
+      assetId,
+      policyId: policy.id,
+      counts: false,
+      reason: 'NOT_CURRENT_OWNER',
+    });
+    expect(JSON.stringify(seen)).not.toContain(org.b);
   });
 
-  it('gives everyone else, an unknown asset and another asset’s policy the same 404', async () => {
+  it('gives a tenant that never owned the machine the same NOT_CURRENT_OWNER, naming no owner', async () => {
+    const assetId = await machine(org.a);
+    const policy = await record(org.a, assetId, 'THIRD_PARTY');
+
+    for (const organizationId of [third, org.b]) {
+      const seen = await asService(() => standing.standing(assetId, policy.id), { organizationId });
+      expect(seen).toEqual({
+        transferred: false,
+        assetId,
+        policyId: policy.id,
+        counts: false,
+        reason: 'NOT_CURRENT_OWNER',
+      });
+    }
+  });
+
+  it('establishes the policy belongs to the asset FIRST: a foreign policy is a 404 for the former owner too, and no owner is named', async () => {
+    const assetId = await machine(org.a);
+    await record(org.a, assetId, 'THIRD_PARTY');
+    const other = await machine(org.a);
+    const otherPolicy = await record(org.a, other, 'THIRD_PARTY');
+    await transfer(assetId, org.a, org.b);
+
+    // org.a owned `assetId` and has transferred it; the policy is another asset's.
+    const refusal = await asService(() => standing.standing(assetId, otherPolicy.id)).catch(
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toMatchObject({ code: 'NOT_FOUND' });
+    expect(JSON.stringify(refusal)).not.toContain(org.b);
+  });
+
+  it('gives an unknown asset, an unknown policy and another asset’s policy the same 404', async () => {
     const assetId = await machine(org.a);
     const policy = await record(org.a, assetId, 'THIRD_PARTY');
     const other = await machine(org.a);
 
     const refusals = await Promise.all(
       [
-        asService(() => standing.standing(assetId, policy.id), { organizationId: third }),
-        asService(() => standing.standing(assetId, policy.id), { organizationId: org.b }),
         asService(() => standing.standing(`AST_${ulid()}`, policy.id)),
         asService(() => standing.standing(other, policy.id)),
         asService(() => standing.standing(assetId, `INS_${ulid()}`)),
+        asService(() => standing.standing(assetId, `INS_${ulid()}`), { organizationId: third }),
       ].map((call) => call.catch((error: unknown) => error)),
     );
 

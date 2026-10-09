@@ -68,9 +68,10 @@ export class AvailabilityService {
     // Two batched reads rather than one per asset. The N+1 version of this is
     // the query behind every fleet dashboard, so it would be the first thing
     // to fall over.
-    const [assignments, windows] = await Promise.all([
+    const [assignments, windows, fenced] = await Promise.all([
       this.repository.findActiveAssignments(assetIds),
       this.repository.findWindowsInForce(at, assetIds),
+      this.repository.findFencedAssetIds(assetIds),
     ]);
 
     const assignmentByAsset = new Map(assignments.map((a) => [a.assetId, a]));
@@ -84,7 +85,13 @@ export class AvailabilityService {
     const items: AvailabilityView[] = assets.items.map((asset) => {
       const assignment = assignmentByAsset.get(asset.id);
       const window = windowByAsset.get(asset.id);
-      const blockers = describeBlockers(asset, assignment, window, this.dispatchPolicy);
+      const blockers = describeBlockers(
+        asset,
+        assignment,
+        window,
+        this.dispatchPolicy,
+        fenced.has(asset.id),
+      );
 
       return {
         assetId: asset.id,
@@ -399,8 +406,20 @@ function describeBlockers(
   assignment: { id: string; driverId: string } | undefined,
   window: { available: boolean; reason: string } | undefined,
   dispatchPolicy: DispatchPolicy = DEFAULT_DISPATCH_POLICY,
+  transferPending = false,
 ): AvailabilityBlocker[] {
   const blockers: AvailabilityBlocker[] = [];
+
+  // A transfer asked whether the machine is free and was told yes (ADR-062):
+  // assignment refuses it, so the listing must not call it available. Any
+  // fence counts, an expired one too — expiry is not an answer.
+  if (transferPending) {
+    blockers.push({
+      code: 'TRANSFER_IN_PROGRESS',
+      owner: 'asset-service',
+      detail: 'The machine is being transferred to another organization',
+    });
+  }
 
   // One blocker per cause, never merged (L3-02): a fleet manager clearing
   // the inspection must still be told the insurance has lapsed, and vice

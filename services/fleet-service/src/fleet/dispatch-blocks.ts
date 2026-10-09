@@ -190,34 +190,6 @@ export function afterTransfer(
   return next;
 }
 
-/**
- * Whether an `INSURANCE_RECORDED` is the previous owner's and so ignored.
- *
- * A coverage that follows the vehicle is never stale. Otherwise, with the
- * generation of the latest transfer the replica saw (`replica.generation`), the
- * event is stale when it carries a lower generation, or none (an older event).
- *
- * With the generation unknown — a transfer that stated none, or a row that
- * predates the column — nothing can be compared, so the event's organization is:
- * one that is not the replica's current owner is the previous owner's, and is
- * ignored (fail closed). The current owner's event, a re-projected one
- * included, applies and restores the coverage. A replica with no row yet has no
- * owner to disagree with.
- */
-export function isStaleInsurance(
-  eventGeneration: number | undefined,
-  coverage: string,
-  replica: { generation: number | null | undefined; owner: string | undefined },
-  retained: readonly string[],
-  eventOrganization: string | undefined,
-): boolean {
-  if (retained.includes(coverage)) return false;
-  if (replica.generation === null || replica.generation === undefined) {
-    return replica.owner !== undefined && eventOrganization !== replica.owner;
-  }
-  return eventGeneration === undefined || eventGeneration < replica.generation;
-}
-
 function endTime(window: CoverWindow): number {
   const to = Date.parse(window.validTo);
   return Number.isNaN(to) ? Number.NEGATIVE_INFINITY : to;

@@ -83,6 +83,7 @@ describe('rollback of the ownership generation (#240 round 3)', () => {
     repository = new FleetRepository(prisma);
     // asset-service confirms each policy as its event states it, unless a test says otherwise.
     policies = new FakePolicySource();
+    policies.replica = (assetId) => repository.findAssetRefUnscoped(assetId);
     consumer = echoing(
       new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
       policies,
@@ -116,10 +117,25 @@ describe('rollback of the ownership generation (#240 round 3)', () => {
     payload: producerShaped(eventName, { organizationId: tenantId, ...payload }),
   });
 
-  const recorded = (tenantId: string, assetId: string, coverage: string, generation?: number) =>
+  /**
+   * `olderTenure`: a policy of the previous tenure, which asset-service denies
+   * under the CURRENT rule (r7: nothing is decided from the replica alone).
+   */
+  const denied = () => {
+    const policyId = id('INS');
+    policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
+    return policyId;
+  };
+  const recorded = (
+    tenantId: string,
+    assetId: string,
+    coverage: string,
+    generation?: number,
+    olderTenure = false,
+  ) =>
     eventFor(tenantId, 'INSURANCE_RECORDED', {
       assetId,
-      policyId: id('INS'),
+      policyId: olderTenure ? denied() : id('INS'),
       insurerName: 'بیمه ایران',
       coverage,
       validFrom: new Date(Date.now() - 1000).toISOString(),
@@ -207,10 +223,11 @@ describe('rollback of the ownership generation (#240 round 3)', () => {
       message: expect.stringContaining('withdrawn from dispatch'),
     };
 
-    // The previous owner's delayed events: ignored, whatever generation they carry.
+    // The previous owner's delayed events: the source denies them, whatever
+    // generation they carry.
     for (const generation of [undefined, 1, 9]) {
       for (const coverage of COVERAGES) {
-        await consumer.handle(recorded(org.a, assetId, coverage, generation));
+        await consumer.handle(recorded(org.a, assetId, coverage, generation, true));
       }
     }
     expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});

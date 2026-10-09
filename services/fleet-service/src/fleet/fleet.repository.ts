@@ -365,6 +365,17 @@ export class FleetRepository {
   }
 
   /**
+   * Which of these machines have a transfer fence standing, live or expired —
+   * the same test assignment applies (ADR-062 § 3b), for a listing.
+   */
+  async findFencedAssetIds(assetIds: readonly string[]): Promise<Set<string>> {
+    if (assetIds.length === 0) return new Set();
+    const rows = await this.client.$queryRaw<{ asset_id: string }[]>`
+      SELECT asset_id FROM asset_transfer_fence WHERE asset_id = ANY(${[...assetIds]}::text[])`;
+    return new Set(rows.map((row) => row.asset_id));
+  }
+
+  /**
    * The database's clock *now*. `clock_timestamp()`, not `now()`: `now()` is
    * the transaction's start, so an assignment whose transaction began before a
    * policy ended but got the asset's lock after it would still pass. Read after

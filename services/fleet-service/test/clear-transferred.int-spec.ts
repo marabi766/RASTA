@@ -30,6 +30,7 @@ describe('insurance:clear-transferred (Q-101)', () => {
     repository = new FleetRepository(prisma);
     // asset-service confirms each policy as its event states it, unless a test says otherwise.
     policies = new FakePolicySource();
+    policies.replica = (assetId) => repository.findAssetRefUnscoped(assetId);
     consumer = echoing(
       new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
       policies,
@@ -139,11 +140,14 @@ describe('insurance:clear-transferred (Q-101)', () => {
     expect(cleared.insuranceCover).toEqual({});
     expect(cleared.retainedCoverages).toEqual([]);
 
-    const recorded = (organizationId: string, ownershipGeneration: number) =>
-      consumer.handle(
+    const recorded = (organizationId: string, ownershipGeneration: number, olderTenure = false) => {
+      const policyId = id('INS');
+      // r7: the previous tenure's policy is one asset-service denies under the current rule.
+      if (olderTenure) policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
+      return consumer.handle(
         eventFor(organizationId, 'INSURANCE_RECORDED', {
           assetId,
-          policyId: id('INS'),
+          policyId,
           insurerName: 'بیمه ایران',
           coverage: 'THIRD_PARTY',
           validFrom: new Date(Date.now() - 1000).toISOString(),
@@ -151,9 +155,10 @@ describe('insurance:clear-transferred (Q-101)', () => {
           ownershipGeneration,
         }),
       );
+    };
 
-    // The previous owner's event, delivered late: the exemption is gone.
-    await recorded(org.a, 1);
+    // The previous owner's event, delivered late: the source denies it.
+    await recorded(org.a, 1, true);
     expect(await windows(assetId)).toEqual([]);
 
     // The re-projection names the current owner and generation: the window is back.

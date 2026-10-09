@@ -42,6 +42,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
     repository = new FleetRepository(prisma);
     // asset-service confirms each policy as its event states it, unless a test says otherwise.
     policies = new FakePolicySource();
+    policies.replica = (assetId) => repository.findAssetRefUnscoped(assetId);
     consumer = echoing(
       new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
       policies,
@@ -304,9 +305,12 @@ describe('a transfer ends the assignments still open on the machine', () => {
         insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
       );
 
+      // asset-service denies it under the current rule (r7: not decided from the replica).
+      const staleId = id('INS');
+      policies.deny(staleId, 'NOT_FOLLOWING_VEHICLE');
       await consumer.handle(
         insurance('INSURANCE_RECORDED', assetId, org.a, {
-          policyId: id('INS'),
+          policyId: staleId,
           coverage: 'THIRD_PARTY',
           validFrom: new Date(Date.now() - 1000).toISOString(),
           validTo: new Date(Date.now() + year).toISOString(),

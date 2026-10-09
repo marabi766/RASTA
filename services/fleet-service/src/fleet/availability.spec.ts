@@ -33,6 +33,19 @@ describe('availability blockers', () => {
     expect(describeBlockers(free, undefined, undefined)).toEqual([]);
   });
 
+  it('names a pending transfer as a blocker owned by asset-service (ADR-062 § 3b)', () => {
+    const blockers = describeWithPolicy(
+      free,
+      undefined,
+      undefined,
+      { blockingCoverages: INSURANCE_COVERAGES, requiredCoverages: [] },
+      true,
+    );
+    expect(blockers).toEqual([
+      expect.objectContaining({ code: 'TRANSFER_IN_PROGRESS', owner: 'asset-service' }),
+    ]);
+  });
+
   describe('attribution', () => {
     it('names asset-service for a failed inspection', () => {
       const [blocker] = describeBlockers(

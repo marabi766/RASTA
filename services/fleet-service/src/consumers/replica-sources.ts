@@ -145,10 +145,11 @@ export type PolicyVerdict =
 export interface InsurancePolicySource {
   /**
    * Whether the policy counts for the asset's current owner under asset-service's
-   * current following rule. `organizationId` is the caller's best knowledge of the
-   * owner (the replica's, else the event's tenant); a machine that has since
-   * been transferred is followed to its current owner once. An unknown policy
-   * is `counts: false`. Throws when there is no answer.
+   * current following rule. `organizationId` is the owner the caller's replica
+   * shows (else the event's tenant): asset-service answers the CURRENT owner
+   * only, and any other tenant gets `counts: false` with `NOT_CURRENT_OWNER`
+   * and no owner — it is not followed. An unknown policy is `counts: false`.
+   * Throws when there is no answer.
    */
   verify(organizationId: string, assetId: string, policyId: string): Promise<PolicyVerdict>;
 }
@@ -176,38 +177,15 @@ const notCountingSchema = z.object({
   transferred: z.literal(false),
   assetId: z.string(),
   policyId: z.string(),
-  organizationId: z.string().min(1),
   counts: z.literal(false),
   reason: z.string().min(1),
 });
-const movedSchema = z.object({
-  transferred: z.literal(true),
-  assetId: z.string(),
-  organizationId: z.string().min(1),
-});
-
-type PolicyAnswer =
-  { kind: 'verdict'; verdict: PolicyVerdict } | { kind: 'moved'; organizationId: string };
 
 /** asset-service's `GET /v1/internal/assets/{assetId}/insurance-policies/{policyId}`. */
 export class InsurancePolicyClient implements InsurancePolicySource {
   constructor(private readonly options: Options) {}
 
   async verify(organizationId: string, assetId: string, policyId: string): Promise<PolicyVerdict> {
-    // At most one hop, as for the snapshot: a previous owner is told who owns
-    // the machine now, and that owner is asked. A second `transferred` is no answer.
-    const first = await this.ask(organizationId, assetId, policyId);
-    if (first.kind === 'verdict') return first.verdict;
-    const second = await this.ask(first.organizationId, assetId, policyId);
-    if (second.kind === 'moved') throw RastaError.upstreamUnavailable(ASSET_SERVICE);
-    return second.verdict;
-  }
-
-  private async ask(
-    organizationId: string,
-    assetId: string,
-    policyId: string,
-  ): Promise<PolicyAnswer> {
     const { status, body } = await internalGet(
       { ...this.options, to: ASSET_SERVICE },
       `/v1/internal/assets/${encodeURIComponent(assetId)}/insurance-policies/${encodeURIComponent(policyId)}`,
@@ -226,20 +204,16 @@ export class InsurancePolicyClient implements InsurancePolicySource {
           policyId: _policy,
           ...verdict
         } = counting.data;
-        return { kind: 'verdict', verdict };
+        return verdict;
       }
       const not = notCountingSchema.safeParse(body);
       if (not.success && not.data.assetId === assetId && not.data.policyId === policyId) {
-        return { kind: 'verdict', verdict: { counts: false, reason: not.data.reason } };
-      }
-      const moved = movedSchema.safeParse(body);
-      if (moved.success && moved.data.assetId === assetId) {
-        return { kind: 'moved', organizationId: moved.data.organizationId };
+        return { counts: false, reason: not.data.reason };
       }
     } else if (status === 404) {
       const parsed = platformErrorSchema.safeParse(body);
       if (parsed.success && parsed.data.code === 'NOT_FOUND') {
-        return { kind: 'verdict', verdict: { counts: false, reason: 'UNKNOWN_POLICY' } };
+        return { counts: false, reason: 'UNKNOWN_POLICY' };
       }
     }
     throw RastaError.upstreamUnavailable(ASSET_SERVICE);

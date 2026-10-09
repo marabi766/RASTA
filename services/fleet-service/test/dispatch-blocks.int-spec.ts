@@ -42,6 +42,8 @@ describe('dispatch blocks (L3-02)', () => {
     repository = new FleetRepository(prisma);
     // asset-service confirms each policy as its event states it, unless a test says otherwise.
     policies = new FakePolicySource();
+    // The source agrees with the replica unless a test says otherwise.
+    policies.replica = (assetId) => repository.findAssetRefUnscoped(assetId);
     consumer = echoing(
       new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
       policies,
@@ -374,6 +376,17 @@ describe('dispatch blocks (L3-02)', () => {
       tenantId,
     });
 
+    /**
+     * A policy of the previous tenure, as asset-service answers it under the
+     * CURRENT rule (r7: the replica decides nothing alone): it does not follow
+     * the vehicle, so the source denies it.
+     */
+    const olderTenure = () => {
+      const policyId = id('INS');
+      policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
+      return policyId;
+    };
+
     /** org.a's machine, fully insured under generation 1 by its first owner. */
     async function insuredByFirstOwner(): Promise<string> {
       const { assetId } = await fleet();
@@ -491,7 +504,7 @@ describe('dispatch blocks (L3-02)', () => {
           await consumer.handle(
             event('INSURANCE_RECORDED', {
               assetId,
-              policyId: id('INS'),
+              policyId: olderTenure(),
               insurerName: 'بیمه ایران',
               coverage,
               validFrom: new Date(Date.now() - 1000).toISOString(),
@@ -518,6 +531,36 @@ describe('dispatch blocks (L3-02)', () => {
           }),
         );
       }
+      await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('r7: after a legacy transfer (retained = [], generation unknown) an old-owner policy the source COUNTS is stored — never lost to a replica-only guess', async () => {
+      const assetId = await insuredByFirstOwner();
+      const driverId = await newOwnerDriver();
+      await transferTo(assetId, {});
+      expect((await repository.findAssetRefUnscoped(assetId))!.ownershipGeneration).toBeNull();
+      expect((await repository.findAssetRefUnscoped(assetId))!.retainedCoverages).toEqual([]);
+      await expect(dispatchForNewOwner(assetId, driverId)).rejects.toMatchObject(refused);
+
+      // The first owner's events, delivered late; the source (default: agrees
+      // with the replica) says each counts for the current owner.
+      for (const coverage of COVERAGES) {
+        await consumer.handle(
+          event('INSURANCE_RECORDED', {
+            assetId,
+            policyId: id('INS'),
+            insurerName: 'بیمه ایران',
+            coverage,
+            validFrom: new Date(Date.now() - 1000).toISOString(),
+            validTo: new Date(Date.now() + year).toISOString(),
+            ownershipGeneration: 1,
+          }),
+        );
+      }
+
+      const row = await repository.findAssetRefUnscoped(assetId);
+      expect(Object.keys(row!.insuranceCover as object).sort()).toEqual([...COVERAGES].sort());
+      expect(policies.asked.at(-1)).toMatchObject({ organizationId: org.b, assetId });
       await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
     });
 
@@ -557,7 +600,7 @@ describe('dispatch blocks (L3-02)', () => {
       await consumer.handle(
         eventFor(org.b, 'INSURANCE_RECORDED', {
           assetId,
-          policyId: id('INS'),
+          policyId: olderTenure(),
           insurerName: 'بیمه ایران',
           coverage: 'THIRD_PARTY',
           validFrom: new Date(Date.now() - 1000).toISOString(),
@@ -582,7 +625,7 @@ describe('dispatch blocks (L3-02)', () => {
         await consumer.handle(
           event('INSURANCE_RECORDED', {
             assetId,
-            policyId: id('INS'),
+            policyId: olderTenure(),
             insurerName: 'بیمه ایران',
             coverage,
             validFrom: new Date(Date.now() - 1000).toISOString(),

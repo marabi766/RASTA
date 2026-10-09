@@ -206,23 +206,25 @@ describe('InsurancePolicyClient', () => {
     });
   });
 
-  it('follows a previous owner to the current one, once, asking as the current owner', async () => {
-    const { client, fetchImpl } = policyClient([json(200, moved), json(200, counting('ORG_B'))]);
+  it('reads NOT_CURRENT_OWNER as a verdict, asks once and never follows an owner', async () => {
+    const { client, fetchImpl } = policyClient([
+      json(200, {
+        transferred: false,
+        assetId: 'AST_1',
+        policyId: 'INS_1',
+        counts: false,
+        reason: 'NOT_CURRENT_OWNER',
+      }),
+    ]);
 
-    await expect(client.verify('ORG_A', 'AST_1', 'INS_1')).resolves.toMatchObject({
-      counts: true,
-      organizationId: 'ORG_B',
+    await expect(client.verify('ORG_A', 'AST_1', 'INS_1')).resolves.toEqual({
+      counts: false,
+      reason: 'NOT_CURRENT_OWNER',
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(tokens.issue).toHaveBeenLastCalledWith(
-      'fleet-service',
-      'asset-service',
-      'SERVICE',
-      'ORG_B',
-    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it('treats a second transfer, and anything malformed or about another policy, as no answer', async () => {
+  it('treats the retired transfer answer, and anything malformed or about another policy, as no answer', async () => {
     for (const responses of [
       [json(200, moved), json(200, moved)],
       [json(500, {})],

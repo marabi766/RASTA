@@ -34,19 +34,20 @@ import {
  *
  * ## What it answers, to whom
  *
- *   - the **current owner**: whether the policy counts and, if it does, its
- *     coverage, window and the asset's current ownership generation;
- *   - a **previous owner** recorded in `asset_transfer`: only that the asset
- *     was transferred and who owns it now (the caller asks that owner) — never
- *     a policy of the current tenure;
- *   - **anyone else**, an asset that does not exist, and a policy that is not
- *     this asset's: the same `404`, so no organization can probe another's.
+ *   - a policy that is not this asset's, or an asset that does not exist: `404`,
+ *     whoever asks — checked first, before the caller's tenure is looked at;
+ *   - the asset's **current owner**: whether the policy counts and, if it does,
+ *     its coverage, window and the asset's current ownership generation;
+ *   - **any other tenant**, a former owner included: `counts: false` with
+ *     `NOT_CURRENT_OWNER` and nothing else — no organization id, no owner data
+ *     (AGENTS.md A-04). The caller that thinks the asset is still its own (it
+ *     has not yet consumed the transfer) retries after the transfer arrives.
  */
 
 /** The only caller: the service that keeps a dispatch replica of the policies. */
 export const POLICY_STANDING_CALLERS = ['fleet-service'] as const;
 
-export type PolicyNotCountingReason = 'NOT_ACTIVE' | 'NOT_FOLLOWING_VEHICLE';
+export type PolicyNotCountingReason = 'NOT_ACTIVE' | 'NOT_FOLLOWING_VEHICLE' | 'NOT_CURRENT_OWNER';
 
 export interface CountingPolicyView {
   transferred: false;
@@ -66,20 +67,13 @@ export interface NotCountingPolicyView {
   transferred: false;
   assetId: string;
   policyId: string;
-  organizationId: string;
+  /** The current owner; absent for `NOT_CURRENT_OWNER`, which names no owner. */
+  organizationId?: string;
   counts: false;
   reason: PolicyNotCountingReason;
 }
 
-export interface TransferredPolicyView {
-  transferred: true;
-  assetId: string;
-  /** The current owner, to be asked instead. */
-  organizationId: string;
-}
-
-export type PolicyStandingResponse =
-  CountingPolicyView | NotCountingPolicyView | TransferredPolicyView;
+export type PolicyStandingResponse = CountingPolicyView | NotCountingPolicyView;
 
 export function assertPolicyStandingCaller(): void {
   const context = getContext();
@@ -118,36 +112,37 @@ export class InsurancePolicyStandingService {
     // A token with no organization is a 403 here, before any query.
     const organizationId = getOrganizationId();
 
-    const found = await runUnscoped(
+    const row = await runUnscoped(
       'a replica verifies a recorded policy by id for the organization signed into its token (ADR-061 § 4)',
       async () => {
         // One statement, so the owner, generation and policy are one snapshot.
+        // The INNER join: a policy that is not this asset's is a 404 for every
+        // caller, before the caller's tenure decides anything.
         const rows = await this.repository.client.$queryRaw<StandingRow[]>`
           SELECT a.organization_id, a.ownership_generation AS asset_generation,
                  p.id AS policy_id, p.coverage::text AS coverage, p.valid_from, p.valid_to,
                  p.status::text AS status, p.deleted_at AS policy_deleted_at,
                  p.ownership_generation AS policy_generation
             FROM asset a
-            LEFT JOIN insurance_policy p ON p.id = ${policyId} AND p.asset_id = a.id
+            JOIN insurance_policy p ON p.id = ${policyId} AND p.asset_id = a.id
            WHERE a.id = ${assetId} AND a.deleted_at IS NULL`;
-        const row = rows[0];
-        if (!row) return null;
-        if (row.organization_id === organizationId) return { row, previous: false };
-        const transfers = await this.repository.client.$queryRaw<{ id: string }[]>`
-          SELECT id FROM asset_transfer
-           WHERE asset_id = ${assetId} AND from_organization_id = ${organizationId}
-           LIMIT 1`;
-        return transfers.length > 0 ? { row, previous: true } : null;
+        return rows[0] ?? null;
       },
     );
-    if (!found) throw RastaError.notFound('InsurancePolicy', policyId);
-
-    const { row } = found;
-    if (found.previous) {
-      return { transferred: true, assetId, organizationId: row.organization_id };
-    }
-    if (!row.policy_id || !row.coverage || !row.valid_from || !row.valid_to) {
+    if (!row || !row.policy_id || !row.coverage || !row.valid_from || !row.valid_to) {
       throw RastaError.notFound('InsurancePolicy', policyId);
+    }
+
+    // Only the current owner is answered. Anyone else learns that and nothing
+    // more: not who owns the asset, not what the policy holds.
+    if (row.organization_id !== organizationId) {
+      return {
+        transferred: false,
+        assetId,
+        policyId,
+        counts: false,
+        reason: 'NOT_CURRENT_OWNER',
+      };
     }
 
     const base = {
