@@ -557,8 +557,9 @@ describe('AssetSyncConsumer', () => {
         const patch = recorded.upserts[0]!;
         expect(patch.insuranceCover).toEqual({});
         expect(patch.retainedCoverages).toEqual([]);
-        // No generation stated: the stored one is not lowered or cleared.
-        expect(patch.ownershipGeneration).toBeUndefined();
+        // No generation stated: the stored one (1) was the departing owner's, so
+        // it is cleared to unknown and the owner check applies (#240 r5).
+        expect(patch.ownershipGeneration).toBeNull();
       });
 
       it('refuses a malformed retainedCoverages before the marker', async () => {

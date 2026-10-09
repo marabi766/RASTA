@@ -158,3 +158,16 @@ export const SERVICE_NAME = 'fleet-service';
 
 /** Everything this service publishes goes to one topic (docs/04 § 4.1). */
 export const FLEET_TOPIC = 'rasta.fleet.v1';
+
+/**
+ * The asset-sync consumer's group and the topics it reads. One group per
+ * (service, purpose), never shared (docs/07 § 7.10). Named here so the module
+ * that starts the consumer and `insurance:drain-check`, which reads the same
+ * group's lag, cannot drift apart.
+ */
+export const ASSET_SYNC_GROUP = 'fleet-service.asset-sync';
+export const ASSET_SYNC_TOPICS = [
+  'rasta.asset.v1',
+  'rasta.insurance.v1',
+  'rasta.maintenance.v1',
+] as const;

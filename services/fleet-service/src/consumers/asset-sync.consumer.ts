@@ -168,10 +168,13 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
         // Lapses are left as they are: they only ever withhold.
         insuranceCover: afterTransfer(parseCover(current?.insuranceCover), retained, generation),
         retainedCoverages: retained ?? [],
-        // Kept when the event carries none (an older event) rather than lowered.
+        // Never lowered by a late transfer. An event that states none (an older
+        // one) leaves the generation UNKNOWN (NULL), not the previous owner's:
+        // keeping it would let a delayed event of the departing owner, at that
+        // generation, pass for the new one's. Unknown applies the owner check.
         ownershipGeneration:
           generation === undefined
-            ? undefined
+            ? null
             : Math.max(generation, current?.ownershipGeneration ?? generation),
       };
     },
@@ -533,7 +536,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
             : { ...withoutStateFields(patch), ...refresh.patch };
           // The snapshot shows a new owner this replica missed the transfer to.
           // It states neither the generation nor the coverages that follow the
-          // vehicle, so none is retained: fail closed, as for an older transfer.
+          // vehicle, so none is retained and the generation is unknown: fail
+          // closed, as for an older transfer.
           // The re-projection command restores the valid windows.
           if (current && current.organizationId !== refresh.organizationId) {
             patch = {
@@ -544,6 +548,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
                 undefined,
               ),
               retainedCoverages: [],
+              ownershipGeneration: null,
             };
           }
         }

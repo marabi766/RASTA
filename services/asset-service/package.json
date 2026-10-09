@@ -17,6 +17,7 @@
     "db:generate": "prisma generate",
     "db:migrate": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate deploy",
     "db:migrate:dev": "node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate dev",
+    "insurance:drain-check": "node -r @swc-node/register --env-file-if-exists=../../.env src/insurance/drain-check.cli.ts",
     "insurance:reproject": "node -r @swc-node/register --env-file-if-exists=../../.env src/insurance/reproject.cli.ts",
     "db:seed": "node -r @swc-node/register --env-file-if-exists=../../.env prisma/seed.ts"
   },

@@ -25,6 +25,8 @@ import {
  */
 describe('dispatch blocks (L3-02)', () => {
   const org = tenants();
+  /** A third owner, for a machine that changes hands twice. */
+  const orgC = org.b.replace('-B-', '-C-');
   let prisma: PrismaService;
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
@@ -39,11 +41,11 @@ describe('dispatch blocks (L3-02)', () => {
     consumer = new AssetSyncConsumer(null, repository);
     assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     strict = new AssignmentService(repository);
-    await cleanup(prisma, [org.a, org.b]);
+    await cleanup(prisma, [org.a, org.b, orgC]);
   });
 
   afterAll(async () => {
-    await cleanup(prisma, [org.a, org.b]);
+    await cleanup(prisma, [org.a, org.b, orgC]);
     await prisma.onModuleDestroy();
   });
 
@@ -510,6 +512,57 @@ describe('dispatch blocks (L3-02)', () => {
         );
       }
       await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
+    });
+
+    it('a transfer that states no generation makes it unknown, so the departing owner’s delayed event at the old generation is ignored (#240 r5)', async () => {
+      const assetId = id('AST');
+      await consumer.handle(event('ASSET_CREATED', { assetId, status: 'ACTIVE', name: 'گریدر' }));
+      const driverC = id('DRV');
+      await asActor({ organizationId: orgC }, () =>
+        prisma.client.driver.create({
+          data: {
+            organizationId: orgC,
+            id: driverC,
+            userId: `USR-${driverC}`,
+            createdBy: 'ITEST',
+            updatedBy: 'ITEST',
+          },
+        }),
+      );
+      // A → B states generation 1; B → C (an older producer's event) states none.
+      await transferTo(assetId, { ownershipGeneration: 1, retainedCoverages: [] });
+      expect((await repository.findAssetRefUnscoped(assetId))!.ownershipGeneration).toBe(1);
+      await consumer.handle(
+        eventFor(orgC, 'ASSET_TRANSFERRED', {
+          assetId,
+          fromOrganizationId: org.b,
+          toOrganizationId: orgC,
+          transferredAt: new Date().toISOString(),
+          reason: 'واگذاری',
+        }),
+      );
+      await consumer.handle(eventFor(orgC, 'ASSET_ACTIVATED', { assetId }));
+      const afterSecond = await repository.findAssetRefUnscoped(assetId);
+      expect(afterSecond!.organizationId).toBe(orgC);
+      expect(afterSecond!.ownershipGeneration).toBeNull();
+
+      // B's policy, recorded at generation 1 and consumed after both transfers.
+      await consumer.handle(
+        eventFor(org.b, 'INSURANCE_RECORDED', {
+          assetId,
+          policyId: id('INS'),
+          insurerName: 'بیمه ایران',
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - 1000).toISOString(),
+          validTo: new Date(Date.now() + year).toISOString(),
+          ownershipGeneration: 1,
+        }),
+      );
+
+      expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+      await expect(
+        asActor({ organizationId: orgC }, () => strict.create({ driverId: driverC, assetId })),
+      ).rejects.toMatchObject(refused);
     });
 
     it('ignores a late INSURANCE_RECORDED of the previous owner after the transfer', async () => {
