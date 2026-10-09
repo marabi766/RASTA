@@ -388,8 +388,7 @@ export interface AvailabilityBlocker {
     | 'IN_MAINTENANCE'
     | 'DISPATCH_BLOCKED'
     | 'ACTIVE_ASSIGNMENT'
-    | 'DECLARED_UNAVAILABLE'
-    | 'TRANSFER_IN_PROGRESS';
+    | 'DECLARED_UNAVAILABLE';
   /** Which service owns the fact behind this blocker. */
   owner: string;
   detail: string;

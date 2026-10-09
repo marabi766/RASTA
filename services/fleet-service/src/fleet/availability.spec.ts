@@ -42,7 +42,7 @@ describe('availability blockers', () => {
       true,
     );
     expect(blockers).toEqual([
-      expect.objectContaining({ code: 'TRANSFER_IN_PROGRESS', owner: 'asset-service' }),
+      expect.objectContaining({ code: 'ASSET_STATUS', owner: 'asset-service' }),
     ]);
   });
 

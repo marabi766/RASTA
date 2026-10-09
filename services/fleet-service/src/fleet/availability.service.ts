@@ -412,10 +412,12 @@ function describeBlockers(
 
   // A transfer asked whether the machine is free and was told yes (ADR-062):
   // assignment refuses it, so the listing must not call it available. Any
-  // fence counts, an expired one too — expiry is not an answer.
+  // fence counts, an expired one too — expiry is not an answer. Reported as
+  // `ASSET_STATUS`, the code the portal already has a sentence for: a new code
+  // would be one it cannot word (its contract spec lists every code).
   if (transferPending) {
     blockers.push({
-      code: 'TRANSFER_IN_PROGRESS',
+      code: 'ASSET_STATUS',
       owner: 'asset-service',
       detail: 'The machine is being transferred to another organization',
     });

@@ -80,7 +80,12 @@ describe('availability under a pending transfer', () => {
 
     expect(await listed(assetId)).toMatchObject({
       available: false,
-      blockers: [expect.objectContaining({ code: 'TRANSFER_IN_PROGRESS' })],
+      blockers: [
+        expect.objectContaining({
+          code: 'ASSET_STATUS',
+          detail: expect.stringContaining('transferred'),
+        }),
+      ],
     });
   });
 
