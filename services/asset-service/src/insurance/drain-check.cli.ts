@@ -37,7 +37,7 @@ async function main(): Promise<number> {
       { report },
       report.drained
         ? 'outbox drained: no unpublished row'
-        : `outbox NOT drained: ${report.unpublished} unpublished row(s) — keep the relay running (asset-service stopped means no relay: start ONE replica only if the rows cannot publish, see outbox-stuck) and run again`,
+        : `outbox NOT drained: ${report.unpublished} unpublished row(s) — run outbox:flush with asset-service stopped, then this again`,
     );
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return report.drained ? 0 : 1;
