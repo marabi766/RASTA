@@ -125,7 +125,9 @@ describe('the published OpenAPI contract (real application)', () => {
         return original(...args);
       });
     try {
-      await note(post('sign', id, person(employer, ['DRIVER']), {})); // 503
+      // On a draft nobody has signed: on `id` the employer's side is already taken.
+      const other = await seedDraft(w, organizations);
+      await note(post('sign', other.id, person(other.employer, ['DRIVER']), {})); // 503
     } finally {
       failing.mockRestore();
     }
