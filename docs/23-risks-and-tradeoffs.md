@@ -1159,11 +1159,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-02 (#191)
 
-### D-048 · ۳۲۲ ستونِ لحظه هنوز `timestamp(3)` بی منطقهٔ زمانی است
+### D-048 · ۳۰۵ ستونِ لحظه هنوز `timestamp(3)` بی منطقهٔ زمانی است (document تبدیل شد)
 
 - **چه چیزی:** بیشتر ستون‌های لحظه در Schemaها `DateTime` بی `@db.Timestamptz` اند، یعنی `timestamp(3) without time zone`:
-  ۳۲۲ ستون در ۱۲ سرویس (construction ۵۷، economic ۵۵، asset ۳۲، maintenance ۳۲، identity ۳۰، marketplace ۲۸، supplier ۲۵،
-  fleet ۲۳، organization ۱۸، document ۱۷، notification ۴، audit ۱) در برابر ۸۶ ستونِ `timestamptz`. Prisma این ستون‌ها را
+  هنگام ثبت ۳۲۲ ستون در ۱۲ سرویس (construction ۵۷، economic ۵۵، asset ۳۲، maintenance ۳۲، identity ۳۰، marketplace ۲۸،
+  supplier ۲۵، fleet ۲۳، organization ۱۸، document ۱۷، notification ۴، audit ۱) در برابر ۸۶ ستونِ `timestamptz`؛ پس از
+  پایلوت document (#242) **۳۰۵ ستون در ۱۱ سرویس** مانده است. Prisma این ستون‌ها را
   به‌صورت ساعت دیواریِ UTC می‌نویسد و می‌خواند و درست است؛ اما SQL خام — `now()`، `CURRENT_TIMESTAMP`، پیش‌فرضِ ستون،
   Trigger یا Backfill در Migration — ساعت دیواریِ **نشست** را ذخیره می‌کند (L7-37).
 - **کاهش ریسک (#214):** هر نشست پایگاه داده با `options=-c TimeZone=UTC` باز می‌شود — نشانی زمان اجرای سرویس‌ها
@@ -1180,11 +1181,64 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   لحظهٔ خام را جابه‌جا می‌نویسد یا می‌خواند (با تهران ۳٫۵ ساعت) و هیچ خطایی نمی‌دهد. مقایسهٔ این ستون‌ها با `now()` در همان نشست هم به همین دلیل وابسته به منطقهٔ زمانی نشست است.
 - **کنترل (تا رفع):** اتصالِ تازه فقط از `withUtcSession` (`@rasta/config` یا `scripts/prisma-lib.mjs`)؛ پیش‌فرض
   `timezone` سرور و Roleها UTC؛ ستونِ لحظهٔ تازه `TIMESTAMPTZ` (`@db.Timestamptz`).
-- **رفع:** انتقال این ستون‌ها به `timestamptz` با Migrationهای قابل بازگشت به‌ازای هر سرویس
-  (`ALTER COLUMN … TYPE timestamptz USING col AT TIME ZONE 'UTC'`، که جدول را بازنویسی و قفل می‌کند، پس در پنجرهٔ
-  نگه‌داری و جدول به جدول)، همراه `@db.Timestamptz(3)` در Schema.
+- **رفع:** انتقال این ستون‌ها به `timestamptz` با Migrationهای قابل بازگشت به‌ازای هر سرویس، همراه `@db.Timestamptz(3)`
+  در Schema — به دستورالعمل زیر، یک PR برای هر سرویس.
+- **پیشرفت:** **document — انجام شد (پایلوت، #242).** هر ۱۷ ستون لحظه‌اند (هیچ تاریخ تقویمی یا ساعت دیواری محلی در این
+  سرویس نیست) و `20261012120000_document_instants_timestamptz` همه را تبدیل کرد. آزمون
+  `document-service/test/instants-timestamptz.int-spec.ts` ردیف‌های نوشته‌شده با Schema قدیم را از up، down و up دوباره
+  می‌گذراند (همهٔ لحظه‌ها تا میلی‌ثانیه برابر، از SQL و از Prisma)، و نشان می‌دهد که `now()` خامِ نشست `Asia/Tehran` — Lease
+  اسکن و Default ستون — در `timestamp(3)` به اندازهٔ اختلاف منطقه جابه‌جا ذخیره می‌شد و در `timestamptz(3)` درست است.
+  مانده: ۱۱ سرویس.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-03 (#214)
+
+#### دستورالعمل تبدیل یک سرویس (Runbook، از پایلوت document)
+
+PR هر سرویس همین گام‌ها را برمی‌دارد و نمونهٔ هر کدام در #242 است.
+
+1. **رده‌بندی.** هر `DateTime` Schema در یکی از سه رده، در STEP 0 همان PR: **لحظه** (رخداد، مهلت، Lease، `now()`
+   یا Default) ← تبدیل؛ **روز تقویمی** (مثلاً تاریخ سررسید بیمه) ← تبدیل نمی‌شود؛ `@db.Date` تصمیم جداست؛ **ساعت دیواری
+   محلی** ← می‌ماند، با دلیل. پیش از حکم، SQL خام سرویس (`$queryRaw`، Migrationها، Triggerها) را برای `now()`،
+   `CURRENT_TIMESTAMP` و مقایسه با `now()` بگرد — همان‌ها مسیرهایی‌اند که تبدیل درستشان می‌کند.
+2. **اندازه.** روی هر محیطی که Migration در آن اجرا می‌شود
+   `SELECT relname, n_live_tup, pg_size_pretty(pg_total_relation_size(oid)) FROM pg_stat_user_tables` را بگیر. بازنویسی
+   زیر ACCESS EXCLUSIVE است و همهٔ Indexها را از نو می‌سازد؛ روی میزبان توسعه، ۱٬۰۰۰٬۰۰۰ ردیف `document` (۵۷۶ MB) ۴۶ ثانیه
+   و ۲٬۰۰۰٬۰۰۰ ردیف `outbox_message` (۹۵۷ MB) ۲۹ ثانیه گرفت. حذف `USING` (میان‌بُر PG12+ برای نشست UTC) بازنویسی را
+   **حذف نمی‌کند** — Typmod `(3)` آن را لازم می‌کند (اندازه‌گیری‌شده). اگر برآورد نگه‌داشتن قفل از بودجهٔ گام ۳ بیشتر است،
+   مسیر برخط (پایین) لازم است. **نکته:** `purgePublished` در هیچ سرویسی صدا زده نمی‌شود، پس `outbox_message` منتشرشده‌ها
+   را نگه می‌دارد و در Production بزرگ‌ترین جدول خواهد بود.
+3. **Migration.** یک `ALTER TABLE` برای هر جدول با همهٔ ستون‌های لحظه‌اش (یک بازنویسی، نه یکی برای هر ستون):
+   `ALTER COLUMN "c" TYPE TIMESTAMPTZ(3) USING "c" AT TIME ZONE 'UTC'` — صریح، پس مستقل از منطقهٔ نشست Migrator. در آغاز
+   فایل `SET LOCAL lock_timeout = '5s'` (پشت تراکنش بلند صف نمی‌کشد و درخواست‌ها پشت او) و
+   `SET LOCAL statement_timeout = '30s'` (جدول بزرگ‌تر از برآورد، Migration را **بسته شکست** می‌دهد و همه چیز برمی‌گردد).
+   `down.sql` وارونهٔ دقیق است — `TYPE TIMESTAMP(3) USING "c" AT TIME ZONE 'UTC'` و حذف ردیف دفتر Migration. Index (حتی
+   Expression مثل `GREATEST(...)`)، CHECK و Default `CURRENT_TIMESTAMP` را خود PostgreSQL منتقل می‌کند.
+4. **Schema.** `@db.Timestamptz(3)` روی هر فیلد، و آزمون واحدی که `DateTime` بی آن را رد کند
+   (`document-service/src/prisma/instant-columns.spec.ts`).
+5. **Verifierها.** `verify-migration-reversible.mjs <svc>` باید بی تغییر سبز شود (Snapshot کاتالوگ، نوع ستون را هم
+   می‌سنجد). دو جای دیگر Migration قدیمی‌تری را زیر تبدیل برمی‌گردانند و باید تبدیل را **اول** برگردانند و با آن دوباره
+   اعمال کنند، وگرنه ستون‌های تبدیل‌شده `timestamp(3)` برمی‌گردند در حالی که دفتر تبدیل را فهرست می‌کند:
+   - `scripts/verify-outbox-claim-migration.mjs` — نام Migration را در `LATER_CLAIM_COLUMN_MIGRATIONS` بیفزا (identity،
+     organization، asset، fleet، maintenance، economic و marketplace؛ بدون آن Verifier از همان `up` با نام سرویس رد می‌کند)؛
+   - `dataRollback` همان سرویس در `verify-migration-reversible-lib.mjs`، اگر Migrationی را برمی‌گرداند که ستون تبدیل‌شده
+     ساخته — `runDownScript` به‌صورت فهرست (تبدیل اول) و گامی که نوع را پس از اعمال دوباره بسنجد (`DOCUMENT_DATA_ROLLBACK`).
+     هر بررسی‌ای که `timestamp without time zone` را سخت‌کد کرده هم عوض می‌شود — مثلاً امضای
+     `audit_correction_command.created_at` در `verify-audit-correction-command-lib.mjs` برای identity.
+6. **آزمون یکپارچگی** به الگوی `instants-timestamptz.int-spec.ts`: Schema دورانداختنی از Migrationهای پیش از تبدیل با
+   `psql --file`؛ ردیف با همهٔ ستون‌های لحظه (Literal UTC و `now()`)؛ up ← down ← up با برابری `extract(epoch …)` همهٔ
+   ستون‌ها و برابری تعریف Indexها و Constraintها؛ نشست غیر UTC که یک مسیر `now()` خام سرویس را پیش و پس از تبدیل اجرا کند؛
+   و تراکنشی که قفل جدول را نگه دارد تا Migration با `lock timeout` بی هیچ تغییری شکست بخورد.
+7. **استقرار: بلافاصله پس از Migration هر Replica سرویس را Restart کن** (یا Migration را با سرویسِ متوقف اجرا کن)؛ در
+   توسعه هر فرایند در حال اجرای سرویس را پس از `pnpm db:migrate`. اتصالی که پیش از تبدیل Statementی روی این جدول‌ها Prepare
+   کرده، پس از آن همان Query را با `cached plan must not change result type` (0A000) شکست می‌دهد و Prisma آن Statement را
+   نگه می‌دارد، پس تا جایگزینی اتصال **هر بار** شکست می‌خورد (اندازه‌گیری‌شده در همان آزمون). همین برای `down.sql`.
+   کد لازم نیست هم‌زمان برگردد: زیر نشست UTC (#214) هر دو Client هر دو نوع ستون را درست می‌خوانند و می‌نویسند.
+
+**مسیر برخط** (فقط برای جدولی که از بودجهٔ گام ۳ بزرگ‌تر است؛ تا امروز لازم نشده و هنوز پیاده نشده): ستون تازهٔ
+`<c>_tz TIMESTAMPTZ(3)` (افزایشی، بی بازنویسی) ← Trigger `BEFORE INSERT OR UPDATE` که آن را از ستون قدیم پر کند ←
+Backfill دسته‌ای در تراکنش‌های جدا ← `CREATE INDEX CONCURRENTLY` جای هر Index ستون قدیم ← در یک تراکنش کوتاه با
+`lock_timeout`: حذف Trigger، جابه‌جایی نام دو ستون، Default و `NOT NULL` (با CHECK از پیش `VALID`). هر گام down خودش را
+دارد؛ نخستین سرویسی که نیازش شود آن را در PR خودش طراحی و آزمون می‌کند.
 
 ### D-049 · غیرفعال‌سازی از کنسول Keycloak در پنجرهٔ نخستین فعال‌سازی ممکن است بازنویسی شود
 
