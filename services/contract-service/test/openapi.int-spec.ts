@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import request from 'supertest';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { ulid } from 'ulid';
+import { EventPublisher } from '../src/events/publisher';
 import { buildContractOpenApiDocument, formatDocument } from '../src/openapi/document';
 import { person, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, seedDraft, wire, type Wiring } from './helpers';
@@ -114,6 +115,20 @@ describe('the published OpenAPI contract (real application)', () => {
     await note(post('sign', id, employerToken, { side: 'EMPLOYER' })); // 400
     await note(post('sign', id, undefined, {})); // 401
     await note(post('sign', id, person(employer, ['DRIVER']), {})); // 403
+    // 503: the refusal of a party is an audit record that could not be written.
+    const publisher = api.app.get(EventPublisher);
+    const original = publisher.enqueue.bind(publisher);
+    const failing = jest
+      .spyOn(publisher, 'enqueue')
+      .mockImplementation(async (...args: Parameters<typeof original>) => {
+        if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+        return original(...args);
+      });
+    try {
+      await note(post('sign', id, person(employer, ['DRIVER']), {})); // 503
+    } finally {
+      failing.mockRestore();
+    }
     await note(post('sign', id, person(stranger, ['ORGANIZATION_ADMIN']), {})); // 404
     await note(post('sign', id, person(employer, ['ORGANIZATION_ADMIN']), {})); // 409 SIDE_ALREADY_SIGNED
     await note(post('cancel', id, employerToken, { reasonCode: 'BECAUSE' })); // 422
