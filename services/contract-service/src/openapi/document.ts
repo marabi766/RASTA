@@ -83,17 +83,17 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
   'GET /v1/contracts/{id}': { status: '200', schema: contractViewSchema },
   'POST /v1/contracts/{id}/sign': { status: '200', schema: contractViewSchema },
   'POST /v1/contracts/{id}/cancel': { status: '200', schema: contractViewSchema },
-  'POST /v1/approval-policies': { status: '201', schema: policyViewSchema },
-  'GET /v1/approval-policies': { status: '200', schema: cursorPageOf(policyViewSchema) },
-  'GET /v1/approval-policies/pending-platform-approval': {
+  'POST /v1/contract-approval-policies': { status: '201', schema: policyViewSchema },
+  'GET /v1/contract-approval-policies': { status: '200', schema: cursorPageOf(policyViewSchema) },
+  'GET /v1/contract-approval-policies/pending-platform-approval': {
     status: '200',
     schema: cursorPageOf(policyViewSchema),
   },
-  'GET /v1/approval-policies/{id}': { status: '200', schema: policyViewSchema },
-  'POST /v1/approval-policies/{id}/submit': { status: '200', schema: policyViewSchema },
-  'POST /v1/approval-policies/{id}/approve': { status: '200', schema: policyViewSchema },
-  'POST /v1/approval-policies/{id}/reject': { status: '200', schema: policyViewSchema },
-  'POST /v1/approval-policies/{id}/retire': { status: '200', schema: policyViewSchema },
+  'GET /v1/contract-approval-policies/{id}': { status: '200', schema: policyViewSchema },
+  'POST /v1/contract-approval-policies/{id}/submit': { status: '200', schema: policyViewSchema },
+  'POST /v1/contract-approval-policies/{id}/approve': { status: '200', schema: policyViewSchema },
+  'POST /v1/contract-approval-policies/{id}/reject': { status: '200', schema: policyViewSchema },
+  'POST /v1/contract-approval-policies/{id}/retire': { status: '200', schema: policyViewSchema },
   'GET /v1/contracts/{id}/amendments': { status: '200', schema: cursorPageOf(amendmentViewSchema) },
   'GET /v1/contracts/{id}/amendments/{amendmentId}': { status: '200', schema: amendmentViewSchema },
   'POST /v1/contracts/{id}/amendments': { status: '201', schema: amendmentViewSchema },
@@ -114,11 +114,11 @@ export const RESPONSE_BODIES: Record<string, { status: '200' | '201'; schema: z.
 const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
   'POST /v1/contracts/{id}/sign': signContractSchema,
   'POST /v1/contracts/{id}/cancel': cancelContractSchema,
-  'POST /v1/approval-policies': createPolicySchema,
-  'POST /v1/approval-policies/{id}/submit': policyTransitionSchema,
-  'POST /v1/approval-policies/{id}/approve': policyTransitionSchema,
-  'POST /v1/approval-policies/{id}/reject': policyRejectionSchema,
-  'POST /v1/approval-policies/{id}/retire': policyTransitionSchema,
+  'POST /v1/contract-approval-policies': createPolicySchema,
+  'POST /v1/contract-approval-policies/{id}/submit': policyTransitionSchema,
+  'POST /v1/contract-approval-policies/{id}/approve': policyTransitionSchema,
+  'POST /v1/contract-approval-policies/{id}/reject': policyRejectionSchema,
+  'POST /v1/contract-approval-policies/{id}/retire': policyTransitionSchema,
   'POST /v1/contracts/{id}/amendments': proposeAmendmentSchema,
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign': signAmendmentSchema,
   'POST /v1/contracts/{id}/milestones': planMilestoneSchema,
@@ -129,7 +129,7 @@ const REQUEST_BODIES: Record<string, z.ZodTypeAny> = {
 const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
   'POST /v1/contracts/{id}/sign',
   'POST /v1/contracts/{id}/cancel',
-  'POST /v1/approval-policies',
+  'POST /v1/contract-approval-policies',
   'POST /v1/contracts/{id}/amendments',
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
   'POST /v1/contracts/{id}/milestones',
@@ -138,9 +138,9 @@ const IDEMPOTENT_COMMANDS: ReadonlySet<string> = new Set([
 
 /** The commands that confirm the union's hierarchy with organization-service. */
 const HIERARCHY_COMMANDS: ReadonlySet<string> = new Set([
-  'POST /v1/approval-policies',
-  'POST /v1/approval-policies/{id}/submit',
-  'POST /v1/approval-policies/{id}/approve',
+  'POST /v1/contract-approval-policies',
+  'POST /v1/contract-approval-policies/{id}/submit',
+  'POST /v1/contract-approval-policies/{id}/approve',
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
 ]);
 
@@ -149,6 +149,7 @@ const HIERARCHY_COMMANDS: ReadonlySet<string> = new Set([
  * (`CONTRACT_AUTHORITY_REFUSED`): when it cannot be written the answer is 503 and nothing was done.
  */
 const AUDITED_COMMANDS: ReadonlySet<string> = new Set([
+  'POST /v1/contracts/{id}/sign',
   'POST /v1/contracts/{id}/amendments',
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
   'POST /v1/contracts/{id}/milestones',
@@ -159,7 +160,7 @@ const AUDITED_COMMANDS: ReadonlySet<string> = new Set([
 const REFUSAL_AREA_OF: Record<string, RefusalArea> = {
   'POST /v1/contracts/{id}/sign': 'signature',
   'POST /v1/contracts/{id}/cancel': 'cancellation',
-  'POST /v1/approval-policies': 'policy',
+  'POST /v1/contract-approval-policies': 'policy',
   'POST /v1/contracts/{id}/amendments': 'amendment',
   'POST /v1/contracts/{id}/amendments/{amendmentId}/sign': 'amendment',
   'POST /v1/contracts/{id}/milestones': 'milestone',
@@ -205,8 +206,8 @@ const REFUSAL_DETAILS_NOTE =
 const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/contracts': listContractsQuerySchema,
   'GET /v1/contracts/{id}/amendments': listAmendmentsQuerySchema,
-  'GET /v1/approval-policies': listPoliciesQuerySchema,
-  'GET /v1/approval-policies/pending-platform-approval': listPoliciesQuerySchema,
+  'GET /v1/contract-approval-policies': listPoliciesQuerySchema,
+  'GET /v1/contract-approval-policies/pending-platform-approval': listPoliciesQuerySchema,
 };
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
@@ -243,7 +244,7 @@ const DESCRIPTION =
   'gets 404. Each party signs separately — a recorded acceptance, not a legal signature ' +
   '(Q-95) — and the contract is SIGNED only when both have; the employer may cancel a draft ' +
   'for a closed reason. Who may sign for the employer is the `contract.signature` approval ' +
-  'policy of its own organization (/v1/approval-policies): written by a union or the platform, ' +
+  'policy of its own organization (/v1/contract-approval-policies): written by a union or the platform, ' +
   'put in force by a platform administrator who is not its author, and never an environment ' +
   'setting; with none in force nobody signs for the employer (422). Amounts are decimal strings of minor units (rials). ' +
   'A SIGNED contract is amended by its employer (a positive change to the price, with a closed ' +
@@ -346,7 +347,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         };
       }
 
-      const descriptions = path.startsWith('/v1/approval-policies')
+      const descriptions = path.startsWith('/v1/contract-approval-policies')
         ? POLICY_ERROR_DESCRIPTIONS
         : ERROR_DESCRIPTIONS;
       for (const [status, description] of Object.entries(descriptions)) {

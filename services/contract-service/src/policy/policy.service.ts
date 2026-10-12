@@ -42,7 +42,7 @@ export const POLICY_ID_PREFIX = ID_PREFIX.policy;
 export const POLICY_STEP_ID_PREFIX = ID_PREFIX.policyStep;
 
 /** The route template the idempotency store keys on: a closed set, never an id. */
-export const CREATE_POLICY_ENDPOINT = 'POST /v1/approval-policies';
+export const CREATE_POLICY_ENDPOINT = 'POST /v1/contract-approval-policies';
 
 /**
  * Approval policies: who writes them, who puts them in force (ADR-023, ADR-063, ADR-068 § 5,

@@ -491,6 +491,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
   it('names a refusal’s action and reason from closed lists, and nothing else', () => {
     const refused = payloads.CONTRACT_AUTHORITY_REFUSED;
     for (const action of [
+      'SIGN_CONTRACT',
       'PROPOSE_AMENDMENT',
       'SIGN_AMENDMENT',
       'PLAN_MILESTONE',
@@ -505,6 +506,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
       'NOT_EMPLOYER',
       'SIGNATURE_POLICY_REQUIRED',
       'POLICY_AUTHOR_NOT_GOVERNING',
+      'MEMBER_OF_BOTH_PARTIES',
     ]) {
       expect(
         validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, reason }),

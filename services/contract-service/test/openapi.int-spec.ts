@@ -129,7 +129,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
   it('can produce every documented status of the approval-policy routes except 500', async () => {
     const operations = Object.entries(document.paths ?? {})
-      .filter(([path]) => path.startsWith('/v1/approval-policies'))
+      .filter(([path]) => path.startsWith('/v1/contract-approval-policies'))
       .flatMap(([, item]) =>
         Object.values(item as Record<string, { responses: Record<string, unknown> }>),
       );
@@ -168,14 +168,14 @@ describe('the published OpenAPI contract (real application)', () => {
       payload: object,
       key: string | undefined = `oas-${ulid()}`,
     ) => {
-      const r = http().post('/v1/approval-policies');
+      const r = http().post('/v1/contract-approval-policies');
       if (token) r.set('authorization', `Bearer ${token}`);
       if (key) r.set('idempotency-key', key);
       return r.send(payload);
     };
     const act = (token: string, id: string, verb: string, payload: object) =>
       http()
-        .post(`/v1/approval-policies/${id}/${verb}`)
+        .post(`/v1/contract-approval-policies/${id}/${verb}`)
         .set('authorization', `Bearer ${token}`)
         .send(payload);
 
@@ -209,15 +209,17 @@ describe('the published OpenAPI contract (real application)', () => {
     await note(act(unionToken, written.body.id, 'retire', { expectedVersion: 2 })); // 422 (not ACTIVE)
     await note(act(unionToken, `APL_${ulid()}`, 'submit', { expectedVersion: 1 })); // 404
     await note(act(unionToken, written.body.id, 'submit', { expectedVersion: 99 })); // 409 version
-    await note(http().get('/v1/approval-policies').set('authorization', `Bearer ${unionToken}`)); // 200
+    await note(
+      http().get('/v1/contract-approval-policies').set('authorization', `Bearer ${unionToken}`),
+    ); // 200
     await note(
       http()
-        .get(`/v1/approval-policies/${written.body.id}`)
+        .get(`/v1/contract-approval-policies/${written.body.id}`)
         .set('authorization', `Bearer ${platformToken}`),
     ); // 200
     await note(
       http()
-        .get('/v1/approval-policies/pending-platform-approval')
+        .get('/v1/contract-approval-policies/pending-platform-approval')
         .set('authorization', `Bearer ${platformToken}`),
     ); // 200
     await note(act(platformToken, written.body.id, 'approve', { expectedVersion: 2 })); // 200

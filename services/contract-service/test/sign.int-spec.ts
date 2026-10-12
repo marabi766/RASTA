@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { EventPublisher } from '../src/events/publisher';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import {
@@ -331,6 +332,18 @@ describe('POST /v1/contracts/{id}/sign', () => {
       );
       expect(reasons(asContractor.body)).toEqual(['signature:MEMBER_OF_BOTH_PARTIES']);
       expect(await signaturesOf(id)).toHaveLength(0);
+      // Each refusal of a party is an audit record, in the shape an amendment's refusal has.
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['SIGN_CONTRACT', 'EMPLOYER', 'MEMBER_OF_BOTH_PARTIES'],
+        ['SIGN_CONTRACT', 'CONTRACTOR', 'MEMBER_OF_BOTH_PARTIES'],
+      ]);
+      expect(refused[0]!.payload).toMatchObject({
+        contractId: id,
+        organizationId: employer,
+        subjectId: null,
+        policyId: null,
+      });
     });
 
     it('fails closed when the two signers cannot be told apart: 422 ACTOR_IDENTITY_UNKNOWN, nothing signed', async () => {
@@ -366,6 +379,37 @@ describe('POST /v1/contracts/{id}/sign', () => {
         const res = await sign(id, person(employer, roles)).expect(403);
         expect(res.body.code).toBe('INSUFFICIENT_ROLE');
       }
+      expect(await signaturesOf(id)).toHaveLength(0);
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['SIGN_CONTRACT', 'EMPLOYER', 'ROLE_NOT_PERMITTED'],
+        ['SIGN_CONTRACT', 'EMPLOYER', 'ROLE_NOT_PERMITTED'],
+        ['SIGN_CONTRACT', 'EMPLOYER', 'ROLE_NOT_PERMITTED'],
+      ]);
+    });
+
+    it('a refusal that cannot be recorded is a retryable 503, not the normal refusal: nothing is signed and the repeated request leaves its trace', async () => {
+      const { id, employer } = await draft();
+      const retryKey = key();
+      const attempt = () => sign(id, person(employer, ['DRIVER']), {}, retryKey);
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+          return original(...args);
+        });
+      try {
+        const down = await attempt().expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+      } finally {
+        failing.mockRestore();
+      }
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
+      await attempt().expect(403);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
       expect(await signaturesOf(id)).toHaveLength(0);
     });
 
@@ -463,10 +507,14 @@ describe('POST /v1/contracts/{id}/sign', () => {
     });
 
     it('the contractor’s side is the CONTRACTOR role of its own organization', async () => {
-      const { id, contractor } = await draft();
+      const { id, employer, contractor } = await draft();
       const res = await sign(id, person(contractor, ['ORGANIZATION_ADMIN'])).expect(403);
       expect(res.body.code).toBe('INSUFFICIENT_ROLE');
       expect(await signaturesOf(id)).toHaveLength(0);
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['SIGN_CONTRACT', 'CONTRACTOR', 'ROLE_NOT_PERMITTED'],
+      ]);
     });
 
     it('the platform administrator, the oversight role and a service never sign — whatever else the token holds', async () => {

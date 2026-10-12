@@ -61,18 +61,18 @@ describe('approval policies (contract.signature)', () => {
     payload: object,
     idempotencyKey: string | null = key(),
   ) => {
-    const r = http().post('/v1/approval-policies');
+    const r = http().post('/v1/contract-approval-policies');
     if (token) r.set('authorization', `Bearer ${token}`);
     if (idempotencyKey !== null) r.set('idempotency-key', idempotencyKey);
     return r.send(payload);
   };
   const command = (token: string, id: string, verb: string, payload: object) =>
     http()
-      .post(`/v1/approval-policies/${id}/${verb}`)
+      .post(`/v1/contract-approval-policies/${id}/${verb}`)
       .set('authorization', `Bearer ${token}`)
       .send(payload);
   const get = (token: string, id: string) =>
-    http().get(`/v1/approval-policies/${id}`).set('authorization', `Bearer ${token}`);
+    http().get(`/v1/contract-approval-policies/${id}`).set('authorization', `Bearer ${token}`);
   const reasons = (res: { body: { details?: { path: string; code: string }[] } }) =>
     res.body.details?.map((detail) => `${detail.path}:${detail.code}`);
 
@@ -153,7 +153,7 @@ describe('approval policies (contract.signature)', () => {
       // A service token reaches no route here: none names a service caller (403).
       const service = await internalToken('economic-service', { organizationId: employer });
       await http()
-        .post('/v1/approval-policies')
+        .post('/v1/contract-approval-policies')
         .set('x-internal-token', service)
         .set('idempotency-key', key())
         .send(body(employer))
@@ -205,7 +205,7 @@ describe('approval policies (contract.signature)', () => {
       expect(slow.body.code).toBe('UPSTREAM_TIMEOUT');
       api.hierarchy.timedOut = false;
       const listed = await http()
-        .get('/v1/approval-policies')
+        .get('/v1/contract-approval-policies')
         .set('authorization', `Bearer ${orgAdmin(employer)}`)
         .expect(200);
       expect(listed.body.items).toEqual([]);
@@ -312,11 +312,11 @@ describe('approval policies (contract.signature)', () => {
         }).expect(403);
       }
       await http()
-        .get('/v1/approval-policies/pending-platform-approval')
+        .get('/v1/contract-approval-policies/pending-platform-approval')
         .set('authorization', `Bearer ${unionAdmin}`)
         .expect(403);
       const queue = await http()
-        .get('/v1/approval-policies/pending-platform-approval')
+        .get('/v1/contract-approval-policies/pending-platform-approval')
         .set('authorization', `Bearer ${platformAdmin}`)
         .expect(200);
       expect(queue.body.items.map((item: { id: string }) => item.id)).toContain(p.id);
@@ -425,20 +425,20 @@ describe('approval policies (contract.signature)', () => {
         const unionToken = person(union, ['UNION_ADMIN']);
         const r = () => request(relaxed.app.getHttpServer());
         const written = await r()
-          .post('/v1/approval-policies')
+          .post('/v1/contract-approval-policies')
           .set('authorization', `Bearer ${unionToken}`)
           .set('idempotency-key', key())
           .send(body(employer))
           .expect(201);
         await r()
-          .post(`/v1/approval-policies/${written.body.id}/submit`)
+          .post(`/v1/contract-approval-policies/${written.body.id}/submit`)
           .set('authorization', `Bearer ${unionToken}`)
           .send({ expectedVersion: 1 })
           .expect(200);
         // The union is not a platform administrator at all; a SYSTEM_ADMIN who is also that person is.
         const same = bearerAsSamePerson(unionToken, ['SYSTEM_ADMIN', 'UNION_ADMIN']);
         const refused = await r()
-          .post(`/v1/approval-policies/${written.body.id}/approve`)
+          .post(`/v1/contract-approval-policies/${written.body.id}/approve`)
           .set('authorization', `Bearer ${same}`)
           .send({ expectedVersion: 2 })
           .expect(403);
@@ -454,18 +454,18 @@ describe('approval policies (contract.signature)', () => {
         const admin = platform();
         const r = () => request(relaxed.app.getHttpServer());
         const written = await r()
-          .post('/v1/approval-policies')
+          .post('/v1/contract-approval-policies')
           .set('authorization', `Bearer ${admin}`)
           .set('idempotency-key', key())
           .send(body(employer))
           .expect(201);
         await r()
-          .post(`/v1/approval-policies/${written.body.id}/submit`)
+          .post(`/v1/contract-approval-policies/${written.body.id}/submit`)
           .set('authorization', `Bearer ${admin}`)
           .send({ expectedVersion: 1 })
           .expect(200);
         await r()
-          .post(`/v1/approval-policies/${written.body.id}/approve`)
+          .post(`/v1/contract-approval-policies/${written.body.id}/approve`)
           .set('authorization', `Bearer ${admin}`)
           .send({ expectedVersion: 2 })
           .expect(200);
@@ -494,19 +494,19 @@ describe('approval policies (contract.signature)', () => {
       api.hierarchy.adopt(union, another);
       const other = await pending(another);
       const asEmployer = await http()
-        .get('/v1/approval-policies')
+        .get('/v1/contract-approval-policies')
         .set('authorization', `Bearer ${orgAdmin(employer)}`)
         .expect(200);
       expect(asEmployer.body.items.map((item: { id: string }) => item.id)).toEqual([mine.id]);
       const asUnion = await http()
-        .get('/v1/approval-policies')
+        .get('/v1/contract-approval-policies')
         .set('authorization', `Bearer ${unionAdmin}`)
         .expect(200);
       expect(asUnion.body.items.map((item: { id: string }) => item.id).sort()).toEqual(
         [mine.id, other.id].sort(),
       );
       const asStranger = await http()
-        .get('/v1/approval-policies')
+        .get('/v1/contract-approval-policies')
         .set('authorization', `Bearer ${orgAdmin(elsewhere)}`)
         .expect(200);
       expect(asStranger.body.items).toEqual([]);
@@ -526,7 +526,7 @@ describe('approval policies (contract.signature)', () => {
       // Whatever the page size: the predicate is in the query, not applied to a page afterwards.
       for (const limit of [1, 2, 50]) {
         const listed = await http()
-          .get(`/v1/approval-policies?limit=${limit}`)
+          .get(`/v1/contract-approval-policies?limit=${limit}`)
           .set('authorization', `Bearer ${authorOrgReader}`)
           .expect(200);
         expect(listed.body).toMatchObject({ items: [], hasMore: false, nextCursor: null });
@@ -536,13 +536,13 @@ describe('approval policies (contract.signature)', () => {
       await get(unionAdmin, first.id).expect(200);
       await get(unionAdmin, second.id).expect(200);
       const page = await http()
-        .get('/v1/approval-policies?limit=1')
+        .get('/v1/contract-approval-policies?limit=1')
         .set('authorization', `Bearer ${unionAdmin}`)
         .expect(200);
       expect(page.body.items).toHaveLength(1);
       expect(page.body.hasMore).toBe(true);
       const next = await http()
-        .get(`/v1/approval-policies?limit=1&cursor=${page.body.nextCursor}`)
+        .get(`/v1/contract-approval-policies?limit=1&cursor=${page.body.nextCursor}`)
         .set('authorization', `Bearer ${unionAdmin}`)
         .expect(200);
       expect(

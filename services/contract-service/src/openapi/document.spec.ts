@@ -53,9 +53,9 @@ describe('the committed OpenAPI document', () => {
 
     expect(operations.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     expect(operations.map((o) => o.key).sort()).toEqual([
-      'GET /v1/approval-policies',
-      'GET /v1/approval-policies/pending-platform-approval',
-      'GET /v1/approval-policies/{id}',
+      'GET /v1/contract-approval-policies',
+      'GET /v1/contract-approval-policies/pending-platform-approval',
+      'GET /v1/contract-approval-policies/{id}',
       'GET /v1/contracts',
       'GET /v1/contracts/{id}',
       'GET /v1/contracts/{id}/amendments',
@@ -63,11 +63,11 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/contracts/{id}/milestones',
       'GET /v1/contracts/{id}/milestones/{milestoneId}',
       'PATCH /v1/contracts/{id}/milestones/{milestoneId}',
-      'POST /v1/approval-policies',
-      'POST /v1/approval-policies/{id}/approve',
-      'POST /v1/approval-policies/{id}/reject',
-      'POST /v1/approval-policies/{id}/retire',
-      'POST /v1/approval-policies/{id}/submit',
+      'POST /v1/contract-approval-policies',
+      'POST /v1/contract-approval-policies/{id}/approve',
+      'POST /v1/contract-approval-policies/{id}/reject',
+      'POST /v1/contract-approval-policies/{id}/retire',
+      'POST /v1/contract-approval-policies/{id}/submit',
       'POST /v1/contracts/{id}/amendments',
       'POST /v1/contracts/{id}/amendments/{amendmentId}/sign',
       'POST /v1/contracts/{id}/cancel',
@@ -78,7 +78,7 @@ describe('the committed OpenAPI document', () => {
       expect(operation.security).toEqual([{ bearer: [] }]);
       // The routes that create (a policy, an amendment, a milestone) answer 201; every other 200.
       const created = [
-        'POST /v1/approval-policies',
+        'POST /v1/contract-approval-policies',
         'POST /v1/contracts/{id}/amendments',
         'POST /v1/contracts/{id}/milestones',
       ].includes(key);
@@ -95,25 +95,29 @@ describe('the committed OpenAPI document', () => {
     it('requires an Idempotency-Key on the create only', () => {
       const headerOf = (op: Op) =>
         op.parameters.filter((parameter) => parameter.in === 'header').map((p) => p.name);
-      expect(headerOf(operation('/v1/approval-policies', 'post'))).toEqual(['Idempotency-Key']);
+      expect(headerOf(operation('/v1/contract-approval-policies', 'post'))).toEqual([
+        'Idempotency-Key',
+      ]);
       for (const verb of ['submit', 'approve', 'reject', 'retire']) {
-        expect(headerOf(operation(`/v1/approval-policies/{id}/${verb}`, 'post'))).toEqual([]);
+        expect(headerOf(operation(`/v1/contract-approval-policies/{id}/${verb}`, 'post'))).toEqual(
+          [],
+        );
       }
     });
 
     it('answers 503 and 504 only where organization-service is asked: create, submit, approve', () => {
       const asks = (path: string) =>
         ['503', '504'].map((s) => operation(path, 'post').responses[s] !== undefined);
-      expect(asks('/v1/approval-policies')).toEqual([true, true]);
-      expect(asks('/v1/approval-policies/{id}/submit')).toEqual([true, true]);
-      expect(asks('/v1/approval-policies/{id}/approve')).toEqual([true, true]);
-      expect(asks('/v1/approval-policies/{id}/reject')).toEqual([false, false]);
-      expect(asks('/v1/approval-policies/{id}/retire')).toEqual([false, false]);
+      expect(asks('/v1/contract-approval-policies')).toEqual([true, true]);
+      expect(asks('/v1/contract-approval-policies/{id}/submit')).toEqual([true, true]);
+      expect(asks('/v1/contract-approval-policies/{id}/approve')).toEqual([true, true]);
+      expect(asks('/v1/contract-approval-policies/{id}/reject')).toEqual([false, false]);
+      expect(asks('/v1/contract-approval-policies/{id}/retire')).toEqual([false, false]);
     });
 
     it('types the create’s 422 with the closed policy reason', () => {
       const schema = (
-        operation('/v1/approval-policies', 'post').responses['422'] as {
+        operation('/v1/contract-approval-policies', 'post').responses['422'] as {
           content: Record<
             string,
             {
@@ -136,7 +140,7 @@ describe('the committed OpenAPI document', () => {
 
     it('never offers the oversight role or the platform operator as an authority', () => {
       const body = (
-        buildContractOpenApiDocument(app).paths?.['/v1/approval-policies'] as unknown as {
+        buildContractOpenApiDocument(app).paths?.['/v1/contract-approval-policies'] as unknown as {
           post: {
             requestBody: {
               content: Record<string, { schema: { properties: { steps: { items: unknown } } } }>;

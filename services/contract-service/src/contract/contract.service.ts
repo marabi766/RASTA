@@ -11,6 +11,7 @@ import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.servi
 import type { ClaimFence } from '../shared/idempotency';
 import { transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
+import { AuthorityRefusals } from '../signing/authority-refusals';
 import { PolicySuspensionService } from '../policy/policy-suspension.service';
 import {
   SigningAuthority,
@@ -60,6 +61,17 @@ class SigningAuthorityRefused extends Error {
   }
 }
 
+/**
+ * The caller's role is not one the policy in force (employer) names, found inside the signing
+ * transaction, which rolls back. `sign` records it as an authority refusal afterwards, like the
+ * refusal of a role for an amendment.
+ */
+class SigningRoleRefused extends Error {
+  constructor(readonly answer: RastaError) {
+    super('The signature was refused: the role is not permitted');
+  }
+}
+
 const factOf = (
   signature: ContractSignature & { review?: { id: string } | null },
 ): SignatureFact => ({
@@ -106,6 +118,7 @@ export class ContractService {
     private readonly repository: ContractRepository,
     private readonly authority: SigningAuthority,
     private readonly suspension: PolicySuspensionService,
+    private readonly refusals: AuthorityRefusals,
     private readonly access: ContractAccess,
     private readonly prisma: PrismaService,
     private readonly publisher: EventPublisher,
@@ -197,15 +210,37 @@ export class ContractService {
     // employer's is the `contract.signature` policy of its organization, which can change under
     // a concurrent approval or retirement: it is read and judged under the contract's lock, in
     // the transaction that records the signature (`signLocked`).
-    const contractorRole = side === 'CONTRACTOR' ? this.access.contractorSigningRole() : undefined;
+    // A party's refusal for want of authority is an audit record, like an amendment's (S-06).
+    const base = {
+      action: 'SIGN_CONTRACT',
+      side,
+      contractId: row.id,
+      organizationId: row.organizationId,
+      subjectId: null,
+    } as const;
+    let contractorRole: string | undefined;
+    if (side === 'CONTRACTOR') {
+      try {
+        contractorRole = this.access.contractorSigningRole();
+      } catch (error) {
+        if (!(error instanceof RastaError)) throw error;
+        return this.refusals.refuse(
+          { ...base, reason: 'ROLE_NOT_PERMITTED' },
+          this.refused('sign', error),
+        );
+      }
+    }
     if (this.access.isMemberOfBothParties(row)) {
-      throw this.refused(
-        'sign',
-        forbiddenRefusal(
-          'Separation of duties: one person cannot be a member of both parties to a contract',
-          'signature',
-          ['MEMBER_OF_BOTH_PARTIES'],
-          { contractId: id },
+      return this.refusals.refuse(
+        { ...base, reason: 'MEMBER_OF_BOTH_PARTIES' },
+        this.refused(
+          'sign',
+          forbiddenRefusal(
+            'Separation of duties: one person cannot be a member of both parties to a contract',
+            'signature',
+            ['MEMBER_OF_BOTH_PARTIES'],
+            { contractId: id },
+          ),
         ),
       );
     }
@@ -227,6 +262,9 @@ export class ContractService {
         { timeoutMs: this.signingTransactionTimeoutMs() },
       );
     } catch (error) {
+      if (error instanceof SigningRoleRefused) {
+        return this.refusals.refuse({ ...base, reason: 'ROLE_NOT_PERMITTED' }, error.answer);
+      }
       if (!(error instanceof SigningAuthorityRefused)) throw error;
       // Not only refused: a stranded policy is suspended, with the same event and audit as the
       // sweeper's (Q-83), so it does not wait for a queued task to stop being in force. The
@@ -348,9 +386,8 @@ export class ContractService {
           ),
         );
       }
-      throw this.refused(
-        'sign',
-        RastaError.insufficientRole(error.requiredRoles, getContext().roles),
+      throw new SigningRoleRefused(
+        this.refused('sign', RastaError.insufficientRole(error.requiredRoles, getContext().roles)),
       );
     }
   }

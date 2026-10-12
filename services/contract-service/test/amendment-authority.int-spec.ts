@@ -52,7 +52,7 @@ describe('the authority an amendment is signed under', () => {
     );
   const command = (token: string, id: string, verb: string, payload: object) =>
     http(api)
-      .post(`/v1/approval-policies/${id}/${verb}`)
+      .post(`/v1/contract-approval-policies/${id}/${verb}`)
       .set('authorization', `Bearer ${token}`)
       .send(payload);
 
@@ -61,7 +61,7 @@ describe('the authority an amendment is signed under', () => {
     api.hierarchy.adopt(unionOrg, employer);
     const unionAdmin = person(unionOrg, ['UNION_ADMIN']);
     const written = await http(api)
-      .post('/v1/approval-policies')
+      .post('/v1/contract-approval-policies')
       .set('authorization', `Bearer ${unionAdmin}`)
       .set('idempotency-key', key())
       .send({

@@ -98,7 +98,7 @@ export class ContractController {
       '(CONTRACT_SIGNATURE_RECORDED). It is a recorded acceptance of both parties — not a legal ' +
       'signature (Q-95 (1)). The employer’s side is signed by the roles the ' +
       '`contract.signature` approval policy in force for its organization names ' +
-      '(/v1/approval-policies; the signature records the policy’s id and version): with none ' +
+      '(/v1/contract-approval-policies; the signature records the policy’s id and version): with none ' +
       'in force nobody signs for the employer, 422 `SIGNATURE_POLICY_REQUIRED`. The contractor’s side is signed by the CONTRACTOR role ' +
       'of its own organization. One person cannot sign for both sides — a caller who is a member ' +
       'of both organizations is refused (403 `MEMBER_OF_BOTH_PARTIES`) and so is one who already ' +

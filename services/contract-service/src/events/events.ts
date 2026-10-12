@@ -438,6 +438,7 @@ export const contractMilestoneChangedPayload = z
  * party: such a caller is told the contract does not exist.
  */
 export const AUTHORITY_REFUSED_ACTIONS = [
+  'SIGN_CONTRACT',
   'PROPOSE_AMENDMENT',
   'SIGN_AMENDMENT',
   'PLAN_MILESTONE',
@@ -450,6 +451,8 @@ export const AUTHORITY_REFUSED_REASONS = [
   'NOT_EMPLOYER',
   'SIGNATURE_POLICY_REQUIRED',
   'POLICY_AUTHOR_NOT_GOVERNING',
+  /** Separation of duties: the caller is a member of both parties to the contract. */
+  'MEMBER_OF_BOTH_PARTIES',
 ] as const;
 
 export const contractAuthorityRefusedPayload = z
