@@ -153,6 +153,10 @@ export async function cleanup(
     `DELETE FROM outbox_message WHERE organization_id = ANY($1::text[])`,
     orgs,
   );
+  await client.$executeRawUnsafe(
+    `DELETE FROM insurance_pending_verification WHERE organization_id = ANY($1::text[])`,
+    orgs,
+  );
 }
 
 /** Waits for `check` to become truthy, or gives up with a readable failure. */

@@ -98,6 +98,42 @@ describe('EventConsumer delivery metadata', () => {
     expect(seen[0]).toEqual({ topic: 'rasta.asset.v1', partition: 2 });
   });
 
+  it('adds the record key and offset when the broker reports them (#240 r8)', async () => {
+    const seen: EventDelivery[] = [];
+    const consumer = new EventConsumer(
+      options,
+      async (_envelope, delivery) => {
+        seen.push(delivery);
+      },
+      silentLogger,
+    );
+    const handle = consumer as unknown as {
+      handleMessage(
+        topic: string,
+        partition: number,
+        value: Buffer | null,
+        headers: undefined,
+        offset?: string,
+        key?: Buffer | null,
+      ): Promise<void>;
+    };
+
+    await handle.handleMessage(
+      'rasta.asset.v1',
+      1,
+      envelopeBytes(),
+      undefined,
+      '17',
+      Buffer.from('AST_SPEC_1'),
+    );
+    await handle.handleMessage('rasta.asset.v1', 1, envelopeBytes(), undefined, '18', null);
+
+    expect(seen).toEqual([
+      { topic: 'rasta.asset.v1', partition: 1, key: 'AST_SPEC_1', offset: '17' },
+      { topic: 'rasta.asset.v1', partition: 1, key: null, offset: '18' },
+    ]);
+  });
+
   it('reports the real topic even when the producer publishes elsewhere', async () => {
     // The reason this metadata exists at all. `producer` is `asset-service` on
     // both messages below; the topic is what tells a retry delivery apart from

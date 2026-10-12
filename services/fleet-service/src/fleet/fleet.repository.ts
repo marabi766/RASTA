@@ -2,7 +2,9 @@ import { Injectable } from '@nestjs/common';
 import {
   allocateStreamSeqSql,
   buildOutboxRow,
+  createSystemContext,
   runUnscoped,
+  runWithContext,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
@@ -876,8 +878,164 @@ export class FleetRepository {
   }
 
   // -------------------------------------------------------------------------
+  // Parked insurance events (#240 r8)
+  //
+  // Written under the envelope's tenant; read and removed by machine or by age,
+  // whichever tenant parked them, under `runUnscoped`. Every mutation of a row
+  // happens under `lockAssetRef` for its machine, so the transfer's handler and
+  // the sweep (on any instance) never decide the same row at once.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Parks an event, in the caller's transaction and under the envelope's tenant
+   * (the tenant guard writes `organization_id` from that context). Called after
+   * the event's `processed_event` marker in the same transaction, so a
+   * redelivery stops at the marker and never parks it twice.
+   */
+  async parkInsuranceEvent(tx: ExtendedPrismaClient, row: ParkedInsuranceInput): Promise<void> {
+    const context = createSystemContext({
+      correlationId: row.correlationId,
+      organizationId: row.organizationId,
+      callerService: SERVICE_NAME,
+    });
+    // Awaited inside the context: a Prisma query is lazy and would otherwise run
+    // after the context closed (test/helpers.ts `asActor`).
+    await runWithContext(context, async () => {
+      await tx.insurancePendingVerification.create({
+        data: {
+          eventId: row.eventId,
+          assetId: row.assetId,
+          // Stated, and held by the guard to the context's tenant: the same one.
+          organizationId: row.organizationId,
+          envelope: row.envelope as Prisma.InputJsonValue,
+          messageKey: row.messageKey,
+          sourceTopic: row.sourceTopic,
+          sourcePartition: row.sourcePartition,
+          sourceOffset: row.sourceOffset,
+          reason: row.reason,
+        },
+      });
+    });
+  }
+
+  /**
+   * One parked event, read under {@link lockAssetRef}. `due` says whether the
+   * sweep may try it now: parked and last tried at least `minAgeSeconds` ago, by
+   * the database's clock — so a second instance's sweep that listed it before
+   * this one tried it leaves it alone.
+   */
+  async findParkedInsurance(
+    tx: ExtendedPrismaClient,
+    eventId: string,
+    minAgeSeconds: number,
+  ): Promise<ParkedInsurance | null> {
+    const rows = await runUnscoped(
+      'a parked insurance event is decided by machine, whichever tenant parked it',
+      () =>
+        tx.$queryRaw<RawParkedInsurance[]>`
+          SELECT event_id, asset_id, organization_id, envelope, message_key, source_topic,
+                 source_partition, source_offset, reason, attempts,
+                 (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
+                  AND (last_attempt_at IS NULL
+                       OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int))) AS due
+            FROM insurance_pending_verification
+           WHERE event_id = ${eventId}`,
+    );
+    const row = rows[0];
+    return row
+      ? {
+          eventId: row.event_id,
+          assetId: row.asset_id,
+          organizationId: row.organization_id,
+          envelope: row.envelope,
+          messageKey: row.message_key,
+          sourceTopic: row.source_topic,
+          sourcePartition: row.source_partition,
+          sourceOffset: row.source_offset,
+          reason: row.reason,
+          attempts: row.attempts,
+          due: row.due,
+        }
+      : null;
+  }
+
+  /** The parked events of one machine, oldest first, whichever tenant parked them. */
+  async listParkedInsuranceForAsset(assetId: string, limit: number): Promise<string[]> {
+    const rows = await runUnscoped(
+      'a transfer re-verifies every parked insurance event of the machine, whichever tenant parked it',
+      () =>
+        this.client.insurancePendingVerification.findMany({
+          where: { assetId },
+          orderBy: [{ firstSeenAt: 'asc' }, { eventId: 'asc' }],
+          select: { eventId: true },
+          take: limit,
+        }),
+    );
+    return rows.map((row) => row.eventId);
+  }
+
+  /** The sweep's batch: parked, and last tried, at least `minAgeSeconds` ago by the database's clock. Oldest first. */
+  async listDueParkedInsurance(
+    minAgeSeconds: number,
+    limit: number,
+  ): Promise<{ eventId: string; assetId: string }[]> {
+    const rows = await runUnscoped(
+      'the parked-insurance sweep spans every tenant; each row is decided under its machine’s lock',
+      () =>
+        this.client.$queryRaw<{ event_id: string; asset_id: string }[]>`
+          SELECT event_id, asset_id FROM insurance_pending_verification
+           WHERE first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
+             AND (last_attempt_at IS NULL
+                  OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int))
+           ORDER BY first_seen_at, event_id
+           LIMIT ${limit}`,
+    );
+    return rows.map((row) => ({ eventId: row.event_id, assetId: row.asset_id }));
+  }
+
+  /** Counts one more attempt that left the event parked, and why. Returns the attempts so far. */
+  async recordParkedAttempt(
+    tx: ExtendedPrismaClient,
+    eventId: string,
+    reason: string,
+  ): Promise<number> {
+    const rows = await runUnscoped(
+      'a parked insurance event is decided by machine, whichever tenant parked it',
+      () =>
+        tx.$queryRaw<{ attempts: number }[]>`
+          UPDATE insurance_pending_verification
+             SET attempts = attempts + 1, last_attempt_at = now(), reason = ${reason}
+           WHERE event_id = ${eventId}
+          RETURNING attempts`,
+    );
+    return rows[0]?.attempts ?? 0;
+  }
+
+  /** Removes a parked event: applied, definitively rejected, or dead-lettered. */
+  async deleteParkedInsurance(tx: ExtendedPrismaClient, eventId: string): Promise<boolean> {
+    const result = await runUnscoped(
+      'a parked insurance event is decided by machine, whichever tenant parked it',
+      () => tx.insurancePendingVerification.deleteMany({ where: { eventId } }),
+    );
+    return result.count === 1;
+  }
+
+  // -------------------------------------------------------------------------
   // Consumer idempotency
   // -------------------------------------------------------------------------
+
+  /**
+   * Forgets that an event was handled, so a replay of it is applied. Only for
+   * an event this consumer acknowledged without applying and has now
+   * dead-lettered (a parked insurance event whose attempts ran out).
+   */
+  async unmarkEventProcessed(
+    tx: ExtendedPrismaClient,
+    eventId: string,
+    consumerName: string,
+  ): Promise<void> {
+    await tx.processedEvent.deleteMany({ where: { eventId, consumerName } });
+  }
 
   /**
    * Records that an event has been handled.
@@ -900,6 +1058,50 @@ export class FleetRepository {
       throw error;
     }
   }
+}
+
+/** What parking an `INSURANCE_RECORDED` stores (#240 r8). */
+export interface ParkedInsuranceInput {
+  eventId: string;
+  assetId: string;
+  /** The envelope's tenant. */
+  organizationId: string;
+  correlationId: string;
+  envelope: unknown;
+  messageKey: string | null;
+  sourceTopic: string;
+  sourcePartition: number | null;
+  sourceOffset: string | null;
+  reason: string;
+}
+
+export interface ParkedInsurance {
+  eventId: string;
+  assetId: string;
+  organizationId: string;
+  envelope: unknown;
+  messageKey: string | null;
+  sourceTopic: string;
+  sourcePartition: number | null;
+  sourceOffset: string | null;
+  reason: string;
+  attempts: number;
+  /** Whether the sweep may try it now (see `findParkedInsurance`). */
+  due: boolean;
+}
+
+interface RawParkedInsurance {
+  event_id: string;
+  asset_id: string;
+  organization_id: string;
+  envelope: unknown;
+  message_key: string | null;
+  source_topic: string;
+  source_partition: number | null;
+  source_offset: string | null;
+  reason: string;
+  attempts: number;
+  due: boolean;
 }
 
 export interface ClearableInsuranceOptions {

@@ -222,6 +222,87 @@ describe('dead-letter headers: where the original sat (F5)', () => {
   });
 });
 
+describe('a deferred dead letter (#240 r8)', () => {
+  interface Publisher {
+    publishDeadLetter: EventConsumer['publishDeadLetter'];
+  }
+
+  it('carries the body, the kept key, the platform headers and where the original sat', async () => {
+    const { handle, dlq } = build(async () => undefined);
+
+    await (handle as unknown as Publisher).publishDeadLetter({
+      value: BODY,
+      key: 'AST_HYGIENE_1',
+      headers: { ...PLATFORM_HEADERS, ...FOREIGN_HEADERS },
+      originalTopic: 'rasta.asset.v1',
+      originalPartition: 3,
+      originalOffset: '41',
+      reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+      detail: `held back\n${SENTINEL.length} times`,
+      attempts: 12,
+    });
+
+    const sent = dlq.sent[0]?.messages[0] as unknown as {
+      key: Buffer | null;
+      value: Buffer;
+      headers: Record<string, unknown>;
+    };
+    expect(sent.value).toEqual(BODY);
+    expect(text(sent.key)).toBe('AST_HYGIENE_1');
+    expect(sent.headers[DLQ_HEADERS.reason]).toBe('PARKED_VERIFICATION_EXHAUSTED');
+    expect(sent.headers[DLQ_HEADERS.originalTopic]).toBe('rasta.asset.v1');
+    expect(sent.headers[DLQ_HEADERS.originalPartition]).toBe('3');
+    expect(sent.headers[DLQ_HEADERS.originalOffset]).toBe('41');
+    expect(sent.headers[DLQ_HEADERS.attempts]).toBe('12');
+    expect(hasControl(text(sent.headers[DLQ_HEADERS.error]))).toBe(false);
+    for (const name of Object.keys(FOREIGN_HEADERS)) expect(sent.headers).not.toHaveProperty(name);
+    expect(text(sent.headers[EVENT_HEADERS.eventId])).toBe(ENVELOPE.eventId);
+  });
+
+  it('omits the partition header when the original partition is unknown', async () => {
+    const { handle, dlq } = build(async () => undefined);
+
+    await (handle as unknown as Publisher).publishDeadLetter({
+      value: BODY,
+      key: null,
+      headers: PLATFORM_HEADERS,
+      originalTopic: 'rasta.asset.v1',
+      reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+      detail: 'held back',
+      attempts: 1,
+    });
+
+    const { headers } = onlyMessage(dlq);
+    expect(headers).not.toHaveProperty(DLQ_HEADERS.originalPartition);
+    expect(headers).not.toHaveProperty(DLQ_HEADERS.originalOffset);
+  });
+
+  it('refuses, rather than drops, when the consumer has no dead-letter topic', async () => {
+    const consumer = new EventConsumer(
+      {
+        brokers: ['localhost:9092'],
+        clientId: 'itest-observer',
+        groupId: 'itest-observer.group',
+        topics: ['rasta.asset.v1'],
+      },
+      async () => undefined,
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+
+    await expect(
+      consumer.publishDeadLetter({
+        value: BODY,
+        key: null,
+        headers: PLATFORM_HEADERS,
+        originalTopic: 'rasta.asset.v1',
+        reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+        detail: 'held back',
+        attempts: 1,
+      }),
+    ).rejects.toThrow(/No dead-letter topic/);
+  });
+});
+
 describe('handler messages: classified, sanitised, bounded (F2)', () => {
   // A message that tries to forge a second log line, hide behind a
   // right-to-left override, and run long — with the sentinel past the bound.

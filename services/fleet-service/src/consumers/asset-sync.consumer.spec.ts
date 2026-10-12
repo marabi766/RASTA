@@ -1,7 +1,16 @@
 import type { EventEnvelope } from '@rasta/contracts';
-import { tryGetContext, type OutboxMessageInput } from '@rasta/nest-common';
-import { AssetSyncConsumer, CONSUMER_NAME } from './asset-sync.consumer';
-import type { FleetRepository } from '../fleet/fleet.repository';
+import {
+  tryGetContext,
+  type DeferredDeadLetter,
+  type OutboxMessageInput,
+} from '@rasta/nest-common';
+import {
+  AssetSyncConsumer,
+  CONSUMER_NAME,
+  DEFAULT_PARKING,
+  type ParkingOptions,
+} from './asset-sync.consumer';
+import type { FleetRepository, ParkedInsuranceInput } from '../fleet/fleet.repository';
 import { CONSUMED_EVENTS, CONSUMED_PAYLOADS } from '../fleet/events';
 import { FakePolicySource, echoing } from '../../test/policy-source.fake';
 import { activeDispatchBlocks } from '../fleet/dispatch-blocks';
@@ -16,6 +25,10 @@ import { activeDispatchBlocks } from '../fleet/dispatch-blocks';
 interface Recorded {
   upserts: Record<string, unknown>[];
   processed: string[];
+  /** Markers removed (a parked event dead-lettered, #240 r8). */
+  unmarked: string[];
+  /** The parked-insurance table, by event id. */
+  parked: Map<string, ParkedRow>;
   /** Every outbox row, with the actor and tenant of the context it was built in. */
   events: (OutboxMessageInput & { callerService?: string; contextTenant?: string })[];
 }
@@ -34,15 +47,31 @@ interface LiveWindow {
   organizationId: string;
 }
 
+/** A parked row as the repository stores it (#240 r8). */
+interface ParkedRow extends ParkedInsuranceInput {
+  attempts: number;
+  due: boolean;
+}
+
 function buildConsumer(options: {
   existing?: Record<string, unknown> | null;
+  /** What the replica shows at each read, when it changes during a test; overrides `existing`. */
+  replica?: () => Record<string, unknown> | null;
   alreadyProcessed?: boolean;
   open?: OpenAssignment[];
   windows?: LiveWindow[];
   /** asset-service's answers about policies; by default it confirms what each event states. */
   policies?: FakePolicySource;
+  parking?: Partial<ParkingOptions>;
 }) {
-  const recorded: Recorded = { upserts: [], processed: [], events: [] };
+  const recorded: Recorded = {
+    upserts: [],
+    processed: [],
+    unmarked: [],
+    parked: new Map(),
+    events: [],
+  };
+  const replica = options.replica ?? (() => options.existing ?? null);
 
   const repository = {
     endActiveAssignmentsForAsset: jest.fn(async (_tx: unknown, _assetId: string, at: Date) =>
@@ -64,7 +93,7 @@ function buildConsumer(options: {
       });
       return 'OUTBOX-1';
     }),
-    findAssetRefUnscoped: jest.fn(async () => options.existing ?? null),
+    findAssetRefUnscoped: jest.fn(async () => replica()),
     lockAssetRef: jest.fn(async () => undefined),
     dropTransferFences: jest.fn(async () => 0),
     transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
@@ -73,16 +102,47 @@ function buildConsumer(options: {
       recorded.processed.push(eventId);
       return true;
     }),
+    unmarkEventProcessed: jest.fn(async (_tx: unknown, eventId: string) => {
+      recorded.unmarked.push(eventId);
+    }),
     upsertAssetRef: jest.fn(async (_tx: unknown, data: Record<string, unknown>) => {
       recorded.upserts.push(data);
       return data;
     }),
+    parkInsuranceEvent: jest.fn(async (_tx: unknown, row: ParkedInsuranceInput) => {
+      recorded.parked.set(row.eventId, { ...row, attempts: 0, due: true });
+    }),
+    findParkedInsurance: jest.fn(
+      async (_tx: unknown, eventId: string) => recorded.parked.get(eventId) ?? null,
+    ),
+    listParkedInsuranceForAsset: jest.fn(async (assetId: string) =>
+      [...recorded.parked.values()]
+        .filter((row) => row.assetId === assetId)
+        .map((row) => row.eventId),
+    ),
+    listDueParkedInsurance: jest.fn(async () =>
+      [...recorded.parked.values()]
+        .filter((row) => row.due)
+        .map((row) => ({ eventId: row.eventId, assetId: row.assetId })),
+    ),
+    recordParkedAttempt: jest.fn(async (_tx: unknown, eventId: string, reason: string) => {
+      const row = recorded.parked.get(eventId)!;
+      row.attempts += 1;
+      row.reason = reason;
+      return row.attempts;
+    }),
+    deleteParkedInsurance: jest.fn(async (_tx: unknown, eventId: string) =>
+      recorded.parked.delete(eventId),
+    ),
   } as unknown as FleetRepository;
 
   const policies = options.policies ?? new FakePolicySource();
-  policies.replica = () => options.existing ?? null;
+  policies.replica = () => replica();
   const consumer = echoing(
-    new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+    new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies, {
+      ...DEFAULT_PARKING,
+      ...options.parking,
+    }),
     policies,
   );
   return { consumer, repository, recorded, policies };
@@ -1981,6 +2041,23 @@ describe('AssetSyncConsumer', () => {
       expect(recorded.upserts[0]).not.toHaveProperty('ownershipGeneration');
     });
 
+    /** An ASSET_TRANSFERRED of the machine to `to`, stating the new generation. */
+    const transferTo = (to: string, generation: number, from = OWNER) =>
+      envelope({
+        eventId: `EVT-TRANSFER-${to}-${generation}`,
+        eventName: 'ASSET_TRANSFERRED',
+        tenantId: to,
+        payload: {
+          assetId: 'AST-SEED-0001',
+          fromOrganizationId: from,
+          toOrganizationId: to,
+          transferredAt: '2026-08-27T10:00:00.000Z',
+          reason: 'x',
+          ownershipGeneration: generation,
+          retainedCoverages: [],
+        },
+      });
+
     describe('r7: the former owner, and an answer that is a snapshot', () => {
       const FORMER = 'ORG-DEH-0001';
       const NEW_OWNER = 'ORG-DEH-0002';
@@ -2012,7 +2089,7 @@ describe('AssetSyncConsumer', () => {
         void FORMER;
       });
 
-      it('NOT_CURRENT_OWNER while the replica still shows that owner: the event FAILS for retry, never ignored', async () => {
+      it('NOT_CURRENT_OWNER while the replica still shows that owner: PARKED with the marker, never dead-lettered or ignored (r8)', async () => {
         // The transfer committed at the source; the replica has not consumed it.
         const policies = new FakePolicySource().set(
           'INS-1',
@@ -2020,43 +2097,70 @@ describe('AssetSyncConsumer', () => {
         );
         const { consumer, recorded } = buildConsumer({ existing: machine, policies });
 
-        await expect(consumer.handle(recordedPolicy())).rejects.toThrow(/no longer/);
+        await consumer.handle(recordedPolicy(), {
+          topic: 'rasta.insurance.v1',
+          partition: 2,
+          key: 'AST-SEED-0001',
+          offset: '77',
+        });
 
+        expect(recorded.processed).toEqual(['01JBQ8Z4K7M2N5P8R1T3V6X9Y2']);
         expect(recorded.upserts).toHaveLength(0);
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
+          assetId: 'AST-SEED-0001',
+          // The envelope's tenant, never the replica's or the source's owner.
+          organizationId: OWNER,
+          reason: 'NOT_CURRENT_OWNER',
+          messageKey: 'AST-SEED-0001',
+          sourceTopic: 'rasta.insurance.v1',
+          sourcePartition: 2,
+          sourceOffset: '77',
+          envelope: expect.objectContaining({ eventName: 'INSURANCE_RECORDED' }),
+        });
       });
 
-      it('...and is applied when redelivered after the transfer has been consumed', async () => {
+      it('...and is applied, without a redelivery, when the transfer is consumed', async () => {
         const policies = new FakePolicySource().set(
           'INS-1',
           counting({ organizationId: NEW_OWNER, ownershipGeneration: 4 }),
         );
-        const first = buildConsumer({ existing: machine, policies });
-        await expect(first.consumer.handle(recordedPolicy())).rejects.toThrow();
+        let shown: Record<string, unknown> = machine;
+        const { consumer, recorded } = buildConsumer({ replica: () => shown, policies });
+        await consumer.handle(recordedPolicy());
+        expect(recorded.parked.size).toBe(1);
 
-        const second = buildConsumer({
-          existing: { ...machine, organizationId: NEW_OWNER, ownershipGeneration: 4 },
-          policies,
+        // The transfer arrives; the projection is what the replica shows next.
+        shown = { ...machine, organizationId: NEW_OWNER, ownershipGeneration: 4 };
+        await consumer.handle(transferTo(NEW_OWNER, 4));
+
+        expect(recorded.parked.size).toBe(0);
+        const applied = recorded.upserts.find((row) => row.sourceEvent === 'INSURANCE_RECORDED');
+        expect(applied).toMatchObject({
+          id: 'AST-SEED-0001',
+          organizationId: NEW_OWNER,
+          insuranceCover: { COMPREHENSIVE: [{ policyId: 'INS-1', generation: 4 }] },
         });
-        await second.consumer.handle(recordedPolicy());
-
-        expect(second.recorded.upserts[0]!.insuranceCover).toMatchObject({
-          COMPREHENSIVE: [{ policyId: 'INS-1', generation: 4 }],
+        expect(policies.asked.at(-1)).toEqual({
+          organizationId: NEW_OWNER,
+          assetId: 'AST-SEED-0001',
+          policyId: 'INS-1',
         });
       });
 
-      it('the source AHEAD of the replica (a transfer between answer and commit): not applied, retried', async () => {
+      it('the source AHEAD of the replica (a transfer between answer and commit): not applied, parked', async () => {
         const policies = new FakePolicySource().set(
           'INS-1',
           counting({ organizationId: OWNER, ownershipGeneration: 4 }),
         );
         const { consumer, recorded } = buildConsumer({ existing: machine, policies });
 
-        await expect(consumer.handle(recordedPolicy())).rejects.toThrow(/ahead of the replica/);
+        await consumer.handle(recordedPolicy());
 
         expect(recorded.upserts).toHaveLength(0);
+        expect([...recorded.parked.values()].map((row) => row.reason)).toEqual(['SOURCE_AHEAD']);
       });
 
-      it('the source AHEAD with the replica generation unknown and the owner changed: retried too', async () => {
+      it('the source AHEAD with the replica generation unknown and the owner changed: parked too', async () => {
         const policies = new FakePolicySource().set('INS-1', counting());
         const { consumer, recorded } = buildConsumer({
           existing: { ...machine, ownershipGeneration: null },
@@ -2064,9 +2168,27 @@ describe('AssetSyncConsumer', () => {
         });
 
         // Asked as OWNER (the replica's), the source answers NOT_CURRENT_OWNER.
-        await expect(consumer.handle(recordedPolicy())).rejects.toThrow();
+        await consumer.handle(recordedPolicy());
 
         expect(recorded.upserts).toHaveLength(0);
+        expect(recorded.parked.size).toBe(1);
+      });
+
+      it('a redelivery of a parked event stops at the marker: parked once', async () => {
+        const policies = new FakePolicySource().set(
+          'INS-1',
+          counting({ organizationId: NEW_OWNER, ownershipGeneration: 4 }),
+        );
+        const { consumer, recorded, repository } = buildConsumer({
+          existing: machine,
+          policies,
+          alreadyProcessed: true,
+        });
+
+        await consumer.handle(recordedPolicy());
+
+        expect(repository.parkInsuranceEvent).not.toHaveBeenCalled();
+        expect(recorded.parked.size).toBe(0);
       });
 
       it('the source BEHIND the replica: the answer is stale, ignored as processed', async () => {
@@ -2104,6 +2226,216 @@ describe('AssetSyncConsumer', () => {
 
         expect(recorded.processed).toHaveLength(1);
         expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+      });
+    });
+
+    /**
+     * #240 r8: a parked event is decided again by the same verification —
+     * after the transfer is projected, and by the sweep — and dead-lettered,
+     * never applied, when its attempts run out.
+     */
+    describe('r8: parked events, re-verified', () => {
+      const B = 'ORG-DEH-0002';
+      const C = 'ORG-DEH-0003';
+      const counting = (organizationId: string, ownershipGeneration: number) =>
+        ({
+          counts: true,
+          organizationId,
+          coverage: 'COMPREHENSIVE',
+          validFrom: '2026-02-01T00:00:00.000Z',
+          validUntil: '2027-02-01T00:00:00.000Z',
+          ownershipGeneration,
+        }) as const;
+
+      /** A consumer whose replica shows `machine` until `move` is called. */
+      function parkedSetup(
+        verdictOwner: string,
+        generation: number,
+        parking: Partial<ParkingOptions> = {},
+      ) {
+        const policies = new FakePolicySource().set('INS-1', counting(verdictOwner, generation));
+        let shown: Record<string, unknown> = machine;
+        const built = buildConsumer({ replica: () => shown, policies, parking });
+        return {
+          ...built,
+          move: (organizationId: string, ownershipGeneration: number) => {
+            shown = { ...machine, organizationId, ownershipGeneration };
+          },
+        };
+      }
+
+      it('a policy that does not count once the transfer is consumed: removed, nothing applied', async () => {
+        const { consumer, recorded, policies, move } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        expect(recorded.parked.size).toBe(1);
+
+        policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
+        move(B, 4);
+        await consumer.handle(transferTo(B, 4));
+
+        expect(recorded.parked.size).toBe(0);
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+      });
+
+      it('the source BEHIND the replica at re-verification: removed as stale', async () => {
+        const { consumer, recorded, policies, move } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+
+        policies.set('INS-1', counting(B, 4));
+        move(B, 5);
+        await consumer.handle(transferTo(B, 5));
+
+        expect(recorded.parked.size).toBe(0);
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+      });
+
+      it('A→B→C with only B consumed: still about a later owner, kept with one attempt counted', async () => {
+        const { consumer, recorded, move } = parkedSetup(C, 5);
+        await consumer.handle(recordedPolicy());
+
+        move(B, 4);
+        await consumer.handle(transferTo(B, 4));
+
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
+          attempts: 1,
+          reason: 'NOT_CURRENT_OWNER',
+        });
+        expect(recorded.unmarked).toHaveLength(0);
+      });
+
+      it('asset-service down at re-verification: the transfer is still projected, the event stays parked', async () => {
+        const { consumer, recorded, policies, move } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+
+        policies.unreachable();
+        move(B, 4);
+        await consumer.handle(transferTo(B, 4));
+
+        expect(recorded.upserts.at(-1)).toMatchObject({ sourceEvent: 'ASSET_TRANSFERRED' });
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
+          attempts: 1,
+          reason: 'NO_ANSWER',
+        });
+      });
+
+      it('the transfer path never dead-letters, even past the maximum', async () => {
+        const deadLetters = { publish: jest.fn(async () => undefined) };
+        const { consumer, recorded, move } = parkedSetup(C, 5, { maxAttempts: 1, deadLetters });
+        await consumer.handle(recordedPolicy());
+
+        move(B, 4);
+        await consumer.handle(transferTo(B, 4));
+
+        expect(deadLetters.publish).not.toHaveBeenCalled();
+        expect(recorded.parked.size).toBe(1);
+      });
+
+      it('the sweep applies a due event once the replica has caught up by any route', async () => {
+        const { consumer, recorded, move } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+
+        // A replay refreshed the replica, or a transfer's own re-verification failed.
+        move(B, 4);
+        const counts = await consumer.sweepParked();
+
+        expect(counts).toMatchObject({ APPLIED: 1, KEPT: 0, DEAD_LETTERED: 0 });
+        expect(recorded.parked.size).toBe(0);
+        expect(recorded.upserts.at(-1)).toMatchObject({
+          organizationId: B,
+          insuranceCover: { COMPREHENSIVE: [{ policyId: 'INS-1', generation: 4 }] },
+        });
+      });
+
+      it('the sweep leaves a row that is not due yet', async () => {
+        const { consumer, recorded, policies, repository } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.due = false;
+        const asked = policies.asked.length;
+
+        // Listed a moment ago (by another instance's run, say): re-checked under the lock.
+        (repository.listDueParkedInsurance as jest.Mock).mockResolvedValueOnce([
+          { eventId: '01JBQ8Z4K7M2N5P8R1T3V6X9Y2', assetId: 'AST-SEED-0001' },
+        ]);
+        const counts = await consumer.sweepParked();
+
+        expect(counts.NOT_DUE).toBe(1);
+        expect(policies.asked).toHaveLength(asked);
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts).toBe(0);
+      });
+
+      it('exhausted: dead-lettered as PARKED_VERIFICATION_EXHAUSTED with its key and headers; row and marker removed', async () => {
+        const deadLetters = { publish: jest.fn(async (_letter: DeferredDeadLetter) => undefined) };
+        const { consumer, recorded } = parkedSetup(B, 4, { maxAttempts: 2, deadLetters });
+        await consumer.handle(recordedPolicy(), {
+          topic: 'rasta.insurance.v1',
+          partition: 1,
+          key: 'AST-SEED-0001',
+          offset: '9',
+        });
+
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1, DEAD_LETTERED: 0 });
+        expect(deadLetters.publish).not.toHaveBeenCalled();
+        expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
+
+        expect(deadLetters.publish).toHaveBeenCalledTimes(1);
+        const letter = deadLetters.publish.mock.calls[0]![0];
+        expect(letter).toMatchObject({
+          key: 'AST-SEED-0001',
+          originalTopic: 'rasta.insurance.v1',
+          originalPartition: 1,
+          originalOffset: '9',
+          reason: 'PARKED_VERIFICATION_EXHAUSTED',
+          attempts: 2,
+        });
+        expect(letter.detail).toMatch(
+          /PARKED_VERIFICATION_EXHAUSTED.*after 2 attempts \(last: NOT_CURRENT_OWNER\)/,
+        );
+        expect(JSON.parse(letter.value.toString('utf8'))).toMatchObject({
+          eventId: '01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+          eventName: 'INSURANCE_RECORDED',
+        });
+        expect(letter.headers).toMatchObject({
+          'x-event-id': '01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+          'x-event-name': 'INSURANCE_RECORDED',
+          'x-tenant-id': OWNER,
+        });
+        expect(recorded.parked.size).toBe(0);
+        // A replay of the dead letter is applied, not stopped at the marker.
+        expect(recorded.unmarked).toEqual(['01JBQ8Z4K7M2N5P8R1T3V6X9Y2']);
+        // Never applied unverified.
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+      });
+
+      it('exhausted but the dead letter cannot be written: the row and the marker stay', async () => {
+        const deadLetters = {
+          publish: jest.fn(async () => {
+            throw new Error('broker down');
+          }),
+        };
+        const { consumer, recorded } = parkedSetup(B, 4, { maxAttempts: 1, deadLetters });
+        await consumer.handle(recordedPolicy());
+
+        const counts = await consumer.sweepParked();
+
+        expect(counts.DEAD_LETTERED).toBe(0);
+        expect(recorded.parked.size).toBe(1);
+        expect(recorded.unmarked).toHaveLength(0);
+      });
+
+      it('exhausted with no dead-letter topic at all (no consumer, no sink): kept, never dropped', async () => {
+        const { consumer, recorded } = parkedSetup(B, 4, { maxAttempts: 1 });
+        await consumer.handle(recordedPolicy());
+
+        await consumer.sweepParked();
+
+        expect(recorded.parked.size).toBe(1);
+        expect(recorded.unmarked).toHaveLength(0);
       });
     });
 

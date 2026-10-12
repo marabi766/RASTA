@@ -135,6 +135,7 @@ export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connect
 // Event consumption ----------------------------------------------------------
 export { EventConsumer, UnprocessableEventError } from './consumer/event-consumer';
 export type {
+  DeferredDeadLetter,
   EventConsumerOptions,
   EventDelivery,
   EventHandler,
@@ -153,6 +154,7 @@ export {
 // Outbox ---------------------------------------------------------------------
 export {
   buildOutboxRow,
+  buildHeaders as envelopeHeaders,
   orderForPublish,
   OutboxRelay,
   renewalIntervalMs,

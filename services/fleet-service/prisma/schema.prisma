@@ -458,6 +458,41 @@ model AssetTransferRelease {
   @@map("asset_transfer_release")
 }
 
+/// An `INSURANCE_RECORDED` waiting for the replica to catch up with its source
+/// (#240 round 8).
+///
+/// asset-service answered for a later owner than the replica has seen
+/// (`NOT_CURRENT_OWNER`, or a later ownership generation): the machine was
+/// transferred at the source and `ASSET_TRANSFERRED` has not been consumed yet —
+/// the topics carry no order between them. The delivery is marked processed and
+/// the event stored here; the transfer's handler re-verifies it once the
+/// transfer is projected, and a periodic sweep re-verifies what is left and
+/// dead-letters a row whose attempts run out. Never applied unverified.
+///
+/// Tenant data: `organizationId` is the event envelope's tenant. The consumer's
+/// reads by machine and the sweep cross tenants through `runUnscoped`.
+model InsurancePendingVerification {
+  eventId         String    @id @map("event_id")
+  assetId         String    @map("asset_id")
+  organizationId  String    @map("organization_id")
+  /// The envelope as consumed: re-verified from it, and dead-lettered as it.
+  envelope        Json
+  messageKey      String?   @map("message_key")
+  sourceTopic     String    @map("source_topic")
+  sourcePartition Int?      @map("source_partition")
+  sourceOffset    String?   @map("source_offset")
+  /// `NOT_CURRENT_OWNER` or `SOURCE_AHEAD`, or the last failure to get an answer.
+  reason          String
+  attempts        Int       @default(0)
+  firstSeenAt     DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(3)
+  lastAttemptAt   DateTime? @map("last_attempt_at") @db.Timestamptz(3)
+
+  @@index([organizationId, assetId])
+  @@index([assetId])
+  @@index([firstSeenAt])
+  @@map("insurance_pending_verification")
+}
+
 // -----------------------------------------------------------------------------
 // Platform plumbing (ADR-021)
 // -----------------------------------------------------------------------------

@@ -124,6 +124,34 @@ export type HandlerOutcome = void | 'SKIPPED';
 export interface EventDelivery {
   readonly topic: string;
   readonly partition: number;
+  /**
+   * The record's key and offset, when the broker reported them. A handler that
+   * holds an event back to dead-letter it later (fleet's parked insurance
+   * events, #240 r8) needs both to write a dead letter the replay tool accepts:
+   * the replay goes out under the kept key, and the offset finds the original.
+   */
+  readonly key?: string | null;
+  readonly offset?: string;
+}
+
+/**
+ * A dead letter a handler writes itself, after the delivery it came from was
+ * acknowledged: the body and the platform headers as the producer published
+ * them, the key the record carried, and where it sat. Written with the same
+ * DLQ headers and counted under the same metric as the consumer's own.
+ */
+export interface DeferredDeadLetter {
+  readonly value: Buffer;
+  readonly key: string | null;
+  /** The platform headers of the original (`EVENT_HEADERS`); any other is dropped. */
+  readonly headers: IHeaders;
+  readonly originalTopic: string;
+  readonly originalPartition?: number;
+  readonly originalOffset?: string;
+  readonly reason: DlqReason;
+  /** Fixed text and identifiers only (S-09), like an {@link UnprocessableEventError}'s message. */
+  readonly detail: string;
+  readonly attempts: number;
 }
 
 /**
@@ -448,7 +476,16 @@ export class EventConsumer {
           }),
           // Frozen so a handler cannot mutate what the broker reported and pass
           // it on as fact.
-          () => this.handler(envelope, Object.freeze({ topic, partition })),
+          () =>
+            this.handler(
+              envelope,
+              Object.freeze({
+                topic,
+                partition,
+                ...(key === undefined ? {} : { key: key === null ? null : key.toString('utf8') }),
+                ...(offset === undefined ? {} : { offset }),
+              }),
+            ),
         );
         return;
       } catch (error) {
@@ -509,10 +546,35 @@ export class EventConsumer {
    * the closed set the metric declares — this consumer's `clientId`, the source
    * topic and the `DlqReason` — and never an event, tenant or error value.
    */
+  /**
+   * Writes a dead letter for an event a handler held back after its delivery was
+   * acknowledged ({@link DeferredDeadLetter}). Throws when it could not be
+   * written — the caller keeps what it holds and tries again — and when this
+   * consumer has no dead-letter topic: such a letter would be dropped.
+   */
+  async publishDeadLetter(letter: DeferredDeadLetter): Promise<void> {
+    if (!this.options.deadLetterTopic) {
+      throw new Error(`No dead-letter topic configured for ${this.options.groupId}`);
+    }
+    await this.deadLetter(
+      {
+        topic: letter.originalTopic,
+        partition: letter.originalPartition,
+        offset: letter.originalOffset,
+        key: letter.key === null ? null : Buffer.from(letter.key, 'utf8'),
+      },
+      letter.value,
+      letter.headers,
+      letter.reason,
+      safeLogText(letter.detail, HANDLER_MESSAGE_MAX),
+      letter.attempts,
+    );
+  }
+
   private async deadLetter(
     original: {
       topic: string;
-      partition: number;
+      partition: number | undefined;
       offset: string | undefined;
       key?: Buffer | null;
     },
@@ -546,7 +608,9 @@ export class EventConsumer {
             ...forwardedHeaders(headers),
             [DLQ_HEADERS.reason]: reason,
             [DLQ_HEADERS.originalTopic]: originalTopic,
-            [DLQ_HEADERS.originalPartition]: String(original.partition),
+            ...(original.partition === undefined
+              ? {}
+              : { [DLQ_HEADERS.originalPartition]: String(original.partition) }),
             ...(original.offset === undefined
               ? {}
               : { [DLQ_HEADERS.originalOffset]: original.offset }),

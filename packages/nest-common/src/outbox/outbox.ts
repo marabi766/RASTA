@@ -247,7 +247,12 @@ export function buildOutboxRow<TPayload>(
   };
 }
 
-function buildHeaders(envelope: EventEnvelope): Record<string, string> {
+/**
+ * The platform headers the relay publishes with an envelope (`EVENT_HEADERS`).
+ * Exported so a consumer that dead-letters an event it held back can restore
+ * them exactly as the producer's relay wrote them (#240 r8).
+ */
+export function buildHeaders(envelope: EventEnvelope): Record<string, string> {
   const headers: Record<string, string> = {
     [EVENT_HEADERS.eventId]: envelope.eventId,
     [EVENT_HEADERS.eventName]: envelope.eventName,

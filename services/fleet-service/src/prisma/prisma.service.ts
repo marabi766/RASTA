@@ -26,6 +26,10 @@ export const TENANT_SCOPED_MODELS = [
   'UsageRecord',
   'AvailabilityWindow',
   'IdempotencyKey',
+  // An INSURANCE_RECORDED parked for re-verification (#240 r8), under its
+  // envelope's tenant. The consumer and the sweep cross tenants by machine
+  // through `runUnscoped`; nothing reads it for a request.
+  'InsurancePendingVerification',
 ] as const;
 
 /**

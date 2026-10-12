@@ -3,11 +3,13 @@ import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   createSystemContext,
+  envelopeHeaders,
   invalidPayloadError,
   isRetryDelivery,
   replicaOwnerMismatchError,
   requireEnvelopeTenant,
   runWithContext,
+  type DeferredDeadLetter,
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
@@ -25,7 +27,7 @@ import {
   type MaintenanceStateSource,
 } from './replica-sources';
 import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
-import { FleetRepository } from '../fleet/fleet.repository';
+import { FleetRepository, type ParkedInsurance } from '../fleet/fleet.repository';
 import {
   INSPECTION_BLOCK_REASON,
   UNKNOWN_COVERAGE,
@@ -376,6 +378,57 @@ const TRANSFER_END_NOTES = 'پایان خودکار: ماشین به سازما�
  */
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
+/** Where a parked event goes when its attempts run out (#240 r8). */
+export interface ParkedDeadLetterSink {
+  publish(letter: DeferredDeadLetter): Promise<void>;
+}
+
+/**
+ * The parked-insurance sweep's bounds (#240 r8; `FLEET_INSURANCE_PARKED_*`).
+ * Dead letters go to this consumer's own dead-letter topic unless a sink is
+ * given (a test's).
+ */
+export interface ParkingOptions {
+  readonly minAgeSeconds: number;
+  readonly maxAttempts: number;
+  readonly sweepIntervalMs: number;
+  readonly batchSize: number;
+  readonly deadLetters?: ParkedDeadLetterSink;
+}
+
+export const DEFAULT_PARKING: ParkingOptions = {
+  minAgeSeconds: 300,
+  maxAttempts: 12,
+  sweepIntervalMs: 60_000,
+  batchSize: 50,
+};
+
+/**
+ * What asset-service's answer about an `INSURANCE_RECORDED` means for the
+ * replica, decided under the asset's lock: store the source's window, drop the
+ * event (the policy does not count, or the answer is older than the replica),
+ * or park it (the source is about a later owner than the replica has seen).
+ */
+type InsuranceOutcome =
+  | { readonly kind: 'APPLY'; readonly patch: AssetRefPatch }
+  | { readonly kind: 'DROP'; readonly reason: string }
+  | { readonly kind: 'PARK'; readonly reason: ParkReason };
+
+/** Why an event is (still) parked: the source ahead, or no answer from it. */
+type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
+
+/** What one re-verification of a parked event did. */
+export type ParkedOutcome = 'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED';
+
+/** Where INSURANCE_RECORDED is published (ASSET_SYNC_TOPICS); a parked event without a delivery is dead-lettered as from here. */
+const INSURANCE_TOPIC = 'rasta.insurance.v1';
+
+/**
+ * At most this many parked events of one machine are re-verified right after its
+ * transfer, each in its own short transaction; any more are the sweep's.
+ */
+const TRANSFER_REVERIFY_LIMIT = 100;
+
 /**
  * Where asset-service's answer stands against the replica it is applied to, by
  * ownership generation. With the replica's generation unknown only the owner
@@ -399,6 +452,8 @@ function sourceOrder(
 export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AssetSyncConsumer.name);
   private consumer?: EventConsumer;
+  private sweepTimer?: NodeJS.Timeout;
+  private sweeping = false;
 
   constructor(
     private readonly consumerFactory: EventConsumerFactory | null,
@@ -410,6 +465,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly transferRecords: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
     /** Asked about every `INSURANCE_RECORDED` before it is applied (ADR-061 § 4); without it none is applied. */
     private readonly insurancePolicies: InsurancePolicySource = UNCONFIGURED_INSURANCE_POLICY_SOURCE,
+    /** The parked-insurance sweep (#240 r8). */
+    private readonly parking: ParkingOptions = DEFAULT_PARKING,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -421,9 +478,15 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     }
     this.consumer = this.consumerFactory((envelope, delivery) => this.handle(envelope, delivery));
     await this.consumer.start();
+    // Only with a consumer: without one nothing is parked, and nothing could be
+    // dead-lettered. Every instance sweeps; rows are decided under their
+    // machine's lock and re-checked as due there, so two never decide one.
+    this.sweepTimer = setInterval(() => void this.runSweep(), this.parking.sweepIntervalMs);
+    this.sweepTimer.unref?.();
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     await this.consumer?.stop();
   }
 
@@ -489,11 +552,12 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       delivery !== undefined && isRetryDelivery(delivery) && STATE_EVENTS.has(envelope.eventName);
 
     const now = new Date();
-    // The producer's clock, for ordering. An unreadable timestamp falls back to
-    // now, which dates the event as late as possible: a failure then blocks,
-    // and a repair clears only failures that are genuinely older.
-    const stated = new Date(envelope.occurredAt);
-    const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
+    const occurredAt = producerInstant(envelope, now);
+
+    // Whether this delivery moved the machine to another owner: a transfer, or a
+    // replay whose refreshed snapshot shows one. Parked insurance events of the
+    // machine are re-verified once that has committed (#240 r8).
+    let ownerChanged = false;
 
     await this.repository.transaction(
       async (tx: ExtendedPrismaClient) => {
@@ -531,18 +595,28 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // transfer, is applied to the row as it now stands, under its current
         // owner: the policy is the vehicle's, not the organization's (docs/24
         // Q-66). The tenant below comes from the row, never from such an event.
-        let patch =
-          envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
-            ? await this.verifiedInsurancePatch(
-                projection,
-                envelope,
-                payload,
-                current,
-                now,
-                occurredAt,
-                organizationId,
-              )
-            : projection.patch(payload, current, now, occurredAt, organizationId);
+        let patch: AssetRefPatch;
+        if (envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED) {
+          const outcome = await this.verifyInsurance(
+            projection,
+            envelope.eventId,
+            payload,
+            current,
+            now,
+            occurredAt,
+            organizationId,
+          );
+          if (outcome.kind === 'PARK') {
+            // The source is about an owner the replica has not seen: parked with
+            // the marker, applied by nothing until the source is asked again
+            // (#240 r8). The replica row is left as it is.
+            await this.park(tx, envelope, delivery, assetId, organizationId, outcome.reason);
+            return;
+          }
+          patch = outcome.kind === 'APPLY' ? outcome.patch : {};
+        } else {
+          patch = projection.patch(payload, current, now, occurredAt, organizationId);
+        }
         const refresh = replayed
           ? await this.readAuthoritativeState(envelope, assetId, organizationId)
           : undefined;
@@ -602,9 +676,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           if (previousOwner && previousOwner !== refresh.organizationId) {
             await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
             await this.revokeWindowsOnTransfer(tx, envelope, assetId, previousOwner, now);
+            ownerChanged = true;
           }
           await this.settleStaleFence(tx, assetId, refresh.organizationId);
         } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+          ownerChanged = true;
           await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
           await this.revokeWindowsOnTransfer(
             tx,
@@ -627,11 +703,260 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS }
         : undefined,
     );
+
+    // After the commit, never inside it: the transfer is projected whatever the
+    // source says about the parked events, and each is decided in its own
+    // transaction under the same lock. A failure here leaves the event parked
+    // for the sweep; it does not fail the transfer.
+    if (ownerChanged) await this.reverifyParkedForAsset(assetId);
   }
 
   /**
-   * The patch an `INSURANCE_RECORDED` makes — from what asset-service confirms,
-   * never from the event alone (ADR-061 § 4, #240 r6–r7).
+   * Re-verifies every event parked for a machine, right after its owner changed
+   * in the replica (#240 r8). Each is decided as a live event would be now; one
+   * still about a later owner (A→B→C, C not yet consumed) stays parked.
+   */
+  async reverifyParkedForAsset(assetId: string): Promise<void> {
+    let parked: string[];
+    try {
+      parked = await this.repository.listParkedInsuranceForAsset(assetId, TRANSFER_REVERIFY_LIMIT);
+    } catch (error) {
+      this.logger.warn(
+        `Parked insurance events of ${assetId} not re-verified after its transfer; ` +
+          `left for the sweep (${describe(error)})`,
+      );
+      return;
+    }
+    for (const eventId of parked) {
+      try {
+        await this.reverifyParked(eventId, assetId, 'TRANSFER');
+      } catch (error) {
+        this.logger.warn(
+          `Parked INSURANCE_RECORDED ${eventId} not re-verified after the transfer of ${assetId}; ` +
+            `left for the sweep (${describe(error)})`,
+        );
+      }
+    }
+  }
+
+  /**
+   * One run of the parked-insurance sweep (#240 r8): a bounded batch of events
+   * parked, and last tried, at least the configured age ago, oldest first. Each
+   * is re-verified at the source; one still unverified after the maximum
+   * attempts is dead-lettered as `PARKED_VERIFICATION_EXHAUSTED`. Exposed so a
+   * test can run it without the timer.
+   */
+  async sweepParked(): Promise<Record<ParkedOutcome, number>> {
+    const counts: Record<ParkedOutcome, number> = {
+      GONE: 0,
+      NOT_DUE: 0,
+      APPLIED: 0,
+      DROPPED: 0,
+      KEPT: 0,
+      DEAD_LETTERED: 0,
+    };
+    const due = await this.repository.listDueParkedInsurance(
+      this.parking.minAgeSeconds,
+      this.parking.batchSize,
+    );
+    for (const row of due) {
+      try {
+        counts[await this.reverifyParked(row.eventId, row.assetId, 'SWEEP')] += 1;
+      } catch (error) {
+        this.logger.warn(
+          `Parked INSURANCE_RECORDED ${row.eventId} of ${row.assetId} not decided by the sweep; ` +
+            `tried again on a later run (${describe(error)})`,
+        );
+      }
+    }
+    return counts;
+  }
+
+  /** The timer's run: never two at once on one instance, and never a thrown error. */
+  private async runSweep(): Promise<void> {
+    if (this.sweeping) return;
+    this.sweeping = true;
+    try {
+      const counts = await this.sweepParked();
+      if (counts.APPLIED + counts.DROPPED + counts.DEAD_LETTERED > 0) {
+        this.logger.log(
+          `Parked insurance sweep: ${counts.APPLIED} applied, ${counts.DROPPED} dropped, ` +
+            `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Parked insurance sweep failed; tried again on its next run (${describe(error)})`,
+      );
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
+  /**
+   * Parks an `INSURANCE_RECORDED` in the delivery's transaction, after its
+   * marker (#240 r8). Stored under the envelope's tenant, with where it came
+   * from so a dead letter of it is one the replay tool accepts.
+   */
+  private async park(
+    tx: ExtendedPrismaClient,
+    envelope: EventEnvelope,
+    delivery: EventDelivery | undefined,
+    assetId: string,
+    organizationId: string,
+    reason: ParkReason,
+  ): Promise<void> {
+    await this.repository.parkInsuranceEvent(tx, {
+      eventId: envelope.eventId,
+      assetId,
+      organizationId,
+      correlationId: envelope.correlationId,
+      envelope,
+      messageKey: delivery?.key ?? null,
+      sourceTopic: delivery?.topic ?? INSURANCE_TOPIC,
+      sourcePartition: delivery?.partition ?? null,
+      sourceOffset: delivery?.offset ?? null,
+      reason,
+    });
+    this.logger.log(
+      `INSURANCE_RECORDED ${envelope.eventId} parked (${reason}): asset-service answers for a later ` +
+        `owner of ${assetId} than the replica has seen; re-verified when the transfer is consumed`,
+    );
+  }
+
+  /**
+   * Decides one parked event, under its machine's lock, in its own transaction
+   * (#240 r8). The same verification and the same generation fence as a live
+   * delivery ({@link verifyInsurance}): applied with the source's window, or
+   * removed when the source says the policy does not count or its answer is
+   * older than the replica, or kept with one more attempt counted. The sweep
+   * dead-letters a row whose attempts reached the maximum — publish first, then
+   * remove the row and the event's marker in the same transaction, so a replay
+   * of the dead letter is applied; a failed publish rolls the attempt back and
+   * the row stays. A source with no answer counts as an attempt; nothing is
+   * ever applied unverified.
+   */
+  private async reverifyParked(
+    eventId: string,
+    assetId: string,
+    trigger: 'TRANSFER' | 'SWEEP',
+  ): Promise<ParkedOutcome> {
+    return this.repository.transaction(
+      async (tx: ExtendedPrismaClient) => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row) return 'GONE';
+        if (trigger === 'SWEEP' && !row.due) return 'NOT_DUE';
+
+        const envelope = row.envelope as EventEnvelope;
+        const contract = CONSUMED_PAYLOADS[CONSUMED_EVENTS.INSURANCE_RECORDED];
+        const parsed = contract.schema.safeParse(envelope.payload);
+        if (!parsed.success) {
+          // Validated before it was parked; a row that no longer parses names
+          // nothing the source can be asked about.
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          this.logger.warn(
+            `Parked INSURANCE_RECORDED ${eventId} removed: its payload no longer parses`,
+          );
+          return 'DROPPED';
+        }
+        const payload = parsed.data as Record<string, unknown>;
+        const current = await this.repository.findAssetRefUnscoped(assetId, tx);
+        const now = new Date();
+
+        let outcome: InsuranceOutcome;
+        try {
+          outcome = await this.verifyInsurance(
+            PROJECTIONS[CONSUMED_EVENTS.INSURANCE_RECORDED],
+            eventId,
+            payload,
+            current,
+            now,
+            producerInstant(envelope, now),
+            row.organizationId,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Parked INSURANCE_RECORDED ${eventId}: no answer from asset-service (${describe(error)})`,
+          );
+          outcome = { kind: 'PARK', reason: 'NO_ANSWER' };
+        }
+
+        if (outcome.kind === 'APPLY') {
+          await this.repository.upsertAssetRef(tx, {
+            ...outcome.patch,
+            id: assetId,
+            organizationId: current?.organizationId ?? row.organizationId,
+            sourceEvent: CONSUMED_EVENTS.INSURANCE_RECORDED,
+          });
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          this.logger.log(
+            `Parked INSURANCE_RECORDED ${eventId} verified and applied to ${assetId}`,
+          );
+          return 'APPLIED';
+        }
+        if (outcome.kind === 'DROP') {
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          this.logger.log(
+            `Parked INSURANCE_RECORDED ${eventId} removed, nothing applied (${outcome.reason})`,
+          );
+          return 'DROPPED';
+        }
+
+        const attempts = await this.repository.recordParkedAttempt(tx, eventId, outcome.reason);
+        if (trigger === 'SWEEP' && attempts >= this.parking.maxAttempts) {
+          await this.deadLetterParked(row, attempts, outcome.reason);
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          await this.repository.unmarkEventProcessed(tx, eventId, CONSUMER_NAME);
+          this.logger.error(
+            `Parked INSURANCE_RECORDED ${eventId} of ${assetId} dead-lettered ` +
+              `(${DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED}) after ${attempts} attempts; last: ${outcome.reason}`,
+          );
+          return 'DEAD_LETTERED';
+        }
+        return 'KEPT';
+      },
+      { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS },
+    );
+  }
+
+  /** Publishes a parked event to the dead-letter topic as the producer published it. Throws when it could not. */
+  private async deadLetterParked(
+    row: ParkedInsurance,
+    attempts: number,
+    lastReason: ParkReason,
+  ): Promise<void> {
+    const consumer = this.consumer;
+    const sink: ParkedDeadLetterSink | undefined =
+      this.parking.deadLetters ??
+      (consumer ? { publish: (letter) => consumer.publishDeadLetter(letter) } : undefined);
+    if (!sink) {
+      throw new Error(`no dead-letter topic to move parked INSURANCE_RECORDED ${row.eventId} to`);
+    }
+    const envelope = row.envelope as EventEnvelope;
+    await sink.publish({
+      value: Buffer.from(JSON.stringify(envelope), 'utf8'),
+      key: row.messageKey ?? envelope.streamKey ?? null,
+      headers: envelopeHeaders(envelope),
+      originalTopic: row.sourceTopic,
+      ...(row.sourcePartition === null ? {} : { originalPartition: row.sourcePartition }),
+      ...(row.sourceOffset === null ? {} : { originalOffset: row.sourceOffset }),
+      reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+      detail:
+        `Parked verification exhausted (${DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED}): ` +
+        `INSURANCE_RECORDED ${row.eventId} for ${row.assetId} still unverified after ` +
+        `${attempts} attempts (last: ${lastReason})`,
+      attempts,
+    });
+  }
+
+  /**
+   * What an `INSURANCE_RECORDED` does — from what asset-service confirms, never
+   * from the event alone (ADR-061 § 4, #240 r6–r8).
    *
    * Whatever route delivered the event (live, `.retry`, a dead-letter replay, a
    * re-projection), it is a statement about the past: after the following list
@@ -644,85 +969,82 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * verified, however old its generation or foreign its tenant looks from the
    * replica: a policy the current rule counts must never be lost to a guess made
    * from a retained list (a legacy transfer retains none). A source that says
-   * the policy does not count, or does not know it, ends the event (acknowledged,
-   * reason logged). No answer throws: the marker rolls back, the event is
-   * retried, and nothing is applied unverified.
+   * the policy does not count, or does not know it, ends the event (DROP:
+   * acknowledged, reason logged). No answer throws: on a live delivery the marker
+   * rolls back, the event is retried, and nothing is applied unverified.
    *
    * The source is asked as the owner the replica shows, and answers the current
    * owner only. `NOT_CURRENT_OWNER` means the asset has moved on and this replica
-   * has not consumed the transfer yet: not a verdict on the policy, so the event
-   * is failed and retried until the transfer arrives (then DLQ as usual).
+   * has not consumed the transfer yet: not a verdict on the policy. The topics
+   * carry no order between them, so retrying for a second and dead-lettering
+   * lost a valid policy (#240 r8): the event is PARKED, and verified again when
+   * the transfer is consumed or by the sweep.
    *
    * The answer is a snapshot: a transfer can commit at the source before this
    * transaction does. Under this asset's lock the source's ownership generation
    * and owner are compared with the replica's — equal, apply; the source ahead,
-   * fail for retry (the transfer event will arrive, and the policy is then
-   * verified again); the source behind, the answer is stale and ignored.
+   * park (the transfer event will arrive, and the policy is then verified
+   * again); the source behind, the answer is stale and the event dropped. A
+   * parked event is decided by this same method when it is re-verified.
    */
-  private async verifiedInsurancePatch(
+  private async verifyInsurance(
     projection: Projection,
-    envelope: EventEnvelope,
+    eventId: string,
     payload: Record<string, unknown>,
     current: CurrentAssetRef | null,
     now: Date,
     occurredAt: Date,
     eventOrganization: string | undefined,
-  ): Promise<AssetRefPatch> {
+  ): Promise<InsuranceOutcome> {
     const coverage = str(payload.coverage);
     const policyId = str(payload.policyId);
     const assetId = str(payload.assetId);
-    if (!coverage || !policyId || !assetId) return {};
+    if (!coverage || !policyId || !assetId) return { kind: 'DROP', reason: 'INCOMPLETE' };
 
     const asked = current?.organizationId ?? eventOrganization;
-    if (!asked) return {};
+    if (!asked) return { kind: 'DROP', reason: 'NO_OWNER' };
     const verdict = await this.insurancePolicies.verify(asked, assetId, policyId);
     if (!verdict.counts) {
-      if (verdict.reason === 'NOT_CURRENT_OWNER') {
-        throw new Error(
-          `INSURANCE_RECORDED ${envelope.eventId}: asset-service says the asset is no longer ` +
-            `the replica's owner's; retried once the transfer has been consumed`,
-        );
-      }
+      if (verdict.reason === 'NOT_CURRENT_OWNER')
+        return { kind: 'PARK', reason: 'NOT_CURRENT_OWNER' };
       this.logger.log(
-        `INSURANCE_RECORDED ${envelope.eventId} ignored: asset-service says policy ${policyId} ` +
+        `INSURANCE_RECORDED ${eventId} ignored: asset-service says policy ${policyId} ` +
           `does not count (${verdict.reason})`,
       );
-      return {};
+      return { kind: 'DROP', reason: verdict.reason };
     }
 
     if (current) {
       const order = sourceOrder(verdict, current);
-      if (order === 'AHEAD') {
-        throw new Error(
-          `INSURANCE_RECORDED ${envelope.eventId}: asset-service is ahead of the replica ` +
-            `(ownership generation ${verdict.ownershipGeneration}); retried once the transfer has been consumed`,
-        );
-      }
+      if (order === 'AHEAD') return { kind: 'PARK', reason: 'SOURCE_AHEAD' };
       if (order === 'BEHIND') {
         this.logger.log(
-          `INSURANCE_RECORDED ${envelope.eventId} ignored: the answer for policy ${policyId} is older ` +
+          `INSURANCE_RECORDED ${eventId} ignored: the answer for policy ${policyId} is older ` +
             `than the replica (ownership generation ${verdict.ownershipGeneration})`,
         );
-        return {};
+        return { kind: 'DROP', reason: 'SOURCE_BEHIND' };
       }
     }
 
     // The event's own coverage, window and generation are replaced by the
     // source's. The replica's owner and generation stay the transfer events' to
     // set: this only ever adds a window the source stands behind.
-    return projection.patch(
-      {
-        ...payload,
-        coverage: verdict.coverage,
-        validFrom: verdict.validFrom,
-        validTo: verdict.validUntil,
-        ownershipGeneration: verdict.ownershipGeneration,
-      },
-      current,
-      now,
-      occurredAt,
-      eventOrganization,
-    );
+    return {
+      kind: 'APPLY',
+      patch: projection.patch(
+        {
+          ...payload,
+          coverage: verdict.coverage,
+          validFrom: verdict.validFrom,
+          validTo: verdict.validUntil,
+          ownershipGeneration: verdict.ownershipGeneration,
+        },
+        current,
+        now,
+        occurredAt,
+        eventOrganization,
+      ),
+    };
   }
 
   /**
@@ -936,6 +1258,20 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       );
     }
   }
+}
+
+/**
+ * The producer's clock, for ordering. An unreadable timestamp falls back to now,
+ * which dates the event as late as possible: a failure then blocks, and a repair
+ * clears only failures that are genuinely older.
+ */
+function producerInstant(envelope: EventEnvelope, now: Date): Date {
+  const stated = new Date(envelope.occurredAt);
+  return Number.isNaN(stated.getTime()) ? now : stated;
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
 /** The later of two instants, either of which may be missing. */

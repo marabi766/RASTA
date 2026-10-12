@@ -1,4 +1,30 @@
-import { dispatchPolicyFromEnv, fleetEnvSchema } from './env';
+import { dispatchPolicyFromEnv, fleetEnvSchema, parkingFromEnv } from './env';
+
+/** #240 r8: the parked-insurance sweep. */
+describe('FLEET_INSURANCE_PARKED_*', () => {
+  const shape = fleetEnvSchema.shape;
+
+  it('defaults to a five-minute age, twelve attempts, a minute between sweeps, fifty a run', () => {
+    expect(
+      parkingFromEnv({
+        FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS:
+          shape.FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS.parse(undefined),
+        FLEET_INSURANCE_PARKED_MAX_ATTEMPTS:
+          shape.FLEET_INSURANCE_PARKED_MAX_ATTEMPTS.parse(undefined),
+        FLEET_INSURANCE_PARKED_SWEEP_INTERVAL_SECONDS:
+          shape.FLEET_INSURANCE_PARKED_SWEEP_INTERVAL_SECONDS.parse(undefined),
+        FLEET_INSURANCE_PARKED_SWEEP_BATCH:
+          shape.FLEET_INSURANCE_PARKED_SWEEP_BATCH.parse(undefined),
+      }),
+    ).toEqual({ minAgeSeconds: 300, maxAttempts: 12, sweepIntervalMs: 60_000, batchSize: 50 });
+  });
+
+  it('refuses a bound that would sweep constantly or never dead-letter', () => {
+    expect(shape.FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS.safeParse('5').success).toBe(false);
+    expect(shape.FLEET_INSURANCE_PARKED_MAX_ATTEMPTS.safeParse('0').success).toBe(false);
+    expect(shape.FLEET_INSURANCE_PARKED_SWEEP_BATCH.safeParse('5000').success).toBe(false);
+  });
+});
 
 /** The Q-101 setting: parsed at start-up, failing closed. */
 describe('FLEET_DISPATCH_REQUIRED_COVERAGES', () => {

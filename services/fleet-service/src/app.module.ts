@@ -74,6 +74,7 @@ import {
   ASSET_SYNC_TOPICS,
   dispatchPolicyFromEnv,
   loadFleetEnv,
+  parkingFromEnv,
   SERVICE_NAME,
   type FleetEnv,
 } from './config/env';
@@ -240,6 +241,10 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
             timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
             tokens: internalTokens(env),
           }),
+          // #240 r8: an INSURANCE_RECORDED the source answers for a later owner
+          // is parked, re-verified on the transfer and by this sweep, and
+          // dead-lettered to rasta.fleet.v1.dlq when its attempts run out.
+          parkingFromEnv(env),
         ),
     },
 

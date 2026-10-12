@@ -121,6 +121,36 @@ export const fleetEnvSchema = baseEnvSchema
      * claim and the window) is taken over by a retry under a new token.
      */
     FLEET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
+
+    /**
+     * Parked `INSURANCE_RECORDED` events (#240 r8): asset-service answered for a
+     * later owner than the replica has seen, so the event waits for the
+     * transfer. The transfer's handler re-verifies them at once; the sweep below
+     * catches the rest. How old a parked event (and its last attempt) must be
+     * before the sweep tries it, in seconds.
+     */
+    FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(30)
+      .max(86_400)
+      .default(300),
+
+    /**
+     * Attempts after which a parked event is dead-lettered as
+     * `PARKED_VERIFICATION_EXHAUSTED` — never applied unverified. With the
+     * default age that is about an hour of the source staying ahead.
+     */
+    FLEET_INSURANCE_PARKED_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(1_000).default(12),
+
+    /** How often the sweep runs, in seconds, and how many parked events it tries per run. */
+    FLEET_INSURANCE_PARKED_SWEEP_INTERVAL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(3_600)
+      .default(60),
+    FLEET_INSURANCE_PARKED_SWEEP_BATCH: z.coerce.number().int().min(1).max(1_000).default(50),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;
@@ -133,6 +163,24 @@ export function dispatchPolicyFromEnv(
     blockingCoverages: env.FLEET_DISPATCH_BLOCKING_COVERAGES,
     requiredCoverages:
       env.FLEET_DISPATCH_REQUIRED_COVERAGES ?? env.FLEET_DISPATCH_BLOCKING_COVERAGES,
+  };
+}
+
+/** The parked-insurance sweep's bounds (#240 r8). */
+export function parkingFromEnv(
+  env: Pick<
+    FleetEnv,
+    | 'FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS'
+    | 'FLEET_INSURANCE_PARKED_MAX_ATTEMPTS'
+    | 'FLEET_INSURANCE_PARKED_SWEEP_INTERVAL_SECONDS'
+    | 'FLEET_INSURANCE_PARKED_SWEEP_BATCH'
+  >,
+): { minAgeSeconds: number; maxAttempts: number; sweepIntervalMs: number; batchSize: number } {
+  return {
+    minAgeSeconds: env.FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS,
+    maxAttempts: env.FLEET_INSURANCE_PARKED_MAX_ATTEMPTS,
+    sweepIntervalMs: env.FLEET_INSURANCE_PARKED_SWEEP_INTERVAL_SECONDS * 1000,
+    batchSize: env.FLEET_INSURANCE_PARKED_SWEEP_BATCH,
   };
 }
 
