@@ -125,6 +125,23 @@ const FOLDED_INITIAL_MIGRATION = {
 };
 
 /**
+ * Later migrations that change an ADR-050 claim column, per service (D-048).
+ *
+ * D-048's per-service conversion turns `claim_expires_at` and `next_attempt_at`,
+ * with the table's other instants, into `timestamptz(3)`. Reversing only the
+ * outbox migrations under it drops those two columns, and the re-deploy adds
+ * them back as the outbox migration wrote them — `timestamp(3)` — while the
+ * ledger still lists the conversion: a database that is neither before nor
+ * after it, which every presence check below passes over. So such a migration
+ * is rolled back first and re-applied with the others, and the claim columns'
+ * type is asserted after each deploy — a service that converts its outbox
+ * without being listed here fails on the first `up`, by name.
+ */
+const LATER_CLAIM_COLUMN_MIGRATIONS = {
+  document: ['20261012120000_document_instants_timestamptz'],
+};
+
+/**
  * Refuses to run if a service owns an outbox and is in neither list.
  *
  * Without this, adding a tenth service is enough to leave its outbox
@@ -269,13 +286,14 @@ function verify(service) {
   const serviceDir = join(REPO_ROOT, 'services', `${service}-service`);
   if (!existsSync(serviceDir)) throw new Error(`no such service directory: ${serviceDir}`);
 
-  const migrationDirs = MIGRATIONS.map((name) => join(serviceDir, 'prisma', 'migrations', name));
+  const names = [...MIGRATIONS, ...(LATER_CLAIM_COLUMN_MIGRATIONS[service] ?? [])];
+  const migrationDirs = names.map((name) => join(serviceDir, 'prisma', 'migrations', name));
   for (const [i, dir] of migrationDirs.entries()) {
     if (!existsSync(join(dir, 'migration.sql'))) {
-      throw new Error(`${MIGRATIONS[i]}/migration.sql is missing`);
+      throw new Error(`${names[i]}/migration.sql is missing`);
     }
     if (!existsSync(join(dir, 'down.sql'))) {
-      throw new Error(`${MIGRATIONS[i]}/down.sql is missing — the migration is not reversible`);
+      throw new Error(`${names[i]}/down.sql is missing — the migration is not reversible`);
     }
   }
 
@@ -379,6 +397,10 @@ function verify(service) {
     if (!result.ok) throw new Error(`up: migrate deploy failed:\n${result.output}`);
     mustRun('up: every claim object exists', assertObjects(true));
     mustRun('up: the claim index has the exact definition ADR-050 specifies', assertIndexDef());
+    mustRun(
+      'up: the claim instants have the type the ledger says',
+      assertClaimInstantType(service),
+    );
     console.log('  ✓ up  ADR-050: 5 columns, 5 constraints, 7 indexes');
 
     mustRun('up: every B1 stream-ordering object exists', assertB1Objects(true));
@@ -417,7 +439,7 @@ function verify(service) {
     // three of seven indexes while reporting success.
     for (const [i, dir] of [...migrationDirs.entries()].reverse()) {
       const down = sql(readDown(dir));
-      if (!down.ok) throw new Error(`down: ${MIGRATIONS[i]}/down.sql failed:\n${down.output}`);
+      if (!down.ok) throw new Error(`down: ${names[i]}/down.sql failed:\n${down.output}`);
     }
     mustRun('down: every claim object is gone', assertObjects(false));
     mustRun('down: every B1 stream-ordering object is gone', assertB1Objects(false));
@@ -434,6 +456,7 @@ function verify(service) {
     }
     mustRun('up again: every claim object is back', assertObjects(true));
     mustRun('up again: the claim index definition is back', assertIndexDef());
+    mustRun('up again: the claim instants are back to their type', assertClaimInstantType(service));
     mustRun('up again: every B1 stream-ordering object is back', assertB1Objects(true));
     mustRun('up again: every B1 definition is back', assertB1Definitions());
     // The real inertness check: the columns were just dropped and re-created,
@@ -459,6 +482,32 @@ function verify(service) {
     else failure = new Error(message);
   }
   if (failure) throw failure;
+}
+
+/**
+ * The type of the two claim instants: `timestamptz` once the service's D-048
+ * conversion is listed in LATER_CLAIM_COLUMN_MIGRATIONS, `timestamp` before.
+ */
+function assertClaimInstantType(service) {
+  const want =
+    service in LATER_CLAIM_COLUMN_MIGRATIONS
+      ? 'timestamp with time zone'
+      : 'timestamp without time zone';
+  return `
+DO $$
+DECLARE wrong TEXT;
+BEGIN
+  SELECT string_agg(column_name || ' is ' || data_type, ', ') INTO wrong
+    FROM information_schema.columns
+   WHERE table_schema = current_schema()
+     AND table_name = 'outbox_message'
+     AND column_name IN ('claim_expires_at', 'next_attempt_at')
+     AND data_type <> '${want}';
+  IF wrong IS NOT NULL THEN
+    RAISE EXCEPTION 'claim instants must be ${want}: % (list a converting migration in LATER_CLAIM_COLUMN_MIGRATIONS)', wrong;
+  END IF;
+END
+$$;`;
 }
 
 function readDown(migrationDir) {
