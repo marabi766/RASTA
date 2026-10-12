@@ -1487,6 +1487,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       120_000,
     );
     expect(suspended.body).toMatchObject({ id: policyId, status: 'SUSPENDED' });
+    expect(await contract(author, contractId.A)).toMatchObject({ authorityReviewRequired: true });
 
     // With no policy in force the employer's signature of the pending amendment is refused —
     // and the amendment and the contract stay exactly as they were. A flag is never a revocation.
@@ -1511,11 +1512,18 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       status: 'PROPOSED',
       employerSignedAt: null,
     });
-    expect(await contract(c1, contractId.A)).toMatchObject({
-      status: 'SIGNED',
-      amendmentsTotalMinor: AMENDMENT_ONE,
-      authorityReviewRequired: false,
-    });
+    // The contract was signed minutes before the move, inside the window D-050 reviews
+    // (the commit deadline plus the clock-skew margin): the employer's signature is flagged for
+    // review. A flag is never a revocation — the contract stays SIGNED, its total unchanged —
+    // and both parties see it.
+    for (const party of [author, c1]) {
+      expect(await contract(party, contractId.A)).toMatchObject({
+        status: 'SIGNED',
+        amendmentsTotalMinor: AMENDMENT_ONE,
+        authorityReviewRequired: true,
+        authorityReviewReason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+      });
+    }
   });
 
   // ---- audit ----------------------------------------------------------------
@@ -1578,6 +1586,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
           ).length;
         const complete =
           countOf('A', 'CONTRACT_AUTHORITY_REFUSED') >= authorityRefusals &&
+          countOf('A', 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED') >= 1 &&
           (['A', 'B'] as const).every((key) =>
             Object.entries(expectedByContract[key]).every(
               ([name, count]) => countOf(key, name) >= count,
