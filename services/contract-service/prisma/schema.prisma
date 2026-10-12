@@ -1,7 +1,8 @@
 // contract-service — the contract boundary (CON-003, ADR-068, docs/04 § 4.13).
 // It holds the draft contract a tender award creates, and — since PR 2 — its signatures
-// and its cancellation; amendments, milestones, statements, the separate technical and
-// financial approvals and the settlement boundary are later changes (ADR-068 § 9).
+// and its cancellation, and — since PR 3 — the amendments and planned milestones of a signed
+// contract; statements, the separate technical and financial approvals and the settlement
+// boundary are later changes (ADR-068 § 9).
 //
 // Everything here is owned by this service alone (AGENTS.md A-01). There is no
 // foreign key into another service's database: `organizationId` (the employer),
@@ -96,10 +97,20 @@ model Contract {
   cancelReasonCode String? @map("cancel_reason_code")
   cancelNote       String? @map("cancel_note")
 
+  /// The two counters of the ADR-068 § 5 cap invariant, `approved_total_minor <= amount_minor +
+  /// amendments_total_minor` (`ck_contract_approved_cap`). CON-003 PR 3 moves only the first, under
+  /// the contract's row lock, when an amendment becomes effective, and only to the exact sum of the
+  /// effective deltas (`contract_guard`); the second is PR 4's and stays 0 here.
+  amendmentsTotalMinor BigInt @default(0) @map("amendments_total_minor")
+  approvedTotalMinor   BigInt @default(0) @map("approved_total_minor")
+
   /// The compare-and-set token. Every change matches on it and increments it.
   version Int @default(1)
 
-  signatures ContractSignature[]
+  signatures          ContractSignature[]
+  amendments          Amendment[]
+  amendmentSignatures AmendmentSignature[]
+  milestones          Milestone[]
 
   // The idempotency key of the consumer: one contract per awarded tender.
   @@unique([organizationId, tenderId], map: "ux_contract_org_tender")
@@ -179,29 +190,170 @@ model ContractSignature {
 /// reconciliation of an ORGANIZATION_MOVED that stranded the policy the signature rests on, and
 /// never changed (`tg_signature_authority_review_immutable`).
 model SignatureAuthorityReview {
-  id             String       @id
-  organizationId String       @map("organization_id")
-  contractId     String       @map("contract_id")
-  side           ContractSide
-  policyId       String       @map("policy_id")
+  id              String       @id
+  organizationId  String       @map("organization_id")
+  contractId      String       @map("contract_id")
+  side            ContractSide
+  policyId        String       @map("policy_id")
   /// `AUTHORITY_CHANGED_DURING_SIGNING` (the only one so far).
-  reason         String
+  reason          String
   /// The move proven to be the cause, with its instant — or neither (`detectedBy` = MOVE_RECHECK).
-  causeEventId   String?      @map("cause_event_id")
-  movedAt        DateTime?    @map("moved_at") @db.Timestamptz(3)
+  causeEventId    String?      @map("cause_event_id")
+  movedAt         DateTime?    @map("moved_at") @db.Timestamptz(3)
   /// `ORGANIZATION_MOVED` (a proven cause) or `MOVE_RECHECK` (a move queued the re-check; not shown to be its cause).
-  detectedBy     String       @map("detected_by")
+  detectedBy      String       @map("detected_by")
   /// What was compared: the move's hierarchy version and the one the signature recorded (NULL for
   /// a move or signature from before versions).
-  movedVersion    BigInt?     @map("moved_version")
-  recordedVersion BigInt?     @map("recorded_version")
-  flaggedAt      DateTime     @map("flagged_at") @db.Timestamptz(3)
+  movedVersion    BigInt?      @map("moved_version")
+  recordedVersion BigInt?      @map("recorded_version")
+  flaggedAt       DateTime     @map("flagged_at") @db.Timestamptz(3)
 
   signature ContractSignature @relation(fields: [organizationId, contractId, side], references: [organizationId, contractId, side], onDelete: Restrict, onUpdate: Restrict)
   policy    ApprovalPolicy    @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
 
   @@unique([organizationId, contractId, side], map: "ux_signature_authority_review_signature")
   @@map("signature_authority_review")
+}
+
+// ---------------------------------------------------------------------------
+// Amendments and milestones (CON-003 PR 3, ADR-068 § 9, docs/24 Q-100)
+// ---------------------------------------------------------------------------
+
+/// `src/amendment/amendment.state-machine.ts`: PROPOSED → EFFECTIVE, and nothing else.
+enum AmendmentStatus {
+  PROPOSED
+  EFFECTIVE
+}
+
+/// A change to the price of a SIGNED contract, proposed by the employer and effective only when
+/// both parties have signed it. The delta is a bigint of minor units and strictly positive for now
+/// (`ck_amendment_delta_positive`; Q-100 asks whether a reduction exists). What it says never
+/// changes once proposed; once effective nothing about it does, and it is never deleted.
+model Amendment {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+
+  /// 1, 2, 3 … per contract, taken under the contract's row lock.
+  amendmentNumber Int    @map("amendment_number")
+  deltaMinor      BigInt @map("delta_minor")
+  /// A code of the closed list the configuration owns, and a bounded bidi-safe text.
+  reasonCode      String @map("reason_code")
+  reasonText      String @map("reason_text")
+
+  status AmendmentStatus @default(PROPOSED)
+
+  proposedBy            String    @map("proposed_by")
+  proposedAt            DateTime  @map("proposed_at") @db.Timestamptz(3)
+  proposedCorrelationId String    @map("proposed_correlation_id")
+  /// Set with the transition to EFFECTIVE, and only then (`ck_amendment_effective`).
+  effectiveAt           DateTime? @map("effective_at") @db.Timestamptz(3)
+  updatedAt             DateTime  @map("updated_at") @db.Timestamptz(3)
+
+  /// The compare-and-set token: moves with the status, not with a signature.
+  version Int @default(1)
+
+  contract   Contract             @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  signatures AmendmentSignature[]
+
+  @@unique([organizationId, id], map: "ux_amendment_org_id")
+  @@unique([organizationId, contractId, amendmentNumber], map: "ux_amendment_number")
+  @@map("amendment")
+}
+
+/// One side's signature of an amendment: the same record as `ContractSignature` — who accepted for
+/// which party, under which configured authority and which hierarchy version. Written once.
+model AmendmentSignature {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+  amendmentId    String @map("amendment_id")
+
+  side                 ContractSide
+  signerOrganizationId String       @map("signer_organization_id")
+
+  signedBy        String  @map("signed_by")
+  signedByIssuer  String? @map("signed_by_issuer")
+  signedBySubject String? @map("signed_by_subject")
+
+  authorityRole String   @map("authority_role")
+  signedAt      DateTime @map("signed_at") @db.Timestamptz(3)
+  correlationId String   @map("correlation_id")
+
+  /// The `contract.signature` policy that authorised the employer's side; nothing for the contractor's.
+  policyId      String? @map("policy_id")
+  policyVersion Int?    @map("policy_version")
+
+  hierarchyAuthorOrganizationId String?   @map("hierarchy_author_organization_id")
+  hierarchyAnswer               String?   @map("hierarchy_answer")
+  hierarchyReadAt               DateTime? @map("hierarchy_read_at") @db.Timestamptz(3)
+  hierarchyCommitDeadline       DateTime? @map("hierarchy_commit_deadline") @db.Timestamptz(3)
+  hierarchyVersion              BigInt?   @map("hierarchy_version")
+
+  contract  Contract                  @relation(fields: [organizationId, contractId], references: [organizationId, id])
+  amendment Amendment                 @relation(fields: [organizationId, amendmentId], references: [organizationId, id])
+  policy    ApprovalPolicy?           @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict)
+  review    AmendmentSignatureReview?
+
+  @@unique([organizationId, amendmentId, side], map: "ux_amendment_signature_side")
+  @@index([organizationId, policyId], map: "ix_amendment_signature_policy")
+  @@map("amendment_signature")
+}
+
+/// An employer amendment signature a move may have raced (D-050): flagged, never revoked.
+model AmendmentSignatureReview {
+  id              String       @id
+  organizationId  String       @map("organization_id")
+  contractId      String       @map("contract_id")
+  amendmentId     String       @map("amendment_id")
+  side            ContractSide
+  policyId        String       @map("policy_id")
+  /// `AUTHORITY_CHANGED_DURING_SIGNING` (the only one so far).
+  reason          String
+  /// The move proven to be the cause, with its instant — or neither (`detectedBy` = MOVE_RECHECK).
+  causeEventId    String?      @map("cause_event_id")
+  movedAt         DateTime?    @map("moved_at") @db.Timestamptz(3)
+  detectedBy      String       @map("detected_by")
+  movedVersion    BigInt?      @map("moved_version")
+  recordedVersion BigInt?      @map("recorded_version")
+  flaggedAt       DateTime     @map("flagged_at") @db.Timestamptz(3)
+
+  signature AmendmentSignature @relation(fields: [organizationId, amendmentId, side], references: [organizationId, amendmentId, side], onDelete: Restrict, onUpdate: Restrict, map: "amendment_signature_review_signature_fkey")
+  policy    ApprovalPolicy     @relation(fields: [organizationId, policyId], references: [organizationId, id], onDelete: Restrict, onUpdate: Restrict, map: "amendment_signature_review_policy_fkey")
+
+  @@unique([organizationId, amendmentId, side], map: "ux_amendment_signature_review_signature")
+  @@index([organizationId, policyId], map: "ix_amendment_signature_review_policy")
+  @@map("amendment_signature_review")
+}
+
+/// A planned milestone of a SIGNED contract: a title, a planned DATE (a day, never an instant) and
+/// an optional planned share in basis points. Edited by the employer while no statement refers to
+/// it; `firstReferencedAt` is set by the statement change of PR 4 (never by PR 3) and freezes it.
+model Milestone {
+  id             String @id
+  organizationId String @map("organization_id")
+  contractId     String @map("contract_id")
+
+  title          String
+  plannedDate    DateTime @map("planned_date") @db.Date
+  /// 1 to 10000 when given. No sum across a contract's milestones is kept: no document defines one.
+  plannedShareBp Int?     @map("planned_share_bp")
+
+  createdAt            DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy            String    @map("created_by")
+  createdCorrelationId String    @map("created_correlation_id")
+  updatedAt            DateTime  @map("updated_at") @db.Timestamptz(3)
+  updatedBy            String    @map("updated_by")
+  /// The first statement that referred to it; once set, the milestone never changes.
+  firstReferencedAt    DateTime? @map("first_referenced_at") @db.Timestamptz(3)
+
+  version Int @default(1)
+
+  contract Contract @relation(fields: [organizationId, contractId], references: [organizationId, id])
+
+  @@unique([organizationId, id], map: "ux_milestone_org_id")
+  @@index([organizationId, contractId, plannedDate, id], map: "ix_milestone_contract")
+  @@map("milestone")
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +429,8 @@ model ApprovalPolicy {
 
   steps               ApprovalPolicyStep[]
   signatures          ContractSignature[]
+  amendmentSignatures AmendmentSignature[]
+  amendmentReviews    AmendmentSignatureReview[]
   reconciliationTasks PolicyReconciliationTask[]
   reviews             SignatureAuthorityReview[]
 
@@ -320,12 +474,12 @@ model PolicyReconciliationTask {
   /// A closed code (`UPSTREAM_UNAVAILABLE` …), never a message.
   lastErrorCode String?                    @map("last_error_code")
 
-  createdAt DateTime  @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime  @map("updated_at") @db.Timestamptz(3)
-  doneAt    DateTime? @map("done_at") @db.Timestamptz(3)
+  createdAt    DateTime  @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @map("updated_at") @db.Timestamptz(3)
+  doneAt       DateTime? @map("done_at") @db.Timestamptz(3)
   /// When the move took effect (the event's own instant): what a signature's hierarchy evidence is
   /// compared with. NULL only on a task queued before it existed; `created_at` stands in.
-  movedAt   DateTime? @map("moved_at") @db.Timestamptz(3)
+  movedAt      DateTime? @map("moved_at") @db.Timestamptz(3)
   /// The move's hierarchy version: signatures that recorded a LOWER one are flagged. A move that
   /// coalesces into the open task keeps the higher. NULL on a task from before versions.
   movedVersion BigInt? @map("moved_version")

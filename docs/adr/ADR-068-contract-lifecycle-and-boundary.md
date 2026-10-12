@@ -142,6 +142,10 @@ ADR-032 این را برای تعمیر ثابت کرده و اینجا همان
 | `CONTRACT_READER_ROLES`             | `ORGANIZATION_ADMIN`    | کدام نقش‌های سازمان کارفرما قرارداد را می‌خوانند (`AUDITOR` در راه‌اندازی رد می‌شود) |
 | `CONSTRUCTION_SERVICE_URL`          | `http://localhost:3110` | نشانی خواندن award                                                                   |
 | `CONTRACT_AWARD_REQUEST_TIMEOUT_MS` | `5000`                  | کل تبادل (Header، بدنه، Parse)؛ بی پاسخ در مهلت = در دسترس نیست                      |
+| `CONTRACT_AMENDMENT_ROLES`          | `ORGANIZATION_ADMIN`    | (PR 3) چه نقش‌هایی از کارفرما الحاقیه پیشنهاد می‌دهند؛ تهی = هیچ‌کس                  |
+| `CONTRACT_AMENDMENT_REASON_CODES`   | `SCOPE_CHANGE,…,OTHER`  | (PR 3) فهرست بستهٔ دلیل الحاقیه؛ کدهای توصیفی بی معنای حقوقی                         |
+| `CONTRACT_MILESTONE_ROLES`          | `ORGANIZATION_ADMIN`    | (PR 3) چه نقش‌هایی از کارفرما Milestone برنامه‌ریزی/ویرایش می‌کنند                   |
+| `CONTRACT_MILESTONE_LIMIT`          | `100`                   | (PR 3) بیشترین تعداد Milestone یک قرارداد؛ محافظت از سرویس، نه قاعدهٔ تجاری          |
 | `CONTRACT_CONSUMER_*`               | پیش‌فرض `EventConsumer` | تلاش دوباره و Backoff                                                                |
 
 (PRهای بعد متغیرهای امضا، چهارچشمی و مرجع زنجیره‌ها را می‌آورند؛ هیچ‌کدام در PR 1 نیست.)
@@ -191,3 +195,11 @@ PR 1 بدون نوشتن هیچ API کاربریِ تغییردهنده مرز �
   `CONTRACT_DRAFTED`، `GET /v1/contracts[/{id}]`، OpenAPI، Compose/CI/ACL. بیرون از PR: مسیر Gateway، هر مسیر نوشتنی، امضا، الحاقیه، صورت‌وضعیت، تأیید، تسویه.
 - **از construction-service چیزی تغییر نکرد:** `GET /v1/tenders/{id}/award` با `@AllowService('contract-service')` از PR 10/11 موجود است.
 - پاسخ‌های موقت و پرسش‌ها: **Q-95، Q-96، Q-97**.
+
+## Implementation notes (CON-003 PR 3, 2026-10-07)
+
+- پیاده‌شده: الحاقیهٔ قرارداد `SIGNED` (پیشنهاد کارفرما، امضای هر دو طرف با همان `SigningAuthority` امضای قرارداد، امضای دوم ⇒ `EFFECTIVE` و `amendments_total_minor += delta` زیر قفل ردیف قرارداد)،
+  Milestone برنامه‌ای (عنوان، **تاریخ** `DATE`، سهم اختیاری basis point)، زمینهٔ Invariant سقف (§ ۵: `amendments_total_minor`، `approved_total_minor`، `CHECK` سقف و کران سرریز `bigint`)،
+  رویدادهای بی مبلغ و بی متن (`CONTRACT_AMENDED` به‌جای `deltaAmount` کاتالوگ)، و ردیف حسابرسی `CONTRACT_AUTHORITY_REFUSED` برای هر ردِ طرف قرارداد در کار وابسته به اختیار.
+- **تصمیم‌های موقت و محافظه‌کارانه (Q-100):** کاهش مبلغ رد می‌شود؛ پس‌گرفتن/ردِ الحاقیه و حذف Milestone نیست؛ اختیار امضای الحاقیه همان `contract.signature` است (گردش‌کار جدا ساخته نشد)؛ جمع سهم Milestoneها کنترل نمی‌شود؛ فقط روی `SIGNED`.
+- بازبینی امضاهای رقابت‌کرده با `ORGANIZATION_MOVED` برای امضای الحاقیه هم می‌آید (جدول بازبینی جدا، همان قاعده: **فقط نسخه**، بی ساعت — دور ۵ #231).

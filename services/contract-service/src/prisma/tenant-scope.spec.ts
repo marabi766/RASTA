@@ -80,7 +80,7 @@ describe('the schema keeps history from being erased', () => {
 });
 
 describe('the schema models nothing CON-003 has not decided so far', () => {
-  it('has the contract, its signatures, the idempotency store and the approval policies (statements, amendments and milestones are later PRs)', () => {
+  it('has the contract, its signatures, amendments and milestones, the idempotency store and the approval policies (statements are a later PR)', () => {
     // Each step adds its models here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()].filter(
       (name) => !['OutboxMessage', 'OutboxStreamSequence'].includes(name),
@@ -89,6 +89,10 @@ describe('the schema models nothing CON-003 has not decided so far', () => {
       'Contract',
       'ContractSignature',
       'SignatureAuthorityReview',
+      'Amendment',
+      'AmendmentSignature',
+      'AmendmentSignatureReview',
+      'Milestone',
       'ApprovalPolicy',
       'PolicyReconciliationTask',
       'ApprovalPolicyStep',
@@ -101,10 +105,13 @@ describe('the schema models nothing CON-003 has not decided so far', () => {
     expect(SCHEMA).not.toMatch(/\b(Float|Decimal)\b/);
   });
 
-  it('is born timestamptz: no plain timestamp column (D-048)', () => {
+  it('is born timestamptz: no plain timestamp column (D-048), and a planned day is a DATE', () => {
     const plain = [...SCHEMA.matchAll(/^\s*(\w+)\s+DateTime\??\s*(?!.*@db\.Timestamptz).*$/gm)]
       .map((match) => match[0].trim())
-      .filter((line) => !line.includes('@db.Timestamptz'));
+      // The one calendar day this schema holds: a milestone's planned date, never an instant.
+      .filter(
+        (line) => !line.includes('@db.Timestamptz') && !/^plannedDate\s.*@db\.Date$/.test(line),
+      );
     expect(plain).toEqual([]);
   });
 

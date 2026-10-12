@@ -13,6 +13,8 @@ function row(overrides: Partial<Contract> = {}): Contract {
     winningBidId: 'BID_01',
     contractorOrganizationId: 'ORG_CONTRACTOR',
     amountMinor: 12_345_678_901_234_567n,
+    amendmentsTotalMinor: 0n,
+    approvedTotalMinor: 0n,
     matrixDigest: 'a'.repeat(64),
     awardedBy: 'USR_AWARDER',
     awardedAt: AT,
@@ -36,6 +38,26 @@ describe('toContractView', () => {
     const view = toContractView(row());
     expect(view.amountMinor).toBe('12345678901234567');
     expect(typeof view.amountMinor).toBe('string');
+  });
+
+  it('shows the amendments total and the price the contract stands at, exactly, past 2^53', () => {
+    const view = toContractView(row({ amountMinor: 9_000_000_000_000_001n }));
+    expect(view).toMatchObject({
+      amendmentsTotalMinor: '0',
+      currentAmountMinor: '9000000000000001',
+    });
+    // The two ends of what a bigint stores: the sum is exact and never a rounded number.
+    const edge = toContractView(
+      row({ amountMinor: 1n, amendmentsTotalMinor: 9_223_372_036_854_775_806n }),
+    );
+    expect(edge.currentAmountMinor).toBe('9223372036854775807');
+    expect(contractViewSchema.safeParse(edge).success).toBe(true);
+  });
+
+  it('shows no approved total: it is the cap’s second counter and belongs to statements', () => {
+    expect(toContractView(row({ approvedTotalMinor: 5n }))).not.toHaveProperty(
+      'approvedTotalMinor',
+    );
   });
 
   it('sends instants as ISO 8601 in UTC', () => {

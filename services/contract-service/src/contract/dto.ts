@@ -81,6 +81,18 @@ export const contractViewSchema = z
         'The contract amount in minor units (rials), a decimal string; never a float. It is ' +
           'the winning bid’s price as construction-service states it, with no adjustment (Q-95 (5)).',
       ),
+    amendmentsTotalMinor: z
+      .string()
+      .describe(
+        'The sum of the amendments that are effective, in minor units, a decimal string (CON-003 ' +
+          'PR 3). Zero until both parties have signed an amendment; it only grows (Q-100).',
+      ),
+    currentAmountMinor: z
+      .string()
+      .describe(
+        '`amountMinor` plus `amendmentsTotalMinor`: the price the contract stands at now, and ' +
+          'the cap approved statements are judged against (ADR-068 § 5).',
+      ),
     status: z.enum(CONTRACT_STATES),
     employerSignedAt: z
       .string()

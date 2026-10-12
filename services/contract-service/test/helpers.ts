@@ -36,7 +36,22 @@ export function databaseUrl(): string {
         "with `pnpm infra:up` and apply this service's migration first.",
     );
   }
-  return withUtcSession(url);
+  return withTestPool(withUtcSession(url));
+}
+
+/**
+ * Connections each test client may open. Prisma's default is physical cores × 2 + 1 — 5 on a
+ * 4-vCPU CI runner, 3 on a 2-vCPU one — and the lock-queue specs need one connection to hold the
+ * lock plus one per queued request (six signatures of three amendments) and one to observe them,
+ * so a default pool starves them on exactly the machines where the suite is judged. A pool sized
+ * for the suite, whatever the host, keeps what a test proves independent of the CPU count.
+ */
+export const TEST_POOL_CONNECTIONS = 16;
+
+function withTestPool(url: string): string {
+  const parsed = new URL(url);
+  parsed.searchParams.set('connection_limit', String(TEST_POOL_CONNECTIONS));
+  return parsed.toString();
 }
 
 /**
@@ -460,9 +475,24 @@ export async function untilSessionsWaitOnALock(
           AND wait_event_type = 'Lock'
           AND pid <> pg_backend_pid()`,
     );
-    if (Number(rows[0]?.waiting ?? 0) >= count) return;
+    const waiting = Number(rows[0]?.waiting ?? 0);
+    if (waiting >= count) return;
     if (Date.now() > deadline) {
-      throw new Error(`Fewer than ${count} sessions were waiting on a lock after ${timeoutMs}ms`);
+      // What the database saw, so a starved pool or a stuck holder reads differently from a slow host.
+      const sessions = await prisma.client.$queryRawUnsafe<
+        { state: string | null; wait_event_type: string | null; n: bigint }[]
+      >(
+        `SELECT state, wait_event_type, count(*) AS n
+           FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()
+          GROUP BY 1, 2 ORDER BY 1, 2`,
+      );
+      const seen = sessions
+        .map((s) => `${s.state ?? 'no state'}/${s.wait_event_type ?? '-'}=${String(s.n)}`)
+        .join(', ');
+      throw new Error(
+        `Only ${waiting} of ${count} sessions were waiting on a lock after ${timeoutMs}ms (sessions: ${seen})`,
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
@@ -479,6 +509,33 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
   try {
     await owner.$transaction(async (tx) => {
+      // The amendments (CON-003 PR 3) hang off the contract and the policies: reviews, then
+      // signatures, then amendments, then milestones — each never deleted by the service, so each
+      // goes with its own guard lifted for this transaction only.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature_review" DISABLE TRIGGER "tg_amendment_signature_review_immutable"',
+      );
+      await tx.amendmentSignatureReview.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature_review" ENABLE TRIGGER "tg_amendment_signature_review_immutable"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature" DISABLE TRIGGER "tg_amendment_signature_immutable"',
+      );
+      await tx.amendmentSignature.deleteMany({
+        where: { organizationId: { in: organizationIds } },
+      });
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "amendment_signature" ENABLE TRIGGER "tg_amendment_signature_immutable"',
+      );
+      await tx.$executeRawUnsafe('ALTER TABLE "amendment" DISABLE TRIGGER "tg_amendment_guard"');
+      await tx.amendment.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe('ALTER TABLE "amendment" ENABLE TRIGGER "tg_amendment_guard"');
+      await tx.$executeRawUnsafe('ALTER TABLE "milestone" DISABLE TRIGGER "tg_milestone_guard"');
+      await tx.milestone.deleteMany({ where: { organizationId: { in: organizationIds } } });
+      await tx.$executeRawUnsafe('ALTER TABLE "milestone" ENABLE TRIGGER "tg_milestone_guard"');
       // A review of a signature (D-050) names its signature and its policy, and is never deleted
       // by the service either: it goes first of all.
       await tx.$executeRawUnsafe(

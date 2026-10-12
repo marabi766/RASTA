@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four, the approval policy’s six and the authority review’s two, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s six, the authority review’s two and amendments’ and milestones’ seven, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -48,6 +48,13 @@ describe('the contract events', () => {
       'APPROVAL_POLICY_SUSPENDED',
       'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
       'CONTRACT_SIGNATURE_REFUSED',
+      'CONTRACT_AMENDMENT_PROPOSED',
+      'CONTRACT_AMENDMENT_SIGNATURE_RECORDED',
+      'CONTRACT_AMENDED',
+      'CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED',
+      'CONTRACT_MILESTONE_PLANNED',
+      'CONTRACT_MILESTONE_CHANGED',
+      'CONTRACT_AUTHORITY_REFUSED',
     ];
     expect(Object.keys(CONTRACT_EVENTS)).toEqual(names);
     expect(Object.keys(CONTRACT_EVENT_SCHEMAS)).toEqual(names);
@@ -320,6 +327,211 @@ describe('the authority events (D-050, review round 3)', () => {
       validateContractPayload('CONTRACT_SIGNATURE_REFUSED', {
         ...refused,
         reason: 'CONTRACT_NOT_DRAFT',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('the amendment and milestone events (CON-003 PR 3)', () => {
+  const at = '2026-10-07T10:00:00.000Z';
+  const payloads = {
+    CONTRACT_AMENDMENT_PROPOSED: {
+      contractId: 'CTR_1',
+      amendmentId: 'AMD_1',
+      amendmentNumber: 1,
+      organizationId: 'ORG_E',
+      contractorOrganizationId: 'ORG_C',
+      reasonCode: 'SCOPE_CHANGE',
+      proposedBy: 'USR_1',
+      proposedAt: at,
+    },
+    CONTRACT_AMENDMENT_SIGNATURE_RECORDED: {
+      contractId: 'CTR_1',
+      amendmentId: 'AMD_1',
+      organizationId: 'ORG_E',
+      side: 'EMPLOYER',
+      signerOrganizationId: 'ORG_E',
+      signedBy: 'USR_1',
+      authorityRole: 'ORGANIZATION_ADMIN',
+      policyId: 'APL_1',
+      policyVersion: 2,
+      signedAt: at,
+    },
+    CONTRACT_AMENDED: {
+      contractId: 'CTR_1',
+      amendmentId: 'AMD_1',
+      amendmentNumber: 1,
+      organizationId: 'ORG_E',
+      contractorOrganizationId: 'ORG_C',
+      reasonCode: 'SCOPE_CHANGE',
+      employerSignedAt: at,
+      contractorSignedAt: at,
+      effectiveAt: at,
+    },
+    CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED: {
+      contractId: 'CTR_1',
+      amendmentId: 'AMD_1',
+      organizationId: 'ORG_E',
+      side: 'EMPLOYER',
+      policyId: 'APL_1',
+      policyVersion: 2,
+      reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+      detectedBy: 'ORGANIZATION_MOVED',
+      causeEventId: 'EVT_1',
+      movedAt: at,
+      movedVersion: 7,
+      flaggedAt: at,
+    },
+    CONTRACT_MILESTONE_PLANNED: {
+      contractId: 'CTR_1',
+      milestoneId: 'MLS_1',
+      organizationId: 'ORG_E',
+      contractorOrganizationId: 'ORG_C',
+      plannedBy: 'USR_1',
+      plannedAt: at,
+    },
+    CONTRACT_MILESTONE_CHANGED: {
+      contractId: 'CTR_1',
+      milestoneId: 'MLS_1',
+      organizationId: 'ORG_E',
+      contractorOrganizationId: 'ORG_C',
+      version: 2,
+      changedBy: 'USR_1',
+      changedAt: at,
+    },
+    CONTRACT_AUTHORITY_REFUSED: {
+      contractId: 'CTR_1',
+      organizationId: 'ORG_E',
+      action: 'SIGN_AMENDMENT',
+      side: 'EMPLOYER',
+      subjectId: 'AMD_1',
+      reason: 'SIGNATURE_POLICY_REQUIRED',
+      policyId: null,
+      refusedBy: 'USR_1',
+      refusedAt: at,
+    },
+  } as const;
+  type Name = keyof typeof payloads;
+
+  it.each(Object.entries(payloads))('%s accepts the payload as published', (name, payload) => {
+    expect(validateContractPayload(name as Name, payload)).toEqual(payload);
+  });
+
+  it.each(Object.keys(payloads))(
+    '%s is keyed by the contract it concerns, on the contract aggregate',
+    (name) => {
+      expect(resolvePartitionKey(name as Name, payloads[name as Name]).key).toBe('CTR_1');
+      expect(AGGREGATE_OF[name as Name]).toBe(AGGREGATE_TYPE);
+    },
+  );
+
+  it.each(Object.keys(payloads))(
+    '%s refuses an amount, a reason text, a title, a date or a share: identifiers and instants only',
+    (name) => {
+      for (const field of [
+        'amountMinor',
+        'deltaMinor',
+        'delta',
+        'amount',
+        'reasonText',
+        'title',
+        'plannedDate',
+        'plannedShareBp',
+        'note',
+      ]) {
+        expect(() =>
+          validateContractPayload(name as Name, { ...payloads[name as Name], [field]: '1' }),
+        ).toThrow(/does not match its published contract/);
+      }
+    },
+  );
+
+  it.each(Object.entries(payloads))('%s refuses a payload missing any field', (name, payload) => {
+    for (const field of Object.keys(payload)) {
+      const { [field as keyof typeof payload]: _omitted, ...rest } = payload as Record<
+        string,
+        unknown
+      >;
+      expect(() => validateContractPayload(name as Name, rest)).toThrow();
+    }
+  });
+
+  it('an amendment review event names its cause in exactly two shapes: event AND instant, or neither (#235 round 2)', () => {
+    const proven = payloads.CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED;
+    const recheck = { ...proven, detectedBy: 'MOVE_RECHECK', causeEventId: null, movedAt: null };
+    const name = 'CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED';
+
+    expect(validateContractPayload(name, proven)).toEqual(proven);
+    expect(validateContractPayload(name, recheck)).toEqual(recheck);
+
+    const refused: [string, Record<string, unknown>][] = [
+      ['MOVE_RECHECK naming an event only', { ...recheck, causeEventId: 'EVT_1' }],
+      ['MOVE_RECHECK naming an instant only', { ...recheck, movedAt: at }],
+      ['MOVE_RECHECK naming both', { ...recheck, causeEventId: 'EVT_1', movedAt: at }],
+      ['ORGANIZATION_MOVED without its event', { ...proven, causeEventId: null }],
+      ['ORGANIZATION_MOVED without its instant', { ...proven, movedAt: null }],
+      ['ORGANIZATION_MOVED naming neither', { ...proven, causeEventId: null, movedAt: null }],
+      ['a detectedBy outside the closed pair', { ...proven, detectedBy: 'GUESS' }],
+    ];
+    for (const [what, payload] of refused) {
+      const outcome = (() => {
+        try {
+          validateContractPayload(name, payload);
+          return 'accepted';
+        } catch (error) {
+          return /does not match its published contract/.test((error as Error).message)
+            ? 'refused'
+            : 'other';
+        }
+      })();
+      expect({ what, outcome }).toEqual({ what, outcome: 'refused' });
+    }
+  });
+
+  it('names a refusal’s action and reason from closed lists, and nothing else', () => {
+    const refused = payloads.CONTRACT_AUTHORITY_REFUSED;
+    for (const action of [
+      'PROPOSE_AMENDMENT',
+      'SIGN_AMENDMENT',
+      'PLAN_MILESTONE',
+      'CHANGE_MILESTONE',
+    ]) {
+      expect(
+        validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, action }),
+      ).toBeTruthy();
+    }
+    for (const reason of [
+      'ROLE_NOT_PERMITTED',
+      'NOT_EMPLOYER',
+      'SIGNATURE_POLICY_REQUIRED',
+      'POLICY_AUTHOR_NOT_GOVERNING',
+    ]) {
+      expect(
+        validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, reason }),
+      ).toBeTruthy();
+    }
+    expect(() =>
+      validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, action: 'CANCEL' }),
+    ).toThrow();
+    expect(() =>
+      validateContractPayload('CONTRACT_AUTHORITY_REFUSED', {
+        ...refused,
+        reason: 'CONTRACT_NOT_SIGNED',
+      }),
+    ).toThrow();
+  });
+
+  it('refuses an amendment number below 1 and an instant with an offset', () => {
+    expect(() =>
+      validateContractPayload('CONTRACT_AMENDED', {
+        ...payloads.CONTRACT_AMENDED,
+        amendmentNumber: 0,
+      }),
+    ).toThrow();
+    expect(() =>
+      validateContractPayload('CONTRACT_AMENDED', {
+        ...payloads.CONTRACT_AMENDED,
+        effectiveAt: '2026-10-07T13:30:00+03:30',
       }),
     ).toThrow();
   });

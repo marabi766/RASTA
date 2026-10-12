@@ -129,6 +129,7 @@ describe('each down.sql, run whole with psql --file', () => {
   const ALL = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{14}_/.test(name))
     .sort();
+  const AMENDMENTS = '20261007100000_amendments_milestones';
   const DETECTION = '20261006160000_review_detection_provenance';
   const VERSION = '20261006140000_signature_hierarchy_version';
   const REVIEW = '20261006120000_signature_authority_review';
@@ -219,7 +220,7 @@ describe('each down.sql, run whole with psql --file', () => {
     }
   });
 
-  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW, VERSION, DETECTION])(
+  it.each([SIGN_CANCEL, SIGNING_POLICY, SUSPENSION, REVIEW, VERSION, DETECTION, AMENDMENTS])(
     '%s is one transaction: it opens with BEGIN and closes with COMMIT, the lock and the check inside',
     (migration) => {
       const statements = readFileSync(down(migration), 'utf8')
@@ -530,5 +531,60 @@ describe('each down.sql, run whole with psql --file', () => {
     const result = psql(unused, ['--file', down(SIGN_CANCEL)]);
     expect(result.out).toBe('');
     expect(result.ok).toBe(true);
+  });
+
+  describe('amendments_milestones (CON-003 PR 3)', () => {
+    /** A SIGNED contract, inserted whole: the guards fire on update, not on a plain insert. */
+    const signedContract = (amendmentsTotal = 0) => `INSERT INTO "contract"
+         ("id", "organization_id", "tender_id", "project_id", "winning_bid_id",
+          "contractor_organization_id", "amount_minor", "matrix_digest", "awarded_by", "awarded_at",
+          "status", "status_changed_at", "status_changed_by", "source_event_id", "created_at",
+          "created_by", "created_correlation_id", "updated_at", "amendments_total_minor")
+       VALUES ('CTR_rb', 'ORG_E', 'TND_1', 'PRJ_1', 'BID_1', 'ORG_C', 1000, repeat('a', 64), 'USR_1',
+               now(), 'SIGNED', now(), 'system', 'EVT_1', now(), 'system', 'COR_1', now(), ${amendmentsTotal})`;
+    const milestone = `INSERT INTO "milestone"
+         ("id", "organization_id", "contract_id", "title", "planned_date", "created_at", "created_by",
+          "created_correlation_id", "updated_at", "updated_by")
+       VALUES ('MLS_rb', 'ORG_E', 'CTR_rb', 't', '2026-12-01', now(), 'USR_1', 'COR_1', now(), 'USR_1')`;
+    const amendment = `INSERT INTO "amendment"
+         ("id", "organization_id", "contract_id", "amendment_number", "delta_minor", "reason_code",
+          "reason_text", "proposed_by", "proposed_at", "proposed_correlation_id", "updated_at")
+       VALUES ('AMD_rb', 'ORG_E', 'CTR_rb', 1, 5, 'OTHER', 'why', 'USR_1', now(), 'COR_1', now())`;
+
+    it.each([
+      [
+        'a milestone',
+        [signedContract(), milestone],
+        /down refused: 0 amendment\(s\), 0 amendment signature\(s\), 0 authority review\(s\), 1 milestone\(s\) and 0 contract/,
+      ],
+      [
+        'an amendment',
+        [signedContract(), amendment],
+        /down refused: 1 amendment\(s\), 0 amendment signature\(s\), 0 authority review\(s\), 0 milestone\(s\) and 0 contract/,
+      ],
+      [
+        'a non-zero amendments total',
+        [signedContract(7)],
+        /down refused: 0 amendment\(s\), 0 amendment signature\(s\), 0 authority review\(s\), 0 milestone\(s\) and 1 contract/,
+      ],
+    ] as const)(
+      'over %s it refuses and changes nothing — with ON_ERROR_STOP and without it; over none it succeeds, to the exact previous shape',
+      (_what, statements, message) => {
+        const schema = scratch(AMENDMENTS);
+        for (const statement of statements) mustRun(schema, ['-c', statement]);
+        const before = shape(schema);
+        for (const stop of [true, false]) {
+          const refused = psql(schema, ['--file', down(AMENDMENTS)], stop);
+          expect(refused.out).toMatch(message);
+          expect(shape(schema)).toBe(before);
+        }
+
+        const unused = scratch(AMENDMENTS);
+        const result = psql(unused, ['--file', down(AMENDMENTS)]);
+        expect(result.out).toBe('');
+        expect(result.ok).toBe(true);
+        expect(shape(unused)).toBe(shape(scratch(DETECTION)));
+      },
+    );
   });
 });

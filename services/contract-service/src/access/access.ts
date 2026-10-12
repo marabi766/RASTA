@@ -74,10 +74,14 @@ export function sideOf(
 export class ContractAccess {
   private readonly employerReaders: readonly string[];
   private readonly cancellers: readonly string[];
+  private readonly amenders: readonly string[];
+  private readonly planners: readonly string[];
 
   constructor(@Inject(ENV) env: ContractEnv) {
     this.employerReaders = [SUPER_ROLE, ...env.CONTRACT_READER_ROLES];
     this.cancellers = env.CONTRACT_CANCEL_ROLES;
+    this.amenders = env.CONTRACT_AMENDMENT_ROLES;
+    this.planners = env.CONTRACT_MILESTONE_ROLES;
   }
 
   /**
@@ -99,6 +103,26 @@ export class ContractAccess {
     }
     if (!context.organizationId) {
       throw RastaError.forbidden('A contract is signed or cancelled for an organization');
+    }
+    return { organizationId: context.organizationId };
+  }
+
+  /**
+   * The caller of a command on a contract's amendments and milestones (CON-003 PR 3): the same
+   * person-for-an-organization as {@link assertCanCommand}, and never the platform administrator —
+   * the operator neither proposes, signs nor plans for a party.
+   */
+  assertCanCommandAmendments(): Acting {
+    assertNotAuditor();
+    assertNotServiceCaller();
+    const context = getContext();
+    if (context.roles.includes(SUPER_ROLE)) {
+      throw RastaError.forbidden(
+        'The platform administrator does not amend a contract or plan its milestones for a party',
+      );
+    }
+    if (!context.organizationId) {
+      throw RastaError.forbidden('A contract is amended for an organization');
     }
     return { organizationId: context.organizationId };
   }
@@ -127,6 +151,31 @@ export class ContractAccess {
     if (!this.cancellers.some((role) => roles.includes(role))) {
       throw RastaError.insufficientRole(this.cancellers, roles);
     }
+  }
+
+  /**
+   * Whether the caller holds a role `CONTRACT_AMENDMENT_ROLES` names — the employer's people who
+   * propose an amendment (CON-003 PR 3). Only the employer proposes; whether the caller acts for
+   * the employer is judged by the caller, after the contract is found.
+   */
+  mayProposeAmendment(): boolean {
+    const roles = getContext().roles;
+    return this.amenders.some((role) => roles.includes(role));
+  }
+
+  /** The roles that propose an amendment, for the refusal that names what was lacking. */
+  amendmentRoles(): readonly string[] {
+    return this.amenders;
+  }
+
+  /** Whether the caller holds a role `CONTRACT_MILESTONE_ROLES` names (plans and edits milestones). */
+  mayPlanMilestones(): boolean {
+    const roles = getContext().roles;
+    return this.planners.some((role) => roles.includes(role));
+  }
+
+  milestoneRoles(): readonly string[] {
+    return this.planners;
   }
 
   /**

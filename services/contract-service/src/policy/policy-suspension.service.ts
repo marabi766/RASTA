@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { AmendmentRepository } from '../amendment/amendment.repository';
 import { SERVICE_NAME, type ContractEnv } from '../config/env';
 import { ContractRepository } from '../contract/contract.repository';
 import { EventPublisher } from '../events/publisher';
@@ -139,6 +140,7 @@ export class PolicySuspensionService {
     private readonly events: EventPublisher,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly contracts: ContractRepository,
+    private readonly amendments: AmendmentRepository,
     @Inject(ENV) private readonly env: ContractEnv,
   ) {}
 
@@ -397,6 +399,45 @@ export class PolicySuspensionService {
       });
       this.logger.warn(
         `Signature of contract ${signature.contractId} flagged for review: the authority it rested ` +
+          `on changed while it was being made (no cause named)`,
+      );
+    }
+
+    // The employer signatures of amendments rest on the same policy and the same hierarchy
+    // evidence (CON-003 PR 3): flagged by the same rule, in the same transaction.
+    const flaggedAmendments = await this.amendments.flagRacedSignatures(tx, {
+      organizationId: policy.organizationId,
+      policyId: policy.id,
+      ...attribution,
+      movedVersion: cause.movedVersion,
+      earliestMoveInstant: cause.earliestMovedAt,
+      withinCurrentVersion,
+      clockSkewMarginSeconds: this.env.CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
+      at,
+    });
+    for (const signature of flaggedAmendments) {
+      await this.events.enqueue(tx, {
+        eventName: 'CONTRACT_AMENDMENT_SIGNATURE_AUTHORITY_FLAGGED',
+        aggregateId: signature.contractId,
+        organizationId: policy.organizationId,
+        payload: {
+          contractId: signature.contractId,
+          amendmentId: signature.amendmentId,
+          organizationId: policy.organizationId,
+          side: 'EMPLOYER',
+          policyId: policy.id,
+          policyVersion: signature.policyVersion,
+          reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+          detectedBy: attribution.detectedBy,
+          causeEventId: null,
+          movedAt: null,
+          movedVersion: cause.movedVersion,
+          flaggedAt: at.toISOString(),
+        },
+        occurredAt: at,
+      });
+      this.logger.warn(
+        `Signature of amendment ${signature.amendmentId} flagged for review: the authority it rested ` +
           `on changed while it was being made (no cause named)`,
       );
     }
