@@ -38,6 +38,14 @@
 -- stops a rewrite holding the table longer than a request would wait. Either
 -- one rolls the whole migration back with nothing changed; the runbook's
 -- online path is then the way forward.
+--
+-- **Restart document-service right after this runs** (or run it with the
+-- service stopped). A connection that prepared a statement on one of these
+-- tables before the conversion fails it afterwards — PostgreSQL refuses to
+-- re-plan a cached statement whose result type changed ("cached plan must not
+-- change result type", 0A000) and Prisma keeps the statement, so that
+-- connection fails the same query until it is replaced. Measured in
+-- test/instants-timestamptz.int-spec.ts. The same holds for down.sql.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 

@@ -7,7 +7,10 @@
 -- migration, and the same rewrite.
 --
 -- The code does not have to be rolled back first. Under a UTC session (#214)
--- either Prisma client reads and writes either column type correctly.
+-- either Prisma client reads and writes either column type correctly. The
+-- service does have to be restarted afterwards, for the reason the forward
+-- migration gives: a connection that prepared a statement on these tables
+-- before the rollback fails it after.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
