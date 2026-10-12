@@ -124,6 +124,7 @@ type Endpoints = Pick<
   | 'constructionUrl'
   | 'organizationUrl'
   | 'supplierUrl'
+  | 'contractUrl'
   | 'keycloakUrl'
   | 'kafkaBrokers'
 >;
@@ -141,6 +142,7 @@ const URL_SETTINGS: ReadonlyArray<[keyof Omit<Endpoints, 'kafkaBrokers'>, string
   ['constructionUrl', 'E2E_CONSTRUCTION_URL'],
   ['organizationUrl', 'E2E_ORGANIZATION_URL'],
   ['supplierUrl', 'E2E_SUPPLIER_URL'],
+  ['contractUrl', 'E2E_CONTRACT_URL'],
   ['keycloakUrl', 'KEYCLOAK_URL'],
 ];
 

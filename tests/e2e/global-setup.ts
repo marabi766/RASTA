@@ -171,6 +171,21 @@ export default async function globalSetup(): Promise<void> {
       120_000,
     );
 
+    // ---- contract-service -----------------------------------------------------
+    // The contract scenario waits for the draft its award creates, and signs under
+    // the policy it writes there; its readiness probe reports the database and
+    // the broker (CON-003).
+    await waitFor(
+      `contract-service to be ready at ${config.contractUrl}/health/ready`,
+      async () => {
+        const response = await context.get(`${config.contractUrl}/health/ready`, {
+          failOnStatusCode: false,
+        });
+        return response.status() === 200;
+      },
+      120_000,
+    );
+
     // ---- Keycloak -----------------------------------------------------------
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,
@@ -213,6 +228,7 @@ export default async function globalSetup(): Promise<void> {
         config.marketplaceTopic,
         config.documentTopic,
         config.constructionTopic,
+        config.contractTopic,
       ]) {
         if (!topics.includes(topic)) {
           throw new Error(

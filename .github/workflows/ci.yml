@@ -2051,6 +2051,7 @@ jobs:
           pnpm --filter @rasta/construction-service run db:migrate
           pnpm --filter @rasta/organization-service run db:migrate
           pnpm --filter @rasta/supplier-service run db:migrate
+          pnpm --filter @rasta/contract-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -2066,6 +2067,8 @@ jobs:
           DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
           DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           # The audit migration runs as the schema owner, never as the runtime
           # role. ADR-053 § 6: a privilege the runtime role could hand back to
           # itself is not a barrier, so `rasta_audit` owns nothing it writes to.
@@ -2267,7 +2270,7 @@ jobs:
             setTimeout(() => { console.error("clamd did not answer the runner"); process.exit(1); }, 15000);
           '
 
-      - name: Start identity, organization, supplier, economic, marketplace, document, audit and construction services and api-gateway
+      - name: Start identity, organization, supplier, economic, marketplace, document, audit, construction and contract services and api-gateway
         # From `dist`, the same artefact the container image runs, rather than
         # from a watch-mode dev server. Started here rather than by Playwright's
         # `webServer` because several processes have to come up in order and
@@ -2457,6 +2460,18 @@ jobs:
             node dist/main.js > /tmp/rasta-logs/construction.log 2>&1 & )
           unset tender_kek
 
+          # CON-003: a draft contract appears when construction-service publishes
+          # TENDER_AWARDED; the service reads the award back from construction-service
+          # and confirms a union-written signing policy with organization-service, each
+          # with a service token it signs itself. No setting here widens a role: who
+          # signs for the employer is a policy the scenario writes, not configuration.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service contract-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/contract-service && \
+            PORT=3111 SERVICE_NAME=contract-service \
+            DATABASE_URL=postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public \
+            node dist/main.js > /tmp/rasta-logs/contract.log 2>&1 & )
+
           ( cd services/api-gateway && \
             PORT=3000 SERVICE_NAME=api-gateway \
             node dist/main.js > /tmp/rasta-logs/gateway.log 2>&1 & )
@@ -2482,19 +2497,21 @@ jobs:
               http://localhost:3102/health/ready || true)"
             supplier="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3108/health/ready || true)"
+            contract="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3111/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/wallets/me || true)"
             if [ "$identity" = "200" ] && [ "$economic" = "200" ] && [ "$marketplace" = "200" ] \
                && [ "$document" = "200" ] && [ "$audit" = "200" ] \
                && [ "$construction" = "200" ] && [ "$organization" = "200" ] \
-               && [ "$supplier" = "200" ] && [ "$gateway" = "401" ]; then
+               && [ "$supplier" = "200" ] && [ "$contract" = "200" ] && [ "$gateway" = "401" ]; then
               echo "stack up after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, organization=${organization}, supplier=${supplier}, gateway=${gateway})"
+          echo "the stack did not come up (identity=${identity}, economic=${economic}, marketplace=${marketplace}, document=${document}, audit=${audit}, construction=${construction}, organization=${organization}, supplier=${supplier}, contract=${contract}, gateway=${gateway})"
           cat /tmp/rasta-logs/identity.log
           cat /tmp/rasta-logs/economic.log
           cat /tmp/rasta-logs/marketplace.log
@@ -2503,6 +2520,7 @@ jobs:
           cat /tmp/rasta-logs/construction.log
           cat /tmp/rasta-logs/organization.log
           cat /tmp/rasta-logs/supplier.log
+          cat /tmp/rasta-logs/contract.log
           cat /tmp/rasta-logs/gateway.log
           exit 1
 
@@ -2549,6 +2567,7 @@ jobs:
           E2E_CONSTRUCTION_URL: http://localhost:3110
           E2E_ORGANIZATION_URL: http://localhost:3102
           E2E_SUPPLIER_URL: http://localhost:3108
+          E2E_CONTRACT_URL: http://localhost:3111
           SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS: '10'
           KEYCLOAK_URL: http://localhost:8080
           KEYCLOAK_REALM: rasta
@@ -2575,6 +2594,8 @@ jobs:
           tail -n 200 /tmp/rasta-logs/organization.log || true
           echo '--- supplier-service ---'
           tail -n 200 /tmp/rasta-logs/supplier.log || true
+          echo '--- contract-service ---'
+          tail -n 200 /tmp/rasta-logs/contract.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-logs/gateway.log || true
           echo '--- keycloak ---'

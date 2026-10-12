@@ -122,5 +122,14 @@ export default defineConfig({
       // shares no row with them; its lifecycle is found by its own project id
       // and correlation id (CON-001).
     },
+    {
+      name: 'contract-api',
+      testDir: './specs/contract',
+      // After the construction project: a contract exists only because a tender
+      // was awarded (ADR-068), so a broken tender flow should name itself there
+      // rather than surface as a draft that never appeared. It provisions its own
+      // organizations, people and tenders and shares no row with that project.
+      dependencies: ['construction-api'],
+    },
   ],
 });

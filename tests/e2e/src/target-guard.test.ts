@@ -26,6 +26,7 @@ const LOCAL = {
   constructionUrl: 'http://localhost:3110',
   organizationUrl: 'http://localhost:3102',
   supplierUrl: 'http://localhost:3108',
+  contractUrl: 'http://localhost:3111',
   keycloakUrl: 'http://localhost:8080',
   kafkaBrokers: ['localhost:9092', '127.0.0.1:9093'],
 };
@@ -62,6 +63,7 @@ describe('assertDisposableE2eTarget', () => {
     ['constructionUrl', 'E2E_CONSTRUCTION_URL'],
     ['organizationUrl', 'E2E_ORGANIZATION_URL'],
     ['supplierUrl', 'E2E_SUPPLIER_URL'],
+    ['contractUrl', 'E2E_CONTRACT_URL'],
     ['keycloakUrl', 'KEYCLOAK_URL'],
   ] as const) {
     it(`refuses a remote ${setting}, naming the setting but not the host`, () => {
