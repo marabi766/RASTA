@@ -200,14 +200,18 @@ pnpm --filter @rasta/fleet-service insurance:drain-check
 
 اعمال‌نشدن پ‌۰ تا پ‌۲ و گام‌های ۲–۴ پس از تغییر فهرست: پنجره‌های قدیمی همچنان در Replica برقرارند و اعزام را مجاز می‌کنند. این Runbook شرطِ تغییر فهرست است، نه اختیاری.
 
-## پس از بازگشتِ Migration نسل مالکیت (`20261008230000`)
+## اعمال دوبارهٔ Migration نسل مالکیت (`20261008230000`) پس از یک بازگشت
 
-`down.sql` ستون‌های `ownership_generation` و `retained_coverages` را حذف می‌کند؛ `migration.sql` دوباره آن‌ها را با `NULL` و `{}` می‌سازد. نسلِ نامعلوم یعنی fleet
-رویداد `INSURANCE_RECORDED`ای را که سازمانش مالک جاری نیست نادیده می‌گیرد (بسته‌ماندن در خطا)؛ پس رویداد دیرِ مالک قبلی پنجره نمی‌سازد. اما پنجره‌هایی که پیش از بازگشت در Replica ماندند همان‌طور
-می‌مانند. **پیش از روشن‌کردن اعزام پس از هر بازگشت:** همان حصار — asset-service متوقف (پ‌۰)، `outbox:flush` (پ‌۱)، هر دو `insurance:drain-check` موفق (پ‌۲؛ رویدادی که پیش از بازگشت صف شده پس از پاک‌سازی پنجره نمی‌سازد)،
+`down.sql` ستون‌های `ownership_generation` و `retained_coverages` را حذف می‌کند؛ `migration.sql` دوباره آن‌ها را با `NULL` و `{}` می‌سازد (همین برای ردیف‌هایی که
+پیش از نخستین استقرار بودند). نسلِ نامعلوم یعنی fleet رویداد `INSURANCE_RECORDED`ای را که سازمانش مالک جاری نیست نادیده می‌گیرد (بسته‌ماندن در خطا)؛ پس رویداد دیرِ مالک قبلی پنجره نمی‌سازد. اما پنجره‌هایی که در Replica ماندند همان‌طور
+می‌مانند. **پیش از روشن‌کردن اعزام پس از اعمال دوباره:** همان حصار — asset-service متوقف (پ‌۰)، `outbox:flush` (پ‌۱)، هر دو `insurance:drain-check` موفق (پ‌۲؛ رویدادی که پیش از بازگشت صف شده پس از پاک‌سازی پنجره نمی‌سازد)،
 سپس `insurance:clear-transferred -- --include-unknown-generation`، راه‌اندازی asset-service و `insurance:reproject -- --reissue`.
-یک `ASSET_TRANSFERRED` بدون نسل، نسلِ Replica را **نامعلوم (NULL)** می‌کند — نه نسلِ مالک قبلی را نگه می‌دارد — تا رویداد دیرِ مالک پیشین در همان نسل از بررسی مالک نگذرد.
-(آزمون: `services/fleet-service/test/ownership-generation-rollback.int-spec.ts`.)
+یک `ASSET_TRANSFERRED` بدون نسل، نسلِ نامعلوم را نامعلوم نگه می‌دارد و نسلِ معلوم را پایین نمی‌آورد (دور ۱۲).
+**نسلِ نامعلوم یعنی دورهٔ مالکیتِ نامعلوم (دور ۱۳):** Replica ممکن است پیش از وجود ستون A→B→A را دیده و پنجرهٔ دورهٔ اول A را نگه داشته باشد. پس
+Refresh یک رویداد حالتِ بازپخش‌شده (یا `ASSET_CREATED`ای که ردیف موجودی می‌یابد) از نسلِ نامعلوم، فقط پنجره‌ای را نگه می‌دارد که زیر نسلِ Snapshot یا
+بالاتر تأیید شده باشد و فهرست نگه‌داشته را خالی می‌کند؛ پنجرهٔ بی‌نسل حذف می‌شود، مگر نسلِ منبع ۰ باشد (ماشینی که هرگز منتقل نشده تنها یک دوره دارد).
+پنجرهٔ معتبرِ حذف‌شده را `insurance:reproject -- --reissue` برمی‌گرداند.
+(آزمون: `services/fleet-service/test/ownership-generation-rollback.int-spec.ts` و `services/fleet-service/test/replica-tenure-reconcile.int-spec.ts`.)
 
 ## بازگشت
 
@@ -215,10 +219,35 @@ pnpm --filter @rasta/fleet-service insurance:drain-check
 **اگر تغییر فهرست را برمی‌گردانی** (فهرست قبلی)، همان رویهٔ بالا است و **با همان حصار**: پ‌۰ (توقف asset-service)، پ‌۱ (`outbox:flush`) و پ‌۲ (هر دو `insurance:drain-check`) پیش از `clear-transferred`، سپس
 بازگرداندن فهرست، راه‌اندازی و `insurance:reproject -- --reissue`؛ وگرنه رویداد صف‌شده زیر فهرست جدید پنجرهٔ پاک‌شده را دوباره می‌سازد.
 
-**بازگشت Migrationهای fleet این PR** (`20261013180000_insurance_epoch`، `20261013120000_insurance_revision`، یا قدیمی‌ترها): کد پیش از این
-ستون‌ها از پاسخِ نگه‌داشته محافظت نمی‌کند، پس همان رویهٔ اجباری: **asset-service متوقف** (پ‌۰)، `outbox:flush` (پ‌۱)، هر دو
-`insurance:drain-check` (پ‌۲)، سپس بازگرداندن کد fleet و بعد `down.sql`ها (جدیدترین اول)، `insurance:clear-transferred -- --include-unknown-generation`،
-راه‌اندازی asset-service و `insurance:reproject -- --reissue`. در تمام این مدت asset-service پایین می‌ماند.
+**بازگشت Migrationهای fleet این PR** (`20261013180000_insurance_epoch`، `20261013120000_insurance_revision`،
+`20261012120000_insurance_pending_verification`، `20261008230000_asset_ref_ownership_generation`): کد پیش از این ستون‌ها از پاسخِ نگه‌داشته
+محافظت نمی‌کند، پس همان حصار اجباری. **پاک‌سازی پیش از بازگشت است، نه پس از آن (دور ۱۳):** `insurance:clear-transferred` خودش
+`ownership_generation`، `retained_coverages` و `insurance_epoch` را می‌خواند و می‌نویسد و `down.sql`ها همین ستون‌ها را حذف می‌کنند؛ پس با
+**کد و ستون‌های فعلی** اجرا می‌شود و بعد کد و Schema برمی‌گردند. ترتیب ثابت؛ از گام ۱ تا ۶ asset-service پایین می‌ماند:
+
+1. پ‌۰ توقف همهٔ نسخه‌های asset-service؛ پ‌۱ `outbox:flush`؛ پ‌۲ هر دو `insurance:drain-check` با کد ۰.
+2. **fleet هنوز روی همین نسخه:** `insurance:clear-transferred -- --dry-run --include-unknown-generation`، سپس بدون `--dry-run`. `invalidated` اجرا
+   باید با Dry-run برابر باشد. (پس از این، تا asset-service پایین است هیچ تأییدی پاسخ نمی‌گیرد، پس هیچ پنجره‌ای برنمی‌گردد.)
+3. فقط اگر `20261012120000` هم برمی‌گردد: `SELECT count(*) FROM insurance_pending_verification;` باید **۰** باشد — `down.sql` آن با ردیف پارک‌شده امتناع
+   می‌کند و چیزی برنمی‌گرداند. تا asset-service پایین است جاروی fleet هر ردیف را `NO_ANSWER` می‌شمارد و پس از `FLEET_INSURANCE_PARKED_MAX_ATTEMPTS`
+   تلاش (پیش‌فرض حدود یک ساعت) با `PARKED_VERIFICATION_EXHAUSTED` به `rasta.fleet.v1.dlq` می‌برد و علامت پردازش را برمی‌دارد. صبر کن تا ۰ شود؛ این
+   Dead letterها در گام ۷ بازپخش می‌شوند.
+4. بازگرداندن کد fleet (همهٔ نسخه‌ها). کد قدیمی با ستون‌های هنوز موجود کار می‌کند: هر ستونِ این Migrationها پیش‌فرض دارد یا NULL‌پذیر است.
+5. `down.sql`ها با نقش **Migrator**، **جدیدترین اول**، فقط تا جایی که برمی‌گردی؛ هر فایل ردیف `_prisma_migrations` خودش را هم حذف می‌کند:
+
+   ```bash
+   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261013180000_insurance_epoch/down.sql
+   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261013120000_insurance_revision/down.sql
+   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261012120000_insurance_pending_verification/down.sql
+   psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL_FLEET_MIGRATOR" -f services/fleet-service/prisma/migrations/20261008230000_asset_ref_ownership_generation/down.sql
+   ```
+
+   (`psql` نشانی بدون `?schema=` را می‌خواهد.) پنجره‌های پاک‌شده پاک می‌مانند؛ `down.sql` چیزی به آن‌ها اضافه نمی‌کند.
+
+6. راه‌اندازی asset-service و، اگر نسخهٔ آن `insurance:reproject` دارد، `insurance:reproject -- --reissue`.
+7. Dead letterهای گام ۳ را طبق [replay-dlq](replay-dlq.md) بازپخش کن.
+
+این رویه روی یک پایگاه یک‌بارمصرف از ابتدا تا انتها اجرا شده است (STATUS دور ۱۳ در #240).
 
 برای شل‌کردن قاعدهٔ اعزام:
 `FLEET_DISPATCH_REQUIRED_COVERAGES=` (خالی)، یا فقط پوشش‌های الزامی، و `fleet-service` را دوباره راه بینداز.

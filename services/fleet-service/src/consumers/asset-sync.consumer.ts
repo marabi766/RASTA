@@ -146,6 +146,8 @@ interface AssetRefPatch {
 const PROJECTIONS: Record<ConsumedEventName, Projection> = {
   // ---- asset-service: the replica -----------------------------------------
   [CONSUMED_EVENTS.ASSET_CREATED]: {
+    // Applied to an absent row only: on an existing one `handle` reconciles from
+    // asset-service instead (#240 r13), so this owner never replaces another.
     patch: (payload) => ({
       organizationId: str(payload.organizationId),
       name: str(payload.name) ?? null,
@@ -335,6 +337,9 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
  * The ordinary state events, which change a row the event's tenant must own
  * (review #205 r2): every state event but the two that set the owner —
  * `ASSET_CREATED` and `ASSET_TRANSFERRED`, both held to the envelope tenant.
+ * Neither is owner-checked; each is fenced its own way instead: a transfer by
+ * the ownership generation (#240 r12), a creation by applying its payload only
+ * to an absent row and reconciling an existing one from asset-service (r13).
  * The safety events are not here: an insurance event from the previous owner
  * after a transfer applies to the vehicle (docs/24 Q-66), and a failed
  * inspection only ever withdraws the machine.
@@ -721,9 +726,25 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         } else {
           patch = projection.patch(payload, current, now, occurredAt, organizationId);
         }
-        const refresh = replayed
-          ? await this.readAuthoritativeState(envelope, assetId, organizationId, delivery)
-          : undefined;
+        // An ASSET_CREATED only initialises an ABSENT replica (#240 r13). One that
+        // finds the row — a late original after replays or transfers moved the
+        // machine on, or a row a safety event created first — names the owner at
+        // registration, which may no longer be the owner: applied, it would move
+        // the machine back with the later owner's generation and windows. It is
+        // reconciled from asset-service instead, exactly as a replayed state event
+        // is (D-039, below); no answer throws, so nothing is written.
+        const reconciled =
+          !replayed && current !== null && envelope.eventName === CONSUMED_EVENTS.ASSET_CREATED;
+        if (reconciled) {
+          this.logger.log(
+            `ASSET_CREATED ${envelope.eventId} of ${assetId}: the replica already holds the machine; ` +
+              'reconciled from asset-service, not from the payload',
+          );
+        }
+        const refresh =
+          replayed || reconciled
+            ? await this.readAuthoritativeState(envelope, assetId, organizationId, delivery)
+            : undefined;
         if (refresh) {
           const known = current?.ownershipGeneration ?? null;
           if (
@@ -760,9 +781,19 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           // only windows recorded under the snapshot's generation or a later one
           // (the current tenure's own) stay. Fail closed, as for an older
           // transfer; the re-projection command restores the valid windows.
+          //
+          // An UNKNOWN generation (a row migrated without one, #240 r13) is an
+          // uncertain tenure: the replica may have missed A→B→A before the column
+          // existed, and kept A's first-tenure windows. So the same rule applies:
+          // a window stays only if it was verified under the snapshot's generation
+          // or later; one with no generation cannot be placed and does not count.
+          // Generation 0 is the exception: a machine never transferred has had one
+          // tenure, so every window on it is that tenure's.
+          const uncertainTenure = known === null && refresh.transferGeneration > 0;
           if (
             current &&
             (current.organizationId !== refresh.organizationId ||
+              uncertainTenure ||
               (known !== null && refresh.transferGeneration > known))
           ) {
             patch = {
@@ -832,8 +863,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         }
       },
       // Every one waits at most the configured time to start (#240 r12); the
-      // ordinary ones keep Prisma's 5 s timeout.
-      replayed || envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
+      // ordinary ones keep Prisma's 5 s timeout. An ASSET_CREATED may be
+      // reconciled under the lock like a replay (r13), so it gets a replay's.
+      replayed ||
+        envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED ||
+        envelope.eventName === CONSUMED_EVENTS.ASSET_CREATED
         ? { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs }
         : { maxWaitMs: this.transactionMaxWaitMs },
     );

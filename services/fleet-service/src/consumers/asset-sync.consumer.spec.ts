@@ -770,8 +770,8 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.upserts[0]).toMatchObject({
           organizationId: 'ORG-DEH-0003',
           ownershipGeneration: 3,
-          insuranceCover: {},
         });
+        expect(recorded.upserts[0]!.insuranceCover).toEqual({});
       });
     });
 
@@ -845,8 +845,8 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.upserts[0]).toMatchObject({
           ownershipGeneration: 2,
           retainedCoverages: [],
-          insuranceCover: {},
         });
+        expect(recorded.upserts[0]!.insuranceCover).toEqual({});
       });
 
       it('the same tenure: the generation is written, the windows are left alone', async () => {
@@ -855,7 +855,7 @@ describe('AssetSyncConsumer', () => {
           {
             id: 'AST-SEED-0001',
             organizationId: 'ORG-DEH-0001',
-            ownershipGeneration: null,
+            ownershipGeneration: 1,
             insuranceCover: cover,
           },
           snapshotAt('ORG-DEH-0001', 1),
@@ -865,6 +865,184 @@ describe('AssetSyncConsumer', () => {
 
         expect(recorded.upserts[0]!.ownershipGeneration).toBe(1);
         expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+      });
+
+      describe('r13: from an unknown generation (a migrated row), the tenure is uncertain', () => {
+        const legacy = (policyId: string) => ({
+          policyId,
+          validFrom: '2026-01-01T00:00:00.000Z',
+          validTo: '2030-01-01T00:00:00.000Z',
+        });
+
+        it('the same owner at generation 2: a window with no generation, or an earlier one, goes; one verified at 2 stays', async () => {
+          const { consumer, recorded } = refreshed(
+            {
+              id: 'AST-SEED-0001',
+              organizationId: 'ORG-DEH-0001',
+              ownershipGeneration: null,
+              retainedCoverages: ['COMPREHENSIVE'],
+              insuranceCover: {
+                COMPREHENSIVE: [legacy('INS-A1'), window('INS-A0', 0)],
+                THIRD_PARTY: [window('INS-A2', 2)],
+              },
+            },
+            snapshotAt('ORG-DEH-0001', 2),
+          );
+
+          await consumer.handle(activation('ORG-DEH-0001'), RETRY);
+
+          expect(recorded.upserts[0]).toMatchObject({
+            organizationId: 'ORG-DEH-0001',
+            ownershipGeneration: 2,
+            retainedCoverages: [],
+          });
+          expect(recorded.upserts[0]!.insuranceCover).toEqual({
+            THIRD_PARTY: [window('INS-A2', 2)],
+          });
+        });
+
+        it('generation 0 (never transferred, one tenure): every window stays', async () => {
+          const { consumer, recorded } = refreshed(
+            {
+              id: 'AST-SEED-0001',
+              organizationId: 'ORG-DEH-0001',
+              ownershipGeneration: null,
+              insuranceCover: { COMPREHENSIVE: [legacy('INS-A1')] },
+            },
+            snapshotAt('ORG-DEH-0001', 0),
+          );
+
+          await consumer.handle(activation('ORG-DEH-0001'), RETRY);
+
+          expect(recorded.upserts[0]!.ownershipGeneration).toBe(0);
+          expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+        });
+
+        it('ending assignments and revoking windows stay an owner change’s alone', async () => {
+          const { consumer, repository } = refreshed(
+            {
+              id: 'AST-SEED-0001',
+              organizationId: 'ORG-DEH-0001',
+              ownershipGeneration: null,
+              insuranceCover: { COMPREHENSIVE: [legacy('INS-A1')] },
+            },
+            snapshotAt('ORG-DEH-0001', 2),
+          );
+
+          await consumer.handle(activation('ORG-DEH-0001'), RETRY);
+
+          expect(repository.endActiveAssignmentsForAsset).not.toHaveBeenCalled();
+          expect(repository.revokeWindowsAfterTransfer).not.toHaveBeenCalled();
+        });
+      });
+
+      describe('r13: an ASSET_CREATED only initialises an absent replica', () => {
+        const created = (tenantId: string) =>
+          envelope({
+            eventId: 'EVT-CREATED-LATE',
+            eventName: 'ASSET_CREATED',
+            tenantId,
+            payload: {
+              assetId: 'AST-SEED-0001',
+              organizationId: tenantId,
+              name: 'نام هنگام ثبت',
+              type: 'LOADER',
+              assetTag: null,
+              status: 'REGISTERED',
+            },
+          });
+        // What replays leave after C→A→B: B at generation 2 with its own window.
+        const atB = {
+          id: 'AST-SEED-0001',
+          organizationId: 'ORG-DEH-0002',
+          status: 'ACTIVE',
+          ownershipGeneration: 2,
+          retainedCoverages: [],
+          insuranceCover: { COMPREHENSIVE: [window('INS-B', 2)] },
+        };
+
+        it('the late original of the first owner: reconciled from asset-service, asked as the event’s tenant; owner, generation and windows stay', async () => {
+          const snapshot = jest.fn(async () => ({
+            ...snapshotAt('ORG-DEH-0002', 2),
+            viaTransfer: true,
+          }));
+          const built = buildConsumer({ existing: atB });
+          Object.assign(built.repository, { findTransferFence: jest.fn(async () => null) });
+          const consumer = new AssetSyncConsumer(null, built.repository, { snapshot });
+
+          await consumer.handle(created('ORG-DEH-0003'), {
+            topic: 'rasta.asset.v1',
+            partition: 0,
+          });
+
+          expect(snapshot).toHaveBeenCalledWith('ORG-DEH-0003', 'AST-SEED-0001');
+          expect(built.recorded.processed).toEqual(['EVT-CREATED-LATE']);
+          const written = built.recorded.upserts[0]!;
+          expect(written).toMatchObject({
+            organizationId: 'ORG-DEH-0002',
+            ownershipGeneration: 2,
+            status: 'ACTIVE',
+            name: 'لودر',
+          });
+          expect(written).not.toHaveProperty('insuranceCover');
+          expect(built.repository.endActiveAssignmentsForAsset).not.toHaveBeenCalled();
+        });
+
+        it('no answer from asset-service: thrown before any write (retried, then dead-lettered)', async () => {
+          const built = buildConsumer({ existing: atB });
+          const consumer = new AssetSyncConsumer(null, built.repository, {
+            snapshot: async () => {
+              throw RastaError.upstreamUnavailable('asset-service');
+            },
+          });
+
+          await expect(consumer.handle(created('ORG-DEH-0003'))).rejects.toThrow();
+          expect(built.recorded.upserts).toEqual([]);
+        });
+
+        it('no source configured: refused, never applied from the payload', async () => {
+          const { consumer, recorded } = buildConsumer({ existing: atB });
+
+          await expect(consumer.handle(created('ORG-DEH-0003'))).rejects.toThrow();
+          expect(recorded.upserts).toEqual([]);
+        });
+
+        it('an absent row is initialised from the payload; nobody is asked', async () => {
+          const snapshot = jest.fn();
+          const built = buildConsumer({});
+          const consumer = new AssetSyncConsumer(null, built.repository, { snapshot });
+
+          await consumer.handle(created('ORG-DEH-0003'));
+
+          expect(snapshot).not.toHaveBeenCalled();
+          expect(built.recorded.upserts[0]).toMatchObject({
+            organizationId: 'ORG-DEH-0003',
+            name: 'نام هنگام ثبت',
+            status: 'REGISTERED',
+          });
+        });
+
+        it('its transaction gets a replay’s timeout, since it may ask under the lock', async () => {
+          const built = buildConsumer({});
+          const consumer = new AssetSyncConsumer(
+            null,
+            built.repository,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            DEFAULT_PARKING,
+            9_000,
+            400,
+          );
+
+          await consumer.handle(created('ORG-DEH-0003'));
+
+          expect(built.repository.transaction).toHaveBeenCalledWith(expect.any(Function), {
+            timeoutMs: 9_000,
+            maxWaitMs: 400,
+          });
+        });
       });
 
       it.each([
