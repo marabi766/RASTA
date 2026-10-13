@@ -26,6 +26,7 @@ function sweeper(
 describe('ReservationSweeper', () => {
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   it('counts what it expired, what another transaction held, and what failed — and carries on', async () => {
@@ -85,8 +86,11 @@ describe('ReservationSweeper', () => {
   });
 
   it('leaves what a sweep’s interval could not finish to the next sweep', async () => {
+    // A clock of the test's own: each batch takes 8 ms of a 20 ms interval, whatever the host.
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
     const expireBatch = jest.fn(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      now += 8;
       return batch(5, true);
     });
     const { sweeper: s } = sweeper(
@@ -96,9 +100,9 @@ describe('ReservationSweeper', () => {
     );
 
     const outcome = await s.runOnce();
-    expect(outcome.backlogged).toBe(1);
-    expect(outcome.expired).toBe(5 * expireBatch.mock.calls.length);
-    expect(expireBatch.mock.calls.length).toBeGreaterThan(1);
+    // Passes end at 8 and 16 ms (under the interval) and at 24 ms (past it): three, then stop.
+    expect(expireBatch).toHaveBeenCalledTimes(3);
+    expect(outcome).toMatchObject({ expired: 15, backlogged: 1 });
   });
 
   it('does not pass again over a batch that expired nothing', async () => {
