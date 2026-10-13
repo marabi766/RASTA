@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
+import { RastaError, getContext, requestPath, type InternalTokenService } from '@rasta/nest-common';
 import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
 
@@ -183,7 +183,8 @@ export class ProxyService {
       return {
         status: response.status,
         headers: this.responseHeaders(response),
-        body: text.length > 0 ? this.parseJson(text) : undefined,
+        body:
+          text.length > 0 ? clientErrorPathOnly(response.status, this.parseJson(text)) : undefined,
       };
     } catch (error) {
       // Not recorded twice: a 5xx already counted when its status arrived. A
@@ -406,6 +407,20 @@ function platformErrorEnvelope(text: string): ApiError | null {
     correlationId,
     ...(traceId !== undefined ? { traceId } : {}),
     timestamp,
-    ...(path !== undefined ? { path } : {}),
+    ...(path !== undefined ? { path: requestPath(path) } : {}),
   };
+}
+
+/**
+ * An upstream's 4xx platform error envelope with its `path` reduced to the
+ * path alone; any other body exactly as it came.
+ *
+ * Every service's exception filter already writes `path` without the query.
+ * What the gateway hands its caller does not rest on that (S-09): the query is
+ * the caller's data — a cursor, a search term — and the gateway forwarded it.
+ */
+function clientErrorPathOnly(status: number, body: unknown): unknown {
+  if (status < 400 || !apiErrorSchema.safeParse(body).success) return body;
+  const { path } = body as ApiError;
+  return path === undefined ? body : { ...(body as ApiError), path: requestPath(path) };
 }
