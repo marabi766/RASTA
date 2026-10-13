@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssetTimeline, type AssetTimelineQuery } from '@/server/assets';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { TIMELINE_CATEGORIES, oneOf } from '@/lib/asset-fields';
 import { TimelineScreen } from './TimelineScreen';
 
@@ -60,7 +60,7 @@ export default async function AssetTimelinePage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/assets" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/assets" />}
     >
       <TimelineScreen result={result} assetId={id} query={query} />
     </AppShell>

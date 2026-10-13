@@ -11,7 +11,7 @@ import {
   type TransactionListQuery,
 } from '@/server/wallet';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { WalletScreen } from './WalletScreen';
 
 /**
@@ -72,7 +72,7 @@ export default async function WalletPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/wallet" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/wallet" />}
     >
       <WalletScreen
         wallet={wallet}

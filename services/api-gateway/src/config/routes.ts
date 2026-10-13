@@ -170,6 +170,11 @@ export const ROUTES: readonly RouteRule[] = [
   // to the caller's organization. A write takes the optional Idempotency-Key construction-service
   // honours; nothing here moves money or is irreversible, so the edge does not require one (#223 F1).
   { prefix: 'criteria-templates', service: 'construction' },
+  // The approval policies a contract's employer is governed by (`contract.signature`, ADR-068 § 5).
+  // `approval-policies` belongs to construction-service and routing is by first segment only, so
+  // contract-service serves its own under a segment it alone owns. Same rules as construction's:
+  // the service enforces authorization, validation, four-eyes approval and the Idempotency-Key.
+  { prefix: 'contract-approval-policies', service: 'contract' },
   { prefix: 'contracts', service: 'contract' },
   { prefix: 'statements', service: 'contract', requiresIdempotencyKey: true },
 

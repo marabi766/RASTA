@@ -17,7 +17,7 @@ import { fetchCurrentUser } from '@/server/identity';
 import { fetchOrganization, type Organization, type ReadResult } from '@/server/organizations';
 import { fetchMembers, type MemberListQuery } from '@/server/members';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 
 import { MembersScreen } from './MembersScreen';
 import { OrganizationProfileForm } from './OrganizationProfileForm';
@@ -154,7 +154,7 @@ export default async function OrganizationsPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/organizations" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/organizations" />}
     >
       <PageHeader
         title="سازمان و اعضا"
