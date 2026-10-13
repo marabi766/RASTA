@@ -1808,8 +1808,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     systemAdmin,
   }) => {
     // The audit records, then the events of every correlated call (awaited together, so one
-    // wait), then the reads around them.
-    test.setTimeout(AUDIT_RECORDS_WAIT_MS + EVENTS_WAIT_MS + HTTP_WORK_MS);
+    // wait), then every event of the contracts on the tap, then the reads around them.
+    test.setTimeout(AUDIT_RECORDS_WAIT_MS + 2 * EVENTS_WAIT_MS + HTTP_WORK_MS);
 
     interface AuditItem {
       organizationId: string | null;
@@ -1970,20 +1970,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     // Every delivery of the correlated calls — every one observed with the call's event ids, not
     // only those found by header, so a redelivery that lost its header cannot hide behind a
     // valid one — carries the call's correlation id in its header and in its envelope alike, and
-    // an eventId; it was published under the employer's tenant, keyed by the contract, and
-    // carried no amount, note or reason text (ADR-068 § 4).
-    const amounts = [
-      PRICE.A.c1,
-      PRICE.A.c2,
-      PRICE.B.c1,
-      PRICE.B.c2,
-      PRICE.C.c1,
-      PRICE.C.c2,
-      AMENDMENT_ONE,
-      AMENDMENT_TWO,
-      'wrong lot',
-      'Additional resurfacing',
-    ];
+    // an eventId; it was published under the employer's tenant and keyed by the contract.
     for (const entry of evidence) {
       const byHeader = delivered.get(entry.correlationId)!;
       expect(byHeader.length, `deliveries of "${entry.label}"`).toBeGreaterThan(0);
@@ -1999,9 +1986,53 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         expect(event.eventId, `${event.eventName} of "${entry.label}": eventId`).toBeTruthy();
         expect(event.tenantId, entry.label).toBe(org.owner);
         expect(Object.values(contractId), entry.label).toContain(event.key);
-        for (const leak of amounts) {
-          expect(JSON.stringify(event.payload), entry.label).not.toContain(leak);
-        }
+      }
+    }
+
+    // No event of the scenario's contracts carries an amount, a note or reason text (ADR-068
+    // § 4): every one the tap observed keyed by one of them, not only the correlated calls' — the
+    // drafts the awards created and the authority flags the move raised carry no correlation id
+    // of ours (Codex r6 on #241). First the tap holds at least what audit-service counted above
+    // for each contract, so the check cannot pass over an event that had not arrived yet.
+    const amounts = [
+      PRICE.A.c1,
+      PRICE.A.c2,
+      PRICE.B.c1,
+      PRICE.B.c2,
+      PRICE.C.c1,
+      PRICE.C.c2,
+      AMENDMENT_ONE,
+      AMENDMENT_TWO,
+      'wrong lot',
+      'Additional resurfacing',
+    ];
+    const contractKey = new Map(TENDERS.map((key) => [contractId[key], key] as const));
+    const ofContracts = await until(
+      'every event audit-service recorded for the contracts, on the tap as well',
+      async () => {
+        const seen = tap.observed((event) => contractKey.has(event.key ?? ''));
+        const complete = TENDERS.every((key) =>
+          Object.entries(expectedByContract[key]).every(
+            ([name, count]) =>
+              distinct(
+                seen.filter((event) => event.key === contractId[key] && event.eventName === name),
+              ).length >= count,
+          ),
+        );
+        return complete ? seen : undefined;
+      },
+      EVENTS_WAIT_MS,
+    );
+    for (const name of ['CONTRACT_DRAFTED', 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED']) {
+      expect(
+        ofContracts.some((event) => event.eventName === name),
+        `${name} is among the events inspected`,
+      ).toBe(true);
+    }
+    for (const event of ofContracts) {
+      const label = `${event.eventName} of contract ${contractKey.get(event.key!)}`;
+      for (const leak of amounts) {
+        expect(JSON.stringify(event.payload), label).not.toContain(leak);
       }
     }
 
