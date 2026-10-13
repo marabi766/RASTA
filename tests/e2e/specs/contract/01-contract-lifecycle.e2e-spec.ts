@@ -1089,11 +1089,36 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     );
     expect(await contract(author, contractId.A)).toMatchObject({ status: 'DRAFT' });
 
+    // A refusal of the contract's state (above) leaves no record; a party's refusal for want of
+    // authority does.
+    const byContractor = correlation('contractor-cancels');
     expectRefusal(
-      await send(c2, 'POST', `/v1/contracts/${contractId.B}/cancel`, { reasonCode: 'OTHER' }),
+      await send(
+        c2,
+        'POST',
+        `/v1/contracts/${contractId.B}/cancel`,
+        { reasonCode: 'OTHER' },
+        byContractor,
+      ),
       { status: 403, code: 'FORBIDDEN' },
       'the contractor cancelling the draft',
     );
+    evidence.push({
+      label: 'contractor cancellation refused',
+      correlationId: byContractor,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.B,
+        payload: {
+          contractId: contractId.B,
+          action: 'CANCEL_CONTRACT',
+          side: 'CONTRACTOR',
+          subjectId: null,
+          reason: 'NOT_EMPLOYER',
+        },
+      },
+    });
     expect(await contract(author, contractId.B)).toMatchObject({ status: 'DRAFT' });
   });
 
@@ -1149,17 +1174,51 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const path = `/v1/contracts/${contractId.A}/sign`;
 
     // An administrator of the employer who does not hold the role the policy names.
+    const withoutRole = correlation('sign-without-role');
     expectRefusal(
-      await send(plain, 'POST', path, {}),
+      await send(plain, 'POST', path, {}, withoutRole),
       { status: 403, code: 'INSUFFICIENT_ROLE' },
       'a person without the policy’s role signing',
     );
+    evidence.push({
+      label: 'signature refused for want of the policy’s role',
+      correlationId: withoutRole,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'SIGN_CONTRACT',
+          side: 'EMPLOYER',
+          subjectId: null,
+          reason: 'ROLE_NOT_PERMITTED',
+        },
+      },
+    });
     // A person who is a member of both parties.
+    const bothParties = correlation('sign-member-of-both');
     expectRefusal(
-      await send(dual, 'POST', path, {}),
+      await send(dual, 'POST', path, {}, bothParties),
       { status: 403, code: 'FORBIDDEN', reason: 'MEMBER_OF_BOTH_PARTIES' },
       'a member of both parties signing',
     );
+    evidence.push({
+      label: 'signature refused to a member of both parties',
+      correlationId: bothParties,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'SIGN_CONTRACT',
+          side: 'EMPLOYER',
+          subjectId: null,
+          reason: 'MEMBER_OF_BOTH_PARTIES',
+        },
+      },
+    });
     // Not a party at all.
     const missingSign = `/v1/contracts/CTR_${RUN}_MISSING/sign`;
     await expectMissingLike(
@@ -1797,6 +1856,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       resourceType: string;
       resourceId: string | null;
       outcome: string;
+      reason: string | null;
     }
     const expectedByContract: Record<TenderKey, Record<string, number>> = {
       A: {
@@ -1819,14 +1879,16 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: 1,
       },
     };
-    // Refusals of a party for want of authority, on contract A: the contractor proposing an
-    // amendment, planning a milestone and changing one, and the employer signing after its
-    // policy was suspended. Each is in `evidence` with its correlation id.
+    // Refusals of a party for want of authority or for separation of duties: on contract A, the
+    // employer signing without the policy's role and as a member of both parties, the contractor
+    // proposing an amendment, planning a milestone and changing one, and the employer signing an
+    // amendment after its policy was suspended; on B, the contractor cancelling. Each is in
+    // `evidence` with its correlation id.
     const refusals = evidence.filter((entry) => entry.refusal);
     const authorityRefusals = refusals.filter(
       (entry) => entry.refusal!.event === 'CONTRACT_AUTHORITY_REFUSED',
     );
-    expect(authorityRefusals).toHaveLength(4);
+    expect(authorityRefusals).toHaveLength(7);
 
     const records = await until(
       'audit records of every contract decision and refusal',
@@ -1879,8 +1941,10 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         ).toHaveLength(count);
       }
     }
-    // Exactly the four authority refusals, no more: one audit record per refusal, found by the
-    // correlation id the call carried, naming the refusal's event, its contract and the tenant.
+    // Exactly the seven authority refusals, no more: one audit record per refusal, found by the
+    // correlation id the call carried, naming the refusal's event, its contract and the tenant,
+    // stored as REFUSED under the closed action and reason the refusal names (#243; a
+    // CONTRACT_SIGNATURE_REFUSED is always the contract's own signature, SIGN_CONTRACT).
     expect(
       records
         .filter((item) => item.sourceEventName === 'CONTRACT_AUTHORITY_REFUSED')
@@ -1891,12 +1955,15 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     for (const entry of refusals) {
       const recorded = records.filter((item) => item.correlationId === entry.correlationId);
       expect(recorded, `audit records of "${entry.label}"`).toHaveLength(1);
+      const { event, contractId: refusedContract, payload } = entry.refusal!;
       expect(recorded[0], entry.label).toMatchObject({
         organizationId: org.owner,
-        action: entry.refusal!.event,
-        sourceEventName: entry.refusal!.event,
+        action: payload.action ?? 'SIGN_CONTRACT',
+        outcome: 'REFUSED',
+        reason: payload.reason,
+        sourceEventName: event,
         resourceType: 'Contract',
-        resourceId: entry.refusal!.contractId,
+        resourceId: refusedContract,
       });
     }
     // At most one flag on contract A (whether it falls in the window depends on the run's
