@@ -49,6 +49,12 @@ export function observerClient(config: E2eConfig, clientId: string): KafkaConfig
  * they disagree.
  */
 export interface ObservedEvent {
+  /**
+   * From the envelope. The outbox delivers at least once: a row published
+   * again before it was marked published arrives with the same `eventId`, and
+   * is the same logical event.
+   */
+  eventId: string | undefined;
   eventName: string;
   /** From the Kafka header — what a consumer filters on without deserialising. */
   correlationId: string | undefined;
@@ -124,12 +130,14 @@ export class EconomicEventTap {
 
         const envelope = message.value
           ? (JSON.parse(message.value.toString('utf8')) as {
+              eventId?: string;
               correlationId?: string;
               payload?: Record<string, unknown>;
             })
           : {};
 
         tap.received.push({
+          eventId: envelope.eventId,
           eventName: read(EVENT_HEADERS.eventName) ?? '(unnamed)',
           correlationId: read(EVENT_HEADERS.correlationId),
           envelopeCorrelationId: envelope.correlationId,

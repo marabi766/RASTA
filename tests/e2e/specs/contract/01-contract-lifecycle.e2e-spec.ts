@@ -60,6 +60,19 @@ const FLAG_WINDOW_BOUND_MS = 120_000;
 const SUSPENSION_WAIT_MS = 120_000;
 const FLAG_WAIT_MS = 60_000;
 
+/**
+ * The declared waits. A test that polls sets its own timeout to the sum of its waits plus
+ * HTTP_WORK_MS, so no wait is cut short by the 120 s default it would otherwise inherit.
+ */
+const TOKEN_WAIT_MS = 30_000;
+/** One wait out of audit-service's 503s while the evidence a step needs is not in yet. */
+const AUDIT_CATCH_UP_MS = 60_000;
+const DRAFT_WAIT_MS = 90_000;
+const AUDIT_RECORDS_WAIT_MS = 180_000;
+const EVENTS_WAIT_MS = 60_000;
+/** The HTTP calls of a test around its waits, and the last poll that overruns a deadline. */
+const HTTP_WORK_MS = 120_000;
+
 /** The least that must be left of the window when a step that needs it open starts. */
 const WINDOW_MARGIN_MS = 15_000;
 
@@ -471,7 +484,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   test('the cast: an owner under the union, three contractors, and the people who act', async ({
     systemAdmin,
   }) => {
-    test.setTimeout(240_000);
+    // One token wait per person, one after another.
+    test.setTimeout(Object.keys(SURNAMES).length * TOKEN_WAIT_MS + HTTP_WORK_MS);
 
     const organization = async (name: string, type: string, parentId?: string): Promise<string> => {
       const created = await systemAdmin.post('/v1/organizations', {
@@ -562,7 +576,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
             (key !== 'dual' || (claims.org_ids ?? []).includes(org.c1));
           return ready ? candidate : undefined;
         },
-        30_000,
+        TOKEN_WAIT_MS,
       );
       signedIn[key] = new Actor(account.username, context, token, config);
     }
@@ -791,15 +805,20 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const closingAt = Date.parse((await tender(author, tenderId.A)).bidClosingAt!);
     // The sweeper closes a tender within one interval of its deadline (ADR-065 § 3).
     const waitMs = Math.max(0, closingAt - Date.now()) + 60_000;
-    test.setTimeout(waitMs + 240_000);
+    // One wait for the three closures (they share a deadline), then one audit catch-up per
+    // opening.
+    test.setTimeout(waitMs + TENDERS.length * AUDIT_CATCH_UP_MS + HTTP_WORK_MS);
 
-    for (const key of TENDERS) {
-      await until(
-        `the sweeper to close tender ${key}`,
-        async () => ((await tender(author, tenderId[key])).status === 'CLOSED' ? true : undefined),
-        waitMs,
-      );
-    }
+    await until(
+      'the sweeper to close all three tenders',
+      async () => {
+        for (const key of TENDERS) {
+          if ((await tender(author, tenderId[key])).status !== 'CLOSED') return undefined;
+        }
+        return true;
+      },
+      waitMs,
+    );
 
     for (const key of TENDERS) {
       const proposed = await send(
@@ -816,7 +835,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
           const response = await send(p2, 'POST', `/v1/tenders/${tenderId[key]}/open-bids`, {});
           return response.status === 503 ? undefined : response;
         },
-        60_000,
+        AUDIT_CATCH_UP_MS,
       );
       expect(opened.status, JSON.stringify(opened.body)).toBe(200);
       expect(opened.body).toMatchObject({ tenderId: tenderId[key], status: 'EVALUATING' });
@@ -854,6 +873,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   });
 
   test('each tender is awarded to its winner, through the award approval', async () => {
+    // One audit catch-up per award, one after another.
+    test.setTimeout(TENDERS.length * AUDIT_CATCH_UP_MS + HTTP_WORK_MS);
     const { p1, awarder } = people;
     for (const key of TENDERS) {
       const winner = WINNER[key];
@@ -868,7 +889,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
           const response = await send(awarder, 'POST', `/v1/tenders/${tenderId[key]}/award`, body);
           return response.status === 503 ? undefined : response;
         },
-        60_000,
+        AUDIT_CATCH_UP_MS,
       );
       expect(awarded.status, JSON.stringify(awarded.body)).toBe(200);
       expect(awarded.body).toMatchObject({
@@ -884,22 +905,22 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   test('each award made exactly one DRAFT contract, which both parties read and no one else does', async ({
     tenantB,
   }) => {
+    // One wait for the three drafts, then the HTTP work: reads and stranger probes.
+    test.setTimeout(DRAFT_WAIT_MS + HTTP_WORK_MS);
     const { author, c1, c2, c3 } = people;
-    const mine = async (key: TenderKey): Promise<ContractBody> =>
-      until(
-        `the draft contract of tender ${key}`,
-        async () => {
-          const list = await author.get('/v1/contracts?limit=100');
-          expect(list.status, JSON.stringify(list.body)).toBe(200);
-          const found = (list.body as { items: ContractBody[] }).items.filter(
-            (item) => item.tenderId === tenderId[key],
-          );
-          return found.length > 0 ? found[0] : undefined;
-        },
-        90_000,
-      );
-    for (const key of TENDERS) {
-      const draft = await mine(key);
+    const drafts = await until(
+      'the draft contracts of all three tenders',
+      async () => {
+        const list = await author.get('/v1/contracts?limit=100');
+        expect(list.status, JSON.stringify(list.body)).toBe(200);
+        const items = (list.body as { items: ContractBody[] }).items;
+        const found = TENDERS.map((key) => items.find((item) => item.tenderId === tenderId[key]));
+        return found.every((item) => item !== undefined) ? found : undefined;
+      },
+      DRAFT_WAIT_MS,
+    );
+    for (const [index, key] of TENDERS.entries()) {
+      const draft = drafts[index]!;
       contractId[key] = draft.id;
       const winner = WINNER[key];
       expect(draft).toMatchObject({
@@ -1607,7 +1628,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   }) => {
     // The declared waits (suspension, then flag) plus the HTTP work around them: two signatures,
     // the move, the reads and the refusal. The signature-to-move bound is asserted separately.
-    test.setTimeout(SUSPENSION_WAIT_MS + FLAG_WAIT_MS + 120_000);
+    test.setTimeout(SUSPENSION_WAIT_MS + FLAG_WAIT_MS + HTTP_WORK_MS);
     const { signer, c1, c2, author } = people;
     const policyPath = `/v1/approval-policies/${policyId}`;
 
@@ -1749,7 +1770,9 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   test('audit-service holds the decisions and the refusals, once each, under the employer’s tenant, and no event carries an amount', async ({
     systemAdmin,
   }) => {
-    test.setTimeout(240_000);
+    // The audit records, then the events of every correlated call (awaited together, so one
+    // wait), then the reads around them.
+    test.setTimeout(AUDIT_RECORDS_WAIT_MS + EVENTS_WAIT_MS + HTTP_WORK_MS);
 
     interface AuditItem {
       organizationId: string | null;
@@ -1827,7 +1850,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
           );
         return complete ? items : undefined;
       },
-      180_000,
+      AUDIT_RECORDS_WAIT_MS,
     );
     // Exactly once where once is the rule: not a second CONTRACT_DRAFTED, CONTRACT_SIGNED or
     // CONTRACT_AMENDED for the replays and the repeated signatures. (A redelivered award is not
@@ -1875,32 +1898,33 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       expect(record.organizationId).toBe(org.owner);
     }
 
-    // The correlated calls: the topic says which refusal it was, and carries no amount.
-    const seen = async (label: string): Promise<ObservedEvent[]> => {
-      const entry = evidence.find((item) => item.label === label)!;
-      return tap.awaitCorrelated(entry.correlationId, entry.events);
-    };
+    // The correlated calls: every one's declared events are on the topic. The tap finds them by
+    // the Kafka header, so a lost header fails here rather than leaving nothing to check below.
+    // Awaited together: one wait, not one per call.
+    const delivered = new Map(
+      await Promise.all(
+        evidence.map(
+          async (entry) =>
+            [
+              entry.correlationId,
+              await tap.awaitCorrelated(entry.correlationId, entry.events, EVENTS_WAIT_MS),
+            ] as const,
+        ),
+      ),
+    );
+    const deliveriesOf = (label: string): ObservedEvent[] =>
+      delivered.get(evidence.find((item) => item.label === label)!.correlationId)!;
+    // The outbox delivers at least once (a row may be published again before it is marked
+    // published): deliveries with one eventId are one logical event.
+    const distinct = (events: ObservedEvent[]): ObservedEvent[] => [
+      ...new Map(events.map((event) => [event.eventId, event])).values(),
+    ];
     const payloadOf = (events: ObservedEvent[], name: string): Record<string, unknown> =>
       events.find((event) => event.eventName === name)!.payload;
 
-    // Each refusal left exactly one event on the topic, with the action, subject and reason
-    // that were refused (the audit record above is its one row).
-    for (const entry of refusals) {
-      const { event, payload } = entry.refusal!;
-      const published = (await seen(entry.label)).filter((item) => item.eventName === event);
-      expect(published, `${event} of "${entry.label}" on the topic`).toHaveLength(1);
-      expect(published[0]!.payload, entry.label).toMatchObject(payload);
-    }
-    expect(payloadOf(await seen('draft cancelled'), 'CONTRACT_CANCELLED')).toMatchObject({
-      contractId: contractId.B,
-      reasonCode: 'AWARD_ERROR',
-    });
-    expect(
-      payloadOf(await seen('employer signature recorded and contract signed'), 'CONTRACT_SIGNED'),
-    ).toMatchObject({ contractId: contractId.A });
-
-    // Every event of the correlated calls was published under the employer's tenant, keyed by
-    // the contract, and none carried an amount, a note or a reason text (ADR-068 § 4).
+    // Every delivery of the correlated calls carries the call's correlation id in its header and
+    // in its envelope alike, and an eventId; it was published under the employer's tenant, keyed
+    // by the contract, and carried no amount, note or reason text (ADR-068 § 4).
     const amounts = [
       PRICE.A.c1,
       PRICE.A.c2,
@@ -1914,7 +1938,14 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       'Additional resurfacing',
     ];
     for (const entry of evidence) {
-      for (const event of tap.correlated(entry.correlationId)) {
+      const events = delivered.get(entry.correlationId)!;
+      expect(events.length, `deliveries of "${entry.label}"`).toBeGreaterThan(0);
+      for (const event of events) {
+        expect(
+          { header: event.correlationId, envelope: event.envelopeCorrelationId },
+          `${event.eventName} of "${entry.label}": correlation id`,
+        ).toEqual({ header: entry.correlationId, envelope: entry.correlationId });
+        expect(event.eventId, `${event.eventName} of "${entry.label}": eventId`).toBeTruthy();
         expect(event.tenantId, entry.label).toBe(org.owner);
         expect(Object.values(contractId), entry.label).toContain(event.key);
         for (const leak of amounts) {
@@ -1922,5 +1953,24 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         }
       }
     }
+
+    // Each refusal is exactly one logical event on the topic, however often it was delivered,
+    // with the action, subject and reason that were refused (the audit record above is its one
+    // row).
+    for (const entry of refusals) {
+      const { event, payload } = entry.refusal!;
+      const published = distinct(deliveriesOf(entry.label)).filter(
+        (item) => item.eventName === event,
+      );
+      expect(published, `${event} of "${entry.label}" on the topic`).toHaveLength(1);
+      expect(published[0]!.payload, entry.label).toMatchObject(payload);
+    }
+    expect(payloadOf(deliveriesOf('draft cancelled'), 'CONTRACT_CANCELLED')).toMatchObject({
+      contractId: contractId.B,
+      reasonCode: 'AWARD_ERROR',
+    });
+    expect(
+      payloadOf(deliveriesOf('employer signature recorded and contract signed'), 'CONTRACT_SIGNED'),
+    ).toMatchObject({ contractId: contractId.A });
   });
 });
