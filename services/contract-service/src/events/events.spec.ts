@@ -34,7 +34,7 @@ const cancelled = {
 };
 
 describe('the contract events', () => {
-  it('are the lifecycle’s four, the approval policy’s six, the authority review’s two and amendments’ and milestones’ seven, each with a schema and an aggregate', () => {
+  it('are the lifecycle’s four, the approval policy’s seven, the authority review’s two and amendments’ and milestones’ seven, each with a schema and an aggregate', () => {
     const names = [
       'CONTRACT_DRAFTED',
       'CONTRACT_SIGNATURE_RECORDED',
@@ -46,6 +46,7 @@ describe('the contract events', () => {
       'APPROVAL_POLICY_ACTIVATED',
       'APPROVAL_POLICY_RETIRED',
       'APPROVAL_POLICY_SUSPENDED',
+      'APPROVAL_POLICY_APPROVAL_REFUSED',
       'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
       'CONTRACT_SIGNATURE_REFUSED',
       'CONTRACT_AMENDMENT_PROPOSED',
@@ -110,6 +111,12 @@ describe('the approval policy events', () => {
       movedOrganizationId: 'ORG_OWNER',
       suspendedBy: 'system:contract-service',
       suspendedAt: '2026-10-05T10:00:00.000Z',
+    },
+    APPROVAL_POLICY_APPROVAL_REFUSED: {
+      ...base,
+      reason: 'SELF_APPROVAL',
+      refusedBy: 'USR_1',
+      refusedAt: '2026-10-05T10:00:00.000Z',
     },
   } as const;
 
@@ -491,6 +498,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
   it('names a refusal’s action and reason from closed lists, and nothing else', () => {
     const refused = payloads.CONTRACT_AUTHORITY_REFUSED;
     for (const action of [
+      'SIGN_CONTRACT',
       'PROPOSE_AMENDMENT',
       'SIGN_AMENDMENT',
       'PLAN_MILESTONE',
@@ -505,6 +513,8 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
       'NOT_EMPLOYER',
       'SIGNATURE_POLICY_REQUIRED',
       'POLICY_AUTHOR_NOT_GOVERNING',
+      'MEMBER_OF_BOTH_PARTIES',
+      'SAME_PERSON_BOTH_SIDES',
     ]) {
       expect(
         validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, reason }),

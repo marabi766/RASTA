@@ -22,6 +22,7 @@ import {
   seedSigned,
   signAmendment,
 } from './amendment-helpers';
+import { EventPublisher } from '../src/events/publisher';
 import {
   cleanup,
   eventsOf,
@@ -337,10 +338,14 @@ describe('amendments of a signed contract', () => {
         expect(refused.map((e) => e.payload.reason)).toEqual(['ROLE_NOT_PERMITTED']);
       });
 
-      it('the platform administrator, the oversight role, a service token and a token without a user id are refused before anything is read', async () => {
+      it('the platform administrator, the oversight role, a service token and a token without a user id are refused; only the administrator acting for the party is recorded', async () => {
         const c = await signed();
         const refusedBefore = (await refusedEvents(c.employer)).length;
         await propose(api, c.id, systemAdminOf(c.employer)).expect(403);
+        const recorded = (await refusedEvents(c.employer)).slice(refusedBefore);
+        expect(recorded.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+          ['PROPOSE_AMENDMENT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ]);
         await propose(api, c.id, auditor(c.employer)).expect(403);
         await http(api)
           .post(`/v1/contracts/${c.id}/amendments`)
@@ -358,7 +363,7 @@ describe('amendments of a signed contract', () => {
         ).expect(403);
         await propose(api, c.id, undefined).expect(401);
         expect(await amendmentRows(w, c.id)).toEqual([]);
-        expect((await refusedEvents(c.employer)).length).toBe(refusedBefore);
+        expect((await refusedEvents(c.employer)).length).toBe(refusedBefore + 1);
       });
     });
   });
@@ -573,6 +578,18 @@ describe('amendments of a signed contract', () => {
           }),
         ).expect(403);
         expect(await amendmentSignatures(w, proposed.id)).toHaveLength(1);
+        // Each is an audit record, written before the 403 (S-06).
+        expect(
+          (await refusedEvents(c.employer)).map((e) => [
+            e.payload.action,
+            e.payload.side,
+            e.payload.subjectId,
+            e.payload.reason,
+          ]),
+        ).toEqual([
+          ['SIGN_AMENDMENT', 'CONTRACTOR', proposed.id, 'SAME_PERSON_BOTH_SIDES'],
+          ['SIGN_AMENDMENT', 'CONTRACTOR', proposed.id, 'SAME_PERSON_BOTH_SIDES'],
+        ]);
       });
 
       it('refuses a member of both parties, whichever side they act for', async () => {
@@ -591,6 +608,45 @@ describe('amendments of a signed contract', () => {
           proposed.id,
           person(c.contractor, ['CONTRACTOR'], { memberships: [c.employer] }),
         ).expect(403);
+        expect(await amendmentSignatures(w, proposed.id)).toEqual([]);
+        expect(
+          (await refusedEvents(c.employer)).map((e) => [e.payload.side, e.payload.reason]),
+        ).toEqual([
+          ['EMPLOYER', 'MEMBER_OF_BOTH_PARTIES'],
+          ['CONTRACTOR', 'MEMBER_OF_BOTH_PARTIES'],
+        ]);
+      });
+
+      it('a separation-of-duties refusal that cannot be recorded is a retryable 503 and leaves its key free; recorded, a repeat under the same key is refused again without a second event', async () => {
+        const c = await signed();
+        const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;
+        const both = person(c.employer, ['ORGANIZATION_ADMIN'], { memberships: [c.contractor] });
+        const retryKey = idemKey('amend-sod');
+        const attempt = () => signAmendment(api, c.id, proposed.id, both, {}, retryKey);
+
+        const publisher = api.app.get(EventPublisher);
+        const original = publisher.enqueue.bind(publisher);
+        const failing = jest
+          .spyOn(publisher, 'enqueue')
+          .mockImplementation(async (...args: Parameters<typeof original>) => {
+            if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+            return original(...args);
+          });
+        try {
+          const down = await attempt().expect(503);
+          expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+          expect(down.headers['retry-after']).toBe('1');
+        } finally {
+          failing.mockRestore();
+        }
+        expect(await refusedEvents(c.employer)).toEqual([]);
+
+        const first = await attempt().expect(403);
+        expect(await refusedEvents(c.employer)).toHaveLength(1);
+        const again = await attempt().expect(403);
+        expect(again.body.code).toBe(first.body.code);
+        expect(reasons(again.body)).toEqual(['amendment:MEMBER_OF_BOTH_PARTIES']);
+        expect(await refusedEvents(c.employer)).toHaveLength(1);
         expect(await amendmentSignatures(w, proposed.id)).toEqual([]);
       });
 
@@ -659,6 +715,15 @@ describe('amendments of a signed contract', () => {
         ).expect(403);
         await signAmendment(api, c.id, proposed.id, undefined).expect(401);
         expect(await amendmentSignatures(w, proposed.id)).toEqual([]);
+        const refused = await refusedEvents(c.employer);
+        expect(
+          refused.map((e) => [
+            e.payload.action,
+            e.payload.side,
+            e.payload.reason,
+            e.payload.subjectId,
+          ]),
+        ).toEqual([['SIGN_AMENDMENT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR', proposed.id]]);
       });
     });
 
