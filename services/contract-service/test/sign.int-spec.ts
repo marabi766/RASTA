@@ -285,14 +285,20 @@ describe('POST /v1/contracts/{id}/sign', () => {
       await sign(id, person(contractor, ['CONTRACTOR'], claims)).expect(200);
       const events = (await eventsOf(w.prisma, employer)).length;
 
-      // The same person, the CONTRACTOR role revoked: only DRIVER is left.
-      const revoked = person(contractor, ['DRIVER'], claims);
-      const read = await get(id, revoked).expect(403);
-      const again = await sign(id, revoked, {}, key()).expect(403);
-      // GET's refusal, word for word — not the signing role's — and not the contract in any form.
-      expect(bare(again.body)).toEqual(bare(read.body));
-      expect(again.body).not.toHaveProperty('id');
-      expect(JSON.stringify(again.body)).not.toMatch(/amount|DRAFT/i);
+      // The same person, the CONTRACTOR role revoked: GET's refusal, word for word, whatever it is
+      // — 403 with no reading role left, and 404 with only an employer's reading role, which reads
+      // nothing in the contractor's organization (a new signature without the role would be 403).
+      for (const [roles, status] of [
+        [['DRIVER'], 403],
+        [['ORGANIZATION_ADMIN'], 404],
+      ] as const) {
+        const revoked = person(contractor, [...roles], claims);
+        const read = await get(id, revoked).expect(status);
+        const again = await sign(id, revoked, {}, key()).expect(status);
+        expect(bare(again.body)).toEqual(bare(read.body));
+        expect(again.body).not.toHaveProperty('id');
+        expect(JSON.stringify(again.body)).not.toMatch(/amount|DRAFT/i);
+      }
 
       const signatures = await signaturesOf(id);
       expect(signatures).toHaveLength(1);
@@ -303,9 +309,8 @@ describe('POST /v1/contracts/{id}/sign', () => {
 
       // Another person without the role, on the side already signed, is a new signature: refused
       // for the role — not 409, which would tell them the side has signed.
-      const other = await sign(id, person(contractor, ['DRIVER'])).expect(403);
+      const other = await sign(id, person(contractor, ['ORGANIZATION_ADMIN'])).expect(403);
       expect(other.body.code).toBe('INSUFFICIENT_ROLE');
-      expect(bare(other.body)).not.toEqual(bare(read.body));
       expect(await signaturesOf(id)).toHaveLength(1);
     });
 

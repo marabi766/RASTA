@@ -527,21 +527,27 @@ describe('amendments of a signed contract', () => {
       ).expect(200);
       const events = (await eventsOf(w.prisma, c.employer)).length;
 
-      // The same person, the CONTRACTOR role revoked: only DRIVER is left.
-      const revoked = person(c.contractor, ['DRIVER'], claims);
-      const read = await get(c.id, proposed.id, revoked).expect(403);
-      const again = await signAmendment(
-        api,
-        c.id,
-        proposed.id,
-        revoked,
-        {},
-        idemKey('amd-sign-contractor-revoked'),
-      ).expect(403);
-      // GET's refusal, word for word — not the signing role's — and nothing of the amendment.
-      expect(bare(again.body)).toEqual(bare(read.body));
-      expect(again.body).not.toHaveProperty('id');
-      expect(JSON.stringify(again.body)).not.toMatch(/delta|amount|PROPOSED/i);
+      // The same person, the CONTRACTOR role revoked: GET's refusal, word for word, whatever it is
+      // — 403 with no reading role left, and 404 with only an employer's reading role, which reads
+      // nothing in the contractor's organization (a new signature without the role would be 403).
+      for (const [roles, status] of [
+        [['DRIVER'], 403],
+        [['ORGANIZATION_ADMIN'], 404],
+      ] as const) {
+        const revoked = person(c.contractor, [...roles], claims);
+        const read = await get(c.id, proposed.id, revoked).expect(status);
+        const again = await signAmendment(
+          api,
+          c.id,
+          proposed.id,
+          revoked,
+          {},
+          idemKey(`amd-sign-contractor-revoked-${status}`),
+        ).expect(status);
+        expect(bare(again.body)).toEqual(bare(read.body));
+        expect(again.body).not.toHaveProperty('id');
+        expect(JSON.stringify(again.body)).not.toMatch(/delta|amount|PROPOSED/i);
+      }
 
       const signatures = await amendmentSignatures(w, proposed.id);
       expect(signatures).toHaveLength(1);
@@ -558,10 +564,9 @@ describe('amendments of a signed contract', () => {
         api,
         c.id,
         proposed.id,
-        person(c.contractor, ['DRIVER']),
+        person(c.contractor, ['ORGANIZATION_ADMIN']),
       ).expect(403);
       expect(other.body.code).toBe('INSUFFICIENT_ROLE');
-      expect(bare(other.body)).not.toEqual(bare(read.body));
       const refused = await refusedEvents(c.employer);
       expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
         ['SIGN_AMENDMENT', 'CONTRACTOR', 'ROLE_NOT_PERMITTED'],
