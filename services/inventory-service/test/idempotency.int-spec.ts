@@ -1,0 +1,356 @@
+import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import type { PrismaClient } from '../src/generated/prisma';
+import { PrismaClient as Owner } from '../src/generated/prisma';
+import { PrismaService } from '../src/prisma/prisma.service';
+import { IdempotencyStore, hashRequest } from '../src/shared/idempotency';
+import { WarehouseService } from '../src/warehouse/warehouse.service';
+import { actor, client, key, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
+import {
+  TEST_POOL_CONNECTIONS,
+  cleanup,
+  databaseUrl,
+  expectReconciled,
+  newOrganizationId,
+  ownerDatabaseUrl,
+  runtimeClient,
+} from './helpers';
+
+/**
+ * Idempotent commands (docs/06 § 6.8; ADR-056 plan step 4): one key, one effect — the same
+ * request replays the first answer and moves nothing again; another request under the key is
+ * refused; concurrent duplicates make one effect; and a key whose record has expired still cannot
+ * apply its command a second time (the `command_key_hash` backstop).
+ */
+describe('idempotent stock commands', () => {
+  let api: ApiHarness;
+  let raw: PrismaClient;
+  const organizations: string[] = [];
+
+  const org = (): string => {
+    const id = newOrganizationId();
+    organizations.push(id);
+    return id;
+  };
+  const movementsOf = async (stockItemId: string) =>
+    Number(
+      (
+        await raw.$queryRaw<{ n: bigint }[]>`
+          SELECT count(*) AS n FROM "stock_movement" WHERE "stock_item_id" = ${stockItemId}`
+      )[0]?.n,
+    );
+
+  beforeAll(async () => {
+    api = await startApi();
+    raw = runtimeClient();
+  });
+
+  afterAll(async () => {
+    await cleanup(organizations);
+    await raw.$disconnect();
+    await api.close();
+  });
+
+  it('replays the same request’s answer and moves nothing again', async () => {
+    const a = org();
+    const { stockItemId, warehouseId, productId } = await seedStock(api, a, 5);
+    const owner = client(api, orgAdmin(a));
+    const k = key();
+
+    const first = await owner.receive(warehouseId, 3, productId, k);
+    const again = await owner.receive(warehouseId, 3, productId, k);
+    expect(first.status).toBe(201);
+    expect(again.status).toBe(201);
+    expect(again.body).toEqual(first.body);
+    expect((await owner.stockItem(stockItemId)).body.onHandQuantity).toBe(8);
+    expect(await movementsOf(stockItemId)).toBe(2);
+
+    const reserveKey = key();
+    const reserved = await owner.reserve([{ stockItemId, quantity: 2 }], {}, reserveKey);
+    const replayed = await owner.reserve([{ stockItemId, quantity: 2 }], {}, reserveKey);
+    expect(replayed.body).toEqual(reserved.body);
+    expect((await owner.stockItem(stockItemId)).body.reservedQuantity).toBe(2);
+  });
+
+  it('refuses the same key with another request (409 IDEMPOTENCY_KEY_REUSED)', async () => {
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 5);
+    const owner = client(api, orgAdmin(a));
+    const k = key();
+    expect((await owner.adjust(stockItemId, 1, k)).status).toBe(201);
+    const other = await owner.adjust(stockItemId, 2, k);
+    expect(other.status).toBe(409);
+    expect(other.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect((await owner.stockItem(stockItemId)).body.onHandQuantity).toBe(6);
+  });
+
+  it('makes one effect of ten concurrent duplicates', async () => {
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 20);
+    const owner = client(api, orgAdmin(a));
+    const k = key();
+
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, () => owner.reserve([{ stockItemId, quantity: 3 }], {}, k)),
+    );
+    const succeeded = responses.filter((response) => response.status === 201);
+    // Each duplicate either waited for the first and replayed its answer, or was told to retry.
+    for (const response of responses) expect([201, 409]).toContain(response.status);
+    expect(succeeded.length).toBeGreaterThanOrEqual(1);
+    const ids = new Set(succeeded.map((response) => response.body.reservations[0].id));
+    expect(ids.size).toBe(1);
+    expect((await owner.stockItem(stockItemId)).body.reservedQuantity).toBe(3);
+    await expectReconciled(raw, [a]);
+  });
+
+  it('never applies a key twice, even after its record expired (the domain backstop)', async () => {
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 5);
+    const owner = client(api, orgAdmin(a));
+    const k = key();
+    expect((await owner.adjust(stockItemId, 1, k)).status).toBe(201);
+
+    // The 24-hour record is gone, as the upkeep timer removes it.
+    const store = new Owner({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await store.idempotencyKey.deleteMany({ where: { organizationId: a } });
+    } finally {
+      await store.$disconnect();
+    }
+
+    const late = await owner.adjust(stockItemId, 1, k);
+    expect(late.status).toBe(409);
+    expect(late.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect((await owner.stockItem(stockItemId)).body.onHandQuantity).toBe(6);
+    expect(await movementsOf(stockItemId)).toBe(2);
+  });
+
+  it('frees the key of a refused command, so the corrected retry runs', async () => {
+    const a = org();
+    const { stockItemId, warehouseId, productId } = await seedStock(api, a, 1);
+    const owner = client(api, orgAdmin(a));
+    const k = key();
+    expect((await owner.reserve([{ stockItemId, quantity: 3 }], {}, k)).status).toBe(422);
+    await owner.receive(warehouseId, 5, productId);
+    expect((await owner.reserve([{ stockItemId, quantity: 3 }], {}, k)).status).toBe(201);
+  });
+
+  describe('a claim another request left behind', () => {
+    const userId = 'USR-IDEM-HOLDER1';
+    const asUser = (organizationId: string) =>
+      client(api, actor(organizationId, ['ORGANIZATION_ADMIN'], { rastaUserId: userId }));
+
+    async function plant(
+      organizationId: string,
+      endpoint: string,
+      k: string,
+      body: unknown,
+      expiresAt: Date,
+    ): Promise<void> {
+      const store = new Owner({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      try {
+        await store.idempotencyKey.create({
+          data: {
+            organizationId,
+            endpoint,
+            key: k,
+            requestHash: hashRequest({ caller: userId, body }),
+            claimToken: `planted-${key()}`,
+            state: 'IN_PROGRESS',
+            expiresAt,
+          },
+        });
+      } finally {
+        await store.$disconnect();
+      }
+    }
+
+    it('is taken over once its lease has lapsed', async () => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 5);
+      const k = key();
+      const body = { stockItemId, quantityDelta: 2 };
+      await plant(a, 'POST /v1/stock/adjustments', k, body, new Date(Date.now() - 1000));
+      const taken = await asUser(a).adjust(stockItemId, 2, k);
+      expect(taken.status).toBe(201);
+      expect(taken.body.stockItem.onHandQuantity).toBe(7);
+    });
+
+    it('is waited for while live, then answered 409 CONFLICT with Retry-After', async () => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 5);
+      const k = key();
+      const body = { stockItemId, quantityDelta: 2 };
+      await plant(a, 'POST /v1/stock/adjustments', k, body, new Date(Date.now() + 60_000));
+      const waiting = await asUser(a).adjust(stockItemId, 2, k);
+      expect(waiting.status).toBe(409);
+      expect(waiting.body.code).toBe('CONFLICT');
+      expect(waiting.headers['retry-after']).toBe('1');
+      expect((await asUser(a).stockItem(stockItemId)).body.onHandQuantity).toBe(5);
+    });
+  });
+
+  it('answers a claim that cannot get a connection (the pool exhausted) 409 CONFLICT with Retry-After, never a 500', async () => {
+    const a = org();
+    // One connection, held by another transaction for longer than the claim's whole budget.
+    const url = new URL(databaseUrl());
+    url.searchParams.set('connection_limit', '1');
+    const narrow = new PrismaService(url.toString());
+    const store = new IdempotencyStore(
+      narrow,
+      { INVENTORY_IDEMPOTENCY_TTL_HOURS: 24, INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 120 },
+      () => undefined,
+    );
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = narrow.transaction(() => held, { timeoutMs: 30_000 });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const work = jest.fn();
+      const context = createSystemContext({
+        correlationId: key(),
+        organizationId: a,
+        userId: 'USR-IDEM-POOL0001',
+      });
+      const outcome = await runWithContext(context, () =>
+        store.execute('POST /v1/stock/adjustments', key(), { n: 1 }, 201, work, jest.fn()),
+      ).catch((error: unknown) => error);
+
+      expect(outcome).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+      expect(work).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await holder;
+      await narrow.onModuleDestroy();
+    }
+    expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
+  }, 30_000);
+
+  /**
+   * Codex round 2, finding 2: creating a warehouse opened its own transaction, outside the
+   * translation every stock command's goes through — a pool with no connection left once the
+   * key was claimed was a 500, with no Retry-After.
+   */
+  describe('a warehouse whose transaction cannot get a connection after its key was claimed', () => {
+    let quick: ApiHarness;
+
+    beforeAll(async () => {
+      quick = await startApi({ INVENTORY_LOCK_TIMEOUT_MS: '300' });
+    });
+
+    afterAll(async () => {
+      await quick.close();
+    });
+
+    /** Every connection of the app's pool, held by an open transaction until released. */
+    async function occupyPool(prisma: PrismaService): Promise<() => Promise<void>> {
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let started = 0;
+      let allStarted: () => void = () => undefined;
+      const ready = new Promise<void>((resolve) => {
+        allStarted = resolve;
+      });
+      const holders = Array.from({ length: TEST_POOL_CONNECTIONS }, () =>
+        prisma.transaction(
+          async () => {
+            started += 1;
+            if (started === TEST_POOL_CONNECTIONS) allStarted();
+            await gate;
+          },
+          { timeoutMs: 30_000, maxWaitMs: 10_000 },
+        ),
+      );
+      await ready;
+      return async () => {
+        open();
+        await Promise.all(holders);
+      };
+    }
+
+    it('is answered 409 CONFLICT with Retry-After: no warehouse, no event, and the key free for the retry', async () => {
+      const a = org();
+      const owner = client(quick, orgAdmin(a));
+      const service = quick.app.get(WarehouseService);
+      const create = service.create.bind(service);
+      let claimedBefore = -1;
+      const spy = jest.spyOn(service, 'create').mockImplementationOnce(async (dto, fence) => {
+        // The claim is committed by now; only the warehouse's own transaction is left to run.
+        claimedBefore = await raw.idempotencyKey.count({
+          where: { organizationId: a, state: 'IN_PROGRESS' },
+        });
+        const release = await occupyPool(quick.prisma);
+        try {
+          return await create(dto, fence);
+        } finally {
+          await release();
+        }
+      });
+      const k = key();
+      try {
+        const refused = await owner.createWarehouse({ name: 'Pool warehouse' }, k);
+        expect(claimedBefore).toBe(1);
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('CONFLICT');
+        expect(refused.headers['retry-after']).toBe('1');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await raw.warehouse.count({ where: { organizationId: a } })).toBe(0);
+      expect(await raw.outboxMessage.count({ where: { organizationId: a } })).toBe(0);
+      // The claim was released with the refusal: the same key runs the retry.
+      expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
+
+      const retried = await owner.createWarehouse({ name: 'Pool warehouse' }, k);
+      expect(retried.status).toBe(201);
+      expect(await raw.warehouse.count({ where: { organizationId: a } })).toBe(1);
+      expect(
+        await raw.outboxMessage.count({
+          where: { organizationId: a, eventName: 'WAREHOUSE_CREATED' },
+        }),
+      ).toBe(1);
+    }, 30_000);
+  });
+
+  it('purges expired records by age alone', async () => {
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 1);
+    await client(api, orgAdmin(a)).adjust(stockItemId, 1);
+    const store = new Owner({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    try {
+      await store.idempotencyKey.updateMany({
+        where: { organizationId: a },
+        data: { expiresAt: new Date(Date.now() - 1000) },
+      });
+    } finally {
+      await store.$disconnect();
+    }
+    expect(await api.app.get(IdempotencyStore).purgeExpired()).toBeGreaterThanOrEqual(2);
+    expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
+  });
+
+  it('keeps the same key of two organizations apart', async () => {
+    const a = org();
+    const b = org();
+    const one = await seedStock(api, a, 1);
+    const two = await seedStock(api, b, 1);
+    const k = key();
+    expect((await client(api, orgAdmin(a)).adjust(one.stockItemId, 1, k)).status).toBe(201);
+    expect((await client(api, orgAdmin(b)).adjust(two.stockItemId, 1, k)).status).toBe(201);
+  });
+
+  it('stores no raw key in a domain table or an event (S-09)', async () => {
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 2);
+    const k = `visible-${key()}`;
+    await client(api, orgAdmin(a)).reserve([{ stockItemId, quantity: 1 }], {}, k);
+    const leaks = await raw.$queryRaw<{ n: bigint }[]>`
+      SELECT (SELECT count(*) FROM "stock_movement" m WHERE m::text LIKE ${`%${k}%`})
+           + (SELECT count(*) FROM "stock_reservation" r WHERE r::text LIKE ${`%${k}%`})
+           + (SELECT count(*) FROM "outbox_message" o WHERE o::text LIKE ${`%${k}%`}) AS n`;
+    expect(Number(leaks[0]?.n)).toBe(0);
+  });
+});

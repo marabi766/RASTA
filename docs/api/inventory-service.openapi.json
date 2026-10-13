@@ -1,0 +1,2863 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/warehouses": {
+      "get": {
+        "description": "Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "WarehouseController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The owner: the organization that operates it."
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "location": {
+                            "type": "object",
+                            "properties": {
+                              "latitude": {
+                                "type": "number"
+                              },
+                              "longitude": {
+                                "type": "number"
+                              }
+                            },
+                            "required": ["latitude", "longitude"],
+                            "additionalProperties": false,
+                            "nullable": true,
+                            "description": "WGS 84 point, or null."
+                          },
+                          "status": {
+                            "const": "ACTIVE",
+                            "description": "ACTIVE only in this version; the lifecycle is Q-108."
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "name",
+                          "location",
+                          "status",
+                          "createdAt",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List the warehouses of the organization the request acts for, newest first",
+        "tags": ["warehouses"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "description": "The owner is the organization the request acts for — any organization, never assumed to be a union (ADR-056 § 5). A body that names another organization in `organizationId` is 403 FORBIDDEN, and so is acting for an organization the caller is not a member of (TENANT_MISMATCH). The warehouse is ACTIVE; there is no lifecycle yet (Q-108). WAREHOUSE_CREATED carries identifiers and the instant only — no name, no location. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "WarehouseController_create_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner: the organization that operates it."
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "object",
+                      "properties": {
+                        "latitude": {
+                          "type": "number"
+                        },
+                        "longitude": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["latitude", "longitude"],
+                      "additionalProperties": false,
+                      "nullable": true,
+                      "description": "WGS 84 point, or null."
+                    },
+                    "status": {
+                      "const": "ACTIVE",
+                      "description": "ACTIVE only in this version; the lifecycle is Q-108."
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "name",
+                    "location",
+                    "status",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create a warehouse, owned by the organization the request acts for",
+        "tags": ["warehouses"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[^\\p{Bidi_Control}]*$",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "Trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the owner’s people; never on an event."
+                  },
+                  "location": {
+                    "type": "object",
+                    "properties": {
+                      "latitude": {
+                        "type": "number",
+                        "minimum": -90,
+                        "maximum": 90
+                      },
+                      "longitude": {
+                        "type": "number",
+                        "minimum": -180,
+                        "maximum": 180
+                      }
+                    },
+                    "required": ["latitude", "longitude"],
+                    "additionalProperties": false,
+                    "description": "Optional WGS 84 point. Never on an event."
+                  },
+                  "organizationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Optional. The owner is always the organization the request acts for; naming any other organization is 403 FORBIDDEN (ADR-056 § 5, negative test 5), never a warehouse for it."
+                  }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/warehouses/{id}": {
+      "get": {
+        "description": "Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "WarehouseController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner: the organization that operates it."
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "object",
+                      "properties": {
+                        "latitude": {
+                          "type": "number"
+                        },
+                        "longitude": {
+                          "type": "number"
+                        }
+                      },
+                      "required": ["latitude", "longitude"],
+                      "additionalProperties": false,
+                      "nullable": true,
+                      "description": "WGS 84 point, or null."
+                    },
+                    "status": {
+                      "const": "ACTIVE",
+                      "description": "ACTIVE only in this version; the lifecycle is Q-108."
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "name",
+                    "location",
+                    "status",
+                    "createdAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one warehouse",
+        "tags": ["warehouses"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/stock/reservations": {
+      "get": {
+        "description": "Optionally by `status` and by `stockItemId`. In this version the holder is the owner (Q-104), so these are the owner’s reservations. Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "ReservationController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["ACTIVE", "CONSUMED", "RELEASED", "EXPIRED"]
+            }
+          },
+          {
+            "name": "stockItemId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The warehouse owner."
+                          },
+                          "warehouseId": {
+                            "type": "string"
+                          },
+                          "stockItemId": {
+                            "type": "string"
+                          },
+                          "holderOrganizationId": {
+                            "type": "string"
+                          },
+                          "orderReference": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["ACTIVE", "CONSUMED", "RELEASED", "EXPIRED"]
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "endedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When it was consumed, released or expired; null while ACTIVE."
+                          },
+                          "endedBy": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Who ended it — `inventory-service` for an expiry; null while ACTIVE."
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "warehouseId",
+                          "stockItemId",
+                          "holderOrganizationId",
+                          "orderReference",
+                          "quantity",
+                          "status",
+                          "expiresAt",
+                          "createdAt",
+                          "createdBy",
+                          "endedAt",
+                          "endedBy",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List reservations, newest first",
+        "tags": ["reservations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "description": "Reserves each line’s quantity of its stock item for the holder — reserved grows, on hand does not — and records a RESERVE movement and STOCK_RESERVED per line. All or nothing: a line short of available stock reserves none (422 `INSUFFICIENT_AVAILABLE_STOCK`); lines of two warehouses are 422 `LINES_SPAN_WAREHOUSES`; an `expiresAt` not in the future or past the longest reservation allowed is 422 `EXPIRY_OUT_OF_RANGE`; a holder other than the owner is 422 `HOLDER_NOT_OWNER` (Q-104). A stock item of another organization is 404. Under any number of concurrent requests the stock is never over-reserved: available never falls below zero. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ReservationController_reserve_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reservations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The warehouse owner."
+                          },
+                          "warehouseId": {
+                            "type": "string"
+                          },
+                          "stockItemId": {
+                            "type": "string"
+                          },
+                          "holderOrganizationId": {
+                            "type": "string"
+                          },
+                          "orderReference": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "quantity": {
+                            "type": "integer"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["ACTIVE", "CONSUMED", "RELEASED", "EXPIRED"]
+                          },
+                          "expiresAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "endedAt": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "When it was consumed, released or expired; null while ACTIVE."
+                          },
+                          "endedBy": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Who ended it — `inventory-service` for an expiry; null while ACTIVE."
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "warehouseId",
+                          "stockItemId",
+                          "holderOrganizationId",
+                          "orderReference",
+                          "quantity",
+                          "status",
+                          "expiresAt",
+                          "createdAt",
+                          "createdBy",
+                          "endedAt",
+                          "endedBy",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["reservations"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "reservation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["RESERVATION_NOT_ACTIVE"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "reservation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "INSUFFICIENT_AVAILABLE_STOCK",
+                              "LINES_SPAN_WAREHOUSES",
+                              "EXPIRY_OUT_OF_RANGE",
+                              "HOLDER_NOT_OWNER"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Reserve stock: every line, or none",
+        "tags": ["reservations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "holderOrganizationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Who the stock is held for. In this version the owner only — the organization the request acts for, and the default (Q-104); any other is 422 HOLDER_NOT_OWNER."
+                  },
+                  "orderReference": {
+                    "type": "string",
+                    "pattern": "^(ORD|PO)_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "Optional opaque `ORD_`/`PO_` reference of the order the stock is held for."
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Optional. When the reservation is released by itself if not issued or released first. No default: without it a reservation lives until released or issued (Q-102). Must be in the future and at most INVENTORY_RESERVATION_MAX_TTL_SECONDS (7 days by default) ahead, by the service’s clock (422 EXPIRY_OUT_OF_RANGE)."
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "stockItemId": {
+                          "type": "string",
+                          "pattern": "^SKI_[0-9A-HJKMNP-TV-Z]{26}$",
+                          "description": "A stock item of the organization the request acts for."
+                        },
+                        "quantity": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483647,
+                          "description": "A positive whole number of the product’s base unit (Q-105)."
+                        }
+                      },
+                      "required": ["stockItemId", "quantity"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "description": "1 to 50 lines, each a distinct stock item of one warehouse (422 LINES_SPAN_WAREHOUSES). All or nothing: one line short of available stock reserves none (422 INSUFFICIENT_AVAILABLE_STOCK). One reservation per line."
+                  }
+                },
+                "required": ["lines"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stock/reservations/{id}": {
+      "get": {
+        "description": "Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "ReservationController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The warehouse owner."
+                    },
+                    "warehouseId": {
+                      "type": "string"
+                    },
+                    "stockItemId": {
+                      "type": "string"
+                    },
+                    "holderOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "quantity": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["ACTIVE", "CONSUMED", "RELEASED", "EXPIRED"]
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "endedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was consumed, released or expired; null while ACTIVE."
+                    },
+                    "endedBy": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Who ended it — `inventory-service` for an expiry; null while ACTIVE."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "warehouseId",
+                    "stockItemId",
+                    "holderOrganizationId",
+                    "orderReference",
+                    "quantity",
+                    "status",
+                    "expiresAt",
+                    "createdAt",
+                    "createdBy",
+                    "endedAt",
+                    "endedBy",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one reservation",
+        "tags": ["reservations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/stock/reservations/{id}/release": {
+      "post": {
+        "description": "Reserved falls by the reservation’s quantity, on hand does not; a RELEASE movement and STOCK_RELEASED (`reason: RELEASED`). `expectedVersion` is optional. A reservation that is no longer ACTIVE — issued, released, or past its `expiresAt` (expired first, under the same lock) — is 409 `RESERVATION_NOT_ACTIVE` (INVALID_STATE_TRANSITION). A reservation of another organization, even on the same stock item, is 404 (ADR-056 § 5). One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ReservationController_release_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The warehouse owner."
+                    },
+                    "warehouseId": {
+                      "type": "string"
+                    },
+                    "stockItemId": {
+                      "type": "string"
+                    },
+                    "holderOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "quantity": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["ACTIVE", "CONSUMED", "RELEASED", "EXPIRED"]
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "endedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was consumed, released or expired; null while ACTIVE."
+                    },
+                    "endedBy": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Who ended it — `inventory-service` for an expiry; null while ACTIVE."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "warehouseId",
+                    "stockItemId",
+                    "holderOrganizationId",
+                    "orderReference",
+                    "quantity",
+                    "status",
+                    "expiresAt",
+                    "createdAt",
+                    "createdBy",
+                    "endedAt",
+                    "endedBy",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "reservation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["RESERVATION_NOT_ACTIVE"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "reservation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "INSUFFICIENT_AVAILABLE_STOCK",
+                              "LINES_SPAN_WAREHOUSES",
+                              "EXPIRY_OUT_OF_RANGE",
+                              "HOLDER_NOT_OWNER"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Release a reservation (ACTIVE → RELEASED): the stock stays",
+        "tags": ["reservations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stock/reservations/{id}/issue": {
+      "post": {
+        "description": "Consumes the **whole** reservation — on hand and reserved both fall by its quantity — and records an ISSUE movement and STOCK_ISSUED. There is no partial issue (Q-107): a smaller need is a release and a new reservation. `expectedVersion` is optional. A reservation that is no longer ACTIVE — issued, released, or past its `expiresAt` (expired first, under the same lock) — is 409 `RESERVATION_NOT_ACTIVE` (INVALID_STATE_TRANSITION). A reservation of another organization, even on the same stock item, is 404 (ADR-056 § 5). One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ReservationController_issue_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The warehouse owner."
+                    },
+                    "warehouseId": {
+                      "type": "string"
+                    },
+                    "stockItemId": {
+                      "type": "string"
+                    },
+                    "holderOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "quantity": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["ACTIVE", "CONSUMED", "RELEASED", "EXPIRED"]
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "createdBy": {
+                      "type": "string"
+                    },
+                    "endedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When it was consumed, released or expired; null while ACTIVE."
+                    },
+                    "endedBy": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Who ended it — `inventory-service` for an expiry; null while ACTIVE."
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "warehouseId",
+                    "stockItemId",
+                    "holderOrganizationId",
+                    "orderReference",
+                    "quantity",
+                    "status",
+                    "expiresAt",
+                    "createdAt",
+                    "createdBy",
+                    "endedAt",
+                    "endedBy",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "reservation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["RESERVATION_NOT_ACTIVE"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "reservation"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "INSUFFICIENT_AVAILABLE_STOCK",
+                              "LINES_SPAN_WAREHOUSES",
+                              "EXPIRY_OUT_OF_RANGE",
+                              "HOLDER_NOT_OWNER"
+                            ]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Issue a reservation (ACTIVE → CONSUMED): the stock leaves",
+        "tags": ["reservations"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stock": {
+      "get": {
+        "description": "Optionally of one warehouse (`warehouseId`) or one product (`productId`). Each item shows on hand, reserved and available (on hand − reserved, never negative). Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "StockController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "warehouseId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "productId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The warehouse owner."
+                          },
+                          "warehouseId": {
+                            "type": "string"
+                          },
+                          "productId": {
+                            "type": "string"
+                          },
+                          "onHandQuantity": {
+                            "type": "integer",
+                            "description": "Physically in the warehouse."
+                          },
+                          "reservedQuantity": {
+                            "type": "integer",
+                            "description": "Held by ACTIVE reservations."
+                          },
+                          "availableQuantity": {
+                            "type": "integer",
+                            "description": "On hand minus reserved: what can still be reserved. Never negative."
+                          },
+                          "version": {
+                            "type": "integer",
+                            "description": "The item’s position in its own ledger: the number of movements applied to it."
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "warehouseId",
+                          "productId",
+                          "onHandQuantity",
+                          "reservedQuantity",
+                          "availableQuantity",
+                          "version",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List stock items and their balances, newest first",
+        "tags": ["stock"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/stock/movements": {
+      "get": {
+        "description": "Of one stock item (`stockItemId`), one warehouse (`warehouseId`) or all of the owner’s. Each movement states its deltas, the balance it left and the item’s ledger position (`itemVersion`, 1, 2, 3, … per item); the balance is always the sum of its movements. Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "StockController_movements_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "stockItemId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "warehouseId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "stockItemId": {
+                            "type": "string"
+                          },
+                          "warehouseId": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": ["RECEIPT", "RESERVE", "RELEASE", "ISSUE", "ADJUSTMENT"]
+                          },
+                          "onHandDelta": {
+                            "type": "integer"
+                          },
+                          "reservedDelta": {
+                            "type": "integer"
+                          },
+                          "onHandAfter": {
+                            "type": "integer"
+                          },
+                          "reservedAfter": {
+                            "type": "integer"
+                          },
+                          "itemVersion": {
+                            "type": "integer",
+                            "description": "The ledger position this movement brought its stock item to: 1, 2, 3, …"
+                          },
+                          "reservationId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "sourceReference": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string",
+                            "description": "The user id of the person, or `inventory-service` for an expiry."
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "stockItemId",
+                          "warehouseId",
+                          "type",
+                          "onHandDelta",
+                          "reservedDelta",
+                          "onHandAfter",
+                          "reservedAfter",
+                          "itemVersion",
+                          "reservationId",
+                          "sourceReference",
+                          "createdAt",
+                          "createdBy"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List stock movements — the append-only ledger — newest first",
+        "tags": ["stock"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/stock/{id}": {
+      "get": {
+        "description": "Closed by default (S-02). Read by the organization that owns the warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (both ORGANIZATION_ADMIN by default, Q-103) held in the organization the request acts for. Anything of another organization, and anything that does not exist, is 404, never 403 (S-03). AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "StockController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The warehouse owner."
+                    },
+                    "warehouseId": {
+                      "type": "string"
+                    },
+                    "productId": {
+                      "type": "string"
+                    },
+                    "onHandQuantity": {
+                      "type": "integer",
+                      "description": "Physically in the warehouse."
+                    },
+                    "reservedQuantity": {
+                      "type": "integer",
+                      "description": "Held by ACTIVE reservations."
+                    },
+                    "availableQuantity": {
+                      "type": "integer",
+                      "description": "On hand minus reserved: what can still be reserved. Never negative."
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "The item’s position in its own ledger: the number of movements applied to it."
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "warehouseId",
+                    "productId",
+                    "onHandQuantity",
+                    "reservedQuantity",
+                    "availableQuantity",
+                    "version",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one stock item and its balance",
+        "tags": ["stock"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/stock/receipts": {
+      "post": {
+        "description": "Adds `quantity` to on hand of the product in the warehouse, creating the stock item on its first receipt, and records a RECEIPT movement and STOCK_RECEIVED. A warehouse of another organization is 404. A balance past the largest quantity stored is 422 `QUANTITY_OUT_OF_RANGE`. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "StockController_receive_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stockItem": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "organizationId": {
+                          "type": "string",
+                          "description": "The warehouse owner."
+                        },
+                        "warehouseId": {
+                          "type": "string"
+                        },
+                        "productId": {
+                          "type": "string"
+                        },
+                        "onHandQuantity": {
+                          "type": "integer",
+                          "description": "Physically in the warehouse."
+                        },
+                        "reservedQuantity": {
+                          "type": "integer",
+                          "description": "Held by ACTIVE reservations."
+                        },
+                        "availableQuantity": {
+                          "type": "integer",
+                          "description": "On hand minus reserved: what can still be reserved. Never negative."
+                        },
+                        "version": {
+                          "type": "integer",
+                          "description": "The item’s position in its own ledger: the number of movements applied to it."
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "organizationId",
+                        "warehouseId",
+                        "productId",
+                        "onHandQuantity",
+                        "reservedQuantity",
+                        "availableQuantity",
+                        "version",
+                        "createdAt",
+                        "updatedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "movement": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "stockItemId": {
+                          "type": "string"
+                        },
+                        "warehouseId": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": ["RECEIPT", "RESERVE", "RELEASE", "ISSUE", "ADJUSTMENT"]
+                        },
+                        "onHandDelta": {
+                          "type": "integer"
+                        },
+                        "reservedDelta": {
+                          "type": "integer"
+                        },
+                        "onHandAfter": {
+                          "type": "integer"
+                        },
+                        "reservedAfter": {
+                          "type": "integer"
+                        },
+                        "itemVersion": {
+                          "type": "integer",
+                          "description": "The ledger position this movement brought its stock item to: 1, 2, 3, …"
+                        },
+                        "reservationId": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "sourceReference": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "createdBy": {
+                          "type": "string",
+                          "description": "The user id of the person, or `inventory-service` for an expiry."
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "stockItemId",
+                        "warehouseId",
+                        "type",
+                        "onHandDelta",
+                        "reservedDelta",
+                        "onHandAfter",
+                        "reservedAfter",
+                        "itemVersion",
+                        "reservationId",
+                        "sourceReference",
+                        "createdAt",
+                        "createdBy"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": ["stockItem", "movement"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (stock: ON_HAND_WOULD_BE_NEGATIVE, QUANTITY_OUT_OF_RANGE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "stock"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["ON_HAND_WOULD_BE_NEGATIVE", "QUANTITY_OUT_OF_RANGE"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Receive stock into a warehouse (on hand grows)",
+        "tags": ["stock"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "warehouseId": {
+                    "type": "string",
+                    "pattern": "^WHS_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "A warehouse of the organization the request acts for."
+                  },
+                  "productId": {
+                    "type": "string",
+                    "pattern": "^PRD_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "The marketplace product, `PRD_<ULID>`: an opaque reference this service never resolves (Q-105). Quantities are counted in its base unit; there is no unit-of-measure field."
+                  },
+                  "quantity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647,
+                    "description": "A positive whole number of the product’s base unit (Q-105)."
+                  },
+                  "sourceReference": {
+                    "type": "string",
+                    "pattern": "^(ORD|PO|ADJ)_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "Optional opaque reference — `ORD_`, `PO_` or `ADJ_` followed by a ULID — to the document this movement comes from. Never resolved here; carried on the movement and its event."
+                  }
+                },
+                "required": ["warehouseId", "productId", "quantity"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stock/adjustments": {
+      "post": {
+        "description": "Changes on hand by `quantityDelta` and records an ADJUSTMENT movement and STOCK_ADJUSTED — also ADR-056’s direct issue without a reservation. On hand may not fall below what is reserved (422 `ON_HAND_WOULD_BE_NEGATIVE`) nor pass the largest quantity stored (422 `QUANTITY_OUT_OF_RANGE`). No reason code or second approval is required: none is decided (Q-109); the operator, the movement and its event are the record. A stock item of another organization is 404. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "StockController_adjust_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "stockItem": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "organizationId": {
+                          "type": "string",
+                          "description": "The warehouse owner."
+                        },
+                        "warehouseId": {
+                          "type": "string"
+                        },
+                        "productId": {
+                          "type": "string"
+                        },
+                        "onHandQuantity": {
+                          "type": "integer",
+                          "description": "Physically in the warehouse."
+                        },
+                        "reservedQuantity": {
+                          "type": "integer",
+                          "description": "Held by ACTIVE reservations."
+                        },
+                        "availableQuantity": {
+                          "type": "integer",
+                          "description": "On hand minus reserved: what can still be reserved. Never negative."
+                        },
+                        "version": {
+                          "type": "integer",
+                          "description": "The item’s position in its own ledger: the number of movements applied to it."
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "updatedAt": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "organizationId",
+                        "warehouseId",
+                        "productId",
+                        "onHandQuantity",
+                        "reservedQuantity",
+                        "availableQuantity",
+                        "version",
+                        "createdAt",
+                        "updatedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "movement": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "stockItemId": {
+                          "type": "string"
+                        },
+                        "warehouseId": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": ["RECEIPT", "RESERVE", "RELEASE", "ISSUE", "ADJUSTMENT"]
+                        },
+                        "onHandDelta": {
+                          "type": "integer"
+                        },
+                        "reservedDelta": {
+                          "type": "integer"
+                        },
+                        "onHandAfter": {
+                          "type": "integer"
+                        },
+                        "reservedAfter": {
+                          "type": "integer"
+                        },
+                        "itemVersion": {
+                          "type": "integer",
+                          "description": "The ledger position this movement brought its stock item to: 1, 2, 3, …"
+                        },
+                        "reservationId": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "sourceReference": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "createdBy": {
+                          "type": "string",
+                          "description": "The user id of the person, or `inventory-service` for an expiry."
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "stockItemId",
+                        "warehouseId",
+                        "type",
+                        "onHandDelta",
+                        "reservedDelta",
+                        "onHandAfter",
+                        "reservedAfter",
+                        "itemVersion",
+                        "reservationId",
+                        "sourceReference",
+                        "createdAt",
+                        "createdBy"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": ["stockItem", "movement"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (stock: ON_HAND_WOULD_BE_NEGATIVE, QUANTITY_OUT_OF_RANGE)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "stock"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["ON_HAND_WOULD_BE_NEGATIVE", "QUANTITY_OUT_OF_RANGE"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Adjust on hand by a signed quantity (a count, a loss, a direct issue)",
+        "tags": ["stock"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stockItemId": {
+                    "type": "string",
+                    "pattern": "^SKI_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "A stock item of the organization the request acts for."
+                  },
+                  "quantityDelta": {
+                    "type": "integer",
+                    "minimum": -2147483647,
+                    "maximum": 2147483647,
+                    "description": "A signed whole number, never zero: positive adds to on hand, negative removes. On hand may not fall below what is reserved (422 ON_HAND_WOULD_BE_NEGATIVE)."
+                  },
+                  "sourceReference": {
+                    "type": "string",
+                    "pattern": "^(ORD|PO|ADJ)_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "Optional opaque reference — `ORD_`, `PO_` or `ADJ_` followed by a ULID — to the document this movement comes from. Never resolved here; carried on the movement and its event."
+                  }
+                },
+                "required": ["stockItemId", "quantityDelta"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "info": {
+    "title": "Rasta — Inventory Service",
+    "description": "Inventory and forward logistics (COM-006, ADR-056). Warehouses — of any organization, never assumed to be a union — and, per product and warehouse, a stock item whose balance (on hand, reserved, available = on hand − reserved) changes only through an append-only ledger of movements: RECEIPT, ADJUSTMENT, and the RESERVE / RELEASE / ISSUE of reservations. Every command is one transaction that locks the stock items it touches in ascending id order (PostgreSQL row locks, no Redis — ADR-056 § 4), so the balance, its movement and its event commit together; the database refuses a negative or over-reserved balance and any balance that does not equal the sum of its movements. Everything is the warehouse owner’s: another organization gets 404. Every command requires an Idempotency-Key. Products, orders and purchase orders are opaque references to the services that own them (Q-105); quantities are whole numbers of a product’s base unit. Shipments and tracking follow.",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "correlationId": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": ["code", "message"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -455,16 +455,31 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 
 ## Inventory — `rasta.inventory.v1`
 
-| رویداد                | مصرف‌کنندگان                 | Payload کلیدی                                 |
-| --------------------- | ---------------------------- | --------------------------------------------- |
-| `STOCK_RECEIVED`      | procurement · analytics      | `warehouseId`, `sku`, `quantity`              |
-| `STOCK_RESERVED`      | **marketplace (Saga سفارش)** | `reservationId`, `orderId`, `sku`, `quantity` |
-| `STOCK_RELEASED`      | marketplace (Saga سفارش)     | `reservationId`, `reason`                     |
-| `STOCK_ISSUED`        | marketplace · analytics      | `sku`, `quantity`, `destination`              |
-| `LOW_STOCK_DETECTED`  | notification · procurement   | `warehouseId`, `sku`, `current`, `threshold`  |
-| `SHIPMENT_CREATED`    | marketplace · notification   | `shipmentId`, `orderId`, `carrier`            |
-| `SHIPMENT_DISPATCHED` | notification                 | `shipmentId`, `dispatchedAt`                  |
-| `SHIPMENT_DELIVERED`  | marketplace · notification   | `shipmentId`, `deliveredAt`                   |
+> **COM-006 PR نخست (2026-10-13، ADR-056).** `inventory-service` شش رویداد زیر را تولید می‌کند؛ ستون Payload آن‌ها
+> Payload واقعی است (`services/inventory-service/src/events/events.ts`، `.strict()`، اعتبارسنجی در زمان انتشار).
+> **`sku` کاتالوگ `productId` شد** — همان ارجاع مبهم `PRD_<ULID>` به محصول marketplace که ADR-056 § ۱ نام می‌برد (Q-105) —
+> و `WAREHOUSE_CREATED` و `STOCK_ADJUSTED` (**پررنگ**) را مدیر پروژه برای همین PR پذیرفت: هر تغییر وضعیت از Outbox
+> می‌گذرد (A-08) و به audit-service می‌رسد (S-06). Payloadها فقط شناسه، مقدار صحیح و لحظه‌اند — نه نام و مکان انبار،
+> نه متن آزاد؛ `orderId` کاتالوگ `orderReference` مبهم (`ORD_`/`PO_`) است و `destination` نیست.
+>
+> **دو جریان (ADR-056 § ۶).** رویدادهای موجودی با `stockItemId` کلید می‌خورند (جریان **STRICT**: رزرو پیش از صدور)،
+> و `WAREHOUSE_CREATED` با `warehouseId`. هر رویداد موجودی موقعیت دفتر کالا را پس از حرکت حمل می‌کند (`itemVersion`،
+> پیوسته از ۱) همراه `onHandAfter`/`reservedAfter`. `STOCK_RELEASED` با `reason: EXPIRED` یعنی سرویس رزرو منقضی را
+> آزاد کرده (`releasedBy: null`، Q-102). `LOW_STOCK_DETECTED` تا تعیین آستانه ساخته نمی‌شود (Q-106)؛ رویدادهای محموله
+> با PR دوم. **امروز مصرف‌کننده‌ای جز audit نیست** (ADR-056 § ۷)؛ ستون مصرف‌کنندگان برنامه است.
+
+| رویداد                  | مصرف‌کنندگان                 | Payload کلیدی                                                                                                                              |
+| ----------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`WAREHOUSE_CREATED`** | **audit**                    | `warehouseId`, `organizationId`, `createdBy`, `createdAt`                                                                                  |
+| `STOCK_RECEIVED`        | procurement · analytics      | `stockItemId`, `warehouseId`, `productId`, `movementId`, `itemVersion`, `quantity`, `onHandAfter`, `reservedAfter`, `sourceReference`      |
+| **`STOCK_ADJUSTED`**    | **audit** · analytics        | `stockItemId`, `warehouseId`, `productId`, `movementId`, `itemVersion`, `quantityDelta`, `onHandAfter`, `reservedAfter`, `sourceReference` |
+| `STOCK_RESERVED`        | **marketplace (Saga سفارش)** | `reservationId`, `stockItemId`, `productId`, `holderOrganizationId`, `orderReference`, `quantity`, `expiresAt`, `itemVersion`, …           |
+| `STOCK_RELEASED`        | marketplace (Saga سفارش)     | `reservationId`, `stockItemId`, `quantity`, `reason` (`RELEASED`\|`EXPIRED`), `releasedBy`, `itemVersion`, …                               |
+| `STOCK_ISSUED`          | marketplace · analytics      | `reservationId`, `stockItemId`, `productId`, `quantity`, `issuedBy`, `itemVersion`, …                                                      |
+| `LOW_STOCK_DETECTED`    | notification · procurement   | (ساخته نشده — Q-106)                                                                                                                       |
+| `SHIPMENT_CREATED`      | marketplace · notification   | `shipmentId`, `orderId`, `carrier`                                                                                                         |
+| `SHIPMENT_DISPATCHED`   | notification                 | `shipmentId`, `dispatchedAt`                                                                                                               |
+| `SHIPMENT_DELIVERED`    | marketplace · notification   | `shipmentId`, `deliveredAt`                                                                                                                |
 
 ## Construction — `rasta.construction.v1`
 
