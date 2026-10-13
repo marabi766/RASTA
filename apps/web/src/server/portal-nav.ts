@@ -4,6 +4,7 @@ import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
 import { fetchCurrentUser, type CurrentUserResult } from './identity';
+import { requestRoles } from './realm-roles';
 import type { WebSession } from './session';
 
 /**
@@ -97,7 +98,8 @@ export function canReadTenders(
 
 /**
  * The navigation for a person, from the roles identity-service reports for the
- * organization they are acting in.
+ * organization they are acting in plus the global realm roles in their token
+ * (`SYSTEM_ADMIN`), which is the set the backend services act on.
  *
  * An identity answer that is missing or unreadable hides the gated link: it is
  * only a convenience, and showing it on a guess is the mistake being fixed. The
@@ -108,7 +110,8 @@ export async function loadPortalNav(
   current?: CurrentUserResult,
 ): Promise<readonly SidebarItem[]> {
   const result = current ?? (await fetchCurrentUser(session));
-  const roles = result.kind === 'USER' ? result.user.effectiveRoles : [];
+  const roles =
+    result.kind === 'USER' ? requestRoles(result.user.effectiveRoles, session.accessToken) : [];
   return portalNavFor({
     canReadProjects: canReadProjects(roles, webServerEnv()),
     canReadTenders: canReadTenders(roles, webServerEnv()),

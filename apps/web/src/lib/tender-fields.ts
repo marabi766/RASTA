@@ -86,6 +86,17 @@ export function statusReasonCodeLabel(code: string | null): string | null {
   return code === null ? null : (STATUS_REASON_CODE_LABELS[code] ?? null);
 }
 
+/**
+ * The in-app path of a tender's detail page, as a sign-in should bring the
+ * person back to it: the id percent-encoded as one segment, and `view` kept
+ * only when it is one of the two values the page understands. Always a
+ * single-slash-rooted path, so it passes `safeReturnTo`.
+ */
+export function tenderDetailPath(id: string, view: unknown): string {
+  const base = `/tenders/${encodeURIComponent(id)}`;
+  return view === 'open' || view === 'own' ? `${base}?view=${view}` : base;
+}
+
 const BASIS_POINTS_PER_PERCENT = 100;
 
 /**

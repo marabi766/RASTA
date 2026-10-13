@@ -5,11 +5,18 @@ import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
 import { fetchCurrentUser } from '@/server/identity';
+import { safeReturnTo } from '@/server/login-attempt';
 import { tenderDoorsFor } from '@/server/portal-nav';
+import { requestRoles } from '@/server/realm-roles';
 import { fetchOpenTender, fetchTender, fetchTenderCriteria } from '@/server/tenders';
+import { tenderDetailPath } from '@/lib/tender-fields';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
-import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './TenderDetailScreen';
+import {
+  IdentityUnavailableDetailScreen,
+  OpenTenderDetailScreen,
+  OwnTenderDetailScreen,
+} from './TenderDetailScreen';
 
 /**
  * The `/tenders/[id]` route — جزئیات مناقصه (docs/16 § ۱۶٫۶). Read-only.
@@ -18,7 +25,8 @@ import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './TenderDetailScr
  * (`/v1/tenders/{id}`) and the bidder's (`/v1/open-tenders/{id}`) — and the
  * address says which one a link meant (`?view=open` from the bidder's list). A
  * bare address takes the owner's door, or the bidder's for somebody who is only
- * a bidder. Whether this caller may see the tender is construction-service's
+ * a bidder. When the roles cannot be read no door is chosen and the person is
+ * told so. Whether this caller may see the tender is construction-service's
  * answer, against the record: one it will not show is `404` and is rendered as
  * absent. Bids are never asked for.
  */
@@ -34,17 +42,28 @@ export default async function TenderPage({
   const { id } = await params;
   const { view: requested } = await searchParams;
   const session = await currentSession();
-  if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/tenders/${id}`)}`);
+  if (!session) {
+    redirect(
+      `/login?returnTo=${encodeURIComponent(safeReturnTo(tenderDetailPath(id, requested)))}`,
+    );
+  }
 
   const current = await fetchCurrentUser(session);
   const doors =
     current.kind === 'USER'
-      ? tenderDoorsFor(current.user.effectiveRoles, webServerEnv())
-      : { own: true, open: false };
-  const open = requested === 'open' || (requested !== 'own' && !doors.own);
+      ? tenderDoorsFor(
+          requestRoles(current.user.effectiveRoles, session.accessToken),
+          webServerEnv(),
+        )
+      : null;
+  const open = requested === 'open' || (requested !== 'own' && doors !== null && !doors.own);
 
   let body: ReactNode;
-  if (open) {
+  if (current.kind !== 'USER') {
+    // Without the roles there is no telling which door a bare address means,
+    // and asking the wrong one would show the wrong answer; nothing is asked.
+    body = <IdentityUnavailableDetailScreen correlationId={current.correlationId} />;
+  } else if (open) {
     body = <OpenTenderDetailScreen result={await fetchOpenTender(session, id)} />;
   } else {
     const result = await fetchTender(session, id);

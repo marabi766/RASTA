@@ -6,6 +6,7 @@ import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
 import { fetchCurrentUser } from '@/server/identity';
 import { tenderDoorsFor } from '@/server/portal-nav';
+import { requestRoles } from '@/server/realm-roles';
 import { fetchOpenTenders, fetchTenders } from '@/server/tenders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
@@ -50,7 +51,10 @@ export default async function TendersPage({
 
   let view: TendersView;
   if (current.kind === 'USER') {
-    const doors = tenderDoorsFor(current.user.effectiveRoles, webServerEnv());
+    const doors = tenderDoorsFor(
+      requestRoles(current.user.effectiveRoles, session.accessToken),
+      webServerEnv(),
+    );
     const [own, open] = await Promise.all([
       doors.own ? fetchTenders(session, query) : null,
       doors.open ? fetchOpenTenders(session, { cursor: query.openCursor }) : null,

@@ -143,7 +143,11 @@ describe('portalNavFor', () => {
 });
 
 describe('loadPortalNav', () => {
-  const SESSION = {} as WebSession;
+  const tokenWith = (realmRoles: string[]): string =>
+    `h.${Buffer.from(JSON.stringify({ realm_access: { roles: realmRoles } })).toString('base64url')}.s`;
+  const sessionWith = (realmRoles: string[]): WebSession =>
+    ({ accessToken: tokenWith(realmRoles) }) as WebSession;
+  const SESSION = sessionWith([]);
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -185,6 +189,41 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/tenders');
     expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/tenders');
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/tenders');
+  });
+
+  // The service acts on membership roles plus the global realm roles, so a realm
+  // SYSTEM_ADMIN is an owner and never a bidder, whatever the membership holds.
+  it.each([
+    {
+      name: 'SYSTEM_ADMIN realm + CONTRACTOR membership',
+      realm: ['SYSTEM_ADMIN'],
+      member: ['CONTRACTOR'],
+      links: ['/tenders', '/projects'],
+    },
+    {
+      name: 'SYSTEM_ADMIN realm + no membership roles',
+      realm: ['SYSTEM_ADMIN'],
+      member: [],
+      links: ['/tenders', '/projects'],
+    },
+    { name: 'CONTRACTOR membership alone', realm: [], member: ['CONTRACTOR'], links: ['/tenders'] },
+    {
+      name: 'a non-global realm role is ignored',
+      realm: ['UNION_ADMIN'],
+      member: ['CONTRACTOR'],
+      links: ['/tenders'],
+    },
+    {
+      name: 'AUDITOR membership beats a realm SYSTEM_ADMIN',
+      realm: ['SYSTEM_ADMIN'],
+      member: ['AUDITOR'],
+      links: [],
+    },
+  ])('draws the right links for $name', async ({ realm, member, links }) => {
+    const items = hrefs(await loadPortalNav(sessionWith(realm), user(member)));
+    for (const link of ['/tenders', '/projects']) {
+      expect(items.includes(link)).toBe(links.includes(link));
+    }
   });
 
   it('keeps the settlements link for the roles that read settlements, next to Projects', async () => {

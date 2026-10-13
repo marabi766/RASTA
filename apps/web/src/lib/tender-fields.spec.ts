@@ -4,10 +4,34 @@ import {
   isTenderStatus,
   scoringMethodLabel,
   statusReasonCodeLabel,
+  tenderDetailPath,
   tenderNatureLabel,
   tenderStatusLabel,
   tenderVisibilityLabel,
 } from './tender-fields';
+import { safeReturnTo } from '@/server/login-attempt';
+
+describe('tenderDetailPath', () => {
+  it.each([
+    ['TND_1', 'open', '/tenders/TND_1?view=open'],
+    ['TND_1', 'own', '/tenders/TND_1?view=own'],
+    ['TND_1', undefined, '/tenders/TND_1'],
+    ['TND_1', 'other', '/tenders/TND_1'],
+    ['TND_1', ['open', 'own'], '/tenders/TND_1'],
+    ['TND_1', 'open&returnTo=//evil.test', '/tenders/TND_1'],
+  ])('keeps only a known view: %s %j → %s', (id, view, path) => {
+    expect(tenderDetailPath(id, view)).toBe(path);
+  });
+
+  it('encodes the id as one segment, so it can only ever be a same-origin path', () => {
+    for (const id of ['../x', '/evil.test', '//evil.test', 'a\\b', 'a?b=c#d']) {
+      const path = tenderDetailPath(id, 'open');
+      expect(safeReturnTo(path)).toBe(path);
+      expect(path.startsWith('/tenders/')).toBe(true);
+      expect(path.slice('/tenders/'.length).split('?')[0]).not.toContain('/');
+    }
+  });
+});
 
 describe('formatWeightBp', () => {
   it.each([

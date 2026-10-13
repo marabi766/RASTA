@@ -17,7 +17,11 @@ import {
 } from '@/server/tenders';
 
 import { TendersScreen, formatBidWindow, type TendersView } from './TendersScreen';
-import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
+import {
+  IdentityUnavailableDetailScreen,
+  OpenTenderDetailScreen,
+  OwnTenderDetailScreen,
+} from './[id]/TenderDetailScreen';
 
 /**
  * What `/tenders` and `/tenders/[id]` render: every outcome the server read can
@@ -219,6 +223,15 @@ describe('the tender list, when the roles could not be read', () => {
     expect(screen.getByText(/نقش شما در این سازمان خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-3/)).toBeInTheDocument();
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+});
+
+describe('the tender detail, when the roles could not be read', () => {
+  it('chooses no door, asks nothing and says so', async () => {
+    const { container } = render(<IdentityUnavailableDetailScreen correlationId="corr-4" />);
+    expect(screen.getByText(/نقش شما در این سازمان خوانده نشد/)).toBeInTheDocument();
+    expect(screen.getByText(/corr-4/)).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 
