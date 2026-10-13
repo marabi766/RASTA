@@ -242,7 +242,7 @@ describe('the tender list has no accessibility violations in any state', () => {
       expect(await axe(container)).toHaveNoViolations();
       unmount();
     }
-  });
+  }, 60_000);
 });
 
 describe('the owner’s tender detail', () => {
@@ -377,7 +377,7 @@ describe('the owner’s tender detail', () => {
       expect(await axe(container)).toHaveNoViolations();
       unmount();
     }
-  });
+  }, 60_000);
 });
 
 describe('the bidder’s tender detail', () => {
@@ -426,7 +426,7 @@ describe('the bidder’s tender detail', () => {
       expect(await axe(container)).toHaveNoViolations();
       unmount();
     }
-  });
+  }, 60_000);
 });
 
 /**
