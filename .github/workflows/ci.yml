@@ -433,6 +433,7 @@ jobs:
           pnpm --filter @rasta/asset-service run db:migrate
           pnpm --filter @rasta/maintenance-service run db:migrate
           pnpm --filter @rasta/document-service run db:migrate
+          pnpm --filter @rasta/marketplace-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -446,6 +447,8 @@ jobs:
           DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
           DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
           DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -460,7 +463,7 @@ jobs:
           # Through turbo, not `pnpm --filter … run db:seed`: the seed imports
           # @rasta/config, which is not built yet at this point in the job, and
           # turbo's db:seed builds it first (dependsOn ^build, db:generate).
-          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service --filter=@rasta/organization-service --filter=@rasta/asset-service --filter=@rasta/maintenance-service
+          pnpm exec turbo run db:seed --filter=@rasta/identity-service --filter=@rasta/fleet-service --filter=@rasta/organization-service --filter=@rasta/asset-service --filter=@rasta/maintenance-service --filter=@rasta/marketplace-service
         env:
           # Demo seeds refuse to run without both (packages/config seed-guard).
           NODE_ENV: test
@@ -470,6 +473,11 @@ jobs:
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
           DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          # The catalogue the order scenarios (`e2e/orders.spec.ts`) buy from: the
+          # same product offered by both tenants, and a draft offer of
+          # ORG-DEH-0002's that ORG-DEH-0001 must not be able to tell from one
+          # that does not exist.
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
 
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
@@ -484,6 +492,7 @@ jobs:
           --filter=@rasta/asset-service...
           --filter=@rasta/maintenance-service...
           --filter=@rasta/document-service...
+          --filter=@rasta/marketplace-service...
 
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
@@ -650,6 +659,19 @@ jobs:
             DOCUMENT_SCANNER_DRIVER=disabled DOCUMENT_SCAN_WORKER_ENABLED=false \
             node dist/main.js > /tmp/rasta-web-e2e-logs/document.log 2>&1 & )
 
+          # marketplace-service (EXP-003): the portal's place-order scenarios
+          # (`e2e/orders.spec.ts`). Started in ADR-039's explicit no-Temporal
+          # mode, so an order stays PENDING: no saga runs, no wallet is touched,
+          # and economic-service is not in this stack — the suite places orders
+          # and reads them, and cannot move money.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service marketplace-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/marketplace-service && \
+            PORT=3106 SERVICE_NAME=marketplace-service \
+            MARKETPLACE_TEMPORAL_ENABLED=false \
+            DATABASE_URL=postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/marketplace.log 2>&1 & )
+
           # The per-person allowance (GATEWAY_RATE_LIMIT_MAX, 300 a minute per
           # user and route prefix by default) is sized for one human. Here three
           # seeded people stand in for every scenario of both Playwright
@@ -680,25 +702,28 @@ jobs:
               http://localhost:3105/health/ready || true)"
             document="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3114/health/ready || true)"
+            marketplace="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3106/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/usage-records || true)"
             if [ "$identity" = "200" ] && [ "$fleet" = "200" ] \
                && [ "$organization" = "200" ] && [ "$asset" = "200" ] \
                && [ "$maintenance" = "200" ] && [ "$document" = "200" ] \
-               && [ "$gateway" = "401" ]; then
+               && [ "$marketplace" = "200" ] && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
           cat /tmp/rasta-web-e2e-logs/organization.log
           cat /tmp/rasta-web-e2e-logs/asset.log
           cat /tmp/rasta-web-e2e-logs/maintenance.log
           cat /tmp/rasta-web-e2e-logs/document.log
+          cat /tmp/rasta-web-e2e-logs/marketplace.log
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
@@ -766,6 +791,8 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/maintenance.log || true
           echo '--- document-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/document.log || true
+          echo '--- marketplace-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/marketplace.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
           echo '--- keycloak ---'
