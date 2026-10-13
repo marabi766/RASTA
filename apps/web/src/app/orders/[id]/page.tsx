@@ -34,6 +34,8 @@ export default async function OrderPage({
   const done =
     typeof query.done === 'string' && isOrderCommand(query.done) ? query.done : undefined;
 
+  const placed = query.placed === '1';
+
   const result = await fetchOrder(session, id);
 
   return (
@@ -65,6 +67,7 @@ export default async function OrderPage({
           csrfToken={session.csrfToken}
           mintSubmissionId={() => mintSubmissionId(session)}
           done={done}
+          placed={placed}
         />
       </div>
     </AppShell>

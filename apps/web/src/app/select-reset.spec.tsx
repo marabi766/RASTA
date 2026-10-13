@@ -12,6 +12,7 @@ import { RecordInspectionForm, RecordPolicyForm } from './assets/[id]/AssetRecor
 import { DeclareAvailabilityForm } from './assets/[id]/AvailabilityForms';
 import { ChangeStatusForm as DriverChangeStatusForm } from './drivers/[id]/ChangeStatusForm';
 import { EndAssignmentForm } from './drivers/[id]/EndAssignmentForm';
+import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
 import { RecordCostForm, RecordPartForm } from './maintenance/[id]/RepairOrderForms';
 
@@ -54,6 +55,10 @@ jest.mock('./drivers/[id]/actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
   return { submitChangeStatus: refuse, submitEndAssignment: refuse };
 });
+jest.mock('./marketplace/[productId]/place-order-actions', () => {
+  const { refuse } = jest.requireActual('@/test/refusal');
+  return { submitPlaceOrder: refuse };
+});
 jest.mock('./maintenance/actions', () => {
   const { refuse } = jest.requireActual('@/test/refusal');
   return { submitReportRequest: refuse };
@@ -86,6 +91,18 @@ const REPAIR_IDENTITY = {
   requestId: 'MNT_01J00000000000000000000000',
   baseline: BASELINE,
 };
+
+const PLACE_ORDER_OFFERS = ['OFR_1', 'OFR_2', 'OFR_3'].map((id) => ({
+  id,
+  productId: 'PRD_1',
+  supplierOrganizationId: `ORG_${id}`,
+  unitPriceMinor: '300000',
+  currency: 'IRR',
+  availableQuantity: 15,
+  leadTimeDays: 5,
+  minimumQuantity: 1,
+  supplierQualification: 'UNAVAILABLE',
+}));
 
 const CASES = [
   {
@@ -146,6 +163,13 @@ const CASES = [
         csrfToken={CSRF}
         submissionId={SUBMISSION}
       />
+    ),
+  },
+  {
+    form: 'place order',
+    select: 'offerId',
+    mount: () => (
+      <PlaceOrderForm offers={PLACE_ORDER_OFFERS} csrfToken={CSRF} submissionId={SUBMISSION} />
     ),
   },
   {
