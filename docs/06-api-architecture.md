@@ -269,6 +269,13 @@ Endpoint در Schema اعلام می‌شود. مرتب‌سازی آزاد رو
 درصدی نادرست در مسیر) `400 VALIDATION_FAILED` با متن ثابت می‌گیرد («The request body is not valid JSON» یا «The request could
 not be read»)؛ متن Parser که بایت‌های کلاینت را نقل می‌کند نه به پاسخ می‌رسد نه به Log.
 
+**Span ردیابی هم Query ندارد.** Instrumentationهای HTTP، چه ورودی چه خروجی (`http`، undici یعنی `fetch`، NestJS)، Query را در
+`url.query` و درون `url.full` ثبت می‌کنند. Query دادهٔ کلاینت است (Cursor، عبارت جست‌وجو، توکن در URL بازگشت) و S-09 رسیدنش به
+Backend ردیابی را هم نمی‌پذیرد. `UrlQueryRedactingSpanProcessor` در `initTelemetry` (`@rasta/observability`) پیش از پایان هر
+Span، `url.full`، `http.url` و `http.target` را تا پیش از `?` یا `#` کوتاه می‌کند و `url.query` را برمی‌دارد. نام Span،
+`url.path` و `http.route` (الگوی Route) دست نمی‌خورند. تست با Instrumentationهای واقعی و Exporter درون‌حافظه:
+`packages/observability/src/url-redaction.spec.ts`.
+
 **دلیل بستهٔ امتناع در `details`.** امتناعی که دلیلش یکی از فهرستی بسته است، آن دلیل را در `details[].code` می‌آورد.
 `code` سطح بالا (`FORBIDDEN`، `CONFLICT`، `BUSINESS_RULE_VIOLATION` …) و `message` همان می‌مانند. کلاینت اول روی `code` و سپس روی `details[].code`
 شاخه می‌زند و هرگز `message` را تجزیه نمی‌کند. `path` می‌گوید دلیل از کجاست: میدان (`status` در asset)، منبع (`registration` در identity)
