@@ -3,16 +3,21 @@
 -- Each instant goes back to the UTC wall time it was before the migration —
 -- `AT TIME ZONE 'UTC'` on a timestamptz is that wall time, whatever zone this
 -- session is in — so a value written before the migration, or after it, reads
--- the same through Prisma on either side. Same lock budget as the forward
--- migration, and the same rewrite.
+-- the same through Prisma on either side. The same rewrite as the forward
+-- migration, so the same rule: run it with document-service stopped, every
+-- replica, and start the service only after it commits (a connection that
+-- prepared a statement on these tables before the rollback fails it after),
+-- under the same timeouts. Run it in one transaction (`psql -X -v
+-- ON_ERROR_STOP=1 --single-transaction --file down.sql`); the per-run override
+-- of the 30 s statement timeout is then
+-- `PGOPTIONS='-c rasta.migration_statement_timeout=15min'`.
 --
 -- The code does not have to be rolled back first. Under a UTC session (#214)
--- either Prisma client reads and writes either column type correctly. The
--- service does have to be restarted afterwards, for the reason the forward
--- migration gives: a connection that prepared a statement on these tables
--- before the rollback fails it after.
+-- either Prisma client reads and writes either column type correctly.
 SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SELECT set_config('statement_timeout',
+                  COALESCE(NULLIF(current_setting('rasta.migration_statement_timeout', true), ''), '30s'),
+                  true);
 
 ALTER TABLE "upload_intent"
   ALTER COLUMN "expires_at"  TYPE TIMESTAMP(3) USING "expires_at"  AT TIME ZONE 'UTC',

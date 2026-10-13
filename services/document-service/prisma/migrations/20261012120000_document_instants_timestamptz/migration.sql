@@ -29,25 +29,36 @@
 -- Indexes, CHECK constraints and the CURRENT_TIMESTAMP defaults are carried
 -- over by PostgreSQL itself, under their own names and definitions.
 --
--- Lock budget (docs/23 D-048, runbook): measured on the dev host, 1,000,000
--- `document` rows took 46 s and 2,000,000 `outbox_message` rows 29 s. No
--- deployed environment holds document data today, so this runs on empty or
--- test-sized tables. Should it ever meet a large one, the two timeouts below
--- make it fail closed: `lock_timeout` stops it queueing behind a long
--- transaction (and every request queueing behind it), and `statement_timeout`
--- stops a rewrite holding the table longer than a request would wait. Either
--- one rolls the whole migration back with nothing changed; the runbook's
--- online path is then the way forward.
+-- **Run it with document-service stopped — every replica, for the whole run —
+-- and start the service only after it commits** (docs/23 D-048 runbook). Two
+-- reasons, both measured:
 --
--- **Restart document-service right after this runs** (or run it with the
--- service stopped). A connection that prepared a statement on one of these
--- tables before the conversion fails it afterwards — PostgreSQL refuses to
--- re-plan a cached statement whose result type changed ("cached plan must not
--- change result type", 0A000) and Prisma keeps the statement, so that
--- connection fails the same query until it is replaced. Measured in
--- test/instants-timestamptz.int-spec.ts. The same holds for down.sql.
+-- - Prisma sends this file as one implicit transaction, so each table's
+--   ACCESS EXCLUSIVE lock is held until the whole migration commits, not until
+--   its own ALTER ends: on the dev host 1,000,000 `document` rows took 46 s and
+--   2,000,000 `outbox_message` rows 29 s, far past the 3 s a request waits at
+--   the gateway. Size the maintenance window by the total.
+-- - A connection that prepared a statement on one of these tables before the
+--   conversion fails it afterwards — PostgreSQL refuses to re-plan a cached
+--   statement whose result type changed ("cached plan must not change result
+--   type", 0A000) and Prisma keeps the statement, so that connection fails the
+--   same query until it is replaced (test/instants-timestamptz.int-spec.ts).
+--
+-- The two timeouts make a run fail closed, with nothing changed — the one
+-- transaction undoes every ALTER before the failing one. `lock_timeout` stops
+-- it waiting on whatever still holds a table (a replica left running, a long
+-- transaction). `statement_timeout` bounds each rewrite at 30 s by default:
+-- no deployed environment holds document data today, so it meets empty or
+-- test-sized tables, and a bigger table than expected fails the run rather than
+-- overrunning the window. An operator who sized a larger table raises it for
+-- one run, without editing this file: `RASTA_MIGRATION_STATEMENT_TIMEOUT=15min
+-- pnpm db:migrate` (scripts/prisma.mjs passes it as the session setting
+-- `rasta.migration_statement_timeout`, read below). After a failure Prisma
+-- refuses every deploy (P3009) until it is resolved — see the runbook.
 SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SELECT set_config('statement_timeout',
+                  COALESCE(NULLIF(current_setting('rasta.migration_statement_timeout', true), ''), '30s'),
+                  true);
 
 ALTER TABLE "upload_intent"
   ALTER COLUMN "expires_at"  TYPE TIMESTAMPTZ(3) USING "expires_at"  AT TIME ZONE 'UTC',
