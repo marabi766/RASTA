@@ -19,6 +19,7 @@ export const PORTAL_NAV: readonly SidebarItem[] = [
   { href: '/maintenance', label: 'نگهداری و تعمیرات' },
   { href: '/orders', label: 'سفارش‌ها' },
   { href: '/marketplace', label: 'بازار' },
+  { href: '/projects', label: 'پروژه‌های عمرانی' },
   { href: '/wallet', label: 'کیف پول' },
   { href: '/organizations', label: 'سازمان و اعضا' },
 ];
