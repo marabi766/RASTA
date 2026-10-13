@@ -1,8 +1,8 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { OFFER_SORTS, searchProducts, type ProductSearchQuery } from '@/server/marketplace';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { MarketplaceScreen } from './MarketplaceScreen';
 
 /**
@@ -59,7 +59,7 @@ export default async function MarketplacePage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/marketplace" />}
+      sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
       <MarketplaceScreen result={result} query={query} />
     </AppShell>

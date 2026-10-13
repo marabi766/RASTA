@@ -1,10 +1,10 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, PageHeader, Section, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, PageHeader, Section, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
 
@@ -68,7 +68,7 @@ export default async function DriversPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/drivers" />}
+      sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
     >
       <PageHeader
         title="راننده و تخصیص"

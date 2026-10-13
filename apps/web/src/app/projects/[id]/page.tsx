@@ -1,9 +1,9 @@
 import { redirect } from 'next/navigation';
 
-import { AppShell, Button, ButtonLink, PageHeader, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchProject } from '@/server/projects';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ProjectDetailScreen } from './ProjectDetailScreen';
 
@@ -35,7 +35,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/projects" />}
+      sidebar={<PortalSidebar session={session} currentHref="/projects" />}
     >
       <PageHeader title="جزئیات پروژه" description="مشخصات پروژه و وضعیت آن." />
       <div className="mt-2">

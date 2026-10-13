@@ -1,10 +1,10 @@
 import { redirect } from 'next/navigation';
 
-import { AppShell, Button, PageHeader, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isProjectStatus } from '@/lib/project-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchProjects, type ProjectListQuery } from '@/server/projects';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ProjectsScreen } from './ProjectsScreen';
 
@@ -54,7 +54,7 @@ export default async function ProjectsPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/projects" />}
+      sidebar={<PortalSidebar session={session} currentHref="/projects" />}
     >
       <PageHeader
         title="پروژه‌های عمرانی"

@@ -10,8 +10,16 @@ import type { SidebarItem } from '@/ui';
  * **Only routes that exist are listed.** docs/16 § 16.6 maps many more, and a
  * link to a screen that answers 404 is a promise the product does not keep.
  * Each one joins this list when its page lands.
+ *
+ * ## A link is not a permission
+ *
+ * An entry may be shown to some roles only (`portalNavFor`), so a person is not
+ * offered a screen that will refuse them. That is a courtesy and nothing more:
+ * the backend decides who may read, and a person who opens the address anyway
+ * is given its answer.
  */
-export const PORTAL_NAV: readonly SidebarItem[] = [
+
+const NAV_BEFORE_PROJECTS: readonly SidebarItem[] = [
   { href: '/', label: 'خانه' },
   { href: '/assets', label: 'ماشین‌آلات' },
   { href: '/drivers', label: 'راننده و تخصیص' },
@@ -19,7 +27,23 @@ export const PORTAL_NAV: readonly SidebarItem[] = [
   { href: '/maintenance', label: 'نگهداری و تعمیرات' },
   { href: '/orders', label: 'سفارش‌ها' },
   { href: '/marketplace', label: 'بازار' },
-  { href: '/projects', label: 'پروژه‌های عمرانی' },
+];
+
+/** Shown only to a role that may read projects (`server/portal-nav.ts`). */
+const PROJECTS_ITEM: SidebarItem = { href: '/projects', label: 'پروژه‌های عمرانی' };
+
+const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },
   { href: '/organizations', label: 'سازمان و اعضا' },
 ];
+
+/** The navigation for a caller, with role-gated entries only when they apply. */
+export function portalNavFor(options: {
+  readonly canReadProjects: boolean;
+}): readonly SidebarItem[] {
+  return [
+    ...NAV_BEFORE_PROJECTS,
+    ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
+    ...NAV_AFTER_PROJECTS,
+  ];
+}

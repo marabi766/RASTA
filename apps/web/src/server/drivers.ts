@@ -17,6 +17,7 @@ import {
 
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -73,7 +74,7 @@ const driverSummarySchema = z.object({
   employeeNo: z.string().nullable().default(null),
   licenceNumber: z.string().nullable().default(null),
   licenceClass: z.string().nullable().default(null),
-  licenceValidTo: z.string().nullable().default(null),
+  licenceValidTo: renderableDate.nullable().default(null),
   status: z.string(),
 });
 

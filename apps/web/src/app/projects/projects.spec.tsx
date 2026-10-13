@@ -1,7 +1,14 @@
 import { render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import type { ProjectDetail, ProjectPage, ProjectSummary, ReadResult } from '@/server/projects';
+import {
+  fetchProject,
+  fetchProjects,
+  type ProjectDetail,
+  type ProjectPage,
+  type ProjectSummary,
+  type ReadResult,
+} from '@/server/projects';
 
 import { ProjectsScreen, formatEstimate } from './ProjectsScreen';
 import { ProjectDetailScreen } from './[id]/ProjectDetailScreen';
@@ -23,22 +30,27 @@ jest.mock('next/link', () => ({
   ),
 }));
 
+const mockCallGateway = jest.fn();
+jest.mock('@/server/gateway', () => ({
+  ...jest.requireActual('@/server/gateway'),
+  callGateway: (...args: unknown[]) => mockCallGateway(...args),
+}));
+
 const PROJECT: ProjectSummary = {
   id: 'PRJ_1',
   title: 'زیرسازی جادهٔ دسترسی',
   operationType: 'خاکبرداری',
   locationDescription: 'کیلومتر ۱۲ محور شمالی',
-  hasArea: true,
   estimatedCostMinor: '90071992547409931234',
   status: 'APPROVED',
-  statusReason: null,
   statusChangedAt: '2026-09-20T08:00:00.000Z',
-  createdAt: '2026-09-19T08:00:00.000Z',
-  updatedAt: '2026-09-20T08:00:00.000Z',
 };
 
 const DETAIL: ProjectDetail = {
   ...PROJECT,
+  hasArea: true,
+  statusReason: null,
+  createdAt: '2026-09-19T08:00:00.000Z',
   scopeOfWork: 'خاکبرداری و تسطیح',
   needsSummary: { draft: 1, submitted: 2, withdrawn: 0 },
 };
@@ -111,7 +123,9 @@ describe('the project list', () => {
       page([PROJECT], 'c2'),
       page([]),
       { kind: 'FORBIDDEN' } as const,
+      { kind: 'NOT_FOUND' } as const,
       { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const,
+      { kind: 'MALFORMED', correlationId: 'corr-1' } as const,
     ]) {
       const { container, unmount } = render(<ProjectsScreen result={result} query={{}} />);
       expect(await axe(container)).toHaveNoViolations();
@@ -170,11 +184,95 @@ describe('the project detail', () => {
       { kind: 'OK', data: DETAIL } as const,
       { kind: 'NOT_FOUND' } as const,
       { kind: 'FORBIDDEN' } as const,
+      { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' } as const,
       { kind: 'MALFORMED', correlationId: 'corr-2' } as const,
     ]) {
       const { container, unmount } = render(<ProjectDetailScreen result={result} />);
       expect(await axe(container)).toHaveNoViolations();
       unmount();
     }
+  });
+});
+
+/**
+ * Read to render, through the real readers: a 200 whose timestamp is not an
+ * instant must reach the screen as the fixed malformed-response text. Before
+ * the schema checked timestamps it passed as `OK` and the date formatter threw
+ * while rendering, with the upstream value in the exception message.
+ */
+describe('a malformed timestamp, from the response to the page', () => {
+  const UPSTREAM = 'UPSTREAM_INVALID_TIMESTAMP';
+
+  const wire = {
+    ...DETAIL,
+    organizationId: 'ORG_OWNER',
+    statusChangedBy: 'USR_X',
+    createdBy: 'USR_X',
+    updatedAt: UPSTREAM,
+  };
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      API_GATEWAY_URL: 'http://gateway.test:3000',
+      OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
+      OIDC_CLIENT_ID: 'rasta-web',
+      WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+      WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
+    });
+  });
+
+  afterEach(() => {
+    mockCallGateway.mockReset();
+  });
+
+  const session = {
+    subject: 'USR_1',
+    username: 'owner',
+    organizationId: 'ORG_OWNER',
+    accessToken: 'access-token-value',
+    accessTokenExpiresAt: 2_000_000_000,
+    refreshToken: 'refresh-token-value',
+    csrfToken: 'csrf',
+    issuedAt: 1_900_000_000,
+  };
+
+  it.each(['statusChangedAt'])('shows the fixed list text for a bad %s', async (field) => {
+    mockCallGateway.mockResolvedValue({
+      data: { items: [{ ...wire, [field]: UPSTREAM }], nextCursor: null, hasMore: false },
+      correlationId: 'corr-list',
+    });
+    const result = await fetchProjects(session);
+
+    const { container } = render(<ProjectsScreen result={result} query={{}} />);
+    expect(screen.getByText(/فهرست پروژه‌ها خوانده نشد/)).toBeInTheDocument();
+    expect(screen.getByText(/corr-list/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain(UPSTREAM);
+  });
+
+  it.each(['statusChangedAt', 'createdAt'])(
+    'shows the fixed detail text for a bad %s',
+    async (field) => {
+      mockCallGateway.mockResolvedValue({
+        data: { ...wire, [field]: UPSTREAM },
+        correlationId: 'corr-detail',
+      });
+      const result = await fetchProject(session, 'PRJ_1');
+
+      const { container } = render(<ProjectDetailScreen result={result} />);
+      expect(screen.getByText(/جزئیات پروژه خوانده نشد/)).toBeInTheDocument();
+      expect(screen.getByText(/corr-detail/)).toBeInTheDocument();
+      expect(container.textContent).not.toContain(UPSTREAM);
+    },
+  );
+
+  it('still renders a well-formed record through the same path', async () => {
+    mockCallGateway.mockResolvedValue({
+      data: { ...wire, updatedAt: '2026-09-20T08:00:00.000Z' },
+      correlationId: 'corr-ok',
+    });
+    const result = await fetchProject(session, 'PRJ_1');
+
+    render(<ProjectDetailScreen result={result} />);
+    expect(screen.getByRole('heading', { name: PROJECT.title })).toBeInTheDocument();
   });
 });

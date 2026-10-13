@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchMaintenanceRequests, type MaintenanceRequestListQuery } from '@/server/maintenance';
 import { canReportMaintenance } from '@/server/maintenance-commands';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { ReportRequestForm } from './ReportRequestForm';
 
@@ -64,7 +64,7 @@ export default async function MaintenancePage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/maintenance" />}
+      sidebar={<PortalSidebar session={session} currentHref="/maintenance" />}
     >
       <MaintenanceScreen
         result={result}

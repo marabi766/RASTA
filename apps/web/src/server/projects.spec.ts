@@ -139,6 +139,56 @@ describe('reading projects', () => {
     expect(JSON.stringify(result)).not.toContain('raw service text');
   });
 
+  describe('timestamps', () => {
+    const BAD_INSTANTS = ['UPSTREAM_INVALID_TIMESTAMP', '', '2026-09-20', '2026-09-20T08:00:00'];
+
+    it.each(BAD_INSTANTS)('refuses %j as a list statusChangedAt', async (bad) => {
+      const { impl } = answering({ items: [{ ...PROJECT, statusChangedAt: bad }] });
+      const result = await withFetch(impl, () => fetchProjects(SESSION));
+      expect(result.kind).toBe('MALFORMED');
+      expect(JSON.stringify(result)).not.toContain('UPSTREAM_INVALID');
+    });
+
+    it.each(['statusChangedAt', 'createdAt'] as const)(
+      'refuses a malformed %s on the detail, and a missing one',
+      async (field) => {
+        const bad = answering({ ...PROJECT, [field]: 'UPSTREAM_INVALID_TIMESTAMP' });
+        expect((await withFetch(bad.impl, () => fetchProject(SESSION, 'PRJ_1'))).kind).toBe(
+          'MALFORMED',
+        );
+
+        const without = Object.fromEntries(
+          Object.entries(PROJECT).filter(([key]) => key !== field),
+        );
+        const missing = answering(without);
+        expect((await withFetch(missing.impl, () => fetchProject(SESSION, 'PRJ_1'))).kind).toBe(
+          'MALFORMED',
+        );
+      },
+    );
+
+    it('accepts a UTC instant with or without an offset', async () => {
+      const { impl } = answering({
+        items: [
+          { ...PROJECT, statusChangedAt: '2026-09-20T08:00:00Z' },
+          { ...PROJECT, statusChangedAt: '2026-09-20T11:30:00+03:30' },
+        ],
+      });
+      const result = await withFetch(impl, () => fetchProjects(SESSION));
+      expect(result.kind).toBe('OK');
+    });
+
+    it('does not read a field the list never renders', async () => {
+      const { impl } = answering({
+        items: [{ ...PROJECT, updatedAt: 'not a date', statusReason: 7, createdAt: 'x' }],
+      });
+      const result = await withFetch(impl, () => fetchProjects(SESSION));
+      expect(result.kind).toBe('OK');
+      expect(JSON.stringify(result)).not.toContain('statusReason');
+      expect(JSON.stringify(result)).not.toContain('updatedAt');
+    });
+  });
+
   it('treats a body that does not match the schema as malformed', async () => {
     const { impl } = answering({ items: 'nope' });
     const result = await withFetch(impl, () => fetchProjects(SESSION));

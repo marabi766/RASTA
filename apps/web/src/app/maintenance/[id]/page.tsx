@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchCurrentUser } from '@/server/identity';
 import { fetchMaintenanceRequest, fetchRepairOrder } from '@/server/maintenance';
@@ -14,7 +14,7 @@ import {
   type RepairCommandName,
 } from '@/lib/repair-order-fields';
 import { readFlash } from '@/server/flash';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { RequestDetailScreen, type OrderForms } from './RequestDetailScreen';
 import { ApproveRequestForm, AssignWorkshopForm, CancelRequestForm } from './RequestCommandForms';
 import {
@@ -141,7 +141,7 @@ export default async function MaintenanceRequestPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/maintenance" />}
+      sidebar={<PortalSidebar session={session} currentHref="/maintenance" />}
     >
       <RequestDetailScreen
         result={result}

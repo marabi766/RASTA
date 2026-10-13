@@ -4,6 +4,7 @@ import type { ProjectStatus } from '@/lib/project-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { utcInstant } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 
@@ -31,23 +32,27 @@ export type { ReadResult };
 
 const minorUnits = z.string().regex(/^-?\d+$/, 'amount must be whole minor units');
 
+/**
+ * What the list renders and nothing more. Every timestamp is a valid UTC
+ * instant (`instant.ts`): a malformed one is a `MALFORMED` outcome, not a
+ * render-time exception.
+ */
 const projectSchema = z.object({
   id: z.string(),
   title: z.string(),
   operationType: z.string(),
   locationDescription: z.string(),
-  hasArea: z.boolean().default(false),
   estimatedCostMinor: minorUnits.nullable().default(null),
   status: z.string(),
-  statusReason: z.string().nullable().default(null),
-  statusChangedAt: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  statusChangedAt: utcInstant,
 });
 
 export type ProjectSummary = z.infer<typeof projectSchema>;
 
 const projectDetailSchema = projectSchema.extend({
+  hasArea: z.boolean().default(false),
+  statusReason: z.string().nullable().default(null),
+  createdAt: utcInstant,
   scopeOfWork: z.string().default(''),
   needsSummary: z
     .object({

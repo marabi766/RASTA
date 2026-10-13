@@ -1,8 +1,8 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchOffers, fetchProduct, OFFER_SORTS } from '@/server/marketplace';
-import { PORTAL_NAV } from '@/app/nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { OffersScreen } from './OffersScreen';
 
 /**
@@ -56,7 +56,7 @@ export default async function ProductOffersPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/marketplace" />}
+      sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
       <OffersScreen product={product} offers={offers} productId={productId} sort={sort} />
     </AppShell>

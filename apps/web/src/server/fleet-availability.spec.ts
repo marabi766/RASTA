@@ -451,7 +451,7 @@ describe('the reads', () => {
             id: WINDOW,
             assetId: ASSET,
             available: false,
-            fromAt: 'a',
+            fromAt: '2026-10-05T00:00:00.000Z',
             reason: 'r',
             createdAt: 'c',
           },
@@ -462,6 +462,25 @@ describe('the reads', () => {
     const ok = await fetchAvailabilityWindows(SESSION, ASSET);
     expect(ok.kind).toBe('OK');
     stub(json(200, { rows: [] }));
+    expect((await fetchAvailabilityWindows(SESSION, ASSET)).kind).toBe('MALFORMED');
+  });
+
+  it('says a window whose rendered date is not a date is malformed, not OK', async () => {
+    stub(
+      json(200, {
+        items: [
+          {
+            id: WINDOW,
+            assetId: ASSET,
+            available: false,
+            fromAt: 'UPSTREAM_INVALID_TIMESTAMP',
+            reason: 'r',
+            createdAt: 'c',
+          },
+        ],
+        hasMore: false,
+      }),
+    );
     expect((await fetchAvailabilityWindows(SESSION, ASSET)).kind).toBe('MALFORMED');
   });
 

@@ -13,6 +13,7 @@ import {
 
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -46,8 +47,8 @@ const assignmentSummarySchema = z.object({
   driverId: z.string(),
   assetId: z.string(),
   active: z.boolean(),
-  startedAt: z.string(),
-  endedAt: z.string().nullable().default(null),
+  startedAt: renderableDate,
+  endedAt: renderableDate.nullable().default(null),
   purpose: z.string().nullable().default(null),
   endReason: z.string().nullable().default(null),
   endNotes: z.string().nullable().default(null),

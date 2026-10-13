@@ -8,13 +8,12 @@ import {
   Identifier,
   PageHeader,
   Section,
-  Sidebar,
   StatusBadge,
   TopBar,
 } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { activeMembership, displayName, fetchCurrentUser } from '@/server/identity';
-import { PORTAL_NAV } from './nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 /**
  * The dashboard (docs/16 § 16.6, `/`).
@@ -61,7 +60,7 @@ export default async function HomePage() {
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/" />}
+      sidebar={<PortalSidebar session={session} currentHref="/" current={result} />}
     >
       <PageHeader title="خانه" description="وضعیت حساب و سازمان فعال شما." />
 
