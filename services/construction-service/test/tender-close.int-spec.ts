@@ -17,6 +17,7 @@ import {
   cancelApproved,
   liftApprovalGuard,
   restoreApprovalGuard,
+  bidKey,
 } from './helpers';
 
 /**
@@ -74,7 +75,7 @@ describe('tender close sweeper', () => {
     (await outboxFor(w.prisma, owner)).filter((row) => row.eventName === 'TENDER_CLOSED');
 
   const submit = (bidder: string, tenderId: string) =>
-    asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+    asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
 
   const refusalOf = async (call: Promise<unknown>): Promise<string> => {
     const error = (await call.then(

@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
 import { brokersOf, corsOrigins, DEFAULT_PORT, loadConstructionEnv, SERVICE_NAME } from './env';
 
 /**
@@ -202,6 +205,38 @@ describe('project roles (Q-69)', () => {
       ['CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS', 'soon'],
     ])('refuses %s=%s', (name, value) => {
       expect(() => load({ [name]: value })).toThrow();
+    });
+  });
+
+  describe('how long a tender’s receipt chain may grow (construction audit F2)', () => {
+    it('defaults to what audit-service returns, and 50 revisions a bid (provisional, D1)', () => {
+      const env = load();
+      expect(env.CONSTRUCTION_TENDER_MAX_RECEIPTS).toBe(EVIDENCE_MAX_CHAIN_LINKS);
+      expect(env.CONSTRUCTION_BID_MAX_REVISIONS).toBe(50);
+    });
+
+    it('never allows more receipts than audit-service returns: such a tender could not be opened', () => {
+      expect(() =>
+        load({ CONSTRUCTION_TENDER_MAX_RECEIPTS: String(EVIDENCE_MAX_CHAIN_LINKS + 1) }),
+      ).toThrow(/CONSTRUCTION_TENDER_MAX_RECEIPTS/);
+      expect(
+        load({ CONSTRUCTION_TENDER_MAX_RECEIPTS: '100' }).CONSTRUCTION_TENDER_MAX_RECEIPTS,
+      ).toBe(100);
+    });
+
+    it.each(['0', '1.5', 'many'])('refuses %s', (value) => {
+      expect(() => load({ CONSTRUCTION_TENDER_MAX_RECEIPTS: value })).toThrow();
+      expect(() => load({ CONSTRUCTION_BID_MAX_REVISIONS: value })).toThrow();
+    });
+
+    it('holds the same limit audit-service holds (its MAX_CHAIN_LINKS), read from its source', () => {
+      // No cross-service import: the declaration is read as text, so the two cannot drift apart.
+      const source = readFileSync(
+        join(__dirname, '../../../audit-service/src/audit/tender-evidence.repository.ts'),
+        'utf8',
+      );
+      const declared = /export const MAX_CHAIN_LINKS = ([\d_]+);/.exec(source)?.[1];
+      expect(Number(declared?.replaceAll('_', ''))).toBe(EVIDENCE_MAX_CHAIN_LINKS);
     });
   });
 

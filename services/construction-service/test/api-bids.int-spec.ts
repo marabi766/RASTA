@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { hashRequestBody } from '../src/shared/idempotency';
 import {
   reasonsOf,
   actor,
@@ -8,7 +9,15 @@ import {
   startApi,
   type ApiHarness,
 } from './api-helpers';
-import { bidContent, cleanup, publishedForBids, qualify, wire, type Wiring } from './helpers';
+import {
+  bidContent,
+  bidKey,
+  cleanup,
+  publishedForBids,
+  qualify,
+  wire,
+  type Wiring,
+} from './helpers';
 
 /**
  * The bidder's HTTP surface through the real `AppModule`: closed without a token and
@@ -28,7 +37,12 @@ describe('bids API', () => {
     organizations.push(id);
     return id;
   };
-  const contractor = (organizationId: string) => as(actor(organizationId, ['CONTRACTOR']));
+  // A fresh Idempotency-Key on every request, as the gateway's clients send one on every unsafe
+  // call (a submission requires it, F4); a read ignores it.
+  const contractor = (organizationId: string) => ({
+    ...as(actor(organizationId, ['CONTRACTOR'])),
+    'idempotency-key': bidKey(),
+  });
 
   const setup = async (label: string, visibility: 'PUBLIC' | 'RESTRICTED' = 'PUBLIC') => {
     const owner = org(`${label}-owner`);
@@ -207,6 +221,101 @@ describe('bids API', () => {
       const res = await req.set(contractor(outsider)).send(body);
       expect([method, path, res.status]).toEqual([method, path, 404]);
     }
+  });
+
+  describe('the mandatory Idempotency-Key on a submission (docs/06 § 6.8, construction audit F4)', () => {
+    const rowsOf = async (tenderId: string) => ({
+      bids: await w.prisma.client.$queryRawUnsafe<{ id: string }[]>(
+        'SELECT id FROM bid WHERE tender_id = $1',
+        tenderId,
+      ),
+      receipts: await w.prisma.client.$queryRawUnsafe<{ seq: number }[]>(
+        'SELECT seq FROM bid_receipt WHERE tender_id = $1',
+        tenderId,
+      ),
+      submitted: await w.prisma.client.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM outbox_message WHERE aggregate_id = $1 AND event_name = 'BID_SUBMITTED'`,
+        tenderId,
+      ),
+    });
+    const submitWith = (
+      bidder: string,
+      tenderId: string,
+      key: string | undefined,
+      body: object,
+    ) => {
+      const headers: Record<string, string> = as(actor(bidder, ['CONTRACTOR']));
+      if (key !== undefined) headers['idempotency-key'] = key;
+      return http().post(`/v1/tenders/${tenderId}/bids`).set(headers).send(body);
+    };
+
+    it('refuses a submission without a key (400) and writes nothing', async () => {
+      const { bidder, tenderId } = await setup('key-missing');
+      // Missing: required. Blank: refused by the header's own bounds before that.
+      for (const [key, code] of [
+        [undefined, 'required'],
+        ['   ', 'INVALID_HEADER'],
+      ] as const) {
+        const res = await submitWith(bidder, tenderId, key, { content: bidContent() });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('VALIDATION_FAILED');
+        expect(res.body.details).toEqual([
+          expect.objectContaining({ path: 'Idempotency-Key', code }),
+        ]);
+      }
+      expect(await rowsOf(tenderId)).toEqual({ bids: [], receipts: [], submitted: [] });
+    });
+
+    it('answers a retry with the stored receipt, one bid, one receipt, one BID_SUBMITTED', async () => {
+      const { bidder, tenderId } = await setup('key-replay');
+      const key = bidKey();
+      const body = { content: bidContent('1250000000') };
+      const first = await submitWith(bidder, tenderId, key, body);
+      expect(first.status).toBe(201);
+      const again = await submitWith(bidder, tenderId, key, body);
+      expect(again.status).toBe(201);
+      expect(again.body).toEqual(first.body);
+      const rows = await rowsOf(tenderId);
+      expect(rows.bids).toHaveLength(1);
+      expect(rows.receipts).toHaveLength(1);
+      expect(rows.submitted).toHaveLength(1);
+
+      // The same key with another body, or on another tender, is not a replay.
+      const other = await submitWith(bidder, tenderId, key, { content: bidContent('900000000') });
+      expect(other.status).toBe(409);
+      expect(other.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      const elsewhere = await setup('key-replay-elsewhere');
+      const moved = await submitWith(bidder, elsewhere.tenderId, key, body);
+      expect(moved.status).toBe(409);
+      expect(moved.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+
+      // The stored request hash is keyed: not the plain SHA-256 of the request, so a backup does
+      // not let a price be guessed (ADR-066 § 1). And nothing of the price is stored with the key.
+      const [stored] = await w.prisma.client.$queryRawUnsafe<
+        { request_hash: string; response_body: unknown }[]
+      >(
+        `SELECT request_hash, response_body FROM idempotency_key WHERE organization_id = $1 AND endpoint = $2`,
+        bidder,
+        'POST /v1/tenders/:id/bids',
+      );
+      expect(stored?.request_hash).toMatch(/^hmac-v1:[a-z0-9-]+:[0-9a-f]{64}$/);
+      expect(stored?.request_hash).not.toContain(hashRequestBody({ id: tenderId, body }));
+      expect(JSON.stringify(stored?.response_body)).not.toContain('1250000000');
+    });
+
+    it('frees the key when the submission is refused, so the same request can be made again', async () => {
+      const { bidder, tenderId } = await setup('key-released');
+      const stranger = org('key-released-unknown');
+      const key = bidKey();
+      // Not eligible (unknown to supplier-service): refused, and the key is not kept.
+      const refused = await submitWith(stranger, tenderId, key, { content: bidContent() });
+      expect(refused.status).toBe(422);
+      await qualify(w, stranger);
+      const retried = await submitWith(stranger, tenderId, key, { content: bidContent() });
+      expect(retried.status).toBe(201);
+      // The tender's own bidder is untouched by another organization's key.
+      expect((await submitWith(bidder, tenderId, key, { content: bidContent() })).status).toBe(201);
+    });
   });
 
   it('lists the tenders it may bid on and shows one with its frozen criteria', async () => {

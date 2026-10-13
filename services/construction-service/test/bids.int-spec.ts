@@ -34,6 +34,7 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  bidKey,
 } from './helpers';
 
 /**
@@ -84,7 +85,7 @@ describe('bids', () => {
   };
 
   const submit = (bidder: string, tenderId: string, content = bidContent()) =>
-    asBidder(bidder, () => w.bids.submit(tenderId, { content }));
+    asBidder(bidder, () => w.bids.submit(tenderId, { content }, bidKey()));
 
   const refusalsOf = async (call: Promise<unknown>): Promise<string> => {
     const error = (await call.then(
@@ -214,7 +215,7 @@ describe('bids', () => {
       const { owner, tenderId } = await setup();
 
       await expect(
-        asAdmin(owner, () => w.bids.submit(tenderId, { content: bidContent() })),
+        asAdmin(owner, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey())),
       ).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
       // The owner's own contractor role is refused too: it cannot bid on its own tender.
       await qualify(w, owner);
@@ -721,6 +722,61 @@ describe('bids', () => {
           }),
       };
     };
+
+    it('keeps a chain audit-service can return: revisions per bid and receipts per tender are bounded, refused in the bid’s transaction (construction audit F2)', async () => {
+      // The caps, small: a bid of at most 3 revisions, a tender of at most 5 receipts.
+      const limited = wire(
+        testEnv({ CONSTRUCTION_BID_MAX_REVISIONS: '3', CONSTRUCTION_TENDER_MAX_RECEIPTS: '5' }),
+      );
+      try {
+        const { owner, bidder, tenderId } = await setup();
+        const others = [org(), org(), org()];
+        for (const other of others) await qualify(w, other);
+        const asLimited = (who: string, content = bidContent()) =>
+          asBidder(who, () => limited.bids.submit(tenderId, { content }, bidKey()));
+        const revise = (who: string, bidId: string, expectedRevision: number) =>
+          asBidder(who, () =>
+            limited.bids.revise(tenderId, bidId, { expectedRevision, content: bidContent('7') }),
+          );
+        const bidRow = (bidId: string) =>
+          runUnscoped('the suite reads the bid it wrote', () =>
+            w.prisma.client.bid.findFirst({ where: { id: bidId } }),
+          );
+
+        const { bidId } = await asLimited(bidder);
+        await revise(bidder, bidId, 1);
+        await revise(bidder, bidId, 2);
+        // The fourth revision of one bid: refused, and nothing of it is written.
+        const before = (await eventsOf(w, owner, 'BID_REVISED')).length;
+        expect(await refusalsOf(revise(bidder, bidId, 3))).toContain('BID_REVISION_LIMIT');
+        expect((await bidRow(bidId))?.revision).toBe(3);
+        expect(await linksOf(tenderId)).toHaveLength(3);
+        expect(await eventsOf(w, owner, 'BID_REVISED')).toHaveLength(before);
+
+        // Receipts 4 and 5, then the tender's chain is full: a sixth is refused, a bid and all.
+        await asLimited(others[0]!);
+        await asLimited(others[1]!);
+        expect(await refusalsOf(asLimited(others[2]!))).toContain('TENDER_RECEIPT_LIMIT');
+        const refusedBid = await runUnscoped('the suite looks for the refused bid', () =>
+          w.prisma.client.bid.findFirst({
+            where: { tenderId, bidderOrganizationId: others[2]! },
+          }),
+        );
+        expect(refusedBid).toBeNull();
+        expect(await linksOf(tenderId)).toHaveLength(5);
+        expect(await eventsOf(w, owner, 'BID_SUBMITTED')).toHaveLength(3);
+
+        // The chain that stands is whole, and is what audit-service was told.
+        const links = await linksOf(tenderId);
+        const evidence = await evidenceFromEvents(owner, tenderId);
+        expect(evidence.links.map((link) => link.receipt)).toEqual(
+          links.map((link) => link.receipt),
+        );
+        expect(verifyReceiptChain(tenderId, links, evidence.head)).toEqual({ ok: true });
+      } finally {
+        await limited.close();
+      }
+    });
 
     it('gives concurrent submissions distinct places in one verifying chain, ending at the announced head', async () => {
       const { owner, tenderId } = await setup();

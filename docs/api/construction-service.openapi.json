@@ -11581,7 +11581,7 @@
     },
     "/v1/tenders/{id}/bids": {
       "post": {
-        "description": "Refused 422 (BUSINESS_RULE_VIOLATION), naming every reason, outside `[bidOpeningAt, bidClosingAt)` judged on the database clock after the tender lock (a bid at the closing instant is refused; also when the deadline crosses between the decision and the write), while the organization is not eligible (BIDDER_NOT_ELIGIBLE: not qualified for CONTRACTING, or suspended, as supplier-service itself says at this moment; an organization unknown to it is not eligible), for the owner’s own tender, for an unknown criterion code, or for a bid over the size limit. If supplier-service cannot be reached the answer is 503/504 and nothing is decided. A second bid is 409 (replace it with PUT). The content is sealed to the tender’s key and never returned: the answer is the receipt, the new head of the tender’s chain, also published on BID_SUBMITTED. Bidder side: the `CONTRACTOR` role in the organization the request acts for (docs/24 Q-85). No other role is accepted — SYSTEM_ADMIN and AUDITOR included, which have no access to a bid through the API (ADR-066 § 4). A tender the caller may not see answers 404, never 403.",
+        "description": "Refused 422 (BUSINESS_RULE_VIOLATION), naming every reason, outside `[bidOpeningAt, bidClosingAt)` judged on the database clock after the tender lock (a bid at the closing instant is refused; also when the deadline crosses between the decision and the write), while the organization is not eligible (BIDDER_NOT_ELIGIBLE: not qualified for CONTRACTING, or suspended, as supplier-service itself says at this moment; an organization unknown to it is not eligible), for the owner’s own tender, for an unknown criterion code, or for a bid over the size limit. If supplier-service cannot be reached the answer is 503/504 and nothing is decided. A second bid is 409 (replace it with PUT). The content is sealed to the tender’s key and never returned: the answer is the receipt, the new head of the tender’s chain, also published on BID_SUBMITTED. An `Idempotency-Key` is **required** (400 VALIDATION_FAILED without one; docs/06 § 6.8): a retry with the same key and body answers the same receipt and submits nothing; the same key with another body or tender is 409 IDEMPOTENCY_KEY_REUSED; a refused or failed submission frees the key. Refused 422 TENDER_RECEIPT_LIMIT when the tender’s receipt chain is full (CONSTRUCTION_TENDER_MAX_RECEIPTS). Bidder side: the `CONTRACTOR` role in the organization the request acts for (docs/24 Q-85). No other role is accepted — SYSTEM_ADMIN and AUDITOR included, which have no access to a bid through the API (ADR-066 § 4). A tender the caller may not see answers 404, never 403.",
         "operationId": "BidController_submit_v1",
         "parameters": [
           {
@@ -11590,6 +11590,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required: without it, 400 VALIDATION_FAILED. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -11685,6 +11696,17 @@
           },
           "409": {
             "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -12534,7 +12556,7 @@
     },
     "/v1/tenders/{id}/bids/{bidId}": {
       "put": {
-        "description": "`expectedRevision` must equal the bid’s current revision (409 OPTIMISTIC_LOCK_FAILED). The same window, eligibility and sealing rules as the submission; publishes BID_REVISED with the new head. A withdrawn bid cannot be replaced (422). Bidder side: the `CONTRACTOR` role in the organization the request acts for (docs/24 Q-85). No other role is accepted — SYSTEM_ADMIN and AUDITOR included, which have no access to a bid through the API (ADR-066 § 4). A tender the caller may not see answers 404, never 403.",
+        "description": "`expectedRevision` must equal the bid’s current revision (409 OPTIMISTIC_LOCK_FAILED). The same window, eligibility and sealing rules as the submission; publishes BID_REVISED with the new head. A withdrawn bid cannot be replaced (422). A bid has at most CONSTRUCTION_BID_MAX_REVISIONS revisions, the submission included (422 BID_REVISION_LIMIT), and the tender’s chain at most CONSTRUCTION_TENDER_MAX_RECEIPTS (422 TENDER_RECEIPT_LIMIT). Bidder side: the `CONTRACTOR` role in the organization the request acts for (docs/24 Q-85). No other role is accepted — SYSTEM_ADMIN and AUDITOR included, which have no access to a bid through the API (ADR-066 § 4). A tender the caller may not see answers 404, never 403.",
         "operationId": "BidController_revise_v1",
         "parameters": [
           {
@@ -14728,7 +14750,7 @@
     },
     "/v1/tenders/{id}/bids/{bidId}/scores": {
       "post": {
-        "description": "Each score is an integer, the points × 100, from 0 to the criterion’s `maxScore` × 100 (a PASS_FAIL criterion: 0 or `maxScore` × 100; 422 `SCORE_OUT_OF_RANGE`); a criterion the tender does not have is 422 `UNKNOWN_CRITERION`. A cell is revised by appending: every score is a new revision and the earlier ones are kept; a score equal to the one standing writes nothing (`unchanged`). Only a QUALIFIED bid (422 `BID_NOT_QUALIFIED`), only while the tender is EVALUATING, and at most CONSTRUCTION_EVALUATION_MAX_EVALUATORS evaluators per bid (default 1; 422 `EVALUATOR_LIMIT`). Publishes BID_SCORED (a count and a digest, never the scores). Owner side: the roles of CONSTRUCTION_TENDER_EVALUATE_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — ADR-067 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds) and a service token are refused. The caller is judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is said about the tender; with CONSTRUCTION_COI_RULES naming EVALUATOR_NOT_TENDER_AUTHOR, so is the person who created or published it (403 `EVALUATOR_IS_TENDER_AUTHOR`; a tender whose author has no stable identity on record is 422 `ACTOR_IDENTITY_UNKNOWN`). One person is one evaluator of a bid, compared on issuer and subject (#188): a person who stood down from it under another user id is 403 `RECUSED`, one who already evaluates it under another user id is 403 `SAME_PERSON_AS_EVALUATOR`, and an evaluator on record without an identity makes it 422 `ACTOR_IDENTITY_UNKNOWN`. Every write needs the platform user id: a token without `rasta_uid` is 403. The routes name no role at the guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. On the caller’s own tender every refusal is audited, whatever role the caller holds (AUDITOR and SYSTEM_ADMIN included): a REFUSED row in the bid access log with its closed code, and BID_ACCESSED, before the 403.",
+        "description": "Each score is an integer, the points × 100, from 0 to the criterion’s `maxScore` × 100 (a PASS_FAIL criterion: 0 or `maxScore` × 100; 422 `SCORE_OUT_OF_RANGE`); a criterion the tender does not have is 422 `UNKNOWN_CRITERION`. A cell is revised by appending: every score is a new revision and the earlier ones are kept; a score equal to the one standing writes nothing (`unchanged`). Only a QUALIFIED bid (422 `BID_NOT_QUALIFIED`), only while the tender is EVALUATING, and at most CONSTRUCTION_EVALUATION_MAX_EVALUATORS evaluators per bid (default 1; 422 `EVALUATOR_LIMIT`). Publishes BID_SCORED (a count and a digest, never the scores). Each score names `expectedRevision`, the revision of that cell of the caller’s own scores they last saw (0 for a cell not yet scored): any other is 409 OPTIMISTIC_LOCK_FAILED and nothing of the request is recorded, so a delayed retry of an older score never overwrites a newer one. An optional Idempotency-Key answers a retry with the first answer. Owner side: the roles of CONSTRUCTION_TENDER_EVALUATE_ROLES, by default the tender owner’s role set (CONSTRUCTION_PROJECT_ROLES) — ADR-067 § 4. SYSTEM_ADMIN, AUDITOR and CONTRACTOR (each refused whenever present, whatever other role the user holds) and a service token are refused. The caller is judged on identity-service as of now (it cannot be reached: 502/504, nothing is done): a member of any organization that bid on the tender is refused 403 `CONFLICT_OF_INTEREST` before anything is said about the tender; with CONSTRUCTION_COI_RULES naming EVALUATOR_NOT_TENDER_AUTHOR, so is the person who created or published it (403 `EVALUATOR_IS_TENDER_AUTHOR`; a tender whose author has no stable identity on record is 422 `ACTOR_IDENTITY_UNKNOWN`). One person is one evaluator of a bid, compared on issuer and subject (#188): a person who stood down from it under another user id is 403 `RECUSED`, one who already evaluates it under another user id is 403 `SAME_PERSON_AS_EVALUATOR`, and an evaluator on record without an identity makes it 422 `ACTOR_IDENTITY_UNKNOWN`. Every write needs the platform user id: a token without `rasta_uid` is 403. The routes name no role at the guard: the service decides, **ownership first** — a tender that is missing, or not the caller’s organization’s, answers 404 (never 403) and is **not** logged — then the roles and the conflict rules. On the caller’s own tender every refusal is audited, whatever role the caller holds (AUDITOR and SYSTEM_ADMIN included): a REFUSED row in the bid access log with its closed code, and BID_ACCESSED, before the 403.",
         "operationId": "EvaluationController_score_v1",
         "parameters": [
           {
@@ -14745,6 +14767,17 @@
             "in": "path",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
             }
           }
         ],
@@ -14905,6 +14938,17 @@
           },
           "409": {
             "description": "Conflict: `expectedVersion` is not the current version (OPTIMISTIC_LOCK_FAILED — reload and retry), an Idempotency-Key reused with a different request (IDEMPOTENCY_KEY_REUSED) or still in flight (CONFLICT), two policy versions created at once (CONFLICT — retry), or the policy in force changed while an approval round was being opened (OPTIMISTIC_LOCK_FAILED — retry); awarding a tender that was already awarded to another bid (ALREADY_EXISTS), or that changed under the award (OPTIMISTIC_LOCK_FAILED — retry). A tender approval that is stale (CONFLICT, APPROVAL_STALE): the tender moved on from the version the request was made on, or the command is not the one approved (another bid, justification or reason) — nothing is executed, the request ends, and the command must be asked for again. Deciding such a request ends it the same way.",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -15032,9 +15076,15 @@
                           "minimum": 0,
                           "maximum": 100000000,
                           "description": "The score × 100, an integer: 0..maxScore × 100 (a PASS_FAIL criterion: 0 or maxScore × 100)."
+                        },
+                        "expectedRevision": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 2147483647,
+                          "description": "The revision of this cell the caller last saw of their own scores — 0 for a cell they have not scored. Compare-and-set: any other is 409 OPTIMISTIC_LOCK_FAILED and nothing of the request is recorded, so a delayed retry of an older score cannot overwrite a newer one."
                         }
                       },
-                      "required": ["criterionCode", "scoreScaled"],
+                      "required": ["criterionCode", "scoreScaled", "expectedRevision"],
                       "additionalProperties": false
                     },
                     "minItems": 1,

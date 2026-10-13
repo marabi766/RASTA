@@ -1,4 +1,5 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { SealingError } from './errors';
 import {
   EnvKekProvider,
   isKekId,
@@ -193,6 +194,50 @@ describe('the KEK configuration', () => {
         expect(`${String(error)} ${JSON.stringify(error)}`).not.toContain(K1);
       }
     }
+  });
+
+  describe('the keyed request digest (a bid submission’s Idempotency-Key, construction audit F4)', () => {
+    const data = '{"body":{"content":{"priceMinor":"1250000000"}},"id":"TND_A"}';
+
+    it('is a keyed digest naming its KEK, stable for the same data and different for any other', () => {
+      const provider = new EnvKekProvider(`v1:${K1}`, 'v1');
+      const digest = provider.requestDigest(data);
+      expect(digest).toMatch(/^hmac-v1:v1:[0-9a-f]{64}$/);
+      expect(provider.requestDigest(data)).toBe(digest);
+      expect(provider.requestDigest(data.replace('125', '126'))).not.toBe(digest);
+      // Not the unkeyed SHA-256 a reader of the database could recompute for a guessed price.
+      expect(digest).not.toContain(createHash('sha256').update(data).digest('hex'));
+      expect(provider.matchesRequestDigest(digest, data)).toBe(true);
+      expect(provider.matchesRequestDigest(digest, `${data} `)).toBe(false);
+    });
+
+    it('depends on the KEK, and is still recognised after a rotation while the old KEK is kept', () => {
+      const before = new EnvKekProvider(`v1:${K1}`, 'v1').requestDigest(data);
+      expect(new EnvKekProvider(`v1:${K2}`, 'v1').requestDigest(data)).not.toBe(before);
+      const rotated = new EnvKekProvider(`v1:${K1},v2:${K2}`, 'v2');
+      expect(rotated.requestDigest(data)).toMatch(/^hmac-v1:v2:/);
+      expect(rotated.matchesRequestDigest(before, data)).toBe(true);
+      // The old KEK removed: nothing it made is recognised any more.
+      expect(new EnvKekProvider(`v2:${K2}`, 'v2').matchesRequestDigest(before, data)).toBe(false);
+    });
+
+    it('recognises nothing malformed, and makes nothing without a KEK', () => {
+      const provider = new EnvKekProvider(`v1:${K1}`, 'v1');
+      const digest = provider.requestDigest(data);
+      for (const stored of [
+        '',
+        createHash('sha256').update(data).digest('hex'),
+        digest.replace('hmac-v1', 'hmac-v2'),
+        `${digest}:extra`,
+        digest.slice(0, -2),
+        digest.replace(/.$/, (last) => (last === '0' ? '1' : '0')),
+      ]) {
+        expect(provider.matchesRequestDigest(stored, data)).toBe(false);
+      }
+      const unset = new EnvKekProvider(undefined, undefined);
+      expect(() => unset.requestDigest(data)).toThrow(SealingError);
+      expect(unset.matchesRequestDigest(digest, data)).toBe(false);
+    });
   });
 
   it('recognises well-formed ids only', () => {

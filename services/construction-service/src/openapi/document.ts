@@ -341,7 +341,10 @@ const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/tenders/{id}/bid-access-log': listBidAccessLogQuerySchema,
 };
 
-/** The create endpoints that accept an optional `Idempotency-Key`. */
+/** The endpoints that refuse a request without an `Idempotency-Key` (docs/06 § 6.8). */
+const REQUIRED_IDEMPOTENT = new Set(['POST /v1/tenders/{id}/bids']);
+
+/** The endpoints that honour an `Idempotency-Key`: optional, except the required ones. */
 const IDEMPOTENT = new Set([
   'POST /v1/projects',
   'POST /v1/projects/{id}/needs',
@@ -349,6 +352,8 @@ const IDEMPOTENT = new Set([
   'POST /v1/approval-policies',
   'POST /v1/projects/{id}/tenders',
   'POST /v1/criteria-templates',
+  'POST /v1/tenders/{id}/bids/{bidId}/scores',
+  ...REQUIRED_IDEMPOTENT,
 ]);
 
 /** Operations that act on an existing row and so can lose a compare-and-set. */
@@ -774,12 +779,14 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         (parameter) => !isHeader(parameter, 'idempotency-key'),
       );
       if (IDEMPOTENT.has(key)) {
+        const required = REQUIRED_IDEMPOTENT.has(key);
         operation.parameters.push({
           name: 'Idempotency-Key',
           in: 'header',
-          required: false,
+          required,
           description:
-            'Optional. The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).',
+            `${required ? 'Required: without it, 400 VALIDATION_FAILED.' : 'Optional.'} ` +
+            'The same key with the same body returns the first response; with a different body, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with a Retry-After header, in seconds. Kept for CONSTRUCTION_IDEMPOTENCY_TTL_HOURS (24 by default).',
           schema: toJsonSchema(z.string().min(1).max(255)),
         });
       }

@@ -261,20 +261,33 @@ export class TenderOpenRepository {
   }
 
   /** The access log of one tender, newest first, a page at a time (cursor = the id of the last row). */
+  /**
+   * A page of the tender's access log, newest first. With `accessorOrganizationId`, only the rows
+   * of that accessor — the filter is in the query, so the page and its cursor hold no other row.
+   */
   listAccessLog(
     tx: ExtendedPrismaClient,
     tenderId: string,
-    query: { cursor?: string; limit: number },
+    query: { cursor?: string; limit: number; accessorOrganizationId?: string },
   ): Promise<BidAccessLog[]> {
     return tx.bidAccessLog.findMany({
-      where: { tenderId, ...(query.cursor ? { id: { lt: query.cursor } } : {}) },
+      where: {
+        tenderId,
+        ...(query.accessorOrganizationId !== undefined
+          ? { accessorOrganizationId: query.accessorOrganizationId }
+          : {}),
+        ...(query.cursor ? { id: { lt: query.cursor } } : {}),
+      },
       orderBy: { id: 'desc' },
       take: query.limit + 1,
     });
   }
 
-  /** Whether the tender exists in the caller's own tenant (the guard scopes it). */
-  async ownsTender(tx: ExtendedPrismaClient, tenderId: string): Promise<boolean> {
-    return (await tx.tender.count({ where: { id: tenderId } })) > 0;
+  /** The tender in the caller's own tenant (the guard scopes it) and when its bids were opened, or null. */
+  findOpening(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+  ): Promise<{ openedAt: Date | null } | null> {
+    return tx.tender.findFirst({ where: { id: tenderId }, select: { openedAt: true } });
   }
 }

@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -11,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { zodPipe } from '@rasta/nest-common';
+import { parseIdempotencyKey } from '../project/project.controller';
 import { BidService } from './bid.service';
 import { OwnBidService } from './own-bid.service';
 import {
@@ -76,10 +78,19 @@ export class BidController {
       'is decided. A second bid is 409 ' +
       '(replace it with PUT). The content is sealed to the tender’s key and never returned: the ' +
       'answer is the receipt, the new head of the tender’s chain, also published on BID_SUBMITTED. ' +
+      'An `Idempotency-Key` is **required** (400 VALIDATION_FAILED without one; docs/06 § 6.8): a ' +
+      'retry with the same key and body answers the same receipt and submits nothing; the same key ' +
+      'with another body or tender is 409 IDEMPOTENCY_KEY_REUSED; a refused or failed submission ' +
+      'frees the key. Refused 422 TENDER_RECEIPT_LIMIT when the tender’s receipt chain is full ' +
+      '(CONSTRUCTION_TENDER_MAX_RECEIPTS). ' +
       BIDDER_NOTE,
   })
-  async submit(@Param('id') id: string, @Body(zodPipe(submitBidSchema)) dto: SubmitBidDto) {
-    return this.bids.submit(id, dto);
+  async submit(
+    @Param('id') id: string,
+    @Body(zodPipe(submitBidSchema)) dto: SubmitBidDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.bids.submit(id, dto, parseIdempotencyKey(idempotencyKey));
   }
 
   @Get('tenders/:id/bids/mine')
@@ -120,7 +131,9 @@ export class BidController {
     description:
       '`expectedRevision` must equal the bid’s current revision (409 OPTIMISTIC_LOCK_FAILED). The ' +
       'same window, eligibility and sealing rules as the submission; publishes BID_REVISED with the ' +
-      `new head. A withdrawn bid cannot be replaced (422). ${BIDDER_NOTE}`,
+      'new head. A withdrawn bid cannot be replaced (422). A bid has at most ' +
+      'CONSTRUCTION_BID_MAX_REVISIONS revisions, the submission included (422 BID_REVISION_LIMIT), ' +
+      `and the tender’s chain at most CONSTRUCTION_TENDER_MAX_RECEIPTS (422 TENDER_RECEIPT_LIMIT). ${BIDDER_NOTE}`,
   })
   async revise(
     @Param('id') id: string,

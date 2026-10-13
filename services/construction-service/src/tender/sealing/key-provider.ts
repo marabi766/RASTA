@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto';
 import { NONCE_BYTES, aeadDecrypt, aeadEncrypt, lengthPrefixed } from './sealing';
 import { SealingError } from './errors';
 
@@ -38,6 +38,15 @@ export interface TenderKeyProvider {
   wrap(privateKeyDer: Buffer, context: KeyContext): WrappedKey;
   /** Returns the PKCS#8 private key. The caller zeroises it (`fill(0)`) when done. */
   unwrap(wrapped: WrappedKey, context: KeyContext): Buffer;
+  /**
+   * A keyed digest of request data, under the current KEK, to be stored where an unkeyed hash
+   * would let a reader of the database guess a low-entropy body offline — a sealed bid's price
+   * (ADR-066 § 1: the commitment is salted for the same reason). It names the KEK it was made
+   * under, so `matchesRequestDigest` recognises it after a rotation while that KEK is kept.
+   */
+  requestDigest(data: string): string;
+  /** Whether `stored` is `requestDigest(data)` under the KEK it names. Unknown KEK: false. */
+  matchesRequestDigest(stored: string, data: string): boolean;
 }
 
 const KEK_BYTES = 32;
@@ -148,5 +157,41 @@ export class EnvKekProvider implements TenderKeyProvider {
       wrapped.ciphertext,
       wrapped.tag,
     );
+  }
+
+  requestDigest(data: string): string {
+    const configuration = this.configuration;
+    if (!configuration) throw new SealingError('KEY_UNAVAILABLE');
+    const kek = configuration.keys.get(configuration.currentId);
+    if (!kek) throw new SealingError('KEY_UNAVAILABLE');
+    return `${REQUEST_DIGEST_VERSION}:${configuration.currentId}:${requestMac(kek, data).toString('hex')}`;
+  }
+
+  matchesRequestDigest(stored: string, data: string): boolean {
+    const [version, kekId, hex, ...rest] = stored.split(':');
+    if (version !== REQUEST_DIGEST_VERSION || !kekId || !hex || rest.length > 0) return false;
+    const kek = this.configuration?.keys.get(kekId);
+    if (!kek) return false;
+    const expected = requestMac(kek, data);
+    const actual = Buffer.from(hex, 'hex');
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  }
+}
+
+/** The stored form of a keyed request digest: `hmac-v1:<kekId>:<hex>`. */
+const REQUEST_DIGEST_VERSION = 'hmac-v1';
+
+/**
+ * HMAC-SHA256 of `data` under a key derived from the KEK (HKDF-SHA256, its own label): the KEK
+ * itself never keys anything but the wrapping, and the derived key is used for nothing else.
+ */
+function requestMac(kek: Buffer, data: string): Buffer {
+  const key = Buffer.from(
+    hkdfSync('sha256', kek, Buffer.alloc(0), 'rasta.construction.request-digest.v1', 32),
+  );
+  try {
+    return createHmac('sha256', key).update(data, 'utf8').digest();
+  } finally {
+    key.fill(0);
   }
 }

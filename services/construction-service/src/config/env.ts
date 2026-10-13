@@ -9,6 +9,7 @@ import {
   loadEnv,
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
+import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
 import {
   CANCELLABLE_BY_LIFECYCLE,
   PROJECT_STATES,
@@ -137,6 +138,11 @@ function roleList(name: string, options: { min: number }) {
  *   CONSTRUCTION_PROGRESS_ALLOW_DECREASE
  *                                       Q-72. Whether a submitted progress
  *                                       report may report less than the last.
+ *   CONSTRUCTION_TENDER_MAX_RECEIPTS    Construction audit F2. The receipts a
+ *                                       tender's chain may hold (≤ what
+ *                                       audit-service returns, 10,000).
+ *   CONSTRUCTION_BID_MAX_REVISIONS      PROVISIONAL (F2, D1): revisions one
+ *                                       bid may have, the submission included.
  *
  * `SYSTEM_ADMIN` is always accepted for project and policy commands, as
  * everywhere on the platform, and never needs to be listed. It is **not**
@@ -492,6 +498,32 @@ export const constructionEnvSchema = baseEnvSchema
       .min(0)
       .max(31_536_000)
       .default(0),
+
+    /**
+     * The most receipts a tender's chain may hold (construction audit F2): every submission and
+     * every replacement appends one, and the opening verifies the whole chain against
+     * audit-service, which returns at most `EVIDENCE_MAX_CHAIN_LINKS` links — a longer chain could
+     * never be opened. So a bid that would append past this is refused (`422
+     * TENDER_RECEIPT_LIMIT`), in its own transaction, and never more than audit-service returns.
+     */
+    CONSTRUCTION_TENDER_MAX_RECEIPTS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(EVIDENCE_MAX_CHAIN_LINKS)
+      .default(EVIDENCE_MAX_CHAIN_LINKS),
+    /**
+     * PROVISIONAL, pending the PM (construction audit F2, D1): the most revisions one bid may
+     * have, its submission (revision 1) included; a replacement past it is `422
+     * BID_REVISION_LIMIT`. Without it one bidder could fill the tender's chain and shut every
+     * competitor out. 50 lets 200 bidders use them all within the 10,000 receipts.
+     */
+    CONSTRUCTION_BID_MAX_REVISIONS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(EVIDENCE_MAX_CHAIN_LINKS)
+      .default(50),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
