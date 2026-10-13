@@ -14,7 +14,11 @@ import { testEnv } from './helpers';
  *   X-Internal-Token from contract-service, for organization-service,
  *   signed for the scope organization; GET /v1/organizations/{id}
  *     id is the scope, or beneath it → 200 { id, hierarchyVersion }
- *     otherwise                      → 404
+ *     otherwise                      → 404 { code: 'NOT_FOUND', message: 'Organization not found' }
+ *
+ * Only that 404 is "not within". A 404 without that body — a proxy's HTML page, an empty body, a
+ * route that is not mounted — proves nothing about the hierarchy and is refused as unavailable:
+ * read as "outside", it would make the sweeper suspend a valid policy (contract audit F2).
  *
  * The server verifies the token with the real verifier, so a client that sent the wrong audience,
  * caller, purpose or organization would fail here. Then every way the answer can go wrong is shown
@@ -48,7 +52,20 @@ type Behaviour =
   | 'stalled-body'
   | 'oversized'
   | 'no-version'
-  | 'bad-version';
+  | 'bad-version'
+  | 'html-404'
+  | 'empty-404'
+  | 'route-404'
+  | 'oversized-404';
+
+/** What organization-service's exception filter renders for `RastaError.notFound('Organization', id)`. */
+const organizationNotFound = (path: string) => ({
+  code: 'NOT_FOUND',
+  message: 'Organization not found',
+  correlationId: 'corr-directory',
+  timestamp: new Date().toISOString(),
+  path,
+});
 
 describe('OrganizationDirectory against the organization-service contract', () => {
   let server: Server;
@@ -81,6 +98,34 @@ describe('OrganizationDirectory against the organization-service contract', () =
           res.writeHead(500).end();
           return;
         }
+        // 404s that are not organization-service's answer about an organization.
+        if (behaviour === 'html-404') {
+          res.writeHead(404, { 'content-type': 'text/html' });
+          res.end('<html><body><h1>404 Not Found</h1>nginx</body></html>');
+          return;
+        }
+        if (behaviour === 'empty-404') {
+          res.writeHead(404).end();
+          return;
+        }
+        if (behaviour === 'route-404') {
+          // Nest's own 404 for a route that is not mounted: the same filter and code, another message.
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              ...organizationNotFound(req.url ?? ''),
+              message: `Cannot GET ${req.url ?? ''}`,
+            }),
+          );
+          return;
+        }
+        if (behaviour === 'oversized-404') {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({ ...organizationNotFound(req.url ?? ''), padding: 'x'.repeat(4096) }),
+          );
+          return;
+        }
         const id = decodeURIComponent((req.url ?? '').replace('/v1/organizations/', ''));
         if (behaviour === 'wrong-body') {
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -98,7 +143,8 @@ describe('OrganizationDirectory against the organization-service contract', () =
           return;
         }
         if (!within(claims.organizationId, id)) {
-          res.writeHead(404).end();
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(organizationNotFound(req.url ?? '')));
           return;
         }
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -199,6 +245,38 @@ describe('OrganizationDirectory against the organization-service contract', () =
       organizationId: 'ORG-UNION',
     });
   });
+
+  it('reads "not within" only from organization-service’s own 404 body (F2)', async () => {
+    // The genuine answer: the resource-level body, for every question that rests on it.
+    await expect(asked(() => directory().isWithin('ORG-UNION', 'ORG-STRANGER'))).resolves.toBe(
+      false,
+    );
+    await expect(
+      asked(() => directory().withinAnswer('ORG-UNION', 'ORG-STRANGER')),
+    ).resolves.toBeNull();
+  });
+
+  it.each([
+    ['an HTML 404 from a proxy', 'html-404'],
+    ['an empty 404', 'empty-404'],
+    ['a route-level 404 (Nest’s `Cannot GET`)', 'route-404'],
+    ['a 404 body larger than the answer allows', 'oversized-404'],
+  ] as const)(
+    'fails closed on %s: unavailable (503), never "outside" (F2)',
+    async (_label, mode) => {
+      behaviour = mode;
+      // Each question a caller asks: the policy write's, the signature's and the sweeper's. None of
+      // them may read this as "not within" — the sweeper would suspend a valid policy.
+      const questions: (() => Promise<unknown>)[] = [
+        () => directory().isWithin('ORG-UNION', 'ORG-STRANGER'),
+        () => directory().withinVersion('ORG-UNION', 'ORG-STRANGER'),
+        () => directory().withinAnswer('ORG-UNION', 'ORG-STRANGER'),
+      ];
+      for (const question of questions) {
+        await expect(asked(question)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      }
+    },
+  );
 
   it('fails closed on any other status (503)', async () => {
     behaviour = 'error';
