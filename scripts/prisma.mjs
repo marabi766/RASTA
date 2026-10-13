@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
-import { ledgerRevoke, withUtcSession } from './prisma-lib.mjs';
+import { ledgerRevoke, withMigrationStatementTimeout, withUtcSession } from './prisma-lib.mjs';
 
 const cwd = process.cwd();
 
@@ -84,7 +84,21 @@ if (!given) {
 // into a `timestamp(3)` column stores the session's wall time, which Prisma
 // reads back as UTC. A startup option, so it holds whatever the server's or
 // the migrator role's default is — and for the ledger revoke below too.
-const url = withUtcSession(given);
+//
+// RASTA_MIGRATION_STATEMENT_TIMEOUT (e.g. `15min`) is one run's override of the
+// statement timeout a table-rewriting migration sets for itself (D-048's
+// conversions read it; nothing else does), for a table an operator sized above
+// the default. A startup option, so it never needs the URL — a credential —
+// retyped. Unset, the migration's own default holds.
+let url;
+try {
+  url = withUtcSession(
+    withMigrationStatementTimeout(given, process.env.RASTA_MIGRATION_STATEMENT_TIMEOUT),
+  );
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
 
 const result = spawnSync('prisma', process.argv.slice(2), {
   cwd,
