@@ -147,7 +147,8 @@ Replica مقایسه می‌شود: `INSURANCE_RECORDED` از سازمانی ج�
 **ترتیبِ دو Topic (#240 دور ۸).** `rasta.insurance.v1` و `rasta.asset.v1` هیچ ترتیبی با هم ندارند، پس `INSURANCE_RECORDED`ِ مالک
 جدید می‌تواند پیش از `ASSET_TRANSFERRED` به fleet برسد؛ asset-service (که فقط به مالک فعلی پاسخ می‌دهد) آن‌گاه `NOT_CURRENT_OWNER` یا نسلی
 جلوتر از Replica می‌گوید. چنین رویدادی دیگر تلاش دوباره و DLQ نمی‌شود: در `insurance_pending_verification` **پارک** و تحویلش پردازش‌شده علامت
-می‌خورد؛ پس از Commitِ انتقال دوباره از منبع پرسیده و اعمال یا حذف می‌شود، و جاروی دوره‌ای باقی را می‌سنجد و پس از آخرین تلاش با
+می‌خورد؛ انتقال در تراکنش خودش آن را «سررسیده» علامت می‌زند (دور ۱۰) و جاروی دوره‌ای — بیرون از Handler کافکا — دوباره از منبع می‌پرسد و
+اعمال یا حذف می‌کند، و پس از آخرین تلاش با
 `PARKED_VERIFICATION_EXHAUSTED` به `rasta.fleet.v1.dlq` می‌فرستد — از راه Outbox خودِ fleet، در همان تراکنشی که ردیف پارک و علامت
 پردازش را حذف می‌کند (دور ۹). هیچ‌گاه بی‌تأیید اعمال نمی‌شود
 ([insurance-reprojection](../runbooks/insurance-reprojection.md)).

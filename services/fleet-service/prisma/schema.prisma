@@ -405,6 +405,12 @@ model AssetRef {
   /// `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` at transfer time). Empty when the
   /// transfer did not say: fail closed.
   retainedCoverages        String[]  @default([]) @map("retained_coverages")
+  /// Counts the changes to the insurance state above (windows, retained list,
+  /// lapses) and to the owner and generation (#240 r10). Kept by the trigger
+  /// `asset_ref_insurance_revision`, never written by the code: a verification
+  /// of an `INSURANCE_RECORDED` reads it before asking asset-service and applies
+  /// its answer only if it is unchanged under the asset's lock.
+  insuranceRevision        BigInt    @default(0) @map("insurance_revision")
 
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")
@@ -486,6 +492,9 @@ model InsurancePendingVerification {
   attempts        Int       @default(0)
   firstSeenAt     DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(3)
   lastAttemptAt   DateTime? @map("last_attempt_at") @db.Timestamptz(3)
+  /// Due from then, whatever its age: set by the machine's transfer (#240 r10),
+  /// cleared by the next attempt. NULL: the age rule alone.
+  nextAttemptAt   DateTime? @map("next_attempt_at") @db.Timestamptz(3)
 
   @@index([organizationId, assetId])
   @@index([assetId])

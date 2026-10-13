@@ -30,6 +30,11 @@ import { FleetRepository } from './fleet.repository';
  *   - **Under the asset's lock.** The page only names candidates; each row is
  *     decided again under {@link FleetRepository.lockAssetRef}, in its own page
  *     transaction, so an event or a transfer that committed since is seen.
+ *   - **Nothing in flight restores a window.** Clearing moves the row's
+ *     `insurance_revision` (trigger, #240 r10). A verification of an
+ *     `INSURANCE_RECORDED` that asked asset-service before the clear committed
+ *     — under the old rule — finds the revision moved under the lock and
+ *     discards its answer; the event is verified again, under the new rule.
  *   - **Bounded.** Keyset pages of `pageSize`, one short transaction each.
  *   - **Tenant-correct.** `organizationId` limits the run to machines that
  *     organization owns now; the counts are per **current** owner.

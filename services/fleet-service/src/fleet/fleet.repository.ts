@@ -851,7 +851,9 @@ export class FleetRepository {
    * emptied in the same update: a delayed old-owner event for a coverage that
    * followed at transfer time would otherwise still be exempted from the owner
    * check and restore a window for the new owner. Lapses and the generation are
-   * left as they are. Returns whether the row was cleared.
+   * left as they are. The row's `insurance_revision` moves with it (trigger,
+   * #240 r10), so a verification that asked asset-service before this commit
+   * cannot restore a window after it. Returns whether the row was cleared.
    */
   async clearInsuranceCover(
     tx: ExtendedPrismaClient,
@@ -916,7 +918,7 @@ export class FleetRepository {
   // Written under the envelope's tenant; read and removed by machine or by age,
   // whichever tenant parked them, under `runUnscoped`. Every mutation of a row
   // happens under `lockAssetRef` for its machine, so the transfer's handler and
-  // the sweep (on any instance) never decide the same row at once.
+  // the sweep (on any instance) never change the same row at once.
   // -------------------------------------------------------------------------
 
   /**
@@ -953,9 +955,9 @@ export class FleetRepository {
 
   /**
    * One parked event, read under {@link lockAssetRef}. `due` says whether the
-   * sweep may try it now: parked and last tried at least `minAgeSeconds` ago, by
-   * the database's clock — so a second instance's sweep that listed it before
-   * this one tried it leaves it alone.
+   * sweep may try it now: made due by its machine's transfer, or parked and last
+   * tried at least `minAgeSeconds` ago, by the database's clock — so a second
+   * instance's sweep that listed it before this one tried it leaves it alone.
    */
   async findParkedInsurance(
     tx: ExtendedPrismaClient,
@@ -968,9 +970,10 @@ export class FleetRepository {
         tx.$queryRaw<RawParkedInsurance[]>`
           SELECT event_id, asset_id, organization_id, envelope, message_key, source_topic,
                  source_partition, source_offset, reason, attempts,
-                 (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
-                  AND (last_attempt_at IS NULL
-                       OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int))) AS due
+                 (COALESCE(next_attempt_at <= now(), false)
+                  OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
+                      AND (last_attempt_at IS NULL
+                           OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int)))) AS due
             FROM insurance_pending_verification
            WHERE event_id = ${eventId}`,
     );
@@ -992,22 +995,27 @@ export class FleetRepository {
       : null;
   }
 
-  /** The parked events of one machine, oldest first, whichever tenant parked them. */
-  async listParkedInsuranceForAsset(assetId: string, limit: number): Promise<string[]> {
-    const rows = await runUnscoped(
-      'a transfer re-verifies every parked insurance event of the machine, whichever tenant parked it',
+  /**
+   * Makes every parked event of one machine due now, whichever tenant parked it
+   * (#240 r10): its transfer committed, so the sweep decides them on its next
+   * run. In the transfer's transaction, under {@link lockAssetRef}; one
+   * statement, asking nobody. Returns how many.
+   */
+  async markParkedInsuranceDue(tx: ExtendedPrismaClient, assetId: string): Promise<number> {
+    return runUnscoped(
+      'a transfer makes every parked insurance event of the machine due, whichever tenant parked it',
       () =>
-        this.client.insurancePendingVerification.findMany({
-          where: { assetId },
-          orderBy: [{ firstSeenAt: 'asc' }, { eventId: 'asc' }],
-          select: { eventId: true },
-          take: limit,
-        }),
+        tx.$executeRaw`
+          UPDATE insurance_pending_verification SET next_attempt_at = now()
+           WHERE asset_id = ${assetId}`,
     );
-    return rows.map((row) => row.eventId);
   }
 
-  /** The sweep's batch: parked, and last tried, at least `minAgeSeconds` ago by the database's clock. Oldest first. */
+  /**
+   * The sweep's batch: made due by a transfer, or parked and last tried at least
+   * `minAgeSeconds` ago, by the database's clock. Those a transfer made due
+   * first, then the oldest.
+   */
   async listDueParkedInsurance(
     minAgeSeconds: number,
     limit: number,
@@ -1017,16 +1025,20 @@ export class FleetRepository {
       () =>
         this.client.$queryRaw<{ event_id: string; asset_id: string }[]>`
           SELECT event_id, asset_id FROM insurance_pending_verification
-           WHERE first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
-             AND (last_attempt_at IS NULL
-                  OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int))
-           ORDER BY first_seen_at, event_id
+           WHERE next_attempt_at <= now()
+              OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
+                  AND (last_attempt_at IS NULL
+                       OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int)))
+           ORDER BY next_attempt_at IS NULL, first_seen_at, event_id
            LIMIT ${limit}`,
     );
     return rows.map((row) => ({ eventId: row.event_id, assetId: row.asset_id }));
   }
 
-  /** Counts one more attempt that left the event parked, and why. Returns the attempts so far. */
+  /**
+   * Counts one more attempt that left the event parked, and why; a mark made by
+   * a transfer is spent, and the age rule applies again. Returns the attempts so far.
+   */
   async recordParkedAttempt(
     tx: ExtendedPrismaClient,
     eventId: string,
@@ -1037,7 +1049,8 @@ export class FleetRepository {
       () =>
         tx.$queryRaw<{ attempts: number }[]>`
           UPDATE insurance_pending_verification
-             SET attempts = attempts + 1, last_attempt_at = now(), reason = ${reason}
+             SET attempts = attempts + 1, last_attempt_at = now(), next_attempt_at = NULL,
+                 reason = ${reason}
            WHERE event_id = ${eventId}
           RETURNING attempts`,
     );
@@ -1068,6 +1081,16 @@ export class FleetRepository {
     consumerName: string,
   ): Promise<void> {
     await tx.processedEvent.deleteMany({ where: { eventId, consumerName } });
+  }
+
+  /**
+   * Whether an event is already marked handled, read outside any transaction.
+   * Only to skip work that would be wasted (asking asset-service about a
+   * redelivered event); the marker itself is still written, and decides, in the
+   * handler's transaction.
+   */
+  async isEventProcessed(eventId: string, consumerName: string): Promise<boolean> {
+    return (await this.client.processedEvent.count({ where: { eventId, consumerName } })) > 0;
   }
 
   /**

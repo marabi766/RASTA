@@ -125,9 +125,9 @@ export const fleetEnvSchema = baseEnvSchema
     /**
      * Parked `INSURANCE_RECORDED` events (#240 r8): asset-service answered for a
      * later owner than the replica has seen, so the event waits for the
-     * transfer. The transfer's handler re-verifies them at once; the sweep below
-     * catches the rest. How old a parked event (and its last attempt) must be
-     * before the sweep tries it, in seconds.
+     * transfer. The transfer's handler makes them due at once and the sweep below
+     * decides them (#240 r10); otherwise, how old a parked event (and its last
+     * attempt) must be before the sweep tries it, in seconds.
      */
     FLEET_INSURANCE_PARKED_MIN_AGE_SECONDS: z.coerce
       .number()
@@ -154,11 +154,11 @@ export const fleetEnvSchema = baseEnvSchema
 
     /**
      * The asset-sync consumer's transactions that hold a machine's lock while
-     * asset-service or maintenance-service is asked (a replayed state event, a
-     * live `INSURANCE_RECORDED`), and those that wait on that lock to decide a
-     * parked event (#240 r9). Must cover the longest chain of such calls plus a
-     * margin ({@link assetSyncBudgetProblem}); the service refuses to start
-     * otherwise.
+     * asset-service or maintenance-service is asked — since #240 r10 only a
+     * replayed state event's refresh — and the insurance decisions (live and
+     * parked) that ask nobody but may wait on that lock behind one. Must cover
+     * the refresh's chain of calls plus a margin ({@link assetSyncBudgetProblem});
+     * the service refuses to start otherwise.
      */
     FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: z.coerce
       .number()
@@ -201,10 +201,11 @@ export function parkingFromEnv(
 
 /**
  * The most upstream calls one asset-sync transaction makes while it holds a
- * machine's lock, one after another: a replayed state event asks asset-service
- * for the snapshot, maintenance-service for the in-maintenance flag, and
- * asset-service whether a stale fence's transfer was recorded. Each is bounded
- * by `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS`.
+ * machine's lock, one after another. Only a replayed state event's refresh
+ * still asks under the lock (#240 r10: an `INSURANCE_RECORDED`, live or parked,
+ * asks before it): asset-service for the snapshot, maintenance-service for the
+ * in-maintenance flag, and asset-service whether a stale fence's transfer was
+ * recorded. Each is bounded by `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS`.
  */
 export const ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK = 3;
 
@@ -213,11 +214,11 @@ export const ASSET_SYNC_TRANSACTION_MARGIN_MS = 5_000;
 
 /**
  * Why `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` cannot work with the upstream
- * timeout, or undefined when it can (#240 r9). A transaction that asks upstream
- * under the lock must outlive every call it makes; one that only waits on that
- * lock (deciding a parked event) must outlive the holder. Shorter, the
- * transaction expires mid-call, rolls back and records nothing — a parked
- * event's attempts would then never advance.
+ * timeout, or undefined when it can (#240 r9, r10). A replay's refresh asks
+ * upstream under the lock and must outlive every call it makes: shorter, every
+ * replay of a state event would expire mid-call and roll back. The insurance
+ * decisions ask nobody; they share the timeout only so that one waiting on the
+ * lock behind a replay outlives it.
  */
 export function assetSyncBudgetProblem(
   env: Pick<
@@ -246,8 +247,8 @@ export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv 
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'fleet-service.main',
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
-  // Fail closed at startup: an invalid combination would fail every
-  // re-verification at run time instead (#240 r9).
+  // Fail closed at startup: an invalid combination would fail every replay of
+  // a state event at run time instead (#240 r9, r10).
   const problem = assetSyncBudgetProblem(env);
   if (problem) throw new Error(`Invalid fleet-service configuration: ${problem}`);
   return env;

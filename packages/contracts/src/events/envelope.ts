@@ -256,8 +256,8 @@ export const DLQ_REASONS = {
   /**
    * A consumer held an event back until its replica caught up with the source
    * (fleet's parked `INSURANCE_RECORDED`, #240 r8): the source answered for a
-   * later owner than the replica had seen. Re-verified on the transfer and by a
-   * periodic sweep; the attempts ran out with the source still ahead, so it is
+   * later owner than the replica had seen. Made due by the transfer and
+   * re-verified by a periodic sweep; the attempts ran out with the source still ahead, so it is
    * dead-lettered, never applied unverified. Replayable once the transfer the
    * replica is missing has been consumed.
    */

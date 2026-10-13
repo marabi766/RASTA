@@ -1,7 +1,7 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
-import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
+import { AssetSyncConsumer, CONSUMER_NAME } from '../src/consumers/asset-sync.consumer';
 import { FakePolicySource, echoing } from './policy-source.fake';
 import { clearTransferredInsurance } from '../src/fleet/clear-transferred.command';
 import { cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
@@ -164,6 +164,103 @@ describe('insurance:clear-transferred (Q-101)', () => {
     // The re-projection names the current owner and generation: the window is back.
     await recorded(org.b, 2);
     expect(await windows(assetId)).toEqual(['THIRD_PARTY']);
+  });
+
+  it('r10: a live verification paused across the clear restores nothing; its retry asks again', async () => {
+    const assetId = await insured();
+    // THIRD_PARTY followed the vehicle when it was transferred.
+    await transfer(assetId, { ownershipGeneration: 2, retainedCoverages: ['THIRD_PARTY'] });
+    expect(await windows(assetId)).toEqual(['THIRD_PARTY']);
+
+    // A delayed event of the previous owner for THIRD_PARTY: under the rule of
+    // the moment it follows the vehicle, so the source counts it for org.b.
+    const policyId = id('INS');
+    const validFrom = new Date(Date.now() - 1000).toISOString();
+    const validTo = new Date(Date.now() + year).toISOString();
+    policies.set(policyId, {
+      counts: true,
+      organizationId: org.b,
+      coverage: 'THIRD_PARTY',
+      validFrom,
+      validUntil: validTo,
+      ownershipGeneration: 2,
+    });
+    const event = eventFor(org.a, 'INSURANCE_RECORDED', {
+      assetId,
+      policyId,
+      insurerName: 'بیمه ایران',
+      coverage: 'THIRD_PARTY',
+      validFrom,
+      validTo,
+      ownershipGeneration: 1,
+    });
+
+    // The answer is held while the rule is narrowed and the windows cleared. No
+    // lock is held while asking, so the clear does not wait for it.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const asking = new Promise<void>((resolve) => (reached = resolve));
+    const verify = policies.verify.bind(policies);
+    const paused = jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+      const answer = await verify(...args);
+      reached();
+      await held;
+      return answer;
+    });
+    const delivery = consumer.handle(event);
+    await asking;
+    await expect(run({ organizationId: org.b })).resolves.toMatchObject({
+      cleared: expect.any(Number),
+    });
+    expect(await windows(assetId)).toEqual([]);
+    release();
+
+    // The answer was about a replica that no longer stands: the delivery fails
+    // with its marker rolled back, and nothing is restored.
+    await expect(delivery).rejects.toThrow(/changed while asset-service was asked/);
+    paused.mockRestore();
+    expect(await windows(assetId)).toEqual([]);
+    const marked = () =>
+      prisma.client.processedEvent.count({
+        where: { eventId: event.eventId, consumerName: CONSUMER_NAME },
+      });
+    expect(await marked()).toBe(0);
+
+    // The retry asks again, under the narrowed rule: ignored, as processed.
+    policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
+    await consumer.handle(event);
+    expect(await windows(assetId)).toEqual([]);
+    expect(await marked()).toBe(1);
+  });
+
+  it('every write to the insurance state moves the revision; other writes do not', async () => {
+    const assetId = await insured();
+    const revision = async () => (await row(assetId))!.insuranceRevision;
+    const before = await revision();
+
+    // A status change touches nothing an insurance answer depends on.
+    await consumer.handle(
+      eventFor(org.a, 'ASSET_STATUS_CHANGED', {
+        assetId,
+        oldStatus: 'ACTIVE',
+        newStatus: 'IN_MAINTENANCE',
+      }),
+    );
+    expect(await revision()).toBe(before);
+
+    // A transfer, then the clear.
+    await transfer(assetId, { ownershipGeneration: 2, retainedCoverages: COVERAGES });
+    const transferred = await revision();
+    expect(transferred).toBeGreaterThan(before);
+    await run({ organizationId: org.b });
+    expect(await revision()).toBeGreaterThan(transferred);
+
+    // Not writable directly: the trigger keeps it.
+    const kept = await revision();
+    await prisma.client
+      .$executeRaw`UPDATE asset_ref SET insurance_revision = 0 WHERE id = ${assetId}`;
+    expect(await revision()).toBe(kept);
   });
 
   it('clears a row that has no windows left but still retains coverages', async () => {

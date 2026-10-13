@@ -243,14 +243,15 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
             tokens: internalTokens(env),
           }),
           // #240 r8: an INSURANCE_RECORDED the source answers for a later owner
-          // is parked, re-verified on the transfer and by this sweep, and
+          // is parked, made due by the transfer (r10), re-verified by this sweep, and
           // dead-lettered to rasta.fleet.v1.dlq when its attempts run out —
           // through the outbox (r9), counted under the consumer's own label.
           {
             ...parkingFromEnv(env),
             dlqMetricService: `${env.KAFKA_CLIENT_ID}-asset-sync`,
           },
-          // Checked against ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS at startup (r9).
+          // Checked against ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS at startup (r9):
+          // a replay's refresh still asks under the lock (r10).
           env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
         ),
     },

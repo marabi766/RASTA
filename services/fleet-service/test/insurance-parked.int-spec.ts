@@ -9,6 +9,7 @@ import {
   type ParkingOptions,
 } from '../src/consumers/asset-sync.consumer';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
+import { clearTransferredInsurance } from '../src/fleet/clear-transferred.command';
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { FakePolicySource } from './policy-source.fake';
 import { asActor, cleanup, id, newPrisma, producerShaped, tenants } from './helpers';
@@ -17,12 +18,13 @@ import { asActor, cleanup, id, newPrisma, producerShaped, tenants } from './help
  * #240 r8, against PostgreSQL: an `INSURANCE_RECORDED` that reaches fleet after
  * asset-service transferred the machine, but before fleet consumed the
  * transfer, is parked — not retried into the DLQ — and applied once the
- * transfer is projected; a periodic sweep re-verifies what is left and
- * dead-letters a row whose attempts run out. Never applied unverified.
+ * transfer is projected: the transfer makes it due (r10) and the sweep
+ * re-verifies it, as it does what is left, and dead-letters a row whose
+ * attempts run out. Never applied unverified.
  *
- * Real database: the parked row commits with the delivery's marker, is read
- * under the asset lock by the transfer's handler and by the sweep, and is
- * tenant data the guard scopes.
+ * Real database: the parked row commits with the delivery's marker, is made due
+ * by the transfer's handler and decided under the asset lock by the sweep, and
+ * is tenant data the guard scopes.
  */
 describe('parked INSURANCE_RECORDED (#240 r8)', () => {
   const org = tenants();
@@ -202,7 +204,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
                                     ELSE now() - interval '1 hour' END
        WHERE event_id = ${eventId}`;
 
-  it('policy before transfer: parked with its marker, applied when the transfer is consumed, dispatch allowed', async () => {
+  it('policy before transfer: parked with its marker, applied by the sweep once the transfer is consumed, dispatch allowed', async () => {
     const assetId = await machineOfA();
     const driverId = await driverOfB();
     const { policyId, envelope } = newOwnersPolicy(assetId);
@@ -231,6 +233,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
 
     await transferToB(assetId);
     await activateForB(assetId);
+    await consumer.sweepParked();
 
     expect(await parked(envelope.eventId)).toBeNull();
     const row = await repository.findAssetRefUnscoped(assetId);
@@ -256,6 +259,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     policies.deny(policyId, 'NOT_ACTIVE');
     await transferToB(assetId);
     await activateForB(assetId);
+    await consumer.sweepParked();
 
     expect(await parked(envelope.eventId)).toBeNull();
     expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
@@ -264,17 +268,31 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
   });
 
-  it('the sweep: re-verifies a row the transfer could not, and leaves one that is not due', async () => {
+  it('the sweep: tries at once a row the transfer made due; one it could not decide waits for its age', async () => {
     const assetId = await machineOfA();
     const { policyId, envelope } = newOwnersPolicy(assetId);
     await consumer.handle(envelope);
 
-    // asset-service down while the transfer is consumed: the transfer is
-    // projected, the event stays parked with one attempt counted.
-    policies.unreachable();
+    // Parked a moment ago: not due, untouched by the sweep.
+    await consumer.sweepParked();
+    expect(await parked(envelope.eventId)).toMatchObject({ attempts: 0, nextAttemptAt: null });
+
+    // The transfer asks nobody; it makes the row due.
     await transferToB(assetId);
     expect((await repository.findAssetRefUnscoped(assetId))!.organizationId).toBe(org.b);
-    expect(await parked(envelope.eventId)).toMatchObject({ attempts: 1, reason: 'NO_ANSWER' });
+    expect(await parked(envelope.eventId)).toMatchObject({
+      attempts: 0,
+      nextAttemptAt: expect.any(Date),
+    });
+
+    // asset-service down when the sweep tries it: one attempt counted, the mark spent.
+    policies.unreachable();
+    await consumer.sweepParked();
+    expect(await parked(envelope.eventId)).toMatchObject({
+      attempts: 1,
+      reason: 'NO_ANSWER',
+      nextAttemptAt: null,
+    });
     policies.unreachable(false);
 
     // Just tried: not due, untouched by the sweep.
@@ -397,6 +415,147 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
   }, 30_000);
 
+  it('r10: the transfer returns at once however many events are parked; the sweep applies them', async () => {
+    const assetId = await machineOfA();
+    const parkedIds: string[] = [];
+    for (let i = 0; i < 120; i++) {
+      const { envelope } = newOwnersPolicy(assetId);
+      await consumer.handle(envelope);
+      parkedIds.push(envelope.eventId);
+    }
+    const ofMachine = () =>
+      runUnscoped('test reads the parked table across tenants', () =>
+        prisma.client.insurancePendingVerification.findMany({ where: { assetId } }),
+      );
+    expect(await ofMachine()).toHaveLength(120);
+
+    // A slow source: deciding them inside the handler, one after another, would
+    // keep it 120 × 250 ms = 30 s away from Kafka — past the session timeout.
+    const verify = policies.verify.bind(policies);
+    const slow = jest.spyOn(policies, 'verify').mockImplementation(async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return verify(...args);
+    });
+    const started = Date.now();
+    await transferToB(assetId);
+    const took = Date.now() - started;
+    expect(slow).not.toHaveBeenCalled();
+    slow.mockRestore();
+    expect(took).toBeLessThan(5_000);
+
+    const marked = await ofMachine();
+    expect(marked).toHaveLength(120);
+    expect(marked.every((row) => row.attempts === 0 && row.nextAttemptAt !== null)).toBe(true);
+
+    // The sweep, outside the handler, decides them all at once: due by the
+    // transfer, not by their age.
+    expect((await consumer.sweepParked()).APPLIED).toBeGreaterThanOrEqual(120);
+    expect(await ofMachine()).toHaveLength(0);
+    const cover = (await repository.findAssetRefUnscoped(assetId))!.insuranceCover as Record<
+      string,
+      { policyId: string }[]
+    >;
+    expect(cover.COMPREHENSIVE).toHaveLength(120);
+  }, 120_000);
+
+  it('r10: a parked verification paused across insurance:clear-transferred restores nothing', async () => {
+    const assetId = await machineOfA();
+    const validFrom = new Date(Date.now() - 1000).toISOString();
+    const validTo = new Date(Date.now() + year).toISOString();
+    const comprehensive = (policyId: string) =>
+      eventFor(org.a, 'INSURANCE_RECORDED', {
+        assetId,
+        policyId,
+        insurerName: 'بیمه ایران',
+        coverage: 'COMPREHENSIVE',
+        validFrom,
+        validTo,
+      });
+    const window = async () =>
+      (await repository.findAssetRefUnscoped(assetId))!.insuranceCover as Record<string, unknown>;
+
+    // org.a's policy, in force before the transfer.
+    const first = id('INS');
+    policies.set(first, {
+      counts: true,
+      organizationId: org.a,
+      coverage: 'COMPREHENSIVE',
+      validFrom,
+      validUntil: validTo,
+      ownershipGeneration: 0,
+    });
+    await consumer.handle(comprehensive(first));
+    // org.a's renewal, consumed here after the transfer committed at the source
+    // but before fleet consumed it: parked. Under the rule of the moment
+    // COMPREHENSIVE follows the vehicle, so the source counts it for org.b.
+    const renewal = id('INS');
+    policies.set(renewal, {
+      counts: true,
+      organizationId: org.b,
+      coverage: 'COMPREHENSIVE',
+      validFrom,
+      validUntil: validTo,
+      ownershipGeneration: 1,
+    });
+    const event = comprehensive(renewal);
+    await consumer.handle(event);
+    expect(await parked(event.eventId)).toMatchObject({ reason: 'NOT_CURRENT_OWNER' });
+    await consumer.handle(
+      eventFor(org.b, 'ASSET_TRANSFERRED', {
+        assetId,
+        fromOrganizationId: org.a,
+        toOrganizationId: org.b,
+        transferredAt: new Date().toISOString(),
+        reason: 'واگذاری',
+        ownershipGeneration: 1,
+        retainedCoverages: ['COMPREHENSIVE'],
+      }),
+    );
+    expect(await window()).toMatchObject({ COMPREHENSIVE: [{ policyId: first }] });
+
+    // The sweep asks about the renewal. While the old rule's answer is held, the
+    // rule is narrowed and the transferred machines' windows are cleared.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const asking = new Promise<void>((resolve) => (reached = resolve));
+    const verify = policies.verify.bind(policies);
+    const paused = jest
+      .spyOn(policies, 'verify')
+      .mockImplementation(async (organizationId, asked, policyId) => {
+        const answer = await verify(organizationId, asked, policyId);
+        if (policyId === renewal) {
+          reached();
+          await held;
+        }
+        return answer;
+      });
+    const sweep = consumer.sweepParked();
+    await asking;
+    const report = await clearTransferredInsurance(repository, {
+      dryRun: false,
+      includeUnknownGeneration: false,
+      organizationId: org.b,
+      pageSize: 100,
+    });
+    expect(report.cleared).toBeGreaterThanOrEqual(1);
+    expect(await window()).toEqual({});
+    release();
+    await sweep;
+    paused.mockRestore();
+
+    // The answer was about a replica that no longer stands: nothing restored,
+    // the event still parked, no attempt counted.
+    expect(await window()).toEqual({});
+    expect(await parked(event.eventId)).toMatchObject({ attempts: 0 });
+
+    // Still due: the next run asks again, under the narrowed rule.
+    policies.deny(renewal, 'NOT_FOLLOWING_VEHICLE');
+    await consumer.sweepParked();
+    expect(await parked(event.eventId)).toBeNull();
+    expect(await window()).toEqual({});
+  });
+
   it('is tenant data: each organization reads only the rows parked under it', async () => {
     const assetOfA = await machineOfA();
     const assetOfB = await machineOfA();
@@ -449,9 +608,12 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
         }),
       ),
     ).rejects.toThrow(/Cross-tenant writes are never implicit/);
-    // The transfer's handler reads by machine, whichever tenant parked.
-    expect(await repository.listParkedInsuranceForAsset(assetOfA, 10)).toEqual([
-      first.envelope.eventId,
-    ]);
+    // The transfer's handler marks by machine, whichever tenant parked.
+    expect(
+      await repository.transaction((tx) => repository.markParkedInsuranceDue(tx, assetOfA)),
+    ).toBe(1);
+    expect(await parked(first.envelope.eventId)).toMatchObject({
+      nextAttemptAt: expect.any(Date),
+    });
   });
 });

@@ -5,7 +5,8 @@ import { PrismaClient } from '../generated/prisma';
 import { loadAssetEnv, SERVICE_NAME } from '../config/env';
 import { PrismaService } from '../prisma/prisma.service';
 import { AssetRepository } from '../asset/asset.repository';
-import { MAX_PAGE_SIZE, reprojectInsurance } from './reproject.command';
+import { reprojectInsurance } from './reproject.command';
+import { parseReprojectArgs } from './reproject.args';
 
 /**
  * `pnpm --filter @rasta/asset-service insurance:reproject [--dry-run]
@@ -21,36 +22,12 @@ import { MAX_PAGE_SIZE, reprojectInsurance } from './reproject.command';
  * outbox rows, which that role may. The same preflight the service runs at
  * boot is run here, since this entry point skips it. Credentials come from the
  * environment only; the arguments carry no secret. Exit 2 on a refusal or an
- * error, naming the role and never the URL.
+ * error, naming the role and never the URL. The arguments are parsed first,
+ * before the environment or the database ({@link parseReprojectArgs}): a
+ * malformed command line touches nothing.
  */
-interface Args {
-  dryRun: boolean;
-  organizationId?: string;
-  pageSize: number;
-  reissue: boolean;
-}
-
-function parseArgs(argv: readonly string[]): Args {
-  const args: Args = { dryRun: false, pageSize: 200, reissue: false };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === '--dry-run') args.dryRun = true;
-    else if (flag === '--organization') args.organizationId = argv[++i];
-    else if (flag === '--page-size') args.pageSize = Number(argv[++i]);
-    else if (flag === '--reissue') args.reissue = true;
-    else throw new Error(`unknown argument ${String(flag)}`);
-  }
-  if (args.organizationId !== undefined && args.organizationId.length === 0) {
-    throw new Error('--organization needs an organization id');
-  }
-  if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > MAX_PAGE_SIZE) {
-    throw new Error(`--page-size must be an integer from 1 to ${MAX_PAGE_SIZE}`);
-  }
-  return args;
-}
-
 async function main(): Promise<number> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseReprojectArgs(process.argv.slice(2));
 
   assertNoMigratorCredentials(process.env);
   const env = loadAssetEnv();

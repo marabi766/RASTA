@@ -126,6 +126,7 @@ function buildConsumer(options: {
       recorded.processed.push(eventId);
       return true;
     }),
+    isEventProcessed: jest.fn(async () => options.alreadyProcessed ?? false),
     unmarkEventProcessed: jest.fn(async (tx: unknown, eventId: string) => {
       recorded.unmarked.push(eventId);
       recorded.removedIn.unmarked.push(txOf(tx));
@@ -146,11 +147,11 @@ function buildConsumer(options: {
       const row = recorded.parked.get(eventId);
       return row ? { ...row } : null;
     }),
-    listParkedInsuranceForAsset: jest.fn(async (assetId: string) =>
-      [...recorded.parked.values()]
-        .filter((row) => row.assetId === assetId)
-        .map((row) => row.eventId),
-    ),
+    markParkedInsuranceDue: jest.fn(async (_tx: unknown, assetId: string) => {
+      const rows = [...recorded.parked.values()].filter((row) => row.assetId === assetId);
+      for (const row of rows) row.due = true;
+      return rows.length;
+    }),
     listDueParkedInsurance: jest.fn(async () =>
       [...recorded.parked.values()]
         .filter((row) => row.due)
@@ -2159,7 +2160,7 @@ describe('AssetSyncConsumer', () => {
         });
       });
 
-      it('...and is applied, without a redelivery, when the transfer is consumed', async () => {
+      it('...and is applied, without a redelivery, by the sweep once the transfer is consumed', async () => {
         const policies = new FakePolicySource().set(
           'INS-1',
           counting({ organizationId: NEW_OWNER, ownershipGeneration: 4 }),
@@ -2172,6 +2173,7 @@ describe('AssetSyncConsumer', () => {
         // The transfer arrives; the projection is what the replica shows next.
         shown = { ...machine, organizationId: NEW_OWNER, ownershipGeneration: 4 };
         await consumer.handle(transferTo(NEW_OWNER, 4));
+        await consumer.sweepParked();
 
         expect(recorded.parked.size).toBe(0);
         const applied = recorded.upserts.find((row) => row.sourceEvent === 'INSURANCE_RECORDED');
@@ -2270,8 +2272,8 @@ describe('AssetSyncConsumer', () => {
     });
 
     /**
-     * #240 r8: a parked event is decided again by the same verification —
-     * after the transfer is projected, and by the sweep — and dead-lettered,
+     * #240 r8, r10: a parked event is decided again by the same verification —
+     * by the sweep, which the transfer makes it due for — and dead-lettered,
      * never applied, when its attempts run out.
      */
     describe('r8: parked events, re-verified', () => {
@@ -2287,19 +2289,32 @@ describe('AssetSyncConsumer', () => {
           ownershipGeneration,
         }) as const;
 
-      /** A consumer whose replica shows `machine` until `move` is called. */
+      /**
+       * A consumer whose replica shows `machine` until `move` is called, at an
+       * insurance revision that `bumpRevision` moves (#240 r10).
+       */
       function parkedSetup(
         verdictOwner: string,
         generation: number,
         parking: Partial<ParkingOptions> = {},
       ) {
         const policies = new FakePolicySource().set('INS-1', counting(verdictOwner, generation));
-        let shown: Record<string, unknown> = machine;
+        let revision = 0n;
+        let shown: Record<string, unknown> = { ...machine, insuranceRevision: revision };
         const built = buildConsumer({ replica: () => shown, policies, parking });
         return {
           ...built,
           move: (organizationId: string, ownershipGeneration: number) => {
-            shown = { ...machine, organizationId, ownershipGeneration };
+            shown = {
+              ...machine,
+              organizationId,
+              ownershipGeneration,
+              insuranceRevision: revision,
+            };
+          },
+          bumpRevision: () => {
+            revision += 1n;
+            shown = { ...shown, insuranceRevision: revision };
           },
         };
       }
@@ -2312,6 +2327,7 @@ describe('AssetSyncConsumer', () => {
         policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
         move(B, 4);
         await consumer.handle(transferTo(B, 4));
+        await consumer.sweepParked();
 
         expect(recorded.parked.size).toBe(0);
         expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
@@ -2326,6 +2342,7 @@ describe('AssetSyncConsumer', () => {
         policies.set('INS-1', counting(B, 4));
         move(B, 5);
         await consumer.handle(transferTo(B, 5));
+        await consumer.sweepParked();
 
         expect(recorded.parked.size).toBe(0);
         expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
@@ -2339,6 +2356,7 @@ describe('AssetSyncConsumer', () => {
 
         move(B, 4);
         await consumer.handle(transferTo(B, 4));
+        await consumer.sweepParked();
 
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
           attempts: 1,
@@ -2354,23 +2372,39 @@ describe('AssetSyncConsumer', () => {
         policies.unreachable();
         move(B, 4);
         await consumer.handle(transferTo(B, 4));
-
         expect(recorded.upserts.at(-1)).toMatchObject({ sourceEvent: 'ASSET_TRANSFERRED' });
+        await consumer.sweepParked();
+
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
           attempts: 1,
           reason: 'NO_ANSWER',
         });
       });
 
-      it('the transfer path never dead-letters, even past the maximum', async () => {
-        const { consumer, recorded, move } = parkedSetup(C, 5, { maxAttempts: 1 });
+      it('r10: the transfer asks nobody — it makes the machine’s parked events due in its own transaction and returns', async () => {
+        const { consumer, recorded, repository, policies, move } = parkedSetup(B, 4);
         await consumer.handle(recordedPolicy());
+        recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.due = false;
+        const asked = policies.asked.length;
 
         move(B, 4);
         await consumer.handle(transferTo(B, 4));
 
-        expect(recorded.deadLetters).toHaveLength(0);
-        expect(recorded.parked.size).toBe(1);
+        expect(policies.asked).toHaveLength(asked);
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
+          due: true,
+          attempts: 0,
+        });
+        // In the transfer's own transaction (the last one opened), under its lock.
+        const [[tx, assetId]] = (repository.markParkedInsuranceDue as jest.Mock).mock.calls as [
+          [unknown, string],
+        ];
+        expect(assetId).toBe('AST-SEED-0001');
+        expect(txOf(tx)).toBe((repository.transaction as jest.Mock).mock.calls.length);
+
+        // The sweep decides it.
+        expect(await consumer.sweepParked()).toMatchObject({ APPLIED: 1 });
+        expect(recorded.parked.size).toBe(0);
       });
 
       it('the sweep applies a due event once the replica has caught up by any route', async () => {
@@ -2406,18 +2440,45 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts).toBe(0);
       });
 
-      it('r9: asset-service is never asked inside a transaction when a parked event is re-verified', async () => {
+      it('r9, r10: asset-service is never asked inside a transaction, live or parked', async () => {
         const { consumer, recorded, move } = parkedSetup(B, 4);
         await consumer.handle(recordedPolicy());
-        // The live delivery asks inside its own transaction, with its marker.
-        expect(recorded.askedInTransaction).toEqual([true]);
+        // The live delivery asks before its transaction (r10).
+        expect(recorded.askedInTransaction).toEqual([false]);
 
         move(B, 4);
         await consumer.handle(transferTo(B, 4));
         await consumer.sweepParked();
 
-        expect(recorded.askedInTransaction).toEqual([true, false]);
+        expect(recorded.askedInTransaction).toEqual([false, false]);
         expect(recorded.parked.size).toBe(0);
+      });
+
+      it('r10: the insurance revision moved while the source was asked (a clear) — kept, no attempt counted, nothing applied', async () => {
+        const { consumer, recorded, policies, move, bumpRevision } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        move(B, 4);
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+          const answer = await verify(...args);
+          // insurance:clear-transferred committed in between: same owner and
+          // generation, the windows emptied — only the revision says so.
+          bumpRevision();
+          return answer;
+        });
+
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1, APPLIED: 0 });
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({ attempts: 0 });
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+
+        // Still parked and due: the next run asks again, now under the new rule.
+        policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
+        expect(await consumer.sweepParked()).toMatchObject({ DROPPED: 1 });
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
       });
 
       it('r9: an upstream timeout is counted as an attempt each run, and the maximum dead-letters it', async () => {
@@ -2455,7 +2516,7 @@ describe('AssetSyncConsumer', () => {
         await consumer.handle(recordedPolicy());
         const verify = policies.verify.bind(policies);
         jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
-          // The transfer's re-verification (or another instance) tried it first.
+          // Another instance's sweep tried it first.
           recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts += 1;
           return verify(...args);
         });
@@ -2564,6 +2625,87 @@ describe('AssetSyncConsumer', () => {
       });
 
       expect(recorded.upserts).toHaveLength(0);
+    });
+
+    describe('r10: the live delivery asks before its transaction, and decides on an unchanged revision', () => {
+      const confirmed = {
+        counts: true,
+        organizationId: OWNER,
+        coverage: 'COMPREHENSIVE',
+        validFrom: '2026-02-01T00:00:00.000Z',
+        validUntil: '2027-02-01T00:00:00.000Z',
+        ownershipGeneration: 3,
+      } as const;
+
+      it('the revision moved while the source was asked (a clear): fails for a retry, nothing applied; the retry asks again', async () => {
+        const policies = new FakePolicySource().set('INS-1', confirmed);
+        let shown: Record<string, unknown> = { ...machine, insuranceRevision: 7n };
+        const { consumer, recorded, repository } = buildConsumer({
+          replica: () => shown,
+          policies,
+        });
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+          const answer = await verify(...args);
+          // insurance:clear-transferred committed in between: same owner and
+          // generation, the windows emptied.
+          shown = { ...shown, insuranceRevision: 8n };
+          return answer;
+        });
+
+        await expect(consumer.handle(recordedPolicy())).rejects.toThrow(
+          /insurance state of AST-SEED-0001 changed while asset-service was asked/,
+        );
+        expect(recorded.upserts).toHaveLength(0);
+        expect(repository.parkInsuranceEvent).not.toHaveBeenCalled();
+        // The source was asked with no lock and no transaction.
+        expect(repository.lockAssetRef).toHaveBeenCalledTimes(1);
+        expect(recorded.askedInTransaction).toEqual([false]);
+
+        // The retry: the narrowed rule no longer counts the policy.
+        policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
+        await consumer.handle(recordedPolicy());
+        expect(policies.asked).toHaveLength(2);
+        expect(recorded.upserts.at(-1)).not.toHaveProperty('insuranceCover');
+      });
+
+      it('an unchanged revision: decided and applied under the lock', async () => {
+        const policies = new FakePolicySource().set('INS-1', confirmed);
+        const { consumer, recorded } = buildConsumer({
+          existing: { ...machine, insuranceRevision: 7n },
+          policies,
+        });
+
+        await consumer.handle(recordedPolicy());
+
+        expect(recorded.upserts[0]!.insuranceCover).toMatchObject({
+          COMPREHENSIVE: [{ policyId: 'INS-1', generation: 3 }],
+        });
+      });
+
+      it('a redelivery of a handled event asks nobody', async () => {
+        const policies = new FakePolicySource().set('INS-1', confirmed);
+        const { consumer, recorded } = buildConsumer({
+          existing: machine,
+          policies,
+          alreadyProcessed: true,
+        });
+
+        await consumer.handle(recordedPolicy());
+
+        expect(policies.asked).toHaveLength(0);
+        expect(recorded.upserts).toHaveLength(0);
+      });
+
+      it('handled when read but unmarked since (its parked row dead-lettered): fails for a retry, never applied unverified', async () => {
+        const policies = new FakePolicySource().set('INS-1', confirmed);
+        const { consumer, recorded, repository } = buildConsumer({ existing: machine, policies });
+        (repository.isEventProcessed as jest.Mock).mockResolvedValueOnce(true);
+
+        await expect(consumer.handle(recordedPolicy())).rejects.toThrow(/no longer marked handled/);
+        expect(policies.asked).toHaveLength(0);
+        expect(recorded.upserts).toHaveLength(0);
+      });
     });
 
     it('a service built without asset-service applies nothing', async () => {
