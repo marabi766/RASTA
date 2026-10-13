@@ -12,7 +12,9 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -200,6 +202,19 @@ import { clamdAddress, loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from '.
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: DocumentEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (env: DocumentEnv, internalTokens: InternalTokenService): AuthGuardOptions => ({
@@ -226,6 +241,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
     private readonly store: PrismaOutboxStore,
     private readonly scanWorker: ScanWorker,
   ) {}
@@ -242,6 +258,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.relay.start();
+    this.purge.start();
     // Started here rather than lazily on the first document, so a scanner that
     // is unreachable shows up in the metrics of an idle deployment instead of
     // waiting for a user to upload something to discover it (ADR-049).
@@ -275,6 +292,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // The worker first: it releases the claims it has not started, so a rolling
     // deploy does not park those documents until their leases expire.
     await this.scanWorker.stop();
-    await this.relay.stop();
+    // A purge batch in flight is bounded by its statement timeout.
+    await Promise.all([this.relay.stop(), this.purge.stop()]);
   }
 }

@@ -8,6 +8,7 @@ import {
   kafkaSaslConfigured,
   loadEnv,
   EnvValidationError,
+  outboxPurgeEnvSchema,
 } from './env';
 
 describe('loadEnv', () => {
@@ -205,6 +206,70 @@ describe('boolean flags in the shared schemas', () => {
     it.each(['abc', '1.5', ''])('refuses %p as a lease rather than coercing it', (value) => {
       expect(() => load({ OUTBOX_CLAIM_LEASE_SECONDS: value })).toThrow(EnvValidationError);
     });
+  });
+});
+
+/**
+ * D-052: the outbox purge. Fail closed — a value that is missing its digits,
+ * out of range or not a number refuses to boot, rather than falling through to
+ * a retention that deletes what an operator meant to keep.
+ */
+describe('outbox purge (D-052)', () => {
+  const schema = baseEnvSchema.merge(outboxPurgeEnvSchema);
+  const base = { SERVICE_NAME: 'fleet-service', PORT: '3104' };
+  const load = (overrides: Record<string, string> = {}) =>
+    loadEnv(schema, { ...base, ...overrides } as NodeJS.ProcessEnv);
+
+  it('is on by default, keeping ADR-050’s seven days, in bounded batches', () => {
+    const env = load();
+
+    expect(env.OUTBOX_PURGE_ENABLED).toBe(true);
+    expect(env.OUTBOX_PURGE_RETENTION_HOURS).toBe(168);
+    expect(env.OUTBOX_PURGE_INTERVAL_SECONDS).toBe(300);
+    expect(env.OUTBOX_PURGE_BATCH_SIZE).toBe(1000);
+    expect(env.OUTBOX_PURGE_MAX_BATCHES_PER_RUN).toBe(10);
+    expect(env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS).toBe(5000);
+  });
+
+  it('reads explicit values', () => {
+    const env = load({
+      OUTBOX_PURGE_ENABLED: 'off',
+      OUTBOX_PURGE_RETENTION_HOURS: '72',
+      OUTBOX_PURGE_INTERVAL_SECONDS: '60',
+      OUTBOX_PURGE_BATCH_SIZE: '250',
+      OUTBOX_PURGE_MAX_BATCHES_PER_RUN: '4',
+      OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '2000',
+    });
+
+    expect(env.OUTBOX_PURGE_ENABLED).toBe(false);
+    expect(env.OUTBOX_PURGE_RETENTION_HOURS).toBe(72);
+    expect(env.OUTBOX_PURGE_INTERVAL_SECONDS).toBe(60);
+    expect(env.OUTBOX_PURGE_BATCH_SIZE).toBe(250);
+    expect(env.OUTBOX_PURGE_MAX_BATCHES_PER_RUN).toBe(4);
+    expect(env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS).toBe(2000);
+  });
+
+  it.each([
+    ['OUTBOX_PURGE_RETENTION_HOURS', ['0', '-1', '8761', '', 'abc', '1.5', '7d']],
+    ['OUTBOX_PURGE_INTERVAL_SECONDS', ['9', '0', '86401', '', 'often']],
+    ['OUTBOX_PURGE_BATCH_SIZE', ['0', '10001', '', '100.5']],
+    ['OUTBOX_PURGE_MAX_BATCHES_PER_RUN', ['0', '1001', '', 'x']],
+    ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', ['99', '60001', '', '5s']],
+    ['OUTBOX_PURGE_ENABLED', ['maybe', '2', 'enabled']],
+  ])('refuses an invalid %s', (name, values) => {
+    for (const value of values) {
+      expect(() => load({ [name]: value })).toThrow(EnvValidationError);
+    }
+  });
+
+  it('refuses a statement timeout that shutdown could not wait out', () => {
+    expect(() =>
+      load({ OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '25000', SHUTDOWN_TIMEOUT_MS: '25000' }),
+    ).toThrow(/OUTBOX_PURGE_STATEMENT_TIMEOUT_MS/);
+    expect(
+      load({ OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '24999', SHUTDOWN_TIMEOUT_MS: '25000' })
+        .OUTBOX_PURGE_STATEMENT_TIMEOUT_MS,
+    ).toBe(24_999);
   });
 });
 

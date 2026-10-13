@@ -1404,6 +1404,34 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هر Migration بازنویسی (D-048، گام ۲) همهٔ ردیف‌های منتشرشده را حساب می‌کند.
 - **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
   صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
+- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization.** زمان‌بند مشترک
+  `OutboxPurgeScheduler` و دستور `purgePublishedSql` در `@rasta/nest-common`، env در `outboxPurgeEnvSchema`
+  (`@rasta/config`):
+  - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
+  - `OUTBOX_PURGE_RETENTION_HOURS` پیش‌فرض ۱۶۸ است: همان هفت روز ADR-050، و برابر نگه‌داری هفت‌روزهٔ Topicهای دامنه در Kafka.
+  - تنظیم‌های دیگر: `_INTERVAL_SECONDS`، `_BATCH_SIZE`، `_MAX_BATCHES_PER_RUN`، `_STATEMENT_TIMEOUT_MS`.
+  - هر مقدار کران دارد و مقدار نامعتبر سرویس را در شروع متوقف می‌کند.
+
+  هر Batch یک تراکنش کوتاه است:
+  - `SET LOCAL statement_timeout`؛
+  - قفل Advisory در سطح تراکنش به‌ازای Schema، تا Replica دوم `busy` بگیرد و اجرایش را تمام کند؛
+  - `FOR UPDATE SKIP LOCKED` و `LIMIT`.
+
+  فقط ردیف منتشرشده‌ای حذف می‌شود که از Retention گذشته باشد، به ساعت پایگاه داده، با `claim_token IS NULL`. ردیفی که
+  `outbox-stuck.md` (علت C) دستی `MANUALLY SKIPPED` کرده **نگه داشته می‌شود**، چون هرگز تحویل نشده است.
+  `created_at < cutoff` راه دسترسی از ایندکس `created_at` است و Migration لازم نشد. اندازه‌گیری روی ۴۰۰٬۰۰۰ ردیف: Batch
+  هزارتایی ۱۱ ms، اجرای بی‌کار ۰٫۱ ms.
+
+  `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
+  `test/outbox-purge.int-spec.ts` در هر پنج سرویس این را نشان می‌دهد.
+
+  **پیش‌شرط:** در اجرای B2 (`outbox-b2-backfill.md`) `OUTBOX_PURGE_ENABLED=false` باشد. B2 شماره‌گذاری را از بیشینهٔ
+  `stream_seq` باقی‌مانده در جدول می‌گیرد، نه از شمارنده.
+
+  **مانده (فازهای بعد، با مالک هر سرویس):**
+  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست؛
+  - economic، marketplace، supplier، construction، contract، notification.
+
 - **اولویت:** متوسط (پیش‌نیاز Production)
 - **ثبت‌شده:** 2026-10-13 (#242 r1)
 
