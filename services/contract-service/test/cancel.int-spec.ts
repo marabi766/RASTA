@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
+import { EventPublisher } from '../src/events/publisher';
 import { ulid } from 'ulid';
 import {
   actor,
@@ -156,6 +157,55 @@ describe('POST /v1/contracts/{id}/cancel', () => {
       expect((await rowOf(id)).status).toBe('DRAFT');
     });
 
+    it('each denial of the authority to cancel is an audit record with a closed action and reason (S-06)', async () => {
+      const { id, employer, contractor } = await draft();
+      await cancel(id, contractorSigner(contractor)).expect(403);
+      await cancel(id, person(employer, ['DRIVER'])).expect(403);
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['CANCEL_CONTRACT', 'CONTRACTOR', 'NOT_EMPLOYER'],
+        ['CANCEL_CONTRACT', 'EMPLOYER', 'ROLE_NOT_PERMITTED'],
+      ]);
+      expect(refused[0]!.payload).toMatchObject({
+        contractId: id,
+        organizationId: employer,
+        subjectId: null,
+        policyId: null,
+      });
+    });
+
+    it('a denial that cannot be recorded is a retryable 503 and leaves its key free; the retry records it once, and a repeat adds no second event', async () => {
+      const { id, employer } = await draft();
+      const retryKey = key();
+      const driver = person(employer, ['DRIVER']);
+      const attempt = () => cancel(id, driver, BODY, retryKey);
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+          return original(...args);
+        });
+      try {
+        const down = await attempt().expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+      } finally {
+        failing.mockRestore();
+      }
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
+
+      await attempt().expect(403);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      await attempt().expect(403);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      expect((await rowOf(id)).status).toBe('DRAFT');
+      // The key was never held: a person with the authority cancels under it.
+      await cancel(id, employerCanceller(employer), BODY, retryKey).expect(200);
+      expect((await rowOf(id)).status).toBe('CANCELLED');
+    });
+
     it('the platform administrator, the oversight role and a service never cancel — whatever else the token holds', async () => {
       const { id, employer, contractor } = await draft();
       await cancel(id, systemAdminOf(employer)).expect(403);
@@ -172,6 +222,34 @@ describe('POST /v1/contracts/{id}/cancel', () => {
       }
       await cancel(id, undefined).expect(401);
       expect((await rowOf(id)).status).toBe('DRAFT');
+      // Only the platform administrator acting for the employer is a refusal of authority the
+      // audit records (S-06); the oversight role and a service are refused before anything is read.
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['CANCEL_CONTRACT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ['CANCEL_CONTRACT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+      ]);
+    });
+
+    it('the platform administrator’s refusal is recorded once per request: a repeat under the same key adds no second event', async () => {
+      const { id, employer } = await draft();
+      const repeatKey = key();
+      const admin = systemAdminOf(employer);
+      await cancel(id, admin, BODY, repeatKey).expect(403);
+      await cancel(id, admin, BODY, repeatKey).expect(403);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      expect((await rowOf(id)).status).toBe('DRAFT');
+    });
+
+    it('a refusal of the contract’s state is answered, not audited: only authority and separation of duties are', async () => {
+      const { id, employer, contractor } = await draft();
+      await sign(id, contractorSigner(contractor)).expect(200);
+      const signed = await cancel(id, employerCanceller(employer)).expect(422);
+      expect(reasons(signed.body)).toEqual(['cancellation:SIGNATURE_RECORDED']);
+      await sign(id, employerSigner(employer)).expect(200);
+      const notDraft = await cancel(id, employerCanceller(employer)).expect(422);
+      expect(reasons(notDraft.body)).toEqual(['cancellation:CONTRACT_NOT_DRAFT']);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
     });
 
     it('a token without the platform user id cancels nothing: 403', async () => {

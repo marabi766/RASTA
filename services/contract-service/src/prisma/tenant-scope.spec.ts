@@ -97,6 +97,7 @@ describe('the schema models nothing CON-003 has not decided so far', () => {
       'PolicyReconciliationTask',
       'ApprovalPolicyStep',
       'IdempotencyKey',
+      'RefusalAuditDedupe',
     ]);
   });
 

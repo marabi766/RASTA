@@ -20,6 +20,7 @@ export const TENANT_SCOPED_MODELS = [
   'Contract',
   'ContractSignature',
   'IdempotencyKey',
+  'RefusalAuditDedupe',
   'ApprovalPolicy',
   'ApprovalPolicyStep',
   'PolicyReconciliationTask',
