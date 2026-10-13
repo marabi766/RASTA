@@ -82,7 +82,11 @@ export class MilestoneService {
     dto: PlanMilestoneDto,
     fence?: ClaimFence<MilestoneView>,
   ): Promise<MilestoneView> {
-    const acting = this.access.assertCanCommandAmendments();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandAmendments(),
+      { action: 'PLAN_MILESTONE', contractId, subjectId: null },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);
@@ -155,7 +159,11 @@ export class MilestoneService {
     dto: ChangeMilestoneDto,
     fence?: ClaimFence<MilestoneView>,
   ): Promise<MilestoneView> {
-    const acting = this.access.assertCanCommandAmendments();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandAmendments(),
+      { action: 'CHANGE_MILESTONE', contractId, subjectId: milestoneId },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);

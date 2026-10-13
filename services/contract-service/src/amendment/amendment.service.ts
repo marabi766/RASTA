@@ -203,7 +203,11 @@ export class AmendmentService {
     dto: ProposeAmendmentDto,
     fence?: ClaimFence<AmendmentView>,
   ): Promise<AmendmentView> {
-    const acting = this.access.assertCanCommandAmendments();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandAmendments(),
+      { action: 'PROPOSE_AMENDMENT', contractId, subjectId: null },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);
@@ -323,7 +327,11 @@ export class AmendmentService {
     dto: SignAmendmentDto,
     fence?: ClaimFence<AmendmentView>,
   ): Promise<AmendmentView> {
-    const acting = this.access.assertCanCommandAmendments();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandAmendments(),
+      { action: 'SIGN_AMENDMENT', contractId, subjectId: amendmentId },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);

@@ -655,6 +655,53 @@ describe('POST /v1/contracts/{id}/sign', () => {
           .expect(403);
       }
       expect(await signaturesOf(id)).toHaveLength(0);
+      // The platform administrator acting for a party is a refusal of authority, audited (S-06);
+      // the oversight role and a service are refused before any contract is read, and are not.
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['SIGN_CONTRACT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ['SIGN_CONTRACT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ['SIGN_CONTRACT', 'CONTRACTOR', 'PLATFORM_ADMINISTRATOR'],
+      ]);
+    });
+
+    it('the platform administrator acting for an organization that is no party is the same 403, and nothing is recorded', async () => {
+      const { id, employer } = await draft();
+      const stranger = `ORG-STRANGER-${ulid()}`;
+      organizations.push(stranger);
+      const outside = await sign(id, systemAdminOf(stranger)).expect(403);
+      const party = await sign(id, systemAdminOf(employer)).expect(403);
+      expect(bare(outside.body)).toEqual(bare(party.body));
+      const missing = await sign('CTR_does_not_exist', systemAdminOf(employer)).expect(403);
+      expect(bare(missing.body)).toEqual(bare(party.body));
+      expect(await eventsOf(w.prisma, stranger)).toEqual([]);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+    });
+
+    it('the platform administrator’s refusal that cannot be recorded is a retryable 503; the retry records it once', async () => {
+      const { id, employer } = await draft();
+      const retryKey = key();
+      const admin = systemAdminOf(employer);
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+          return original(...args);
+        });
+      try {
+        const down = await sign(id, admin, {}, retryKey).expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+      } finally {
+        failing.mockRestore();
+      }
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
+      await sign(id, admin, {}, retryKey).expect(403);
+      await sign(id, admin, {}, retryKey).expect(403);
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => e.payload.reason)).toEqual(['PLATFORM_ADMINISTRATOR']);
     });
   });
 

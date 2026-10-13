@@ -338,10 +338,14 @@ describe('amendments of a signed contract', () => {
         expect(refused.map((e) => e.payload.reason)).toEqual(['ROLE_NOT_PERMITTED']);
       });
 
-      it('the platform administrator, the oversight role, a service token and a token without a user id are refused before anything is read', async () => {
+      it('the platform administrator, the oversight role, a service token and a token without a user id are refused; only the administrator acting for the party is recorded', async () => {
         const c = await signed();
         const refusedBefore = (await refusedEvents(c.employer)).length;
         await propose(api, c.id, systemAdminOf(c.employer)).expect(403);
+        const recorded = (await refusedEvents(c.employer)).slice(refusedBefore);
+        expect(recorded.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+          ['PROPOSE_AMENDMENT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ]);
         await propose(api, c.id, auditor(c.employer)).expect(403);
         await http(api)
           .post(`/v1/contracts/${c.id}/amendments`)
@@ -359,7 +363,7 @@ describe('amendments of a signed contract', () => {
         ).expect(403);
         await propose(api, c.id, undefined).expect(401);
         expect(await amendmentRows(w, c.id)).toEqual([]);
-        expect((await refusedEvents(c.employer)).length).toBe(refusedBefore);
+        expect((await refusedEvents(c.employer)).length).toBe(refusedBefore + 1);
       });
     });
   });
@@ -673,6 +677,15 @@ describe('amendments of a signed contract', () => {
         ).expect(403);
         await signAmendment(api, c.id, proposed.id, undefined).expect(401);
         expect(await amendmentSignatures(w, proposed.id)).toEqual([]);
+        const refused = await refusedEvents(c.employer);
+        expect(
+          refused.map((e) => [
+            e.payload.action,
+            e.payload.side,
+            e.payload.reason,
+            e.payload.subjectId,
+          ]),
+        ).toEqual([['SIGN_AMENDMENT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR', proposed.id]]);
       });
     });
 

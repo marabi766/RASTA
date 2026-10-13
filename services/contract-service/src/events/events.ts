@@ -32,6 +32,7 @@ export const CONTRACT_EVENTS = {
   APPROVAL_POLICY_ACTIVATED: 'APPROVAL_POLICY_ACTIVATED',
   APPROVAL_POLICY_RETIRED: 'APPROVAL_POLICY_RETIRED',
   APPROVAL_POLICY_SUSPENDED: 'APPROVAL_POLICY_SUSPENDED',
+  APPROVAL_POLICY_APPROVAL_REFUSED: 'APPROVAL_POLICY_APPROVAL_REFUSED',
   CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
   CONTRACT_SIGNATURE_REFUSED: 'CONTRACT_SIGNATURE_REFUSED',
   CONTRACT_AMENDMENT_PROPOSED: 'CONTRACT_AMENDMENT_PROPOSED',
@@ -198,6 +199,29 @@ export const approvalPolicyRetiredPayload = z
     policyVersion: positive,
     retiredBy: id,
     retiredAt: instant,
+  })
+  .strict();
+
+/**
+ * The platform approval of a policy was refused for separation of duties (four eyes, Q-70 (7)): the
+ * approver is the person who wrote or submitted it. The audit record of the refusal, written in a
+ * transaction of its own so it survives the request failing; the policy itself is unchanged. Who
+ * asked, the closed reason — no free text.
+ */
+export const POLICY_APPROVAL_REFUSED_REASONS = [
+  /** The approver wrote or submitted the policy. */
+  'SELF_APPROVAL',
+] as const;
+
+export const approvalPolicyApprovalRefusedPayload = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    workflowKey,
+    policyVersion: positive,
+    reason: z.enum(POLICY_APPROVAL_REFUSED_REASONS),
+    refusedBy: id,
+    refusedAt: instant,
   })
   .strict();
 
@@ -433,9 +457,12 @@ export const contractMilestoneChangedPayload = z
 /**
  * A party's attempt at an authority-bound action on a contract was refused for want of authority
  * (the audit record of the refusal, written in a transaction of its own so it survives the request
- * failing): proposing or signing an amendment, planning or editing a milestone. Who asked, for which
- * contract, the closed action and reason — no free text. Never written for a caller who is not a
- * party: such a caller is told the contract does not exist.
+ * failing): signing or cancelling the contract, proposing or signing an amendment, planning or
+ * editing a milestone — refused for want of authority or for separation of duties. Who asked, for
+ * which contract, the closed action and reason — no free text. Never written for a caller who is
+ * not a party: such a caller is told the contract does not exist. A refusal of the contract's
+ * state (a contract no longer a draft, a version moved on) is not one of these: it is answered and
+ * not audited.
  */
 export const AUTHORITY_REFUSED_ACTIONS = [
   'SIGN_CONTRACT',
@@ -456,6 +483,8 @@ export const AUTHORITY_REFUSED_REASONS = [
   'MEMBER_OF_BOTH_PARTIES',
   /** Separation of duties: the caller already signed the other side. */
   'SAME_PERSON_BOTH_SIDES',
+  /** The platform administrator, acting for a party's organization, does not act for a party. */
+  'PLATFORM_ADMINISTRATOR',
 ] as const;
 
 export const contractAuthorityRefusedPayload = z
@@ -485,6 +514,7 @@ export const CONTRACT_EVENT_SCHEMAS = {
   APPROVAL_POLICY_ACTIVATED: approvalPolicyActivatedPayload,
   APPROVAL_POLICY_RETIRED: approvalPolicyRetiredPayload,
   APPROVAL_POLICY_SUSPENDED: approvalPolicySuspendedPayload,
+  APPROVAL_POLICY_APPROVAL_REFUSED: approvalPolicyApprovalRefusedPayload,
   CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: contractSignatureAuthorityFlaggedPayload,
   CONTRACT_SIGNATURE_REFUSED: contractSignatureRefusedPayload,
   CONTRACT_AMENDMENT_PROPOSED: contractAmendmentProposedPayload,

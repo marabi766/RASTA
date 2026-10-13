@@ -5,12 +5,17 @@ import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common'
 /**
  * The allow-listed projection of contract-service's refusal events onto the audit row.
  *
- * `CONTRACT_AUTHORITY_REFUSED` (an authority-bound action by a party was refused) and
- * `CONTRACT_SIGNATURE_REFUSED` (the employer's signature was refused for want of a policy) are
- * *published* — they are the durable record of a refusal — so the path-A default of "an event on a
- * topic is a success under its own name" is wrong for them: `outcome=REFUSED` searches missed every
- * contract, amendment and milestone refusal. These two events are stored as `REFUSED`, under the
- * closed action the refusal names (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …) and the closed reason.
+ * `CONTRACT_AUTHORITY_REFUSED` (an authority-bound action by a party was refused, for want of
+ * authority or for separation of duties), `CONTRACT_SIGNATURE_REFUSED` (the employer's signature
+ * was refused for want of a policy) and `APPROVAL_POLICY_APPROVAL_REFUSED` (a policy's approval
+ * refused by four eyes) are *published* — they are the durable record of a refusal — so the path-A
+ * default of "an event on a topic is a success under its own name" is wrong for them:
+ * `outcome=REFUSED` searches missed every contract, amendment, milestone and policy-approval
+ * refusal. These events are stored as `REFUSED`, under the closed action the refusal names
+ * (`SIGN_CONTRACT`, `SIGN_AMENDMENT`, …, `APPROVE_POLICY`) and the closed reason.
+ *
+ * Only authority and separation-of-duties refusals are published as refusals; contract-service
+ * answers a refusal of a contract's state (a contract no longer a draft) without a record.
  *
  * ## Allow-list, not redaction
  *
@@ -29,7 +34,14 @@ export const CONTRACT_TOPIC = 'rasta.contract.v1';
 export const CONTRACT_REFUSAL_EVENTS = {
   AUTHORITY: 'CONTRACT_AUTHORITY_REFUSED',
   SIGNATURE: 'CONTRACT_SIGNATURE_REFUSED',
+  POLICY_APPROVAL: 'APPROVAL_POLICY_APPROVAL_REFUSED',
 } as const;
+
+/** The action a refused policy approval is stored under. */
+export const POLICY_APPROVAL_ACTION = 'APPROVE_POLICY';
+
+/** Contract-service's `POLICY_APPROVAL_REFUSED_REASONS`. */
+export const POLICY_APPROVAL_REFUSAL_REASONS = ['SELF_APPROVAL'] as const;
 
 /** Contract-service's `AUTHORITY_REFUSED_ACTIONS`. */
 export const CONTRACT_REFUSAL_ACTIONS = [
@@ -49,6 +61,7 @@ export const CONTRACT_REFUSAL_REASONS = [
   'POLICY_AUTHOR_NOT_GOVERNING',
   'MEMBER_OF_BOTH_PARTIES',
   'SAME_PERSON_BOTH_SIDES',
+  'PLATFORM_ADMINISTRATOR',
 ] as const;
 
 const id = z.string().min(1).max(128);
@@ -81,9 +94,23 @@ const signatureRefused = z
   })
   .strict();
 
+/** A policy's platform approval refused for separation of duties (four eyes). */
+const policyApprovalRefused = z
+  .object({
+    policyId: id,
+    organizationId: id,
+    workflowKey: z.string().min(1).max(64),
+    policyVersion: z.number().int().min(1),
+    reason: z.enum(POLICY_APPROVAL_REFUSAL_REASONS),
+    refusedBy: id,
+    refusedAt: instant,
+  })
+  .strict();
+
 export interface ContractRefusalProjection {
-  readonly action: (typeof CONTRACT_REFUSAL_ACTIONS)[number];
-  readonly reason: (typeof CONTRACT_REFUSAL_REASONS)[number];
+  readonly action: (typeof CONTRACT_REFUSAL_ACTIONS)[number] | typeof POLICY_APPROVAL_ACTION;
+  readonly reason:
+    (typeof CONTRACT_REFUSAL_REASONS)[number] | (typeof POLICY_APPROVAL_REFUSAL_REASONS)[number];
 }
 
 /**
@@ -104,6 +131,11 @@ export function toContractRefusalProjection(
     const parsed = signatureRefused.safeParse(envelope.payload);
     if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
     return { action: 'SIGN_CONTRACT', reason: parsed.data.reason };
+  }
+  if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.POLICY_APPROVAL) {
+    const parsed = policyApprovalRefused.safeParse(envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    return { action: POLICY_APPROVAL_ACTION, reason: parsed.data.reason };
   }
   return null;
 }

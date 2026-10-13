@@ -92,6 +92,24 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
         at(12),
       ),
       envelope('CONTRACT_SIGNED', { contractId }, at(13)),
+      authorityRefused('CANCEL_CONTRACT', 'PLATFORM_ADMINISTRATOR', at(14)).source,
+      {
+        ...envelope(
+          'APPROVAL_POLICY_APPROVAL_REFUSED',
+          {
+            policyId,
+            organizationId: ORG,
+            workflowKey: 'contract.signature',
+            policyVersion: 1,
+            reason: 'SELF_APPROVAL',
+            refusedBy: id('USR'),
+            refusedAt: at(15).toISOString(),
+          },
+          at(15),
+        ),
+        aggregateType: 'ApprovalPolicy',
+        aggregateId: policyId,
+      },
     ];
     for (const source of records) {
       await repository.ingest(toAuditEventRecord(source, delivery), DOMAIN_PROJECTOR_CONSUMER);
@@ -116,6 +134,8 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
     expect(response.status).toBe(200);
     const items = response.body.items as { action: string; reason: string; outcome: string }[];
     expect(items.map((item) => [item.action, item.reason, item.outcome]).sort()).toEqual([
+      ['APPROVE_POLICY', 'SELF_APPROVAL', 'REFUSED'],
+      ['CANCEL_CONTRACT', 'PLATFORM_ADMINISTRATOR', 'REFUSED'],
       ['PLAN_MILESTONE', 'NOT_EMPLOYER', 'REFUSED'],
       ['SIGN_AMENDMENT', 'MEMBER_OF_BOTH_PARTIES', 'REFUSED'],
       ['SIGN_CONTRACT', 'SIGNATURE_POLICY_REQUIRED', 'REFUSED'],
@@ -141,5 +161,16 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
       typeof value === 'bigint' ? value.toString() : value,
     );
     expect(text).not.toContain(policyId);
+  });
+
+  it('finds a refused policy approval by its action, on the policy it names', async () => {
+    const refused = await search({ outcome: 'REFUSED', action: 'APPROVE_POLICY' });
+    expect(refused.status).toBe(200);
+    expect(refused.body.items).toHaveLength(1);
+    expect(refused.body.items[0]).toMatchObject({
+      reason: 'SELF_APPROVAL',
+      resourceType: 'ApprovalPolicy',
+      resourceId: policyId,
+    });
   });
 });

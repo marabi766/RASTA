@@ -390,6 +390,8 @@ describe('the committed OpenAPI document', () => {
     it('answers 503 where a refusal is recorded or the hierarchy is asked, and 504 only for the latter', () => {
       const answers = (path: string, method: 'post' | 'patch') =>
         ['503', '504'].map((s) => operation(path, method).responses[s] !== undefined);
+      expect(answers('/v1/contracts/{id}/sign', 'post')).toEqual([true, false]);
+      expect(answers('/v1/contracts/{id}/cancel', 'post')).toEqual([true, false]);
       expect(answers('/v1/contracts/{id}/amendments', 'post')).toEqual([true, false]);
       expect(answers('/v1/contracts/{id}/amendments/{amendmentId}/sign', 'post')).toEqual([
         true,

@@ -238,7 +238,11 @@ export class ContractService {
     dto: SignContractDto,
     fence?: ClaimFence<ContractView>,
   ): Promise<ContractView> {
-    const acting = this.access.assertCanCommand();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommand(),
+      { action: 'SIGN_CONTRACT', contractId: id, subjectId: null },
+      fence,
+    );
     const row = await this.findParty(acting.organizationId, id);
     const side = sideOf(row, acting.organizationId);
     if (!side) throw RastaError.notFound('Contract', id);
@@ -603,7 +607,11 @@ export class ContractService {
     dto: CancelContractDto,
     fence?: ClaimFence<ContractView>,
   ): Promise<ContractView> {
-    const acting = this.access.assertCanCommand();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommand(),
+      { action: 'CANCEL_CONTRACT', contractId: id, subjectId: null },
+      fence,
+    );
     const row = await this.findParty(acting.organizationId, id);
     const side = sideOf(row, acting.organizationId);
     if (!side) throw RastaError.notFound('Contract', id);
@@ -626,6 +634,8 @@ export class ContractService {
       );
     }
 
+    // From here a refusal is of the request or the contract's state (a reason not on the list, a
+    // contract no longer a draft or already signed): answered, never audited as a refusal.
     if (!this.env.CONTRACT_CANCEL_REASON_CODES.includes(dto.reasonCode)) {
       throw this.refused(
         'cancel',

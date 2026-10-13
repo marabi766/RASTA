@@ -5,6 +5,7 @@ import type { EventEnvelope } from '@rasta/contracts';
 import {
   CONTRACT_REFUSAL_ACTIONS,
   CONTRACT_REFUSAL_REASONS,
+  POLICY_APPROVAL_REFUSAL_REASONS,
   toContractRefusalProjection,
 } from './contract-refusal-projection';
 import { toAuditEventRecord } from './audit.mapper';
@@ -20,6 +21,16 @@ const authorityPayload = {
   subjectId: 'AMD_1',
   reason: 'SAME_PERSON_BOTH_SIDES',
   policyId: null,
+  refusedBy: 'USR_1',
+  refusedAt: '2026-10-13T10:00:00.000Z',
+};
+
+const policyApprovalPayload = {
+  policyId: 'APL_1',
+  organizationId: 'ORG_1',
+  workflowKey: 'contract.signature',
+  policyVersion: 2,
+  reason: 'SELF_APPROVAL',
   refusedBy: 'USR_1',
   refusedAt: '2026-10-13T10:00:00.000Z',
 };
@@ -72,6 +83,49 @@ describe('the contract refusal projection', () => {
       'SIGN_CONTRACT',
       'POLICY_AUTHOR_NOT_GOVERNING',
     ]);
+  });
+
+  it('stores the platform administrator refused for a party under the closed reason', () => {
+    const record = toAuditEventRecord(
+      envelope('CONTRACT_AUTHORITY_REFUSED', {
+        ...authorityPayload,
+        action: 'CANCEL_CONTRACT',
+        subjectId: null,
+        reason: 'PLATFORM_ADMINISTRATOR',
+      }),
+      delivery(),
+    );
+
+    expect([record.outcome, record.action, record.reason]).toEqual([
+      'REFUSED',
+      'CANCEL_CONTRACT',
+      'PLATFORM_ADMINISTRATOR',
+    ]);
+  });
+
+  it('stores a policy approval refused by four eyes as a refused APPROVE_POLICY', () => {
+    const record = toAuditEventRecord(
+      envelope('APPROVAL_POLICY_APPROVAL_REFUSED', policyApprovalPayload),
+      delivery(),
+    );
+
+    expect([record.outcome, record.action, record.reason]).toEqual([
+      'REFUSED',
+      'APPROVE_POLICY',
+      'SELF_APPROVAL',
+    ]);
+    expect(record.sourceEventName).toBe('APPROVAL_POLICY_APPROVAL_REFUSED');
+    expect(JSON.stringify(record)).not.toContain('USR_1');
+  });
+
+  it.each([
+    ['a reason outside the closed list', { ...policyApprovalPayload, reason: 'BECAUSE' }],
+    ['a field the contract does not declare', { ...policyApprovalPayload, note: 'free text' }],
+    ['a missing field', { ...policyApprovalPayload, policyVersion: undefined }],
+  ])('refuses a policy approval refusal with %s without storing anything', (_label, payload) => {
+    expect(() =>
+      toAuditEventRecord(envelope('APPROVAL_POLICY_APPROVAL_REFUSED', payload), delivery()),
+    ).toThrow(UnprocessableEventError);
   });
 
   it('copies nothing of the payload but the action and the reason', () => {
@@ -148,6 +202,12 @@ describe('the contract refusal projection', () => {
     it('lists the same reasons', () => {
       expect([...CONTRACT_REFUSAL_REASONS].sort()).toEqual(
         listOf('AUTHORITY_REFUSED_REASONS').sort(),
+      );
+    });
+
+    it('lists the same policy approval reasons', () => {
+      expect([...POLICY_APPROVAL_REFUSAL_REASONS].sort()).toEqual(
+        listOf('POLICY_APPROVAL_REFUSED_REASONS').sort(),
       );
     });
   });

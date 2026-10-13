@@ -222,6 +222,34 @@ describe('POST /v1/contracts/{id}/cancel', () => {
       }
       await cancel(id, undefined).expect(401);
       expect((await rowOf(id)).status).toBe('DRAFT');
+      // Only the platform administrator acting for the employer is a refusal of authority the
+      // audit records (S-06); the oversight role and a service are refused before anything is read.
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['CANCEL_CONTRACT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ['CANCEL_CONTRACT', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+      ]);
+    });
+
+    it('the platform administrator’s refusal is recorded once per request: a repeat under the same key adds no second event', async () => {
+      const { id, employer } = await draft();
+      const repeatKey = key();
+      const admin = systemAdminOf(employer);
+      await cancel(id, admin, BODY, repeatKey).expect(403);
+      await cancel(id, admin, BODY, repeatKey).expect(403);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      expect((await rowOf(id)).status).toBe('DRAFT');
+    });
+
+    it('a refusal of the contract’s state is answered, not audited: only authority and separation of duties are', async () => {
+      const { id, employer, contractor } = await draft();
+      await sign(id, contractorSigner(contractor)).expect(200);
+      const signed = await cancel(id, employerCanceller(employer)).expect(422);
+      expect(reasons(signed.body)).toEqual(['cancellation:SIGNATURE_RECORDED']);
+      await sign(id, employerSigner(employer)).expect(200);
+      const notDraft = await cancel(id, employerCanceller(employer)).expect(422);
+      expect(reasons(notDraft.body)).toEqual(['cancellation:CONTRACT_NOT_DRAFT']);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
     });
 
     it('a token without the platform user id cancels nothing: 403', async () => {

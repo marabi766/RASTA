@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { EventPublisher } from '../src/events/publisher';
 import {
   actor,
   auditor,
@@ -412,8 +413,57 @@ describe('approval policies (contract.signature)', () => {
         expectedVersion: 2,
       }).expect(403);
       expect(refused.body.message).toMatch(/different platform administrator/);
+      // Separation of duties refused is an audit record (S-06), in a transaction of its own.
+      const audited = await eventsOf(api.prisma, employer, 'APPROVAL_POLICY_APPROVAL_REFUSED');
+      expect(audited.map((e) => e.payload)).toEqual([
+        {
+          policyId: written.body.id,
+          organizationId: employer,
+          workflowKey: 'contract.signature',
+          policyVersion: written.body.policyVersion,
+          reason: 'SELF_APPROVAL',
+          refusedBy: expect.any(String),
+          refusedAt: expect.any(String),
+        },
+      ]);
       await command(otherPlatformAdmin, written.body.id, 'approve', { expectedVersion: 2 }).expect(
         200,
+      );
+      expect(await eventsOf(api.prisma, employer, 'APPROVAL_POLICY_APPROVAL_REFUSED')).toHaveLength(
+        1,
+      );
+    });
+
+    it('a self-approval refusal that cannot be recorded is a retryable 503: the policy is unchanged, and the retry records it', async () => {
+      const admin = platform();
+      const written = await create(admin, body(employer)).expect(201);
+      await command(admin, written.body.id, 'submit', { expectedVersion: 1 }).expect(200);
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'APPROVAL_POLICY_APPROVAL_REFUSED') {
+            throw new Error('outbox down');
+          }
+          return original(...args);
+        });
+      try {
+        const down = await command(admin, written.body.id, 'approve', {
+          expectedVersion: 2,
+        }).expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+      } finally {
+        failing.mockRestore();
+      }
+      expect(await eventsOf(api.prisma, employer, 'APPROVAL_POLICY_APPROVAL_REFUSED')).toEqual([]);
+      const still = await get(platformAdmin, written.body.id).expect(200);
+      expect(still.body).toMatchObject({ status: 'PENDING_PLATFORM_APPROVAL', version: 2 });
+
+      await command(admin, written.body.id, 'approve', { expectedVersion: 2 }).expect(403);
+      expect(await eventsOf(api.prisma, employer, 'APPROVAL_POLICY_APPROVAL_REFUSED')).toHaveLength(
+        1,
       );
     });
 
@@ -443,6 +493,14 @@ describe('approval policies (contract.signature)', () => {
           .send({ expectedVersion: 2 })
           .expect(403);
         expect(refused.body.message).toMatch(/approved by a different person, always/);
+        const audited = await eventsOf(
+          relaxed.prisma,
+          employer,
+          'APPROVAL_POLICY_APPROVAL_REFUSED',
+        );
+        expect(audited.map((e) => [e.payload.policyId, e.payload.reason])).toEqual([
+          [written.body.id, 'SELF_APPROVAL'],
+        ]);
       } finally {
         await relaxed.close();
       }
