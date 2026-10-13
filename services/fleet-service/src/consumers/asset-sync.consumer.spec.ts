@@ -668,9 +668,21 @@ describe('AssetSyncConsumer', () => {
         const patch = recorded.upserts[0]!;
         expect(patch.insuranceCover).toEqual({});
         expect(patch.retainedCoverages).toEqual([]);
-        // No generation stated: the stored one (1) was the departing owner's, so
-        // it is cleared to unknown and the owner check applies (#240 r5).
-        expect(patch.ownershipGeneration).toBeNull();
+        // No generation stated: a known one is never lowered (#240 r12; r5 set
+        // it to unknown). Every window went with it, and a verified answer at a
+        // later generation is parked, not applied, until the replica catches up.
+        expect(patch.ownershipGeneration).toBe(1);
+      });
+
+      it('r12: a transfer without a generation leaves an unknown one unknown: the owner check applies', async () => {
+        const { consumer, recorded } = buildConsumer({
+          existing: { ...movingMachine, ownershipGeneration: null },
+        });
+
+        await consumer.handle(transfer());
+
+        expect(recorded.upserts[0]!.organizationId).toBe('ORG-DEH-0002');
+        expect(recorded.upserts[0]!.ownershipGeneration).toBeNull();
       });
 
       it('refuses a malformed retainedCoverages before the marker', async () => {
@@ -681,6 +693,197 @@ describe('AssetSyncConsumer', () => {
         ).rejects.toThrow();
         expect(recorded.processed).toHaveLength(0);
       });
+    });
+
+    describe('r12: the ownership generation only rises', () => {
+      // The replica at generation 2, owner B, with B's own window recorded at 2:
+      // what operator replays (`--allow-stale`) leave after C→A→B, while the
+      // original C→A transfer (generation 1) is still on its way.
+      const atTwo = {
+        id: 'AST-SEED-0001',
+        organizationId: 'ORG-DEH-0002',
+        status: 'ACTIVE',
+        ownershipGeneration: 2,
+        retainedCoverages: [],
+        insuranceCover: {
+          COMPREHENSIVE: [
+            {
+              policyId: 'INS-B',
+              validFrom: '2026-01-01T00:00:00.000Z',
+              validTo: '2030-01-01T00:00:00.000Z',
+              generation: 2,
+            },
+          ],
+        },
+      };
+      const lateTransfer = (generation: number) =>
+        transfer({
+          tenantId: 'ORG-DEH-0003',
+          payload: {
+            assetId: 'AST-SEED-0001',
+            fromOrganizationId: 'ORG-DEH-0001',
+            toOrganizationId: 'ORG-DEH-0003',
+            transferredAt: '2026-08-27T10:00:00.000Z',
+            reason: 'واگذاری',
+            ownershipGeneration: generation,
+            retainedCoverages: [],
+          },
+        });
+
+      it.each([1, 2])(
+        'a transfer at generation %i, not after the replica’s 2: marked handled, nothing changed or ended',
+        async (generation) => {
+          const { consumer, repository, recorded } = buildConsumer({
+            existing: atTwo,
+            open: [open],
+          });
+
+          await consumer.handle(lateTransfer(generation));
+
+          expect(recorded.processed).toEqual(['EVT-TRANSFER-1']);
+          expect(recorded.upserts).toEqual([]);
+          expect(repository.endActiveAssignmentsForAsset).not.toHaveBeenCalled();
+          expect(repository.revokeWindowsAfterTransfer).not.toHaveBeenCalled();
+          expect(repository.dropTransferFences).not.toHaveBeenCalled();
+          expect(repository.markParkedInsuranceDue).not.toHaveBeenCalled();
+          expect(recorded.events).toEqual([]);
+        },
+      );
+
+      it('a replayed one (.retry) is history too: the source is not even asked', async () => {
+        const { repository, recorded } = buildConsumer({ existing: atTwo });
+        const snapshot = jest.fn();
+        const consumer = new AssetSyncConsumer(null, repository, { snapshot });
+
+        await consumer.handle(lateTransfer(1), { topic: 'rasta.asset.v1.retry', partition: 0 });
+
+        expect(snapshot).not.toHaveBeenCalled();
+        expect(recorded.processed).toEqual(['EVT-TRANSFER-1']);
+        expect(recorded.upserts).toEqual([]);
+      });
+
+      it('a transfer after it applies as ever, and raises the generation', async () => {
+        const { consumer, recorded } = buildConsumer({ existing: atTwo, open: [open] });
+
+        await consumer.handle(lateTransfer(3));
+
+        expect(recorded.upserts[0]).toMatchObject({
+          organizationId: 'ORG-DEH-0003',
+          ownershipGeneration: 3,
+          insuranceCover: {},
+        });
+      });
+    });
+
+    describe('r12: a refresh writes the source’s generation', () => {
+      const RETRY = { topic: 'rasta.asset.v1.retry', partition: 0 } as const;
+      const snapshotAt = (organizationId: string, transferGeneration: number) => ({
+        assetId: 'AST-SEED-0001',
+        organizationId,
+        status: 'ACTIVE',
+        name: 'لودر',
+        type: 'LOADER',
+        assetTag: null,
+        transferGeneration,
+        viaTransfer: false,
+      });
+      const window = (policyId: string, generation: number) => ({
+        policyId,
+        validFrom: '2026-01-01T00:00:00.000Z',
+        validTo: '2030-01-01T00:00:00.000Z',
+        generation,
+      });
+      const activation = (tenantId: string) =>
+        envelope({ eventName: 'ASSET_ACTIVATED', tenantId, payload: { assetId: 'AST-SEED-0001' } });
+      const refreshed = (existing: Record<string, unknown>, snapshot: object) => {
+        const built = buildConsumer({ existing });
+        Object.assign(built.repository, { findTransferFence: jest.fn(async () => null) });
+        const consumer = new AssetSyncConsumer(
+          null,
+          built.repository,
+          { snapshot: async () => snapshot as never },
+          undefined,
+          { resolve: async () => 'RECORDED' },
+        );
+        return { ...built, consumer };
+      };
+
+      it('a new owner: the snapshot’s generation, and only windows recorded under it stay', async () => {
+        const { consumer, recorded } = refreshed(
+          {
+            id: 'AST-SEED-0001',
+            organizationId: 'ORG-DEH-0001',
+            ownershipGeneration: null,
+            insuranceCover: { COMPREHENSIVE: [window('INS-A', 1), window('INS-B', 2)] },
+          },
+          snapshotAt('ORG-DEH-0002', 2),
+        );
+
+        await consumer.handle(activation('ORG-DEH-0002'), RETRY);
+
+        expect(recorded.upserts[0]).toMatchObject({
+          organizationId: 'ORG-DEH-0002',
+          ownershipGeneration: 2,
+          retainedCoverages: [],
+          insuranceCover: { COMPREHENSIVE: [window('INS-B', 2)] },
+        });
+      });
+
+      it('the same owner at a later generation (A→B→A missed): the earlier tenure’s windows go', async () => {
+        const { consumer, recorded } = refreshed(
+          {
+            id: 'AST-SEED-0001',
+            organizationId: 'ORG-DEH-0001',
+            ownershipGeneration: 0,
+            insuranceCover: { COMPREHENSIVE: [window('INS-A1', 0)] },
+          },
+          snapshotAt('ORG-DEH-0001', 2),
+        );
+
+        await consumer.handle(activation('ORG-DEH-0001'), RETRY);
+
+        expect(recorded.upserts[0]).toMatchObject({
+          ownershipGeneration: 2,
+          retainedCoverages: [],
+          insuranceCover: {},
+        });
+      });
+
+      it('the same tenure: the generation is written, the windows are left alone', async () => {
+        const cover = { COMPREHENSIVE: [window('INS-A', 1)] };
+        const { consumer, recorded } = refreshed(
+          {
+            id: 'AST-SEED-0001',
+            organizationId: 'ORG-DEH-0001',
+            ownershipGeneration: null,
+            insuranceCover: cover,
+          },
+          snapshotAt('ORG-DEH-0001', 1),
+        );
+
+        await consumer.handle(activation('ORG-DEH-0001'), RETRY);
+
+        expect(recorded.upserts[0]!.ownershipGeneration).toBe(1);
+        expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+      });
+
+      it.each([
+        ['an earlier generation', snapshotAt('ORG-DEH-0001', 1)],
+        ['another owner at the same generation', snapshotAt('ORG-DEH-0003', 2)],
+      ])(
+        'a snapshot showing %s than the replica is never written: retried',
+        async (_label, snapshot) => {
+          const { consumer, recorded } = refreshed(
+            { id: 'AST-SEED-0001', organizationId: 'ORG-DEH-0002', ownershipGeneration: 2 },
+            snapshot,
+          );
+
+          await expect(consumer.handle(activation('ORG-DEH-0002'), RETRY)).rejects.toThrow(
+            /does not follow the replica's 2/,
+          );
+          expect(recorded.upserts).toEqual([]);
+        },
+      );
     });
 
     describe('an insurance event of the previous owner after a transfer', () => {
@@ -2329,8 +2532,8 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.parked.size).toBe(1);
 
         policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
-        move(B, 4);
         await consumer.handle(transferTo(B, 4));
+        move(B, 4);
         await consumer.sweepParked();
 
         expect(recorded.parked.size).toBe(0);
@@ -2344,8 +2547,8 @@ describe('AssetSyncConsumer', () => {
         await consumer.handle(recordedPolicy());
 
         policies.set('INS-1', counting(B, 4));
-        move(B, 5);
         await consumer.handle(transferTo(B, 5));
+        move(B, 5);
         await consumer.sweepParked();
 
         expect(recorded.parked.size).toBe(0);
@@ -2358,8 +2561,8 @@ describe('AssetSyncConsumer', () => {
         const { consumer, recorded, move } = parkedSetup(C, 5);
         await consumer.handle(recordedPolicy());
 
-        move(B, 4);
         await consumer.handle(transferTo(B, 4));
+        move(B, 4);
         await consumer.sweepParked();
 
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
@@ -2374,8 +2577,10 @@ describe('AssetSyncConsumer', () => {
         await consumer.handle(recordedPolicy());
 
         policies.unreachable();
-        move(B, 4);
+        // Moved once the transfer is handled: before, the replica would already
+        // stand at its generation and the transfer be history (r12).
         await consumer.handle(transferTo(B, 4));
+        move(B, 4);
         expect(recorded.upserts.at(-1)).toMatchObject({ sourceEvent: 'ASSET_TRANSFERRED' });
         await consumer.sweepParked();
 
@@ -2391,8 +2596,8 @@ describe('AssetSyncConsumer', () => {
         recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.due = false;
         const asked = policies.asked.length;
 
-        move(B, 4);
         await consumer.handle(transferTo(B, 4));
+        move(B, 4);
 
         expect(policies.asked).toHaveLength(asked);
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
@@ -2450,8 +2655,8 @@ describe('AssetSyncConsumer', () => {
         // The live delivery asks before its transaction (r10).
         expect(recorded.askedInTransaction).toEqual([false]);
 
-        move(B, 4);
         await consumer.handle(transferTo(B, 4));
+        move(B, 4);
         await consumer.sweepParked();
 
         expect(recorded.askedInTransaction).toEqual([false, false]);
@@ -2786,6 +2991,102 @@ describe('AssetSyncConsumer', () => {
 
       expect(policies.asked).toHaveLength(1);
       expect(recorded.upserts[0]).not.toHaveProperty('insuranceCover');
+    });
+
+    describe('r12: transactions, reads and heartbeats inside the delivery budget', () => {
+      it('every transaction states its start wait; an ordinary event keeps Prisma’s timeout', async () => {
+        const { repository } = buildConsumer({ existing: machine });
+        const consumer = new AssetSyncConsumer(
+          null,
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          DEFAULT_PARKING,
+          14_200,
+          321,
+        );
+
+        await consumer.handle(
+          envelope({
+            eventName: 'ASSET_ACTIVATED',
+            tenantId: OWNER,
+            payload: { assetId: 'AST-SEED-0001' },
+          }),
+        );
+
+        expect(jest.mocked(repository.transaction).mock.calls.at(-1)![1]).toEqual({
+          maxWaitMs: 321,
+        });
+      });
+
+      it('the reads before the transaction are bounded by the start wait: slower, the attempt fails and nothing is asked', async () => {
+        const policies = new FakePolicySource();
+        const { repository } = buildConsumer({ existing: machine, policies });
+        jest
+          .mocked(repository.isEventProcessed)
+          .mockImplementation(() => new Promise<boolean>(() => undefined));
+        const consumer = new AssetSyncConsumer(
+          null,
+          repository,
+          undefined,
+          undefined,
+          undefined,
+          policies,
+          DEFAULT_PARKING,
+          14_200,
+          60,
+        );
+        const started = Date.now();
+
+        await expect(consumer.handle(recordedPolicy())).rejects.toThrow(
+          /reading the replica of AST-SEED-0001 took longer than 60 ms/,
+        );
+        expect(Date.now() - started).toBeLessThan(2_000);
+        expect(policies.asked).toHaveLength(0);
+        expect(repository.transaction).not.toHaveBeenCalled();
+      });
+
+      it('heartbeats before and after asking asset-service, and the transaction states both bounds', async () => {
+        const order: string[] = [];
+        const { consumer, repository, policies } = buildConsumer({ existing: machine });
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementation(async (...args) => {
+          order.push('verify');
+          return verify(...args);
+        });
+        const heartbeat = jest.fn(() => {
+          order.push('beat');
+        });
+
+        await consumer.handle(recordedPolicy(), {
+          topic: 'rasta.insurance.v1',
+          partition: 0,
+          heartbeat,
+        });
+
+        expect(order).toEqual(['beat', 'verify', 'beat']);
+        expect(jest.mocked(repository.transaction).mock.calls.at(-1)![1]).toEqual({
+          timeoutMs: 14_200,
+          maxWaitMs: 500,
+        });
+      });
+
+      it('heartbeats after a question that fails, too', async () => {
+        const policies = new FakePolicySource().unreachable();
+        const { consumer } = buildConsumer({ existing: machine, policies });
+        const heartbeat = jest.fn();
+
+        await expect(
+          consumer.handle(recordedPolicy(), {
+            topic: 'rasta.insurance.v1',
+            partition: 0,
+            heartbeat,
+          }),
+        ).rejects.toThrow();
+        expect(heartbeat).toHaveBeenCalledTimes(2);
+      });
     });
   });
 });

@@ -253,6 +253,8 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
           // Checked against ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS at startup (r9):
           // a replay's refresh still asks under the lock (r10).
           env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
+          // r12: every asset-sync transaction's start wait, in the same budget.
+          env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS,
         ),
     },
 

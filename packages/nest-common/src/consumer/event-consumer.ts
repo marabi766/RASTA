@@ -132,6 +132,16 @@ export interface EventDelivery {
    */
   readonly key?: string | null;
   readonly offset?: string;
+  /**
+   * Keeps this member in its group while a long handler runs (fleet's
+   * asset-sync, #240 r12): kafkajs heartbeats between messages, not during one,
+   * so a handler that waits on other services calls this before and after each
+   * question. It starts kafkajs's heartbeat — sent only once its interval has
+   * passed, and shared with any already in flight — and returns at once; it
+   * never throws (a failure is logged). The consumer also calls it between a
+   * message's attempts. Absent when no broker delivered the message (a test).
+   */
+  readonly heartbeat?: () => void;
 }
 
 /**
@@ -238,7 +248,9 @@ export const DEFAULT_BACKOFF_MS = 500;
 /**
  * The group session timeout. kafkajs heartbeats between messages, not while a
  * handler runs, so one message's attempts, their pauses and its dead letter
- * must finish within it or the broker evicts the member and rebalances.
+ * must finish within it or the broker evicts the member and rebalances — unless
+ * the handler heartbeats itself ({@link EventDelivery.heartbeat}); the consumer
+ * does between attempts.
  */
 export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
 
@@ -353,7 +365,7 @@ export class EventConsumer {
         // Sequential per partition. Ordering within an aggregate is the whole
         // reason the producer sets a partition key; processing concurrently
         // inside a partition would throw it away.
-        eachMessage: async ({ topic, partition, message }) => {
+        eachMessage: async ({ topic, partition, message, heartbeat }) => {
           await this.handleMessage(
             topic,
             partition,
@@ -361,6 +373,7 @@ export class EventConsumer {
             message.headers,
             message.offset,
             message.key,
+            heartbeat,
           );
         },
       });
@@ -404,7 +417,9 @@ export class EventConsumer {
     headers: IHeaders | undefined,
     offset?: string,
     key?: Buffer | null,
+    heartbeat?: () => Promise<void>,
   ): Promise<void> {
+    const beat = heartbeat === undefined ? undefined : () => this.beat(heartbeat);
     let envelope: EventEnvelope;
 
     try {
@@ -493,6 +508,7 @@ export class EventConsumer {
                 partition,
                 ...(key === undefined ? {} : { key: key === null ? null : key.toString('utf8') }),
                 ...(offset === undefined ? {} : { offset }),
+                ...(beat === undefined ? {} : { heartbeat: beat }),
               }),
             ),
         );
@@ -531,9 +547,25 @@ export class EventConsumer {
         }
 
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
+        // The member stays in its group across the pause (#240 r12).
+        beat?.();
         await sleep(backoff * attempt);
+        beat?.();
       }
     }
+  }
+
+  /**
+   * Starts kafkajs's heartbeat and returns at once: it is sent only when its
+   * interval has passed, and one in flight is shared. A failure — a rebalance
+   * under way, a broker that does not answer — is logged, never thrown into the
+   * handler: the message's own outcome decides its fate, and the runner sees the
+   * rebalance after it.
+   */
+  private beat(heartbeat: () => Promise<void>): void {
+    void heartbeat().catch((error: unknown) => {
+      this.logger.warn(`Heartbeat of ${this.options.groupId} failed: ${describe(error)}`);
+    });
   }
 
   /**

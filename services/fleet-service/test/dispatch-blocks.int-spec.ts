@@ -564,7 +564,7 @@ describe('dispatch blocks (L3-02)', () => {
       await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
     });
 
-    it('a transfer that states no generation makes it unknown, so the departing owner’s delayed event at the old generation is ignored (#240 r5)', async () => {
+    it('a transfer that states no generation leaves a known one as it is (#240 r12; r5 made it unknown), and the departing owner’s delayed event at the old generation is still ignored', async () => {
       const assetId = id('AST');
       await consumer.handle(event('ASSET_CREATED', { assetId, status: 'ACTIVE', name: 'گریدر' }));
       const driverC = id('DRV');
@@ -594,7 +594,9 @@ describe('dispatch blocks (L3-02)', () => {
       await consumer.handle(eventFor(orgC, 'ASSET_ACTIVATED', { assetId }));
       const afterSecond = await repository.findAssetRefUnscoped(assetId);
       expect(afterSecond!.organizationId).toBe(orgC);
-      expect(afterSecond!.ownershipGeneration).toBeNull();
+      // Never lowered (r12): the windows went with the transfer, and the source,
+      // not the replica's generation, decides the delayed event below.
+      expect(afterSecond!.ownershipGeneration).toBe(1);
 
       // B's policy, recorded at generation 1 and consumed after both transfers.
       await consumer.handle(

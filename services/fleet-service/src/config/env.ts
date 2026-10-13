@@ -165,14 +165,29 @@ export const fleetEnvSchema = baseEnvSchema
      * the refresh's chain of calls plus a margin, and every attempt of one
      * delivery must still fit in the consumer's session timeout
      * ({@link assetSyncBudgetProblem}); the service refuses to start otherwise.
-     * The default, 15 s, satisfies both at the default upstream timeout (#240 r11).
+     * The default, 14.2 s, satisfies both at the default upstream timeout and
+     * start wait (#240 r11, r12).
      */
     FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(1_000)
       .max(CONSUMER_SESSION_TIMEOUT_MS)
-      .default(15_000),
+      .default(14_200),
+
+    /**
+     * How long each asset-sync transaction may wait to start (Prisma's `maxWait`:
+     * a pool connection), every one of them, and how long the reads an
+     * `INSURANCE_RECORDED` makes before its transaction may take together
+     * (#240 r12). Longer, the attempt fails and is retried. Counted twice per
+     * attempt in the delivery budget ({@link assetSyncDeliveryWorstCaseMs}).
+     */
+    FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS: z.coerce
+      .number()
+      .int()
+      .min(50)
+      .max(10_000)
+      .default(500),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;
@@ -224,21 +239,35 @@ export const ASSET_SYNC_DELIVERY_MARGIN_MS = 3_000;
 
 type AssetSyncTimeouts = Pick<
   FleetEnv,
-  'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS' | 'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS'
+  | 'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS'
+  | 'FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS'
+  | 'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS'
 >;
 
 /**
  * The longest one asset-sync delivery can take inside the consumer's handler
- * (#240 r11). An attempt is at most one upstream call made before its
- * transaction (an `INSURANCE_RECORDED`'s verification) plus the transaction,
- * which its timeout ends — and a transaction ended while its refresh waits on a
- * call returns once that call does, which the same term covers, a replay making
- * no call before its transaction. The consumer makes {@link DEFAULT_MAX_RETRIES}
- * attempts with growing pauses between them.
+ * (#240 r11, r12). An attempt is at most:
+ *
+ *   - the reads before its transaction (an `INSURANCE_RECORDED`'s marker and
+ *     replica), bounded together by the start wait;
+ *   - one upstream call made before its transaction (that event's
+ *     verification);
+ *   - the wait for the transaction to start (`maxWait`, every asset-sync
+ *     transaction);
+ *   - the transaction, which its timeout ends — and a transaction ended while
+ *     its refresh waits on a call returns once that call does, which the upstream
+ *     term covers, a replay making no call before its transaction.
+ *
+ * The consumer makes {@link DEFAULT_MAX_RETRIES} attempts with growing pauses
+ * between them. Each question to another service and each pause is also
+ * bracketed by the consumer's heartbeat (r12), so the session no longer rests
+ * on this sum alone; it is still held to it.
  */
 export function assetSyncDeliveryWorstCaseMs(env: AssetSyncTimeouts): number {
   const attempt =
-    env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS + env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS;
+    2 * env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS +
+    env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS +
+    env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS;
   let pauses = 0;
   for (let failed = 1; failed < DEFAULT_MAX_RETRIES; failed += 1)
     pauses += DEFAULT_BACKOFF_MS * failed;
@@ -258,8 +287,9 @@ export function assetSyncDeliveryWorstCaseMs(env: AssetSyncTimeouts): number {
  *     kafkajs does not heartbeat while a handler runs, and a longer delivery has
  *     the member evicted and the partition rebalanced mid-message.
  *
- * Together they bound the upstream timeout too: at most about 3.3 s while the
- * refresh asks under the lock (docs/runbooks/replay-dlq.md, known limitation).
+ * Together they bound the upstream timeout too: at most about 3.1 s with the
+ * default start wait while the refresh asks under the lock
+ * (docs/runbooks/replay-dlq.md, known limitation).
  */
 export function assetSyncBudgetProblem(env: AssetSyncTimeouts): string | undefined {
   const needed =
@@ -276,7 +306,8 @@ export function assetSyncBudgetProblem(env: AssetSyncTimeouts): string | undefin
   const allowed = CONSUMER_SESSION_TIMEOUT_MS - ASSET_SYNC_DELIVERY_MARGIN_MS;
   if (worst > allowed) {
     return (
-      `one asset-sync delivery can take ${DEFAULT_MAX_RETRIES} × (ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS ` +
+      `one asset-sync delivery can take ${DEFAULT_MAX_RETRIES} × (2 × FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS ` +
+      `(${env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS} ms) + ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS ` +
       `(${env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS} ms) + FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS ` +
       `(${env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS} ms)) + pauses = ${worst} ms, more than the ` +
       `consumer session timeout (${CONSUMER_SESSION_TIMEOUT_MS} ms) less ${ASSET_SYNC_DELIVERY_MARGIN_MS} ms = ${allowed} ms`

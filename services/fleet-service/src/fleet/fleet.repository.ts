@@ -47,7 +47,7 @@ export class FleetRepository {
 
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; maxWaitMs?: number },
   ): Promise<T> {
     return this.prisma.transaction(fn, options);
   }

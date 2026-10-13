@@ -122,9 +122,9 @@
 > `clear-transferred` آن را برای **هر** ردیف منتقل‌شده‌ای که هدف می‌گیرد — خالی‌ها هم — **همیشه** یک واحد بالا می‌برد و هیچ نویسندهٔ دیگری به آن
 > دست نمی‌زند؛ هر تأیید آن را هم کنار شمارهٔ بازنگری، مالک و نسل مقایسه می‌کند. (۲) Handler انتقال دیگر رویدادهای پارک‌شده را خودش نمی‌سنجد: در تراکنش
 > خودش `next_attempt_at = now()` می‌گذارد و برمی‌گردد؛ جارو (بیرون از Handler کافکا) آن‌ها را بی‌درنگ و پیش از ردیف‌های قدیمی‌تر می‌سنجد.
-> `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` (پیش‌فرض ۱۵۰۰۰ از دور ۱۱) باید از ۳ × `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` + ۵۰۰۰ میلی‌ثانیه بیشتر باشد
-> و سه تلاش یک تحویل، ۳ × (`ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` + آن) + ۱۵۰۰، از ۶۰ ثانیهٔ Session مصرف‌کننده منهای ۳۰۰۰ بیشتر نشود؛
-> وگرنه سرویس بالا نمی‌آید — ببین «محدودیت شناخته‌شده» در [replay-dlq](replay-dlq.md). ردیف‌های مانده:
+> `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` (پیش‌فرض ۱۴۲۰۰ از دور ۱۲) باید از ۳ × `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` + ۵۰۰۰ میلی‌ثانیه بیشتر باشد
+> و سه تلاش یک تحویل، ۳ × (۲ × `FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS` + `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` + آن) + ۱۵۰۰، از ۶۰ ثانیهٔ
+> Session مصرف‌کننده منهای ۳۰۰۰ بیشتر نشود؛ وگرنه سرویس بالا نمی‌آید — ببین «محدودیت شناخته‌شده» در [replay-dlq](replay-dlq.md). ردیف‌های مانده:
 > `SELECT event_id, asset_id, organization_id, reason, attempts, first_seen_at FROM insurance_pending_verification ORDER BY first_seen_at;`
 > این سازوکارها پاسخی را که **پیش از** پاک‌سازی گرفته شده بی‌اثر می‌کنند؛ پاسخی که **پس از** آن از asset-serviceِ هنوز روشن با قاعدهٔ قدیمی
 > برسد را نه. پس **توقف asset-service، `outbox:flush` و هر دو `insurance:drain-check` اجباری‌اند** (بالا)، و «حصار بازپخش DLQ» در

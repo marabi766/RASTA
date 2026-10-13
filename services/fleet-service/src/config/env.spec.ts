@@ -23,13 +23,15 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
   };
 
-  it('defaults to 15 s, which covers three calls at the default upstream timeout and fits a delivery in the session (r11)', () => {
+  it('defaults to 14.2 s and a 500 ms start wait, which cover three calls at the default upstream timeout and fit a delivery in the session (r12)', () => {
     const env = loadFleetEnv(MINIMAL);
-    expect(env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS).toBe(15_000);
+    expect(env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS).toBe(14_200);
+    expect(env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS).toBe(500);
     expect(env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS).toBe(3_000);
     expect(assetSyncBudgetProblem(env)).toBeUndefined();
-    // Three attempts of (3 s + 15 s) and pauses of 0.5 s and 1 s: under 60 s less the 3 s margin.
-    expect(assetSyncDeliveryWorstCaseMs(env)).toBe(55_500);
+    // Three attempts of (0.5 s reads + 3 s call + 0.5 s start wait + 14.2 s) and
+    // pauses of 0.5 s and 1 s: under 60 s less the 3 s margin.
+    expect(assetSyncDeliveryWorstCaseMs(env)).toBe(56_100);
     expect(CONSUMER_SESSION_TIMEOUT_MS).toBe(60_000);
   });
 
@@ -37,7 +39,7 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     expect(() =>
       loadFleetEnv({ ...MINIMAL, ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '4000' }),
     ).toThrow(
-      /FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS \(15000 ms\) must exceed 3 × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS \(4000 ms\) \+ 5000 ms = 17000 ms/,
+      /FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS \(14200 ms\) must exceed 3 × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS \(4000 ms\) \+ 5000 ms = 17000 ms/,
     );
   });
 
@@ -45,38 +47,56 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     const at = (transaction: number) =>
       assetSyncBudgetProblem({
         FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: transaction,
+        FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS: 500,
         ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: 3_000,
       });
     expect(at(14_000)).toMatch(/must exceed/);
     expect(at(14_001)).toBeUndefined();
   });
 
-  it('r11: refuses a delivery that could outlast the consumer session; the bound is exact', () => {
-    const at = (transaction: number, upstream = 3_000) =>
+  it('r11, r12: refuses a delivery that could outlast the consumer session, start waits and reads included; the bound is exact', () => {
+    const at = (transaction: number, upstream = 3_000, maxWait = 500) =>
       assetSyncBudgetProblem({
         FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: transaction,
+        FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS: maxWait,
         ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: upstream,
       });
-    // 3 × (3 s + 15.5 s) + 1.5 s = 57 s: allowed. One millisecond more is not.
-    expect(at(15_500)).toBeUndefined();
-    expect(at(15_501)).toMatch(
-      /one asset-sync delivery can take 3 × .* = 57003 ms, more than the consumer session timeout \(60000 ms\) less 3000 ms = 57000 ms/,
+    // 3 × (2 × 0.5 s + 3 s + 14.5 s) + 1.5 s = 57 s: allowed. One millisecond more is not.
+    expect(at(14_500)).toBeUndefined();
+    expect(at(14_501)).toMatch(
+      /one asset-sync delivery can take 3 × \(2 × FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS \(500 ms\) .* = 57003 ms, more than the consumer session timeout \(60000 ms\) less 3000 ms = 57000 ms/,
     );
-    // The old default no longer starts.
+    // The r11 default (15 s) fitted only while the start wait and the reads were
+    // left out: with Prisma's own 2 s it is 67.5 s; with 500 ms still 58.5 s.
+    expect(at(15_000, 3_000, 2_000)).toMatch(/= 67500 ms/);
+    expect(at(15_000)).toMatch(/= 58500 ms/);
+    // The start wait is held to the same bound: at the default transaction
+    // timeout, 650 ms fits exactly and 651 ms does not.
+    expect(at(14_200, 3_000, 650)).toBeUndefined();
+    expect(at(14_200, 3_000, 651)).toMatch(/= 57006 ms/);
+    expect(() =>
+      loadFleetEnv({ ...MINIMAL, FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS: '2000' }),
+    ).toThrow(/consumer session timeout/);
     expect(() =>
       loadFleetEnv({ ...MINIMAL, FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '30000' }),
     ).toThrow(/consumer session timeout/);
-    // While the refresh asks under the lock, no upstream timeout above about 3.37 s
-    // satisfies both rules: the smallest transaction it needs is already too long.
-    expect(at(3 * 3_374 + 5_001, 3_374)).toBeUndefined();
-    expect(at(3 * 3_375 + 5_001, 3_375)).toMatch(/consumer session timeout/);
-    expect(at(3 * 3_375 + 5_000, 3_375)).toMatch(/must exceed/);
+    // While the refresh asks under the lock, no upstream timeout above about 3.12 s
+    // satisfies both rules at the default start wait: the smallest transaction it
+    // needs is already too long.
+    expect(at(3 * 3_124 + 5_001, 3_124)).toBeUndefined();
+    expect(at(3 * 3_125 + 5_001, 3_125)).toMatch(/consumer session timeout/);
+    expect(at(3 * 3_125 + 5_000, 3_125)).toMatch(/must exceed/);
   });
 
-  it('refuses a transaction timeout longer than the session timeout in the schema', () => {
+  it('refuses a transaction timeout longer than the session timeout, and a start wait out of range, in the schema', () => {
     expect(() =>
       loadFleetEnv({ ...MINIMAL, FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '60001' }),
     ).toThrow();
+    const maxWait = fleetEnvSchema.shape.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS;
+    expect(maxWait.safeParse('49').success).toBe(false);
+    expect(maxWait.safeParse('10001').success).toBe(false);
+    expect(maxWait.safeParse('1.5').success).toBe(false);
+    expect(maxWait.parse('50')).toBe(50);
   });
 });
 

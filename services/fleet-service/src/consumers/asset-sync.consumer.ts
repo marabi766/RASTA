@@ -188,13 +188,14 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
         // Lapses are left as they are: they only ever withhold.
         insuranceCover: afterTransfer(parseCover(current?.insuranceCover), retained, generation),
         retainedCoverages: retained ?? [],
-        // Never lowered by a late transfer. An event that states none (an older
-        // one) leaves the generation UNKNOWN (NULL), not the previous owner's:
-        // keeping it would let a delayed event of the departing owner, at that
-        // generation, pass for the new one's. Unknown applies the owner check.
+        // Monotonic (#240 r12): a transfer at or below the replica's generation
+        // never reaches this patch (`handle` acknowledges it unapplied). An event
+        // that states none (an older one) leaves an unknown generation UNKNOWN
+        // (NULL), so the owner check applies, and a known one as it is: never
+        // lowered.
         ownershipGeneration:
           generation === undefined
-            ? null
+            ? (current?.ownershipGeneration ?? null)
             : Math.max(generation, current?.ownershipGeneration ?? generation),
       };
     },
@@ -376,9 +377,19 @@ function withoutStateFields(patch: AssetRefPatch): AssetRefPatch {
  * #240 r11). Replays are rare operator actions; but what waits on the lock
  * behind one may FAIL rather than wait — an ordinary delivery or an HTTP
  * request's transaction has Prisma's 5 s (known limitation,
- * docs/runbooks/replay-dlq.md).
+ * docs/runbooks/replay-dlq.md). 14.2 s since #240 r12, so that the start waits
+ * and the reads before a transaction fit the session too.
  */
-export const DEFAULT_TRANSACTION_TIMEOUT_MS = 15_000;
+export const DEFAULT_TRANSACTION_TIMEOUT_MS = 14_200;
+
+/**
+ * How long every asset-sync transaction may wait to start — for a pool
+ * connection — and how long the reads an `INSURANCE_RECORDED` makes before its
+ * transaction may take together (#240 r12). Prisma's own `maxWait` (2 s) was
+ * outside the delivery budget; this one is in it.
+ * `FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS`.
+ */
+export const DEFAULT_TRANSACTION_MAX_WAIT_MS = 500;
 
 const CONSUMER_NAME = 'fleet-service.asset-sync';
 
@@ -489,6 +500,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly parking: ParkingOptions = DEFAULT_PARKING,
     /** `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` (#240 r9). */
     private readonly transactionTimeoutMs: number = DEFAULT_TRANSACTION_TIMEOUT_MS,
+    /** `FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS` (#240 r12). */
+    private readonly transactionMaxWaitMs: number = DEFAULT_TRANSACTION_MAX_WAIT_MS,
   ) {
     // RastaDeadLetterMessagePublished alerts on an increase, which a series born
     // at one never shows: each topic a parked event can come from starts at zero.
@@ -599,7 +612,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // on the network.
     const verified =
       envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
-        ? await this.askAboutRecordedPolicy(envelope.eventId, payload, assetId, organizationId)
+        ? await this.askAboutRecordedPolicy(
+            envelope.eventId,
+            payload,
+            assetId,
+            organizationId,
+            delivery,
+          )
         : undefined;
 
     const now = new Date();
@@ -640,6 +659,23 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           current.organizationId !== organizationId
         ) {
           throw replicaOwnerMismatchError(envelope);
+        }
+
+        // The replica's ownership generation only rises (#240 r12). A transfer at
+        // or below it — the original of one a replay's refresh already moved past,
+        // or a replay of it — is history: applied, it would hand the machine back
+        // to an earlier owner and keep the later owner's windows (which its
+        // generation leaves standing) for it. Acknowledged, nothing changed.
+        if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+          const stated = int(payload.ownershipGeneration);
+          const known = current?.ownershipGeneration ?? null;
+          if (stated !== undefined && known !== null && stated <= known) {
+            this.logger.log(
+              `ASSET_TRANSFERRED ${envelope.eventId} of ${assetId} ignored: its ownership generation ` +
+                `${stated} is not after the replica's ${known}; owner and insurance left as they are`,
+            );
+            return;
+          }
         }
 
         // An insurance event from the previous owner's tenant, consumed after the
@@ -686,32 +722,57 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           patch = projection.patch(payload, current, now, occurredAt, organizationId);
         }
         const refresh = replayed
-          ? await this.readAuthoritativeState(envelope, assetId, organizationId)
+          ? await this.readAuthoritativeState(envelope, assetId, organizationId, delivery)
           : undefined;
         if (refresh) {
+          const known = current?.ownershipGeneration ?? null;
+          if (
+            known !== null &&
+            (refresh.transferGeneration < known ||
+              (refresh.transferGeneration === known &&
+                current?.organizationId !== refresh.organizationId))
+          ) {
+            // asset-service's answer is about an earlier tenure than the replica
+            // has seen, or names another owner at the same one: written, it would
+            // lower the generation or move the owner without one (#240 r12). Not
+            // written; retried, then dead-lettered.
+            throw new Error(
+              `${envelope.eventName} ${envelope.eventId}: asset-service's ownership generation ` +
+                `${refresh.transferGeneration} of ${assetId} does not follow the replica's ${known}`,
+            );
+          }
           // The replica fields come from the owners. What stays of the payload's
           // patch is the safety part, which has its own order-insensitive rules
           // (a repair completion still resolves an older inspection failure) —
           // but only for a tenant that still owns the machine: an event from a
-          // previous owner is good for the owner change alone.
-          patch = refresh.viaTransfer
-            ? refresh.patch
-            : { ...withoutStateFields(patch), ...refresh.patch };
-          // The snapshot shows a new owner this replica missed the transfer to.
-          // It states neither the generation nor the coverages that follow the
-          // vehicle, so none is retained and the generation is unknown: fail
-          // closed, as for an older transfer.
-          // The re-projection command restores the valid windows.
-          if (current && current.organizationId !== refresh.organizationId) {
+          // previous owner is good for the owner change alone. The generation is
+          // the source's too (#240 r12): a transfer at or below it, consumed
+          // later, is then recognised as history.
+          patch = {
+            ...(refresh.viaTransfer
+              ? refresh.patch
+              : { ...withoutStateFields(patch), ...refresh.patch }),
+            ownershipGeneration: refresh.transferGeneration,
+          };
+          // The snapshot shows a tenure this replica missed the transfer to — a
+          // new owner, or a later generation of the same one (A→B→A). It does not
+          // state the coverages that follow the vehicle, so none is retained:
+          // only windows recorded under the snapshot's generation or a later one
+          // (the current tenure's own) stay. Fail closed, as for an older
+          // transfer; the re-projection command restores the valid windows.
+          if (
+            current &&
+            (current.organizationId !== refresh.organizationId ||
+              (known !== null && refresh.transferGeneration > known))
+          ) {
             patch = {
               ...patch,
               insuranceCover: afterTransfer(
                 parseCover(current.insuranceCover),
                 undefined,
-                undefined,
+                refresh.transferGeneration,
               ),
               retainedCoverages: [],
-              ownershipGeneration: null,
             };
           }
         }
@@ -746,7 +807,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
             await this.revokeWindowsOnTransfer(tx, envelope, assetId, previousOwner, now);
             parkedMadeDue = await this.repository.markParkedInsuranceDue(tx, assetId);
           }
-          await this.settleStaleFence(tx, assetId, refresh.organizationId);
+          await this.settleStaleFence(tx, assetId, refresh.organizationId, delivery);
         } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
           // The machine's parked insurance events may be about this owner: made
           // due, never decided here. Deciding them asks asset-service once each,
@@ -770,9 +831,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           }
         }
       },
+      // Every one waits at most the configured time to start (#240 r12); the
+      // ordinary ones keep Prisma's 5 s timeout.
       replayed || envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
-        ? { timeoutMs: this.transactionTimeoutMs }
-        : undefined,
+        ? { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs }
+        : { maxWaitMs: this.transactionMaxWaitMs },
     );
 
     // Committed: the sweep, outside this handler, decides what the transfer made
@@ -934,7 +997,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         const current = await this.repository.findAssetRefUnscoped(assetId, tx);
         return { row, payload: parsed.data as Record<string, unknown>, current };
       },
-      { timeoutMs: this.transactionTimeoutMs },
+      { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
     );
     if (typeof read === 'string') return read;
 
@@ -1035,7 +1098,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         }
         return 'KEPT';
       },
-      { timeoutMs: this.transactionTimeoutMs },
+      { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
     );
 
     if (lettered) {
@@ -1135,21 +1198,30 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * This method is the live delivery's first two steps: the replica as it
    * stands, then the source's answer — or, for a redelivery of a handled event,
    * nothing asked at all. No answer throws: the event is retried, nothing written.
+   * The two reads together take at most the transaction's start wait (#240 r12),
+   * so the delivery budget bounds them; slower, the attempt fails and is retried.
    */
   private async askAboutRecordedPolicy(
     eventId: string,
     payload: Record<string, unknown>,
     assetId: string,
     eventOrganization: string | undefined,
+    delivery: EventDelivery | undefined,
   ): Promise<LiveAnswer> {
-    if (await this.repository.isEventProcessed(eventId, CONSUMER_NAME)) return 'ALREADY_HANDLED';
-    const read = await this.repository.findAssetRefUnscoped(assetId);
+    const before = await withinDeadline(
+      this.transactionMaxWaitMs,
+      `INSURANCE_RECORDED ${eventId}: reading the replica of ${assetId}`,
+      async () =>
+        (await this.repository.isEventProcessed(eventId, CONSUMER_NAME))
+          ? ('ALREADY_HANDLED' as const)
+          : { read: await this.repository.findAssetRefUnscoped(assetId) },
+    );
+    if (before === 'ALREADY_HANDLED') return before;
+    const { read } = before;
     const question = insuranceQuestion(payload, read, eventOrganization);
     if (question.kind === 'DROP') return { read, outcome: question };
-    const verdict = await this.insurancePolicies.verify(
-      question.organizationId,
-      question.assetId,
-      question.policyId,
+    const verdict = await asking(delivery, () =>
+      this.insurancePolicies.verify(question.organizationId, question.assetId, question.policyId),
     );
     return { read, verdict };
   }
@@ -1254,10 +1326,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     tx: ExtendedPrismaClient,
     assetId: string,
     currentOwner: string,
+    delivery: EventDelivery | undefined,
   ): Promise<void> {
     const fence = await this.repository.findTransferFence(assetId, tx);
     if (!fence || fence.organizationId === currentOwner) return;
-    const answer = await this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId);
+    const answer = await asking(delivery, () =>
+      this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId),
+    );
     if (answer === 'RECORDED') {
       await this.repository.deleteTransferFence(tx, assetId, fence.fenceId);
     }
@@ -1272,19 +1347,28 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * not knowing the machine for the organization the event names is a
    * refusal, not a retry: the answer will not change (SOURCE_UNCONFIRMED).
    * No answer from either throws, so the event is retried and dead-lettered.
+   * The snapshot's ownership generation comes back with it (#240 r12).
    */
   private async readAuthoritativeState(
     envelope: EventEnvelope,
     assetId: string,
     organizationId: string | undefined,
-  ): Promise<{ organizationId: string; viaTransfer: boolean; patch: AssetRefPatch }> {
+    delivery: EventDelivery | undefined,
+  ): Promise<{
+    organizationId: string;
+    viaTransfer: boolean;
+    transferGeneration: number;
+    patch: AssetRefPatch;
+  }> {
     if (!organizationId) {
       throw new UnprocessableEventError(
         DLQ_REASONS.SOURCE_UNCONFIRMED,
         `${envelope.eventName} ${envelope.eventId} names no organization to ask asset-service for`,
       );
     }
-    const snapshot = await this.assetSource.snapshot(organizationId, assetId);
+    const snapshot = await asking(delivery, () =>
+      this.assetSource.snapshot(organizationId, assetId),
+    );
     if (!snapshot) {
       throw new UnprocessableEventError(
         DLQ_REASONS.SOURCE_UNCONFIRMED,
@@ -1295,11 +1379,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // no longer owns the machine, which is good for the owner change alone.
     const inMaintenance =
       MAINTENANCE_EVENTS.has(envelope.eventName) && !snapshot.viaTransfer
-        ? await this.maintenanceSource.inMaintenance(snapshot.organizationId, assetId)
+        ? await asking(delivery, () =>
+            this.maintenanceSource.inMaintenance(snapshot.organizationId, assetId),
+          )
         : undefined;
     return {
       organizationId: snapshot.organizationId,
       viaTransfer: snapshot.viaTransfer,
+      transferGeneration: snapshot.transferGeneration,
       patch: {
         organizationId: snapshot.organizationId,
         name: snapshot.name,
@@ -1525,6 +1612,39 @@ function sameInsuranceState(a: CurrentAssetRef | null, b: CurrentAssetRef | null
 function producerInstant(envelope: EventEnvelope, now: Date): Date {
   const stated = new Date(envelope.occurredAt);
   return Number.isNaN(stated.getTime()) ? now : stated;
+}
+
+/**
+ * One question to another service during a delivery, with the consumer's
+ * heartbeat before and after it (#240 r12): kafkajs does not heartbeat while a
+ * handler runs, so a delivery that asks several times keeps its member in the
+ * group by itself rather than by the startup arithmetic alone. The heartbeat
+ * neither waits nor throws. A sweep has no delivery and no heartbeat.
+ */
+async function asking<T>(delivery: EventDelivery | undefined, call: () => Promise<T>): Promise<T> {
+  delivery?.heartbeat?.();
+  try {
+    return await call();
+  } finally {
+    delivery?.heartbeat?.();
+  }
+}
+
+/**
+ * `work`, or a failure once `ms` have passed (#240 r12). Bounds reads that have
+ * no deadline of their own — a pool connection can be waited for far longer —
+ * so they fit the delivery budget; what is abandoned only reads.
+ */
+async function withinDeadline<T>(ms: number, what: string, work: () => Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms} ms`)), ms);
+  });
+  try {
+    return await Promise.race([work(), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function describe(error: unknown): string {
