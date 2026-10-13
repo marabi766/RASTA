@@ -44,6 +44,10 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
         await prisma.client.idempotencyKey.findMany({ where: { organizationId, key: k } }),
     );
 
+  /** `complete` as the work calls it: inside a transaction of its own. */
+  const complete = (k: string, token: string, status: number, body: unknown) =>
+    prisma.transaction((tx) => store().complete(tx, ENDPOINT, k, token, status, body));
+
   it('treats one key under two organizations as two reservations', async () => {
     const k = key('shared');
     const body = { sku: 'same-body' };
@@ -61,9 +65,7 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
     const k = key('reply');
     const claim = await as(org.buyer, () => store().claim(ENDPOINT, k, { n: 1 }));
     if (claim.kind !== 'PROCEED') throw new Error('expected to own the key');
-    await as(org.buyer, () =>
-      store().complete(ENDPOINT, k, claim.token, 201, { secret: 'A-only' }),
-    );
+    await as(org.buyer, () => complete(k, claim.token, 201, { secret: 'A-only' }));
 
     // The owner replays its own response.
     const replay = await as(org.buyer, () => store().claim(ENDPOINT, k, { n: 1 }));
@@ -80,7 +82,10 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
     const claim = await as(org.buyer, () => store().claim(ENDPOINT, k, { n: 2 }));
     if (claim.kind !== 'PROCEED') throw new Error('expected to own the key');
 
-    await as(org.other, () => store().complete(ENDPOINT, k, claim.token, 200, { stolen: true }));
+    // Refused, so the other tenant's work would roll back with it.
+    await expect(
+      as(org.other, () => complete(k, claim.token, 200, { stolen: true })),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
     await as(org.other, () => store().release(ENDPOINT, k, claim.token));
 
     const [row] = await rowsFor(org.buyer, k);
@@ -140,7 +145,7 @@ describe('the idempotency store keeps tenants apart (real database)', () => {
       });
       const claim = await as(org.buyer, () => store().claim(ENDPOINT, k, body(1)));
       if (claim.kind !== 'PROCEED') throw new Error('expected to own the key');
-      await as(org.buyer, () => store().complete(ENDPOINT, k, claim.token, 201, { id: 'ORD-1' }));
+      await as(org.buyer, () => complete(k, claim.token, 201, { id: 'ORD-1' }));
 
       await expect(as(org.buyer, () => store().claim(ENDPOINT, k, body(2)))).rejects.toMatchObject({
         code: 'IDEMPOTENCY_KEY_REUSED',

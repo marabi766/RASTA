@@ -1,7 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import { OrderController } from './order.controller';
-import { IdempotencyStore, hashRequestBody, targeted } from '../shared/idempotency';
+import {
+  IdempotencyStore,
+  hashRequestBody,
+  targeted,
+  type RecordResponse,
+} from '../shared/idempotency';
 import type { OrderService } from './order.service';
 import type { OrderSagaClient } from '../temporal/saga.client';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -112,20 +117,24 @@ function inMemoryKeyTable() {
     },
   };
 
-  return { prisma: withTransaction(idempotencyKey), rows };
+  return { prisma: withTransaction(idempotencyKey), tx: { idempotencyKey }, rows };
 }
 
 /**
  * The domain service, reduced to the one fact these tests need: which order
  * each command actually ran against. Every command answers with the order it
- * was given, as the real one does.
+ * was given, as the real one does, and stores that answer through `record` —
+ * its last argument — in its "transaction" `tx`, as the real one does.
  */
-function recordingOrders() {
+function recordingOrders(tx: unknown) {
   const ran: Array<{ command: string; id: string }> = [];
   const answer = (command: string) =>
-    jest.fn(async (id: string) => {
+    jest.fn(async (id: string, ...rest: unknown[]) => {
       ran.push({ command, id });
-      return { id, status: `AFTER_${command}` };
+      const view = { id, status: `AFTER_${command}` };
+      const record = rest[rest.length - 1] as RecordResponse<typeof view> | undefined;
+      await record?.(tx as never, view);
+      return view;
     });
   const orders = {
     confirm: answer('confirm'),
@@ -135,6 +144,8 @@ function recordingOrders() {
     resolveDispute: answer('resolveDispute'),
     cancel: answer('cancel'),
     submitReview: answer('submitReview'),
+    // The replay guard (#253): lets every replay through unless a test says not.
+    assertReplayVisible: jest.fn(async (_id: string, _command: string) => undefined),
   };
   return { orders, ran };
 }
@@ -143,8 +154,9 @@ function setup() {
   const table = inMemoryKeyTable();
   const store = new IdempotencyStore(table.prisma, {
     MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
+    MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 60,
   } as MarketplaceEnv);
-  const { orders, ran } = recordingOrders();
+  const { orders, ran } = recordingOrders(table.tx);
   const signal = jest.fn(async (..._args: unknown[]) => undefined);
   const saga = { signal, start: jest.fn(async () => undefined) } as unknown as OrderSagaClient;
   return {
@@ -156,8 +168,11 @@ function setup() {
   };
 }
 
-/** Runs `fn` as a caller acting for `organizationId`, as the guard would set it. */
-function as<T>(organizationId: string, fn: () => Promise<T>): Promise<T> {
+/**
+ * Runs `fn` as a caller acting for `organizationId`, as the guard would set it
+ * — by default the organization's one user, or `userId` when a test needs two.
+ */
+function as<T>(organizationId: string, fn: () => Promise<T>, userId?: string): Promise<T> {
   const context = {
     requestId: `req-${organizationId}`,
     correlationId: `corr-${organizationId}`,
@@ -165,7 +180,7 @@ function as<T>(organizationId: string, fn: () => Promise<T>): Promise<T> {
     organizationIds: [organizationId],
     authType: 'USER',
     roles: ['PROCUREMENT_USER'],
-    userId: `USR-${organizationId}`,
+    userId: userId ?? `USR-${organizationId}`,
     startedAt: 0,
   } as unknown as RequestContext;
   return runWithContext(context, fn);
@@ -255,6 +270,37 @@ describe('OrderController — a replay never reaches an order it did not run on'
       expect(signal.mock.calls[0]?.slice(0, 2)).toEqual([OWN_ORDER, signalName]);
     });
 
+    it('refuses another user’s identical request in the same organization as a reused key (#253)', async () => {
+      const { controller, ran, signal } = setup();
+
+      const first = await as(BUYER_ORG, () => call(controller, OWN_ORDER), 'USR-A');
+      signal.mockClear();
+
+      const other = as(BUYER_ORG, () => call(controller, OWN_ORDER), 'USR-B');
+      await expect(other).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      expect(await other.catch((error: unknown) => JSON.stringify(error))).not.toContain(
+        JSON.stringify(first),
+      );
+      expect(ran).toHaveLength(1);
+      expect(signal).not.toHaveBeenCalled();
+    });
+
+    it('answers the guard’s refusal to an original caller who lost the party, and signals nothing (#253)', async () => {
+      const { controller, orders, ran, signal } = setup();
+      await as(BUYER_ORG, () => call(controller, OWN_ORDER));
+      signal.mockClear();
+
+      const refusal = Object.assign(new Error('Only the buying organization may do this'), {
+        code: 'FORBIDDEN',
+      });
+      orders.assertReplayVisible.mockRejectedValueOnce(refusal);
+
+      await expect(as(BUYER_ORG, () => call(controller, OWN_ORDER))).rejects.toBe(refusal);
+      expect(orders.assertReplayVisible).toHaveBeenCalledWith(OWN_ORDER, expect.any(String));
+      expect(ran).toHaveLength(1);
+      expect(signal).not.toHaveBeenCalled();
+    });
+
     it('signals nothing when the command itself is refused', async () => {
       const { controller, orders, signal } = setup();
       const refused = Object.assign(new Error('not a party to this order'), { code: 'NOT_FOUND' });
@@ -313,8 +359,8 @@ describe('targeted — the request identity of a command on one order', () => {
     );
   });
 
-  it('with no body, hashes exactly what confirm always stored', () => {
-    // So confirm keys recorded before this change still match after it.
+  it('with no body, is exactly `{ id }`, the shape confirm always hashed', () => {
+    // The store hashes it together with the caller since #253.
     expect(hashRequestBody(targeted(OWN_ORDER))).toBe(hashRequestBody({ id: OWN_ORDER }));
   });
 });

@@ -63,17 +63,21 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
  * an effect that cannot be taken back in `docs/06` § 6.8's sense — confirming
  * receipt is what lets settlement happen, and a dispute halts it indefinitely.
  *
- * It is also what the gateway enforces: `requiresIdempotencyKey` applies to the
- * whole `orders` prefix, because teaching the routing layer which verb commits
- * money would give it domain knowledge ADR-009 keeps out of it. A service that
- * accepted a key on some of these and refused it on others would make the
- * gateway's rule wrong rather than coarse.
+ * And every unsafe catalogue route: docs/06 § 6.8 lists publishing an offer
+ * among the operations that must be idempotent, and without a key a double
+ * submit published two offers (or created two products).
  *
- * The catalogue routes are absent deliberately. Publishing an offer is
- * repeatable and creates nothing irreversible, and demanding a key there would
- * teach clients to send meaningless ones.
+ * It is also what the gateway enforces: `requiresIdempotencyKey` applies to the
+ * whole `orders`, `products` and `offers` prefixes (unsafe methods only),
+ * because teaching the routing layer which verb commits money would give it
+ * domain knowledge ADR-009 keeps out of it. A service that accepted a key on
+ * some of these and refused it on others would make the gateway's rule wrong
+ * rather than coarse.
  */
 const IDEMPOTENT_ROUTES = new Set([
+  'POST /v1/products',
+  'POST /v1/offers',
+  'PATCH /v1/offers/{id}',
   'POST /v1/orders',
   'POST /v1/orders/{id}/confirm',
   'POST /v1/orders/{id}/fulfill',
@@ -193,8 +197,11 @@ export function enrichOpenApiDocument(
             required: true,
             schema: { type: 'string', minLength: 8, maxLength: 128 },
             description:
-              'Required. A retry with the same key returns the first response without ' +
-              'executing again; the same key with a different body is refused with 409 ' +
+              'Required. A retry by the same user with the same key returns the first ' +
+              'response without executing again — once the caller has passed the current ' +
+              'read and owner check of what it names; otherwise the caller gets the refusal ' +
+              'the route itself would give. The same key with ' +
+              'a different body, or from another user, is refused with 409 ' +
               'IDEMPOTENCY_KEY_REUSED, and while the first request is still in flight with ' +
               'CONFLICT and a Retry-After header, in seconds. ' +
               `Keys are honoured for ${retention}, which is ` +

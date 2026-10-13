@@ -2,6 +2,7 @@ import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import {
+  apiKey,
   apiTenant,
   auditor,
   buyer,
@@ -44,6 +45,7 @@ describe('catalogue API', () => {
   async function createProduct(org = supplierOrg, overrides: Record<string, unknown> = {}) {
     return request(http)
       .post('/v1/products')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', `Bearer ${supplier(org)}`)
       .send({
         sku: sku(),
@@ -62,6 +64,7 @@ describe('catalogue API', () => {
   ) {
     return request(http)
       .post('/v1/offers')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', `Bearer ${supplier(org)}`)
       .send({
         productId,
@@ -106,6 +109,7 @@ describe('catalogue API', () => {
     it('refuses a missing required field with 400', async () => {
       const response = await request(http)
         .post('/v1/products')
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .send({ sku: sku(), name: 'no category or unit' });
 
@@ -121,6 +125,7 @@ describe('catalogue API', () => {
     it('refuses the oversight role with 403', async () => {
       await request(http)
         .post('/v1/products')
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${auditor(supplierOrg)}`)
         .send({ sku: sku(), name: 'n', category: 'c', kind: 'GOOD', unit: 'u' })
         .expect(403);
@@ -129,6 +134,7 @@ describe('catalogue API', () => {
     it('refuses an unauthenticated request with 401', async () => {
       await request(http)
         .post('/v1/products')
+        .set('idempotency-key', apiKey('catalogue'))
         .send({ sku: sku(), name: 'n', category: 'c', kind: 'GOOD', unit: 'u' })
         .expect(401);
     });
@@ -193,6 +199,7 @@ describe('catalogue API', () => {
       const product = await createProduct();
       const response = await request(http)
         .post('/v1/offers')
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${buyer(supplierOrg)}`)
         .send({
           productId: product.body.id,
@@ -211,6 +218,7 @@ describe('catalogue API', () => {
 
       const updated = await request(http)
         .patch(`/v1/offers/${offer.body.id}`)
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .send({ unitPriceMinor: '175000' })
         .expect(200);
@@ -236,6 +244,7 @@ describe('catalogue API', () => {
 
       const updated = await request(http)
         .patch(`/v1/offers/${offer.body.id}`)
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .send({ availableQuantity: 99 })
         .expect(200);
@@ -250,6 +259,7 @@ describe('catalogue API', () => {
 
       const withdrawn = await request(http)
         .patch(`/v1/offers/${offer.body.id}`)
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .send({ status: 'WITHDRAWN' })
         .expect(200);
@@ -269,6 +279,7 @@ describe('catalogue API', () => {
 
       await request(http)
         .patch(`/v1/offers/${offer.body.id}`)
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .send({})
         .expect(400);
@@ -280,6 +291,7 @@ describe('catalogue API', () => {
 
       const response = await request(http)
         .patch(`/v1/offers/${offer.body.id}`)
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(otherSupplierOrg)}`)
         .send({ unitPriceMinor: '1' });
 
@@ -294,6 +306,7 @@ describe('catalogue API', () => {
     it('reports 404 for an offer that does not exist', async () => {
       await request(http)
         .patch('/v1/offers/OFR_NOT_REAL')
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .send({ unitPriceMinor: '1000' })
         .expect(404);
@@ -308,6 +321,7 @@ describe('catalogue API', () => {
 
       await request(http)
         .patch(`/v1/offers/${offer.body.id}`)
+        .set('idempotency-key', apiKey('catalogue'))
         .set('authorization', `Bearer ${platformAdmin()}`)
         .send({ unitPriceMinor: '1000' })
         .expect(200);
