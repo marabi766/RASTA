@@ -127,7 +127,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -254,7 +254,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -264,11 +264,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -436,7 +436,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -446,7 +446,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -642,7 +642,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -801,7 +801,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -811,7 +811,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -821,11 +821,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -875,7 +875,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1105,7 +1105,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1115,7 +1115,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1274,7 +1274,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1284,7 +1284,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1294,11 +1294,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1348,7 +1348,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1563,7 +1563,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1573,7 +1573,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1583,11 +1583,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1637,7 +1637,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: INSUFFICIENT_AVAILABLE_STOCK, LINES_SPAN_WAREHOUSES, EXPIRY_OUT_OF_RANGE, HOLDER_NOT_OWNER)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1867,7 +1867,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2053,7 +2053,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2168,7 +2168,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2178,7 +2178,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2378,7 +2378,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2388,7 +2388,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2398,11 +2398,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -2419,7 +2419,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (stock: ON_HAND_WOULD_BE_NEGATIVE, QUANTITY_OUT_OF_RANGE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (stock: ON_HAND_WOULD_BE_NEGATIVE, QUANTITY_OUT_OF_RANGE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2687,7 +2687,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2697,7 +2697,7 @@
             }
           },
           "404": {
-            "description": "Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.",
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2707,11 +2707,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -2728,7 +2728,7 @@
             }
           },
           "422": {
-            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (stock: ON_HAND_WOULD_BE_NEGATIVE, QUANTITY_OUT_OF_RANGE)",
+            "description": "Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once. When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (stock: ON_HAND_WOULD_BE_NEGATIVE, QUANTITY_OUT_OF_RANGE)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2819,11 +2819,1211 @@
           }
         }
       }
+    },
+    "/v1/shipments": {
+      "get": {
+        "description": "Optionally by `side` (`origin` | `consignee`) and by `status`. Each side is listed only as far as the caller’s roles open it. Closed by default (S-02). Read by the two organizations of a shipment (ADR-056 § 5): the owner of its origin warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (Q-103) — and its consignee — a role of INVENTORY_CONSIGNEE_READER_ROLES (Q-113); all three ORGANIZATION_ADMIN by default, held in the organization the request acts for. Any other organization, or a side the caller’s roles do not open, gets 404, never 403 (S-03). No user id is shown. AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "ShipmentController_list_v1",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 25
+            }
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["origin", "consignee"],
+              "description": "`origin`: shipments leaving the warehouses of the organization the request acts for; `consignee`: shipments sent to it. Without it, both — as far as the caller’s roles open each side."
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "organizationId": {
+                            "type": "string",
+                            "description": "The owner of the origin warehouse."
+                          },
+                          "originWarehouseId": {
+                            "type": "string"
+                          },
+                          "consigneeOrganizationId": {
+                            "type": "string"
+                          },
+                          "orderReference": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+                          },
+                          "legs": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "sequence": {
+                                  "type": "integer"
+                                },
+                                "carrierName": {
+                                  "type": "string"
+                                },
+                                "carrierReference": {
+                                  "type": "string",
+                                  "nullable": true
+                                }
+                              },
+                              "required": ["sequence", "carrierName", "carrierReference"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "dispatchedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "deliveredAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "updatedAt": {
+                            "type": "string"
+                          },
+                          "version": {
+                            "type": "integer",
+                            "description": "1 while CREATED, 2 once DISPATCHED, 3 once DELIVERED."
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "organizationId",
+                          "originWarehouseId",
+                          "consigneeOrganizationId",
+                          "orderReference",
+                          "status",
+                          "legs",
+                          "createdAt",
+                          "dispatchedAt",
+                          "deliveredAt",
+                          "updatedAt",
+                          "version"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextCursor", "hasMore"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "List shipments leaving or sent to the organization the request acts for, newest first",
+        "tags": ["shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "description": "A CREATED shipment from `originWarehouseId` — a warehouse of the organization the request acts for (another’s is 404) — to `consigneeOrganizationId`, with 1 to 10 legs in carrying order. It moves no stock (Q-115): stock leaves through issuing a reservation. The shipment, its legs, its CREATED tracking event and SHIPMENT_CREATED (identifiers only — no carrier) commit in one transaction. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ShipmentController_create_v1",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner of the origin warehouse."
+                    },
+                    "originWarehouseId": {
+                      "type": "string"
+                    },
+                    "consigneeOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+                    },
+                    "legs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sequence": {
+                            "type": "integer"
+                          },
+                          "carrierName": {
+                            "type": "string"
+                          },
+                          "carrierReference": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": ["sequence", "carrierName", "carrierReference"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "dispatchedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "deliveredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "1 while CREATED, 2 once DISPATCHED, 3 once DELIVERED."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "originWarehouseId",
+                    "consigneeOrganizationId",
+                    "orderReference",
+                    "status",
+                    "legs",
+                    "createdAt",
+                    "dispatchedAt",
+                    "deliveredAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED).",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create a shipment out of one of the owner’s warehouses",
+        "tags": ["shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "originWarehouseId": {
+                    "type": "string",
+                    "pattern": "^WHS_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "The warehouse it leaves: one of the organization the request acts for (another’s is 404). A shipment always leaves a warehouse of this platform (ADR-056 § 2)."
+                  },
+                  "consigneeOrganizationId": {
+                    "type": "string",
+                    "pattern": "^ORG(_[0-9A-HJKMNP-TV-Z]{26}|-[A-Z0-9-]{1,48})$",
+                    "description": "The organization the shipment is sent to (ADR-056 § 5): it may read the shipment and its tracking, never move it. An opaque platform organization id, not resolved or verified by this service (Q-113). May be the owner itself."
+                  },
+                  "orderReference": {
+                    "type": "string",
+                    "pattern": "^(ORD|PO)_[0-9A-HJKMNP-TV-Z]{26}$",
+                    "description": "Optional opaque `ORD_`/`PO_` reference of the order it is for. Never resolved."
+                  },
+                  "legs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "carrierName": {
+                          "type": "string",
+                          "pattern": "^[^\\p{Bidi_Control}]*$",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "description": "Who carries this leg: trimmed, 1 to 200 characters, without bidirectional control characters. Shown to the shipment’s readers; never on an event (Q-115)."
+                        },
+                        "carrierReference": {
+                          "type": "string",
+                          "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\p{Bidi_Control}]*$",
+                          "minLength": 1,
+                          "maxLength": 100,
+                          "description": "Optional: the carrier’s own reference (a waybill number). Never on an event."
+                        }
+                      },
+                      "required": ["carrierName"],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "description": "1 to 10 legs, in the order they are carried; numbered from 1. Fixed once created."
+                  }
+                },
+                "required": ["originWarehouseId", "consigneeOrganizationId", "legs"],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/shipments/{id}": {
+      "get": {
+        "description": "Closed by default (S-02). Read by the two organizations of a shipment (ADR-056 § 5): the owner of its origin warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (Q-103) — and its consignee — a role of INVENTORY_CONSIGNEE_READER_ROLES (Q-113); all three ORGANIZATION_ADMIN by default, held in the organization the request acts for. Any other organization, or a side the caller’s roles do not open, gets 404, never 403 (S-03). No user id is shown. AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "ShipmentController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner of the origin warehouse."
+                    },
+                    "originWarehouseId": {
+                      "type": "string"
+                    },
+                    "consigneeOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+                    },
+                    "legs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sequence": {
+                            "type": "integer"
+                          },
+                          "carrierName": {
+                            "type": "string"
+                          },
+                          "carrierReference": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": ["sequence", "carrierName", "carrierReference"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "dispatchedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "deliveredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "1 while CREATED, 2 once DISPATCHED, 3 once DELIVERED."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "originWarehouseId",
+                    "consigneeOrganizationId",
+                    "orderReference",
+                    "status",
+                    "legs",
+                    "createdAt",
+                    "dispatchedAt",
+                    "deliveredAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read one shipment, with its legs",
+        "tags": ["shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/shipments/{id}/tracking": {
+      "get": {
+        "description": "The tracking history — one event per status the shipment reached (CREATED, DISPATCHED, DELIVERED), ordered by when it happened. Closed by default (S-02). Read by the two organizations of a shipment (ADR-056 § 5): the owner of its origin warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (Q-103) — and its consignee — a role of INVENTORY_CONSIGNEE_READER_ROLES (Q-113); all three ORGANIZATION_ADMIN by default, held in the organization the request acts for. Any other organization, or a side the caller’s roles do not open, gets 404, never 403 (S-03). No user id is shown. AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "operationId": "ShipmentController_tracking_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "shipmentId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+                    },
+                    "originWarehouseId": {
+                      "type": "string"
+                    },
+                    "consigneeOrganizationId": {
+                      "type": "string"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": ["CREATED", "DISPATCHED", "DELIVERED"],
+                            "description": "The status the shipment reached."
+                          },
+                          "occurredAt": {
+                            "type": "string"
+                          },
+                          "recordedAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["id", "type", "occurredAt", "recordedAt"],
+                        "additionalProperties": false
+                      },
+                      "description": "What happened to the shipment, in the order it happened."
+                    }
+                  },
+                  "required": [
+                    "shipmentId",
+                    "status",
+                    "originWarehouseId",
+                    "consigneeOrganizationId",
+                    "events"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Track a shipment: its status and what happened to it, in order",
+        "tags": ["shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/shipments/{id}/dispatch": {
+      "post": {
+        "description": "Records the DISPATCHED tracking event and SHIPMENT_DISPATCHED. A shipment already dispatched or delivered is 409 `SHIPMENT_NOT_CREATED` (INVALID_STATE_TRANSITION). `expectedVersion` is optional. Only an operator of the origin warehouse’s owner moves a shipment (ADR-056 plan step 10); its consignee reads it and is refused 403 FORBIDDEN here, any other organization gets 404. One transaction: the shipment row is locked, moved by compare-and-set, and its tracking event, its SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ShipmentController_dispatch_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner of the origin warehouse."
+                    },
+                    "originWarehouseId": {
+                      "type": "string"
+                    },
+                    "consigneeOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+                    },
+                    "legs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sequence": {
+                            "type": "integer"
+                          },
+                          "carrierName": {
+                            "type": "string"
+                          },
+                          "carrierReference": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": ["sequence", "carrierName", "carrierReference"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "dispatchedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "deliveredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "1 while CREATED, 2 once DISPATCHED, 3 once DELIVERED."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "originWarehouseId",
+                    "consigneeOrganizationId",
+                    "orderReference",
+                    "status",
+                    "legs",
+                    "createdAt",
+                    "dispatchedAt",
+                    "deliveredAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (shipment: SHIPMENT_NOT_CREATED, SHIPMENT_NOT_DISPATCHED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "shipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["SHIPMENT_NOT_CREATED", "SHIPMENT_NOT_DISPATCHED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Dispatch a shipment (CREATED → DISPATCHED): it left its origin warehouse",
+        "tags": ["shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/shipments/{id}/deliver": {
+      "post": {
+        "description": "`ConfirmDelivery` (docs/04 § 4.11): only an operator of the origin warehouse’s owner (ADR-056 plan step 10) — not the consignee (Q-114). Records the DELIVERED tracking event and SHIPMENT_DELIVERED. A shipment not yet dispatched, or already delivered, is 409 `SHIPMENT_NOT_DISPATCHED` (INVALID_STATE_TRANSITION). `expectedVersion` is optional. Only an operator of the origin warehouse’s owner moves a shipment (ADR-056 plan step 10); its consignee reads it and is refused 403 FORBIDDEN here, any other organization gets 404. One transaction: the shipment row is locked, moved by compare-and-set, and its tracking event, its SHIPMENT_* event and the stored response commit together. A shipment another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "operationId": "ShipmentController_deliver_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Required, 8 to 255 characters. The same key with the same body from the same user returns the first response and does nothing again; with a different body or user, 409 IDEMPOTENCY_KEY_REUSED; while the first request is still in flight, 409 CONFLICT with Retry-After. Scoped to the organization, kept for INVENTORY_IDEMPOTENCY_TTL_HOURS (24 by default) — and, for a stock command, applied at most once per stock item for good.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 255
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "description": "The owner of the origin warehouse."
+                    },
+                    "originWarehouseId": {
+                      "type": "string"
+                    },
+                    "consigneeOrganizationId": {
+                      "type": "string"
+                    },
+                    "orderReference": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["CREATED", "DISPATCHED", "DELIVERED"]
+                    },
+                    "legs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sequence": {
+                            "type": "integer"
+                          },
+                          "carrierName": {
+                            "type": "string"
+                          },
+                          "carrierReference": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": ["sequence", "carrierName", "carrierReference"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "dispatchedAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "deliveredAt": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "updatedAt": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "integer",
+                      "description": "1 while CREATED, 2 once DISPATCHED, 3 once DELIVERED."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "organizationId",
+                    "originWarehouseId",
+                    "consigneeOrganizationId",
+                    "orderReference",
+                    "status",
+                    "legs",
+                    "createdAt",
+                    "dispatchedAt",
+                    "deliveredAt",
+                    "updatedAt",
+                    "version"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query or body does not match the published schema. Unknown parameters and fields are refused rather than ignored; on a command, a missing or malformed Idempotency-Key is a 400 too.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) — or, for a shipment read, INVENTORY_CONSIGNEE_READER_ROLES — in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on creating a warehouse, a body naming another organization (FORBIDDEN); a shipment’s consignee dispatching or delivering it (FORBIDDEN — only the origin warehouse’s owner moves a shipment).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found — also returned for a warehouse, stock item, reservation or shipment of another organization (for a shipment: neither the owner of its origin warehouse nor its consignee, ADR-056 § 5), so its existence is never disclosed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command (to the stock item, or as this shipment or tracking event) (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item or shipment another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE); a shipment not in the status the move starts from (INVALID_STATE_TRANSITION, SHIPMENT_NOT_CREATED / SHIPMENT_NOT_DISPATCHED). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation, shipment) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (shipment: SHIPMENT_NOT_CREATED, SHIPMENT_NOT_DISPATCHED)",
+            "headers": {
+              "Retry-After": {
+                "required": false,
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item or shipment another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database connection or transaction was to be had within the budget, or reservations past their expiresAt whose release would reverse the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "correlationId": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "const": "shipment"
+                          },
+                          "code": {
+                            "type": "string",
+                            "enum": ["SHIPMENT_NOT_CREATED", "SHIPMENT_NOT_DISPATCHED"]
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["path", "code", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["code", "message"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Deliver a shipment (DISPATCHED → DELIVERED), as its origin warehouse’s owner records it",
+        "tags": ["shipments"],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The `version` the caller read. When given, the command applies only to that version (409 OPTIMISTIC_LOCK_FAILED otherwise)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
     }
   },
   "info": {
     "title": "Rasta — Inventory Service",
-    "description": "Inventory and forward logistics (COM-006, ADR-056). Warehouses — of any organization, never assumed to be a union — and, per product and warehouse, a stock item whose balance (on hand, reserved, available = on hand − reserved) changes only through an append-only ledger of movements: RECEIPT, ADJUSTMENT, and the RESERVE / RELEASE / ISSUE of reservations. Every command is one transaction that locks the stock items it touches in ascending id order (PostgreSQL row locks, no Redis — ADR-056 § 4), so the balance, its movement and its event commit together; the database refuses a negative or over-reserved balance and any balance that does not equal the sum of its movements. Everything is the warehouse owner’s: another organization gets 404. Every command requires an Idempotency-Key. Products, orders and purchase orders are opaque references to the services that own them (Q-105); quantities are whole numbers of a product’s base unit. Shipments and tracking follow.",
+    "description": "Inventory and forward logistics (COM-006, ADR-056). Warehouses — of any organization, never assumed to be a union — and, per product and warehouse, a stock item whose balance (on hand, reserved, available = on hand − reserved) changes only through an append-only ledger of movements: RECEIPT, ADJUSTMENT, and the RESERVE / RELEASE / ISSUE of reservations. Every command is one transaction that locks the stock items it touches in ascending id order (PostgreSQL row locks, no Redis — ADR-056 § 4), so the balance, its movement and its event commit together; the database refuses a negative or over-reserved balance and any balance that does not equal the sum of its movements. Everything is the warehouse owner’s: another organization gets 404. Every command requires an Idempotency-Key. Products, orders and purchase orders are opaque references to the services that own them (Q-105); quantities are whole numbers of a product’s base unit. Shipments leave an owner’s warehouse for a consignee organization, CREATED → DISPATCHED → DELIVERED with a tracking event for each, moved only by the owner and read by the owner and the consignee alone (ADR-056 § 2, § 5); a shipment moves no stock.",
     "version": "0.1.0",
     "contact": {}
   },

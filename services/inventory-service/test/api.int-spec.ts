@@ -438,6 +438,16 @@ describe('the inventory API (real application, real PostgreSQL)', () => {
         ['/v1/stock/reservations', { lines: [{ stockItemId, quantity: 1 }] }],
         [`/v1/stock/reservations/${reservationId}/release`, {}],
         [`/v1/stock/reservations/${reservationId}/issue`, {}],
+        [
+          '/v1/shipments',
+          {
+            originWarehouseId: warehouseId,
+            consigneeOrganizationId: a,
+            legs: [{ carrierName: 'X' }],
+          },
+        ],
+        [`/v1/shipments/SHP_${'0'.repeat(26)}/dispatch`, {}],
+        [`/v1/shipments/SHP_${'0'.repeat(26)}/deliver`, {}],
       ] as const;
       // The platform administrator without an active organization, and a person acting for none.
       for (const roles of [['SYSTEM_ADMIN'], ['ORGANIZATION_ADMIN']]) {

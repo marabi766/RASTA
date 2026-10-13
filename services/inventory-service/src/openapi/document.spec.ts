@@ -66,10 +66,13 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes the warehouse, stock and reservation routes of COM-006 PR 1, each closed — no shipment yet', () => {
+  it('publishes the warehouse, stock, reservation (PR 1) and shipment (PR 2) routes, each closed', () => {
     const keys = operations().map((o) => o.key);
     expect(keys.sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     expect(keys.sort()).toEqual([
+      'GET /v1/shipments',
+      'GET /v1/shipments/{id}',
+      'GET /v1/shipments/{id}/tracking',
       'GET /v1/stock',
       'GET /v1/stock/movements',
       'GET /v1/stock/reservations',
@@ -77,6 +80,9 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/stock/{id}',
       'GET /v1/warehouses',
       'GET /v1/warehouses/{id}',
+      'POST /v1/shipments',
+      'POST /v1/shipments/{id}/deliver',
+      'POST /v1/shipments/{id}/dispatch',
       'POST /v1/stock/adjustments',
       'POST /v1/stock/receipts',
       'POST /v1/stock/reservations',
@@ -124,14 +130,31 @@ describe('the committed OpenAPI document', () => {
     expect(codesOf('POST /v1/stock/adjustments', '422')).toEqual(
       Object.keys(REFUSAL_REASONS.stock),
     );
+    expect(codesOf('POST /v1/shipments/{id}/deliver', '409')).toEqual([
+      'SHIPMENT_NOT_CREATED',
+      'SHIPMENT_NOT_DISPATCHED',
+    ]);
   });
 
-  it('answers 404 on a read by id and on a stock command, never on a list or on create', () => {
+  it('answers 404 on a read by id and on a command whose body names a row, never on a list or on creating a warehouse', () => {
     expect(operation('GET /v1/stock/{id}').responses['404']).toBeDefined();
     expect(operation('POST /v1/stock/receipts').responses['404']).toBeDefined();
+    expect(operation('POST /v1/shipments').responses['404']).toBeDefined();
+    expect(operation('GET /v1/shipments/{id}/tracking').responses['404']).toBeDefined();
     expect(operation('GET /v1/stock').responses['404']).toBeUndefined();
+    expect(operation('GET /v1/shipments').responses['404']).toBeUndefined();
     expect(operation('POST /v1/warehouses').responses['404']).toBeUndefined();
     expect(operation('POST /v1/warehouses').responses['422']).toBeUndefined();
+  });
+
+  it('gives a shipment command no 422: it breaks no stock rule, it can only be in the wrong state', () => {
+    for (const key of [
+      'POST /v1/shipments',
+      'POST /v1/shipments/{id}/dispatch',
+      'POST /v1/shipments/{id}/deliver',
+    ]) {
+      expect([key, operation(key).responses['422']]).toEqual([key, undefined]);
+    }
   });
 
   it('answers 201 when something is created, 200 otherwise', () => {

@@ -1,6 +1,6 @@
 // inventory-service — inventory and forward logistics (COM-006, ADR-056, docs/04 § 4.11).
-// PR 1 holds warehouses, stock items, the append-only stock movement ledger and reservations;
-// shipments, their legs and tracking events are PR 2 (ADR-056 § 1).
+// Warehouses, stock items, the append-only stock movement ledger and reservations (PR 1);
+// shipments, their legs and tracking events (PR 2) — the seven tables of ADR-056 § 1.
 //
 // Everything here is owned by this service alone (AGENTS.md A-01). There is no foreign key into
 // another service's database: `productId` (marketplace's), `orderReference` and `sourceReference`
@@ -179,6 +179,84 @@ model StockReservation {
 }
 
 // ---------------------------------------------------------------------------
+// Shipments (COM-006 PR 2, ADR-056 § 2, § 5)
+// ---------------------------------------------------------------------------
+
+/// The physical movement of goods out of one of the owner's warehouses — not marketplace's
+/// Fulfillment (ADR-056 § 2). CREATED → DISPATCHED → DELIVERED, once each (`tg_shipment_guard`;
+/// Q-114). Moves no stock (Q-115). Written and read in SQL (`src/shipment/shipment.repository.ts`):
+/// the consignee's read crosses tenants by design.
+model Shipment {
+  id String @id
+
+  /// The owner of the origin warehouse, and the tenant.
+  organizationId          String  @map("organization_id")
+  originWarehouseId       String  @map("origin_warehouse_id")
+  /// Who it is sent to: may read it and its tracking, never moves it (ADR-056 § 5). Opaque (Q-113).
+  consigneeOrganizationId String  @map("consignee_organization_id")
+  /// Opaque `ORD_`/`PO_` reference of another service.
+  orderReference          String? @map("order_reference")
+  /// CREATED | DISPATCHED | DELIVERED (CHECK ck_shipment_status).
+  status                  String  @default("CREATED")
+  legCount                Int     @map("leg_count")
+  commandKeyHash          String  @map("command_key_hash")
+
+  createdAt            DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy            String    @map("created_by")
+  createdCorrelationId String    @map("created_correlation_id")
+  dispatchedAt         DateTime? @map("dispatched_at") @db.Timestamptz(3)
+  dispatchedBy         String?   @map("dispatched_by")
+  deliveredAt          DateTime? @map("delivered_at") @db.Timestamptz(3)
+  deliveredBy          String?   @map("delivered_by")
+  updatedAt            DateTime  @map("updated_at") @db.Timestamptz(3)
+  /// 1, 2, 3 — one per status reached (CHECK ck_shipment_version_matches_status).
+  version              Int       @default(1)
+
+  @@unique([organizationId, id], map: "ux_shipment_org_id")
+  @@unique([organizationId, commandKeyHash], map: "ux_shipment_command")
+  @@index([organizationId, status, id], map: "ix_shipment_org_status")
+  @@index([consigneeOrganizationId, id], map: "ix_shipment_consignee")
+  @@map("shipment")
+}
+
+/// One carrier's part of a shipment's way, numbered from 1. Written with its shipment, never
+/// changed (`tg_shipment_leg_guard`). The carrier is free text, never on an event (Q-115).
+model ShipmentLeg {
+  id String @id
+
+  organizationId   String  @map("organization_id")
+  shipmentId       String  @map("shipment_id")
+  sequence         Int
+  carrierName      String  @map("carrier_name")
+  carrierReference String? @map("carrier_reference")
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, shipmentId, sequence], map: "ux_shipment_leg_sequence")
+  @@map("shipment_leg")
+}
+
+/// What happened to a shipment, append-only and in order (`tg_tracking_event_guard`): one event
+/// per status it reached.
+model TrackingEvent {
+  id String @id
+
+  organizationId String   @map("organization_id")
+  shipmentId     String   @map("shipment_id")
+  /// CREATED | DISPATCHED | DELIVERED (CHECK ck_tracking_event_type).
+  type           String
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(3)
+  recordedAt     DateTime @map("recorded_at") @db.Timestamptz(3)
+  recordedBy     String   @map("recorded_by")
+  correlationId  String   @map("correlation_id")
+  commandKeyHash String   @map("command_key_hash")
+
+  @@unique([organizationId, commandKeyHash], map: "ux_tracking_event_command")
+  @@index([organizationId, shipmentId, occurredAt, id], map: "ix_tracking_event_org_shipment")
+  @@map("tracking_event")
+}
+
+// ---------------------------------------------------------------------------
 // Idempotent commands (docs/06 § 6.8) — contract-service's store, this service's copy
 // ---------------------------------------------------------------------------
 
@@ -220,7 +298,7 @@ model OutboxMessage {
   eventVersion  Int    @default(1) @map("event_version")
 
   topic        String
-  /// `stockItemId` or `warehouseId`, by event (`src/events/routing.ts`, docs/07 § 7.7).
+  /// `stockItemId`, `shipmentId` or `warehouseId`, by event (`src/events/routing.ts`, docs/07 § 7.7).
   partitionKey String @map("partition_key")
 
   payload Json

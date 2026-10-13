@@ -2741,7 +2741,7 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 
 ## ۷-ز. inventory-service — ورودی کامل حافظه
 
-> **وضعیت (2026-10-13):** **SKELETON + STOCK CORE** — COM-006 PR 1 (شاخهٔ `feat/inventory-service-skeleton`، PR #246). پورت **۳۱۰۹**،
+> **وضعیت (2026-10-14):** **SKELETON + STOCK CORE + SHIPMENTS** — COM-006 PR 1 (شاخهٔ `feat/inventory-service-skeleton`، PR #246) و PR 2 (PR #257، روی آن). پورت **۳۱۰۹**،
 > پایگاه داده `rasta_inventory`، Topic ‏`rasta.inventory.v1`. تصمیم: [ADR-056](docs/adr/ADR-056-inventory-forward-logistics.md) (`Accepted`)
 > و برنامه‌اش (§ «وضعیت پیاده‌سازی و انحراف‌ها» با چهار انحراف تأییدشده). پرسش‌های باز **Q-102..Q-109**، همه با پاسخ موقت پیکربندی‌پذیر یا محدودکننده.
 
@@ -2760,8 +2760,18 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 **شواهد محلی (نه CI):** ۲۲۹ تست (۱۵۹ واحد + ۷۰ یکپارچگی روی PostgreSQL واقعی)، پوشش ترکیبی ۹۳٫۹٪ گزاره / ۸۷٫۸٪ شاخه / ۹۱٫۸٪ تابع / ۹۶٫۶٪ خط؛
 ۵۰ رزرو موازی روی ۱۰ واحد ⇒ دقیقاً ۱۰ موفق؛ ۲۰۰ دور ترتیب وارونه ⇒ صفر Deadlock؛ طوفان ترکیبی آشتی می‌شود؛ منفی‌های ۱، ۲ و ۵ ADR-056 § ۵.
 
-**ساخته نشده (صادقانه):** محموله و رهگیری (PR 2)، پورت‌های یکپارچگی `Unavailable*` و دارندهٔ غیرمالک (PR 3، Q-104)، `LOW_STOCK_DETECTED` (Q-106)،
-`FindNearestWarehouse`، E2E و لایهٔ محصولی گام ۱۲. **هیچ Consumerی نیست** — سفارش marketplace هنوز موجودی را رزرو نمی‌کند (ADR-041 § ۲). `COM-006` `READY` می‌ماند.
+**COM-006 PR 2 — محموله و رهگیری (2026-10-14، شاخهٔ `feat/inventory-shipments`، PR #257 روی #246):** `shipment` (مالک انبار مبدأ =
+`organization_id`؛ کلید خارجی ترکیبی به انبار همان مالک؛ گیرندهٔ مبهم `consigneeOrganizationId`)، `shipment_leg` (۱ تا ۱۰ ساق، حمل‌کنندهٔ متنی،
+تغییرناپذیر) و `tracking_event` (الحاقی، مرتب)؛ فرمان‌های ساخت، ارسال و تحویل (`CREATED → DISPATCHED → DELIVERED`، یک‌باره، با `tracking_event` و
+`SHIPMENT_*` در همان تراکنش؛ فقط نقش عملیاتی مالک)؛ `GET /v1/shipments`، `/{id}`، `/{id}/tracking` برای **مالک یا گیرنده** (نقش‌های گیرنده:
+`INVENTORY_CONSIGNEE_READER_ROLES`)، سازمان سوم `404` (منفی ۳)، گیرنده روی ارسال/تحویل `403`. پایگاه داده گذار، هم‌خوانی وضعیت با رهگیری در Commit،
+ساق‌های کامل و ترتیب تاریخچه را نگه می‌دارد. قرارداد رویدادها در `packages/contracts` (`events/inventory-shipments.ts`)، جریان STRICT
+`shipmentId`، بی حمل‌کننده و متن آزاد. Gateway: `requiresIdempotencyKey` روی `shipments`. محموله موجودی را جابه‌جا نمی‌کند (Q-115). پرسش‌های باز
+**Q-113..Q-115**. شواهد محلی: ۳۰ مجموعه / ۳۱۵ تست (واحد + یکپارچگی روی PostgreSQL واقعی)، پوشش ۹۴٫۲ / ۸۸٫۵ / ۹۳٫۳ / ۹۷٫۲؛ Migration رفت‌وبرگشت سبز.
+
+**ساخته نشده (صادقانه):** نقطهٔ میانی رهگیری و `FAILED` (Q-114)، آزمون ترتیب با Kafka واقعی (گام ۹)، پورت‌های یکپارچگی `Unavailable*` و دارندهٔ
+غیرمالک (PR 3، Q-104)، `LOW_STOCK_DETECTED` (Q-106)، `FindNearestWarehouse`، E2E و لایهٔ محصولی گام ۱۲. **هیچ Consumerی نیست** — سفارش marketplace
+هنوز موجودی را رزرو نمی‌کند (ADR-041 § ۲). `COM-006` `READY` می‌ماند.
 
 ---
 

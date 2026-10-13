@@ -25,6 +25,10 @@ const MIGRATION = readFileSync(
   ),
   'utf8',
 );
+const SHIPMENTS_MIGRATION = readFileSync(
+  join(__dirname, '..', '..', 'prisma', 'migrations', '20261014120000_shipments', 'migration.sql'),
+  'utf8',
+);
 
 /** Every `model X { ... }` block in the schema, as name → body. */
 function models(schema: string): Map<string, string> {
@@ -76,6 +80,24 @@ describe('the schema keeps history from being erased', () => {
   it('uses no cascading delete anywhere', () => {
     expect(SCHEMA).not.toMatch(/onDelete:\s*Cascade/);
     expect(MIGRATION).not.toMatch(/ON DELETE CASCADE/i);
+    expect(SHIPMENTS_MIGRATION).not.toMatch(/ON DELETE CASCADE/i);
+  });
+
+  it('guards shipments against deletion and their legs and tracking as append-only (PR 2)', () => {
+    for (const trigger of [
+      'tg_shipment_guard',
+      'tg_shipment_no_truncate',
+      'tg_shipment_history_check',
+      'tg_shipment_leg_guard',
+      'tg_shipment_leg_no_truncate',
+      'tg_tracking_event_guard',
+      'tg_tracking_event_no_truncate',
+    ]) {
+      expect([trigger, SHIPMENTS_MIGRATION.includes(`TRIGGER "${trigger}"`)]).toEqual([
+        trigger,
+        true,
+      ]);
+    }
   });
 
   it('guards the ledger as append-only and every balance-bearing table against deletion', () => {
@@ -94,8 +116,8 @@ describe('the schema keeps history from being erased', () => {
   });
 });
 
-describe('the schema models nothing COM-006 PR 1 has not decided', () => {
-  it('has warehouses, stock items, movements, reservations and the idempotency store (shipments are PR 2)', () => {
+describe('the schema models nothing COM-006 has not decided', () => {
+  it('has warehouses, stock items, movements, reservations (PR 1), shipments, legs and tracking (PR 2) and the idempotency store', () => {
     // Each PR adds its models here, so an unplanned one still fails this test.
     const names = [...models(SCHEMA).keys()].filter(
       (name) => !['OutboxMessage', 'OutboxStreamSequence'].includes(name),
@@ -105,11 +127,14 @@ describe('the schema models nothing COM-006 PR 1 has not decided', () => {
       'StockItem',
       'StockMovement',
       'StockReservation',
+      'Shipment',
+      'ShipmentLeg',
+      'TrackingEvent',
       'IdempotencyKey',
     ]);
   });
 
-  it('keeps no consumer bookkeeping: nothing is consumed in PR 1 (ADR-056 § 7, ADR-032)', () => {
+  it('keeps no consumer bookkeeping: nothing is consumed yet (ADR-056 § 7, ADR-032)', () => {
     expect(SCHEMA).not.toMatch(/ProcessedEvent|processed_event/);
   });
 
@@ -133,10 +158,11 @@ describe('the schema models nothing COM-006 PR 1 has not decided', () => {
       .filter((line) => !line.includes('@db.Timestamptz'));
     expect(plain).toEqual([]);
     expect(MIGRATION).not.toMatch(/TIMESTAMP\(3\)/);
+    expect(SHIPMENTS_MIGRATION).not.toMatch(/TIMESTAMP\(3\)/);
   });
 
   it('stores no raw Idempotency-Key in a domain table (S-09)', () => {
-    for (const model of ['StockMovement', 'StockReservation']) {
+    for (const model of ['StockMovement', 'StockReservation', 'Shipment', 'TrackingEvent']) {
       const body = models(SCHEMA).get(model) ?? '';
       expect([model, /idempotencyKey|idempotency_key/.test(body)]).toEqual([model, false]);
       expect(body).toMatch(/commandKeyHash/);

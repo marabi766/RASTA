@@ -141,8 +141,9 @@ export async function expectReconciled(
 }
 
 /**
- * Removes everything the given organizations wrote. Movements, stock items, reservations and
- * warehouses are never deleted by the service (their guards), so the suite's own removal goes
+ * Removes everything the given organizations wrote. Shipments, their legs and tracking, movements,
+ * stock items, reservations and warehouses are never deleted by the service (their guards), so the
+ * suite's own removal goes
  * through the **owner** connection and lifts each guard for one transaction — never through the
  * runtime client under test, or the suites would teach the code to do it.
  */
@@ -152,6 +153,9 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
   try {
     await owner.$transaction(async (tx) => {
       for (const [table, triggers] of [
+        ['tracking_event', ['tg_tracking_event_guard']],
+        ['shipment_leg', ['tg_shipment_leg_guard']],
+        ['shipment', ['tg_shipment_guard']],
         ['stock_movement', ['tg_stock_movement_append_only']],
         ['stock_reservation', ['tg_stock_reservation_guard']],
         ['stock_item', ['tg_stock_item_guard']],

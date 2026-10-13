@@ -376,8 +376,15 @@ marketplace (گام ۵) پیاده شده‌اند؛ موتور محاسبه (گ
 > `STOCK_RECEIVED` · `STOCK_RESERVED` · `STOCK_RELEASED` · `STOCK_ISSUED` به‌علاوهٔ `WAREHOUSE_CREATED` و `STOCK_ADJUSTED`
 > (`docs/events/README.md`). مسیرها: `POST/GET /v1/warehouses` · `GET /v1/stock` · `GET /v1/stock/{id}` ·
 > `GET /v1/stock/movements` · `POST /v1/stock/receipts` · `POST /v1/stock/adjustments` · `POST/GET /v1/stock/reservations` ·
-> `POST /v1/stock/reservations/{id}/release|issue` (`docs/api/inventory-service.openapi.json`). **هنوز نه:** محموله و
-> رهگیری (PR دوم)، `LOW_STOCK_DETECTED` (Q-106)، `FindNearestWarehouse`، و هیچ Consumerی. پرسش‌های باز Q-102 تا Q-109.
+> `POST /v1/stock/reservations/{id}/release|issue` (`docs/api/inventory-service.openapi.json`). پرسش‌های باز Q-102 تا Q-109.
+>
+> **وضعیت پیاده‌سازی (COM-006 PR دوم، 2026-10-14، روی PR نخست).** ساخته شد: `shipment` · `shipment_leg` · `tracking_event` و فرمان‌های
+> `CreateShipment` · `DispatchShipment` · `DeliverShipment` (همان `ConfirmDelivery`؛ فقط نقش عملیاتی مالک انبار مبدأ)، پرس‌وجوهای `GetShipment` ·
+> `TrackShipment`، و رویدادهای `SHIPMENT_CREATED` · `SHIPMENT_DISPATCHED` · `SHIPMENT_DELIVERED` (جریان STRICT `shipmentId`؛ قرارداد در
+> `packages/contracts`). مسیرها: `POST/GET /v1/shipments` · `GET /v1/shipments/{id}` · `GET /v1/shipments/{id}/tracking` ·
+> `POST /v1/shipments/{id}/dispatch|deliver`. رهگیری را گیرنده **یا** مالک انبار مبدأ می‌خواند و سازمان سوم `404` می‌گیرد (ADR-056 § ۵)؛ گیرنده
+> فقط می‌خواند. محموله موجودی را جابه‌جا نمی‌کند. پرسش‌های باز Q-113 تا Q-115. **هنوز نه:** `RecordTrackingEvent` (نقطهٔ میانی، Q-114)،
+> `LOW_STOCK_DETECTED` (Q-106)، `FindNearestWarehouse`، پورت‌های یکپارچگی، و هیچ Consumerی.
 
 ---
 

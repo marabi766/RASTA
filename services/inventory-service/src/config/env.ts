@@ -53,7 +53,8 @@ function roleList(name: string) {
  *
  * ## Every domain setting here is a provisional answer to an open question
  *
- * The defaults are the temporary decisions recorded in `docs/24` (Q-102 to Q-109), chosen to be
+ * The defaults are the temporary decisions recorded in `docs/24` (Q-102 to Q-109, Q-113 to
+ * Q-115), chosen to be
  * the narrowest behaviour that still works, and each can be changed without a code change
  * (ADR-023, AGENTS.md § 9):
  *
@@ -65,6 +66,11 @@ function roleList(name: string) {
  *                                       (an operator reads too). Default `ORGANIZATION_ADMIN`.
  *                                       AUDITOR and SYSTEM_ADMIN are refused by both lists and by
  *                                       the code; a service token reaches nothing in PR 1.
+ *   INVENTORY_CONSIGNEE_READER_ROLES    Q-113. Which roles of a shipment's **consignee**
+ *                                       organization read that shipment and its tracking
+ *                                       (ADR-056 § 5). Default `ORGANIZATION_ADMIN`. A consignee
+ *                                       only reads: every shipment command is the origin
+ *                                       warehouse owner's (operators above).
  *   INVENTORY_RESERVATION_MAX_TTL_SECONDS
  *                                       Q-102. A reservation has no default lifetime: it lives
  *                                       until released or issued unless the caller sets
@@ -94,8 +100,9 @@ function roleList(name: string) {
  *                                       retry may take it over (docs/06 § 6.8).
  *
  * No unit of measure, no low-stock threshold (Q-106), no partial issue (Q-107), no warehouse
- * lifecycle (Q-108) and no control on a negative adjustment beyond the operator role (Q-109) is
- * configured here: none is decided, and none is invented.
+ * lifecycle (Q-108), no control on a negative adjustment beyond the operator role (Q-109), no
+ * shipment state beyond CREATED → DISPATCHED → DELIVERED (Q-114) and no link from a shipment to
+ * stock (Q-115) is configured here: none is decided, and none is invented.
  */
 export const inventoryEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
@@ -113,6 +120,11 @@ export const inventoryEnvSchema = baseEnvSchema
       .string()
       .default('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_READER_ROLES')),
+
+    INVENTORY_CONSIGNEE_READER_ROLES: z
+      .string()
+      .default('ORGANIZATION_ADMIN')
+      .pipe(roleList('INVENTORY_CONSIGNEE_READER_ROLES')),
 
     INVENTORY_RESERVATION_MAX_TTL_SECONDS: z.coerce
       .number()

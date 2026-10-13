@@ -28,6 +28,13 @@ const GUARDS = [
   ['stock_reservation', 'tg_stock_reservation_guard'],
   ['stock_reservation', 'tg_stock_reservation_no_truncate'],
   ['stock_reservation', 'tg_stock_reservation_ledger_check'],
+  ['shipment', 'tg_shipment_guard'],
+  ['shipment', 'tg_shipment_no_truncate'],
+  ['shipment', 'tg_shipment_history_check'],
+  ['shipment_leg', 'tg_shipment_leg_guard'],
+  ['shipment_leg', 'tg_shipment_leg_no_truncate'],
+  ['tracking_event', 'tg_tracking_event_guard'],
+  ['tracking_event', 'tg_tracking_event_no_truncate'],
 ] as const;
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
@@ -92,6 +99,8 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
     await refused('ALTER TABLE "stock_movement" OWNER TO rasta_inventory');
     await refused('DROP TABLE "stock_movement"');
     await refused('TRUNCATE "stock_reservation"');
+    await refused('TRUNCATE "tracking_event"');
+    await refused('ALTER TABLE "shipment" DROP CONSTRAINT IF EXISTS "ck_shipment_status"');
   });
 
   it('may not create an object it would own, or rename the database', async () => {
@@ -133,9 +142,12 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'shipment',
+      'shipment_leg',
       'stock_item',
       'stock_movement',
       'stock_reservation',
+      'tracking_event',
       'warehouse',
     ]);
     for (const { table, privileges } of rows) {

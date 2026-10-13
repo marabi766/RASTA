@@ -164,6 +164,20 @@ export {
   replayExecutedPayloadSchemaV1,
 } from './events/ops-replay';
 export type { ReplayPosition, ReplayExecutedPayloadV1 } from './events/ops-replay';
+export {
+  INVENTORY_SHIPMENT_EVENTS,
+  INVENTORY_SHIPMENT_EVENT_SCHEMAS,
+  SHIPMENT_AGGREGATE,
+  shipmentCreatedPayloadSchema,
+  shipmentDispatchedPayloadSchema,
+  shipmentDeliveredPayloadSchema,
+} from './events/inventory-shipments';
+export type {
+  InventoryShipmentEventName,
+  ShipmentCreatedPayload,
+  ShipmentDispatchedPayload,
+  ShipmentDeliveredPayload,
+} from './events/inventory-shipments';
 export type {
   AuditOutcome,
   AuditTrailActor,
