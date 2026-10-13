@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 
 import { Alert, AppShell, Button, Identifier, PageHeader, Section, Sidebar, TopBar } from '@/ui';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { currentSession } from '@/server/current-session';
 import { mintSubmissionId } from '@/server/submission';
 
@@ -47,7 +47,7 @@ export default async function UsagePage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/usage" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/usage" />}
     >
       <PageHeader
         title="ثبت کارکرد"
