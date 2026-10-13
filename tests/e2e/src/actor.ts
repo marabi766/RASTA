@@ -1,8 +1,17 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { E2eConfig } from './env';
-import { failureMessage, send, type Fetch, type HttpMethod } from './http.ts';
+import {
+  beforeDeadline,
+  DEADLINE_PASSED,
+  failureMessage,
+  REQUEST_TIMEOUT_MS,
+  send,
+  type Fetch,
+  type HttpMethod,
+} from './http.ts';
 import type { E2eUser } from './keycloak';
+import { CHECK_STILL_RUNNING } from './poll.ts';
 
 /**
  * The authenticated client every scenario drives the platform through, and the poll that reads
@@ -67,23 +76,36 @@ export const POLL_INTERVAL_MS = 1_000;
  * left, and every request carries one that is valid when it is sent.
  *
  * The token itself is never part of an error message.
+ *
+ * A renewal is bounded like any request (Codex r6 on #241): the grants go through `send`, and
+ * whatever grant this is given, a renewal that has not answered within `grantTimeoutMs` fails
+ * rather than holding every request that waits on it.
  */
 export class SessionToken {
   private current: { value: string; renewAt: number };
   private renewing: Promise<string> | undefined;
   /** Issues a new token for the same account: the grant the first one came from. */
   private readonly grant: () => Promise<string>;
+  private readonly grantTimeoutMs: number;
 
-  constructor(initial: string, grant: () => Promise<string>) {
+  constructor(
+    initial: string,
+    grant: () => Promise<string>,
+    grantTimeoutMs: number = REQUEST_TIMEOUT_MS,
+  ) {
     this.grant = grant;
+    this.grantTimeoutMs = grantTimeoutMs;
     this.current = SessionToken.read(initial);
   }
 
   async value(): Promise<string> {
     if (Date.now() < this.current.renewAt) return this.current.value;
     // One renewal at a time, however many requests are waiting on it.
-    this.renewing ??= this.grant()
+    this.renewing ??= beforeDeadline(this.grant(), Date.now() + this.grantTimeoutMs)
       .then((token) => {
+        if (token === DEADLINE_PASSED) {
+          throw new Error(`The token renewal did not answer within ${this.grantTimeoutMs}ms`);
+        }
         this.current = SessionToken.read(token);
         return token;
       })
@@ -143,6 +165,10 @@ export function failOnUnauthenticated<T>(check: () => Promise<T>): Promise<T> {
  * actor's token is renewed before it expires, so it fails the wait at once with the platform's
  * own answer instead of surfacing later as a timeout. The timeout names the last failure only
  * through `failureMessage` — a transport failure's fixed text, never a request's headers.
+ *
+ * The deadline holds around each check too (Codex r6 on #241): a check that does not answer —
+ * a call whose token renewal stalled — is overtaken at the deadline, and the poll fails with the
+ * timeout it declared.
  */
 export async function until<T>(
   description: string,
@@ -152,18 +178,27 @@ export async function until<T>(
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last = '';
+  let overtaken = false;
   while (Date.now() < deadline) {
     try {
-      const value = await failOnUnauthenticated(check);
+      const value = await beforeDeadline(failOnUnauthenticated(check), deadline);
+      if (value === DEADLINE_PASSED) {
+        overtaken = true;
+        break;
+      }
       if (value !== undefined) return value;
     } catch (error) {
       if (error instanceof UnauthenticatedError) throw error;
       last = failureMessage(error);
     }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(intervalMs, Math.max(0, deadline - Date.now()))),
+    );
   }
   throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for ${description}${last ? `; ${last}` : ''}`,
+    `Timed out after ${timeoutMs}ms waiting for ${description}` +
+      (last ? `; ${last}` : '') +
+      (overtaken ? `; ${CHECK_STILL_RUNNING}` : ''),
   );
 }
 

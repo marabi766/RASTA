@@ -146,7 +146,53 @@ describe('isLoopbackHost', () => {
   it('judges the host a URL actually resolves to, not the text before an @', () => {
     assert.deepEqual(
       e2eTargetRefusals({ ...LOCAL, gatewayUrl: 'http://localhost@gateway.prod.ir' }, ALLOWED_ENV),
-      ['E2E_GATEWAY_URL is not a loopback address'],
+      [
+        'E2E_GATEWAY_URL carries credentials in its URL',
+        'E2E_GATEWAY_URL is not a loopback address',
+      ],
+    );
+  });
+});
+
+describe('a URL with credentials in it (Codex r6 on #241)', () => {
+  const PASSWORD = 'pw-CANARY-91c2';
+
+  for (const [field, setting] of [
+    ['keycloakUrl', 'KEYCLOAK_URL'],
+    ['gatewayUrl', 'E2E_GATEWAY_URL'],
+    ['contractUrl', 'E2E_CONTRACT_URL'],
+  ] as const) {
+    for (const userinfo of [`kc-user:${PASSWORD}@`, `kc-user@`, `:${PASSWORD}@`]) {
+      it(`refuses ${setting} with "${userinfo.replace(PASSWORD, '<password>')}" on loopback, quoting none of it`, () => {
+        const endpoints = { ...LOCAL, [field]: `http://${userinfo}127.0.0.1:8080` };
+
+        assert.deepEqual(e2eTargetRefusals(endpoints, ALLOWED_ENV), [
+          `${setting} carries credentials in its URL`,
+        ]);
+        assert.throws(
+          () => assertDisposableE2eTarget(endpoints, ALLOWED_ENV),
+          (error: Error) =>
+            error instanceof E2eTargetRefusedError &&
+            !error.message.includes(PASSWORD) &&
+            !error.message.includes('kc-user') &&
+            !error.message.includes('127.0.0.1:8080'),
+        );
+      });
+    }
+  }
+
+  it('refuses a Kafka broker with credentials in it, quoting none of it', () => {
+    const endpoints = {
+      ...LOCAL,
+      kafkaBrokers: ['localhost:9092', `observer:${PASSWORD}@localhost:9093`],
+    };
+
+    assert.deepEqual(e2eTargetRefusals(endpoints, ALLOWED_ENV), [
+      'KAFKA_BROKERS names a broker with credentials in it',
+    ]);
+    assert.throws(
+      () => assertDisposableE2eTarget(endpoints, ALLOWED_ENV),
+      (error: Error) => !error.message.includes(PASSWORD),
     );
   });
 });

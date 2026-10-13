@@ -13,6 +13,16 @@
  * - **A transport failure is replaced, not wrapped.** `TransportError` is built from fixed text,
  *   the method, the path, the status class and a cause code. It keeps no `cause`, because a
  *   reporter prints the cause chain too.
+ * - **An answer that is not the one asked for is described, not quoted** (Codex r6 on #241).
+ *   `AnswerError` names the call and the status class, and at most a code that looks like an
+ *   identifier: never a body excerpt, never a parser's message (`JSON.parse` quotes its input,
+ *   and a token response's input is a credential).
+ * - **Every request has a deadline it keeps** (Codex r6 on #241). The timeout aborts the
+ *   request, and `send` also stops waiting at it, so a transport that ignores the abort cannot
+ *   hold a caller — a token grant included — past it.
+ *
+ * Keycloak's calls go through it too (`keycloak-transport.ts`): they carry a password, an admin
+ * token or a bearer token, and a misconfigured `KEYCLOAK_URL` would otherwise reach a report.
  *
  * No extensionless imports, so `node --test` loads it (`actor.test.ts`).
  */
@@ -22,6 +32,8 @@ export const REQUEST_TIMEOUT_MS = 30_000;
 
 /** A cause code is an identifier (`ECONNREFUSED`, `UND_ERR_SOCKET`), never free text. */
 const CAUSE_CODE = /^[A-Z][A-Z0-9_]{1,39}$/;
+/** An error code in an answer (`invalid_grant`, `unknown_error`): an identifier, nothing more. */
+const ANSWER_CODE = /^[A-Za-z][A-Za-z0-9_]{1,39}$/;
 /** How far down `cause` / `AggregateError.errors` a code is looked for. */
 const CAUSE_DEPTH = 4;
 
@@ -35,6 +47,8 @@ export interface HttpRequest {
   headers: Record<string, string>;
   /** Serialised as JSON; `undefined` sends no body. */
   body?: unknown;
+  /** Sent form-encoded instead (a token grant); takes precedence over `body`. */
+  form?: Record<string, string>;
 }
 
 export interface HttpAnswer {
@@ -60,16 +74,75 @@ export class TransportError extends Error {
   ) {
     super(
       `Transport failure: ${request.method} ${routeOf(request.path)} ` +
-        `(status ${status === undefined ? 'none' : `${Math.floor(status / 100)}xx`}, cause ${causeCode})`,
+        `(status ${status === undefined ? 'none' : statusClass(status)}, cause ${causeCode})`,
     );
     this.name = 'TransportError';
     this.causeCode = causeCode;
   }
 }
 
+/**
+ * An answer that was not the one asked for: refused, or a body that is not what it should be.
+ * The message is `what` (fixed text the caller wrote), the call, the status class and a fixed
+ * detail — `error <code>` with a code read by `answerCodeOf`, or a phrase such as
+ * `body not JSON`. Nothing the answer said is copied into it but that code.
+ */
+export class AnswerError extends Error {
+  readonly statusClass: string;
+
+  constructor(
+    what: string,
+    request: Pick<HttpRequest, 'method' | 'path'>,
+    status: number,
+    detail?: string,
+  ) {
+    super(
+      `${what}: ${request.method} ${routeOf(request.path)} answered ${statusClass(status)}` +
+        (detail ? ` (${detail})` : ''),
+    );
+    this.name = 'AnswerError';
+    this.statusClass = statusClass(status);
+  }
+}
+
 /** The path without its query string: the route is the evidence, the parameters are not. */
 function routeOf(path: string): string {
   return path.split('?')[0] ?? path;
+}
+
+function statusClass(status: number): string {
+  return `${Math.floor(status / 100)}xx`;
+}
+
+/**
+ * `error <code>` from an answer's JSON `error` field (OAuth's `invalid_grant`), when it is an
+ * identifier; otherwise nothing. The body is parsed, never quoted.
+ */
+export function answerCodeOf(text: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const code =
+    typeof parsed === 'object' && parsed !== null
+      ? (parsed as { error?: unknown }).error
+      : undefined;
+  return typeof code === 'string' && ANSWER_CODE.test(code) ? `error ${code}` : undefined;
+}
+
+/** An answer's body as JSON, or an `AnswerError` that says only that it was not. */
+export function jsonOf<T>(
+  what: string,
+  request: Pick<HttpRequest, 'method' | 'path'>,
+  answer: HttpAnswer,
+): T {
+  try {
+    return JSON.parse(answer.text) as T;
+  } catch {
+    throw new AnswerError(what, request, answer.status, 'body not JSON');
+  }
 }
 
 /**
@@ -94,31 +167,75 @@ export function causeCodeOf(error: unknown, depth = 0): string {
   return 'UNKNOWN';
 }
 
+/** What `beforeDeadline` resolves to when the deadline came first. */
+export const DEADLINE_PASSED: unique symbol = Symbol('deadline passed');
+
+/**
+ * `work`, or `DEADLINE_PASSED` once `deadline` (epoch ms) is reached, whichever is first. The
+ * work is not cancelled — the caller stops waiting for it — and a rejection it settles with
+ * later is swallowed: nobody is listening any more.
+ */
+export async function beforeDeadline<T>(
+  work: Promise<T>,
+  deadline: number,
+): Promise<T | typeof DEADLINE_PASSED> {
+  work.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const passed = new Promise<typeof DEADLINE_PASSED>((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, deadline - Date.now()), DEADLINE_PASSED);
+  });
+  try {
+    return await Promise.race([work, passed]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Sends one request. A non-2xx is an answer like any other — these tests assert on refusals as
- * much as on successes — and only a missing answer throws, as a `TransportError`.
+ * much as on successes — and only a missing answer throws, as a `TransportError`: refused,
+ * reset, or not answered (headers and body) within `timeoutMs` (cause `TIMEOUT`).
  */
-export async function send(request: HttpRequest, fetchImpl: Fetch = fetch): Promise<HttpAnswer> {
-  let response: Response;
+export async function send(
+  request: HttpRequest,
+  fetchImpl: Fetch = fetch,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<HttpAnswer> {
+  const deadline = Date.now() + timeoutMs;
+  const body =
+    request.form !== undefined
+      ? new URLSearchParams(request.form).toString()
+      : request.body !== undefined
+        ? JSON.stringify(request.body)
+        : undefined;
+  let response: Response | typeof DEADLINE_PASSED;
   try {
-    response = await fetchImpl(`${request.baseUrl}${request.path}`, {
-      method: request.method,
-      headers: request.headers,
-      ...(request.body !== undefined ? { body: JSON.stringify(request.body) } : {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    response = await beforeDeadline(
+      fetchImpl(`${request.baseUrl}${request.path}`, {
+        method: request.method,
+        headers: {
+          ...request.headers,
+          ...(request.form !== undefined
+            ? { 'content-type': 'application/x-www-form-urlencoded' }
+            : {}),
+        },
+        ...(body !== undefined ? { body } : {}),
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
+      deadline,
+    );
   } catch (error) {
     throw new TransportError(request, undefined, causeCodeOf(error));
   }
+  if (response === DEADLINE_PASSED) throw new TransportError(request, undefined, 'TIMEOUT');
+  let text: string | typeof DEADLINE_PASSED;
   try {
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers),
-      text: await response.text(),
-    };
+    text = await beforeDeadline(response.text(), deadline);
   } catch (error) {
     throw new TransportError(request, response.status, causeCodeOf(error));
   }
+  if (text === DEADLINE_PASSED) throw new TransportError(request, response.status, 'TIMEOUT');
+  return { status: response.status, headers: Object.fromEntries(response.headers), text };
 }
 
 const REDACTED = '[redacted]';
@@ -133,12 +250,12 @@ export function redactCredentials(text: string): string {
 }
 
 /**
- * What a poll may say about the last failure it saw: a `TransportError`'s fixed message as it
- * is, anything else as its name and message with credentials redacted. Never the stack, the
- * cause chain or the object's own fields.
+ * What a poll may say about the last failure it saw: a `TransportError`'s or `AnswerError`'s
+ * fixed message as it is, anything else as its name and message with credentials redacted.
+ * Never the stack, the cause chain or the object's own fields.
  */
 export function failureMessage(error: unknown): string {
-  if (error instanceof TransportError) return error.message;
+  if (error instanceof TransportError || error instanceof AnswerError) return error.message;
   if (error instanceof Error) return redactCredentials(`${error.name}: ${error.message}`);
   return redactCredentials(String(error));
 }

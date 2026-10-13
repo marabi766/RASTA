@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { inspect } from 'node:util';
 import { Actor, SessionToken, until } from './actor.ts';
 import { failureMessage, TransportError, type Fetch } from './http.ts';
+import { CHECK_STILL_RUNNING, waitFor } from './poll.ts';
 
 /**
  * No credential leaves through a failure (Codex r5 on #241): a request that gets no answer
@@ -196,6 +197,98 @@ describe('until()', () => {
     );
 
     assert.match((error as Error).message, /Bearer \[redacted\] and \[redacted\]$/);
+    assertNoCredential(everything(error));
+  });
+});
+
+describe('a stalled token grant (Codex r6 on #241)', () => {
+  /** A token that is already due for renewal, so the next call asks the grant. */
+  function expiredToken(): string {
+    const segment = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    return `${segment({ alg: 'RS256' })}.${segment({ exp: now - 10, iat: now - 910 })}.${CANARY}`;
+  }
+  const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
+  const elapsedSince = (started: number) => Date.now() - started;
+
+  it('until() fails at its declared timeout, not when the grant gives up', async () => {
+    const sent: string[] = [];
+    const client = new Actor(
+      'synthetic.user',
+      // The grant's own bound is well after the poll's: only the poll's deadline can end this.
+      new SessionToken(expiredToken(), never, 1_500),
+      { gatewayUrl: 'http://127.0.0.1:3000' },
+      (url) => {
+        sent.push(url);
+        return Promise.resolve(new Response('{}'));
+      },
+    );
+    const started = Date.now();
+    const error = await until(
+      'the contract to be signed',
+      async () => {
+        await client.get('/v1/contracts/CTR-1');
+        return undefined;
+      },
+      100,
+      10,
+    ).then(
+      () => assert.fail('a poll whose every call stalls must time out'),
+      (thrown: unknown) => thrown,
+    );
+
+    assert.ok(elapsedSince(started) < 1_000, `took ${elapsedSince(started)}ms`);
+    assert.equal(sent.length, 0, 'no request is sent while the token is being renewed');
+    assert.equal(
+      (error as Error).message,
+      `Timed out after 100ms waiting for the contract to be signed; ${CHECK_STILL_RUNNING}`,
+    );
+    assertNoCredential(everything(error));
+  });
+
+  it('a renewal is bounded by itself too, with fixed text', async () => {
+    const token = new SessionToken(expiredToken(), never, 30);
+    const started = Date.now();
+    const error = await token.value().then(
+      () => assert.fail('a renewal that never answers must fail'),
+      (thrown: unknown) => thrown,
+    );
+
+    assert.ok(elapsedSince(started) < 1_000, `took ${elapsedSince(started)}ms`);
+    assert.equal((error as Error).message, 'The token renewal did not answer within 30ms');
+    assertNoCredential(everything(error));
+  });
+
+  it('events.waitFor() fails at its declared timeout over a check that never answers', async () => {
+    const started = Date.now();
+    const error = await waitFor('the tap to join', never, 100, undefined, 10).then(
+      () => assert.fail('must time out'),
+      (thrown: unknown) => thrown,
+    );
+
+    assert.ok(elapsedSince(started) < 1_000, `took ${elapsedSince(started)}ms`);
+    assert.equal(
+      (error as Error).message,
+      `Timed out after 100ms waiting for the tap to join; ${CHECK_STILL_RUNNING}`,
+    );
+  });
+
+  it('events.waitFor() still reports the last failure, sanitized', async () => {
+    const error = await waitFor(
+      'anything',
+      () => Promise.reject(new Error(`authorization: Bearer ${TOKEN}`)),
+      30,
+      undefined,
+      5,
+    ).then(
+      () => assert.fail('must time out'),
+      (thrown: unknown) => thrown,
+    );
+
+    assert.match(
+      (error as Error).message,
+      /; last error: Error: authorization: Bearer \[redacted\]$/,
+    );
     assertNoCredential(everything(error));
   });
 });

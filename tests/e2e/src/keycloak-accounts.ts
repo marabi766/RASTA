@@ -1,4 +1,14 @@
-import { e2eConfig, type E2eConfig } from './env';
+import { e2eConfig, type E2eConfig } from './env.ts';
+import { jsonOf } from './http.ts';
+import {
+  adminRead,
+  adminRequest,
+  claimsOf,
+  keycloakRequest,
+  passwordGrant,
+  type KeycloakRequest,
+  type KeycloakTransport,
+} from './keycloak-transport.ts';
 
 /**
  * Keycloak access for accounts the platform provisions itself (ADR-060).
@@ -11,7 +21,7 @@ import { e2eConfig, type E2eConfig } from './env';
  *
  * Separate from `keycloak.ts` on purpose: that file reconciles the seed realm,
  * and nothing here changes realm configuration — only one throwaway account's
- * credential.
+ * credential. Every call goes through `keycloak-transport.ts`, as that file's do.
  */
 
 /** A password for accounts these tests create. Never a real credential; never logged. */
@@ -24,46 +34,6 @@ export interface KeycloakUser {
   requiredActions?: string[];
   attributes?: Record<string, string[]>;
   [field: string]: unknown;
-}
-
-let adminToken: { value: string; expiresAt: number } | undefined;
-
-async function adminAccessToken(config: E2eConfig): Promise<string> {
-  if (adminToken && adminToken.expiresAt > Date.now() + 10_000) return adminToken.value;
-  const response = await fetch(
-    `${config.keycloakUrl}/realms/master/protocol/openid-connect/token`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: 'admin-cli',
-        username: config.keycloakAdmin.username,
-        password: config.keycloakAdmin.password,
-      }),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`Keycloak refused an admin token: ${response.status}`);
-  }
-  const body = (await response.json()) as { access_token: string; expires_in: number };
-  adminToken = { value: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
-  return adminToken.value;
-}
-
-async function admin(config: E2eConfig, path: string, init: RequestInit = {}): Promise<Response> {
-  const response = await fetch(`${config.keycloakUrl}/admin/realms/${config.realm}${path}`, {
-    ...init,
-    headers: {
-      ...init.headers,
-      authorization: `Bearer ${await adminAccessToken(config)}`,
-      'content-type': 'application/json',
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`Keycloak admin ${init.method ?? 'GET'} ${path} answered ${response.status}`);
-  }
-  return response;
 }
 
 /**
@@ -83,13 +53,10 @@ export async function enableSignIn(
 ): Promise<void> {
   const user = await findAccount(username, config);
 
-  await admin(config, `/users/${user.id}/reset-password`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      type: 'password',
-      value: PROVISIONED_ACCOUNT_PASSWORD,
-      temporary: false,
-    }),
+  await adminRequest(config, 'PUT', `/users/${user.id}/reset-password`, {
+    type: 'password',
+    value: PROVISIONED_ACCOUNT_PASSWORD,
+    temporary: false,
   });
 
   await updateAccount(username, { requiredActions: [] }, config);
@@ -101,7 +68,7 @@ export async function readAccount(
   config: E2eConfig = e2eConfig(),
 ): Promise<KeycloakUser> {
   const { id } = await findAccount(username, config);
-  return (await (await admin(config, `/users/${id}`)).json()) as KeycloakUser;
+  return adminRead<KeycloakUser>(config, `/users/${id}`);
 }
 
 /**
@@ -114,40 +81,40 @@ export async function updateAccount(
   config: E2eConfig = e2eConfig(),
 ): Promise<void> {
   const { id } = await findAccount(username, config);
-  await admin(config, `/users/${id}`, { method: 'PUT', body: JSON.stringify(fields) });
+  await adminRequest(config, 'PUT', `/users/${id}`, fields);
 }
 
 async function findAccount(username: string, config: E2eConfig): Promise<KeycloakUser> {
-  const [user] = (await (
-    await admin(config, `/users?username=${encodeURIComponent(username)}&exact=true`)
-  ).json()) as KeycloakUser[];
+  const [user] = await adminRead<KeycloakUser[]>(
+    config,
+    `/users?username=${encodeURIComponent(username)}&exact=true`,
+  );
   if (!user) throw new Error(`No Keycloak account for ${username}; provisioning did not reach it`);
   return user;
 }
 
-/** A fresh access token for a provisioned account — never a cached one. */
+/**
+ * A fresh access token for a provisioned account — never a cached one. Through
+ * `keycloak-transport.ts`: bounded by the request timeout, and failing with fixed text.
+ */
 export async function freshToken(
   username: string,
   config: E2eConfig = e2eConfig(),
+  transport?: KeycloakTransport,
 ): Promise<string> {
-  const response = await fetch(
-    `${config.keycloakUrl}/realms/${config.realm}/protocol/openid-connect/token`,
+  const granted = await passwordGrant(
+    config,
     {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: config.clientId,
-        username,
-        password: PROVISIONED_ACCOUNT_PASSWORD,
-        scope: 'openid',
-      }),
+      realm: config.realm,
+      clientId: config.clientId,
+      username,
+      password: PROVISIONED_ACCOUNT_PASSWORD,
+      scope: 'openid',
     },
+    username,
+    transport,
   );
-  if (!response.ok) {
-    throw new Error(`Keycloak refused a token for ${username}: ${response.status}`);
-  }
-  return ((await response.json()) as { access_token: string }).access_token;
+  return granted.accessToken;
 }
 
 /** The claims ADR-060 builds authorization from. */
@@ -159,8 +126,7 @@ export interface MembershipClaims {
 }
 
 export function membershipClaims(token: string): MembershipClaims {
-  const segment = token.split('.')[1] ?? '';
-  const claims = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as MembershipClaims;
+  const claims = claimsOf(token) as MembershipClaims;
   return {
     rasta_uid: claims.rasta_uid,
     org_id: claims.org_id,
@@ -174,13 +140,20 @@ export async function readOwnAccount(
   token: string,
   config: E2eConfig = e2eConfig(),
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await fetch(
-    `${config.keycloakUrl}/realms/${config.realm}/account/?userProfileMetadata=true`,
-    {
-      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-    },
-  );
-  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  const request: KeycloakRequest = {
+    method: 'GET',
+    path: `/realms/${config.realm}/account/?userProfileMetadata=true`,
+    headers: { authorization: `Bearer ${token}` },
+  };
+  const answer = await keycloakRequest(config, request);
+  return {
+    status: answer.status,
+    body: jsonOf<Record<string, unknown>>(
+      'The account console answered unreadably',
+      request,
+      answer,
+    ),
+  };
 }
 
 /** Tries to write attributes through the account console's own REST API, as the user. */
@@ -189,15 +162,17 @@ export async function writeOwnAccount(
   representation: Record<string, unknown>,
   config: E2eConfig = e2eConfig(),
 ): Promise<{ status: number; body: unknown }> {
-  const response = await fetch(`${config.keycloakUrl}/realms/${config.realm}/account/`, {
+  const request: KeycloakRequest = {
     method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/json',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(representation),
-  });
-  const text = await response.text();
-  return { status: response.status, body: text ? (JSON.parse(text) as unknown) : null };
+    path: `/realms/${config.realm}/account/`,
+    headers: { authorization: `Bearer ${token}` },
+    body: representation,
+  };
+  const answer = await keycloakRequest(config, request);
+  return {
+    status: answer.status,
+    body: answer.text
+      ? jsonOf<unknown>('The account console answered unreadably', request, answer)
+      : null,
+  };
 }

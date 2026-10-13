@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { EVENT_HEADERS } from '@rasta/contracts';
 import { e2eConfig, type E2eConfig } from './env';
-import { failureMessage } from './http';
 import { OBSERVER_PRINCIPAL, observerKafkaSettings } from './kafka-observer';
+import { waitFor } from './poll';
 
 /**
  * Reads what economic-service actually published.
@@ -20,6 +20,7 @@ import { OBSERVER_PRINCIPAL, observerKafkaSettings } from './kafka-observer';
  */
 
 export { OBSERVER_PRINCIPAL } from './kafka-observer';
+export { waitFor } from './poll';
 
 /**
  * How the harness reaches the authenticated broker (RUN-006, ADR-061 § 3): as
@@ -171,6 +172,15 @@ export class EconomicEventTap {
   }
 
   /**
+   * Every event seen so far that `select` keeps, correlated or not: what a check over a whole
+   * stream reads — a draft the award created, a flag a sweeper raised — and not only the events
+   * a call of the scenario's own carried a correlation id into.
+   */
+  observed(select: (event: ObservedEvent) => boolean): ObservedEvent[] {
+    return this.received.filter(select);
+  }
+
+  /**
    * Waits until at least `expected` events carrying `correlationId` have
    * arrived, then returns them.
    */
@@ -199,35 +209,4 @@ export class EconomicEventTap {
   async stop(): Promise<void> {
     await this.consumer.disconnect();
   }
-}
-
-/**
- * Polls `check` until it is true. No fixed sleeps anywhere in this suite —
- * docs/14 § 14.7 forbids them, and a sleep long enough to be reliable is
- * always long enough to be slow.
- */
-export async function waitFor(
-  description: string,
-  check: () => boolean | Promise<boolean>,
-  timeoutMs = 30_000,
-  detail?: () => string,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-
-  while (Date.now() < deadline) {
-    try {
-      if (await check()) return;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-
-  throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for ${description}` +
-      (detail ? `; ${detail()}` : '') +
-      // A check may call through an `Actor`: only the sanitized message, never the error itself.
-      (lastError ? `; last error: ${failureMessage(lastError)}` : ''),
-  );
 }

@@ -52,6 +52,19 @@ Screenshot/Video هم (صفحه‌ای نیست). گزارشی که CI در شک
 و stdout/stderr تست‌ها — هیچ‌کدام توکن ندارند؛ پیام 401 در Poll بدنهٔ پاسخ پلتفرم را
 دارد، نه درخواست را. آزمون پس‌رفت: `src/actor.test.ts`.
 
+**Keycloak هم از همان Transport (Codex r6 روی #241).** همهٔ فراخوان‌های Keycloak —
+Grant توکن کاربران و تمدید آن، توکن Admin، Admin API، Account Console و بررسی
+آمادگی در `global-setup.ts` — از `src/keycloak-transport.ts` روی `send()` می‌گذرند.
+پاسخ رد یا ناخوانا `AnswerError` می‌شود: متن ثابت + Method + Path بدون Query + کلاس
+Status + حداکثر یک کد شناسه‌مانند (مثل `error invalid_grant`)؛ هرگز بدنهٔ پاسخ و هرگز
+پیام `JSON.parse` (که ورودی‌اش، یعنی توکن، را نقل می‌کند). URLی که Userinfo دارد
+(`http://user:pass@host`) همان ابتدا در `src/target-guard.ts` رد می‌شود، بی‌آنکه
+مقدارش تکرار شود. هر درخواست مهلت خودش را نگه می‌دارد (۳۰ ثانیه، حتی اگر Transport
+به Abort اعتنا نکند)، تمدید `SessionToken` جداگانه محدود است، و `until()` و
+`waitFor()` مهلت اعلام‌شده را دور هر Check هم اجرا می‌کنند: Checkی که پاسخ نمی‌دهد در
+همان مهلت قطع می‌شود. آزمون‌ها: `src/keycloak-transport.test.ts`،
+`src/actor.test.ts`، `src/target-guard.test.ts`.
+
 **آماده برای Browser:** وقتی `apps/web` ساخته شد، یک Project دوم در
 `playwright.config.ts` اضافه می‌شود (نمونه‌اش همان‌جا کامنت شده) و
 `pnpm exec playwright install chromium` در CI. هیچ‌چیز در `src/` فرض نمی‌کند UI

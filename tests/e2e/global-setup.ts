@@ -2,6 +2,7 @@ import { request } from '@playwright/test';
 import { Kafka, logLevel } from 'kafkajs';
 import { e2eConfig } from './src/env';
 import { accessToken, ensureTenantBUser, E2E_USERS, verifyDisposableRealm } from './src/keycloak';
+import { keycloakRequest } from './src/keycloak-transport';
 import { observerClient, waitFor } from './src/events';
 import { assertDisposableE2eTarget } from './src/target-guard';
 
@@ -187,14 +188,16 @@ export default async function globalSetup(): Promise<void> {
     );
 
     // ---- Keycloak -----------------------------------------------------------
+    // Through the transport every other Keycloak call uses (src/keycloak-transport.ts), not
+    // Playwright's: what a failure says about it is fixed text, like theirs.
     await waitFor(
       `Keycloak realm ${config.realm} to be reachable`,
       async () => {
-        const response = await context.get(
-          `${config.keycloakUrl}/realms/${config.realm}/.well-known/openid-configuration`,
-          { failOnStatusCode: false },
-        );
-        return response.status() === 200;
+        const answer = await keycloakRequest(config, {
+          method: 'GET',
+          path: `/realms/${config.realm}/.well-known/openid-configuration`,
+        });
+        return answer.status === 200;
       },
       180_000,
     );

@@ -22,7 +22,8 @@ import type { E2eConfig } from './env';
  *      override: a disposable stack elsewhere is reached through a tunnel or a
  *      port-forward to localhost, which is a deliberate act.
  *
- * Refusals name the variable, never its value (S-09).
+ * Refusals name the variable, never its value (S-09). A URL that carries userinfo
+ * (`http://user:password@host`) is refused too, whatever its host.
  *
  * Loopback proves where an endpoint is, not what it is: a tunnel, or a local
  * gateway with production upstreams, passes it (Codex review of #117,
@@ -99,18 +100,20 @@ export function isLoopbackHost(hostname: string): boolean {
   );
 }
 
-function urlHost(value: string): string | undefined {
+/** The URL's host, and whether it carries userinfo (`user:password@`); undefined if not http(s). */
+function urlTarget(value: string): { host: string; userinfo: boolean } | undefined {
   try {
     const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname : undefined;
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+    return { host: url.hostname, userinfo: url.username !== '' || url.password !== '' };
   } catch {
     return undefined;
   }
 }
 
 /** A broker is `host:port`; an IPv6 literal must be bracketed, as kafkajs expects. */
-function brokerHost(broker: string): string | undefined {
-  return urlHost(`http://${broker}`);
+function brokerTarget(broker: string): { host: string; userinfo: boolean } | undefined {
+  return urlTarget(`http://${broker}`);
 }
 
 type Endpoints = Pick<
@@ -158,23 +161,26 @@ export function e2eTargetRefusals(endpoints: Endpoints, env: NodeJS.ProcessEnv):
   }
 
   for (const [field, setting] of URL_SETTINGS) {
-    const host = urlHost(endpoints[field]);
-    if (host === undefined) {
+    const target = urlTarget(endpoints[field]);
+    if (target === undefined) {
       reasons.push(`${setting} is not an http(s) URL`);
-    } else if (!isLoopbackHost(host)) {
-      reasons.push(`${setting} is not a loopback address`);
+      continue;
     }
+    // Credentials do not go in a URL (Codex r6 on #241): `fetch` refuses to build a request
+    // from one with an error that quotes it whole, password included.
+    if (target.userinfo) reasons.push(`${setting} carries credentials in its URL`);
+    if (!isLoopbackHost(target.host)) reasons.push(`${setting} is not a loopback address`);
   }
 
   if (endpoints.kafkaBrokers.length === 0) {
     reasons.push('KAFKA_BROKERS names no broker');
   }
-  for (const broker of endpoints.kafkaBrokers) {
-    const host = brokerHost(broker);
-    if (host === undefined || !isLoopbackHost(host)) {
-      reasons.push('KAFKA_BROKERS names a broker that is not a loopback address');
-      break;
-    }
+  const brokers = endpoints.kafkaBrokers.map(brokerTarget);
+  if (brokers.some((target) => target?.userinfo)) {
+    reasons.push('KAFKA_BROKERS names a broker with credentials in it');
+  }
+  if (brokers.some((target) => target === undefined || !isLoopbackHost(target.host))) {
+    reasons.push('KAFKA_BROKERS names a broker that is not a loopback address');
   }
 
   return reasons;
