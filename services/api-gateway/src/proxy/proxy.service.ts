@@ -1,7 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
 import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
-import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
+import type { GatewayEnv } from '../config/env';
+import {
+  TENDER_OPENING_ROUTES,
+  serviceUrl,
+  type ServiceName,
+  type ServiceUrls,
+  type UpstreamDeadlineRoute,
+} from '../config/routes';
 
 /**
  * Forwards a request to the owning service.
@@ -67,6 +74,33 @@ export function circuitRetryAfterSeconds(remainingMs: number): number {
   return Math.min(3600, Math.max(1, Math.ceil(remainingMs / 1000)));
 }
 
+export interface ProxyOptions {
+  timeoutMs: number;
+  failureThreshold: number;
+  resetAfterMs: number;
+  /**
+   * Requests whose owning service may legitimately work longer than `timeoutMs`, each with its
+   * own deadline (Codex r2 on #250, G1). The first match wins; anything else gets `timeoutMs`.
+   */
+  routeDeadlines?: readonly (UpstreamDeadlineRoute & { timeoutMs: number })[];
+}
+
+/**
+ * The forwarder's settings from configuration: one deadline for every route, and
+ * `GATEWAY_TENDER_OPEN_TIMEOUT_MS` for the tender opening routes alone.
+ */
+export function proxyOptionsOf(env: GatewayEnv): ProxyOptions {
+  return {
+    timeoutMs: env.GATEWAY_UPSTREAM_TIMEOUT_MS,
+    failureThreshold: env.GATEWAY_CIRCUIT_FAILURE_THRESHOLD,
+    resetAfterMs: env.GATEWAY_CIRCUIT_RESET_MS,
+    routeDeadlines: TENDER_OPENING_ROUTES.map((route) => ({
+      ...route,
+      timeoutMs: env.GATEWAY_TENDER_OPEN_TIMEOUT_MS,
+    })),
+  };
+}
+
 @Injectable()
 export class ProxyService {
   private readonly logger = new Logger(ProxyService.name);
@@ -75,12 +109,20 @@ export class ProxyService {
   constructor(
     private readonly urls: ServiceUrls,
     private readonly internalTokens: InternalTokenService,
-    private readonly options: {
-      timeoutMs: number;
-      failureThreshold: number;
-      resetAfterMs: number;
-    },
+    private readonly options: ProxyOptions,
   ) {}
+
+  /** How long this request may wait for its upstream. */
+  deadlineFor(request: Pick<ProxyRequest, 'service' | 'method' | 'path'>): number {
+    const method = request.method.toUpperCase();
+    const route = this.options.routeDeadlines?.find(
+      (candidate) =>
+        candidate.service === request.service &&
+        candidate.method === method &&
+        candidate.path.test(request.path),
+    );
+    return route?.timeoutMs ?? this.options.timeoutMs;
+  }
 
   async forward(request: ProxyRequest): Promise<ProxyResponse> {
     this.assertCircuitClosed(request.service);
@@ -130,7 +172,8 @@ export class ProxyService {
     };
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    const timeoutMs = this.deadlineFor(request);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     // Each upstream response counts toward the circuit exactly once, whichever
     // way it fails afterwards: a 5xx is counted when its status arrives, and a
     // body that then fails to read (truncated, reset) must not count it again.
@@ -200,7 +243,7 @@ export class ProxyService {
 
       if ((error as Error).name === 'AbortError') {
         throw new RastaError('UPSTREAM_TIMEOUT', 'The upstream service did not respond in time', {
-          internalContext: { service: request.service, timeoutMs: this.options.timeoutMs },
+          internalContext: { service: request.service, timeoutMs },
         });
       }
 

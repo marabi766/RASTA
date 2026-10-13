@@ -356,14 +356,47 @@ describe('sealing and opening a bid', () => {
     it('cannot be forged: an object that did not come from verifyReceipts opens nothing', () => {
       const sealed = seal();
       const verified = verifyReceipts(BINDING.tenderId, receiptsOf([sealed]));
-      const lookalike = Object.create(VerifiedReceipts.prototype as object) as VerifiedReceipts;
-      Object.assign(lookalike, { tenderId: verified.tenderId, head: verified.head });
-      (lookalike as unknown as { newestOf: VerifiedReceipts['newestOf'] }).newestOf = (id) =>
-        verified.newestOf(id);
+      const lookalike = Object.create(VerifiedReceipts.prototype as object, {
+        tenderId: { value: verified.tenderId },
+        head: { value: verified.head },
+        newestOf: { value: (id: string) => verified.newestOf(id) },
+      }) as VerifiedReceipts;
       expect(() => openWith(sealed, lookalike)).toThrow(
         expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
       );
       expect(openWith(sealed, verified)).toEqual(CONTENT);
+    });
+
+    it('cannot be changed in-process once verified (Codex r2 on #250)', () => {
+      const original = seal();
+      const forged = seal(BINDING, { ...CONTENT, priceMinor: '1' });
+      const verified = verifyReceipts(BINDING.tenderId, receiptsOf([original]));
+      const writable = verified as unknown as Record<string, unknown>;
+
+      // The handle is frozen and carries nothing: no field to point at another tender or index.
+      expect(Object.isFrozen(verified)).toBe(true);
+      expect(Object.keys(verified)).toEqual([]);
+      expect(() => (writable.tenderId = 'TND_OTHER')).toThrow(TypeError);
+      expect(() => (writable.newest = new Map())).toThrow(TypeError);
+      // Nor can the class's behaviour be swapped for every handle at once.
+      expect(() => {
+        (VerifiedReceipts.prototype as unknown as Record<string, unknown>).newestOf = () =>
+          undefined;
+      }).toThrow(TypeError);
+      expect(() => {
+        (VerifiedReceipts as unknown as Record<string, unknown>).verify = () => verified;
+      }).toThrow(TypeError);
+
+      // What it hands out is a copy: rewriting it to vouch for the forgery changes nothing.
+      const handedOut = verified.newestOf(BINDING.bidId) as unknown as Record<string, unknown>;
+      expect(() => (handedOut.ciphertextSha256 = forged.ciphertextSha256)).toThrow(TypeError);
+      (handedOut.receivedAt as Date).setTime(0);
+      expect(verified.newestOf(BINDING.bidId)?.receivedAt.getTime()).not.toBe(0);
+
+      expect(() => openWith(forged, verified)).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+      );
+      expect(openWith(original, verified)).toEqual(CONTENT);
     });
 
     it('reads only what it verified: editing the receipts afterwards changes nothing', () => {

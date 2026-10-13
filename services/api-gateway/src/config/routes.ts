@@ -216,6 +216,28 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'kpis', service: 'analytics' },
 ];
 
+/** A request the gateway forwards under a deadline of its own, not `GATEWAY_UPSTREAM_TIMEOUT_MS`. */
+export interface UpstreamDeadlineRoute {
+  service: ServiceName;
+  /** Upper-case HTTP method. */
+  method: string;
+  /** The whole forwarded path (`/v1/...`, no query). */
+  path: RegExp;
+}
+
+/**
+ * The two requests that decrypt every standing bid of a tender in construction-service, under its
+ * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS` (Codex r2 on #250, G1): opening the bids, and the owner's
+ * read of every opened bid. They run under `GATEWAY_TENDER_OPEN_TIMEOUT_MS`; nothing else does — the
+ * proposal, a single bid's read and every other route keep the default deadline. Data, like the
+ * table above: the gateway learns which requests are slow, not why (ADR-009).
+ */
+export const TENDER_OPENING_ROUTES: readonly UpstreamDeadlineRoute[] = [
+  // A trailing slash reaches the same handler upstream, so it gets the same deadline.
+  { service: 'construction', method: 'POST', path: /^\/v1\/tenders\/[^/]+\/open-bids\/?$/ },
+  { service: 'construction', method: 'GET', path: /^\/v1\/tenders\/[^/]+\/bids\/?$/ },
+];
+
 /** Longest-prefix match, so `orders` never shadows a longer sibling. */
 export function resolveRoute(path: string): RouteRule | undefined {
   const segment = path.replace(/^\/+/, '').split('/')[0];

@@ -82,7 +82,9 @@ export class BidController {
       'retry with the same key and body answers the same receipt and submits nothing; the same key ' +
       'with another body or tender is 409 IDEMPOTENCY_KEY_REUSED; a refused or failed submission ' +
       'frees the key. Refused 422 TENDER_RECEIPT_LIMIT when the tender’s receipt chain is full ' +
-      '(CONSTRUCTION_TENDER_MAX_RECEIPTS). ' +
+      '(CONSTRUCTION_TENDER_MAX_RECEIPTS), and 422 TENDER_BID_LIMIT when the tender already has ' +
+      'as many standing bids as it may (CONSTRUCTION_TENDER_MAX_STANDING_BIDS; the answer says the ' +
+      'limit is reached, never how many bid). ' +
       BIDDER_NOTE,
   })
   async submit(

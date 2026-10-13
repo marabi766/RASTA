@@ -7,6 +7,8 @@ import {
   DEFAULT_PORT,
   loadConstructionEnv,
   SERVICE_NAME,
+  TENDER_MAX_STANDING_BIDS_CEILING,
+  TENDER_MAX_STANDING_BIDS_DEFAULT,
   TENDER_OPEN_TIMEOUT_DEFAULT_MS,
   TENDER_OPEN_TIMEOUT_MAX_MS,
   TENDER_OPEN_TIMEOUT_MIN_MS,
@@ -246,6 +248,38 @@ describe('project roles (Q-69)', () => {
       );
       const declared = /export const MAX_CHAIN_LINKS = ([\d_]+);/.exec(source)?.[1];
       expect(Number(declared?.replaceAll('_', ''))).toBe(EVIDENCE_MAX_CHAIN_LINKS);
+    });
+  });
+
+  describe('how many bids may stand on one tender (Codex r2 on #250, Q-117)', () => {
+    it('defaults to the provisional 200 and takes a value up to the measured ceiling', () => {
+      expect(load().CONSTRUCTION_TENDER_MAX_STANDING_BIDS).toBe(TENDER_MAX_STANDING_BIDS_DEFAULT);
+      expect(TENDER_MAX_STANDING_BIDS_DEFAULT).toBe(200);
+      expect(
+        load({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: String(TENDER_MAX_STANDING_BIDS_CEILING) })
+          .CONSTRUCTION_TENDER_MAX_STANDING_BIDS,
+      ).toBe(TENDER_MAX_STANDING_BIDS_CEILING);
+    });
+
+    it('at the default caps, every standing bid can use every revision within the receipt cap', () => {
+      const env = load();
+      expect(
+        env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS * env.CONSTRUCTION_BID_MAX_REVISIONS,
+      ).toBeLessThanOrEqual(env.CONSTRUCTION_TENDER_MAX_RECEIPTS);
+    });
+
+    it.each([
+      String(TENDER_MAX_STANDING_BIDS_CEILING + 1),
+      '10000',
+      '0',
+      '-1',
+      '200.5',
+      'unlimited',
+      '',
+    ])('refuses %j at startup rather than falling back', (value) => {
+      expect(() => load({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: value })).toThrow(
+        /CONSTRUCTION_TENDER_MAX_STANDING_BIDS/,
+      );
     });
   });
 

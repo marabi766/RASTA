@@ -280,8 +280,20 @@ export interface TrustedReceipts {
 
 type Receipted = ReceiptLink & { readonly receipt: string };
 
-/** Only what {@link verifyReceipts} made: `openBid` accepts nothing else. */
-const VERIFIED = new WeakSet<VerifiedReceipts>();
+/** What a verification established: the tender, its trusted head, each bid's newest receipt. */
+interface VerifiedIndex {
+  readonly tenderId: string;
+  readonly head: string;
+  readonly newest: ReadonlyMap<string, Receipted>;
+}
+
+/**
+ * Only what {@link verifyReceipts} made, and what it found — kept here, module-private, and never on
+ * the object handed out (Codex r2 on #250): a holder of a `VerifiedReceipts` cannot reach the index
+ * to change it, and `openBid` reads the index from here, not through anything the holder could
+ * replace.
+ */
+const VERIFIED = new WeakMap<VerifiedReceipts, VerifiedIndex>();
 
 /**
  * A tender's receipts after their chain was verified against the trusted head — **once** — with
@@ -291,14 +303,13 @@ const VERIFIED = new WeakSet<VerifiedReceipts>();
  * proves nothing more and costs O(receipts) each time: at the permitted caps (200 bids, 10,000
  * receipts) that was some 30 s of hashing inside the opening's transaction (Codex r1 on #250,
  * R2). Made only by {@link verifyReceipts}, from a copy of what it verified, so nothing changed
- * after the check is ever read; `openBid` refuses any other object.
+ * after the check is ever read; `openBid` refuses any other object. The object itself is a frozen
+ * handle: what it stands for lives in the module-private {@link VERIFIED}.
  */
 export class VerifiedReceipts {
-  private constructor(
-    readonly tenderId: string,
-    readonly head: string,
-    private readonly newest: ReadonlyMap<string, Receipted>,
-  ) {}
+  private constructor() {
+    Object.freeze(this);
+  }
 
   /** See {@link verifyReceipts}. */
   static verify(tenderId: string, receipts: TrustedReceipts): VerifiedReceipts {
@@ -319,15 +330,34 @@ export class VerifiedReceipts {
     // In chain order, so each bid's entry ends as its newest receipt.
     const newest = new Map<string, Receipted>();
     for (const link of links) newest.set(link.bidId, link);
-    const verified = new VerifiedReceipts(tenderId, receipts.head, newest);
-    VERIFIED.add(verified);
+    const verified = new VerifiedReceipts();
+    VERIFIED.set(verified, Object.freeze({ tenderId, head: receipts.head, newest }));
     return verified;
   }
 
-  /** The newest receipt issued for `bidId`, or undefined when it has none. */
-  newestOf(bidId: string): Receipted | undefined {
-    return this.newest.get(bidId);
+  /** The tender whose chain was verified. */
+  get tenderId(): string {
+    return indexOf(this).tenderId;
   }
+
+  /** The trusted head the chain was verified to end at. */
+  get head(): string {
+    return indexOf(this).head;
+  }
+
+  /** The newest receipt issued for `bidId` — a copy — or undefined when it has none. */
+  newestOf(bidId: string): Receipted | undefined {
+    const link = indexOf(this).newest.get(bidId);
+    return link && Object.freeze({ ...link, receivedAt: new Date(link.receivedAt.getTime()) });
+  }
+}
+Object.freeze(VerifiedReceipts);
+Object.freeze(VerifiedReceipts.prototype);
+
+function indexOf(receipts: VerifiedReceipts): VerifiedIndex {
+  const index = VERIFIED.get(receipts);
+  if (!index) throw new SealingError('RECEIPT_CHAIN_BROKEN');
+  return index;
 }
 
 /**
@@ -374,11 +404,13 @@ export function openBid(input: {
   }
 
   // Verified once for the tender (`verifyReceipts`), and for this one.
-  if (!VERIFIED.has(receipts) || receipts.tenderId !== binding.tenderId) {
+  // Read from the module's own record of the verification, never through the object's methods.
+  const verified = VERIFIED.get(receipts);
+  if (!verified || verified.tenderId !== binding.tenderId) {
     throw new SealingError('RECEIPT_CHAIN_BROKEN');
   }
 
-  const receipted = receipts.newestOf(binding.bidId);
+  const receipted = verified.newest.get(binding.bidId);
   if (!receipted || receipted.revision !== binding.revision) {
     throw new SealingError('RECEIPT_MISMATCH');
   }

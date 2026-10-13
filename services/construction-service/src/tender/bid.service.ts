@@ -52,6 +52,7 @@ export const BID_REFUSALS = [
   'BID_NOT_SUBMITTED',
   'BID_REVISION_LIMIT',
   'TENDER_RECEIPT_LIMIT',
+  'TENDER_BID_LIMIT',
 ] as const;
 export type BidRefusal = (typeof BID_REFUSALS)[number];
 
@@ -546,6 +547,16 @@ export class BidService {
     // rolls the bid back with it.
     if (slot.seq > this.env.CONSTRUCTION_TENDER_MAX_RECEIPTS) {
       throw this.refused(input.tenderId, ['TENDER_RECEIPT_LIMIT']);
+    }
+    // A new bid, under the same lock: every submission holds it until it commits, so each one
+    // counts every bid committed before it, and a tender never stands more bids than its opening
+    // is known to finish (Codex r2 on #250). The refusal names the limit, never the count.
+    if (
+      input.eventName === 'BID_SUBMITTED' &&
+      (await this.bids.countStandingBids(tx, input.tenderId)) >
+        this.env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS
+    ) {
+      throw this.refused(input.tenderId, ['TENDER_BID_LIMIT']);
     }
     const previous = slot.previousReceipt ?? genesisReceipt(input.tenderId);
     const link = {

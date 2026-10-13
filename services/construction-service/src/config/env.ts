@@ -34,6 +34,16 @@ export const TENDER_OPEN_TIMEOUT_MAX_MS = 120_000;
 export const TENDER_OPEN_TIMEOUT_DEFAULT_MS = 30_000;
 
 /**
+ * `CONSTRUCTION_TENDER_MAX_STANDING_BIDS` (Codex r2 on #250): the opening decrypts every standing
+ * bid in its transaction, and the receipt cap alone let 10,000 organizations bid once each —
+ * ~33 s of decryption before any write. PROVISIONAL default 200 (Q-117); the ceiling is the
+ * largest value measured to open within the default timeout (`tender-open-scale.int-spec`, run
+ * with it), so a configuration nobody has measured refuses to start.
+ */
+export const TENDER_MAX_STANDING_BIDS_DEFAULT = 200;
+export const TENDER_MAX_STANDING_BIDS_CEILING = 500;
+
+/**
  * The oversight role. Refused by this service whatever the configuration says
  * (`docs/09` § 9.3: aggregate access only), so naming it in a role list below
  * is a configuration error rather than a grant.
@@ -152,6 +162,9 @@ function roleList(name: string, options: { min: number }) {
  *                                       audit-service returns, 10,000).
  *   CONSTRUCTION_BID_MAX_REVISIONS      PROVISIONAL (F2, D1): revisions one
  *                                       bid may have, the submission included.
+ *   CONSTRUCTION_TENDER_MAX_STANDING_BIDS
+ *                                       PROVISIONAL (Q-117): bids standing on
+ *                                       one tender at once; 1–500, default 200.
  *   CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS How long the opening's transaction (and
  *                                       the owner's read of every opened bid)
  *                                       may run; 5,000–120,000, default 30,000.
@@ -536,6 +549,21 @@ export const constructionEnvSchema = baseEnvSchema
       .min(1)
       .max(EVIDENCE_MAX_CHAIN_LINKS)
       .default(50),
+    /**
+     * PROVISIONAL, pending the product owner (Q-117; Codex r2 on #250): the most bids that may
+     * stand (submitted, not withdrawn) on one tender at once; a submission past it is `422
+     * TENDER_BID_LIMIT`, which says the limit is reached and nothing of how many bid. Without it
+     * the receipt cap was the only bound, and 10,000 bidders of one revision each fit under it:
+     * an opening that decrypts every standing bid could not finish within its timeout. The
+     * ceiling is what the scale test measured to open in time; above it the service refuses to
+     * start rather than accept tenders it may not be able to open.
+     */
+    CONSTRUCTION_TENDER_MAX_STANDING_BIDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(TENDER_MAX_STANDING_BIDS_CEILING)
+      .default(TENDER_MAX_STANDING_BIDS_DEFAULT),
     /**
      * How long the transaction that opens a tender's bids — and the owner's read of every opened
      * bid, which repeats the same work — may run (Codex r1 on #250, R2). It decrypts every

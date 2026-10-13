@@ -799,6 +799,97 @@ describe('bids', () => {
       }
     });
 
+    it('admits at most CONSTRUCTION_TENDER_MAX_STANDING_BIDS standing bids; past it a new bid is refused with nothing written and nothing said of the count (Codex r2 on #250)', async () => {
+      const limited = wire(testEnv({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: '2' }));
+      try {
+        const { owner, bidder, tenderId } = await setup();
+        const [second, third, fourth] = [org(), org(), org()];
+        for (const other of [second, third, fourth]) await qualify(w, other);
+        const asLimited = (who: string, key = bidKey()) =>
+          asBidder(who, () => limited.bids.submit(tenderId, { content: bidContent() }, key));
+        const bidsOf = (who: string) =>
+          runUnscoped('the suite looks for a bidder’s bid', () =>
+            w.prisma.client.bid.findMany({ where: { tenderId, bidderOrganizationId: who } }),
+          );
+
+        const first = await asLimited(bidder);
+        await asLimited(second);
+
+        // The third: refused before anything is written, and the refusal is the limit alone.
+        const key = bidKey();
+        const refused = (await asLimited(third, key).then(
+          () => undefined,
+          (e: unknown) => e,
+        )) as { code?: string; message?: string; details?: unknown } | undefined;
+        expect(refused).toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          message: 'Bid refused: TENDER_BID_LIMIT',
+          details: [
+            { path: 'bid', code: 'TENDER_BID_LIMIT', message: 'Bid refused: TENDER_BID_LIMIT' },
+          ],
+        });
+        // Nothing in what the bidder is told counts anyone.
+        expect(
+          JSON.stringify({ message: refused?.message, details: refused?.details }),
+        ).not.toMatch(/\d/);
+        expect(await bidsOf(third)).toEqual([]);
+        expect(await linksOf(tenderId)).toHaveLength(2);
+        expect(await eventsOf(w, owner, 'BID_SUBMITTED')).toHaveLength(2);
+        // The key was freed: the same request is judged again — and refused again — not replayed.
+        expect(await refusalsOf(asLimited(third, key))).toContain('TENDER_BID_LIMIT');
+
+        // A revision adds no bid: a standing bidder may still replace its own at the limit.
+        await asBidder(bidder, () =>
+          limited.bids.revise(tenderId, first.bidId, {
+            expectedRevision: 1,
+            content: bidContent('7'),
+          }),
+        );
+        // A withdrawn bid no longer stands, so its place is free — once.
+        await asBidder(bidder, () =>
+          limited.bids.withdraw(tenderId, first.bidId, { expectedRevision: 2 }),
+        );
+        await asLimited(third);
+        expect(await refusalsOf(asLimited(fourth))).toContain('TENDER_BID_LIMIT');
+        expect(await bidsOf(fourth)).toEqual([]);
+      } finally {
+        await limited.close();
+      }
+    });
+
+    it('never lets concurrent submissions count past one another: exactly CONSTRUCTION_TENDER_MAX_STANDING_BIDS of them stand (Codex r2 on #250)', async () => {
+      const limited = wire(testEnv({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: '2' }));
+      try {
+        const { owner, tenderId } = await setup();
+        const bidders = [org(), org(), org(), org(), org(), org()];
+        for (const bidder of bidders) await qualify(w, bidder);
+
+        const outcomes = await Promise.allSettled(
+          bidders.map((bidder) =>
+            asBidder(bidder, () =>
+              limited.bids.submit(tenderId, { content: bidContent() }, bidKey()),
+            ),
+          ),
+        );
+
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(2);
+        const refusals = outcomes.flatMap((outcome) =>
+          outcome.status === 'rejected' ? [outcome.reason as { message?: string }] : [],
+        );
+        expect(refusals.map((reason) => reason.message)).toEqual(
+          Array(4).fill('Bid refused: TENDER_BID_LIMIT'),
+        );
+        const standing = await runUnscoped('the suite counts the bids that stand', () =>
+          w.prisma.client.bid.count({ where: { tenderId, status: 'SUBMITTED' } }),
+        );
+        expect(standing).toBe(2);
+        expect(await linksOf(tenderId)).toHaveLength(2);
+        expect(await eventsOf(w, owner, 'BID_SUBMITTED')).toHaveLength(2);
+      } finally {
+        await limited.close();
+      }
+    });
+
     it('gives concurrent submissions distinct places in one verifying chain, ending at the announced head', async () => {
       const { owner, tenderId } = await setup();
       const bidders = [org(), org(), org(), org(), org(), org()];
