@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { UTC_SESSION_OPTION, ledgerRevoke, withUtcSession } from './prisma-lib.mjs';
+import {
+  MIGRATION_STATEMENT_TIMEOUT_SETTING,
+  UTC_SESSION_OPTION,
+  ledgerRevoke,
+  withMigrationStatementTimeout,
+  withUtcSession,
+} from './prisma-lib.mjs';
 import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
 
 const pg = (user, db, schema) =>
@@ -93,4 +99,41 @@ test('withUtcSession is idempotent, and re-applies after a later TimeZone', () =
     assert.ok(new URL(once).searchParams.get('options').endsWith(UTC_SESSION_OPTION));
   }
   assert.equal(withUtcSession(UTC_SESSION_CORPUS[6]), UTC_SESSION_CORPUS[6]);
+});
+
+// --- withMigrationStatementTimeout (D-048) ------------------------------------
+
+test('a statement-timeout override joins the options, before UTC, everything else kept', () => {
+  const url = UTC_SESSION_CORPUS[3];
+  const overridden = withMigrationStatementTimeout(url, '15min');
+  assert.equal(
+    overridden,
+    `${url}&options=${encodeURIComponent(`-c ${MIGRATION_STATEMENT_TIMEOUT_SETTING}=15min`)}`,
+  );
+  assert.equal(
+    new URL(withUtcSession(overridden)).searchParams.get('options'),
+    `-c rasta.migration_statement_timeout=15min ${UTC_SESSION_OPTION}`,
+  );
+  assert.equal(
+    new URL(withMigrationStatementTimeout(UTC_SESSION_CORPUS[5], '90s')).searchParams.get(
+      'options',
+    ),
+    '-c statement_timeout=5000 -c rasta.migration_statement_timeout=90s',
+  );
+});
+
+test('no override leaves the URL alone; anything but a positive duration is refused', () => {
+  for (const value of [undefined, '']) {
+    assert.equal(
+      withMigrationStatementTimeout(UTC_SESSION_CORPUS[3], value),
+      UTC_SESSION_CORPUS[3],
+    );
+  }
+  for (const value of ['0s', '15', '15 min', '1d', '-5s', '5s -c role=postgres', "5s'"]) {
+    assert.throws(
+      () => withMigrationStatementTimeout(UTC_SESSION_CORPUS[0], value),
+      /is not a positive duration/,
+      value,
+    );
+  }
 });

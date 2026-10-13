@@ -119,7 +119,8 @@ jobs:
         # Every service is placed exactly once — split or audit — and one in
         # neither fails; the migration ledger revoke
         # scripts/prisma.mjs runs after each migration quotes and refuses
-        # what it must.
+        # what it must; and every variable prisma.mjs reads reaches it through
+        # turbo, root `pnpm db:migrate` included (#242).
         run: pnpm run test:db-runtime-privileges-lib
 
       - name: Image scope rule

@@ -89,7 +89,8 @@ audit، fleet و maintenance در `TABLE_EXEMPTIONS` با Queryِ خواننده
 می‌زند و به هر اتصالِ Pool و هر `$queryRaw` می‌رسد: نشانی سرویس‌ها از `databaseEnvSchema` (`withUtcSession` در
 `@rasta/config`)، Migrationها از `scripts/prisma.mjs` و Seedها از همان تابع. اتصالِ تازه (Script، CLI، Worker) باید از
 یکی از این دو بگذرد؛ `scripts/db-session-utc.pg.test.mjs` هر سازوکار را زیر Roleی با پیش‌فرض تهران می‌آزماید. ستونِ تازهٔ
-لحظه `TIMESTAMPTZ` است؛ بدهیِ ستون‌های موجودِ `timestamp(3)`: `docs/23` D-048.
+لحظه `TIMESTAMPTZ` است؛ بدهیِ ستون‌های موجودِ `timestamp(3)`: `docs/23` D-048 (document تبدیل شد؛ دستورالعمل
+تبدیل هر سرویس همان‌جاست).
 
 ---
 
