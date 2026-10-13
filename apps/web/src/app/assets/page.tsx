@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
 import { RegisterAssetForm } from './RegisterAssetForm';
@@ -67,7 +67,7 @@ export default async function AssetsPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/assets" />}
+      sidebar={<PortalSidebar session={session} currentHref="/assets" current={currentUser} />}
     >
       <AssetsScreen
         result={result}

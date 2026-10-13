@@ -9,7 +9,6 @@ import {
   NoAccessState,
   PageHeader,
   Section,
-  Sidebar,
   TopBar,
 } from '@/ui';
 import { currentSession } from '@/server/current-session';
@@ -17,7 +16,7 @@ import { fetchCurrentUser } from '@/server/identity';
 import { fetchOrganization, type Organization, type ReadResult } from '@/server/organizations';
 import { fetchMembers, type MemberListQuery } from '@/server/members';
 import { mintSubmissionId } from '@/server/submission';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { MembersScreen } from './MembersScreen';
 import { OrganizationProfileForm } from './OrganizationProfileForm';
@@ -154,7 +153,9 @@ export default async function OrganizationsPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/organizations" />}
+      sidebar={
+        <PortalSidebar session={session} currentHref="/organizations" current={currentUser} />
+      }
     >
       <PageHeader
         title="سازمان و اعضا"

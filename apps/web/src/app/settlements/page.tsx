@@ -1,10 +1,10 @@
 import { redirect } from 'next/navigation';
 
-import { AppShell, Button, PageHeader, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isSettlementView } from '@/lib/settlement-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchSettlements, type SettlementListQuery } from '@/server/settlements';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SettlementsScreen } from './SettlementsScreen';
 
@@ -38,10 +38,7 @@ export default async function SettlementsPage({
     cursor: one(params.cursor),
   };
 
-  const [result, nav] = await Promise.all([
-    fetchSettlements(session, query),
-    portalNavFor(session),
-  ]);
+  const result = await fetchSettlements(session, query);
 
   return (
     <AppShell
@@ -55,7 +52,7 @@ export default async function SettlementsPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={nav} currentHref="/settlements" />}
+      sidebar={<PortalSidebar session={session} currentHref="/settlements" />}
     >
       <PageHeader
         title="تسویه‌ها"

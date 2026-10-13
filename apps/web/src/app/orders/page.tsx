@@ -1,10 +1,10 @@
 import { redirect } from 'next/navigation';
 
-import { AppShell, Button, PageHeader, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { ORDER_LIST_ROLES, type OrderListRole } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchOrders, type OrderListQuery } from '@/server/orders';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrdersScreen } from './OrdersScreen';
 
@@ -65,7 +65,7 @@ export default async function OrdersPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/orders" />}
+      sidebar={<PortalSidebar session={session} currentHref="/orders" />}
     >
       <PageHeader
         title="سفارش‌ها"

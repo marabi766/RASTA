@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchDossier, type AssetSummary } from '@/server/assets';
 import {
@@ -37,7 +37,7 @@ import { fetchCurrentUser } from '@/server/identity';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { DossierScreen } from './DossierScreen';
 import { UpdateAssetForm } from './UpdateAssetForm';
 import { LifecycleControls, type LifecycleToken } from './LifecycleControls';
@@ -205,7 +205,7 @@ export default async function AssetDossierPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/assets" />}
+      sidebar={<PortalSidebar session={session} currentHref="/assets" current={currentUser} />}
     >
       <DossierScreen
         result={result}

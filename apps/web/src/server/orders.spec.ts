@@ -134,6 +134,13 @@ describe('reading an order', () => {
     expect(result.kind).toBe('MALFORMED');
   });
 
+  it('refuses a createdAt the date formatter would throw on, rather than rendering it', async () => {
+    const { impl } = answering({ ...ORDER, createdAt: 'UPSTREAM_INVALID_TIMESTAMP' });
+    const result = await withFetch(impl, () => fetchOrder(SESSION, 'ORD_1'));
+    expect(result.kind).toBe('MALFORMED');
+    expect(JSON.stringify(result)).not.toContain('UPSTREAM_INVALID');
+  });
+
   it('keeps the available actions the service computed for this caller', async () => {
     const { impl } = answering(ORDER);
     const result = await withFetch(impl, () => fetchOrder(SESSION, 'ORD_1'));

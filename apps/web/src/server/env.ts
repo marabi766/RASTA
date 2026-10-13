@@ -40,6 +40,25 @@ const httpUrl = z
     'Expected an http(s) URL',
   );
 
+/** The oversight role has aggregate access only; no setting here may grant it a screen. */
+const OVERSIGHT_ROLE = 'AUDITOR';
+
+/** A comma-separated role list, trimmed, empty elements dropped, never naming the oversight role. */
+function roleList(name: string, fallback: string) {
+  return z
+    .string()
+    .default(fallback)
+    .transform((raw) =>
+      raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    )
+    .refine((roles) => !roles.includes(OVERSIGHT_ROLE), {
+      message: `${name} may not name ${OVERSIGHT_ROLE}`,
+    });
+}
+
 const schema = z.object({
   /**
    * The only origin this portal's server code is allowed to call.
@@ -107,6 +126,19 @@ const schema = z.object({
       'Expected a redis:// or rediss:// URL',
     )
     .optional(),
+
+  /**
+   * Which roles are shown the Projects link (`server/portal-nav.ts`).
+   *
+   * These **mirror** construction-service's `CONSTRUCTION_PROJECT_ROLES`
+   * (default `ORGANIZATION_ADMIN`) and `CONSTRUCTION_PROJECT_READER_ROLES`
+   * (default none) and must be changed together with them. They decide only
+   * whether a link is drawn; the service still decides who may read, and a
+   * refusal is rendered as an outcome. `AUDITOR` is refused at boot, as the
+   * service refuses it: the oversight role has aggregate access only.
+   */
+  WEB_PROJECT_ROLES: roleList('WEB_PROJECT_ROLES', 'ORGANIZATION_ADMIN'),
+  WEB_PROJECT_READER_ROLES: roleList('WEB_PROJECT_READER_ROLES', ''),
 
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
