@@ -4,7 +4,7 @@ import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDriver, fetchDriverAssignments } from '@/server/drivers';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { DriverDetailScreen } from './DriverDetailScreen';
 
 /**
@@ -51,7 +51,7 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/drivers" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/drivers" />}
     >
       <DriverDetailScreen
         result={result}

@@ -116,7 +116,24 @@ export interface ClaimFence<T> {
    * receive.
    */
   complete(tx: ExtendedPrismaClient, result: T): Promise<T>;
+  /**
+   * Whether this request's refusal for `reason` is the first to be audited, **in the caller's own
+   * transaction** — the one that writes the refusal's event, or not, by the answer. A
+   * contract-service refusal is not terminal (docs/06 § 6.8): the claim is released and the request
+   * may be made again, so the audit is de-duplicated instead — by tenant, user, key, request and
+   * reason. The same refusal again writes no second event; another reason (conditions changed) is
+   * a new one. The record commits with the event or not at all.
+   *
+   * A record lives `CONTRACT_IDEMPOTENCY_TTL_HOURS`, like a completed response: a request that
+   * claimed its key after the record expired is a new one and is audited again, whether or not the
+   * upkeep timer has purged the record yet; a request that claimed it before is not. Throws — and
+   * so aborts the transaction — when the claim is no longer this request's, as `hold` does.
+   */
+  firstRefusal(tx: ExtendedPrismaClient, reason: string): Promise<boolean>;
 }
+
+/** The part of a fence a refusal needs; independent of the response type. */
+export type RefusalFence = Pick<ClaimFence<unknown>, 'firstRefusal'>;
 
 /**
  * Re-checks, before a completed response is replayed, that the caller may still see what it
@@ -126,7 +143,9 @@ export interface ClaimFence<T> {
  */
 export type ReplayGuard<T> = (stored: T) => Promise<void>;
 
-type Claim = { kind: 'PROCEED'; token: string } | { kind: 'REPLAY'; status: number; body: unknown };
+type Claim =
+  | { kind: 'PROCEED'; token: string; claimedAt: Date }
+  | { kind: 'REPLAY'; status: number; body: unknown };
 
 export type IdempotencyEnv = Pick<
   ContractEnv,
@@ -211,6 +230,10 @@ export class IdempotencyStore {
 
     let stored: { value: T } | undefined;
     const fence: ClaimFence<T> = {
+      firstRefusal: async (tx, reason) => {
+        await this.hold(tx, endpoint, key, claim.token);
+        return this.firstRefusal(tx, key, body, reason, claim.claimedAt);
+      },
       hold: (tx) => this.hold(tx, endpoint, key, claim.token),
       complete: async (tx, result) => {
         const value = JSON.parse(JSON.stringify(result)) as T;
@@ -228,6 +251,8 @@ export class IdempotencyStore {
       // would turn into an unrelated error: it is logged, and the claim simply stays until its
       // lease lapses (CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS, docs/06 § 6.8), after which a retry
       // takes the key over. Until then a retry with the same key is 409 CONFLICT with Retry-After.
+      // A refusal releases the claim like any failure: a request that could succeed on retry must
+      // be free to (docs/06 § 6.8). Its audit event is de-duplicated, not its key held.
       await this.releaseQuietly(endpoint, key, claim.token);
       throw error;
     }
@@ -291,6 +316,40 @@ export class IdempotencyStore {
       this.logLostClaim('complete', endpoint);
       throw claimLost(endpoint);
     }
+  }
+
+  /**
+   * {@link ClaimFence.firstRefusal}, once `hold` has locked the claim: one statement inserts the
+   * dedupe record of this (tenant, user, key, request, reason) — or replaces one that had expired
+   * by the time this request claimed its key — and reports whether it wrote. The purge's timing
+   * decides nothing: an expired record still present is replaced, and one this request's claim
+   * predates is never purged under it (`purgeExpired`).
+   *
+   * Judged against the **claim's** instant, not now: a request that claimed while the record was
+   * live is the same refused request repeated, even if the record expires before it is refused.
+   * A concurrent twin waits on the row this statement wrote until its transaction ends, then
+   * re-checks the row as committed — live again — and writes nothing.
+   */
+  private async firstRefusal(
+    tx: ExtendedPrismaClient,
+    key: string,
+    body: unknown,
+    reason: string,
+    claimedAt: Date,
+  ): Promise<boolean> {
+    const organizationId = getOrganizationId();
+    const userId = getContext().userId ?? 'unknown';
+    const now = new Date();
+    const written = await tx.$queryRaw<{ written: number }[]>`
+      INSERT INTO refusal_audit_dedupe AS existing
+        (organization_id, user_id, key, request_hash, reason, created_at, expires_at)
+      VALUES (${organizationId}, ${userId}, ${key}, ${this.hash(body)}, ${reason},
+              ${now}, ${this.expiry(now)})
+      ON CONFLICT (organization_id, user_id, key, request_hash, reason) DO UPDATE
+        SET created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at
+        WHERE existing.expires_at <= ${claimedAt}
+      RETURNING 1 AS written`;
+    return written.length === 1;
   }
 
   /** When a **completed** response stops being replayed. */
@@ -368,7 +427,7 @@ export class IdempotencyStore {
           },
         }),
       );
-      return { kind: 'PROCEED', token };
+      return { kind: 'PROCEED', token, claimedAt: now };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
     }
@@ -497,14 +556,35 @@ export class IdempotencyStore {
    * Removes expired records, on the upkeep timer. Unscoped by necessity — the timer runs
    * outside any request — and safe: the predicate is age alone, so it can only remove records
    * `claim` already refuses to honour.
+   *
+   * A refusal-audit dedupe record is removed by the same rule — only once `firstRefusal` would
+   * replace it for every request still able to be refused. Such a request holds a live claim, so
+   * the record must have expired before that claim was taken: more than a claim lease ago, which
+   * no live claim's instant predates. That is age alone again, and needs no lock against a
+   * concurrent `firstRefusal` — even one whose claim committed after this statement's snapshot.
+   * Besides, no record is removed while its (tenant, key) has a live claim at all.
    */
   async purgeExpired(): Promise<number> {
-    const result = await runUnscoped(
+    return runUnscoped(
       'expired idempotency records are platform upkeep, deleted by age alone and never by tenant',
-      () =>
-        this.prisma.client.idempotencyKey.deleteMany({ where: { expiresAt: { lt: new Date() } } }),
+      async () => {
+        const now = new Date();
+        const keys = await this.prisma.client.idempotencyKey.deleteMany({
+          where: { expiresAt: { lt: now } },
+        });
+        const leaseAgo = new Date(
+          now.getTime() - this.env.CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS * 1000,
+        );
+        await this.prisma.client.$executeRaw`
+          DELETE FROM refusal_audit_dedupe AS dedupe
+          WHERE dedupe.expires_at < ${leaseAgo}
+            AND NOT EXISTS (
+              SELECT 1 FROM idempotency_key AS claim
+              WHERE claim.organization_id = dedupe.organization_id AND claim.key = dedupe.key
+                AND claim.state = 'IN_PROGRESS' AND claim.expires_at > ${now})`;
+        return keys.count;
+      },
     );
-    return result.count;
   }
 }
 

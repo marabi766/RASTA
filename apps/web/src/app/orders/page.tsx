@@ -4,7 +4,7 @@ import { AppShell, Button, PageHeader, Sidebar, TopBar } from '@/ui';
 import { ORDER_LIST_ROLES, type OrderListRole } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchOrders, type OrderListQuery } from '@/server/orders';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 
 import { OrdersScreen } from './OrdersScreen';
 
@@ -65,7 +65,7 @@ export default async function OrdersPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/orders" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/orders" />}
     >
       <PageHeader
         title="سفارش‌ها"

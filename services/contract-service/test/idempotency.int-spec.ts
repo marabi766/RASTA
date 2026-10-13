@@ -1,5 +1,7 @@
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { ContractRepository } from '../src/contract/contract.repository';
+import { EventPublisher } from '../src/events/publisher';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import {
@@ -7,14 +9,24 @@ import {
   IdempotencyStore,
   requiredIdempotencyKey,
   type ClaimFence,
+  type RefusalFence,
 } from '../src/shared/idempotency';
-import { cleanup, databaseUrl, newOrganizationId, ownerDatabaseUrl } from './helpers';
+import { AuthorityRefusals } from '../src/signing/authority-refusals';
+import {
+  cleanup,
+  databaseUrl,
+  eventsOf,
+  newOrganizationId,
+  ownerDatabaseUrl,
+  testEnv,
+} from './helpers';
 
 /**
  * The idempotency store (docs/06 § 6.8) against a real PostgreSQL, each way a claim can end:
  * completed and replayed, released after a failure, lapsed and taken over, lost to a successor,
- * held by a request that is still working, and never completed. The routes' own use of it is
- * proven in `sign.int-spec.ts`, `cancel.int-spec.ts` and `approval-policy.int-spec.ts`.
+ * held by a request that is still working, and never completed — and the record that keeps a
+ * refusal's audit event from repeating. The routes' own use of it is proven in `sign.int-spec.ts`,
+ * `cancel.int-spec.ts` and `approval-policy.int-spec.ts`.
  */
 describe('the idempotency store', () => {
   let prisma: PrismaService;
@@ -392,5 +404,223 @@ describe('the idempotency store', () => {
     expect(await store.purgeExpired()).toBeGreaterThanOrEqual(1);
     expect(await rowsOf(org, old)).toEqual([]);
     expect(await rowsOf(org, fresh)).toHaveLength(1);
+  });
+
+  /**
+   * A refusal is not terminal (docs/06 § 6.8): the claim is released, and its audit event is
+   * de-duplicated by a record that lives as long as a completed response. The record's expiry is
+   * judged against the instant the request claimed its key — never against when the purge ran.
+   */
+  describe('the refusal-audit record', () => {
+    const OTHER_ENDPOINT = 'POST /v1/test/{id}/other';
+    const refusals = (): AuthorityRefusals =>
+      new AuthorityRefusals(prisma, new EventPublisher(testEnv()), new ContractRepository(prisma));
+    /** A refusal of a party's authority, recorded through the request's fence. */
+    const refuse = (org: string, fence: RefusalFence): Promise<never> =>
+      refusals().refuse(
+        {
+          action: 'SIGN_CONTRACT',
+          side: 'EMPLOYER',
+          contractId: `CTR_${ulid()}`,
+          organizationId: org,
+          subjectId: null,
+          reason: 'ROLE_NOT_PERMITTED',
+        },
+        RastaError.insufficientRole(['ORGANIZATION_ADMIN'], ['DRIVER']),
+        fence,
+      );
+    const attempt = (
+      org: string,
+      k: string,
+      before: (fence: RefusalFence) => Promise<void> = async () => undefined,
+      endpoint = ENDPOINT,
+    ) =>
+      inOrganization(org, () =>
+        store.execute(
+          endpoint,
+          k,
+          { refused: true },
+          200,
+          async (fence) => {
+            await before(fence);
+            return refuse(org, fence);
+          },
+          async () => undefined,
+        ),
+      );
+    const refusedEvents = async (org: string) =>
+      (await eventsOf(prisma, org, 'CONTRACT_AUTHORITY_REFUSED')).length;
+
+    const withOwner = async <T>(fn: (owner: PrismaClient) => Promise<T>): Promise<T> => {
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      try {
+        return await fn(owner);
+      } finally {
+        await owner.$disconnect();
+      }
+    };
+    const recordsOf = (org: string, k: string) =>
+      withOwner((owner) =>
+        owner.refusalAuditDedupe.findMany({ where: { organizationId: org, key: k } }),
+      );
+    const expireRecordAt = (org: string, k: string, expiresAt: Date) =>
+      withOwner((owner) =>
+        owner.refusalAuditDedupe.updateMany({
+          where: { organizationId: org, key: k },
+          data: { expiresAt },
+        }),
+      );
+    /** A record as a refusal would have left it, its lifetime chosen. */
+    const plantRecord = (org: string, k: string, expiresAt: Date) =>
+      withOwner((owner) =>
+        owner.refusalAuditDedupe.create({
+          data: {
+            organizationId: org,
+            userId: 'USR_1',
+            key: k,
+            requestHash: 'h',
+            reason: 'ROLE_NOT_PERMITTED',
+            expiresAt,
+          },
+        }),
+      );
+    /** The instant this request claimed its key: its lease, less the lease's length. */
+    const claimedAt = async (org: string, k: string, endpoint = ENDPOINT): Promise<Date> => {
+      const [claim] = (await rowsOf(org, k)).filter(
+        (row) => row.endpoint === endpoint && row.state === 'IN_PROGRESS',
+      );
+      if (!claim) throw new Error('no claim in flight');
+      return new Date(
+        claim.expiresAt.getTime() - env.CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS * 1000,
+      );
+    };
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    it('the same refusal repeated is audited once while the record lives, and again once it has expired — purged or not', async () => {
+      const org = organization();
+      const k = key();
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(1);
+
+      // Expired, still in the table: the purge has not run. A request that claims now is new.
+      await expireRecordAt(org, k, new Date(Date.now() - 1_000));
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(2);
+      // The record was replaced, and lives again: the next repeat is not audited.
+      const [record] = await recordsOf(org, k);
+      expect(record!.expiresAt.getTime()).toBeGreaterThan(Date.now());
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(2);
+    });
+
+    it.each([
+      ['expiring at the claim’s instant is expired: a new event', 0, 2],
+      ['expiring a millisecond after it is not, though it has expired by the refusal: none', 1, 1],
+    ])('the boundary is the claim: a record %s', async (_label, offsetMs, events) => {
+      const org = organization();
+      const k = key();
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(1);
+
+      await expect(
+        attempt(org, k, async () => {
+          const at = await claimedAt(org, k);
+          await expireRecordAt(org, k, new Date(at.getTime() + offsetMs));
+          await sleep(5);
+        }),
+      ).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(events);
+    });
+
+    it('two concurrent reuses after the record expired write exactly one event', async () => {
+      const org = organization();
+      const k = key();
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      await expireRecordAt(org, k, new Date(Date.now() - 1_000));
+
+      // Two routes, one key, one caller and body: the claims do not serialise them, the record
+      // does. Both hold their claims before either is refused.
+      let arrived = 0;
+      let bothClaimed!: () => void;
+      const together = new Promise<void>((resolve) => {
+        bothClaimed = resolve;
+      });
+      const meet = async () => {
+        arrived += 1;
+        if (arrived === 2) bothClaimed();
+        await together;
+      };
+      const outcomes = await Promise.allSettled([
+        attempt(org, k, meet, ENDPOINT),
+        attempt(org, k, meet, OTHER_ENDPOINT),
+      ]);
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(['rejected', 'rejected']);
+      for (const outcome of outcomes) {
+        expect((outcome as PromiseRejectedResult).reason).toMatchObject({
+          code: 'INSUFFICIENT_ROLE',
+        });
+      }
+      expect(await refusedEvents(org)).toBe(2);
+      expect(await recordsOf(org, k)).toHaveLength(1);
+    }, 20_000);
+
+    it('a request that claimed while the record lived is audited once, with the purge run between its claim and its refusal', async () => {
+      const org = organization();
+      const k = key();
+      await expect(attempt(org, k)).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(1);
+
+      await expect(
+        attempt(org, k, async () => {
+          // The record expires just after this request claimed, and the purge runs before it is
+          // refused: the record stays, and the refusal is the same one repeated.
+          const at = await claimedAt(org, k);
+          await expireRecordAt(org, k, new Date(at.getTime() + 1));
+          await sleep(5);
+          await store.purgeExpired();
+          expect(await recordsOf(org, k)).toHaveLength(1);
+        }),
+      ).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
+      expect(await refusedEvents(org)).toBe(1);
+    });
+
+    it('is purged only once it expired more than a claim lease ago, and never while its key has a live claim', async () => {
+      const org = organization();
+      const lease = env.CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS * 1000;
+      const longAgo = new Date(Date.now() - lease - 60_000);
+      const old = key();
+      const recent = key();
+      const held = key();
+      const lapsed = key();
+      await plantRecord(org, old, longAgo);
+      await plantRecord(org, recent, new Date(Date.now() - 1_000));
+      await plantRecord(org, held, longAgo);
+      await plant(org, held, 'h', 'IN_PROGRESS', new Date(Date.now() + 60_000));
+      await plantRecord(org, lapsed, longAgo);
+      await plant(org, lapsed, 'h', 'IN_PROGRESS', new Date(Date.now() - 1_000));
+
+      await store.purgeExpired();
+      expect(await recordsOf(org, old)).toEqual([]);
+      expect(await recordsOf(org, recent)).toHaveLength(1);
+      expect(await recordsOf(org, held)).toHaveLength(1);
+      // A claim whose lease lapsed holds nothing: it is purged with its record.
+      expect(await recordsOf(org, lapsed)).toEqual([]);
+      expect(await rowsOf(org, lapsed)).toEqual([]);
+    });
+
+    it('a request whose claim was lost records nothing: a retryable 503, no event and no record', async () => {
+      const org = organization();
+      const k = key();
+      await expect(
+        attempt(org, k, async () => {
+          await runUnscoped('the suite takes the claim away', () =>
+            prisma.client.idempotencyKey.deleteMany({ where: { organizationId: org, key: k } }),
+          );
+        }),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE', retryAfterSeconds: 1 });
+      expect(await refusedEvents(org)).toBe(0);
+      expect(await recordsOf(org, k)).toEqual([]);
+    });
   });
 });

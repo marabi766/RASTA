@@ -724,3 +724,71 @@ describe('payment-reconciliation evidence on path A', () => {
     expect(JSON.stringify(logged)).not.toContain('payload keys');
   });
 });
+
+describe('contract refusal events on path A', () => {
+  const delivery: EventDelivery = Object.freeze({ topic: 'rasta.contract.v1', partition: 0 });
+  const EMAIL_KEY = 'alice.private@example.com';
+
+  function refusal(payloadOverrides: Record<string, unknown> = {}): EventEnvelope {
+    return {
+      eventId: '01JPROJECTORSPECREFUSAL01',
+      eventName: 'CONTRACT_AUTHORITY_REFUSED',
+      eventVersion: 1,
+      occurredAt: '2026-10-13T10:00:00.000Z',
+      producer: 'contract-service',
+      aggregateType: 'Contract',
+      aggregateId: 'con_1',
+      tenantId: 'ORG-1',
+      correlationId: 'corr-1',
+      payload: {
+        contractId: 'con_1',
+        organizationId: 'ORG-1',
+        action: 'SIGN_CONTRACT',
+        side: 'EMPLOYER',
+        subjectId: null,
+        reason: 'ROLE_NOT_PERMITTED',
+        policyId: null,
+        refusedBy: 'usr_1',
+        refusedAt: '2026-10-13T10:00:00.000Z',
+        ...payloadOverrides,
+      },
+    } as EventEnvelope;
+  }
+
+  it('rejects an unknown property before ingestion and never logs its name', async () => {
+    const logged: unknown[][] = [];
+    const logger = {
+      info: (...args: unknown[]) => logged.push(args),
+      warn: (...args: unknown[]) => logged.push(args),
+      error: (...args: unknown[]) => logged.push(args),
+      debug: (...args: unknown[]) => logged.push(args),
+    } as unknown as Logger;
+    let ingested = 0;
+    const projector = new DomainProjectorConsumer(
+      () => ({}) as EventConsumer,
+      {
+        ingest: async (): Promise<IngestOutcome> => {
+          ingested += 1;
+          return 'WRITTEN';
+        },
+      } as unknown as AuditRepository,
+      logger,
+    );
+
+    await expect(
+      projector.handle(refusal({ [EMAIL_KEY]: 'x', reason: 'NOT_A_REASON' }), delivery),
+    ).rejects.toMatchObject({ name: 'UnprocessableEventError', reason: 'VALIDATION_FAILED' });
+
+    expect(ingested).toBe(0);
+    const text = JSON.stringify(logged);
+    // The event identifiers and the fixed schema paths and codes are logged…
+    expect(text).toContain('CONTRACT_AUTHORITY_REFUSED');
+    expect(text).toContain('01JPROJECTORSPECREFUSAL01');
+    expect(text).toContain('reason:invalid_enum_value');
+    expect(text).toContain('(root):unrecognized_keys');
+    // …a property name from the payload never is, in any form.
+    expect(text).not.toContain(EMAIL_KEY);
+    expect(text).not.toContain('alice');
+    expect(text).not.toContain('payload keys');
+  });
+});

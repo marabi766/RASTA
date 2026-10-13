@@ -5,7 +5,7 @@ import { fetchMaintenanceRequests, type MaintenanceRequestListQuery } from '@/se
 import { canReportMaintenance } from '@/server/maintenance-commands';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { ReportRequestForm } from './ReportRequestForm';
 
@@ -64,7 +64,7 @@ export default async function MaintenancePage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/maintenance" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/maintenance" />}
     >
       <MaintenanceScreen
         result={result}

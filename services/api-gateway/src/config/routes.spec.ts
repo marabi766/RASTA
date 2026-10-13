@@ -210,6 +210,8 @@ describe('resolveRoute', () => {
     ['/projects/PRJ_1/approvals', 'construction'],
     ['/approvals/APR_1/decision', 'construction'],
     ['/approval-policies/APL_1/activate', 'construction'],
+    ['/contract-approval-policies', 'contract'],
+    ['/contract-approval-policies/APL_1/approve', 'contract'],
     ['/open-tenders', 'construction'],
     ['/open-tenders/TND_1', 'construction'],
     ['/criteria-templates', 'construction'],

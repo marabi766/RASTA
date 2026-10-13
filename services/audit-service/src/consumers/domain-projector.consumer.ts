@@ -115,6 +115,18 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       // The event id, name and topic are identifiers, not content. The payload
       // is described by key names only — never values — because this line ends
       // up in a log aggregator with none of the audit store's access controls.
+      //
+      // A payload a strict projection rejected (the contract refusal events) is not
+      // described by key names at all: a producer can put text — an email — in a
+      // property name. Its refusal carries fixed schema paths and zod issue codes
+      // only, and that is all that is logged beside the event identifiers (S-09).
+      if (error instanceof UnprocessableEventError) {
+        this.logger.error(
+          `Cannot map ${envelope.eventName} ${envelope.eventId} from ${delivery.topic}: ` +
+            error.message,
+        );
+        throw error;
+      }
       this.logger.error(
         `Cannot map ${envelope.eventName} ${envelope.eventId} from ${delivery.topic} ` +
           `(payload keys: ${describePayloadKeys(envelope.payload)})`,
