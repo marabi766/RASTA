@@ -1,10 +1,21 @@
+import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import { ulid } from 'ulid';
 import type { PrismaClient } from '../src/generated/prisma';
+import { ID_PREFIX, newId } from '../src/events/publisher';
 import { ReservationExpiry } from '../src/reservation/expiry';
 import { ReservationRepository } from '../src/reservation/reservation.repository';
 import { ReservationSweeper } from '../src/reservation/reservation.sweeper';
-import { StockRepository } from '../src/stock/stock.repository';
-import { client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
+import { transactionNow } from '../src/shared/clock';
+import { commandKeyHash } from '../src/shared/command';
+import { StockRepository, type StockItemRow } from '../src/stock/stock.repository';
+import { actor, client, key, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, expectReconciled, newOrganizationId, runtimeClient } from './helpers';
+
+/** INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE for this suite: small, so a backlog is cheap to build. */
+const BATCH = 10;
+
+/** The envelope's actor of every expiry, on the command path and the sweeper's alike. */
+const SERVICE_ACTOR = { type: 'SERVICE', id: 'inventory-service' };
 
 /**
  * Reservation expiry (Q-102; ADR-056 plan step 5 asked for the choice): a real transition — an
@@ -25,25 +36,89 @@ describe('reservation expiry', () => {
   };
   const inASecond = () => new Date(Date.now() + 1000).toISOString();
   const pastDue = () => new Promise((resolve) => setTimeout(resolve, 1300));
-  const releasedEvents = async (organizationId: string) =>
+  interface Envelope {
+    eventName: string;
+    correlationId: string;
+    actor?: { type: string; id: string };
+    payload: Record<string, unknown>;
+  }
+  const envelopes = async (organizationId: string, eventName?: string) =>
     (
       await raw.outboxMessage.findMany({
-        where: { organizationId, eventName: 'STOCK_RELEASED' },
-        orderBy: { createdAt: 'asc' },
+        where: { organizationId, ...(eventName === undefined ? {} : { eventName }) },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       })
-    ).map((row) => (row.payload as { payload: Record<string, unknown> }).payload);
+    ).map((row) => row.payload as unknown as Envelope);
+  const releasedEvents = async (organizationId: string) =>
+    (await envelopes(organizationId, 'STOCK_RELEASED')).map((envelope) => envelope.payload);
+  const activeCount = (stockItemId: string) =>
+    raw.stockReservation.count({ where: { stockItemId, status: 'ACTIVE' } });
+
+  /**
+   * `count` reservations of one unit on a stock item, due within a second — written as the
+   * service writes them (balance, reservation, RESERVE movement), in one transaction: a backlog
+   * no sequence of API calls builds quickly. Returns their ids, oldest first.
+   */
+  async function plantDue(
+    organizationId: string,
+    stockItemId: string,
+    count: number,
+  ): Promise<string[]> {
+    const stock = api.app.get(StockRepository);
+    const ids: string[] = [];
+    await runWithContext(createSystemContext({ correlationId: ulid(), organizationId }), () =>
+      api.prisma.transaction(
+        async (tx) => {
+          const at = await transactionNow(tx);
+          const expiresAt = new Date(at.getTime() + 1000);
+          let item = (await stock.lock(tx, organizationId, stockItemId)) as StockItemRow;
+          for (let i = 0; i < count; i += 1) {
+            item = await stock.move(tx, item, { onHand: 0, reserved: 1 }, 'USR-BACKLOG', at);
+            const keyHash = commandKeyHash('plant', ulid());
+            const reservation = await reservations.insert(tx, {
+              id: newId(ID_PREFIX.reservation),
+              organizationId,
+              warehouseId: item.warehouseId,
+              stockItemId,
+              holderOrganizationId: organizationId,
+              orderReference: null,
+              quantity: 1,
+              expiresAt,
+              commandKeyHash: keyHash,
+              actor: 'USR-BACKLOG',
+              correlationId: 'plant',
+              at,
+            });
+            await stock.insertMovement(tx, {
+              id: newId(ID_PREFIX.movement),
+              item,
+              type: 'RESERVE',
+              onHandDelta: 0,
+              reservedDelta: 1,
+              reservationId: reservation.id,
+              sourceReference: null,
+              commandKeyHash: keyHash,
+              correlationId: 'plant',
+              actor: 'USR-BACKLOG',
+              at,
+            });
+            ids.push(reservation.id);
+          }
+        },
+        { timeoutMs: 120_000, maxWaitMs: 10_000 },
+      ),
+    );
+    return ids;
+  }
 
   beforeAll(async () => {
-    api = await startApi();
+    api = await startApi({ INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: String(BATCH) });
     raw = runtimeClient();
     reservations = api.app.get(ReservationRepository);
-    sweeper = new ReservationSweeper(
-      api.prisma,
-      reservations,
-      api.app.get(StockRepository),
-      api.app.get(ReservationExpiry),
-      { intervalMs: 60_000, batchSize: 100, lockTimeoutMs: 1000 },
-    );
+    sweeper = new ReservationSweeper(reservations, api.app.get(ReservationExpiry), {
+      intervalMs: 60_000,
+      batchSize: 100,
+    });
   });
 
   afterAll(async () => {
@@ -97,6 +172,8 @@ describe('reservation expiry', () => {
         itemVersion: 3,
       }),
     ]);
+    // The audit actor is the service, as the payload says.
+    expect((await envelopes(a, 'STOCK_RELEASED'))[0]?.actor).toEqual(SERVICE_ACTOR);
 
     // A second sweep finds nothing left of this owner's.
     await sweeper.runOnce();
@@ -120,6 +197,25 @@ describe('reservation expiry', () => {
     });
     expect(await releasedEvents(a)).toEqual([expect.objectContaining({ reason: 'EXPIRED' })]);
     await expectReconciled(raw, [a]);
+  });
+
+  it('records an expiry a person’s command made as the service’s act, in that command’s correlation', async () => {
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 5);
+    const userId = 'USR-EXPIRY-CALLER1';
+    const person = client(api, actor(a, ['ORGANIZATION_ADMIN'], { rastaUserId: userId }));
+    await person.reserve([{ stockItemId, quantity: 2 }], { expiresAt: inASecond() });
+    await pastDue();
+
+    expect((await person.reserve([{ stockItemId, quantity: 1 }])).status).toBe(201);
+    const [expired] = await envelopes(a, 'STOCK_RELEASED');
+    const reserved = (await envelopes(a, 'STOCK_RESERVED')).at(-1);
+    expect(expired?.payload).toMatchObject({ reason: 'EXPIRED', releasedBy: null });
+    // Not the person whose command happened to lock the item: the service.
+    expect(expired?.actor).toEqual(SERVICE_ACTOR);
+    // The command's own event is still the person's, and both share its correlation.
+    expect(reserved?.actor).toEqual({ type: 'USER', id: userId });
+    expect(expired?.correlationId).toBe(reserved?.correlationId);
   });
 
   it('releasing or issuing a reservation past its time is refused: it expired first (409 RESERVATION_NOT_ACTIVE)', async () => {
@@ -182,6 +278,118 @@ describe('reservation expiry', () => {
     expect((await owner.get(`/v1/stock/reservations/${id}`)).body).toMatchObject({
       status: 'ACTIVE',
       expiresAt: null,
+    });
+  });
+
+  /**
+   * Codex round 1, finding 1: expiring every due reservation of an item in one transaction grew
+   * with the backlog until it outlived its budget, rolled back, and was repeated — and rolled back
+   * — by every later command on the item and every sweep. A batch, committed, never the backlog.
+   */
+  describe('a backlog larger than a batch', () => {
+    it('is worked off in committed batches: one transaction expires a batch, and keeps it', async () => {
+      const a = org();
+      const backlog = 25 * BATCH;
+      const { stockItemId } = await seedStock(api, a, backlog);
+      await plantDue(a, stockItemId, backlog);
+      await pastDue();
+
+      const expiry = api.app.get(ReservationExpiry);
+      const first = await expiry.expireBatch(a, stockItemId, ulid(), 'sweeper');
+      expect(first).toMatchObject({ expired: BATCH, backlog: true });
+      // Committed: what one batch did stays done, whatever the next one meets.
+      expect(await activeCount(stockItemId)).toBe(backlog - BATCH);
+      expect((await client(api, orgAdmin(a)).stockItem(stockItemId)).body.reservedQuantity).toBe(
+        backlog - BATCH,
+      );
+
+      const outcome = await sweeper.runOnce();
+      expect(outcome).toMatchObject({ failed: 0, backlogged: 0 });
+      expect(outcome.expired).toBeGreaterThanOrEqual(backlog - BATCH);
+      expect(await activeCount(stockItemId)).toBe(0);
+      const released = await envelopes(a, 'STOCK_RELEASED');
+      expect(released).toHaveLength(backlog);
+      expect(released.every((envelope) => envelope.actor?.id === SERVICE_ACTOR.id)).toBe(true);
+      await expectReconciled(raw, [a]);
+    });
+
+    it('lets through a command what is left cannot change — receipt, adjustment, reservation, release, issue', async () => {
+      const a = org();
+      const { stockItemId, warehouseId, productId } = await seedStock(api, a, 100);
+      const owner = client(api, orgAdmin(a));
+      const live = (await owner.reserve([{ stockItemId, quantity: 2 }])).body.reservations[0].id;
+      const due = await plantDue(a, stockItemId, 6 * BATCH);
+      await pastDue();
+
+      expect((await owner.receive(warehouseId, 5, productId)).status).toBe(201);
+      expect((await owner.adjust(stockItemId, -10)).status).toBe(201);
+      expect((await owner.reserve([{ stockItemId, quantity: 20 }])).status).toBe(201);
+      expect((await owner.release(live)).status).toBe(200);
+      // Four commands, each one batch: the backlog is smaller, and not gone.
+      expect(await activeCount(stockItemId)).toBe(6 * BATCH - 4 * BATCH + 1);
+
+      // A due reservation past every batch so far is expired all the same.
+      const last = due.at(-1) as string;
+      const issued = await owner.issue(last);
+      expect(issued.status).toBe(409);
+      expect(issued.body.details).toEqual([
+        expect.objectContaining({ code: 'RESERVATION_NOT_ACTIVE' }),
+      ]);
+      await expectReconciled(raw, [a]);
+    });
+
+    it('answers 409 CONFLICT with Retry-After where what is left could change a refusal, and leaves a batch done', async () => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 3 * BATCH);
+      const owner = client(api, orgAdmin(a));
+      await plantDue(a, stockItemId, 3 * BATCH);
+      await pastDue();
+      const k = key();
+
+      // Each attempt expires a batch in its own transaction — rolled back with the 409 — and one
+      // committed after it, so every retry finds the backlog a batch smaller.
+      const first = await owner.reserve([{ stockItemId, quantity: 25 }], {}, k);
+      expect(first.status).toBe(409);
+      expect(first.body.code).toBe('CONFLICT');
+      expect(first.headers['retry-after']).toBe('1');
+      expect(await activeCount(stockItemId)).toBe(2 * BATCH);
+
+      const second = await owner.reserve([{ stockItemId, quantity: 25 }], {}, k);
+      expect(second.status).toBe(409);
+      expect(await activeCount(stockItemId)).toBe(BATCH);
+
+      const third = await owner.reserve([{ stockItemId, quantity: 25 }], {}, k);
+      expect(third.status).toBe(201);
+      expect((await owner.stockItem(stockItemId)).body).toMatchObject({
+        onHandQuantity: 3 * BATCH,
+        reservedQuantity: 25,
+      });
+      await expectReconciled(raw, [a]);
+    });
+
+    it('answers an adjustment below reserved 409 while a backlog could make room, 422 once none is left', async () => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 3 * BATCH);
+      const owner = client(api, orgAdmin(a));
+      await plantDue(a, stockItemId, 2 * BATCH + 1);
+      await pastDue();
+
+      const contended = await owner.adjust(stockItemId, -(3 * BATCH));
+      expect(contended.status).toBe(409);
+      expect(contended.headers['retry-after']).toBe('1');
+      expect(await activeCount(stockItemId)).toBe(BATCH + 1);
+
+      // One due reservation is left past this one's batch, and the adjustment fits with it counted.
+      const fits = await owner.adjust(stockItemId, -(3 * BATCH - 1));
+      expect(fits.status).toBe(201);
+      expect(await activeCount(stockItemId)).toBe(1);
+      // No backlog past the batch: the refusal is sure, and a 422.
+      const refused = await owner.adjust(stockItemId, -2);
+      expect(refused.status).toBe(422);
+      expect(refused.body.details).toEqual([
+        expect.objectContaining({ code: 'ON_HAND_WOULD_BE_NEGATIVE' }),
+      ]);
+      await expectReconciled(raw, [a]);
     });
   });
 });

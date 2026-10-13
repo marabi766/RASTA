@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
-import { isLockTimeout, isUniqueViolation } from './prisma-errors';
+import { isLockTimeout, isTransactionUnavailable, isUniqueViolation } from './prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
 import { SERVICE_NAME, type InventoryEnv } from '../config/env';
 
@@ -140,6 +140,7 @@ export type IdempotencyEnv = Pick<
  * | situation                               | response                                    |
  * | --------------------------------------- | ------------------------------------------- |
  * | no key, or one outside 8–255 characters | `400 VALIDATION_FAILED`, nothing claimed    |
+ * | a caller the inventory policy refuses   | its `403`, nothing claimed or replayed      |
  * | new key                                 | the work runs; its response is stored       |
  * | same key, same request, same caller     | the stored response, nothing runs again —   |
  * |                                         | if the caller may still see what it names   |
@@ -183,9 +184,16 @@ export type IdempotencyEnv = Pick<
 export class IdempotencyStore {
   private readonly logger = new Logger(IdempotencyStore.name);
 
+  /**
+   * @param authorize Refuses a caller who may not run a command here at all — the inventory
+   *   policy's 403 — and runs **before** anything about the key: a caller refused by it claims
+   *   nothing, replays nothing and learns nothing of a key's state, and a tenantless one never
+   *   reaches the organization-scoped store (where it would be a 500, not a 403).
+   */
   constructor(
     private readonly prisma: PrismaService,
     private readonly env: IdempotencyEnv,
+    private readonly authorize: () => void,
   ) {}
 
   /**
@@ -201,6 +209,7 @@ export class IdempotencyStore {
     work: (fence: ClaimFence<T>) => Promise<T>,
     stillVisible: ReplayGuard<T>,
   ): Promise<{ result: T; executed: boolean }> {
+    this.authorize();
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') {
       const stored = claim.body as T;
@@ -316,7 +325,14 @@ export class IdempotencyStore {
     const deadline = Date.now() + IN_FLIGHT_WAIT_MS;
     let retries = 0;
     for (;;) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline).catch(
+        (error: unknown) => {
+          // The look at the existing row runs outside a transaction: an exhausted pool there is
+          // P2024, the same contention `withinBudget` answers, and answered the same way.
+          if (isTransactionUnavailable(error)) throw inFlight(endpoint);
+          throw error;
+        },
+      );
       if (outcome === RETRY_CLAIM) {
         retries += 1;
         if (retries >= CLAIM_ATTEMPTS) throw inFlight(endpoint);
@@ -428,7 +444,8 @@ export class IdempotencyStore {
         { timeoutMs: waitMs + WAIT_TRANSACTION_SLACK_MS, maxWaitMs: waitMs },
       );
     } catch (error) {
-      if (isLockTimeout(error)) throw inFlight(endpoint);
+      // No connection within the budget (P2028/P2024) is the same budget spent as a lock wait.
+      if (isLockTimeout(error) || isTransactionUnavailable(error)) throw inFlight(endpoint);
       throw error;
     }
   }
@@ -457,8 +474,10 @@ export class IdempotencyStore {
         { timeoutMs: waitMs + WAIT_TRANSACTION_SLACK_MS, maxWaitMs: waitMs },
       );
     } catch (error) {
-      if (!isLockTimeout(error)) throw error;
-      return;
+      if (isLockTimeout(error)) return;
+      // No connection for the wait within what is left of the budget: the budget is spent.
+      if (isTransactionUnavailable(error)) throw inFlight(endpoint);
+      throw error;
     }
     const waited = Date.now() - started;
     if (waited < IN_FLIGHT_POLL_MS) await sleep(IN_FLIGHT_POLL_MS - waited);

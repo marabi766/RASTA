@@ -110,20 +110,23 @@ export class ReservationRepository {
   }
 
   /**
-   * The ACTIVE reservations of a **locked** stock item whose `expiresAt` is at or before `at`,
-   * locked, oldest first.
+   * At most `limit` ACTIVE reservations of a **locked** stock item whose `expiresAt` is at or
+   * before `at`, locked, the longest overdue first. Never all of them: a backlog is worked off
+   * in batches (`ReservationExpiry`).
    */
   async dueOf(
     tx: ExtendedPrismaClient,
     organizationId: string,
     stockItemId: string,
     at: Date,
+    limit: number,
   ): Promise<ReservationRow[]> {
     return tx.$queryRaw<ReservationRow[]>`
       SELECT ${COLUMNS} FROM "stock_reservation"
        WHERE "organization_id" = ${organizationId} AND "stock_item_id" = ${stockItemId}
          AND "status" = 'ACTIVE' AND "expires_at" <= ${at}
-       ORDER BY "id"
+       ORDER BY "expires_at", "id"
+       LIMIT ${limit}::integer
        FOR UPDATE`;
   }
 

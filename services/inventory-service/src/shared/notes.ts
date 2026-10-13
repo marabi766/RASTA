@@ -24,7 +24,9 @@ export const COMMAND_NOTE =
 
 export const STOCK_COMMAND_NOTE =
   'One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending ' +
-  'id order, reservations of theirs past `expiresAt` are released first, then the balance, its ' +
-  'append-only movement and the event commit together — or nothing does. A stock item another ' +
-  'command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; ' +
-  'retry with the same key.';
+  'id order, reservations of theirs past `expiresAt` are released first (at most ' +
+  'INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only ' +
+  'movement and the event commit together — or nothing does. A stock item another command ' +
+  'holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past ' +
+  '`expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry ' +
+  'with the same key.';

@@ -1,9 +1,12 @@
+import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import type { PrismaClient } from '../src/generated/prisma';
 import { PrismaClient as Owner } from '../src/generated/prisma';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { IdempotencyStore, hashRequest } from '../src/shared/idempotency';
 import { actor, client, key, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import {
   cleanup,
+  databaseUrl,
   expectReconciled,
   newOrganizationId,
   ownerDatabaseUrl,
@@ -183,6 +186,44 @@ describe('idempotent stock commands', () => {
       expect((await asUser(a).stockItem(stockItemId)).body.onHandQuantity).toBe(5);
     });
   });
+
+  it('answers a claim that cannot get a connection (the pool exhausted) 409 CONFLICT with Retry-After, never a 500', async () => {
+    const a = org();
+    // One connection, held by another transaction for longer than the claim's whole budget.
+    const url = new URL(databaseUrl());
+    url.searchParams.set('connection_limit', '1');
+    const narrow = new PrismaService(url.toString());
+    const store = new IdempotencyStore(
+      narrow,
+      { INVENTORY_IDEMPOTENCY_TTL_HOURS: 24, INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 120 },
+      () => undefined,
+    );
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = narrow.transaction(() => held, { timeoutMs: 30_000 });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const work = jest.fn();
+      const context = createSystemContext({
+        correlationId: key(),
+        organizationId: a,
+        userId: 'USR-IDEM-POOL0001',
+      });
+      const outcome = await runWithContext(context, () =>
+        store.execute('POST /v1/stock/adjustments', key(), { n: 1 }, 201, work, jest.fn()),
+      ).catch((error: unknown) => error);
+
+      expect(outcome).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+      expect(work).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await holder;
+      await narrow.onModuleDestroy();
+    }
+    expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
+  }, 30_000);
 
   it('purges expired records by age alone', async () => {
     const a = org();

@@ -1,8 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, getContext } from '@rasta/nest-common';
 import { SERVICE_NAME, type InventoryEnv } from '../config/env';
 import { inventoryCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { ExpiryBacklog, ReservationExpiry } from '../reservation/expiry';
 import { ENV } from '../tokens';
 import { transactionNow } from './clock';
 import { boundLockWaits, translateCommandError } from './command';
@@ -19,12 +20,14 @@ export type StockCommandName = 'receive' | 'adjust' | 'reserve' | 'release' | 'i
  *
  * — all in one transaction, so the balance, its ledger, the event and the replayable answer
  * commit together or not at all. What the database refused is translated once, here
- * (`translateCommandError`), and every outcome is counted.
+ * (`translateCommandError`), and every outcome is counted. A command refused for an expiry
+ * backlog (`ExpiryBacklog`) leaves one committed batch of it expired behind.
  */
 @Injectable()
 export class CommandRunner {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly expiry: ReservationExpiry,
     @Inject(ENV) private readonly env: InventoryEnv,
   ) {}
 
@@ -50,6 +53,11 @@ export class CommandRunner {
       this.count(command, 'applied');
       return result;
     } catch (error) {
+      // The rollback took the command's own expiry batch with it: commit one now, so the retry
+      // the 409 asks for finds the backlog smaller even if no sweep runs in between.
+      if (error instanceof ExpiryBacklog) {
+        await this.expiry.workOff(error, getContext().correlationId);
+      }
       const answered = translateCommandError(error, overdrawn);
       if (answered instanceof RastaError) {
         this.count(command, answered.code === 'CONFLICT' ? 'contended' : 'refused');

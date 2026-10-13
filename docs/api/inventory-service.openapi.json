@@ -127,7 +127,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -254,7 +254,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -264,11 +264,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, or a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations past their expiresAt that could change the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -436,7 +436,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -642,7 +642,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -671,7 +671,7 @@
         ]
       },
       "post": {
-        "description": "Reserves each line’s quantity of its stock item for the holder — reserved grows, on hand does not — and records a RESERVE movement and STOCK_RESERVED per line. All or nothing: a line short of available stock reserves none (422 `INSUFFICIENT_AVAILABLE_STOCK`); lines of two warehouses are 422 `LINES_SPAN_WAREHOUSES`; an `expiresAt` not in the future or past the longest reservation allowed is 422 `EXPIRY_OUT_OF_RANGE`; a holder other than the owner is 422 `HOLDER_NOT_OWNER` (Q-104). A stock item of another organization is 404. Under any number of concurrent requests the stock is never over-reserved: available never falls below zero. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first, then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "Reserves each line’s quantity of its stock item for the holder — reserved grows, on hand does not — and records a RESERVE movement and STOCK_RESERVED per line. All or nothing: a line short of available stock reserves none (422 `INSUFFICIENT_AVAILABLE_STOCK`); lines of two warehouses are 422 `LINES_SPAN_WAREHOUSES`; an `expiresAt` not in the future or past the longest reservation allowed is 422 `EXPIRY_OUT_OF_RANGE`; a holder other than the owner is 422 `HOLDER_NOT_OWNER` (Q-104). A stock item of another organization is 404. Under any number of concurrent requests the stock is never over-reserved: available never falls below zero. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "ReservationController_reserve_v1",
         "parameters": [
           {
@@ -801,7 +801,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -821,11 +821,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, or a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations past their expiresAt that could change the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1105,7 +1105,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1146,7 +1146,7 @@
     },
     "/v1/stock/reservations/{id}/release": {
       "post": {
-        "description": "Reserved falls by the reservation’s quantity, on hand does not; a RELEASE movement and STOCK_RELEASED (`reason: RELEASED`). `expectedVersion` is optional. A reservation that is no longer ACTIVE — issued, released, or past its `expiresAt` (expired first, under the same lock) — is 409 `RESERVATION_NOT_ACTIVE` (INVALID_STATE_TRANSITION). A reservation of another organization, even on the same stock item, is 404 (ADR-056 § 5). One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first, then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "Reserved falls by the reservation’s quantity, on hand does not; a RELEASE movement and STOCK_RELEASED (`reason: RELEASED`). `expectedVersion` is optional. A reservation that is no longer ACTIVE — issued, released, or past its `expiresAt` (expired first, under the same lock) — is 409 `RESERVATION_NOT_ACTIVE` (INVALID_STATE_TRANSITION). A reservation of another organization, even on the same stock item, is 404 (ADR-056 § 5). One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "ReservationController_release_v1",
         "parameters": [
           {
@@ -1274,7 +1274,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1294,11 +1294,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, or a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations past their expiresAt that could change the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1435,7 +1435,7 @@
     },
     "/v1/stock/reservations/{id}/issue": {
       "post": {
-        "description": "Consumes the **whole** reservation — on hand and reserved both fall by its quantity — and records an ISSUE movement and STOCK_ISSUED. There is no partial issue (Q-107): a smaller need is a release and a new reservation. `expectedVersion` is optional. A reservation that is no longer ACTIVE — issued, released, or past its `expiresAt` (expired first, under the same lock) — is 409 `RESERVATION_NOT_ACTIVE` (INVALID_STATE_TRANSITION). A reservation of another organization, even on the same stock item, is 404 (ADR-056 § 5). One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first, then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "Consumes the **whole** reservation — on hand and reserved both fall by its quantity — and records an ISSUE movement and STOCK_ISSUED. There is no partial issue (Q-107): a smaller need is a release and a new reservation. `expectedVersion` is optional. A reservation that is no longer ACTIVE — issued, released, or past its `expiresAt` (expired first, under the same lock) — is 409 `RESERVATION_NOT_ACTIVE` (INVALID_STATE_TRANSITION). A reservation of another organization, even on the same stock item, is 404 (ADR-056 § 5). One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "ReservationController_issue_v1",
         "parameters": [
           {
@@ -1563,7 +1563,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1583,11 +1583,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, or a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE). When refused for a closed reason, `details` names it: one entry, `path` the area (stock, reservation) and `code` the reason, one of those listed here. Branch on `code` and `details[].code`, never on `message`. (reservation: RESERVATION_NOT_ACTIVE)",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations past their expiresAt that could change the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -1867,7 +1867,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2053,7 +2053,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2168,7 +2168,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2209,7 +2209,7 @@
     },
     "/v1/stock/receipts": {
       "post": {
-        "description": "Adds `quantity` to on hand of the product in the warehouse, creating the stock item on its first receipt, and records a RECEIPT movement and STOCK_RECEIVED. A warehouse of another organization is 404. A balance past the largest quantity stored is 422 `QUANTITY_OUT_OF_RANGE`. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first, then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "Adds `quantity` to on hand of the product in the warehouse, creating the stock item on its first receipt, and records a RECEIPT movement and STOCK_RECEIVED. A warehouse of another organization is 404. A balance past the largest quantity stored is 422 `QUANTITY_OUT_OF_RANGE`. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "StockController_receive_v1",
         "parameters": [
           {
@@ -2378,7 +2378,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2398,11 +2398,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, or a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations past their expiresAt that could change the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,
@@ -2518,7 +2518,7 @@
     },
     "/v1/stock/adjustments": {
       "post": {
-        "description": "Changes on hand by `quantityDelta` and records an ADJUSTMENT movement and STOCK_ADJUSTED — also ADR-056’s direct issue without a reservation. On hand may not fall below what is reserved (422 `ON_HAND_WOULD_BE_NEGATIVE`) nor pass the largest quantity stored (422 `QUANTITY_OUT_OF_RANGE`). No reason code or second approval is required: none is decided (Q-109); the operator, the movement and its event are the record. A stock item of another organization is 404. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first, then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
+        "description": "Changes on hand by `quantityDelta` and records an ADJUSTMENT movement and STOCK_ADJUSTED — also ADR-056’s direct issue without a reservation. On hand may not fall below what is reserved (422 `ON_HAND_WOULD_BE_NEGATIVE`) nor pass the largest quantity stored (422 `QUANTITY_OUT_OF_RANGE`). No reason code or second approval is required: none is decided (Q-109); the operator, the movement and its event are the record. A stock item of another organization is 404. One transaction (ADR-056 § 3): the stock items the command touches are locked in ascending id order, reservations of theirs past `expiresAt` are released first (at most INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE per item), then the balance, its append-only movement and the event commit together — or nothing does. A stock item another command holds longer than INVENTORY_LOCK_TIMEOUT_MS, or a refusal that reservations past `expiresAt` not yet released could still change, is 409 CONFLICT with Retry-After; retry with the same key. Requires an `Idempotency-Key` (docs/06 § 6.8): without one, or with one outside 8 to 255 characters, 400 VALIDATION_FAILED and nothing is done. The same key with the same body from the same user answers the original response and does nothing again; the same key with another body or user is 409 IDEMPOTENCY_KEY_REUSED; a duplicate that arrives while the first is still being processed waits for its answer and past a few seconds is 409 CONFLICT with Retry-After. The caller must be a signed-in person with a platform user id and a role of INVENTORY_OPERATOR_ROLES (ORGANIZATION_ADMIN by default, Q-103) in the organization the request acts for; AUDITOR, SYSTEM_ADMIN and service tokens are refused (403). Anything of another organization is 404, never 403. Refusals carry their closed reason in `details[].code` (docs/06 § 6.7).",
         "operationId": "StockController_adjust_v1",
         "parameters": [
           {
@@ -2687,7 +2687,7 @@
             }
           },
           "403": {
-            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, or a user token without the platform user id on a command (FORBIDDEN); on create, a body naming another organization (FORBIDDEN).",
+            "description": "Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).",
             "content": {
               "application/json": {
                 "schema": {
@@ -2707,11 +2707,11 @@
             }
           },
           "409": {
-            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, or a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
+            "description": "An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).",
             "headers": {
               "Retry-After": {
                 "required": false,
-                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS: the seconds to wait before retrying with the same key. Absent on every other 409.",
+                "description": "Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations past their expiresAt that could change the refusal are still being released: the seconds to wait before retrying with the same key. Absent on every other 409.",
                 "schema": {
                   "type": "integer",
                   "minimum": 1,

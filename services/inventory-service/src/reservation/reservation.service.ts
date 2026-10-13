@@ -18,9 +18,9 @@ import type {
   ReservationView,
   ReserveStockDto,
 } from './dto';
-import { ReservationExpiry } from './expiry';
+import { ExpiryBacklog, ReservationExpiry, type ExpiryBatch } from './expiry';
 import { ReservationRepository, type ReservationRow } from './reservation.repository';
-import { canMove } from './reservation.state-machine';
+import { canMove, isDue } from './reservation.state-machine';
 import { toReservationView } from './views';
 
 /**
@@ -83,13 +83,17 @@ export class ReservationService {
         );
       }
 
-      const items: StockItemRow[] = [];
+      const batches: ExpiryBatch[] = [];
       for (const item of locked) {
-        items.push(await this.expiry.expireDue(tx, item, at, correlationId, 'command'));
+        batches.push(await this.expiry.expireDue(tx, item, at, correlationId, 'command'));
       }
+      const items: StockItemRow[] = batches.map((batch) => batch.item);
       const quantityOf = new Map(dto.lines.map((line) => [line.stockItemId, line.quantity]));
-      for (const item of items) {
+      for (const { item, backlog } of batches) {
         if ((quantityOf.get(item.id) ?? 0) > item.availableQuantity) {
+          // Due reservations past the batch still hold stock: once they are expired this line
+          // may fit, so the refusal would not be sure (`ReservationExpiry`).
+          if (backlog) throw new ExpiryBacklog(acting.organizationId, [item.id]);
           throw refusal(
             'reservation',
             'INSUFFICIENT_AVAILABLE_STOCK',
@@ -240,16 +244,19 @@ export class ReservationService {
       const locked = await this.stock.lock(tx, acting.organizationId, found.stockItemId);
       if (!locked) throw RastaError.notFound('StockReservation', id);
       // An expiry that is due is honoured first: a reservation past its time is EXPIRED, and
-      // releasing or issuing it is then refused like any other ended one.
-      const item = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
+      // releasing or issuing it is then refused like any other ended one. A backlog left past
+      // the batch only lowers reserved, which neither a release nor an issue depends on.
+      const { item } = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
       const reservation = await this.reservations.lock(tx, acting.organizationId, id);
       if (!reservation) throw RastaError.notFound('StockReservation', id);
-      if (!canMove(reservation.status, status)) {
+      // This one may be due and still past the batch: it is expired all the same.
+      const current = isDue(reservation, at) ? 'EXPIRED' : reservation.status;
+      if (!canMove(current, status)) {
         throw refusal(
           'reservation',
           'RESERVATION_NOT_ACTIVE',
           'The reservation has already been issued, released or expired',
-          { reservationId: id, status: reservation.status },
+          { reservationId: id, status: current },
         );
       }
       if (dto.expectedVersion !== undefined && dto.expectedVersion !== reservation.version) {

@@ -40,6 +40,7 @@ describe('translateCommandError', () => {
     for (const error of [
       raw('55P03', 'canceling statement due to lock timeout'),
       { code: 'P2028', message: 'Transaction API error: Unable to start a transaction' },
+      { code: 'P2024', message: 'Timed out fetching a new connection from the connection pool' },
     ]) {
       const answered = translateCommandError(error, stockOverdrawn) as RastaError;
       expect(answered.code).toBe('CONFLICT');

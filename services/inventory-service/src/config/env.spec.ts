@@ -29,6 +29,10 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
     expect(env.INVENTORY_RESERVATION_SWEEP_BATCH_SIZE).toBe(100);
   });
 
+  it('expires at most 20 due reservations of one stock item per transaction', () => {
+    expect(env.INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE).toBe(20);
+  });
+
   it('waits at most five seconds for a stock item another command holds', () => {
     expect(env.INVENTORY_LOCK_TIMEOUT_MS).toBe(5000);
   });
@@ -94,6 +98,8 @@ describe('overrides', () => {
     ['a reservation cap over a year', { INVENTORY_RESERVATION_MAX_TTL_SECONDS: '40000000' }],
     ['a zero sweep interval', { INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: '0' }],
     ['a zero sweep batch', { INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: '0' }],
+    ['a zero expiry batch', { INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: '0' }],
+    ['an expiry batch over 500', { INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: '501' }],
     ['a lock timeout under 100 ms', { INVENTORY_LOCK_TIMEOUT_MS: '10' }],
     ['a lock timeout over a minute', { INVENTORY_LOCK_TIMEOUT_MS: '60001' }],
     ['a zero idempotency lifetime', { INVENTORY_IDEMPOTENCY_TTL_HOURS: '0' }],

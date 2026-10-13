@@ -25,3 +25,12 @@ export const RESERVATION_TRANSITIONS: Readonly<Record<Status, readonly Status[]>
 export function canMove(from: Status, to: Status): boolean {
   return RESERVATION_TRANSITIONS[from].includes(to);
 }
+
+/** An ACTIVE reservation whose `expiresAt` is at or before `at`: expired, whether or not yet recorded. */
+export function isDue(reservation: { status: Status; expiresAt: Date | null }, at: Date): boolean {
+  return (
+    reservation.status === 'ACTIVE' &&
+    reservation.expiresAt !== null &&
+    reservation.expiresAt.getTime() <= at.getTime()
+  );
+}

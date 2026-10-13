@@ -121,26 +121,27 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
 
     {
       provide: ReservationSweeper,
-      inject: [PrismaService, ReservationRepository, StockRepository, ReservationExpiry, ENV],
+      inject: [ReservationRepository, ReservationExpiry, ENV],
       useFactory: (
-        prisma: PrismaService,
         reservations: ReservationRepository,
-        stock: StockRepository,
         expiry: ReservationExpiry,
         env: InventoryEnv,
       ) =>
-        new ReservationSweeper(prisma, reservations, stock, expiry, {
+        new ReservationSweeper(reservations, expiry, {
           intervalMs: env.INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS * 1000,
           batchSize: env.INVENTORY_RESERVATION_SWEEP_BATCH_SIZE,
-          lockTimeoutMs: env.INVENTORY_LOCK_TIMEOUT_MS,
         }),
     },
 
-    // Idempotent commands (docs/06 § 6.8): this service's own store for every POST.
+    // Idempotent commands (docs/06 § 6.8): this service's own store for every POST — every one
+    // an operator's command, authorized before its key is claimed or replayed.
     {
       provide: IdempotencyStore,
-      inject: [PrismaService, ENV],
-      useFactory: (prisma: PrismaService, env: InventoryEnv) => new IdempotencyStore(prisma, env),
+      inject: [PrismaService, ENV, InventoryAccess],
+      useFactory: (prisma: PrismaService, env: InventoryEnv, access: InventoryAccess) =>
+        new IdempotencyStore(prisma, env, () => {
+          access.assertOperator();
+        }),
     },
 
     {

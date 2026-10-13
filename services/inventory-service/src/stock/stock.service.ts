@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { InventoryAccess } from '../access/access';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
-import { ReservationExpiry } from '../reservation/expiry';
+import { ExpiryBacklog, ReservationExpiry } from '../reservation/expiry';
 import type { Command } from '../shared/command';
 import { stockOverdrawn } from '../shared/command';
 import { CommandRunner } from '../shared/command-runner';
@@ -61,7 +61,8 @@ export class StockService {
       });
       const locked = await this.stock.lock(tx, acting.organizationId, itemId);
       if (!locked) throw RastaError.notFound('StockItem', itemId);
-      const item = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
+      // A backlog left past the batch cannot change a receipt: it is about reserved, not on hand.
+      const { item } = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
 
       if (item.onHandQuantity + dto.quantity > MAX_QUANTITY) {
         throw refusal(
@@ -123,10 +124,19 @@ export class StockService {
     return this.runner.run('adjust', command.fence, stockOverdrawn, async (tx, at) => {
       const locked = await this.stock.lock(tx, acting.organizationId, dto.stockItemId);
       if (!locked) throw RastaError.notFound('StockItem', dto.stockItemId);
-      const item = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
+      const { item, backlog } = await this.expiry.expireDue(
+        tx,
+        locked,
+        at,
+        correlationId,
+        'command',
+      );
 
       const onHandAfter = item.onHandQuantity + dto.quantityDelta;
       if (onHandAfter < item.reservedQuantity) {
+        // Reserved still counts due reservations past the batch: once they are expired this
+        // adjustment may fit, so the refusal would not be sure.
+        if (backlog) throw new ExpiryBacklog(item.organizationId, [item.id]);
         throw refusal(
           'stock',
           'ON_HAND_WOULD_BE_NEGATIVE',

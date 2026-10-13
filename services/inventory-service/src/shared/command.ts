@@ -5,6 +5,7 @@ import type { ClaimFence } from './idempotency';
 import {
   isCheckViolation,
   isLockTimeout,
+  isTransactionUnavailable,
   isUniqueViolation,
   violatedConstraint,
 } from './prisma-errors';
@@ -91,9 +92,9 @@ function isCommandKey(error: unknown, constraint: string | undefined): boolean {
  */
 export function translateCommandError(error: unknown, overdrawn: () => RastaError): unknown {
   if (error instanceof RastaError) return error;
-  // P2028: the transaction could not start in time (the pool is exhausted) or outlived its
-  // budget waiting on locks — the same contention, answered the same way.
-  if (isLockTimeout(error) || (error as { code?: unknown } | null)?.code === 'P2028') {
+  // The transaction could not start in time (the pool is exhausted) or outlived its budget
+  // waiting on locks — the same contention, answered the same way.
+  if (isLockTimeout(error) || isTransactionUnavailable(error)) {
     return new RastaError(
       'CONFLICT',
       'The stock is being changed by another request; retry shortly',

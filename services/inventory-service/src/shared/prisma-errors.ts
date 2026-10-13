@@ -44,6 +44,17 @@ export function isLockTimeout(error: unknown): boolean {
 }
 
 /**
+ * Prisma could not give the work a transaction in time, or ended it past its budget: `P2028`
+ * (a transaction that could not start within `maxWait` — the pool is exhausted — or that
+ * outlived its `timeout`), and `P2024`, the same exhaustion met by a statement outside a
+ * transaction. Contention, never a defect: the caller answers it like a lock timeout.
+ */
+export function isTransactionUnavailable(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === 'P2028' || code === 'P2024';
+}
+
+/**
  * The SQLSTATE of a database error, from a raw query (`P2010`, `meta.code`) or from the
  * driver's own message (`Code: \`23505\``), or `undefined` when there is none.
  */

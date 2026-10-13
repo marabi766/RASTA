@@ -1,6 +1,7 @@
 import request from 'supertest';
 import {
   actor,
+  bearer,
   client,
   internalToken,
   key,
@@ -424,6 +425,39 @@ describe('the inventory API (real application, real PostgreSQL)', () => {
         const refused = client(api, actor(a, ['ORGANIZATION_ADMIN', role]));
         expect([role, (await refused.stockItem(stockItemId)).status]).toEqual([role, 403]);
       }
+    });
+
+    it('refuses a tenantless caller on every command with the policy’s 403 — before any key is claimed', async () => {
+      const a = org();
+      const { stockItemId, warehouseId } = await seedStock(api, a, 2);
+      const reservationId = `SRV_${'0'.repeat(26)}`;
+      const commands = [
+        ['/v1/warehouses', { name: 'Tenantless warehouse' }],
+        ['/v1/stock/receipts', { warehouseId, productId: newProductId(), quantity: 1 }],
+        ['/v1/stock/adjustments', { stockItemId, quantityDelta: 1 }],
+        ['/v1/stock/reservations', { lines: [{ stockItemId, quantity: 1 }] }],
+        [`/v1/stock/reservations/${reservationId}/release`, {}],
+        [`/v1/stock/reservations/${reservationId}/issue`, {}],
+      ] as const;
+      // The platform administrator without an active organization, and a person acting for none.
+      for (const roles of [['SYSTEM_ADMIN'], ['ORGANIZATION_ADMIN']]) {
+        const tenantless = client(
+          api,
+          bearer({ sub: `sub-${key()}`, rastaUserId: 'USR-APITEST-NOORG01', roles }),
+        );
+        for (const [path, body] of commands) {
+          const k = key();
+          const response = await tenantless.post(path, body, k);
+          expect([roles[0], path, response.status, response.body.code]).toEqual([
+            roles[0],
+            path,
+            403,
+            'FORBIDDEN',
+          ]);
+          expect(await raw.idempotencyKey.count({ where: { key: k } })).toBe(0);
+        }
+      }
+      expect((await client(api, orgAdmin(a)).stockItem(stockItemId)).body.onHandQuantity).toBe(2);
     });
 
     it('refuses a service token: nothing calls inventory service to service in PR 1', async () => {

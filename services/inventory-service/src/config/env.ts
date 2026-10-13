@@ -76,7 +76,16 @@ function roleList(name: string) {
  *                                       a stock item expires that item's due reservations first,
  *                                       so the sweeper bounds how long a due one holds stock
  *                                       nobody touches (ADR-056 plan step 5).
- *   INVENTORY_LOCK_TIMEOUT_MS           How long a command waits for a stock item another command
+ *   INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE
+ *                                       How many due reservations of one stock item one
+ *                                       transaction expires — a command's or the sweeper's.
+ *                                       A backlog larger than this is worked off in committed
+ *                                       batches, never in one transaction that outgrows its
+ *                                       budget and rolls back every time (`ReservationExpiry`).
+ *                                       Default 20: a reservation of the most lines (50) then
+ *                                       expires at most 1000 in one transaction, well inside
+ *                                       its budget (about 15 ms each, measured locally).
+ *   INVENTORY_LOCK_TIMEOUT_MS          How long a command waits for a stock item another command
  *                                       holds before it answers 409 CONFLICT with Retry-After —
  *                                       never an unbounded wait (ADR-056 § 3).
  *   INVENTORY_IDEMPOTENCY_TTL_HOURS / _CLAIM_LEASE_SECONDS
@@ -119,6 +128,7 @@ export const inventoryEnvSchema = baseEnvSchema
       .max(3600)
       .default(30),
     INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
 
     INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
 

@@ -1,6 +1,7 @@
 import {
   isCheckViolation,
   isLockTimeout,
+  isTransactionUnavailable,
   isUniqueViolation,
   sqlStateOf,
   violatedConstraint,
@@ -65,6 +66,22 @@ describe('lock timeouts', () => {
   it('does not recognise anything else', () => {
     expect(isLockTimeout(raw('40P01'))).toBe(false);
     expect(isLockTimeout(undefined)).toBe(false);
+  });
+});
+
+describe('a transaction Prisma could not give in time', () => {
+  it('is P2028 (no transaction within maxWait, or past its timeout) and P2024 (no connection)', () => {
+    expect(isTransactionUnavailable({ code: 'P2028', message: 'Transaction API error' })).toBe(
+      true,
+    );
+    expect(isTransactionUnavailable({ code: 'P2024', message: 'Timed out fetching' })).toBe(true);
+  });
+
+  it('is nothing else', () => {
+    expect(isTransactionUnavailable(raw('55P03'))).toBe(false);
+    expect(isTransactionUnavailable({ code: 'P2002' })).toBe(false);
+    expect(isTransactionUnavailable(new Error('P2028'))).toBe(false);
+    expect(isTransactionUnavailable(null)).toBe(false);
   });
 });
 

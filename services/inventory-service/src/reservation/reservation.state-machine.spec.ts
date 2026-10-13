@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RESERVATION_STATES } from './dto';
-import { RESERVATION_TRANSITIONS, canMove } from './reservation.state-machine';
+import { RESERVATION_TRANSITIONS, canMove, isDue } from './reservation.state-machine';
 
 const MIGRATION = readFileSync(
   join(
@@ -30,6 +30,17 @@ describe('the reservation lifecycle (ADR-056 § 3)', () => {
       }
     }
     expect(canMove('ACTIVE', 'ACTIVE')).toBe(false);
+  });
+
+  it('treats an ACTIVE reservation at or past its expiresAt as due, and nothing else', () => {
+    const at = new Date('2026-10-13T12:00:00.000Z');
+    const before = new Date(at.getTime() - 1);
+    const after = new Date(at.getTime() + 1);
+    expect(isDue({ status: 'ACTIVE', expiresAt: before }, at)).toBe(true);
+    expect(isDue({ status: 'ACTIVE', expiresAt: at }, at)).toBe(true);
+    expect(isDue({ status: 'ACTIVE', expiresAt: after }, at)).toBe(false);
+    expect(isDue({ status: 'ACTIVE', expiresAt: null }, at)).toBe(false);
+    expect(isDue({ status: 'RELEASED', expiresAt: before }, at)).toBe(false);
   });
 
   it('names every state the database declares, and no other', () => {
