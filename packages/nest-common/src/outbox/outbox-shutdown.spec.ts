@@ -142,6 +142,59 @@ describe('OutboxShutdown', () => {
     await stopping;
   });
 
+  it('stops the workers in the same call, by the same deadline, beside the relay and the purge', async () => {
+    const calls: { name: string; deadlineAt?: number }[] = [];
+    const gates: (() => void)[] = [];
+    const part = (name: string): OutboxStoppable => ({
+      stop: (options) => {
+        calls.push({ name, deadlineAt: options?.deadlineAt });
+        return new Promise<void>((resolve) => gates.push(resolve));
+      },
+    });
+    const shutdown = new OutboxShutdown({
+      relay: part('relay'),
+      purge: part('purge'),
+      workers: [part('scan'), part('sweep')],
+      budgetMs: 23_000,
+      now: () => 1_000_000,
+    });
+
+    let done = false;
+    const stopping = shutdown.stop().then(() => {
+      done = true;
+    });
+    expect(calls).toEqual([
+      { name: 'relay', deadlineAt: 1_023_000 },
+      { name: 'purge', deadlineAt: 1_023_000 },
+      { name: 'scan', deadlineAt: 1_023_000 },
+      { name: 'sweep', deadlineAt: 1_023_000 },
+    ]);
+    // Waits for every one of them, the workers included.
+    for (const open of gates.slice(0, 3)) open();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(done).toBe(false);
+    gates[3]!();
+    await stopping;
+    expect(done).toBe(true);
+  });
+
+  it('bounds a worker that never stops by the shared deadline, beside a stuck relay', async () => {
+    const relay = await relayStuckInPublish(1);
+    // A worker that honours the deadline, with a unit of work that never ends.
+    const worker: OutboxStoppable = {
+      stop: async (options) => {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(0, (options?.deadlineAt ?? Infinity) - Date.now())),
+        );
+      },
+    };
+    const shutdown = new OutboxShutdown({ relay, workers: [worker], budgetMs: 1500 });
+    const ms = await elapsed(() => shutdown.stop());
+    // The relay's 1 s grace and the worker's 1.5 s, concurrently: 1.5 s, not 2.5 s.
+    expect(ms).toBeGreaterThanOrEqual(1400);
+    expect(ms).toBeLessThan(2200);
+  });
+
   it('is one stop: a repeated call joins it and, once it returned, returns at once', async () => {
     const relay = await relayStuckInPublish(1);
     const purge = await purgeStuckInBatch();

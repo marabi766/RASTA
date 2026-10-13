@@ -216,12 +216,24 @@ import { clamdAddress, loadDocumentEnv, SERVICE_NAME, type DocumentEnv } from '.
         }),
     },
     {
-      // D-052: the relay and the purge drain together in the destroy phase,
-      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: the relay, the purge and the scan worker stop together in the
+      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The worker
+      // too (Codex r3 on #247): stopped later, it kept polling while the relay
+      // drained and then waited for a scan of up to DOCUMENT_SCAN_TIMEOUT_MS.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
-      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: DocumentEnv) =>
-        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OutboxPurgeScheduler, ScanWorker, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        scanWorker: ScanWorker,
+        env: DocumentEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [scanWorker],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {
@@ -300,12 +312,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    // The worker first: it releases the claims it has not started, so a rolling
-    // deploy does not park those documents until their leases expire.
-    await this.scanWorker.stop();
-    // The relay and the purge already drained in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop
-    // and returns at once.
+    // The scan worker, the relay and the purge already stopped in
+    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline — the
+    // worker handing back the claims it had not finished, so a rolling deploy
+    // does not park those documents until their leases expire. This joins that
+    // stop and returns at once.
     await this.outboxShutdown.stop();
   }
 }

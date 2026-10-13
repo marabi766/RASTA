@@ -159,6 +159,7 @@ export {
   renewalDeadlineMs,
   RENEWAL_INTERVAL_DIVISOR,
   RENEWAL_DEADLINE_CEILING_MS,
+  withinDeadline,
 } from './outbox/outbox';
 export type {
   OutboxMessageInput,

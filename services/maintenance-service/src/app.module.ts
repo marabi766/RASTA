@@ -102,11 +102,12 @@ import {
 const FLEET_TOPICS = ['rasta.fleet.v1'];
 const ASSET_TOPICS = ['rasta.asset.v1'];
 
-// A note on the three providers nothing below injects — `UsageConsumer`,
-// `AssetSyncConsumer` and `DueScanner`. Nest instantiates every provider a
-// module declares, so their `onModuleInit` runs and they subscribe and start
-// their timer without anyone holding a reference. Injecting them into
-// `AppModule` purely to keep them alive would be a lie about the dependency.
+// A note on the two providers nothing below injects — `UsageConsumer` and
+// `AssetSyncConsumer`. Nest instantiates every provider a module declares, so
+// their `onModuleInit` runs and they subscribe without anyone holding a
+// reference. Injecting them into `AppModule` purely to keep them alive would be
+// a lie about the dependency. `DueScanner` starts its own timer the same way;
+// `OutboxShutdown` injects it because it stops it.
 
 @Module({
   controllers: [
@@ -306,12 +307,24 @@ const ASSET_TOPICS = ['rasta.asset.v1'];
         }),
     },
     {
-      // D-052: the relay and the purge drain together in the destroy phase,
-      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: the relay, the purge and the due scanner stop together in the
+      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The scanner
+      // too (Codex r3 on #247): stopped later, its timer kept writing outbox
+      // rows while the relay drained.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
-      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: MaintenanceEnv) =>
-        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+      inject: [OutboxRelay, OutboxPurgeScheduler, DueScanner, ENV],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        dueScanner: DueScanner,
+        env: MaintenanceEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [dueScanner],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
     },
 
     {

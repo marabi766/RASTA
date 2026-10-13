@@ -191,6 +191,29 @@ export class ScanRepository {
     );
   }
 
+  /**
+   * Releases every claim this worker still holds, the one being scanned
+   * included. Returns how many.
+   *
+   * For a shutdown that cannot wait for its scan (`ScanWorker.stop` at the
+   * shared deadline). The scan still running here loses its write-back — the
+   * lease is no longer its own, so `completeIfHeld` and `rescheduleIfHeld`
+   * match nothing — and the document is due for any worker at once, its
+   * attempts and retry schedule untouched. `owner` is minted per process, so
+   * this names exactly this process's claims.
+   */
+  async releaseAllHeld(owner: string): Promise<number> {
+    const changed = await runUnscoped(
+      'a stopping worker returns every claim it holds to the queue',
+      () =>
+        this.prisma.client.document.updateMany({
+          where: { scanState: 'PENDING', scanLeaseOwner: owner },
+          data: { scanLeaseOwner: null, scanLeaseExpiresAt: null },
+        }),
+    );
+    return changed.count;
+  }
+
   /** How many documents are waiting. Drives the pending-work gauge. */
   async pendingCount(): Promise<number> {
     return runUnscoped('the queue depth is a platform metric, not a tenant one', () =>

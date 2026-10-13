@@ -20,6 +20,12 @@ import type { OutboxStopOptions } from './outbox';
  * sum, and `loadEnv` refuses a configuration in which either one's own bound
  * does not fit the budget.
  *
+ * A service's other background loops that write through the same database
+ * (`workers`: document-service's scan worker) stop here too, by the same
+ * deadline (Codex r3 on #247). Stopped later, in `onApplicationShutdown`, one
+ * kept polling while the relay drained and then waited for its own unit of
+ * work on top of the relay's — the same sum this coordinator exists to avoid.
+ *
  * `stop()` is one promise: a later call — `onApplicationShutdown` confirming
  * the stop, a repeated signal — joins it, and once it has returned, returns at
  * once. Cross-cutting mechanism only (ADR-018).
@@ -34,6 +40,12 @@ export interface OutboxShutdownOptions {
   relay: OutboxStoppable;
   /** Absent in a service that does not run the purge. */
   purge?: OutboxStoppable;
+  /**
+   * Other background loops stopped in the same phase by the same deadline. Each
+   * must stop polling at once and return by `deadlineAt`, abandoning its unit
+   * of work in a state another instance can take over.
+   */
+  workers?: readonly OutboxStoppable[];
   /** The shared budget, from the first `stop()` (`outboxShutdownBudgetMs`). */
   budgetMs: number;
   /** Injection seam for the tests; nothing else should pass this. */
@@ -53,7 +65,7 @@ export class OutboxShutdown {
     this.now = options.now ?? Date.now;
   }
 
-  /** Drains the relay and the purge concurrently, both by one deadline. */
+  /** Drains the relay, the purge and the workers concurrently, all by one deadline. */
   stop(): Promise<void> {
     this.stopping ??= this.drain();
     return this.stopping;
@@ -69,6 +81,7 @@ export class OutboxShutdown {
     await Promise.all([
       this.options.relay.stop({ deadlineAt }),
       this.options.purge?.stop({ deadlineAt }),
+      ...(this.options.workers ?? []).map((worker) => worker.stop({ deadlineAt })),
     ]);
   }
 }
