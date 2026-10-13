@@ -93,6 +93,7 @@ export { RolesGuard } from './guards/roles.guard';
 export {
   RequestContextMiddleware,
   parseTraceparent,
+  requestPath,
   CORRELATION_ID_HEADER,
   REQUEST_ID_HEADER,
   TRACEPARENT_HEADER,

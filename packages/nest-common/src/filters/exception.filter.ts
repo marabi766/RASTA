@@ -4,6 +4,7 @@ import {
   HttpException,
   HttpStatus,
   Inject,
+  NotFoundException,
   type ArgumentsHost,
   type ExceptionFilter,
 } from '@nestjs/common';
@@ -17,6 +18,7 @@ import {
 } from '../errors/rasta-error';
 import { safeLogText } from '../errors/safe-log-text';
 import { tryGetContext } from '../context/request-context';
+import { requestPath } from '../middleware/request-context.middleware';
 
 export const EXCEPTION_FILTER_LOGGER = Symbol('RASTA_EXCEPTION_FILTER_LOGGER');
 
@@ -62,6 +64,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const context = tryGetContext();
 
     const { status, code, message, details, internalContext, logged } = this.normalize(exception);
+    // The middleware already records the path alone; a context built anywhere
+    // else is held to the same rule here, where it leaves the service.
+    const path = context?.path ? requestPath(context.path) : undefined;
 
     const body: ApiError = {
       code,
@@ -70,7 +75,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       correlationId: context?.correlationId ?? 'unknown',
       ...(context?.traceId ? { traceId: context.traceId } : {}),
       timestamp: new Date().toISOString(),
-      ...(context?.path ? { path: context.path } : {}),
+      ...(path ? { path } : {}),
     };
 
     const logPayload = {
@@ -79,7 +84,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       status,
       internalContext,
       method: context?.method,
-      path: context?.path,
+      path,
     };
 
     // 5xx is our fault and needs a stack. 4xx is the caller's and would
@@ -182,10 +187,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
           internalContext: { originalMessage: safeLogText(extractHttpMessage(exception)) },
         };
       }
+      const message = extractHttpMessage(exception);
+      // Nest's own answer to a route nothing matched (`RoutesResolver`) is
+      // `Cannot GET <originalUrl>` — the target as received, query and all.
+      // The path stays, because clients tell a route-level 404 from a missing
+      // record by this text; the query goes, from the response and the log.
+      const routeNotFound = ROUTE_NOT_FOUND.exec(message);
+      if (exception instanceof NotFoundException && routeNotFound) {
+        const reported = `${routeNotFound[1]}${requestPath(routeNotFound[2] ?? '')}`;
+        return {
+          status,
+          code: httpStatusToCode(status),
+          message: reported,
+          logged: { ...loggableError(exception), message: safeLogText(reported) },
+        };
+      }
       return {
         status,
         code: httpStatusToCode(status),
-        message: extractHttpMessage(exception),
+        message,
       };
     }
 
@@ -226,6 +246,9 @@ const MALFORMED_JSON_BODY = 'The request body is not valid JSON';
 
 /** What a client is told about any other request the framework could not read. */
 const MALFORMED_REQUEST = 'The request could not be read';
+
+/** Nest's route-not-found text: `Cannot <METHOD> <request target>`. */
+const ROUTE_NOT_FOUND = /^(Cannot [A-Z]+ )(.*)$/s;
 
 /**
  * body-parser's refusals this filter answers, by the `type` body-parser sets

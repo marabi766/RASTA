@@ -269,6 +269,13 @@ Endpoint در Schema اعلام می‌شود. مرتب‌سازی آزاد رو
 درصدی نادرست در مسیر) `400 VALIDATION_FAILED` با متن ثابت می‌گیرد («The request body is not valid JSON» یا «The request could
 not be read»)؛ متن Parser که بایت‌های کلاینت را نقل می‌کند نه به پاسخ می‌رسد نه به Log.
 
+**`path` فقط مسیر است.** `path` پاکت خطا و `path` خط Log همان خطا مسیر درخواست‌اند **بی Query و بی Fragment**
+(`/v1/x?cursor=…` ← `/v1/x`)؛ مقدار Query دادهٔ کلاینت است (Cursor، عبارت جست‌وجو) و S-09 بازتابش را در پیام خطا و Log
+نمی‌پذیرد. `RequestContextMiddleware` همین را در زمینهٔ درخواست ثبت می‌کند (`requestPath`) و `AllExceptionsFilter` دوباره
+اعمالش می‌کند. پاسخ 404 خود Nest برای مسیری که Route ندارد همان `Cannot GET <path>` می‌ماند — کلاینت‌ها 404 مسیر را از
+404 رکورد با همین متن جدا می‌کنند — اما بی Query. Gateway `path` پاکت خطای Upstream (4xx و 5xx) را نیز به همین شکل کوتاه
+می‌کند. مسیریابی و خود Query دست نمی‌خورند: Query بی‌تغییر به سرویس مالک می‌رسد.
+
 **دلیل بستهٔ امتناع در `details`.** امتناعی که دلیلش یکی از فهرستی بسته است، آن دلیل را در `details[].code` می‌آورد.
 `code` سطح بالا (`FORBIDDEN`، `CONFLICT`، `BUSINESS_RULE_VIOLATION` …) و `message` همان می‌مانند. کلاینت اول روی `code` و سپس روی `details[].code`
 شاخه می‌زند و هرگز `message` را تجزیه نمی‌کند. `path` می‌گوید دلیل از کجاست: میدان (`status` در asset)، منبع (`registration` در identity)

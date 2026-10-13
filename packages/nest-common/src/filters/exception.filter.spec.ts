@@ -1,5 +1,12 @@
-import { BadRequestException, HttpException, HttpStatus, type ArgumentsHost } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  NotFoundException,
+  type ArgumentsHost,
+} from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
+import { runWithContext, type RequestContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 import { LOG_TEXT_MAX } from '../errors/safe-log-text';
 import { AllExceptionsFilter, loggableError, type LoggedError } from './exception.filter';
@@ -355,6 +362,68 @@ describe('AllExceptionsFilter, Retry-After (docs/06 § 6.8)', () => {
     expect(inFlight(1).retryAfterSeconds).toBe(1);
     expect(inFlight().retryAfterSeconds).toBeUndefined();
     expect(RastaError.internal('x').retryAfterSeconds).toBeUndefined();
+  });
+});
+
+describe('AllExceptionsFilter, the request is reported by its path alone (S-09)', () => {
+  const context = (path: string): RequestContext => ({
+    correlationId: 'corr-path-spec',
+    requestId: 'req-path-spec',
+    roles: [],
+    organizationIds: [],
+    authType: 'ANONYMOUS',
+    method: 'GET',
+    path,
+    startedAt: 0,
+  });
+  const within = (path: string, exception: unknown) =>
+    runWithContext(context(path), () => run(exception));
+
+  it.each([
+    ['a 4xx', RastaError.notFound('Asset', 'AST_1'), 'debug'],
+    ['a 403', RastaError.forbidden('No'), 'warn'],
+    ['a 5xx', new Error('boom'), 'error'],
+  ])('%s: `path` in the body and in the log line carries no query', (_, exception, level) => {
+    const { body, lines } = within('/v1/x?secret=abc', exception);
+
+    expect(body).toMatchObject({ path: '/v1/x' });
+    expect(JSON.stringify(body)).not.toContain('abc');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.level).toBe(level);
+    expect(lines[0]?.payload).toMatchObject({ method: 'GET', path: '/v1/x' });
+    expect(JSON.stringify(lines)).not.toContain('abc');
+  });
+
+  it('nor a fragment', () => {
+    const { body, lines } = within('/v1/x#secret=abc', RastaError.notFound('Asset'));
+    expect(body).toMatchObject({ path: '/v1/x' });
+    expect(JSON.stringify([body, lines])).not.toContain('abc');
+  });
+
+  it('Nest’s route-not-found text keeps its path and loses the query', () => {
+    // What Nest's RoutesResolver throws: `Cannot ${method} ${originalUrl}`.
+    const { status, body, lines } = within(
+      '/v1/nowhere?secret=abc',
+      new NotFoundException('Cannot GET /v1/nowhere?secret=abc'),
+    );
+
+    expect(status).toBe(404);
+    expect(body).toMatchObject({
+      code: 'NOT_FOUND',
+      message: 'Cannot GET /v1/nowhere',
+      path: '/v1/nowhere',
+    });
+    expect(lines[0]?.payload.err).toMatchObject({
+      type: 'NotFoundException',
+      message: 'Cannot GET /v1/nowhere',
+    });
+    expect(lines[0]?.payload.err.stack).toMatch(/^\s+at /);
+    expect(JSON.stringify([body, lines])).not.toContain('abc');
+  });
+
+  it('any other 404 text stays as it was', () => {
+    const { body } = within('/v1/x', new NotFoundException('Asset not found'));
+    expect(body).toMatchObject({ message: 'Asset not found' });
   });
 });
 
