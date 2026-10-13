@@ -58,6 +58,29 @@ export interface Acting {
 }
 
 /**
+ * The platform administrator, acting for an organization it selected, was refused a party's command
+ * (Q-95 (1)). The same `403` as ever, whether or not it is caught: a command that finds the contract
+ * it names, with that organization a party to it, records the refusal first
+ * (`AuthorityRefusals.commandingCaller`, S-06). The answer does not change with the contract, so it
+ * tells the caller nothing about it.
+ */
+export class PlatformAdministratorRefused extends RastaError {
+  constructor(
+    message: string,
+    readonly organizationId: string,
+  ) {
+    super('FORBIDDEN', message);
+  }
+}
+
+/** The platform administrator's refusal: one an audit can name when it acts for an organization. */
+function platformAdministratorRefused(message: string, organizationId: string | undefined) {
+  return organizationId
+    ? new PlatformAdministratorRefused(message, organizationId)
+    : RastaError.forbidden(message);
+}
+
+/**
  * Which side of `contract` the organization is, or `null` when it is neither. The two are never
  * one organization (`ck_contract_parties_distinct`).
  */
@@ -97,8 +120,9 @@ export class ContractAccess {
     assertNotServiceCaller();
     const context = getContext();
     if (context.roles.includes(SUPER_ROLE)) {
-      throw RastaError.forbidden(
+      throw platformAdministratorRefused(
         'The platform administrator does not sign or cancel a contract for a party',
+        context.organizationId,
       );
     }
     if (!context.organizationId) {
@@ -117,8 +141,9 @@ export class ContractAccess {
     assertNotServiceCaller();
     const context = getContext();
     if (context.roles.includes(SUPER_ROLE)) {
-      throw RastaError.forbidden(
+      throw platformAdministratorRefused(
         'The platform administrator does not amend a contract or plan its milestones for a party',
+        context.organizationId,
       );
     }
     if (!context.organizationId) {

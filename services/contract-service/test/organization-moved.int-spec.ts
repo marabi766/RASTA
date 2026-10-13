@@ -59,7 +59,7 @@ describe('a signing policy follows an organization move', () => {
       .send({});
   const command = (token: string, id: string, verb: string, payload: object) =>
     http()
-      .post(`/v1/approval-policies/${id}/${verb}`)
+      .post(`/v1/contract-approval-policies/${id}/${verb}`)
       .set('authorization', `Bearer ${token}`)
       .send(payload);
   const reasons = (body: { details?: { path: string; code: string }[] }) =>
@@ -70,7 +70,7 @@ describe('a signing policy follows an organization move', () => {
     api.hierarchy.adopt(unionOrg, employer);
     const unionAdmin = person(unionOrg, ['UNION_ADMIN']);
     const written = await http()
-      .post('/v1/approval-policies')
+      .post('/v1/contract-approval-policies')
       .set('authorization', `Bearer ${unionAdmin}`)
       .set('idempotency-key', key())
       .send({
@@ -97,7 +97,7 @@ describe('a signing policy follows an organization move', () => {
   async function activePlatformPolicy(employer: string): Promise<string> {
     const author = actor(employer, ['SYSTEM_ADMIN']);
     const written = await http()
-      .post('/v1/approval-policies')
+      .post('/v1/contract-approval-policies')
       .set('authorization', `Bearer ${author}`)
       .set('idempotency-key', key())
       .send({
@@ -383,7 +383,7 @@ describe('a signing policy follows an organization move', () => {
       api.hierarchy.adopt(union, employer);
       const unionAdmin = person(union, ['UNION_ADMIN']);
       const written = await http()
-        .post('/v1/approval-policies')
+        .post('/v1/contract-approval-policies')
         .set('authorization', `Bearer ${unionAdmin}`)
         .set('idempotency-key', key())
         .send({
