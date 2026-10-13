@@ -158,6 +158,18 @@ export class EconomicEventTap {
   }
 
   /**
+   * Every delivery seen so far of these events, by the envelope's `eventId` —
+   * whatever header it arrived with. A redelivery that lost its correlation
+   * header is invisible to `correlated` and found here.
+   */
+  withEventIds(eventIds: Iterable<string | undefined>): ObservedEvent[] {
+    const wanted = new Set([...eventIds].filter((id) => id !== undefined));
+    return this.received.filter(
+      (event) => event.eventId !== undefined && wanted.has(event.eventId),
+    );
+  }
+
+  /**
    * Waits until at least `expected` events carrying `correlationId` have
    * arrived, then returns them.
    */

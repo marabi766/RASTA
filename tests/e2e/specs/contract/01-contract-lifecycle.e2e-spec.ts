@@ -1,6 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import type { APIRequestContext } from '@playwright/test';
-import { test, expect, errorCode, idempotencyKey, Actor, type ApiResponse } from '../../src/api';
+import {
+  test,
+  expect,
+  errorCode,
+  failOnUnauthenticated,
+  idempotencyKey,
+  Actor,
+  SessionToken,
+  UnauthenticatedError,
+  type ApiResponse,
+} from '../../src/api';
 import { ORG, e2eConfig } from '../../src/env';
 import { EconomicEventTap, type ObservedEvent } from '../../src/events';
 import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-accounts';
@@ -231,7 +241,11 @@ function send(
   });
 }
 
-/** Polls at a rate the gateway's per-user limit tolerates; never a fixed sleep. */
+/**
+ * Polls at a rate the gateway's per-user limit tolerates; never a fixed sleep. A 401 is not
+ * retried: every actor's token is renewed before it expires, so it fails the wait at once with
+ * the platform's own answer instead of surfacing later as a timeout.
+ */
 async function until<T>(
   description: string,
   check: () => Promise<T | undefined>,
@@ -241,9 +255,10 @@ async function until<T>(
   let last = '';
   while (Date.now() < deadline) {
     try {
-      const value = await check();
+      const value = await failOnUnauthenticated(check);
       if (value !== undefined) return value;
     } catch (error) {
+      if (error instanceof UnauthenticatedError) throw error;
       last = String(error);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -578,7 +593,12 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         },
         TOKEN_WAIT_MS,
       );
-      signedIn[key] = new Actor(account.username, context, token, config);
+      signedIn[key] = new Actor(
+        account.username,
+        context,
+        new SessionToken(token, () => freshToken(account.username)),
+        config,
+      );
     }
     people = signedIn;
   });
@@ -1922,9 +1942,11 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const payloadOf = (events: ObservedEvent[], name: string): Record<string, unknown> =>
       events.find((event) => event.eventName === name)!.payload;
 
-    // Every delivery of the correlated calls carries the call's correlation id in its header and
-    // in its envelope alike, and an eventId; it was published under the employer's tenant, keyed
-    // by the contract, and carried no amount, note or reason text (ADR-068 § 4).
+    // Every delivery of the correlated calls — every one observed with the call's event ids, not
+    // only those found by header, so a redelivery that lost its header cannot hide behind a
+    // valid one — carries the call's correlation id in its header and in its envelope alike, and
+    // an eventId; it was published under the employer's tenant, keyed by the contract, and
+    // carried no amount, note or reason text (ADR-068 § 4).
     const amounts = [
       PRICE.A.c1,
       PRICE.A.c2,
@@ -1938,8 +1960,12 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       'Additional resurfacing',
     ];
     for (const entry of evidence) {
-      const events = delivered.get(entry.correlationId)!;
-      expect(events.length, `deliveries of "${entry.label}"`).toBeGreaterThan(0);
+      const byHeader = delivered.get(entry.correlationId)!;
+      expect(byHeader.length, `deliveries of "${entry.label}"`).toBeGreaterThan(0);
+      const events = new Set([
+        ...byHeader,
+        ...tap.withEventIds(byHeader.map((event) => event.eventId)),
+      ]);
       for (const event of events) {
         expect(
           { header: event.correlationId, envelope: event.envelopeCorrelationId },
