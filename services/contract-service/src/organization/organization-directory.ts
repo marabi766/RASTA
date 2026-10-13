@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
+import { z } from 'zod';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ContractEnv } from '../config/env';
 
@@ -47,7 +48,7 @@ export async function readCapped(response: Response, limit: number): Promise<str
  * `GET {ORGANIZATION_SERVICE_URL}/v1/organizations/{organizationId}` with an `X-Internal-Token`
  * minted for organization-service and signed for `scopeOrganizationId` — the tenant is inside the
  * signature (ADR-035). organization-service answers `{ id }` when the organization is the signed
- * one or beneath it, and 404 otherwise.
+ * one or beneath it, and 404 with its error body (`Organization not found`) otherwise.
  *
  * The user's own token is deliberately not forwarded: organization-service treats `UNION_ADMIN` as
  * a platform operator that sees every organization, so a union administrator's token would prove
@@ -55,11 +56,13 @@ export async function readCapped(response: Response, limit: number): Promise<str
  *
  * ## Fail closed
  *
- * 200 with the same id → within. 404 → not within. Anything else — another status, a body that
- * does not name the organization or is larger than `MAX_RESPONSE_BYTES`, a timeout (which covers
- * the body read and parse, not only the headers), a network error — is `UPSTREAM_UNAVAILABLE` /
- * `UPSTREAM_TIMEOUT`, and the policy write is refused. "Could not confirm" is never read as
- * "confirmed".
+ * 200 with the same id → within. 404 with organization-service's own `Organization not found`
+ * body → not within. Anything else — another status, a 404 without that body (a proxy's page, an
+ * empty body, a missing route), a body that does not name the organization or is larger than
+ * `MAX_RESPONSE_BYTES`, a timeout (which covers the body read and parse, not only the headers), a
+ * network error — is `UPSTREAM_UNAVAILABLE` / `UPSTREAM_TIMEOUT`: the policy write and the
+ * signature are refused, and the sweeper leaves the policy as it is and retries the task. "Could
+ * not confirm" is never read as "confirmed" — nor as "outside", which would suspend a valid policy.
  */
 @Injectable()
 export class OrganizationDirectory {
@@ -133,8 +136,14 @@ export class OrganizationDirectory {
       });
 
       if (response.status === 404) {
-        await response.body?.cancel().catch(() => undefined);
-        return null;
+        // "Not within" only when organization-service's own handler said so, about this kind of
+        // record (`isOrganizationNotFound`). Any other 404 — a proxy's HTML page, an empty body, a
+        // route missing during a deploy — proves nothing about the hierarchy, and read as "outside"
+        // it would suspend a valid policy: unavailable instead, and the caller retries.
+        const text = await readCapped(response, MAX_RESPONSE_BYTES);
+        if (text !== null && isOrganizationNotFound(parseJson(text))) return null;
+        this.logger.warn('organization-service answered a 404 that is not its own; refusing');
+        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
       }
       if (response.status !== 200) {
         await response.body?.cancel().catch(() => undefined);
@@ -149,12 +158,7 @@ export class OrganizationDirectory {
         this.logger.warn('organization-service answered a body larger than { id }; refusing');
         throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
       }
-      let body: { id?: unknown; hierarchyVersion?: unknown } | null = null;
-      try {
-        body = JSON.parse(text) as { id?: unknown; hierarchyVersion?: unknown } | null;
-      } catch {
-        body = null;
-      }
+      const body = parseJson(text) as { id?: unknown; hierarchyVersion?: unknown } | null;
       if (body?.id !== organizationId) {
         this.logger.warn('organization-service answered 200 without naming the organization asked');
         throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
@@ -176,4 +180,29 @@ export class OrganizationDirectory {
       clearTimeout(timer);
     }
   }
+}
+
+/** The body as JSON, or `null` when it is not JSON. */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * organization-service's error body for an organization it looked for and did not find within the
+ * signed one: `RastaError.notFound('Organization', id)` rendered by the global exception filter
+ * (`OrganizationService.confirmWithinCaller`). A route-level 404 goes through the same filter with
+ * the same code, but its message is Nest's `Cannot GET …`, so the message is what tells the two
+ * apart — the distinction the award client draws (`isAwardNotFound`).
+ */
+const notFoundBodySchema = z.object({
+  code: z.literal('NOT_FOUND'),
+  message: z.literal('Organization not found'),
+});
+
+export function isOrganizationNotFound(body: unknown): boolean {
+  return notFoundBodySchema.safeParse(body).success;
 }

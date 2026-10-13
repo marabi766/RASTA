@@ -88,8 +88,10 @@ export interface EnqueueOutcome {
  *
  * **The Kafka handler** (`OrganizationMovedConsumer` → `enqueueMove`) does database work only: in
  * one transaction it queues a task for every ACTIVE or PENDING_PLATFORM_APPROVAL policy a union
- * wrote for another organization, and returns. No network call, so no session timeout, however
- * many policies there are; and nothing is skipped for lack of time.
+ * wrote for another organization — and every SUSPENDED or RETIRED one a signature that raced the
+ * move may still rest on (`PolicyRepository.listUnionPoliciesToReconfirm`) — and returns. No
+ * network call, so no session timeout, however many policies there are; and nothing is skipped for
+ * lack of time.
  *
  * **The sweeper** (`PolicyReconciliationSweeper`) claims due tasks in bounded batches, asks
  * organization-service, and calls `suspend` for the ones whose union has lost the organization. A
@@ -149,7 +151,11 @@ export class PolicySuspensionService {
    * with no network call. Idempotent: a policy that already has an open task gets none.
    */
   async enqueueMove(cause: MoveCause): Promise<EnqueueOutcome> {
-    const candidates = await this.repository.listUnionPoliciesToReconfirm();
+    const candidates = await this.repository.listUnionPoliciesToReconfirm({
+      movedAt: cause.movedAt,
+      movedVersion: cause.movedVersion,
+      clockSkewMarginSeconds: this.env.CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS,
+    });
     if (candidates.length === 0) return { candidates: 0, queued: 0 };
 
     const queued = await this.prisma.transaction(async (tx) => {
