@@ -1,14 +1,12 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { InventoryAccess } from '../access/access';
-import { SERVICE_NAME, type InventoryEnv } from '../config/env';
+import { SERVICE_NAME } from '../config/env';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { inventoryCommandsTotal } from '../observability/metrics';
-import { PrismaService } from '../prisma/prisma.service';
-import { transactionNow } from '../shared/clock';
+import { CommandRunner } from '../shared/command-runner';
 import { pageOf, type CursorPage } from '../shared/dto';
 import type { ClaimFence } from '../shared/idempotency';
-import { ENV } from '../tokens';
 import type { CreateWarehouseDto, ListWarehousesQuery, WarehouseView } from './dto';
 import { toWarehouseView } from './views';
 import { WarehouseRepository } from './warehouse.repository';
@@ -23,9 +21,8 @@ export class WarehouseService {
   constructor(
     private readonly warehouses: WarehouseRepository,
     private readonly access: InventoryAccess,
-    private readonly prisma: PrismaService,
     private readonly publisher: EventPublisher,
-    @Inject(ENV) private readonly env: InventoryEnv,
+    private readonly runner: CommandRunner,
   ) {}
 
   /**
@@ -46,40 +43,33 @@ export class WarehouseService {
       );
     }
 
-    return this.prisma.transaction(
-      async (tx) => {
-        await fence.hold(tx);
-        const at = await transactionNow(tx);
-        const row = await this.warehouses.insert(tx, {
-          id: newId(ID_PREFIX.warehouse),
-          organizationId: acting.organizationId,
-          name: dto.name,
-          location: dto.location ?? null,
-          actor: acting.userId,
-          correlationId: getContext().correlationId,
-          at,
-        });
-        await this.publisher.enqueue(tx, {
-          eventName: 'WAREHOUSE_CREATED',
-          aggregateId: row.id,
+    // The warehouse, its event and the stored answer in one transaction — the stock commands'
+    // own (`CommandRunner`), so a pool with no connection left after the claim was taken is the
+    // same retryable 409, never a 500. It writes no balance: no balance CHECK to translate.
+    return this.runner.run('create_warehouse', fence, null, async (tx, at) => {
+      const row = await this.warehouses.insert(tx, {
+        id: newId(ID_PREFIX.warehouse),
+        organizationId: acting.organizationId,
+        name: dto.name,
+        location: dto.location ?? null,
+        actor: acting.userId,
+        correlationId: getContext().correlationId,
+        at,
+      });
+      await this.publisher.enqueue(tx, {
+        eventName: 'WAREHOUSE_CREATED',
+        aggregateId: row.id,
+        organizationId: row.organizationId,
+        occurredAt: at,
+        payload: {
+          warehouseId: row.id,
           organizationId: row.organizationId,
-          occurredAt: at,
-          payload: {
-            warehouseId: row.id,
-            organizationId: row.organizationId,
-            createdBy: acting.userId,
-            createdAt: at.toISOString(),
-          },
-        });
-        inventoryCommandsTotal.inc({
-          service: SERVICE_NAME,
-          command: 'create_warehouse',
-          outcome: 'applied',
-        });
-        return fence.complete(tx, toWarehouseView(row));
-      },
-      { maxWaitMs: this.env.INVENTORY_LOCK_TIMEOUT_MS },
-    );
+          createdBy: acting.userId,
+          createdAt: at.toISOString(),
+        },
+      });
+      return toWarehouseView(row);
+    });
   }
 
   async get(id: string): Promise<WarehouseView> {

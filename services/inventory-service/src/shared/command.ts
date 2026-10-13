@@ -88,9 +88,12 @@ function isCommandKey(error: unknown, constraint: string | undefined): boolean {
  *     refuses, whatever the code checked before (ADR-056 § 3).
  *
  * A trigger's refusal (`ck_stock_movement_chain`, …) is a defect, not a request error, and stays
- * a 500.
+ * a 500 — as does a balance CHECK met by a command that writes no balance (`overdrawn` `null`).
  */
-export function translateCommandError(error: unknown, overdrawn: () => RastaError): unknown {
+export function translateCommandError(
+  error: unknown,
+  overdrawn: (() => RastaError) | null,
+): unknown {
   if (error instanceof RastaError) return error;
   // The transaction could not start in time (the pool is exhausted) or outlived its budget
   // waiting on locks — the same contention, answered the same way.
@@ -105,7 +108,12 @@ export function translateCommandError(error: unknown, overdrawn: () => RastaErro
   if (isUniqueViolation(error) && isCommandKey(error, constraint)) {
     return RastaError.idempotencyKeyReused();
   }
-  if (isCheckViolation(error) && constraint !== undefined && BALANCE_CHECKS.has(constraint)) {
+  if (
+    overdrawn !== null &&
+    isCheckViolation(error) &&
+    constraint !== undefined &&
+    BALANCE_CHECKS.has(constraint)
+  ) {
     return overdrawn();
   }
   return error;

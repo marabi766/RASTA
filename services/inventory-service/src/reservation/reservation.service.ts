@@ -83,24 +83,31 @@ export class ReservationService {
         );
       }
 
+      const quantityOf = new Map(dto.lines.map((line) => [line.stockItemId, line.quantity]));
+      const asked = (item: StockItemRow): number => quantityOf.get(item.id) as number;
+      // A line beyond on hand never fits, whatever expires: expiry gives back reserved, never
+      // on hand. Final, before any expiry runs.
+      const beyond = locked.find((item) => asked(item) > item.onHandQuantity);
+      if (beyond) throw insufficientStock(beyond.id);
+
       const batches: ExpiryBatch[] = [];
       for (const item of locked) {
         batches.push(await this.expiry.expireDue(tx, item, at, correlationId, 'command'));
       }
       const items: StockItemRow[] = batches.map((batch) => batch.item);
-      const quantityOf = new Map(dto.lines.map((line) => [line.stockItemId, line.quantity]));
-      for (const { item, backlog } of batches) {
-        if ((quantityOf.get(item.id) ?? 0) > item.availableQuantity) {
-          // Due reservations past the batch still hold stock: once they are expired this line
-          // may fit, so the refusal would not be sure (`ReservationExpiry`).
-          if (backlog) throw new ExpiryBacklog(acting.organizationId, [item.id]);
-          throw refusal(
-            'reservation',
-            'INSUFFICIENT_AVAILABLE_STOCK',
-            'Not enough stock is available to reserve',
-            { stockItemId: item.id },
-          );
-        }
+      const short = batches.filter(({ item }) => asked(item) > item.availableQuantity);
+      // Short even with every due reservation past the batch expired: live reservations hold
+      // what is missing, and the refusal is final (`ReservationExpiry`).
+      const sure = short.find(
+        ({ item, backlogQuantity }) => asked(item) > item.availableQuantity + backlogQuantity,
+      );
+      if (sure) throw insufficientStock(sure.item.id);
+      // Short only while the backlog still holds stock: expired, it makes room — not sure yet.
+      if (short.length > 0) {
+        throw new ExpiryBacklog(
+          acting.organizationId,
+          short.map(({ item }) => item.id),
+        );
       }
 
       const made = new Map<string, ReservationView>();
@@ -108,7 +115,7 @@ export class ReservationService {
         const reservation = await this.reserveLine(tx, {
           acting,
           item,
-          quantity: quantityOf.get(item.id) as number,
+          quantity: asked(item),
           holder,
           orderReference: dto.orderReference ?? null,
           expiresAt,
@@ -334,4 +341,14 @@ export class ReservationService {
   async assertVisible(id: string): Promise<void> {
     await this.get(id);
   }
+}
+
+/** The final refusal of a line the stock item cannot hold. */
+function insufficientStock(stockItemId: string): RastaError {
+  return refusal(
+    'reservation',
+    'INSUFFICIENT_AVAILABLE_STOCK',
+    'Not enough stock is available to reserve',
+    { stockItemId },
+  );
 }

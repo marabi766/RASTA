@@ -127,8 +127,9 @@ const RETRY_AFTER_HEADER = {
   required: false,
   description:
     'Sent only with CONFLICT — this Idempotency-Key is still being processed, or a stock item ' +
-    'another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or reservations ' +
-    'past their expiresAt that could change the refusal are still being released: the seconds ' +
+    'another request holds was not released within INVENTORY_LOCK_TIMEOUT_MS, or no database ' +
+    'connection or transaction was to be had within the budget, or reservations past their ' +
+    'expiresAt whose release would reverse the refusal are still being released: the seconds ' +
     'to wait before retrying with the same key. Absent on every other 409.',
   schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
 };
@@ -164,8 +165,8 @@ export const ERROR_DESCRIPTIONS: Record<number, string> = {
   401: 'No credentials, or a token that is expired, unverifiable or issued for another audience.',
   403: 'Authenticated, but not permitted: no role of INVENTORY_OPERATOR_ROLES (commands) or INVENTORY_READER_ROLES / INVENTORY_OPERATOR_ROLES (reads) in the organization the request acts for (INSUFFICIENT_ROLE); acting for an organization the caller is not a member of (TENANT_MISMATCH); the oversight role, the platform administrator, a service token, a caller acting for no organization, or a user token without the platform user id on a command (FORBIDDEN) — on a command, before its Idempotency-Key is claimed or replayed; on create, a body naming another organization (FORBIDDEN).',
   404: 'Not found — also returned for a warehouse, stock item or reservation of another organization, so its existence is never disclosed.',
-  409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, or a reservation or adjustment refused only while reservations past their expiresAt are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).',
-  422: 'Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104).',
+  409: 'An Idempotency-Key reused with a different request or user, or one that already applied this command to the stock item (IDEMPOTENCY_KEY_REUSED); the same key still in flight, a stock item another request held past INVENTORY_LOCK_TIMEOUT_MS, no database connection or transaction within the command’s budget, or a reservation or adjustment refused only while reservations past their expiresAt — whose release would make room — are still being released (CONFLICT, with Retry-After — retry with the same key); `expectedVersion` that is not the current version (OPTIMISTIC_LOCK_FAILED); a reservation that is no longer ACTIVE (INVALID_STATE_TRANSITION, RESERVATION_NOT_ACTIVE).',
+  422: 'Well-formed but refused by a rule (BUSINESS_RULE_VIOLATION): not enough available stock (INSUFFICIENT_AVAILABLE_STOCK — all or nothing), on hand below what is reserved (ON_HAND_WOULD_BE_NEGATIVE), a balance past the largest quantity stored (QUANTITY_OUT_OF_RANGE), lines of two warehouses (LINES_SPAN_WAREHOUSES), an expiresAt out of range (EXPIRY_OUT_OF_RANGE), a holder other than the owner (HOLDER_NOT_OWNER, Q-104). Final: a refusal no pending expiry could reverse — a line beyond on hand, an adjustment below zero or below what live reservations hold — is a 422 at once.',
   500: 'Unexpected server error.',
 };
 

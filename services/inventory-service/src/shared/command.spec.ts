@@ -92,6 +92,19 @@ describe('translateCommandError', () => {
     expect(stock.details).toEqual([expect.objectContaining({ code: 'ON_HAND_WOULD_BE_NEGATIVE' })]);
   });
 
+  it('translates a command that writes no balance alike, but leaves a balance CHECK it met a defect', () => {
+    const unavailable = { code: 'P2028', message: 'Transaction API error: Unable to start' };
+    expect(translateCommandError(unavailable, null)).toMatchObject({
+      code: 'CONFLICT',
+      retryAfterSeconds: 1,
+    });
+    const oversell = raw(
+      '23514',
+      'new row for relation "stock_item" violates check constraint "ck_stock_item_on_hand_nonneg"',
+    );
+    expect(translateCommandError(oversell, null)).toBe(oversell);
+  });
+
   it('leaves a trigger’s refusal a defect: it is never dressed up as a request error', () => {
     const chain = raw('23514', 'ck_stock_movement_chain: a movement continues the previous one');
     expect(translateCommandError(chain, stockOverdrawn)).toBe(chain);

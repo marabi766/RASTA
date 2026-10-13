@@ -131,6 +131,24 @@ export class ReservationRepository {
   }
 
   /**
+   * What the ACTIVE reservations of a **locked** stock item that are due at `at` still hold, in
+   * all: the part of `reserved` that expiring them would give back. One aggregate over
+   * `ix_stock_reservation_org_item_status`, whatever the backlog.
+   */
+  async dueQuantity(
+    tx: ExtendedPrismaClient,
+    organizationId: string,
+    stockItemId: string,
+    at: Date,
+  ): Promise<number> {
+    const rows = await tx.$queryRaw<{ held: bigint | null }[]>`
+      SELECT sum("quantity") AS "held" FROM "stock_reservation"
+       WHERE "organization_id" = ${organizationId} AND "stock_item_id" = ${stockItemId}
+         AND "status" = 'ACTIVE' AND "expires_at" <= ${at}`;
+    return Number(rows[0]?.held ?? 0);
+  }
+
+  /**
    * The stock items, across every owner, that hold a reservation past its `expiresAt` — the
    * sweeper's question, by the database's clock. Unscoped by necessity: the sweeper runs outside
    * any request. Read without a lock; each item is then locked and re-checked in its own

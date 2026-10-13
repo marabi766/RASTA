@@ -124,7 +124,10 @@ export class StockService {
     return this.runner.run('adjust', command.fence, stockOverdrawn, async (tx, at) => {
       const locked = await this.stock.lock(tx, acting.organizationId, dto.stockItemId);
       if (!locked) throw RastaError.notFound('StockItem', dto.stockItemId);
-      const { item, backlog } = await this.expiry.expireDue(
+      // Below zero, on hand is refused whatever expires: expiry gives back reserved, never on
+      // hand. Final, before any expiry runs.
+      if (locked.onHandQuantity + dto.quantityDelta < 0) throw onHandBelowReserved(locked.id);
+      const { item, backlogQuantity } = await this.expiry.expireDue(
         tx,
         locked,
         at,
@@ -134,17 +137,14 @@ export class StockService {
 
       const onHandAfter = item.onHandQuantity + dto.quantityDelta;
       if (onHandAfter < item.reservedQuantity) {
-        // Reserved still counts due reservations past the batch: once they are expired this
-        // adjustment may fit, so the refusal would not be sure.
-        if (backlog) throw new ExpiryBacklog(item.organizationId, [item.id]);
-        throw refusal(
-          'stock',
-          'ON_HAND_WOULD_BE_NEGATIVE',
-          'On hand would fall below what is reserved',
-          {
-            stockItemId: item.id,
-          },
-        );
+        // Below what live reservations hold, even with every due one past the batch expired:
+        // the refusal is final.
+        if (onHandAfter < item.reservedQuantity - backlogQuantity) {
+          throw onHandBelowReserved(item.id);
+        }
+        // Below reserved only while the backlog still counts in it: expired, it makes room —
+        // not sure yet.
+        throw new ExpiryBacklog(item.organizationId, [item.id]);
       }
       if (onHandAfter > MAX_QUANTITY) {
         throw refusal(
@@ -229,4 +229,16 @@ export class StockService {
   async assertVisible(id: string): Promise<void> {
     await this.get(id);
   }
+}
+
+/** The final refusal of an adjustment that would leave on hand below what is reserved. */
+function onHandBelowReserved(stockItemId: string): RastaError {
+  return refusal(
+    'stock',
+    'ON_HAND_WOULD_BE_NEGATIVE',
+    'On hand would fall below what is reserved',
+    {
+      stockItemId,
+    },
+  );
 }

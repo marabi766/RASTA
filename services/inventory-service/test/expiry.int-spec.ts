@@ -391,5 +391,89 @@ describe('reservation expiry', () => {
       ]);
       await expectReconciled(raw, [a]);
     });
+
+    /**
+     * Codex round 2, finding 1: a refusal no expiry could reverse was a 409 while a backlog was
+     * left, retried batch after batch only to end in the 422 it was from the start.
+     */
+    it('refuses at once, 422, what no expiry could make fit — beyond on hand, below zero — and expires nothing for it', async () => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 5 * BATCH);
+      const owner = client(api, orgAdmin(a));
+      await plantDue(a, stockItemId, 5 * BATCH);
+      await pastDue();
+
+      const reserve = await owner.reserve([{ stockItemId, quantity: 5 * BATCH + 1 }]);
+      expect(reserve.status).toBe(422);
+      expect(reserve.headers['retry-after']).toBeUndefined();
+      expect(reserve.body.details).toEqual([
+        expect.objectContaining({ code: 'INSUFFICIENT_AVAILABLE_STOCK' }),
+      ]);
+      const adjust = await owner.adjust(stockItemId, -(5 * BATCH + 1));
+      expect(adjust.status).toBe(422);
+      expect(adjust.headers['retry-after']).toBeUndefined();
+      expect(adjust.body.details).toEqual([
+        expect.objectContaining({ code: 'ON_HAND_WOULD_BE_NEGATIVE' }),
+      ]);
+      // Neither waited on the backlog, and neither left a batch of it done.
+      expect(await activeCount(stockItemId)).toBe(5 * BATCH);
+      expect(await releasedEvents(a)).toHaveLength(0);
+      await expectReconciled(raw, [a]);
+    });
+
+    it('tells what live reservations hold from what the backlog does: 422 when only the live ones are in the way, 409 when the backlog is', async () => {
+      const a = org();
+      const { stockItemId, warehouseId } = await seedStock(api, a, 5 * BATCH);
+      const other = await seedStock(api, a, BATCH, { warehouseId });
+      const owner = client(api, orgAdmin(a));
+      // Live: no expiresAt. Due: three batches, so a command's batch always leaves a backlog.
+      expect((await owner.reserve([{ stockItemId, quantity: 2 * BATCH }])).status).toBe(201);
+      expect((await owner.reserve([{ stockItemId: other.stockItemId, quantity: 5 }])).status).toBe(
+        201,
+      );
+      await plantDue(a, stockItemId, 3 * BATCH);
+      await pastDue();
+      const live = 2 * BATCH;
+      const onHand = 5 * BATCH;
+
+      // Short by one even with every due reservation expired: the live ones hold it.
+      const reserve = await owner.reserve([{ stockItemId, quantity: onHand - live + 1 }]);
+      expect(reserve.status).toBe(422);
+      expect(reserve.body.details).toEqual([
+        expect.objectContaining({ code: 'INSUFFICIENT_AVAILABLE_STOCK' }),
+      ]);
+      const adjust = await owner.adjust(stockItemId, -(onHand - live + 1));
+      expect(adjust.status).toBe(422);
+      expect(adjust.body.details).toEqual([
+        expect.objectContaining({ code: 'ON_HAND_WOULD_BE_NEGATIVE' }),
+      ]);
+      // One line the backlog could make room for, one nothing could: the reservation is final.
+      const mixed = await owner.reserve([
+        { stockItemId, quantity: onHand - live },
+        { stockItemId: other.stockItemId, quantity: BATCH - 5 + 1 },
+      ]);
+      expect(mixed.status).toBe(422);
+      expect(mixed.body.details).toEqual([
+        expect.objectContaining({ code: 'INSUFFICIENT_AVAILABLE_STOCK' }),
+      ]);
+      expect(mixed.headers['retry-after']).toBeUndefined();
+      // The final refusals left the backlog as it was.
+      expect(await activeCount(stockItemId)).toBe(1 + 3 * BATCH);
+
+      // Only the backlog in the way: not sure yet, 409 with Retry-After, and a batch left done.
+      const contended = await owner.reserve([{ stockItemId, quantity: onHand - live }]);
+      expect(contended.status).toBe(409);
+      expect(contended.body.code).toBe('CONFLICT');
+      expect(contended.headers['retry-after']).toBe('1');
+      expect(await activeCount(stockItemId)).toBe(1 + 2 * BATCH);
+      const adjustContended = await owner.adjust(stockItemId, -(onHand - live));
+      expect(adjustContended.status).toBe(409);
+      expect(adjustContended.headers['retry-after']).toBe('1');
+      expect(await activeCount(stockItemId)).toBe(1 + BATCH);
+
+      // The backlog gone, the same reservation fits.
+      expect((await owner.reserve([{ stockItemId, quantity: onHand - live }])).status).toBe(201);
+      await expectReconciled(raw, [a]);
+    });
   });
 });

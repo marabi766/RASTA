@@ -3,8 +3,10 @@ import type { PrismaClient } from '../src/generated/prisma';
 import { PrismaClient as Owner } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { IdempotencyStore, hashRequest } from '../src/shared/idempotency';
+import { WarehouseService } from '../src/warehouse/warehouse.service';
 import { actor, client, key, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import {
+  TEST_POOL_CONNECTIONS,
   cleanup,
   databaseUrl,
   expectReconciled,
@@ -224,6 +226,94 @@ describe('idempotent stock commands', () => {
     }
     expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
   }, 30_000);
+
+  /**
+   * Codex round 2, finding 2: creating a warehouse opened its own transaction, outside the
+   * translation every stock command's goes through — a pool with no connection left once the
+   * key was claimed was a 500, with no Retry-After.
+   */
+  describe('a warehouse whose transaction cannot get a connection after its key was claimed', () => {
+    let quick: ApiHarness;
+
+    beforeAll(async () => {
+      quick = await startApi({ INVENTORY_LOCK_TIMEOUT_MS: '300' });
+    });
+
+    afterAll(async () => {
+      await quick.close();
+    });
+
+    /** Every connection of the app's pool, held by an open transaction until released. */
+    async function occupyPool(prisma: PrismaService): Promise<() => Promise<void>> {
+      let open: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      let started = 0;
+      let allStarted: () => void = () => undefined;
+      const ready = new Promise<void>((resolve) => {
+        allStarted = resolve;
+      });
+      const holders = Array.from({ length: TEST_POOL_CONNECTIONS }, () =>
+        prisma.transaction(
+          async () => {
+            started += 1;
+            if (started === TEST_POOL_CONNECTIONS) allStarted();
+            await gate;
+          },
+          { timeoutMs: 30_000, maxWaitMs: 10_000 },
+        ),
+      );
+      await ready;
+      return async () => {
+        open();
+        await Promise.all(holders);
+      };
+    }
+
+    it('is answered 409 CONFLICT with Retry-After: no warehouse, no event, and the key free for the retry', async () => {
+      const a = org();
+      const owner = client(quick, orgAdmin(a));
+      const service = quick.app.get(WarehouseService);
+      const create = service.create.bind(service);
+      let claimedBefore = -1;
+      const spy = jest.spyOn(service, 'create').mockImplementationOnce(async (dto, fence) => {
+        // The claim is committed by now; only the warehouse's own transaction is left to run.
+        claimedBefore = await raw.idempotencyKey.count({
+          where: { organizationId: a, state: 'IN_PROGRESS' },
+        });
+        const release = await occupyPool(quick.prisma);
+        try {
+          return await create(dto, fence);
+        } finally {
+          await release();
+        }
+      });
+      const k = key();
+      try {
+        const refused = await owner.createWarehouse({ name: 'Pool warehouse' }, k);
+        expect(claimedBefore).toBe(1);
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('CONFLICT');
+        expect(refused.headers['retry-after']).toBe('1');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await raw.warehouse.count({ where: { organizationId: a } })).toBe(0);
+      expect(await raw.outboxMessage.count({ where: { organizationId: a } })).toBe(0);
+      // The claim was released with the refusal: the same key runs the retry.
+      expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
+
+      const retried = await owner.createWarehouse({ name: 'Pool warehouse' }, k);
+      expect(retried.status).toBe(201);
+      expect(await raw.warehouse.count({ where: { organizationId: a } })).toBe(1);
+      expect(
+        await raw.outboxMessage.count({
+          where: { organizationId: a, eventName: 'WAREHOUSE_CREATED' },
+        }),
+      ).toBe(1);
+    }, 30_000);
+  });
 
   it('purges expired records by age alone', async () => {
     const a = org();

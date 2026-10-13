@@ -34,14 +34,21 @@ export interface ExpiryBatch {
    * expired by a later batch — the next command's, the sweeper's or {@link ReservationExpiry.expireBatch}.
    */
   backlog: boolean;
+  /**
+   * What those due reservations past the batch still hold, in all — the most expiring the
+   * backlog could take off `reserved`. `0` without a backlog.
+   */
+  backlogQuantity: number;
 }
 
 /**
- * A command whose refusal the not-yet-expired part of a backlog could change: `reserved` still
- * counts reservations that are due, so "not enough available" or "on hand below reserved" may
- * no longer be true once they are expired. Answered `409 CONFLICT` with `Retry-After` — never a
- * 422 that might be wrong. `CommandRunner` expires a batch of each item in its own transaction
- * before answering, so every retry finds the backlog smaller.
+ * A command whose refusal the not-yet-expired part of a backlog could reverse: `reserved` still
+ * counts reservations that are due, and once they are expired "not enough available" or "on hand
+ * below reserved" would no longer be true. Answered `409 CONFLICT` with `Retry-After` — never a
+ * 422 that might be wrong. A refusal the backlog could not reverse — what is asked for exceeds
+ * what the item would have with every due reservation expired — is the final 422 at once.
+ * `CommandRunner` expires a batch of each item in its own transaction before answering, so every
+ * retry finds the backlog smaller.
  */
 export class ExpiryBacklog extends RastaError {
   constructor(
@@ -89,8 +96,11 @@ export class ExpiryBacklog extends RastaError {
  * never on hand. A decision that holds with the leftover due reservations still counted holds
  * without them — so a receipt, an adjustment that keeps on hand above reserved, a reservation
  * that fits what is available, a release and an issue all **proceed**. Only a refusal could be
- * wrong: "not enough available" or "on hand below reserved" with a backlog left is
- * {@link ExpiryBacklog}, a retryable 409, not a 422.
+ * wrong, and only one the backlog could reverse: "not enough available" or "on hand below
+ * reserved" that would no longer hold with every due reservation expired
+ * ({@link ExpiryBatch.backlogQuantity} given back) is {@link ExpiryBacklog}, a retryable 409.
+ * One that would still hold — a line beyond on hand, an adjustment below zero, or below what
+ * live reservations hold — is the final 422 at once, backlog or not.
  *
  * ## The service acts, under its own context
  *
@@ -113,7 +123,7 @@ export class ReservationExpiry {
 
   /**
    * Expires one batch of the due reservations of a stock item **the caller has locked**, and
-   * reports the item as it then stands and whether a backlog remains.
+   * reports the item as it then stands, whether a backlog remains and what it holds.
    */
   async expireDue(
     tx: ExtendedPrismaClient,
@@ -164,7 +174,12 @@ export class ReservationExpiry {
       expired += 1;
       inventoryReservationsExpiredTotal.inc({ service: SERVICE_NAME, path });
     }
-    return { item: current, expired, backlog: due.length > size };
+    const backlog = due.length > size;
+    // Asked only when a backlog remains: what it holds is then what decides a refusal.
+    const backlogQuantity = backlog
+      ? await this.reservations.dueQuantity(tx, item.organizationId, item.id, at)
+      : 0;
+    return { item: current, expired, backlog, backlogQuantity };
   }
 
   /**

@@ -9,19 +9,22 @@ import { transactionNow } from './clock';
 import { boundLockWaits, translateCommandError } from './command';
 import type { ClaimFence } from './idempotency';
 
-export type StockCommandName = 'receive' | 'adjust' | 'reserve' | 'release' | 'issue';
+export type CommandName =
+  'create_warehouse' | 'receive' | 'adjust' | 'reserve' | 'release' | 'issue';
 
 /**
- * The one shape of a stock command's transaction (ADR-056 § 3):
+ * The one shape of a command's transaction (ADR-056 § 3):
  *
  *   hold the Idempotency-Key claim → bound every lock wait → read the transaction's instant →
- *   the work (lock, expire due, write balance, movement, reservation, outbox) → store the
- *   response on the claim
+ *   the work (lock, expire due, write balance, movement, reservation — or the warehouse — and
+ *   outbox) → store the response on the claim
  *
- * — all in one transaction, so the balance, its ledger, the event and the replayable answer
+ * — all in one transaction, so the change, its ledger, the event and the replayable answer
  * commit together or not at all. What the database refused is translated once, here
- * (`translateCommandError`), and every outcome is counted. A command refused for an expiry
- * backlog (`ExpiryBacklog`) leaves one committed batch of it expired behind.
+ * (`translateCommandError`): a pool with no connection to give, or a transaction past its
+ * budget, is the same retryable 409 for every command, after its claim was taken as before.
+ * Every outcome is counted. A command refused for an expiry backlog (`ExpiryBacklog`) leaves one
+ * committed batch of it expired behind.
  */
 @Injectable()
 export class CommandRunner {
@@ -32,9 +35,10 @@ export class CommandRunner {
   ) {}
 
   async run<T>(
-    command: StockCommandName,
+    command: CommandName,
     fence: ClaimFence<T>,
-    overdrawn: () => RastaError,
+    /** What a balance CHECK becomes; `null` for a command that writes no balance. */
+    overdrawn: (() => RastaError) | null,
     work: (tx: ExtendedPrismaClient, at: Date) => Promise<T>,
   ): Promise<T> {
     const lockTimeoutMs = this.env.INVENTORY_LOCK_TIMEOUT_MS;
@@ -66,7 +70,7 @@ export class CommandRunner {
     }
   }
 
-  private count(command: StockCommandName, outcome: 'applied' | 'refused' | 'contended'): void {
+  private count(command: CommandName, outcome: 'applied' | 'refused' | 'contended'): void {
     inventoryCommandsTotal.inc({ service: SERVICE_NAME, command, outcome });
   }
 }
