@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import {
   fetchHolds,
@@ -11,7 +11,7 @@ import {
   type TransactionListQuery,
 } from '@/server/wallet';
 import { mintSubmissionId } from '@/server/submission';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { WalletScreen } from './WalletScreen';
 
 /**
@@ -72,7 +72,7 @@ export default async function WalletPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/wallet" />}
+      sidebar={<PortalSidebar session={session} currentHref="/wallet" />}
     >
       <WalletScreen
         wallet={wallet}

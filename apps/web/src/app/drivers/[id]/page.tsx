@@ -1,10 +1,10 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDriver, fetchDriverAssignments } from '@/server/drivers';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriverDetailScreen } from './DriverDetailScreen';
 
 /**
@@ -51,7 +51,7 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/drivers" />}
+      sidebar={<PortalSidebar session={session} currentHref="/drivers" current={currentUser} />}
     >
       <DriverDetailScreen
         result={result}

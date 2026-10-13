@@ -62,13 +62,19 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 > مشکل نیست — CI روی **Merge Ref** اجرا می‌شود، یعنی نتیجهٔ ترکیب شاخه با
 > `main` را می‌سنجد، نه خود شاخه را.
 
-| شاخه                                      | Worktree                          | نشست          | PR                                                  | ahead / behind | وضعیت                                                                        |
-| ----------------------------------------- | --------------------------------- | ------------- | --------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
-| `demo/investor-preview`                   | `F:\Rasta-Parallel\investor-demo` | —             | —                                                   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
-| `design/claude-design`                    | پوشهٔ موقت در `%TEMP%`            | —             | —                                                   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
-| `feat/web-exp-002-documents-availability` | نشست ابری (cloud-sonnet6)         | cloud-sonnet6 | [#225](https://github.com/marabi766/RASTA/pull/225) | —              | EXP-002 برش ۷: مدارک دارایی و آمادگی اعزام در `/assets/[id]`؛ ADR-069 و Q-98 |
-| `fix/construction-refusal-reason-field`   | سرور (کارگر) — از Cloud 3         | server-worker | [#227](https://github.com/marabi766/RASTA/pull/227) | —              | دلیل بستهٔ ردهای `construction-service` در `details[].code`                  |
-| `feat/contract-service-con003-pr2`        | سرور (کارگر)                      | server-worker | —                                                   | —              | CON-003 PR 2: امضا و ابطال قرارداد (روی شاخهٔ PR 1 ساخته می‌شود)             |
+| شاخه                                    | Worktree                          | نشست            | PR                                                  | ahead / behind | وضعیت                                                                        |
+| --------------------------------------- | --------------------------------- | --------------- | --------------------------------------------------- | -------------- | ---------------------------------------------------------------------------- |
+| `demo/investor-preview`                 | `F:\Rasta-Parallel\investor-demo` | —               | —                                                   | ۳۴ / ۱۶۷       | شاخهٔ نمایشی بلندمدت؛ هرگز در `main` ادغام نمی‌شود — سند خودش این را می‌گوید |
+| `design/claude-design`                  | پوشهٔ موقت در `%TEMP%`            | —               | —                                                   | ۷ / ۴۷۳        | ابزار انتشار طرح؛ خارج از چرخهٔ محصول                                        |
+| `fix/fleet-dispatch-insurance-in-force` | سرور (کارگر ۱)                    | server-worker   | [#240](https://github.com/marabi766/RASTA/pull/240) | —              | بیمهٔ در اعتبار هنگام اعزام؛ Q-101؛ دور ۱۵ بازبینی                           |
+| `test/contract-lifecycle-e2e`           | سرور (کارگر ۲)                    | server-worker-2 | [#241](https://github.com/marabi766/RASTA/pull/241) | —              | E2E چرخهٔ عمر قرارداد از راه Gateway                                         |
+| `feat/web-exp-003-place-order`          | سرور (کارگر ۳)                    | server-worker-3 | [#245](https://github.com/marabi766/RASTA/pull/245) | —              | EXP-003: ثبت سفارش از صفحهٔ پیشنهادها                                        |
+| `feat/inventory-service-skeleton`       | سرور (کارگر ۴)                    | server-worker-4 | [#246](https://github.com/marabi766/RASTA/pull/246) | —              | COM-006 PR 1: اسکلت inventory-service؛ Q-102 … Q-109؛ در صف ادغام            |
+| `feat/outbox-purge-phase1`              | سرور (کارگر ۱)                    | server-worker   | [#247](https://github.com/marabi766/RASTA/pull/247) | —              | پاک‌سازی زمان‌بندی‌شدهٔ Outbox، فاز ۱ (D-052)                                |
+| `fix/construction-audit-findings`       | سرور (کارگر ۴)                    | server-worker-4 | [#250](https://github.com/marabi766/RASTA/pull/250) | —              | یافته‌های ممیزی construction-service؛ Q-117                                  |
+| `fix/marketplace-idempotency-gaps`      | سرور (کارگر ۱)                    | server-worker   | [#253](https://github.com/marabi766/RASTA/pull/253) | —              | شکاف‌های Idempotency در marketplace؛ Q-110 و Q-116                           |
+| `fix/economic-scoped-cursor`            | سرور (کارگر ۲)                    | server-worker-2 | [#256](https://github.com/marabi766/RASTA/pull/256) | —              | مکان‌نمای فهرست‌های economic در دامنهٔ خود فهرست؛ در صف ادغام                |
+| `feat/inventory-shipments`              | سرور (کارگر ۴)                    | server-worker-4 | [#257](https://github.com/marabi766/RASTA/pull/257) | —              | COM-006 PR 2: محموله و رهگیری (پایه: #246)؛ Q-113 … Q-115                    |
 
 ## شاخه‌های بازنشسته
 
@@ -253,6 +259,27 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `fix/construction-tender-front-door`                              | [#226](https://github.com/marabi766/RASTA/pull/226) | `89402e4`   |
 | `feat/contract-service-con003-pr1`                                | [#228](https://github.com/marabi766/RASTA/pull/228) | `25744c6`   |
 | `fix/construction-award-read-project`                             | [#229](https://github.com/marabi766/RASTA/pull/229) | `ffe056d`   |
+| `feat/web-exp-002-documents-availability`                         | [#225](https://github.com/marabi766/RASTA/pull/225) | `91009ad`   |
+| `fix/construction-refusal-reason-field`                           | [#227](https://github.com/marabi766/RASTA/pull/227) | `eead32b`   |
+| `docs/registry-sync-1005`                                         | [#230](https://github.com/marabi766/RASTA/pull/230) | `80474fc`   |
+| `feat/contract-service-con003-pr2`                                | [#231](https://github.com/marabi766/RASTA/pull/231) | `ad1cfaa`   |
+| `fix/web-select-reset-after-refusal`                              | [#232](https://github.com/marabi766/RASTA/pull/232) | `9974c36`   |
+| `fix/deps-audit-1006`                                             | [#233](https://github.com/marabi766/RASTA/pull/233) | `418e7ac`   |
+| `fix/asset-document-refs-on-transfer`                             | [#234](https://github.com/marabi766/RASTA/pull/234) | `85656d9`   |
+| `feat/contract-service-con003-pr3`                                | [#235](https://github.com/marabi766/RASTA/pull/235) | `8125929`   |
+| `fix/deps-sharp-1006`                                             | [#236](https://github.com/marabi766/RASTA/pull/236) | `c89971a`   |
+| `chore/migration-verifier-psql-file`                              | [#237](https://github.com/marabi766/RASTA/pull/237) | `0fd6fe4`   |
+| `fix/deps-source-map-js-pin`                                      | [#238](https://github.com/marabi766/RASTA/pull/238) | `ee10023`   |
+| `fix/web-forged-baseline-flake`                                   | [#239](https://github.com/marabi766/RASTA/pull/239) | `9f07f9f`   |
+| `fix/document-timestamptz`                                        | [#242](https://github.com/marabi766/RASTA/pull/242) | `f6ef73f`   |
+| `fix/contract-signature-policy-gateway`                           | [#243](https://github.com/marabi766/RASTA/pull/243) | `128dbd9`   |
+| `fix/contract-read-snapshot`                                      | [#244](https://github.com/marabi766/RASTA/pull/244) | `88b937e`   |
+| `fix/contract-audit-findings`                                     | [#248](https://github.com/marabi766/RASTA/pull/248) | `27f0c22`   |
+| `feat/web-exp-003-settlements`                                    | [#249](https://github.com/marabi766/RASTA/pull/249) | `e61a253`   |
+| `fix/contract-audit-followups`                                    | [#251](https://github.com/marabi766/RASTA/pull/251) | `603dd05`   |
+| `feat/web-exp-004-construction-read`                              | [#252](https://github.com/marabi766/RASTA/pull/252) | `ce5a534`   |
+| `docs/contract-admin-refusal-oracle`                              | [#254](https://github.com/marabi766/RASTA/pull/254) | `1934750`   |
+| `fix/construction-tender-close-plan-test`                         | [#255](https://github.com/marabi766/RASTA/pull/255) | `4ab9c01`   |
 
 > **هشدار پابرجا:** ref محلی `main` در مخزن اصلی `F:\Rasta` صدها کامیت عقب
 > است و می‌ماند. هیچ Worktreeای `main` را checkout نکرده، پس `git fetch` آن ref
@@ -310,74 +337,85 @@ Job پیش از رسیدن به آن مرحله متوقف می‌شد — پس 
 
 ### ADR
 
-| شماره     | مالک                                      | وضعیت                                                                                    |
-| --------- | ----------------------------------------- | ---------------------------------------------------------------------------------------- |
-| ۰۵۴       | `feat/notification-service`               | روی `main` (`cc89660`)                                                                   |
-| ۰۵۵       | `feat/audit-service-aud-004-contract`     | روی `main` (`9fa75cc`)                                                                   |
-| ۰۵۶       | `docs/inventory-logistics-adr`            | روی `main` (`f2eb8fa`)                                                                   |
-| ۰۵۷       | `docs/audit-immutable-archive`            | مصرف شد — بازشماری از ۰۵۵ انجام شد                                                       |
-| ۰۵۸       | `feat/web-foundation`                     | مصرف شد — جای پورتال وب و مرز Design System                                              |
-| ۰۵۹       | `feat/web-session-and-shell`              | روی `main` (`3cf79aa`) — نگهداشت توکن در پورتال                                          |
-| ۰۶۰       | `fix/identity-tenant-bound-roles`         | روی `main` (`6b9b956`) — نقش‌های سراسری                                                  |
-| ۰۶۱       | `docs/adr-061-event-provenance`           | روی `main` (`3115f4d`) — منشأ رویداد                                                     |
-| ۰۶۲       | `fix/asset-transfer-clearance`            | روی `main` (`9bcc7dc`، #127) — پاک‌سازی انتقال دارایی در برابر کار باز                   |
-| ۰۶۳       | `claude/new-session-6ektto`               | روی `main` (`7a5233c`، #119) — چرخهٔ عمر ساخت و مالکیت سیاست موافقت                      |
-| ۰۶۴       | `fix/economic-payment-reconciler`         | روی `main` (`fd5a42e`، #140) — آشتی‌دهندهٔ پایدار پرداخت                                 |
-| ۰۶۵ … ۰۶۷ | `feat/construction-tender-adr`            | روی `main` (`33935aa`، #156) — چرخهٔ عمر مناقصه، محرمانگی پیشنهاد، ارزیابی و تعارض منافع |
-| ۰۶۸       | `feat/contract-service-con003-pr1`        | روی `main` (`25744c6`، #228) — چرخهٔ عمر قرارداد و مرز `contract-service`                |
-| ۰۶۹       | `feat/web-exp-002-documents-availability` | رزرو (#225) — بارگذاری مدرک از راه سرور پورتال؛ مرورگر به ذخیره‌ساز وصل نمی‌شود          |
-| ۰۷۰+      | آزاد                                      | —                                                                                        |
+| شماره     | مالک                                      | وضعیت                                                                                            |
+| --------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| ۰۵۴       | `feat/notification-service`               | روی `main` (`cc89660`)                                                                           |
+| ۰۵۵       | `feat/audit-service-aud-004-contract`     | روی `main` (`9fa75cc`)                                                                           |
+| ۰۵۶       | `docs/inventory-logistics-adr`            | روی `main` (`f2eb8fa`)                                                                           |
+| ۰۵۷       | `docs/audit-immutable-archive`            | مصرف شد — بازشماری از ۰۵۵ انجام شد                                                               |
+| ۰۵۸       | `feat/web-foundation`                     | مصرف شد — جای پورتال وب و مرز Design System                                                      |
+| ۰۵۹       | `feat/web-session-and-shell`              | روی `main` (`3cf79aa`) — نگهداشت توکن در پورتال                                                  |
+| ۰۶۰       | `fix/identity-tenant-bound-roles`         | روی `main` (`6b9b956`) — نقش‌های سراسری                                                          |
+| ۰۶۱       | `docs/adr-061-event-provenance`           | روی `main` (`3115f4d`) — منشأ رویداد                                                             |
+| ۰۶۲       | `fix/asset-transfer-clearance`            | روی `main` (`9bcc7dc`، #127) — پاک‌سازی انتقال دارایی در برابر کار باز                           |
+| ۰۶۳       | `claude/new-session-6ektto`               | روی `main` (`7a5233c`، #119) — چرخهٔ عمر ساخت و مالکیت سیاست موافقت                              |
+| ۰۶۴       | `fix/economic-payment-reconciler`         | روی `main` (`fd5a42e`، #140) — آشتی‌دهندهٔ پایدار پرداخت                                         |
+| ۰۶۵ … ۰۶۷ | `feat/construction-tender-adr`            | روی `main` (`33935aa`، #156) — چرخهٔ عمر مناقصه، محرمانگی پیشنهاد، ارزیابی و تعارض منافع         |
+| ۰۶۸       | `feat/contract-service-con003-pr1`        | روی `main` (`25744c6`، #228) — چرخهٔ عمر قرارداد و مرز `contract-service`                        |
+| ۰۶۹       | `feat/web-exp-002-documents-availability` | روی `main` (`91009ad`، #225) — بارگذاری مدرک از راه سرور پورتال؛ مرورگر به ذخیره‌ساز وصل نمی‌شود |
+| ۰۷۰+      | آزاد                                      | —                                                                                                |
 
 ### پرسش‌های باز `Q-NN`
 
-| شماره       | مالک                                         | وضعیت                                                                                                                         |
-| ----------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Q-44        | تصمیم محصول MVP                              | **بسته** روی `main` و تثبیت‌شده با نقل‌قول کلمه‌به‌کلمه در `ADR-056 § ۲` — تغییرناپذیر                                        |
-| Q-45 … Q-55 | `feat/audit-service-aud-004-contract`        | روی `main`                                                                                                                    |
-| Q-56        | `feat/supplier-performance-phase2`           | روی `main` (`f7252d3`)                                                                                                        |
-| Q-57        | `feat/audit-service-aud-004-contract`        | روی `main`                                                                                                                    |
-| Q-58        | `docs/audit-immutable-archive`               | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                                                          |
-| Q-59        | `feat/asset-insurance-claim-api`             | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه                                                  |
-| Q-60        | `fix/identity-role-grant-ladder`             | روی `main` (`9347b80`) — مرجع اعطای نقش: چه نقشی چه نقش‌هایی را می‌دهد، و چه عضویتی را اداره می‌کند                           |
-| Q-61        | `fix/identity-cross-tenant-provisioning`     | روی `main` (`cfdb7b0`) — مرجع ساخت حساب در سازمانی جز سازمان خود. **پس از استفاده ثبت شد** — #81 بدون رزرو پیشین آن را برداشت |
-| Q-62        | `claude/upbeat-tesla-cenkph`                 | روی `main` (#90) — مرجع استرداد (Refund) تراکنش: چه کسی، از کدام وضعیت                                                        |
-| Q-63        | `fix/identity-tenant-bound-roles`            | روی `main` (`6b9b956`) — نقش‌های سراسری؛ همراه `ADR-060`                                                                      |
-| Q-64        | `claude/adoring-cerf-nhq97e`                 | روی `main` (`8b3136b`)؛ بسته با تصمیم مالک پروژه در #104 (`771a491`) — چه نقشی سیاست حکمرانی را تنظیم می‌کند                  |
-| Q-65        | `fix/fleet-dispatch-and-usage-integrity`     | روی `main` (`b55e4e9`) — کدام پوشش بیمه مانع اعزام است، و چه چیزی مانع معاینه را برمی‌دارد                                    |
-| Q-66        | `fix/asset-transfer-and-insurance-integrity` | روی `main` (`aa4efcc`، #108) — آیا بیمهٔ مالک پیشین پس از انتقال پوشش مالک جدید است                                           |
-| Q-67        | `claude/adoring-cerf-nhq97e-org-concurrency` | روی `main` (`333aa76`، #111) — آیا `/ancestors` برای غیراپراتور زنجیرهٔ بالاتر از ریشهٔ قابل‌دید را نشان دهد                  |
-| Q-68 … Q-73 | `claude/new-session-6ektto`                  | روی `main` (`7a5233c`، #119) — پرسش‌های CON-001 (مدل پروژه، نقش‌ها، مرجع موافقت، اجرا، پیشرفت، مهلت)                          |
-| Q-74        | `fix/asset-transfer-clearance`               | روی `main` (`9bcc7dc`، #127) — سرنوشت کار باز مالک پیشین پس از انتقال دارایی                                                  |
-| Q-75        | `claude/modest-carson-jl3e5v`                | روی `main` (`9e85472`، #120)؛ **بسته** با تصمیم مالک پروژه — فرمول امتیاز تأمین‌کننده                                         |
-| Q-76        | `fix/economic-ledger-reversal-guard`         | روی `main` (`0212ca5`، #123) — معنای برگرداندن تسویه، استرداد یا پاداش                                                        |
-| Q-77 … Q-79 | `feat/supplier-performance-consumer`         | روی `main` (`f9d0b84`، #126) — قواعد موتور امتیاز؛ **منتظر پاسخ مالک**، گام ۶ مسدود                                           |
-| Q-80        | `fix/organization-union-admin-scope`         | روی `main` (`e686fb0`، #132) — دامنهٔ `UNION_ADMIN` در ثبت سازمان‌ها                                                          |
-| Q-81, Q-82  | `fix/economic-payment-reconciler`            | روی `main` (`fd5a42e`، #140) — Capture پرداخت Authorize‌شده؛ حل انسانی پرداخت تشدیدشده                                        |
-| Q-83        | `fix/construction-policy-on-org-moved`       | روی `main` (`5091890`، #148) — سیاست موافقت پس از جابه‌جایی سازمان                                                            |
-| Q-84 … Q-90 | `feat/construction-tender-adr`               | روی `main` (`33935aa`، #156) — پرسش‌های طراحی CON-002                                                                         |
-| Q-91        | `feat/construction-tender-open`              | روی `main` (`f79f100`، #184) — بازگشایی پیشنهادها                                                                             |
-| Q-92        | `feat/construction-tender-evaluation`        | روی `main` (`afac1bc`، #190) — ارزیابی پیشنهادها                                                                              |
-| Q-93        | `feat/construction-tender-award`             | روی `main` (`982ef27`، #199) — انتخاب برنده                                                                                   |
-| Q-94        | `feat/web-exp-002-asset-lifecycle`           | روی `main` (`f400f1e`، #195) — دارایی دارای کار باز و خروج از سرویس                                                           |
-| Q-95 … Q-97 | `feat/contract-service-con003-pr1`           | روی `main` (`25744c6`، #228) — پرسش‌های CON-003 (امضا و ابطال، صورت‌وضعیت و تأیید، تسویه)                                     |
-| Q-98        | `feat/web-exp-002-documents-availability`    | رزرو (#225) — نگاشت نوع مدرک به ردهٔ document-service، سقف بدنهٔ بارگذاری، اثر سهمیهٔ ساعتی                                   |
-| Q-99+       | آزاد                                         | —                                                                                                                             |
+| شماره         | مالک                                         | وضعیت                                                                                                                         |
+| ------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Q-44          | تصمیم محصول MVP                              | **بسته** روی `main` و تثبیت‌شده با نقل‌قول کلمه‌به‌کلمه در `ADR-056 § ۲` — تغییرناپذیر                                        |
+| Q-45 … Q-55   | `feat/audit-service-aud-004-contract`        | روی `main`                                                                                                                    |
+| Q-56          | `feat/supplier-performance-phase2`           | روی `main` (`f7252d3`)                                                                                                        |
+| Q-57          | `feat/audit-service-aud-004-contract`        | روی `main`                                                                                                                    |
+| Q-58          | `docs/audit-immutable-archive`               | مصرف شد — بازشماری از `Q-44`؛ سیاست لنگرگذاری خارجی، همراه `ADR-057`                                                          |
+| Q-59          | `feat/asset-insurance-claim-api`             | روی `main` (`fa14ef4`) — مرجع تأیید/رد ادعای خسارت بیمه و مالکیت اجرای تسویه                                                  |
+| Q-60          | `fix/identity-role-grant-ladder`             | روی `main` (`9347b80`) — مرجع اعطای نقش: چه نقشی چه نقش‌هایی را می‌دهد، و چه عضویتی را اداره می‌کند                           |
+| Q-61          | `fix/identity-cross-tenant-provisioning`     | روی `main` (`cfdb7b0`) — مرجع ساخت حساب در سازمانی جز سازمان خود. **پس از استفاده ثبت شد** — #81 بدون رزرو پیشین آن را برداشت |
+| Q-62          | `claude/upbeat-tesla-cenkph`                 | روی `main` (#90) — مرجع استرداد (Refund) تراکنش: چه کسی، از کدام وضعیت                                                        |
+| Q-63          | `fix/identity-tenant-bound-roles`            | روی `main` (`6b9b956`) — نقش‌های سراسری؛ همراه `ADR-060`                                                                      |
+| Q-64          | `claude/adoring-cerf-nhq97e`                 | روی `main` (`8b3136b`)؛ بسته با تصمیم مالک پروژه در #104 (`771a491`) — چه نقشی سیاست حکمرانی را تنظیم می‌کند                  |
+| Q-65          | `fix/fleet-dispatch-and-usage-integrity`     | روی `main` (`b55e4e9`) — کدام پوشش بیمه مانع اعزام است، و چه چیزی مانع معاینه را برمی‌دارد                                    |
+| Q-66          | `fix/asset-transfer-and-insurance-integrity` | روی `main` (`aa4efcc`، #108) — آیا بیمهٔ مالک پیشین پس از انتقال پوشش مالک جدید است                                           |
+| Q-67          | `claude/adoring-cerf-nhq97e-org-concurrency` | روی `main` (`333aa76`، #111) — آیا `/ancestors` برای غیراپراتور زنجیرهٔ بالاتر از ریشهٔ قابل‌دید را نشان دهد                  |
+| Q-68 … Q-73   | `claude/new-session-6ektto`                  | روی `main` (`7a5233c`، #119) — پرسش‌های CON-001 (مدل پروژه، نقش‌ها، مرجع موافقت، اجرا، پیشرفت، مهلت)                          |
+| Q-74          | `fix/asset-transfer-clearance`               | روی `main` (`9bcc7dc`، #127) — سرنوشت کار باز مالک پیشین پس از انتقال دارایی                                                  |
+| Q-75          | `claude/modest-carson-jl3e5v`                | روی `main` (`9e85472`، #120)؛ **بسته** با تصمیم مالک پروژه — فرمول امتیاز تأمین‌کننده                                         |
+| Q-76          | `fix/economic-ledger-reversal-guard`         | روی `main` (`0212ca5`، #123) — معنای برگرداندن تسویه، استرداد یا پاداش                                                        |
+| Q-77 … Q-79   | `feat/supplier-performance-consumer`         | روی `main` (`f9d0b84`، #126) — قواعد موتور امتیاز؛ **منتظر پاسخ مالک**، گام ۶ مسدود                                           |
+| Q-80          | `fix/organization-union-admin-scope`         | روی `main` (`e686fb0`، #132) — دامنهٔ `UNION_ADMIN` در ثبت سازمان‌ها                                                          |
+| Q-81, Q-82    | `fix/economic-payment-reconciler`            | روی `main` (`fd5a42e`، #140) — Capture پرداخت Authorize‌شده؛ حل انسانی پرداخت تشدیدشده                                        |
+| Q-83          | `fix/construction-policy-on-org-moved`       | روی `main` (`5091890`، #148) — سیاست موافقت پس از جابه‌جایی سازمان                                                            |
+| Q-84 … Q-90   | `feat/construction-tender-adr`               | روی `main` (`33935aa`، #156) — پرسش‌های طراحی CON-002                                                                         |
+| Q-91          | `feat/construction-tender-open`              | روی `main` (`f79f100`، #184) — بازگشایی پیشنهادها                                                                             |
+| Q-92          | `feat/construction-tender-evaluation`        | روی `main` (`afac1bc`، #190) — ارزیابی پیشنهادها                                                                              |
+| Q-93          | `feat/construction-tender-award`             | روی `main` (`982ef27`، #199) — انتخاب برنده                                                                                   |
+| Q-94          | `feat/web-exp-002-asset-lifecycle`           | روی `main` (`f400f1e`، #195) — دارایی دارای کار باز و خروج از سرویس                                                           |
+| Q-95 … Q-97   | `feat/contract-service-con003-pr1`           | روی `main` (`25744c6`، #228) — پرسش‌های CON-003 (امضا و ابطال، صورت‌وضعیت و تأیید، تسویه)                                     |
+| Q-98          | `feat/web-exp-002-documents-availability`    | روی `main` (`91009ad`، #225) — نگاشت نوع مدرک به ردهٔ document-service، سقف بدنهٔ بارگذاری، اثر سهمیهٔ ساعتی                  |
+| Q-99          | `fix/asset-document-refs-on-transfer`        | روی `main` (`85656d9`، #234) — ارجاع‌های مدرک مالک قبلی پس از انتقال دارایی                                                   |
+| Q-100         | `feat/contract-service-con003-pr3`           | روی `main` (`8125929`، #235) — الحاقیه و Milestone                                                                            |
+| Q-101         | `fix/fleet-dispatch-insurance-in-force`      | رزرو (#240)                                                                                                                   |
+| Q-102 … Q-109 | `feat/inventory-service-skeleton`            | رزرو (#246) — پرسش‌های COM-006 PR 1                                                                                           |
+| Q-110         | `fix/marketplace-idempotency-gaps`           | رزرو (#253) — یادداشت سفارش پذیرفته می‌شد ولی ذخیره نمی‌شد                                                                    |
+| Q-111, Q-112  | —                                            | بی‌استفاده — نخست با Q-110 برای #257 کنار گذاشته شد؛ Q-110 دوبار داده شده بود و رزرو #257 جابه‌جا شد                          |
+| Q-113 … Q-115 | `feat/inventory-shipments`                   | رزرو (#257)                                                                                                                   |
+| Q-116         | `fix/marketplace-idempotency-gaps`           | رزرو (#253، دور ۲)                                                                                                            |
+| Q-117         | `fix/construction-audit-findings`            | رزرو (#250) — سقف واقعی پیشنهادهای هر مناقصه                                                                                  |
+| Q-118+        | آزاد                                         | —                                                                                                                             |
 
 ### ریسک‌های `D-NNN` (`docs/23`)
 
 شماره‌های تازهٔ `docs/23` هم پیش از کار همین‌جا رزرو می‌شوند؛ شاخه‌ها شمارهٔ یکدیگر را نمی‌بینند.
 
-| شماره         | مالک                                          | وضعیت                                                                                    |
-| ------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| D-033         | `fix/asset-transfer-clearance`                | روی `main` (`9bcc7dc`، #127)                                                             |
-| D-036         | `feat/supplier-performance-consumer`          | روی `main` (`f9d0b84`، #126) — Consumer عملکرد تا احراز Broker خاموش                     |
-| D-037         | `fix/keycloak-projector-race`                 | روی `main` (`0c3067a`، #129) — پنجرهٔ باقی‌ماندهٔ ایمیل و نام در Projector کی‌کلاک       |
-| D-038 … D-045 | شاخه‌های 09-28 تا 10-01                       | روی `main` — عنوان هرکدام در `docs/23`                                                   |
-| D-046         | `fix/economic-payment-reconciler-b3`          | روی `main` (`7660d99`، #175)؛ پیگیری در #204 (`c028ee5`) — سابقهٔ حسابرسی حل انسانی آشتی |
-| D-047         | `fix/d045-credentials-out-of-argv`            | روی `main` (`8c88d2e`، #191) — URL پایگاه داده در argv موتور Prisma                      |
-| D-048         | `chore/db-session-utc-and-tenant-index-check` | روی `main` (`0f461d0`، #214) — ستون‌های لحظهٔ بی منطقهٔ زمانی (`timestamp(3)`)           |
-| D-049         | `fix/identity-one-live-membership`            | روی `main` (`92cd37f`، #219) — غیرفعال‌سازی از کنسول Keycloak در پنجرهٔ نخستین فعال‌سازی |
-| D-050+        | آزاد                                          | —                                                                                        |
+| شماره         | مالک                                          | وضعیت                                                                                                        |
+| ------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| D-033         | `fix/asset-transfer-clearance`                | روی `main` (`9bcc7dc`، #127)                                                                                 |
+| D-036         | `feat/supplier-performance-consumer`          | روی `main` (`f9d0b84`، #126) — Consumer عملکرد تا احراز Broker خاموش                                         |
+| D-037         | `fix/keycloak-projector-race`                 | روی `main` (`0c3067a`، #129) — پنجرهٔ باقی‌ماندهٔ ایمیل و نام در Projector کی‌کلاک                           |
+| D-038 … D-045 | شاخه‌های 09-28 تا 10-01                       | روی `main` — عنوان هرکدام در `docs/23`                                                                       |
+| D-046         | `fix/economic-payment-reconciler-b3`          | روی `main` (`7660d99`، #175)؛ پیگیری در #204 (`c028ee5`) — سابقهٔ حسابرسی حل انسانی آشتی                     |
+| D-047         | `fix/d045-credentials-out-of-argv`            | روی `main` (`8c88d2e`، #191) — URL پایگاه داده در argv موتور Prisma                                          |
+| D-048         | `chore/db-session-utc-and-tenant-index-check` | روی `main` (`0f461d0`، #214) — ستون‌های لحظهٔ بی منطقهٔ زمانی (`timestamp(3)`)                               |
+| D-049         | `fix/identity-one-live-membership`            | روی `main` (`92cd37f`، #219) — غیرفعال‌سازی از کنسول Keycloak در پنجرهٔ نخستین فعال‌سازی                     |
+| D-050, D-051  | `feat/contract-service-con003-pr2`            | روی `main` (`ad1cfaa`، #231) — امضا و `ORGANIZATION_MOVED` همزمان؛ علت تعلیق یا بازبینی امضا اثبات‌پذیر نیست |
+| D-052         | `fix/document-timestamptz`                    | روی `main` (`f6ef73f`، #242) — ردیف‌های منتشرشدهٔ Outbox هرگز پاک نمی‌شوند؛ فاز ۱ پاک‌سازی: #247             |
+| D-053+        | آزاد                                          | —                                                                                                            |
 
 > **چرا Q-44 قابل جابه‌جایی نیست:** یک ADR ادغام‌شده آن را به‌عنوان مرجع
 > پذیرش نقل کرده. نقل‌قول را نمی‌شود ویرایش کرد بی‌آنکه سند دروغ شود. هر
@@ -509,3 +547,4 @@ git merge-tree --write-tree <شاخه> origin/main     # ۴. تداخل متنی
 | 2026-09-28 | همگام‌سازی با `main` روی `f9d0b84`: #107 تا #126 بازنشسته شدند، #127 تا #129 فعال‌اند؛ دفتر `D-NNN` افزوده شد (D-037 برای #129). جدول فعال از 2026-09-25 به‌روز نشده بود.                                                                                                                                                                                    |
 | 2026-10-03 | همگام‌سازی با `main` روی `7781335`: #127 تا #209 بازنشسته شدند؛ #206، #208 و #210 فعال‌اند؛ دفتر شماره‌ها تا ADR-067، Q-94 و D-047 به‌روز شد. جدول فعال از 2026-09-28 به‌روز نشده بود — یادآوری اینکه این سند جز با به‌روزرسانی منظم مدیر پروژه کهنه می‌شود.                                                                                                 |
 | 2026-10-05 | همگام‌سازی با `main` روی `25744c6`: #206، #208 و #210 تا #229 (جز #225 و #227) بازنشسته شدند؛ #225 و #227 فعال‌اند و CON-003 PR 2 در راه است. ADR-068 و Q-95 تا Q-97 روی `main`؛ ADR-069 و Q-98 برای #225 رزرو شد — نخست درخواستِ پاسخ‌نگرفتهٔ #225 همان ADR-068 و Q-95 بود که برای #228 رزرو شده بود، و پیش از برخورد جابه‌جا شد. D-048 و D-049 روی `main`. |
+| 2026-10-13 | همگام‌سازی با `main` روی `ce5a534`: #208، #225، #227 و #230 تا #255 (جز PRهای باز) بازنشسته شدند؛ #240، #241، #245، #246، #247، #250، #253، #256 و #257 فعال‌اند. ADR-069، Q-98 تا Q-100 و D-050 تا D-052 روی `main`. Q-110 دوبار رزرو شده بود (#253 و #257)؛ رزرو #257 پیش از شروع کار به Q-113 تا Q-115 جابه‌جا شد و Q-111 و Q-112 بی‌استفاده ماندند.      |

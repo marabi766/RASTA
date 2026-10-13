@@ -132,6 +132,12 @@ const IDEMPOTENT_ROUTES = new Set([
 const COMMON = [401, 403, 500] as const;
 const READ_ONE = [...COMMON, 404] as const;
 const WRITE = [...COMMON, 400, 404, 409, 422] as const;
+/**
+ * A cursor-paginated list: a query that fails its schema, or a `cursor` that
+ * is not a row of the list asked for, is a 400 (shared/cursor.ts). Never a
+ * 404 — that would say something about the row the cursor names.
+ */
+const LIST = [...COMMON, 400] as const;
 
 const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/wallets/provider': COMMON,
@@ -139,7 +145,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/wallets/{id}': READ_ONE,
   'GET /v1/wallets/{id}/holds': READ_ONE,
   'POST /v1/wallets/{id}/top-up': WRITE,
-  'GET /v1/transactions': COMMON,
+  'GET /v1/transactions': LIST,
   'GET /v1/transactions/{id}': READ_ONE,
   'POST /v1/transactions': WRITE,
   'POST /v1/transactions/{id}/authorise-settlement': WRITE,
@@ -148,14 +154,14 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/transactions/{id}/refund': WRITE,
   'POST /v1/transactions/{id}/cancel': WRITE,
   'POST /v1/settlements': WRITE,
-  'GET /v1/settlements': COMMON,
+  'GET /v1/settlements': LIST,
   'GET /v1/settlements/{id}': READ_ONE,
   'GET /v1/ledger/accounts': COMMON,
-  'GET /v1/ledger/accounts/{id}/entries': READ_ONE,
+  'GET /v1/ledger/accounts/{id}/entries': [...LIST, 404],
   'GET /v1/ledger/journals/{id}': READ_ONE,
   'POST /v1/ledger/journals/{id}/reverse': WRITE,
   'GET /v1/ledger/trial-balance': COMMON,
-  'GET /v1/commissions': COMMON,
+  'GET /v1/commissions': LIST,
   'GET /v1/commissions/rules': COMMON,
   'POST /v1/commissions/rules': WRITE,
   'PATCH /v1/commissions/rules/{id}': WRITE,
@@ -163,7 +169,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/rewards/rules': COMMON,
   'POST /v1/rewards/rules': WRITE,
   'PATCH /v1/rewards/rules/{id}': WRITE,
-  'GET /v1/payment-intents': COMMON,
+  'GET /v1/payment-intents': LIST,
   'GET /v1/payment-intents/{id}': READ_ONE,
   'POST /v1/payment-intents/{id}/refund': WRITE,
   'GET /v1/payment-intents/{id}/reconciliation': READ_ONE,
@@ -174,7 +180,7 @@ const ERRORS: Record<string, readonly number[]> = {
 };
 
 const STATUS_TEXT: Record<number, string> = {
-  400: 'The request is malformed, failed schema validation, or omitted a required Idempotency-Key (VALIDATION_FAILED)',
+  400: 'The request is malformed, failed schema validation, omitted a required Idempotency-Key, or named a cursor that is not a row of the list asked for (VALIDATION_FAILED)',
   401: 'No credentials, or a token that is expired or invalid',
   403: 'Authenticated, but the role or the requested organization is not permitted. The oversight role (AUDITOR) is refused every endpoint in this service',
   404: 'Not found — also returned for a resource owned by another organization, so its existence is never disclosed',

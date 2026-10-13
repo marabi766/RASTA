@@ -1,4 +1,5 @@
 import { enrichOpenApiDocument } from './document';
+import { INVALID_CURSOR_MESSAGE } from '../shared/cursor';
 import type { OpenAPIObject } from '@nestjs/swagger';
 
 /**
@@ -169,6 +170,32 @@ describe('enrichOpenApiDocument', () => {
     expect(JSON.stringify(operation.responses['409'].content)).toContain(
       '#/components/schemas/ApiError',
     );
+  });
+
+  it.each([
+    '/v1/transactions',
+    '/v1/settlements',
+    '/v1/ledger/accounts/{id}/entries',
+    '/v1/commissions',
+    '/v1/payment-intents',
+  ])('publishes the out-of-scope cursor refusal on %s', (path) => {
+    // Every cursor-paginated list resolves its cursor in its own scope and
+    // refuses one outside it with 400 (shared/cursor.ts). The document says
+    // so, on the response and on the parameter, so a client can tell a
+    // refused cursor from the end of the list.
+    const document = emptyDocument();
+    document.paths = { [path]: { get: { responses: {} } } } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const operation = (enriched.paths[path] as Record<string, never>).get as unknown as {
+      responses: Record<string, { description: string }>;
+      parameters: { name: string; description?: string }[];
+    };
+
+    expect(operation.responses['400']?.description).toContain('cursor');
+    const cursor = operation.parameters.find((parameter) => parameter.name === 'cursor');
+    expect(cursor?.description).toContain(INVALID_CURSOR_MESSAGE);
+    expect(cursor?.description).toContain('400 VALIDATION_FAILED');
   });
 
   it('leaves a route it knows nothing about with a success response and no body', () => {

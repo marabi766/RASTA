@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import { after, resolveCursor } from '../shared/cursor';
 
 /** How a transaction list may be narrowed. */
 export interface TransactionFilter {
@@ -208,28 +209,39 @@ export class TransactionRepository {
         : {}),
     };
 
-    const query = (where: Prisma.TransactionWhereInput) =>
-      this.client.transaction.findMany({
-        where,
-        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
-        take: filter.limit + 1,
-        ...(filter.cursor ? { cursor: { id: filter.cursor }, skip: 1 } : {}),
-      });
-
     // The payee view has to cross the tenant guard, because `organization_id`
     // on the row is the payer. It is narrowed to exactly the caller's own id on
     // the counterparty column, so it can only ever return rows the caller is a
     // party to.
+    const scope: Prisma.TransactionWhereInput = filter.includeIncoming
+      ? { OR: [{ organizationId }, { counterpartyOrganizationId: organizationId }] }
+      : { organizationId };
+
+    const read = async () => {
+      // The cursor is resolved in the list's party scope, not in its filter
+      // window: a transaction's status moves while a client pages, so a row
+      // that matched `status=HELD` on page one may not on page two, and
+      // refusing it then would break paging rather than protect anything.
+      // The window narrows rows the caller can already see; the scope is what
+      // decides which rows those are (shared/cursor.ts).
+      const boundary = await resolveCursor(filter.cursor, (id) =>
+        this.client.transaction
+          .findFirst({ where: { AND: [scope, { id }] }, select: { id: true, occurredAt: true } })
+          .then((row) => (row ? { at: row.occurredAt, id: row.id } : null)),
+      );
+      return this.client.transaction.findMany({
+        where: { AND: [scope, window, ...(boundary ? [after('occurredAt', boundary)] : [])] },
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        take: filter.limit + 1,
+      });
+    };
+
     const rows = filter.includeIncoming
       ? await runUnscoped(
           'a payee reads transactions where it is the counterparty, narrowed to its own id',
-          () =>
-            query({
-              ...window,
-              OR: [{ organizationId }, { counterpartyOrganizationId: organizationId }],
-            }),
+          read,
         )
-      : await query(window);
+      : await read();
 
     const hasMore = rows.length > filter.limit;
     const items = hasMore ? rows.slice(0, filter.limit) : rows;

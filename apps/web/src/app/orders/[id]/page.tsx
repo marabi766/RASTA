@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation';
 
-import { AppShell, Button, ButtonLink, PageHeader, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { isOrderCommand } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchOrder } from '@/server/orders';
 import { mintSubmissionId } from '@/server/submission';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrderDetailScreen } from './OrderDetailScreen';
 
@@ -48,7 +48,7 @@ export default async function OrderPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/orders" />}
+      sidebar={<PortalSidebar session={session} currentHref="/orders" />}
     >
       <PageHeader
         title="جزئیات سفارش"

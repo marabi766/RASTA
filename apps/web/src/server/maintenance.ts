@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 
@@ -29,8 +30,8 @@ const requestSummarySchema = z.object({
   status: z.string(),
   severity: z.string().nullable().default(null),
   title: z.string(),
-  reportedAt: z.string(),
-  dueDate: z.string().nullable().default(null),
+  reportedAt: renderableDate,
+  dueDate: renderableDate.nullable().default(null),
   totalCostMinor: z.string(),
 });
 
@@ -62,7 +63,7 @@ const repairOrderSchema = z.object({
   workshopName: z.string().nullable().default(null),
   workSummary: z.string().nullable().default(null),
   workPerformed: z.string().nullable().default(null),
-  assignedAt: z.string(),
+  assignedAt: renderableDate,
   startedAt: z.string().nullable().default(null),
   completedAt: z.string().nullable().default(null),
   cancelledAt: z.string().nullable().default(null),
@@ -132,13 +133,13 @@ const requestDetailSchema = requestSummarySchema.extend({
   description: z.string().nullable().default(null),
   reportedBy: z.string(),
   outOfServiceAt: z.string().nullable().default(null),
-  returnedToServiceAt: z.string().nullable().default(null),
+  returnedToServiceAt: renderableDate.nullable().default(null),
   downtimeMinutes: z.number().int().nullable().default(null),
-  startedAt: z.string().nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-  approvedAt: z.string().nullable().default(null),
+  startedAt: renderableDate.nullable().default(null),
+  completedAt: renderableDate.nullable().default(null),
+  approvedAt: renderableDate.nullable().default(null),
   approvalNotes: z.string().nullable().default(null),
-  cancelledAt: z.string().nullable().default(null),
+  cancelledAt: renderableDate.nullable().default(null),
   cancellationReason: z.string().nullable().default(null),
   repairOrders: z.array(repairOrderSchema).default([]),
   costBreakdown: z.array(costLineSchema).default([]),

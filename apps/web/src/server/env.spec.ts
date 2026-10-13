@@ -78,6 +78,33 @@ describe('the rest of the configuration', () => {
   });
 });
 
+describe('who is shown the Projects link', () => {
+  it("defaults to construction-service's own defaults: ORGANIZATION_ADMIN writes, nobody else reads", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_PROJECT_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_PROJECT_READER_ROLES).toEqual([]);
+  });
+
+  it('reads comma lists, trimmed, with empty elements dropped', () => {
+    const env = loadWebServerEnv({
+      ...REQUIRED,
+      WEB_PROJECT_ROLES: ' ORGANIZATION_ADMIN , FLEET_MANAGER,, ',
+      WEB_PROJECT_READER_ROLES: 'DRIVER',
+    });
+    expect(env.WEB_PROJECT_ROLES).toEqual(['ORGANIZATION_ADMIN', 'FLEET_MANAGER']);
+    expect(env.WEB_PROJECT_READER_ROLES).toEqual(['DRIVER']);
+  });
+
+  it.each(['WEB_PROJECT_ROLES', 'WEB_PROJECT_READER_ROLES'])(
+    'refuses to start when %s names AUDITOR, as the service does',
+    (key) => {
+      expect(() => loadWebServerEnv({ ...REQUIRED, [key]: 'ORGANIZATION_ADMIN,AUDITOR' })).toThrow(
+        new RegExp(key),
+      );
+    },
+  );
+});
+
 describe('refresh coordination in production (ADR-059 addendum)', () => {
   it('refuses to start in production without WEB_REDIS_URL', () => {
     // Two replicas are the documented topology; without shared coordination
