@@ -193,6 +193,39 @@ describe('repair orders', () => {
   });
 });
 
+describe('the inventory prefixes (COM-006, ADR-056 plan step 6)', () => {
+  it('route warehouses and stock to inventory-service and require a key on their writes', () => {
+    // A reservation, an issue or an adjustment posted twice must move stock once (docs/06
+    // § 6.8). The requirement applies to unsafe methods only, so reading stock needs none.
+    for (const path of [
+      '/warehouses',
+      '/stock/receipts',
+      '/stock/adjustments',
+      '/stock/reservations',
+      '/stock/reservations/SRV_1/issue',
+    ]) {
+      const route = resolveRoute(path);
+      expect([path, route?.service, route?.requiresIdempotencyKey]).toEqual([
+        path,
+        'inventory',
+        true,
+      ]);
+    }
+  });
+
+  it('stay closed, with no role filter of their own: the service decides who acts (Q-103)', () => {
+    for (const prefix of ['warehouses', 'stock']) {
+      const route = resolveRoute(prefix);
+      expect(route?.publicReason).toBeUndefined();
+      expect(route?.roles).toBeUndefined();
+    }
+  });
+
+  it('leave shipments as they were until its routes exist (PR 2)', () => {
+    expect(resolveRoute('/shipments')).toEqual({ prefix: 'shipments', service: 'inventory' });
+  });
+});
+
 describe('resolveRoute', () => {
   it.each([
     ['/users/me', 'identity'],

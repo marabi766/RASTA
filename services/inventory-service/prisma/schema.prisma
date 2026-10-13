@@ -1,0 +1,263 @@
+// inventory-service — inventory and forward logistics (COM-006, ADR-056, docs/04 § 4.11).
+// PR 1 holds warehouses, stock items, the append-only stock movement ledger and reservations;
+// shipments, their legs and tracking events are PR 2 (ADR-056 § 1).
+//
+// Everything here is owned by this service alone (AGENTS.md A-01). There is no foreign key into
+// another service's database: `productId` (marketplace's), `orderReference` and `sourceReference`
+// (marketplace's or procurement's) and `holderOrganizationId` are opaque identifiers whose
+// authority is the owner of each (ADR-056 § 1).
+//
+// ## The tenant is the warehouse owner
+//
+// `organization_id` is the organization that owns the warehouse — ADR-056 § 5's
+// `ownerOrganizationId` is this platform column — and is copied onto every child row
+// (`docs/05` § 5.2). It leads every composite index, and children reference their parent through
+// `(organization_id, …)`, so no row can point into another tenant's warehouse.
+//
+// ## Balances are written in SQL, under a row lock
+//
+// Every change to a stock balance runs as raw SQL in `src/stock/stock.repository.ts`, after
+// `SELECT … FOR UPDATE` on the stock items it touches in ascending id order (ADR-056 § 3). The
+// database keeps what the code promises: CHECKs refuse a negative or over-reserved balance, the
+// ledger is append-only, a balance moves one ledger position (`version`) at a time with the
+// movement that states it, and a reservation's movements agree with the reservation
+// (`migration.sql`, the triggers). The relations are declared in SQL only; this schema lists the
+// columns the reads use.
+//
+// Every instant is `timestamptz(3)` from the first migration (D-048).
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Warehouse
+// ---------------------------------------------------------------------------
+
+/// A place stock is kept, operated by one organization — any organization, never assumed to be
+/// a union (ADR-056 § 5, ADR-012). Created ACTIVE; its lifecycle is Q-108.
+model Warehouse {
+  id String @id
+
+  /// The owner: the organization that operates the warehouse, and the tenant.
+  organizationId String @map("organization_id")
+
+  name     String
+  /// PostGIS point (WGS 84). Prisma has no geography type: written and read in SQL.
+  location Unsupported("geography(Point, 4326)")?
+  /// ACTIVE only in PR 1 (CHECK ck_warehouse_status).
+  status   String @default("ACTIVE")
+
+  createdAt            DateTime @map("created_at") @db.Timestamptz(3)
+  createdBy            String   @map("created_by")
+  createdCorrelationId String   @map("created_correlation_id")
+  updatedAt            DateTime @map("updated_at") @db.Timestamptz(3)
+  version              Int      @default(1)
+
+  @@unique([organizationId, id], map: "ux_warehouse_org_id")
+  @@map("warehouse")
+}
+
+// ---------------------------------------------------------------------------
+// Stock
+// ---------------------------------------------------------------------------
+
+/// One product in one warehouse, and its balance (ADR-056 § 3).
+model StockItem {
+  id String @id
+
+  organizationId String @map("organization_id")
+  warehouseId    String @map("warehouse_id")
+  /// Marketplace's product, `PRD_<ULID>`, never resolved here (Q-105).
+  productId      String @map("product_id")
+
+  onHandQuantity    Int @default(0) @map("on_hand_quantity")
+  reservedQuantity  Int @default(0) @map("reserved_quantity")
+  /// `on_hand_quantity - reserved_quantity`, GENERATED ALWAYS … STORED: never written.
+  availableQuantity Int @default(dbgenerated()) @map("available_quantity")
+  /// The item's position in its own ledger: the number of movements applied to it.
+  version           Int @default(0)
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+  createdBy String   @map("created_by")
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+  updatedBy String   @map("updated_by")
+
+  @@unique([organizationId, warehouseId, productId], map: "ux_stock_item_org_warehouse_product")
+  @@unique([organizationId, id], map: "ux_stock_item_org_id")
+  @@unique([organizationId, warehouseId, id], map: "ux_stock_item_org_warehouse_id")
+  @@map("stock_item")
+}
+
+/// What a stock movement did (ADR-056 § 3).
+enum StockMovementType {
+  RECEIPT
+  RESERVE
+  RELEASE
+  ISSUE
+  ADJUSTMENT
+}
+
+/// One change to one stock item's balance — append-only (`tg_stock_movement_append_only`), a
+/// verified chain by `itemVersion` (`tg_stock_movement_chain`). A correction is a new ADJUSTMENT.
+model StockMovement {
+  id String @id
+
+  organizationId String            @map("organization_id")
+  warehouseId    String            @map("warehouse_id")
+  stockItemId    String            @map("stock_item_id")
+  type           StockMovementType
+
+  onHandDelta   Int @map("on_hand_delta")
+  reservedDelta Int @map("reserved_delta")
+  onHandAfter   Int @map("on_hand_after")
+  reservedAfter Int @map("reserved_after")
+  /// The stock item's ledger position this movement brought it to.
+  itemVersion   Int @map("item_version")
+
+  reservationId   String? @map("reservation_id")
+  /// Opaque `ORD_`/`PO_`/`ADJ_` reference of another service (ADR-056 § 1).
+  sourceReference String? @map("source_reference")
+  /// SHA-256 of the command's route and Idempotency-Key; the raw key is never stored here (S-09).
+  commandKeyHash  String  @map("command_key_hash")
+  correlationId   String  @map("correlation_id")
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+  createdBy String   @map("created_by")
+
+  @@unique([organizationId, commandKeyHash, stockItemId], map: "ux_stock_movement_command")
+  @@unique([organizationId, stockItemId, itemVersion], map: "ux_stock_movement_item_version")
+  @@index([organizationId, stockItemId, id], map: "ix_stock_movement_org_item")
+  @@index([organizationId, warehouseId, id], map: "ix_stock_movement_org_warehouse")
+  @@map("stock_movement")
+}
+
+/// The reservation lifecycle (ADR-056 § 3): ACTIVE → CONSUMED | RELEASED | EXPIRED, once.
+enum StockReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+  EXPIRED
+}
+
+/// A quantity of one stock item held for a holder. In PR 1 the holder is the owner (Q-104).
+model StockReservation {
+  id String @id
+
+  organizationId       String                 @map("organization_id")
+  warehouseId          String                 @map("warehouse_id")
+  stockItemId          String                 @map("stock_item_id")
+  holderOrganizationId String                 @map("holder_organization_id")
+  /// Opaque `ORD_`/`PO_` reference of another service.
+  orderReference       String?                @map("order_reference")
+  quantity             Int
+  status               StockReservationStatus @default(ACTIVE)
+  /// Optional; no default lifetime (Q-102).
+  expiresAt            DateTime?              @map("expires_at") @db.Timestamptz(3)
+  commandKeyHash       String                 @map("command_key_hash")
+
+  createdAt            DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy            String    @map("created_by")
+  createdCorrelationId String    @map("created_correlation_id")
+  endedAt              DateTime? @map("ended_at") @db.Timestamptz(3)
+  endedBy              String?   @map("ended_by")
+  updatedAt            DateTime  @map("updated_at") @db.Timestamptz(3)
+  version              Int       @default(1)
+
+  @@unique([organizationId, commandKeyHash, stockItemId], map: "ux_stock_reservation_command")
+  @@unique([organizationId, stockItemId, id], map: "ux_stock_reservation_org_item_id")
+  @@index([organizationId, status, id], map: "ix_stock_reservation_org_status")
+  @@index([organizationId, stockItemId, status, expiresAt], map: "ix_stock_reservation_org_item_status")
+  @@map("stock_reservation")
+}
+
+// ---------------------------------------------------------------------------
+// Idempotent commands (docs/06 § 6.8) — contract-service's store, this service's copy
+// ---------------------------------------------------------------------------
+
+model IdempotencyKey {
+  key            String @map("key")
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 over the canonical request and the caller.
+  requestHash String @map("request_hash")
+  /// Minted per claim; the command's transaction locks and completes the row by it.
+  claimToken  String @map("claim_token")
+
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
+  /// IN_PROGRESS | COMPLETED (CHECK ck_idempotency_state).
+  state          String
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// While IN_PROGRESS: the claim's lease, after which a retry may take the key over under a
+  /// new token. Once COMPLETED: INVENTORY_IDEMPOTENCY_TTL_HOURS after the response.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}
+
+// ---------------------------------------------------------------------------
+// Platform plumbing — identical in shape to every other service's
+// ---------------------------------------------------------------------------
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  /// `stockItemId` or `warehouseId`, by event (`src/events/routing.ts`, docs/07 § 7.7).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  publishedAt DateTime? @map("published_at") @db.Timestamptz(3)
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  /// ADR-050 durable claim. `claimToken` is the only fence.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz(3)
+  claimCount     Int       @default(0) @map("claim_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at") @db.Timestamptz(3)
+
+  /// ADR-051 B3: allocated by `EventPublisher.enqueue` inside the caller's
+  /// transaction. `isStreamHead` stays false: head maintenance is B4.
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// ADR-051 — one row per ordered stream (`topic + partitionKey`).
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  nextSeq      BigInt @default(1) @map("next_seq")
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
+}

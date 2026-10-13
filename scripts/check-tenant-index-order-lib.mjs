@@ -50,6 +50,7 @@ export const SERVICES = [
   'audit',
   'construction',
   'contract',
+  'inventory',
   'organization',
   'fleet',
   'identity',

@@ -10,6 +10,7 @@
     "economic-service",
     "fleet-service",
     "identity-service",
+    "inventory-service",
     "maintenance-service",
     "marketplace-service",
     "notification-service",
@@ -239,6 +240,20 @@
       "principal": "audit-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -586,6 +601,13 @@
       "operation": "WRITE"
     },
     {
+      "principal": "inventory-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
       "principal": "maintenance-service",
       "resourceType": "GROUP",
       "resourceName": "maintenance-service.",
@@ -911,6 +933,27 @@
       "principal": "ops-replay",
       "resourceType": "TOPIC",
       "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
