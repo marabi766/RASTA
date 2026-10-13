@@ -61,7 +61,10 @@ describe('insurance:clear-transferred (Q-101)', () => {
     payload: producerShaped(eventName, { organizationId: tenantId, ...payload }),
   });
 
-  /** org.a's machine with a window for every coverage and one recorded lapse. */
+  /**
+   * org.a's machine, never transferred, with a window for every coverage and one
+   * recorded lapse. The verified policies initialise its generation at 0 (#240 r15).
+   */
   async function insured(): Promise<string> {
     const assetId = id('AST');
     await consumer.handle(eventFor(org.a, 'ASSET_CREATED', { assetId, status: 'ACTIVE' }));
@@ -74,13 +77,20 @@ describe('insurance:clear-transferred (Q-101)', () => {
           coverage,
           validFrom: new Date(Date.now() - 1000).toISOString(),
           validTo: new Date(Date.now() + year).toISOString(),
-          ownershipGeneration: 1,
+          ownershipGeneration: 0,
         }),
       );
     }
     await consumer.handle(eventFor(org.a, 'INSURANCE_EXPIRED', { assetId, coverage: 'LIABILITY' }));
     return assetId;
   }
+
+  /** The row as the generation migration left it: generation unknown (NULL). */
+  const generationUnknown = (assetId: string) =>
+    prisma.client.$executeRawUnsafe(
+      `UPDATE asset_ref SET ownership_generation = NULL WHERE id = $1`,
+      assetId,
+    );
 
   const transfer = (assetId: string, extra: Record<string, unknown>) =>
     consumer.handle(
@@ -370,8 +380,10 @@ describe('insurance:clear-transferred (Q-101)', () => {
 
   it('leaves a machine that was never transferred, unless the unknown generation is asked for', async () => {
     const assetId = await insured();
-    // Stated generation 1 by the policies, but the replica itself saw no transfer.
-    expect((await row(assetId))!.ownershipGeneration).toBeNull();
+    expect((await row(assetId))!.ownershipGeneration).toBe(0);
+    await expect(run({ organizationId: org.a })).resolves.toMatchObject({ cleared: 0 });
+    // A row from before the generation column: nothing says it was transferred.
+    await generationUnknown(assetId);
 
     await expect(run({ organizationId: org.a })).resolves.toMatchObject({ cleared: 0 });
     expect(await windows(assetId)).toEqual([...COVERAGES].sort());
@@ -383,11 +395,14 @@ describe('insurance:clear-transferred (Q-101)', () => {
   });
 
   it('finds a legacy transfer (no generation) while the transfer is still the latest event, and the rest only with the flag', async () => {
+    // Rows from before the generation column, so the transfers leave it unknown.
     const latest = await insured();
+    await generationUnknown(latest);
     await transfer(latest, { retainedCoverages: COVERAGES });
     // A later event overwrites the replica's source event; with no generation
     // left there is nothing in the row that says it was ever transferred.
     const activated = await insured();
+    await generationUnknown(activated);
     await transfer(activated, { retainedCoverages: COVERAGES });
     await consumer.handle(eventFor(org.b, 'ASSET_ACTIVATED', { assetId: activated }));
 
@@ -446,6 +461,7 @@ describe('insurance:clear-transferred (Q-101)', () => {
   // Last: its org.a rows would change the counts the tests above expect.
   it('r11: the epoch moves for exactly the rows a run targets, empty ones included', async () => {
     const never = await insured();
+    await generationUnknown(never);
     const transferred = await insured();
     await consumer.handle(
       eventFor(org.a, 'ASSET_TRANSFERRED', {

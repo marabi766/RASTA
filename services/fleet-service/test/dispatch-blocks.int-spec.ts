@@ -406,6 +406,17 @@ describe('dispatch blocks (L3-02)', () => {
       return assetId;
     }
 
+    /**
+     * The row as the generation migration left it: generation unknown (NULL).
+     * Since #240 r15 a verified policy initialises the generation, so a legacy
+     * transfer only ever meets an unknown one on a row from before the column.
+     */
+    const generationUnknown = (assetId: string) =>
+      prisma.client.$executeRawUnsafe(
+        `UPDATE asset_ref SET ownership_generation = NULL WHERE id = $1`,
+        assetId,
+      );
+
     /** Moves the machine to org.b and commissions it there. */
     async function transferTo(assetId: string, extra: Record<string, unknown>) {
       await consumer.handle(
@@ -493,6 +504,7 @@ describe('dispatch blocks (L3-02)', () => {
 
     it('after a legacy transfer (no generation) ignores the previous owner’s delayed event, and takes the current owner’s re-projected one', async () => {
       const assetId = await insuredByFirstOwner();
+      await generationUnknown(assetId);
       const driverId = await newOwnerDriver();
       await transferTo(assetId, {});
       expect((await repository.findAssetRefUnscoped(assetId))!.ownershipGeneration).toBeNull();
@@ -536,6 +548,7 @@ describe('dispatch blocks (L3-02)', () => {
 
     it('r7: after a legacy transfer (retained = [], generation unknown) an old-owner policy the source COUNTS is stored — never lost to a replica-only guess', async () => {
       const assetId = await insuredByFirstOwner();
+      await generationUnknown(assetId);
       const driverId = await newOwnerDriver();
       await transferTo(assetId, {});
       expect((await repository.findAssetRefUnscoped(assetId))!.ownershipGeneration).toBeNull();
@@ -560,6 +573,8 @@ describe('dispatch blocks (L3-02)', () => {
 
       const row = await repository.findAssetRefUnscoped(assetId);
       expect(Object.keys(row!.insuranceCover as object).sort()).toEqual([...COVERAGES].sort());
+      // r15: the source's answer initialised the unknown generation.
+      expect(row!.ownershipGeneration).toBe(1);
       expect(policies.asked.at(-1)).toMatchObject({ organizationId: org.b, assetId });
       await expect(dispatchForNewOwner(assetId, driverId)).resolves.toMatchObject({ assetId });
     });

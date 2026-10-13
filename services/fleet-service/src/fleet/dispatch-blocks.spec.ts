@@ -19,7 +19,12 @@ describe('dispatch blocks', () => {
   const thirdParty = (validFrom: string, validTo: string, policyId = 'INS_NEW') => ({
     THIRD_PARTY: [{ policyId, validFrom, validTo }],
   });
-  const clean = { inspectionBlockedReason: null, insuranceLapsedCoverages: [], insuranceCover: {} };
+  const clean = {
+    inspectionBlockedReason: null,
+    insuranceLapsedCoverages: [],
+    insuranceCover: {},
+    ownershipGeneration: 0,
+  };
   // The lapse rules on their own: nothing is required to be in force. The
   // required-coverage rule (Q-101) has its own describe below.
   const lapseRules: DispatchPolicy = {
@@ -280,6 +285,56 @@ describe('dispatch blocks', () => {
     it('fails closed by default', () => {
       expect(activeDispatchBlocks(clean, now)).toHaveLength(1);
     });
+
+    describe('an unknown ownership generation (#240 r15)', () => {
+      // The row as the generation migration left it: in-force windows recorded
+      // before windows had a generation, and the generation NULL.
+      const migrated = { ...clean, insuranceCover: all, ownershipGeneration: null };
+
+      it('counts no window: the ordinary insurance refusal, every required coverage named', () => {
+        expect(activeDispatchBlocks(migrated, now, failClosed)).toEqual([
+          {
+            cause: 'INSURANCE',
+            detail:
+              'The insurance policy has expired (COMPREHENSIVE, LIABILITY, PASSENGER_ACCIDENT, THIRD_PARTY)',
+            coverages: ['COMPREHENSIVE', 'LIABILITY', 'PASSENGER_ACCIDENT', 'THIRD_PARTY'],
+          },
+        ]);
+      });
+
+      it('counts no window stamped with a generation either', () => {
+        const stamped = Object.fromEntries(
+          Object.entries(all).map(([coverage, windows]) => [
+            coverage,
+            windows.map((window) => ({ ...window, generation: 2 })),
+          ]),
+        );
+        expect(
+          activeDispatchBlocks({ ...migrated, insuranceCover: stamped }, now, failClosed),
+        ).toHaveLength(1);
+      });
+
+      it('leaves a recorded lapse unanswered', () => {
+        const lapsed = { ...migrated, insuranceLapsedCoverages: ['THIRD_PARTY'] };
+        expect(blocksOf(lapsed, now)).toEqual([
+          expect.objectContaining({ coverages: ['THIRD_PARTY'] }),
+        ]);
+        expect(blocksOf({ ...lapsed, ownershipGeneration: 0 }, now)).toEqual([]);
+      });
+
+      it('adds no rule of its own: no coverage required and no lapse, nothing blocks', () => {
+        expect(activeDispatchBlocks(migrated, now, lapseRules)).toEqual([]);
+      });
+
+      it('any known generation counts the windows as before', () => {
+        expect(
+          activeDispatchBlocks({ ...migrated, ownershipGeneration: 0 }, now, failClosed),
+        ).toEqual([]);
+        expect(
+          activeDispatchBlocks({ ...migrated, ownershipGeneration: 3 }, now, failClosed),
+        ).toEqual([]);
+      });
+    });
   });
 
   describe('activeDispatchBlocks', () => {
@@ -294,6 +349,7 @@ describe('dispatch blocks', () => {
             inspectionBlockedReason: 'The most recent technical inspection failed',
             insuranceLapsedCoverages: ['THIRD_PARTY', 'COMPREHENSIVE'],
             insuranceCover: {},
+            ownershipGeneration: 0,
           },
           now,
         ),

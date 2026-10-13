@@ -25,6 +25,7 @@ describe('availability blockers', () => {
     inspectionBlockedReason: null,
     insuranceLapsedCoverages: [] as string[],
     insuranceCover: {},
+    ownershipGeneration: 0,
   };
   const lapsedThirdParty = { insuranceLapsedCoverages: ['THIRD_PARTY'] };
   const insuranceDetail = 'The insurance policy has expired (THIRD_PARTY)';
@@ -131,6 +132,7 @@ describe('availability blockers', () => {
           inspectionBlockedReason: null,
           insuranceLapsedCoverages: ['THIRD_PARTY'],
           insuranceCover: {},
+          ownershipGeneration: 0,
         },
         { id: 'ASG_1', driverId: 'DRV_1' },
         { available: false, reason: 'رزرو' },

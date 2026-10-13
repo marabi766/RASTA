@@ -167,18 +167,24 @@ export function withRecordedPolicy(
  * one is the new owner's own — its event may have been consumed before the
  * transfer's, the topics being separate — and stays. `retained` absent (an
  * event that predates the field) retains nothing: fail closed, and the
- * re-projection command restores the valid windows.
+ * re-projection command restores the valid windows. `previousGenerationKnown`
+ * false (the replica's generation was NULL) retains no window without a
+ * generation either.
  */
 export function afterTransfer(
   cover: InsuranceCover,
   retained: readonly string[] | undefined,
   generation: number | undefined,
+  previousGenerationKnown = true,
 ): InsuranceCover {
   const kept = new Set(retained ?? []);
   const next: InsuranceCover = {};
   for (const [coverage, windows] of Object.entries(cover)) {
+    // From an UNKNOWN generation (#240 r15) a retained coverage keeps only the
+    // windows verified with a generation, all of them the tenure being left: one
+    // with none may be from an earlier tenure the replica never told apart.
     const own = kept.has(coverage)
-      ? windows
+      ? windows.filter((window) => previousGenerationKnown || window.generation !== undefined)
       : windows.filter(
           (window) =>
             generation !== undefined &&
@@ -253,6 +259,8 @@ export interface DispatchBlockFields {
   inspectionBlockedReason: string | null;
   insuranceLapsedCoverages: readonly string[];
   insuranceCover: unknown;
+  /** NULL: a row the generation migration left unknown; none of its windows counts. */
+  ownershipGeneration: number | null;
 }
 
 /** One reason a machine may not be dispatched, one entry per cause. */
@@ -277,9 +285,15 @@ export function activeDispatchBlocks(
   if (asset.inspectionBlockedReason) {
     blocks.push({ cause: 'INSPECTION', detail: asset.inspectionBlockedReason });
   }
+  // An UNKNOWN ownership generation (a row the generation migration left NULL)
+  // is an unknown tenure: the replica may have missed A→B→A before the column
+  // existed and still hold A's first-tenure window, which nothing on the row can
+  // tell from the current one. So no window counts until the row is initialised
+  // from asset-service — a refresh, or a verified INSURANCE_RECORDED (#240 r15).
+  // Fail closed: the machine reads as uninsured, the ordinary insurance refusal.
+  const cover = asset.ownershipGeneration === null ? {} : parseCover(asset.insuranceCover);
   // A lapse of a coverage that does not gate dispatch stays recorded, so that
   // widening the configuration later brings it back, but it blocks nothing.
-  const cover = parseCover(asset.insuranceCover);
   const lapses = [
     ...new Set([
       ...unresolvedLapses(asset.insuranceLapsedCoverages, cover, now),

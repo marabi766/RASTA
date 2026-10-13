@@ -2362,6 +2362,7 @@ describe('AssetSyncConsumer', () => {
           inspectionBlockedReason: null,
           insuranceLapsedCoverages: [],
           insuranceCover: cover,
+          ownershipGeneration: 3,
         },
         new Date('2026-10-01T00:00:00.000Z'),
         { blockingCoverages: ['COMPREHENSIVE'], requiredCoverages: ['COMPREHENSIVE'] },
@@ -2458,9 +2459,118 @@ describe('AssetSyncConsumer', () => {
             { policyId: 'INS-NEW', validTo: '2027-09-01T00:00:00.000Z', generation: 3 },
           ],
         },
+        // r15: the source's answer initialises the unknown generation.
+        ownershipGeneration: 3,
+        retainedCoverages: [],
       });
-      // The replica's own generation is the transfer events' to set.
-      expect(recorded.upserts[0]).not.toHaveProperty('ownershipGeneration');
+    });
+
+    describe('r15: an unknown generation initialised by the source’s answer', () => {
+      const legacyWindow = {
+        policyId: 'INS-FIRST-TENURE',
+        validFrom: '2025-01-01T00:00:00.000Z',
+        validTo: '2999-01-01T00:00:00.000Z',
+      };
+      const migrated = {
+        ...machine,
+        ownershipGeneration: null,
+        retainedCoverages: ['THIRD_PARTY'],
+        insuranceCover: {
+          COMPREHENSIVE: [legacyWindow],
+          THIRD_PARTY: [{ ...legacyWindow, policyId: 'INS-TP-NOW', generation: 3 }],
+        },
+      };
+      const verdict = (generation: number) => ({
+        counts: true as const,
+        organizationId: OWNER,
+        coverage: 'COMPREHENSIVE',
+        validFrom: '2026-09-01T00:00:00.000Z',
+        validUntil: '2027-09-01T00:00:00.000Z',
+        ownershipGeneration: generation,
+      });
+
+      it('above generation 0: windows with no generation, or an earlier one, go; nothing retained', async () => {
+        const policies = new FakePolicySource().set('INS-NEW', verdict(3));
+        const { consumer, recorded } = buildConsumer({ existing: migrated, policies });
+
+        await consumer.handle(recordedPolicy({ policyId: 'INS-NEW' }));
+
+        const upsert = recorded.upserts[0]!;
+        expect(upsert.ownershipGeneration).toBe(3);
+        expect(upsert.retainedCoverages).toEqual([]);
+        expect(upsert.insuranceCover).toEqual({
+          COMPREHENSIVE: [
+            {
+              policyId: 'INS-NEW',
+              validFrom: '2026-09-01T00:00:00.000Z',
+              validTo: '2027-09-01T00:00:00.000Z',
+              generation: 3,
+            },
+          ],
+          THIRD_PARTY: [{ ...legacyWindow, policyId: 'INS-TP-NOW', generation: 3 }],
+        });
+      });
+
+      it('at generation 0 (never transferred, one tenure): every window stays', async () => {
+        const policies = new FakePolicySource().set('INS-NEW', verdict(0));
+        const neverMoved = { ...migrated, retainedCoverages: [] };
+        const { consumer, recorded } = buildConsumer({ existing: neverMoved, policies });
+
+        await consumer.handle(recordedPolicy({ policyId: 'INS-NEW', ownershipGeneration: 0 }));
+
+        const upsert = recorded.upserts[0]!;
+        expect(upsert.ownershipGeneration).toBe(0);
+        expect(upsert).not.toHaveProperty('retainedCoverages');
+        expect((upsert.insuranceCover as Record<string, unknown[]>).COMPREHENSIVE).toEqual([
+          legacyWindow,
+          expect.objectContaining({ policyId: 'INS-NEW', generation: 0 }),
+        ]);
+      });
+
+      it('a known generation is not touched by the answer', async () => {
+        const policies = new FakePolicySource().set('INS-NEW', verdict(3));
+        const { consumer, recorded } = buildConsumer({
+          existing: { ...migrated, ownershipGeneration: 3 },
+          policies,
+        });
+
+        await consumer.handle(recordedPolicy({ policyId: 'INS-NEW' }));
+
+        expect(recorded.upserts[0]).not.toHaveProperty('ownershipGeneration');
+        expect(recorded.upserts[0]).not.toHaveProperty('retainedCoverages');
+        expect(
+          (recorded.upserts[0]!.insuranceCover as Record<string, unknown[]>).COMPREHENSIVE,
+        ).toHaveLength(2);
+      });
+
+      it('a transfer from it retains no window without a generation, even of a following coverage', async () => {
+        const { consumer, recorded } = buildConsumer({ existing: migrated });
+
+        await consumer.handle(
+          envelope({
+            eventId: 'EVT-TRANSFER-FROM-UNKNOWN',
+            eventName: 'ASSET_TRANSFERRED',
+            tenantId: 'ORG-DEH-0002',
+            payload: {
+              assetId: 'AST-SEED-0001',
+              fromOrganizationId: OWNER,
+              toOrganizationId: 'ORG-DEH-0002',
+              transferredAt: '2026-08-27T10:00:00.000Z',
+              reason: 'x',
+              ownershipGeneration: 4,
+              retainedCoverages: ['COMPREHENSIVE', 'THIRD_PARTY'],
+            },
+          }),
+        );
+
+        expect(recorded.upserts[0]).toMatchObject({
+          organizationId: 'ORG-DEH-0002',
+          ownershipGeneration: 4,
+        });
+        expect(recorded.upserts[0]!.insuranceCover).toEqual({
+          THIRD_PARTY: [{ ...legacyWindow, policyId: 'INS-TP-NOW', generation: 3 }],
+        });
+      });
     });
 
     /** An ASSET_TRANSFERRED of the machine to `to`, stating the new generation. */

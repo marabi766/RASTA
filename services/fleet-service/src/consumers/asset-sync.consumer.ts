@@ -187,8 +187,14 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
         // required-coverage dispatch rule a stale window would authorize the
         // new owner. No `retainedCoverages` (an older event) drops them all —
         // fail closed; the re-projection command restores the valid ones.
-        // Lapses are left as they are: they only ever withhold.
-        insuranceCover: afterTransfer(parseCover(current?.insuranceCover), retained, generation),
+        // Lapses are left as they are: they only ever withhold. From an unknown
+        // generation a retained window must also carry one (#240 r15).
+        insuranceCover: afterTransfer(
+          parseCover(current?.insuranceCover),
+          retained,
+          generation,
+          (current?.ownershipGeneration ?? null) !== null,
+        ),
         retainedCoverages: retained ?? [],
         // Monotonic (#240 r12): a transfer at or below the replica's generation
         // never reaches this patch (`handle` acknowledges it unapplied). An event
@@ -480,6 +486,24 @@ function sourceOrder(
     if (verdict.ownershipGeneration < known) return 'BEHIND';
   }
   return verdict.organizationId === replica.organizationId ? 'SAME' : 'AHEAD';
+}
+
+/**
+ * The fields that initialise a replica row whose ownership generation is unknown
+ * at the `generation` asset-service states for its owner (#240 r15): the
+ * generation, and the windows of an uncertain tenure (r13) — above 0 only those
+ * verified under it or later, none retained.
+ */
+function initialisedTenure(
+  current: Pick<CurrentAssetRef, 'insuranceCover'>,
+  generation: number,
+): Pick<AssetRefPatch, 'ownershipGeneration' | 'insuranceCover' | 'retainedCoverages'> {
+  if (generation === 0) return { ownershipGeneration: 0 };
+  return {
+    ownershipGeneration: generation,
+    insuranceCover: afterTransfer(parseCover(current.insuranceCover), undefined, generation),
+    retainedCoverages: [],
+  };
 }
 
 @Injectable()
@@ -1328,25 +1352,35 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // An UNKNOWN generation (a row the generation migration left NULL) counts no
+    // window at dispatch (#240 r15). asset-service's answer is about this owner
+    // (compared above) and names the generation it is in, so it initialises the
+    // row — with the cleanup a refresh from an unknown generation makes (r13):
+    // only windows verified under that generation or a later one stay, nothing
+    // is retained; generation 0, a machine never transferred, keeps them all.
+    const initialised =
+      current && current.ownershipGeneration === null
+        ? initialisedTenure(current, verdict.ownershipGeneration)
+        : undefined;
+    const base = current && initialised ? { ...current, ...initialised } : current;
+
     // The event's own coverage, window and generation are replaced by the
-    // source's. The replica's owner and generation stay the transfer events' to
-    // set: this only ever adds a window the source stands behind.
-    return {
-      kind: 'APPLY',
-      patch: projection.patch(
-        {
-          ...payload,
-          coverage: verdict.coverage,
-          validFrom: verdict.validFrom,
-          validTo: verdict.validUntil,
-          ownershipGeneration: verdict.ownershipGeneration,
-        },
-        current,
-        now,
-        occurredAt,
-        eventOrganization,
-      ),
-    };
+    // source's. A known owner and generation stay the transfer events' to set:
+    // this only ever adds a window the source stands behind.
+    const patch = projection.patch(
+      {
+        ...payload,
+        coverage: verdict.coverage,
+        validFrom: verdict.validFrom,
+        validTo: verdict.validUntil,
+        ownershipGeneration: verdict.ownershipGeneration,
+      },
+      base,
+      now,
+      occurredAt,
+      eventOrganization,
+    );
+    return { kind: 'APPLY', patch: initialised ? { ...initialised, ...patch } : patch };
   }
 
   /**
