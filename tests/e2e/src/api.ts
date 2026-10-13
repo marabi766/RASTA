@@ -1,245 +1,42 @@
 import { test as base, type APIRequestContext } from '@playwright/test';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import { Actor, SessionToken, type ApiResponse } from './actor';
 import { e2eConfig, type E2eConfig } from './env';
 import { accessToken, E2E_USERS, type E2eUser } from './keycloak';
 
 /**
- * The client every scenario drives the platform through.
+ * The fixtures every scenario drives the platform through.
  *
- * Playwright's `APIRequestContext` rather than a browser, because there is no
- * production frontend yet: `apps/web` is an empty directory (PROJECT_MEMORY
- * § 6). Writing a browser test against a page that does not exist would mean
- * building a page for the test to click, and then the suite would prove that
- * the fixture works. An API-level run through the gateway exercises the whole
- * stack that *does* exist — gateway routing, rate limiting, idempotency
- * enforcement, JWT verification, tenant resolution, the domain, PostgreSQL and
- * Kafka — and none of it is mocked.
+ * API calls rather than a browser, because there is no production frontend
+ * yet: `apps/web` is an empty directory (PROJECT_MEMORY § 6). Writing a browser
+ * test against a page that does not exist would mean building a page for the
+ * test to click, and then the suite would prove that the fixture works. An
+ * API-level run through the gateway exercises the whole stack that *does* exist
+ * — gateway routing, rate limiting, idempotency enforcement, JWT verification,
+ * tenant resolution, the domain, PostgreSQL and Kafka — and none of it is
+ * mocked.
+ *
+ * An authenticated call goes through `Actor` (`actor.ts`) over Node's `fetch`,
+ * never through Playwright's `APIRequestContext`: the runner records a failed
+ * API call's request headers in its report, the bearer token among them
+ * (`http.ts`). Only `Anonymous`, which carries no credential, uses Playwright's.
  *
  * When `apps/web` lands, a browser project is added to `playwright.config.ts`
  * beside this one; nothing here has to change, because nothing here assumes the
  * absence of a UI.
  */
 
-export interface ApiResponse<T> {
-  status: number;
-  body: T;
-  headers: Record<string, string>;
-  /** The correlation id this request carried, for asserting the event path. */
-  correlationId: string;
-}
-
-export interface CallOptions {
-  /** Sent as `Idempotency-Key`. Required by the gateway on economic writes. */
-  idempotencyKey?: string;
-  /** Sent as `X-Correlation-Id`. Generated when absent so every call has one. */
-  correlationId?: string;
-  /** Sent as `X-Organization-Id` — the tenant the caller asks to act for. */
-  organizationId?: string;
-  body?: unknown;
-  /**
-   * Talk to something other than the gateway.
-   *
-   * Used in exactly one place — the per-journal ledger read, which the gateway
-   * currently makes unreachable for every role (docs/24 Q-27) — and labelled at
-   * the call site. Everything else in this suite goes through the front door,
-   * because the gateway's routing, rate limiting and idempotency enforcement
-   * are part of what is under test.
-   */
-  baseUrl?: string;
-  /**
-   * Sent as `X-Internal-Token`, and **instead of** the bearer token.
-   *
-   * A service-to-service call is not a user call wearing a different hat: it
-   * carries no user credential at all, and the guard treats a request holding
-   * both as the user's (the internal token then names only the relaying hop).
-   * Passing this therefore drops the `Authorization` header, which is what a
-   * calling service actually sends.
-   */
-  internalToken?: string;
-}
-
-/** How long before its `exp` a token is replaced: clock skew, plus the request in flight. */
-const TOKEN_RENEWAL_MARGIN_MS = 60_000;
-
-/**
- * An access token that renews itself before it expires.
- *
- * The realm issues tokens for 15 minutes, and a scenario that provisions its
- * cast and then waits out tender windows and sweepers outlives that. A token
- * that lapsed mid-run answers 401 `TOKEN_EXPIRED`, which a poll would read as
- * "not yet" and report as a timeout somewhere else entirely. So the token is
- * replaced — with the same grant that issued it — once less than the margin is
- * left, and every request carries one that is valid when it is sent.
- *
- * The token itself is never part of an error message.
- */
-export class SessionToken {
-  private current: { value: string; renewAt: number };
-  private renewing: Promise<string> | undefined;
-
-  constructor(
-    initial: string,
-    /** Issues a new token for the same account: the grant the first one came from. */
-    private readonly grant: () => Promise<string>,
-  ) {
-    this.current = SessionToken.read(initial);
-  }
-
-  async value(): Promise<string> {
-    if (Date.now() < this.current.renewAt) return this.current.value;
-    // One renewal at a time, however many requests are waiting on it.
-    this.renewing ??= this.grant()
-      .then((token) => {
-        this.current = SessionToken.read(token);
-        return token;
-      })
-      .finally(() => {
-        this.renewing = undefined;
-      });
-    return this.renewing;
-  }
-
-  /**
-   * When to renew, from the token's own `exp` and `iat`. The margin is capped at
-   * half the lifetime, so a realm with short-lived tokens is not asked for a new
-   * one on every request.
-   */
-  private static read(token: string): { value: string; renewAt: number } {
-    const segment = token.split('.')[1] ?? '';
-    let claims: { exp?: unknown; iat?: unknown } = {};
-    try {
-      claims = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as typeof claims;
-    } catch {
-      // Reported below, without the token.
-    }
-    if (typeof claims.exp !== 'number') {
-      throw new Error('The identity provider issued an access token without a numeric exp claim');
-    }
-    const expiresAt = claims.exp * 1000;
-    const lifetime = typeof claims.iat === 'number' ? expiresAt - claims.iat * 1000 : Infinity;
-    return {
-      value: token,
-      renewAt: expiresAt - Math.min(TOKEN_RENEWAL_MARGIN_MS, lifetime / 2),
-    };
-  }
-}
-
-/**
- * A 401 answered to a call made while polling.
- *
- * Every actor's token is valid when sent, so a 401 is never "not yet": it is the
- * finding, and a poll that retried it would report a timeout instead.
- */
-export class UnauthenticatedError extends Error {}
-
-const failingOnUnauthenticated = new AsyncLocalStorage<true>();
-
-/**
- * Runs one polling check so that any 401 an actor receives inside it throws an
- * `UnauthenticatedError` carrying the call and the platform's answer, rather
- * than returning a response the check would read as "not yet". Outside a check,
- * a 401 is data like any other status.
- */
-export function failOnUnauthenticated<T>(check: () => Promise<T>): Promise<T> {
-  return failingOnUnauthenticated.run(true, check);
-}
-
-/**
- * One authenticated actor, talking to the platform the way a client would.
- *
- * Deliberately thin: it adds headers and parses JSON, and does nothing that
- * could paper over a difference between what the platform returned and what a
- * test asserts.
- */
-export class Actor {
-  constructor(
-    /** A seeded user (`E2E_USERS`), or an account a scenario provisioned through the platform. */
-    readonly username: E2eUser | (string & {}),
-    private readonly context: APIRequestContext,
-    private readonly token: SessionToken,
-    private readonly config: E2eConfig,
-  ) {}
-
-  get(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
-    return this.call('GET', path, options);
-  }
-
-  post(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
-    return this.call('POST', path, options);
-  }
-
-  patch(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
-    return this.call('PATCH', path, options);
-  }
-
-  /** A whole replacement — a tender's criteria, a bid's next revision. */
-  put(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
-    return this.call('PUT', path, options);
-  }
-
-  /**
-   * Deletion, which on this platform is a tombstone rather than a removal.
-   *
-   * It carries a body — document-service requires a stated reason, because a
-   * tombstone that answers "who and when" but not "why" is not the audit
-   * record it exists to be.
-   */
-  delete(path: string, options: CallOptions = {}): Promise<ApiResponse<unknown>> {
-    return this.call('DELETE', path, options);
-  }
-
-  async call(
-    method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
-    path: string,
-    options: CallOptions = {},
-  ): Promise<ApiResponse<unknown>> {
-    const correlationId = options.correlationId ?? `e2e-${randomUUID()}`;
-
-    const headers: Record<string, string> = {
-      'x-correlation-id': correlationId,
-      accept: 'application/json',
-      ...(options.internalToken
-        ? { 'x-internal-token': options.internalToken }
-        : { authorization: `Bearer ${await this.token.value()}` }),
-    };
-    if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey;
-    if (options.organizationId) headers['x-organization-id'] = options.organizationId;
-    if (options.body !== undefined) headers['content-type'] = 'application/json';
-
-    const response = await this.context.fetch(
-      `${options.baseUrl ?? this.config.gatewayUrl}${path}`,
-      {
-        method,
-        headers,
-        ...(options.body !== undefined ? { data: options.body } : {}),
-        // These tests assert on 4xx as much as on 2xx, so a non-2xx is data, not
-        // a transport failure.
-        failOnStatusCode: false,
-      },
-    );
-
-    const text = await response.text();
-    let body: unknown = text;
-    if (text.length > 0) {
-      try {
-        body = JSON.parse(text) as unknown;
-      } catch {
-        // Left as text. A non-JSON body from a JSON API is itself a finding,
-        // and swallowing it into `{}` would hide it.
-      }
-    }
-
-    if (response.status() === 401 && failingOnUnauthenticated.getStore()) {
-      throw new UnauthenticatedError(
-        `${method} ${path} as ${this.username} answered 401 while polling ` +
-          `(correlation ${correlationId}): ${typeof body === 'string' ? body : JSON.stringify(body)}`,
-      );
-    }
-
-    return { status: response.status(), body, headers: response.headers(), correlationId };
-  }
-}
+export {
+  Actor,
+  failOnUnauthenticated,
+  POLL_INTERVAL_MS,
+  SessionToken,
+  UnauthenticatedError,
+  until,
+  type ApiResponse,
+  type CallOptions,
+} from './actor';
+export { TransportError } from './http';
 
 /** An unauthenticated caller — used to prove endpoints are closed by default. */
 export class Anonymous {
@@ -300,12 +97,8 @@ function cachedToken(username: E2eUser, config: E2eConfig): Promise<SessionToken
   return pending;
 }
 
-async function actor(
-  username: E2eUser,
-  context: APIRequestContext,
-  config: E2eConfig,
-): Promise<Actor> {
-  return new Actor(username, context, await cachedToken(username, config), config);
+async function actor(username: E2eUser, config: E2eConfig): Promise<Actor> {
+  return new Actor(username, await cachedToken(username, config), config);
 }
 
 export const test = base.extend<RastaFixtures>({
@@ -316,20 +109,20 @@ export const test = base.extend<RastaFixtures>({
   config: async ({}, use) => {
     await use(e2eConfig());
   },
-  systemAdmin: async ({ request, config }, use) => {
-    await use(await actor(E2E_USERS.systemAdmin, request, config));
+  systemAdmin: async ({ config }, use) => {
+    await use(await actor(E2E_USERS.systemAdmin, config));
   },
-  tenantA: async ({ request, config }, use) => {
-    await use(await actor(E2E_USERS.tenantA, request, config));
+  tenantA: async ({ config }, use) => {
+    await use(await actor(E2E_USERS.tenantA, config));
   },
-  tenantB: async ({ request, config }, use) => {
-    await use(await actor(E2E_USERS.tenantB, request, config));
+  tenantB: async ({ config }, use) => {
+    await use(await actor(E2E_USERS.tenantB, config));
   },
-  platformAdmin: async ({ request, config }, use) => {
-    await use(await actor(E2E_USERS.platformAdmin, request, config));
+  platformAdmin: async ({ config }, use) => {
+    await use(await actor(E2E_USERS.platformAdmin, config));
   },
-  auditor: async ({ request, config }, use) => {
-    await use(await actor(E2E_USERS.auditor, request, config));
+  auditor: async ({ config }, use) => {
+    await use(await actor(E2E_USERS.auditor, config));
   },
   anonymous: async ({ request, config }, use) => {
     await use(new Anonymous(request, config));

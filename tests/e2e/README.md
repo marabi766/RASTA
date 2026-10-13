@@ -34,9 +34,23 @@ Kafka منتشر می‌شود:
 `apps/web` و `apps/admin` پوشه‌های خالی‌اند. یک تست Browser باید صفحه‌ای را
 Drive کند که وجود ندارد؛ ساختن صفحه‌ای برای تست، یعنی تستِ Fixture خودمان.
 
-`APIRequestContext` همان Stack واقعی را می‌زند: Gateway (Routing، Rate Limit،
+فراخوان API همان Stack واقعی را می‌زند: Gateway (Routing، Rate Limit،
 اجبار `Idempotency-Key`)، `economic-service` واقعی، PostgreSQL واقعی، Kafka
 واقعی و توکن واقعی Keycloak.
+
+**توکن هرگز به گزارش نمی‌رسد (Codex r5 روی #241).** هر فراخوان دارای Credential
+(`Bearer` یا `X-Internal-Token`) از `Actor` (`src/actor.ts`) و `fetch` خود Node
+می‌گذرد، نه از `APIRequestContext` Playwright: Playwright خطای فراخوان شکست‌خورده
+را با همهٔ Headerهای درخواست، از جمله `authorization`، در گزارش HTML ثبت می‌کند —
+حتی با Trace خاموش و حتی وقتی تست خطا را گرفته باشد. خطای Transport با
+`TransportError` (`src/http.ts`) جایگزین می‌شود: متن ثابت + Method + Path بدون
+Query + کلاس Status + کد علت، بی‌هیچ Header و بی‌`cause`. پیام Timeout در `until()`
+و `waitFor()` فقط همین متن پاک‌شده را دارد. Trace برای همهٔ Projectها خاموش است و
+Screenshot/Video هم (صفحه‌ای نیست). گزارشی که CI در شکست بارگذاری می‌کند
+(`playwright-report`) پس فقط این‌ها را دارد: عنوان تست‌ها و Stepها (Stepهای API
+فقط برای فراخوان‌های بی‌Credential)، پیام و Stack خطاها، تکهٔ کد منبع پیرامون خطا،
+و stdout/stderr تست‌ها — هیچ‌کدام توکن ندارند؛ پیام 401 در Poll بدنهٔ پاسخ پلتفرم را
+دارد، نه درخواست را. آزمون پس‌رفت: `src/actor.test.ts`.
 
 **آماده برای Browser:** وقتی `apps/web` ساخته شد، یک Project دوم در
 `playwright.config.ts` اضافه می‌شود (نمونه‌اش همان‌جا کامنت شده) و

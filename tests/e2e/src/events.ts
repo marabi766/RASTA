@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { EVENT_HEADERS } from '@rasta/contracts';
 import { e2eConfig, type E2eConfig } from './env';
+import { failureMessage } from './http';
 import { OBSERVER_PRINCIPAL, observerKafkaSettings } from './kafka-observer';
 
 /**
@@ -226,6 +227,7 @@ export async function waitFor(
   throw new Error(
     `Timed out after ${timeoutMs}ms waiting for ${description}` +
       (detail ? `; ${detail()}` : '') +
-      (lastError ? `; last error: ${String(lastError)}` : ''),
+      // A check may call through an `Actor`: only the sanitized message, never the error itself.
+      (lastError ? `; last error: ${failureMessage(lastError)}` : ''),
   );
 }

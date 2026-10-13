@@ -1,14 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import type { APIRequestContext } from '@playwright/test';
 import {
   test,
   expect,
   errorCode,
-  failOnUnauthenticated,
   idempotencyKey,
   Actor,
   SessionToken,
-  UnauthenticatedError,
+  until,
   type ApiResponse,
 } from '../../src/api';
 import { ORG, e2eConfig } from '../../src/env';
@@ -81,9 +79,6 @@ const HTTP_WORK_MS = 120_000;
 
 /** The least that must be left of the window when a step that needs it open starts. */
 const WINDOW_MARGIN_MS = 15_000;
-
-/** One poll per second: the gateway allows 300 calls a minute per user. */
-const POLL_INTERVAL_MS = 1_000;
 
 const OWNER_ROLE = 'ORGANIZATION_ADMIN';
 
@@ -235,33 +230,6 @@ function send(
     idempotencyKey: idempotencyKey(`contract-${RUN}`),
     ...(correlationId ? { correlationId } : {}),
   });
-}
-
-/**
- * Polls at a rate the gateway's per-user limit tolerates; never a fixed sleep. A 401 is not
- * retried: every actor's token is renewed before it expires, so it fails the wait at once with
- * the platform's own answer instead of surfacing later as a timeout.
- */
-async function until<T>(
-  description: string,
-  check: () => Promise<T | undefined>,
-  timeoutMs: number,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last = '';
-  while (Date.now() < deadline) {
-    try {
-      const value = await failOnUnauthenticated(check);
-      if (value !== undefined) return value;
-    } catch (error) {
-      if (error instanceof UnauthenticatedError) throw error;
-      last = String(error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-  }
-  throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for ${description}${last ? `; ${last}` : ''}`,
-  );
 }
 
 /** The closed reason of a refusal: the first `details[].code` of the error body (docs/06 § 6.7). */
@@ -427,7 +395,6 @@ async function assertInvisibleToStranger(
 // ---------------------------------------------------------------------------
 
 test.describe.serial('a contract, end to end (CON-003)', () => {
-  let context: APIRequestContext;
   let tap: EconomicEventTap;
 
   const org = { owner: '', c1: '', c2: '', c3: '' };
@@ -480,14 +447,12 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     refusal?: { event: string; contractId: string; payload: Record<string, unknown> };
   }[] = [];
 
-  test.beforeAll(async ({ playwright }) => {
-    context = await playwright.request.newContext();
+  test.beforeAll(async () => {
     tap = await EconomicEventTap.start(config, config.contractTopic);
   });
 
   test.afterAll(async () => {
     await tap?.stop();
-    await context?.dispose();
   });
 
   // ---- the cast and the awarded tenders -------------------------------------
@@ -591,7 +556,6 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       );
       signedIn[key] = new Actor(
         account.username,
-        context,
         new SessionToken(token, () => freshToken(account.username)),
         config,
       );
