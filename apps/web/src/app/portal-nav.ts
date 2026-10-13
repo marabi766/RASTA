@@ -6,9 +6,13 @@ import { portalNavFor } from './nav';
 /**
  * Whether the roles admit `GET /v1/settlements`, so the Settlements link is
  * worth drawing. `null` is "roles could not be read".
+ *
+ * `AUDITOR` is excluded first, whatever else the person holds: economic-service
+ * refuses a caller holding it (`assertNotAuditor()`) even alongside an admin role.
  */
 export function canReadSettlements(roles: readonly string[] | null): boolean {
-  return roles !== null && SETTLEMENT_READ_ROLES.some((role) => roles.includes(role));
+  if (roles === null || roles.includes('AUDITOR')) return false;
+  return SETTLEMENT_READ_ROLES.some((role) => roles.includes(role));
 }
 
 /**
