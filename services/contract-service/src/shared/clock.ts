@@ -20,10 +20,19 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
  * from one clock, so the comparison measures the domain rather than the infrastructure.
  */
 /**
- * The database's clock **now**, advancing inside a transaction — `clock_timestamp()` — for the one
- * thing that must not be the transaction's start: the instant a question was asked of another
- * service in the middle of it (`ContractService.authorityOf`, D-050). Never stamped on a row beside
- * `transactionNow`'s instant as if they were one reading (D-5).
+ * The database's clock **now**, advancing inside a transaction — `clock_timestamp()` — for the
+ * things that must not be the transaction's start:
+ *
+ * - the instant a question was asked of another service in the middle of it
+ *   (`SigningAuthority.resolve`, D-050);
+ * - the instant of a signature (a contract's or an amendment's), read once **after** the locks are
+ *   held and the authority confirmed, and reused for every row and event of that signature: two
+ *   signatures are ordered by the contract's lock, and a transaction that started first but took
+ *   the lock second must not record an instant before the other's (contract audit F4). The one
+ *   reading is still one instant for the row and its events (D-5).
+ *
+ * Never stamped on a row beside `transactionNow`'s instant as if they were one reading (D-5). The
+ * D-050 commit deadline stays on the transaction's start: it bounds when the transaction can commit.
  */
 export async function databaseClock(tx: ExtendedPrismaClient): Promise<Date> {
   const rows = await tx.$queryRawUnsafe<{ now: Date }[]>('SELECT clock_timestamp() AS now');

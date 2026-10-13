@@ -482,6 +482,44 @@ describe('amendments of a signed contract', () => {
       expect(events).toHaveLength(1);
     });
 
+    it('a signer whose roles were revoked since is refused as GET refuses them — a new key reads nothing, the signature stays, nothing is written (audit F1)', async () => {
+      const c = await signed();
+      const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;
+      const claims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      await signAmendment(
+        api,
+        c.id,
+        proposed.id,
+        person(c.employer, ['ORGANIZATION_ADMIN'], claims),
+      ).expect(200);
+      await signAmendment(api, c.id, proposed.id, c.contractorToken).expect(200);
+      const events = (await eventsOf(w.prisma, c.employer)).length;
+
+      // The same person, every reading role revoked: only DRIVER is left.
+      const revoked = person(c.employer, ['DRIVER'], claims);
+      const read = await get(c.id, proposed.id, revoked).expect(403);
+      const again = await signAmendment(
+        api,
+        c.id,
+        proposed.id,
+        revoked,
+        {},
+        idemKey('amd-sign-revoked'),
+      ).expect(403);
+      // GET's refusal, word for word — and neither the amendment nor the contract's totals.
+      expect(bare(again.body)).toEqual(bare(read.body));
+      expect(again.body).not.toHaveProperty('id');
+      expect(JSON.stringify(again.body)).not.toMatch(/delta|amount|EFFECTIVE/i);
+
+      const signatures = await amendmentSignatures(w, proposed.id);
+      expect(signatures).toHaveLength(2);
+      expect(signatures.find((s) => s.side === 'EMPLOYER')).toMatchObject({
+        signedBy: claims.rastaUserId,
+      });
+      expect(await eventsOf(w.prisma, c.employer)).toHaveLength(events);
+      expect(await refusedEvents(c.employer)).toEqual([]);
+    });
+
     it('another person for a side that has signed is 409 SIDE_ALREADY_SIGNED and writes nothing', async () => {
       const c = await signed();
       const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;
@@ -799,6 +837,59 @@ describe('amendments of a signed contract', () => {
         'EFFECTIVE',
       ]);
       expect(await eventsOf(w.prisma, c.employer, 'CONTRACT_AMENDED')).toHaveLength(3);
+    });
+
+    it('a signature queued behind the lock records the instant it signed — after the lock was released, never its transaction’s start (audit F4)', async () => {
+      const c = await signed();
+      const id = (await propose(api, c.id, c.employerToken).expect(201)).body.id as string;
+      const first = await signAmendment(api, c.id, id, c.employerToken).expect(200);
+
+      // Hold the contract's row lock and queue the second signature behind it: its transaction
+      // starts now, and signs only once the lock is released.
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+      let releasedAt: Date | undefined;
+      const holder = w.prisma.transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM contract WHERE organization_id = ${c.employer} AND id = ${c.id} FOR UPDATE`;
+          locked();
+          await held;
+          releasedAt = (await tx.$queryRaw<{ at: Date }[]>`SELECT clock_timestamp() AS at`)[0]!.at;
+        },
+        { timeoutMs: 60_000 },
+      );
+      await lockTaken;
+      // Awaiting starts the request (supertest is lazy until then).
+      const running = Promise.all([signAmendment(api, c.id, id, c.contractorToken)]);
+      try {
+        await untilSessionsWaitOnALock(w.prisma, 1);
+        // The queued transaction's start is now measurably before the release.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } finally {
+        release();
+        await Promise.allSettled([holder, running]);
+      }
+      await holder;
+      const [second] = await running;
+      expect(second!.status).toBe(200);
+      expect(second!.body.status).toBe('EFFECTIVE');
+
+      const effectiveAt = second!.body.effectiveAt as string;
+      expect(new Date(effectiveAt).getTime()).toBeGreaterThanOrEqual(releasedAt!.getTime());
+      expect(new Date(effectiveAt).getTime()).toBeGreaterThan(
+        new Date(first.body.employerSignedAt as string).getTime(),
+      );
+      // One instant for the signature, the amendment's effect and the event.
+      expect(second!.body.contractorSignedAt).toBe(effectiveAt);
+      const [amendment] = await amendmentRows(w, c.id);
+      expect(amendment!.effectiveAt!.toISOString()).toBe(effectiveAt);
+      const [event] = await eventsOf(w.prisma, c.employer, 'CONTRACT_AMENDED');
+      expect(event!.payload).toMatchObject({
+        contractorSignedAt: effectiveAt,
+        effectiveAt,
+      });
     });
   });
 

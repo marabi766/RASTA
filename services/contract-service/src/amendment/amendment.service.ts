@@ -12,7 +12,7 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PolicySuspensionService } from '../policy/policy-suspension.service';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import { transactionNow } from '../shared/clock';
+import { databaseClock, transactionNow } from '../shared/clock';
 import type { ClaimFence } from '../shared/idempotency';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
 import { AuthorityRefusals, type AuthorityRefusal } from '../signing/authority-refusals';
@@ -319,7 +319,8 @@ export class AmendmentService {
   /**
    * Signs the amendment for the side the caller acts for (`PROPOSED → EFFECTIVE` once both have).
    * The same person signing the same side again changes nothing and answers with the amendment as
-   * it is; another person for a side that has signed is `409`.
+   * it is — if they may still read it, else with `get`'s refusal; another person for a side that
+   * has signed is `409`.
    */
   async sign(
     contractId: string,
@@ -457,6 +458,10 @@ export class AmendmentService {
     if (mine) {
       const comparison = compareActors(person, signerOf(mine));
       if (comparison === 'SAME') {
+        // The answer is the amendment as it stands, so it is given only to a caller who may read it
+        // now — the check `get` makes, with its refusal: a signer whose roles were revoked since
+        // learns nothing by signing again. The signature stays; nothing is written.
+        this.assertMayRead(contract);
         contractCommandsTotal.inc({
           service: SERVICE_NAME,
           command: 'sign_amendment',
@@ -533,7 +538,11 @@ export class AmendmentService {
       }
     }
 
-    const at = await transactionNow(tx);
+    // One instant for the signature, its event and — the second one — the amendment's effect and
+    // `CONTRACT_AMENDED`: read now, under the locks and with the authority confirmed, not at the
+    // transaction's start, so a command that began first but waited for the lock never signs before
+    // the one that held it.
+    const at = await databaseClock(tx);
     const recorded = await this.repository.insertSignature(tx, {
       id: newId(ID_PREFIX.amendmentSignature),
       organizationId: contract.organizationId,
@@ -702,6 +711,19 @@ export class AmendmentService {
           RastaError.insufficientRole(error.requiredRoles, getContext().roles),
         ),
       );
+    }
+  }
+
+  /**
+   * The read authorization `get` applies — the roles first, then the party — for a signature whose
+   * answer is the amendment unchanged; its refusal is `get`'s, counted as this command's.
+   */
+  private assertMayRead(contract: Contract): void {
+    try {
+      assertPartyOf(contract, this.access.assertCanRead());
+    } catch (error) {
+      if (error instanceof RastaError) throw this.refused('sign_amendment', error);
+      throw error;
     }
   }
 

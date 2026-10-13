@@ -9,7 +9,7 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ClaimFence, RefusalFence } from '../shared/idempotency';
-import { transactionNow } from '../shared/clock';
+import { databaseClock, transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
 import { AuthorityRefusals, type AuthorityRefusal } from '../signing/authority-refusals';
 import { PolicySuspensionService } from '../policy/policy-suspension.service';
@@ -231,7 +231,8 @@ export class ContractService {
    * employer's authority is the `contract.signature` approval policy in force for its own
    * organization — nobody until one is written and approved (422 `SIGNATURE_POLICY_REQUIRED`).
    * The same person signing the same side again changes nothing and answers with the contract
-   * as it is; another person for a side that has signed is `409`.
+   * as it is — if they may still read it, else with `get`'s refusal; another person for a side
+   * that has signed is `409`.
    */
   async sign(
     id: string,
@@ -474,6 +475,10 @@ export class ContractService {
     if (mine) {
       const comparison = compareActors(person, signerOf(mine));
       if (comparison === 'SAME') {
+        // The answer is the contract as it stands, so it is given only to a caller who may read it
+        // now — the check `get` makes, with its refusal: a signer whose roles were revoked since
+        // learns nothing by signing again. The signature stays; nothing is written.
+        this.assertMayRead(contract);
         contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'unchanged' });
         return toContractView(contract, signatures.map(factOf));
       }
@@ -526,7 +531,11 @@ export class ContractService {
       if (comparison === 'UNKNOWN') throw this.refused('sign', this.identityUnknown(contract.id));
     }
 
-    const at = await transactionNow(tx);
+    // One instant for the signature, its event and — the second one — the contract's move and
+    // `CONTRACT_SIGNED`: read now, under the lock and with the authority confirmed, not at the
+    // transaction's start. A command that began first but waited for the lock still signs after the
+    // one that held it, never before it.
+    const at = await databaseClock(tx);
     const correlationId = getContext().correlationId;
     const recorded = await this.repository.insertSignature(tx, {
       id: newId(ID_PREFIX.signature),
@@ -721,6 +730,19 @@ export class ContractService {
       (await this.repository.findAsContractor(organizationId, id));
     if (!row || !sideOf(row, organizationId)) throw RastaError.notFound('Contract', id);
     return row;
+  }
+
+  /**
+   * The read authorization `get` applies — the roles first, then the party — for a command whose
+   * answer is the contract unchanged; its refusal is `get`'s, counted as this command's.
+   */
+  private assertMayRead(contract: Contract): void {
+    try {
+      assertPartyOf(contract, this.access.assertCanRead());
+    } catch (error) {
+      if (error instanceof RastaError) throw this.refused('sign', error);
+      throw error;
+    }
   }
 
   /** `409` when the caller named a version and the contract is no longer at it. */
