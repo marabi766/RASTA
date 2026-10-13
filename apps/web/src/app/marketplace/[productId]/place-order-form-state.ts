@@ -47,7 +47,8 @@ export type PlaceOrderFormState =
    */
   | {
       readonly kind: 'UNCONFIRMED';
-      readonly correlationId: string;
+      /** Null when no answer ever came back (a lost response, a reload mid-send): there is no tracking code to show. */
+      readonly correlationId: string | null;
       readonly submissionId: string;
       readonly values: PlaceOrderFormValues;
       readonly retryRefused?: true;

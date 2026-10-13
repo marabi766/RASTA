@@ -6,13 +6,18 @@ import { useActionState, useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
-import { EMPTY_PLACE_ORDER_FORM, type PlaceOrderFormValues } from '@/lib/place-order-fields';
+import {
+  canonicalQuantity,
+  EMPTY_PLACE_ORDER_FORM,
+  type PlaceOrderFormValues,
+} from '@/lib/place-order-fields';
 import {
   clearUnresolvedOrder,
   restoreUnresolvedOrder,
   saveUnresolvedOrder,
   type Binding,
   type RestoredOrder,
+  type UnresolvedOrder,
 } from '@/lib/unresolved-order';
 import type { Offer } from '@/server/marketplace';
 
@@ -92,6 +97,24 @@ function unconfirmedFrom(restored: RestoredOrder): UnconfirmedPlaceOrder {
   };
 }
 
+/**
+ * The submission as the action will validate it — the same offer text, the
+ * quantity as a count — or null when the action would refuse it before sending
+ * anything (nothing to remember then).
+ */
+function pendingFrom(form: FormData): Omit<UnresolvedOrder, 'savedAt'> | null {
+  const submissionId = form.get(SUBMISSION_FIELD);
+  const offerId = form.get('offerId');
+  const quantity = form.get('quantity');
+  if (typeof submissionId !== 'string' || typeof offerId !== 'string') return null;
+  if (typeof quantity !== 'string') return null;
+
+  const canonical = canonicalQuantity(quantity);
+  const offer = offerId.trim();
+  if (canonical === null || offer === '' || offer.length > 64) return null;
+  return { submissionId, values: { offerId: offer, quantity: canonical }, correlationId: null };
+}
+
 /** A redirect from a server action reaches the client as a rejection whose digest says so. */
 function isRedirect(error: unknown): boolean {
   const digest = (error as { digest?: unknown } | null)?.digest;
@@ -109,6 +132,12 @@ function OrderForm({
 }: PlaceOrderFormProps & { initial: PlaceOrderFormState }) {
   const send = useCallback(
     async (previous: PlaceOrderFormState, form: FormData): Promise<PlaceOrderFormState> => {
+      const firstSend = previous.kind !== 'UNCONFIRMED';
+      // Remember it BEFORE it is sent (F1): from here until an answer, a reload or
+      // a lost response must find the same key, not mint another.
+      const unsent = firstSend ? pendingFrom(form) : null;
+      if (unsent) saveUnresolvedOrder(productId, unsent, binding);
+
       let next: PlaceOrderFormState;
       try {
         next = await submitPlaceOrder(previous, form);
@@ -118,16 +147,18 @@ function OrderForm({
           clearUnresolvedOrder(productId);
           throw error;
         }
-        // The call itself failed — most often the portal's own gate answering 401
-        // JSON to an action POST whose session has ended, which Next rejects as an
-        // "unexpected response". For an unresolved order that must not throw the
-        // view away: the doubt is still there, and so is the stored entry.
-        if (previous.kind === 'UNCONFIRMED') return withRetryNote(previous, 'sessionEnded');
+        // The call itself failed — a lost response after the order may have
+        // committed, or the portal's own gate answering 401 JSON to an action POST
+        // whose session has ended, which Next rejects as an "unexpected response".
+        // Either way the doubt is still there, and so is the stored entry.
+        if (!firstSend) return withRetryNote(previous as UnconfirmedPlaceOrder, 'sessionEnded');
+        if (unsent) return { kind: 'UNCONFIRMED', ...unsent };
         throw error;
       }
-      // Remember it the moment it becomes unresolved, before anything can navigate away.
-      if (next.kind === 'UNCONFIRMED' && previous.kind !== 'UNCONFIRMED') {
-        saveUnresolvedOrder(productId, next, binding);
+      if (firstSend) {
+        // Answered: with the correlation id if it is still in doubt, else settled.
+        if (next.kind === 'UNCONFIRMED') saveUnresolvedOrder(productId, next, binding);
+        else if (unsent) clearUnresolvedOrder(productId);
       }
       return next;
     },
@@ -294,7 +325,7 @@ function UnconfirmedOrder({
         <Link href="/orders" className="underline">
           فهرست سفارش‌های
         </Link>{' '}
-        خود را ببینید. کد پیگیری: {state.correlationId}
+        خود را ببینید.{state.correlationId ? ` کد پیگیری: ${state.correlationId}` : ''}
       </Alert>
       {state.retryRefused ? (
         <Alert tone="warning">

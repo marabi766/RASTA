@@ -441,16 +441,102 @@ describe('a session that ended behind an unresolved order (F2)', () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
-  it('a first send the gate refuses is still an error, not an invented uncertainty', async () => {
+  it('a first send the gate refuses is uncertain too: nothing says the order did not commit', async () => {
     submit.mockImplementation(async () => {
       postThroughGate(EXPIRED);
       throw new Error('unreachable');
     });
-    const caught = jest.fn();
+    const { container } = loadPage();
+    await fillAndSend(container);
+
+    expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
+    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(stored()).toMatchObject({ submissionId: PAGE_KEY });
+  });
+});
+
+describe('an order is remembered before it is sent (F1)', () => {
+  it('is in storage while the first send is still in flight, PENDING and without a correlation id', async () => {
+    let answer: (state: PlaceOrderFormState) => void = () => undefined;
+    submit.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const { container } = loadPage();
+    await fillAndSend(container);
+
+    expect(stored()).toMatchObject({
+      submissionId: PAGE_KEY,
+      values: { offerId: 'OFR_1', quantity: '3' },
+      correlationId: null,
+      pending: true,
+    });
+    await act(async () => answer({ kind: 'FORBIDDEN', correlationId: 'COR_F' }));
+  });
+
+  it('a reload while the first send is in flight restores the uncertainty view with the same key', async () => {
+    let answer: (state: PlaceOrderFormState) => void = () => undefined;
+    submit.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const first = loadPage();
+    await fillAndSend(first.container);
+    first.unmount();
+
+    // The reload: a new page id, the old send's outcome unknown.
+    const reloaded = loadPage({ submissionId: 'sub_RELOADRELOADRELOADRELOADRELOADRELOADRELO' });
+    await waitFor(() =>
+      expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument(),
+    );
+    expect(reloaded.container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(reloaded.container.querySelector('[name="offerId"]')).toHaveValue('OFR_1');
+    expect(reloaded.container.querySelector('[name="quantity"]')).toHaveValue('3');
+    expect(screen.queryByText(/کد پیگیری/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
+    // The abandoned send finally ends (its page is gone); a transition left open would block later actions.
+    await act(async () => answer({ kind: 'FORBIDDEN', correlationId: 'COR_F' }));
+  });
+
+  it('a transport rejection of the first send is the uncertainty view with the same key, kept in storage', async () => {
+    submit.mockRejectedValueOnce(new Error('network down'));
+    const { container } = loadPage();
+    await fillAndSend(container);
+
+    expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
+    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(stored()).toMatchObject({ submissionId: PAGE_KEY, pending: true });
+
+    // And the retry is the same key.
+    submit.mockResolvedValueOnce({ ...UNCONFIRMED, submissionId: PAGE_KEY, retryUnknown: true });
+    await retry(container);
+    const [, form] = submit.mock.calls[1] as [PlaceOrderFormState, FormData];
+    expect(form.get('submission')).toBe(PAGE_KEY);
+    expect(form.get('quantity')).toBe('3');
+  });
+
+  it('the answer to the first send adds the correlation id and drops the PENDING marker', async () => {
+    submit.mockResolvedValueOnce({ ...UNCONFIRMED, submissionId: PAGE_KEY });
+    const { container } = loadPage();
+    await fillAndSend(container);
+
+    expect(stored()).toMatchObject({ submissionId: PAGE_KEY, correlationId: 'COR_ORIGINAL' });
+    expect(stored()).not.toHaveProperty('pending');
+  });
+
+  it.each([
+    ['a refusal of the form', { kind: 'FORBIDDEN', correlationId: 'COR_F' } as const],
+    ['no session', { kind: 'REFUSED', reason: 'NO_SESSION' } as const],
+  ])('%s settles it: nothing stays in storage', async (_name, answer) => {
+    submit.mockResolvedValueOnce(answer);
+    const { container } = loadPage();
+    await fillAndSend(container);
+    expect(stored()).toBeNull();
+  });
+
+  it('a successful first send (the action redirects) leaves nothing', async () => {
+    const redirect = Object.assign(new Error('NEXT_REDIRECT'), {
+      digest: 'NEXT_REDIRECT;push;/orders/ORD_1?placed=1;307;',
+    });
+    submit.mockRejectedValueOnce(redirect);
     const spy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const { container } = render(
-        <Catch onError={caught}>
+        <Catch onError={() => undefined}>
           <PlaceOrderForm {...pageProps()} />
         </Catch>,
       );
@@ -458,7 +544,79 @@ describe('a session that ended behind an unresolved order (F2)', () => {
     } finally {
       spy.mockRestore();
     }
-    expect(caught).toHaveBeenCalledWith(expect.objectContaining({ message: UNEXPECTED_RESPONSE }));
     expect(stored()).toBeNull();
+  });
+
+  it('a form the action would refuse before sending anything is not remembered', async () => {
+    submit.mockResolvedValueOnce({
+      kind: 'INVALID',
+      submissionId: PAGE_KEY,
+      values: { offerId: 'OFR_1', quantity: 'abc' },
+      fieldErrors: { quantity: 'x' },
+      message: null,
+    });
+    const { container } = loadPage();
+    fireEvent.change(container.querySelector('[name="quantity"]') as HTMLInputElement, {
+      target: { value: 'abc' },
+    });
+    await act(async () => {
+      fireEvent.submit(container.querySelector('form') as HTMLFormElement);
+    });
+    expect(stored()).toBeNull();
+  });
+});
+
+describe('what is remembered is what was sent (F2)', () => {
+  it('a quantity typed with leading zeros is remembered as the count, and survives a reload', async () => {
+    submit.mockRejectedValueOnce(new Error('network down'));
+    const first = loadPage();
+    fireEvent.change(first.container.querySelector('select[name="offerId"]') as HTMLSelectElement, {
+      target: { value: 'OFR_1' },
+    });
+    fireEvent.change(first.container.querySelector('[name="quantity"]') as HTMLInputElement, {
+      target: { value: '00000000000000003' },
+    });
+    await act(async () => {
+      fireEvent.submit(first.container.querySelector('form') as HTMLFormElement);
+    });
+
+    expect(stored()).toMatchObject({ values: { offerId: 'OFR_1', quantity: '3' } });
+    first.unmount();
+
+    const reloaded = loadPage();
+    await waitFor(() =>
+      expect(reloaded.container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY),
+    );
+    expect(reloaded.container.querySelector('[name="quantity"]')).toHaveValue('3');
+    expect(stored()).not.toBeNull();
+  });
+
+  it('Persian digits are remembered as Latin ones', async () => {
+    submit.mockRejectedValueOnce(new Error('network down'));
+    const { container } = loadPage();
+    fireEvent.change(container.querySelector('select[name="offerId"]') as HTMLSelectElement, {
+      target: { value: 'OFR_1' },
+    });
+    fireEvent.change(container.querySelector('[name="quantity"]') as HTMLInputElement, {
+      target: { value: '۰۰۳' },
+    });
+    await act(async () => {
+      fireEvent.submit(container.querySelector('form') as HTMLFormElement);
+    });
+    expect(stored()).toMatchObject({ values: { quantity: '3' } });
+  });
+
+  it('an entry an earlier build wrote with the text as typed is restored as the count, not deleted', async () => {
+    plant({ values: { offerId: 'OFR_1', quantity: '00000000000000003' } });
+    const { container } = loadPage();
+    await waitFor(() => expect(container.querySelector('[name="submission"]')).toHaveValue(KEY));
+    expect(container.querySelector('[name="quantity"]')).toHaveValue('3');
+    expect(stored()).not.toBeNull();
+  });
+
+  it('a quantity the action could never have accepted is still dropped on restore', async () => {
+    plant({ values: { offerId: 'OFR_1', quantity: '0' } });
+    loadPage();
+    await waitFor(() => expect(stored()).toBeNull());
   });
 });

@@ -4,7 +4,12 @@ import { redirect } from 'next/navigation';
 
 import { currentSession } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
-import { placeOrder, parsePlaceOrderForm, placeOrderFormValues } from '@/server/place-order';
+import {
+  placeOrder,
+  parsePlaceOrderForm,
+  placeOrderFormValues,
+  type PlaceOrderRequest,
+} from '@/server/place-order';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { withRetryNote, type PlaceOrderFormState } from './place-order-form-state';
@@ -36,6 +41,10 @@ export async function submitPlaceOrder(
   // back unconfirmed (a 5xx, a 401/405/429 the portal cannot tell from "maybe")
   // must not swap them for the retry's own.
   return withRetryNote(previous, state.kind === 'UNCONFIRMED' ? 'retryUnknown' : 'retryRefused');
+}
+
+function sentQuantity(request: PlaceOrderRequest): string {
+  return String(request.lines[0].quantity);
 }
 
 async function attempt(form: FormData): Promise<PlaceOrderFormState> {
@@ -84,6 +93,16 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
       // progress is the same unknown: another request with this submission id
       // is still in flight. The values and the id come back so the retry is the
       // same request: same body, same key; the service replays or completes it.
-      return { kind: 'UNCONFIRMED', correlationId: result.correlationId, submissionId, values };
+      // What is kept for the retry is what was sent: the quantity the request
+      // carries, not the text that was typed (`00003` is the order for 3).
+      return {
+        kind: 'UNCONFIRMED',
+        correlationId: result.correlationId,
+        submissionId,
+        values: {
+          offerId: parsed.request.lines[0].offerId,
+          quantity: sentQuantity(parsed.request),
+        },
+      };
   }
 }

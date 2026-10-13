@@ -214,6 +214,30 @@ describe('placing an order — what the service answers', () => {
     },
   );
 
+  // F2: the quantity kept for a retry is the count that was sent, not the text typed.
+  it.each([
+    ['leading zeros', '00000000000000003'],
+    ['Persian digits', '۰۰۳'],
+    ['padding', ' 3 '],
+  ])('keeps the quantity that was sent, not the text typed (%s)', async (_name, typed) => {
+    placeOrder.mockResolvedValue({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_Z' });
+    const submission = mintSubmissionId(SESSION);
+    const state = await submitPlaceOrder(
+      IDLE_PLACE_ORDER_FORM,
+      formData({ ...GOOD, quantity: typed }, { submission }),
+    );
+
+    expect(placeOrder.mock.calls[0]?.[1]).toEqual({
+      lines: [{ offerId: GOOD.offerId, quantity: 3 }],
+    });
+    expect(state).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR_Z',
+      submissionId: submission,
+      values: { offerId: GOOD.offerId, quantity: '3' },
+    });
+  });
+
   it('retries an uncertain order with the same body and the same submission id, then goes to the order', async () => {
     const submission = mintSubmissionId(SESSION);
     placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_4' });

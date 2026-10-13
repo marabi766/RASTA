@@ -1,4 +1,4 @@
-import type { PlaceOrderFormValues } from './place-order-fields';
+import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fields';
 
 /**
  * An order whose outcome is unknown, kept in `sessionStorage` so that a reload,
@@ -36,7 +36,8 @@ const MAX_FIELD_LENGTH = 128;
 export interface UnresolvedOrder {
   readonly submissionId: string;
   readonly values: PlaceOrderFormValues;
-  readonly correlationId: string;
+  /** Null while the first send has not been answered: the entry is then PENDING. */
+  readonly correlationId: string | null;
   /** Milliseconds since the epoch, browser clock. Used only to age the entry out. */
   readonly savedAt: number;
 }
@@ -49,6 +50,8 @@ export interface Binding {
 
 interface Stored extends UnresolvedOrder {
   readonly v: typeof VERSION;
+  /** Saved before the action was sent; the outcome of the send is not known. */
+  readonly pending?: true;
   readonly owner: string;
   readonly session: string;
 }
@@ -89,7 +92,7 @@ function parse(raw: string): Stored | null {
     entry.v !== VERSION ||
     !text(entry.submissionId) ||
     !SUBMISSION_ID.test(entry.submissionId) ||
-    !text(entry.correlationId) ||
+    !(entry.correlationId === null || text(entry.correlationId)) ||
     !text(entry.owner) ||
     !text(entry.session) ||
     typeof entry.savedAt !== 'number' ||
@@ -97,10 +100,14 @@ function parse(raw: string): Stored | null {
     typeof values !== 'object' ||
     values === null ||
     !text(values.offerId, 64) ||
-    !text(values.quantity, 16)
+    typeof values.quantity !== 'string'
   ) {
     return null;
   }
+  // The same rule the action applies, so nothing it would have accepted is refused
+  // here — an entry written with the text as typed still reads as the count it was.
+  const quantity = canonicalQuantity(values.quantity);
+  if (quantity === null) return null;
   return {
     v: VERSION,
     submissionId: entry.submissionId,
@@ -108,8 +115,52 @@ function parse(raw: string): Stored | null {
     savedAt: entry.savedAt,
     owner: entry.owner,
     session: entry.session,
-    values: { offerId: values.offerId, quantity: values.quantity },
+    values: { offerId: values.offerId, quantity },
   };
+}
+
+/** Every key this module owns, in the order storage lists them. */
+function ownKeys(store: Storage): string[] {
+  const keys: string[] = [];
+  for (let index = 0; index < store.length; index += 1) {
+    const key = store.key(index);
+    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
+  }
+  return keys;
+}
+
+/**
+ * Account boundary, logout: nothing of an unresolved order outlives the person
+ * who signed out, whatever product it was for. (A session that merely *expires*
+ * is not a logout: the same person's next login keeps theirs, below.)
+ */
+export function purgeAllUnresolvedOrders(): void {
+  try {
+    const store = storage();
+    if (!store) return;
+    for (const key of ownKeys(store)) store.removeItem(key);
+  } catch {
+    // See above.
+  }
+}
+
+/**
+ * Account boundary, a page for `owner`: entries of anyone else — and entries
+ * that cannot be read as anyone's — are removed. The same person after a
+ * re-login keeps theirs (view-only, `restoreUnresolvedOrder`).
+ */
+export function purgeForeignUnresolvedOrders(owner: string): void {
+  try {
+    const store = storage();
+    if (!store) return;
+    for (const key of ownKeys(store)) {
+      const raw = store.getItem(key);
+      const entry = raw === null ? null : parse(raw);
+      if (!entry || entry.owner !== owner) store.removeItem(key);
+    }
+  } catch {
+    // See above.
+  }
 }
 
 export function saveUnresolvedOrder(
@@ -124,6 +175,8 @@ export function saveUnresolvedOrder(
       submissionId: order.submissionId,
       values: { offerId: order.values.offerId, quantity: order.values.quantity },
       correlationId: order.correlationId,
+      // Written before the send, when there is no correlation id yet.
+      ...(order.correlationId === null ? { pending: true as const } : {}),
       savedAt: now,
       owner: binding.owner,
       session: binding.session,

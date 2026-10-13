@@ -19,6 +19,8 @@
  * what it was priced at.
  */
 
+import { toLatinDigits } from './format';
+
 /** `createOrderSchema` — one line per order from this form; the cart is deferred (ADR-037 § 3). */
 export const PLACE_ORDER_FIELDS = ['offerId', 'quantity'] as const;
 
@@ -34,3 +36,21 @@ export const EMPTY_PLACE_ORDER_FORM: PlaceOrderFormValues = {
 export const PLACE_ORDER_LIMITS = {
   quantity: { max: 1_000_000 },
 } as const;
+
+/**
+ * The quantity as the action validates and sends it — Latin digits, no leading
+ * zeros — or null when it is not a count the action would accept.
+ *
+ * The one place the text becomes a number's text: `'٠٠٣'` and `'00000000000000003'`
+ * are both the order for 3, and what is remembered for a retry (`unresolved-order.ts`)
+ * is this, so the remembered order is the one that was sent.
+ */
+export function canonicalQuantity(value: string): string | null {
+  const text = toLatinDigits(value).trim();
+  if (!/^[0-9]+$/.test(text)) return null;
+  const count = Number(text);
+  if (!Number.isSafeInteger(count) || count < 1 || count > PLACE_ORDER_LIMITS.quantity.max) {
+    return null;
+  }
+  return String(count);
+}
