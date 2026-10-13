@@ -13,6 +13,7 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import { cleanup } from './helpers';
+import { ORDER_NOTE_NOT_STORED } from '../src/order/dto';
 
 /**
  * The order HTTP surface, every path including the refusals.
@@ -50,6 +51,7 @@ describe('order API', () => {
   ): Promise<string> {
     const product = await request(http)
       .post('/v1/products')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', `Bearer ${supplier(supplierOrg)}`)
       .send({
         sku: `API-SKU-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
@@ -62,6 +64,7 @@ describe('order API', () => {
 
     const offer = await request(http)
       .post('/v1/offers')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', `Bearer ${supplier(supplierOrg)}`)
       .send({
         productId: product.body.id,
@@ -120,6 +123,38 @@ describe('order API', () => {
         .expect(400);
 
       expect(response.body.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('refuses a non-empty note with 400 and places nothing, rather than dropping it (Q-110)', async () => {
+      // An order has nowhere to keep a note. Accepted, the buyer's text was
+      // silently dropped; refused, the buyer learns it was not sent.
+      const offerId = await publishOffer();
+      const key = apiKey('api-note');
+
+      const response = await request(http)
+        .post('/v1/orders')
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', key)
+        .send({ lines: [{ offerId, quantity: 1 }], note: 'please deliver before noon' })
+        .expect(400);
+
+      expect(response.body.code).toBe('VALIDATION_FAILED');
+      expect(response.body.details).toEqual([
+        expect.objectContaining({ message: ORDER_NOTE_NOT_STORED }),
+      ]);
+      expect(JSON.stringify(response.body)).not.toContain('noon');
+      const placed = await runUnscoped('the suite counts orders under the refused key', () =>
+        harness.prisma.client.order.count({ where: { idempotencyKey: key } }),
+      );
+      expect(placed).toBe(0);
+
+      // An empty note has nothing to drop, and is accepted as before.
+      await request(http)
+        .post('/v1/orders')
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', apiKey('api-note-empty'))
+        .send({ lines: [{ offerId, quantity: 1 }], note: '' })
+        .expect(201);
     });
 
     it('refuses a request with no Idempotency-Key with 400', async () => {

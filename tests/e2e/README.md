@@ -9,15 +9,19 @@
 مسیر بحرانی دامنه اقتصادی، سرتاسر — از توکن واقعی Keycloak تا رویدادی که روی
 Kafka منتشر می‌شود:
 
-| فایل                       | سناریو                                                                                                         |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `01-authenticated-context` | ورود، تشخیص سازمان فعال، رد کردن عضویت جعلی                                                                    |
-| `02-critical-path`         | کیف پول → شارژ شبیه‌سازی‌شده → تعهد + Hold → Replay → تأیید → تسویه → دفتر                                     |
-| `03-authorization`         | ۴۰۴ میان‌مستأجری، دید دو طرف تراکنش، و «`AUDITOR` هیچ دسترسی ندارد»                                            |
-| `04-financial-safety`      | خرج بیش از موجودی، Idempotency، اعتراض، عدد بزرگ‌تر از `Number`                                                |
-| `05-correlation`           | یک `correlationId` از HTTP تا Header و Envelope رویداد روی Kafka                                               |
-| `construction/01-…`        | CON-001: بسته بودن بی‌توکن، ساخت Idempotent، چرخهٔ پروژه و نیاز، ۴۰۹ نسخهٔ کهنه، ۴۰۴ میان‌مستأجری، رکورد Audit |
-| `construction/03-…`        | CON-002: مناقصه سرتاسر — موافقت‌ها، پیشنهاد مهرشده، بستن، بازگشایی چهارچشمی، ارزیابی، انتخاب، ابطال، ۴۰۴       |
+| فایل                       | سناریو                                                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `01-authenticated-context` | ورود، تشخیص سازمان فعال، رد کردن عضویت جعلی                                                                                                            |
+| `02-critical-path`         | کیف پول → شارژ شبیه‌سازی‌شده → تعهد + Hold → Replay → تأیید → تسویه → دفتر                                                                             |
+| `03-authorization`         | ۴۰۴ میان‌مستأجری، دید دو طرف تراکنش، و «`AUDITOR` هیچ دسترسی ندارد»                                                                                    |
+| `04-financial-safety`      | خرج بیش از موجودی، Idempotency، اعتراض، عدد بزرگ‌تر از `Number`                                                                                        |
+| `05-correlation`           | یک `correlationId` از HTTP تا Header و Envelope رویداد روی Kafka                                                                                       |
+| `construction/01-…`        | CON-001: بسته بودن بی‌توکن، ساخت Idempotent، چرخهٔ پروژه و نیاز، ۴۰۹ نسخهٔ کهنه، ۴۰۴ میان‌مستأجری، رکورد Audit                                         |
+| `construction/03-…`        | CON-002: مناقصه سرتاسر — موافقت‌ها، پیشنهاد مهرشده، بستن، بازگشایی چهارچشمی، ارزیابی، انتخاب، ابطال، ۴۰۴                                               |
+| `contract/01-…`            | CON-003: سه مناقصهٔ منتخب → سه پیش‌نویس قرارداد؛ امضا (سیاست `contract.signature`)، لغو، الحاقیه، Milestone، ۴۰۴ میان‌مستأجری، جابه‌جایی سازمان، Audit |
+
+سناریوی قرارداد تماماً از Gateway می‌گذرد، از جمله نوشتن و تأیید سیاست `contract.signature`
+(`/v1/contract-approval-policies`، #243)؛ `E2E_CONTRACT_URL` (:3111) فقط برای بررسی آمادگی است.
 
 `docs/14 § 14.7` ردیف‌های ۱، ۴، ۸ و ۹ — با نیمه Marketplace حذف‌شده، نه
 شبیه‌سازی‌شده: قرارداد `ORDER_*` طبق ADR-032 موکول است و نوشتن Payload سرویسی که
@@ -30,9 +34,36 @@ Kafka منتشر می‌شود:
 `apps/web` و `apps/admin` پوشه‌های خالی‌اند. یک تست Browser باید صفحه‌ای را
 Drive کند که وجود ندارد؛ ساختن صفحه‌ای برای تست، یعنی تستِ Fixture خودمان.
 
-`APIRequestContext` همان Stack واقعی را می‌زند: Gateway (Routing، Rate Limit،
+فراخوان API همان Stack واقعی را می‌زند: Gateway (Routing، Rate Limit،
 اجبار `Idempotency-Key`)، `economic-service` واقعی، PostgreSQL واقعی، Kafka
 واقعی و توکن واقعی Keycloak.
+
+**توکن هرگز به گزارش نمی‌رسد (Codex r5 روی #241).** هر فراخوان دارای Credential
+(`Bearer` یا `X-Internal-Token`) از `Actor` (`src/actor.ts`) و `fetch` خود Node
+می‌گذرد، نه از `APIRequestContext` Playwright: Playwright خطای فراخوان شکست‌خورده
+را با همهٔ Headerهای درخواست، از جمله `authorization`، در گزارش HTML ثبت می‌کند —
+حتی با Trace خاموش و حتی وقتی تست خطا را گرفته باشد. خطای Transport با
+`TransportError` (`src/http.ts`) جایگزین می‌شود: متن ثابت + Method + Path بدون
+Query + کلاس Status + کد علت، بی‌هیچ Header و بی‌`cause`. پیام Timeout در `until()`
+و `waitFor()` فقط همین متن پاک‌شده را دارد. Trace برای همهٔ Projectها خاموش است و
+Screenshot/Video هم (صفحه‌ای نیست). گزارشی که CI در شکست بارگذاری می‌کند
+(`playwright-report`) پس فقط این‌ها را دارد: عنوان تست‌ها و Stepها (Stepهای API
+فقط برای فراخوان‌های بی‌Credential)، پیام و Stack خطاها، تکهٔ کد منبع پیرامون خطا،
+و stdout/stderr تست‌ها — هیچ‌کدام توکن ندارند؛ پیام 401 در Poll بدنهٔ پاسخ پلتفرم را
+دارد، نه درخواست را. آزمون پس‌رفت: `src/actor.test.ts`.
+
+**Keycloak هم از همان Transport (Codex r6 روی #241).** همهٔ فراخوان‌های Keycloak —
+Grant توکن کاربران و تمدید آن، توکن Admin، Admin API، Account Console و بررسی
+آمادگی در `global-setup.ts` — از `src/keycloak-transport.ts` روی `send()` می‌گذرند.
+پاسخ رد یا ناخوانا `AnswerError` می‌شود: متن ثابت + Method + Path بدون Query + کلاس
+Status + حداکثر یک کد شناسه‌مانند (مثل `error invalid_grant`)؛ هرگز بدنهٔ پاسخ و هرگز
+پیام `JSON.parse` (که ورودی‌اش، یعنی توکن، را نقل می‌کند). URLی که Userinfo دارد
+(`http://user:pass@host`) همان ابتدا در `src/target-guard.ts` رد می‌شود، بی‌آنکه
+مقدارش تکرار شود. هر درخواست مهلت خودش را نگه می‌دارد (۳۰ ثانیه، حتی اگر Transport
+به Abort اعتنا نکند)، تمدید `SessionToken` جداگانه محدود است، و `until()` و
+`waitFor()` مهلت اعلام‌شده را دور هر Check هم اجرا می‌کنند: Checkی که پاسخ نمی‌دهد در
+همان مهلت قطع می‌شود. آزمون‌ها: `src/keycloak-transport.test.ts`،
+`src/actor.test.ts`، `src/target-guard.test.ts`.
 
 **آماده برای Browser:** وقتی `apps/web` ساخته شد، یک Project دوم در
 `playwright.config.ts` اضافه می‌شود (نمونه‌اش همان‌جا کامنت شده) و

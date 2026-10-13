@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { e2eConfig, ORG, type E2eConfig } from './env';
-import { disposableRealmRefusal, E2eTargetRefusedError } from './target-guard';
+import { e2eConfig, ORG, type E2eConfig } from './env.ts';
+import {
+  adminRead,
+  adminRequest,
+  claimsOf,
+  passwordGrant,
+  type KeycloakTransport,
+} from './keycloak-transport.ts';
+import { disposableRealmRefusal, E2eTargetRefusedError } from './target-guard.ts';
 
 /**
  * Real tokens from the real identity provider.
@@ -63,7 +70,13 @@ export function seedPassword(): string {
   if (override) return override;
 
   const realmPath = resolve(__dirname, '../../../infrastructure/docker/keycloak/rasta-realm.json');
-  const realm = JSON.parse(readFileSync(realmPath, 'utf8')) as RealmExport;
+  let realm: RealmExport;
+  try {
+    realm = JSON.parse(readFileSync(realmPath, 'utf8')) as RealmExport;
+  } catch {
+    // Fixed text: `JSON.parse` quotes its input, and this input holds the passwords.
+    throw new Error(`${realmPath} could not be read as JSON`);
+  }
 
   const credential = realm.users
     ?.find((user) => user.username === E2E_USERS.tenantA)
@@ -85,35 +98,27 @@ export function seedPassword(): string {
  * one flow a headless test can drive without a browser, and it produces exactly
  * the token the authorization-code flow produces — same mappers, same audience,
  * same signature.
+ *
+ * Through `keycloak-transport.ts`: bounded by the request timeout, and failing with fixed text.
  */
 export async function accessToken(
   username: E2eUser,
   config: E2eConfig = e2eConfig(),
+  transport?: KeycloakTransport,
 ): Promise<string> {
-  const response = await fetch(
-    `${config.keycloakUrl}/realms/${config.realm}/protocol/openid-connect/token`,
+  const granted = await passwordGrant(
+    config,
     {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: config.clientId,
-        username,
-        password: seedPassword(),
-        scope: 'openid',
-      }),
+      realm: config.realm,
+      clientId: config.clientId,
+      username,
+      password: seedPassword(),
+      scope: 'openid',
     },
+    username,
+    transport,
   );
-
-  if (!response.ok) {
-    throw new Error(
-      `Keycloak refused a token for ${username}: ${response.status} ${await response.text()}`,
-    );
-  }
-
-  const body = (await response.json()) as { access_token?: string };
-  if (!body.access_token) throw new Error(`Keycloak returned no access_token for ${username}`);
-  return body.access_token;
+  return granted.accessToken;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,8 +181,10 @@ interface KeycloakUser {
 export async function ensureTenantBUser(
   config: E2eConfig = e2eConfig(),
 ): Promise<'found' | 'created' | 'repaired'> {
-  const lookup = await adminRequest(config, `/users?username=${E2E_USERS.tenantB}&exact=true`);
-  const [existing] = (await lookup.json()) as KeycloakUser[];
+  const [existing] = await adminRead<KeycloakUser[]>(
+    config,
+    `/users?username=${E2E_USERS.tenantB}&exact=true`,
+  );
 
   let outcome: 'found' | 'created' | 'repaired' = 'found';
   let userId: string;
@@ -192,15 +199,12 @@ export async function ensureTenantBUser(
     }
   } else {
     await allowAdminEditedAttributes(config);
-    const created = await adminRequest(config, '/users', {
-      method: 'POST',
-      body: JSON.stringify({
-        ...tenantBRepresentation(),
-        credentials: [{ type: 'password', value: seedPassword(), temporary: false }],
-      }),
+    const created = await adminRequest(config, 'POST', '/users', {
+      ...tenantBRepresentation(),
+      credentials: [{ type: 'password', value: seedPassword(), temporary: false }],
     });
 
-    const location = created.headers.get('location')?.split('/').pop();
+    const location = created.headers.location?.split('/').pop();
     if (!location) throw new Error('Keycloak created a user but returned no Location header');
     userId = location;
     outcome = 'created';
@@ -232,18 +236,12 @@ export async function ensureTenantBUser(
 }
 
 async function writeRepresentation(config: E2eConfig, userId: string): Promise<void> {
-  await adminRequest(config, `/users/${userId}`, {
-    method: 'PUT',
-    body: JSON.stringify(tenantBRepresentation()),
-  });
+  await adminRequest(config, 'PUT', `/users/${userId}`, tenantBRepresentation());
 }
 
 /** Whether this user's token carries the organization and its admin role in it. */
 async function tokenCarriesOrganization(config: E2eConfig): Promise<boolean> {
-  const token = await accessToken(E2E_USERS.tenantB, config);
-  const segment = token.split('.')[1];
-  if (!segment) return false;
-  const claims = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8')) as {
+  const claims = claimsOf(await accessToken(E2E_USERS.tenantB, config)) as {
     org_id?: string;
     org_roles?: string[] | string;
   };
@@ -258,8 +256,7 @@ async function tokenCarriesOrganization(config: E2eConfig): Promise<boolean> {
  * `globalSetup` after every other check and before the first Keycloak write.
  */
 export async function verifyDisposableRealm(config: E2eConfig = e2eConfig()): Promise<void> {
-  const response = await adminRequest(config, '');
-  const refusal = disposableRealmRefusal(await response.json(), config.realm);
+  const refusal = disposableRealmRefusal(await adminRead<unknown>(config, ''), config.realm);
   if (refusal) throw new E2eTargetRefusedError([refusal]);
 }
 
@@ -275,67 +272,11 @@ export async function verifyDisposableRealm(config: E2eConfig = e2eConfig()): Pr
  * reaches it.
  */
 async function allowAdminEditedAttributes(config: E2eConfig): Promise<void> {
-  const current = await adminRequest(config, '/users/profile');
-  const profile = (await current.json()) as { unmanagedAttributePolicy?: string };
+  const profile = await adminRead<{ unmanagedAttributePolicy?: string }>(config, '/users/profile');
   if (profile.unmanagedAttributePolicy === 'ADMIN_EDIT') return;
 
-  await adminRequest(config, '/users/profile', {
-    method: 'PUT',
-    body: JSON.stringify({ ...profile, unmanagedAttributePolicy: 'ADMIN_EDIT' }),
+  await adminRequest(config, 'PUT', '/users/profile', {
+    ...profile,
+    unmanagedAttributePolicy: 'ADMIN_EDIT',
   });
-}
-
-let adminToken: string | undefined;
-
-async function adminAccessToken(config: E2eConfig): Promise<string> {
-  if (adminToken) return adminToken;
-
-  const response = await fetch(
-    `${config.keycloakUrl}/realms/master/protocol/openid-connect/token`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: 'admin-cli',
-        username: config.keycloakAdmin.username,
-        password: config.keycloakAdmin.password,
-      }),
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Keycloak refused an admin token: ${response.status} ${await response.text()}. ` +
-        'Set KEYCLOAK_ADMIN and KEYCLOAK_ADMIN_PASSWORD for this environment.',
-    );
-  }
-
-  const body = (await response.json()) as { access_token: string };
-  adminToken = body.access_token;
-  return adminToken;
-}
-
-async function adminRequest(
-  config: E2eConfig,
-  path: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  const token = await adminAccessToken(config);
-  const response = await fetch(`${config.keycloakUrl}/admin/realms/${config.realm}${path}`, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      'content-type': 'application/json',
-      ...(init.headers ?? {}),
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Keycloak admin ${init.method ?? 'GET'} ${path} failed: ` +
-        `${response.status} ${await response.text()}`,
-    );
-  }
-  return response;
 }

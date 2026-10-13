@@ -14,6 +14,7 @@ import { e2eConfig } from '../../src/env';
 
 async function publishedOffer(tenantB: Actor): Promise<string> {
   const product = await tenantB.post('/v1/products', {
+    idempotencyKey: idempotencyKey('e2e-catalogue'),
     body: {
       sku: `E2E-ISO-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
       name: 'تسمه پروانه',
@@ -23,6 +24,7 @@ async function publishedOffer(tenantB: Actor): Promise<string> {
     },
   });
   const offer = await tenantB.post('/v1/offers', {
+    idempotencyKey: idempotencyKey('e2e-catalogue'),
     body: {
       productId: (product.body as { id: string }).id,
       unitPriceMinor: '200000',
@@ -102,6 +104,7 @@ test.describe.serial('marketplace isolation', () => {
     const offerId = await publishedOffer(tenantB);
 
     const response = await tenantA.patch(`/v1/offers/${offerId}`, {
+      idempotencyKey: idempotencyKey('e2e-catalogue'),
       body: { unitPriceMinor: '1' },
     });
     // 404, not 403: a refusal by name would confirm the offer exists under
