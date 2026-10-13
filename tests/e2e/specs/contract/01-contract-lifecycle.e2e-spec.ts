@@ -1366,12 +1366,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
 
     await expectMissingLike(
       await send(c3, 'POST', path, {}),
-      send(
-        c3,
-        'POST',
-        `/v1/contracts/CTR_${RUN}_MISSING/amendments/AMD_${RUN}_MISSING_0/sign`,
-        {},
-      ),
+      send(c3, 'POST', `/v1/contracts/CTR_${RUN}_MISSING/amendments/AMD_${RUN}_MISSING_0/sign`, {}),
       'a stranger signing the amendment',
     );
 
@@ -1628,14 +1623,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       amendmentsTotalMinor: c.amendmentsTotalMinor,
     });
     const moneyBefore = {
-      A: [
-        moneyOf(await contract(author, contractId.A)),
-        moneyOf(await contract(c1, contractId.A)),
-      ],
-      C: [
-        moneyOf(await contract(author, contractId.C)),
-        moneyOf(await contract(c2, contractId.C)),
-      ],
+      A: [moneyOf(await contract(author, contractId.A)), moneyOf(await contract(c1, contractId.A))],
+      C: [moneyOf(await contract(author, contractId.C)), moneyOf(await contract(c2, contractId.C))],
     };
 
     // D-050 flags an employer signature only while the move's instant is within the signature's
