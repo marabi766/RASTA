@@ -25,6 +25,8 @@ rasta.identity.v1.dlq dead-letter
 rasta.identity.v1.retry retry
 rasta.insurance.v1 stream
 rasta.insurance.v1.retry retry
+rasta.inventory.v1 stream
+rasta.inventory.v1.retry retry
 rasta.maintenance.v1 stream
 rasta.maintenance.v1.dlq dead-letter
 rasta.maintenance.v1.retry retry

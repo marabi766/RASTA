@@ -17,7 +17,7 @@ import { OrganizationDirectory } from '../organization/organization-directory';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { CursorPage } from '../contract/dto';
 import type { ClaimFence } from '../shared/idempotency';
-import { transactionNow } from '../shared/clock';
+import { databaseClock, transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { ruleRefusal } from '../shared/refusal';
 import { storedActor, storedIdentityOf } from '../shared/stable-actor';
@@ -282,7 +282,6 @@ export class PolicyService implements OnModuleInit {
 
     await this.prisma
       .transaction(async (tx) => {
-        const at = await transactionNow(tx);
         // Serialise with every signature being recorded on this workflow, and with any other
         // approval or retirement of it (no contract lock is held here, so the one lock order
         // holds). Organization and workflow key never change, so `found` names the slot;
@@ -296,6 +295,10 @@ export class PolicyService implements OnModuleInit {
         this.assertVersion(policy.id, policy.version, dto.expectedVersion);
         assertPolicyTransition(policyId, policy.status as PolicyStateName, 'ACTIVE');
         this.assertFourEyes(policy, approver);
+        // One instant for the activation, the retirement it makes and their events: read now,
+        // under the slot's lock, not at the transaction's start — a signature that held the lock
+        // first committed before this, and nothing here may be dated before it (#248 follow-up).
+        const at = await databaseClock(tx);
 
         const workflowKey = policy.workflowKey as WorkflowKey;
         const current = await this.repository.findActivePolicyOf(
@@ -401,7 +404,6 @@ export class PolicyService implements OnModuleInit {
     const { actor } = this.access.assertCanRetirePolicy(found);
 
     await this.prisma.transaction(async (tx) => {
-      const at = await transactionNow(tx);
       // Taking a policy out of force is serialised with signatures being recorded under it
       // (PolicyRepository.lockPolicySlot); re-read under the lock.
       await this.repository.lockPolicySlot(
@@ -412,6 +414,8 @@ export class PolicyService implements OnModuleInit {
       const policy = await this.policyOrNotFound(tx, policyId);
       this.assertVersion(policy.id, policy.version, dto.expectedVersion);
       assertPolicyTransition(policyId, policy.status as PolicyStateName, 'RETIRED');
+      // Read under the lock, as `approve` does: never before a signature that held it first.
+      const at = await databaseClock(tx);
 
       const matched = await this.repository.transitionPolicy(tx, {
         organizationId: policy.organizationId,

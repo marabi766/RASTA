@@ -280,6 +280,96 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect((await rowOf(id)).status).toBe('SIGNED');
     });
 
+    it('a contractor whose role was revoked since they signed is refused as GET refuses them — not as a new signature without the role: the signature stays, nothing is written (#248 follow-up)', async () => {
+      const { id, employer, contractor } = await draft();
+      const claims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      await sign(id, person(contractor, ['CONTRACTOR'], claims)).expect(200);
+      const events = (await eventsOf(w.prisma, employer)).length;
+
+      // The same person, the CONTRACTOR role revoked: GET's refusal, word for word, whatever it is
+      // — 403 with no reading role left, and 404 with only an employer's reading role, which reads
+      // nothing in the contractor's organization (a new signature without the role would be 403).
+      for (const [roles, status] of [
+        [['DRIVER'], 403],
+        [['ORGANIZATION_ADMIN'], 404],
+      ] as const) {
+        const revoked = person(contractor, [...roles], claims);
+        const read = await get(id, revoked).expect(status);
+        const again = await sign(id, revoked, {}, key()).expect(status);
+        expect(bare(again.body)).toEqual(bare(read.body));
+        expect(again.body).not.toHaveProperty('id');
+        expect(JSON.stringify(again.body)).not.toMatch(/amount|DRAFT/i);
+      }
+
+      const signatures = await signaturesOf(id);
+      expect(signatures).toHaveLength(1);
+      expect(signatures[0]).toMatchObject({ side: 'CONTRACTOR', signedBy: claims.rastaUserId });
+      // No event at all — no refusal recorded for a signer signing again.
+      expect(await eventsOf(w.prisma, employer)).toHaveLength(events);
+      expect((await rowOf(id)).status).toBe('DRAFT');
+
+      // Another person without the role, on the side already signed, is a new signature: refused
+      // for the role — not 409, which would tell them the side has signed.
+      const other = await sign(id, person(contractor, ['ORGANIZATION_ADMIN'])).expect(403);
+      expect(other.body.code).toBe('INSUFFICIENT_ROLE');
+      expect(await signaturesOf(id)).toHaveLength(1);
+    });
+
+    it('the role refusal is judged after the same-person answer and before the 409: the revoked signer is not audited, a stranger without the role is — once per request — and is not told the side has signed (#243 × #251)', async () => {
+      const { id, employer, contractor } = await draft();
+      const claims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      await sign(id, person(contractor, ['CONTRACTOR'], claims)).expect(200);
+      const authorityRefusals = () => eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+
+      // The signer, the CONTRACTOR role revoked, signing their own side again — twice under one key:
+      // GET's refusal each time, and no refusal of a role recorded for it.
+      for (const [roles, status] of [
+        [['DRIVER'], 403],
+        [['ORGANIZATION_ADMIN'], 404],
+      ] as const) {
+        const revoked = person(contractor, [...roles], claims);
+        const read = await get(id, revoked).expect(status);
+        const repeatKey = key();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const again = await sign(id, revoked, {}, repeatKey).expect(status);
+          expect(bare(again.body)).toEqual(bare(read.body));
+        }
+      }
+      expect(await authorityRefusals()).toEqual([]);
+
+      // A stranger without the role, on the side already signed: the role's refusal, not the 409 —
+      // audited as ROLE_NOT_PERMITTED, and once only when repeated under the same key.
+      const strangerClaims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      const stranger = person(contractor, ['ORGANIZATION_ADMIN'], strangerClaims);
+      const repeatKey = key();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const refused = await sign(id, stranger, {}, repeatKey).expect(403);
+        expect(refused.body.code).toBe('INSUFFICIENT_ROLE');
+        expect(JSON.stringify(refused.body)).not.toMatch(/SIDE_ALREADY_SIGNED|already signed/i);
+      }
+      const recorded = await authorityRefusals();
+      expect(recorded.map((e) => e.payload)).toEqual([
+        {
+          contractId: id,
+          organizationId: employer,
+          action: 'SIGN_CONTRACT',
+          side: 'CONTRACTOR',
+          subjectId: null,
+          reason: 'ROLE_NOT_PERMITTED',
+          policyId: null,
+          refusedBy: strangerClaims.rastaUserId,
+          refusedAt: expect.any(String),
+        },
+      ]);
+
+      // With the role, another person is told the side has signed — and that is not an audit record.
+      const taken = await sign(id, contractorSigner(contractor)).expect(409);
+      expect(reasons(taken.body)).toEqual(['signature:SIDE_ALREADY_SIGNED']);
+      expect(await authorityRefusals()).toHaveLength(1);
+      expect(await signaturesOf(id)).toHaveLength(1);
+      expect((await rowOf(id)).status).toBe('DRAFT');
+    });
+
     it('the same person is the same on another token of theirs: one subject, two user ids', async () => {
       const { id, employer } = await draft();
       const sub = `sub-${ulid()}`;

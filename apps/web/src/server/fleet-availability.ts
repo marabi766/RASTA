@@ -19,6 +19,7 @@ import {
 import { readFromGateway, type ReadResult } from './assets';
 import { localDateToIso } from './drivers';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
@@ -164,11 +165,11 @@ const windowSchema = z.object({
   id: z.string(),
   assetId: z.string(),
   available: z.boolean(),
-  fromAt: z.string(),
-  toAt: z.string().nullable().default(null),
+  fromAt: renderableDate,
+  toAt: renderableDate.nullable().default(null),
   reason: z.string(),
   createdAt: z.string(),
-  revokedAt: z.string().nullable().default(null),
+  revokedAt: renderableDate.nullable().default(null),
 });
 
 export type AvailabilityWindow = z.infer<typeof windowSchema>;
