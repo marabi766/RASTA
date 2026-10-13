@@ -231,4 +231,57 @@ describe('placing an order — what the service answers', () => {
     expect(secondCall[2]).toBe(submission);
     expect(firstCall[2]).toBe(submission);
   });
+
+  // Order commits, recording the idempotency response fails (UNCONFIRMED); the
+  // record expires and the offer is withdrawn: pricing refuses the retry before
+  // the order-key check. A refusal proves nothing about the first request.
+  it.each([
+    ['NOT_FOUND', { kind: 'NOT_FOUND' }],
+    ['a 409 refusal', { kind: 'INVALID', fieldErrors: {}, message: 'CONFLICT' }],
+    ['a 422 refusal', { kind: 'INVALID', fieldErrors: { quantity: 'x' }, message: 'm' }],
+    ['FORBIDDEN', { kind: 'FORBIDDEN' }],
+  ])('keeps an unconfirmed order unconfirmed when its retry gets %s', async (_name, answer) => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_5' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+
+    placeOrder.mockResolvedValueOnce({ ...answer, correlationId: 'COR_6' });
+    const retry = await submitPlaceOrder(first, formData(first.values, { submission }));
+
+    expect(retry).toEqual({
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR_5',
+      submissionId: submission,
+      values: GOOD,
+      retryRefused: true,
+    });
+    // And it stays so through a second refused retry.
+    placeOrder.mockResolvedValueOnce({ kind: 'NOT_FOUND', correlationId: 'COR_7' });
+    expect(await submitPlaceOrder(retry, formData(first.values, { submission }))).toEqual(retry);
+  });
+
+  it('keeps an unconfirmed order unconfirmed when the retry is refused before the service', async () => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_5' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+    currentSession.mockResolvedValue(null);
+
+    expect(await submitPlaceOrder(first, formData(first.values, { submission }))).toMatchObject({
+      kind: 'UNCONFIRMED',
+      submissionId: submission,
+      retryRefused: true,
+    });
+  });
+
+  it('lets a successful retry replace the unconfirmed state', async () => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_5' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+    await expect(submitPlaceOrder(first, formData(first.values, { submission }))).rejects.toThrow(
+      /NEXT_REDIRECT/,
+    );
+  });
 });

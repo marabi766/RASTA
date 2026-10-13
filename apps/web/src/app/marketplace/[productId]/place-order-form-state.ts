@@ -32,12 +32,17 @@ export type PlaceOrderFormState =
    * Sent, maybe committed, not confirmed: a 5xx, a timeout, an in-flight 409.
    * Carries the values and the submission id so "retry the same request" sends
    * the same body under the same key; only "start a new order" mints another.
+   *
+   * Once unconfirmed, only a successful answer to a retry of the same submission
+   * ends the doubt. `retryRefused` is set when a retry was answered with a
+   * refusal: that proves nothing about the first request, so the state stays.
    */
   | {
       readonly kind: 'UNCONFIRMED';
       readonly correlationId: string;
       readonly submissionId: string;
       readonly values: PlaceOrderFormValues;
+      readonly retryRefused?: true;
     };
 
 export const IDLE_PLACE_ORDER_FORM: PlaceOrderFormState = { kind: 'IDLE' };

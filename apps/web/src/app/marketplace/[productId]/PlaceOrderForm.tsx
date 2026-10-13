@@ -198,6 +198,12 @@ function UnconfirmedOrder({
         </Link>{' '}
         خود را ببینید. کد پیگیری: {state.correlationId}
       </Alert>
+      {state.retryRefused ? (
+        <Alert tone="warning">
+          ارسال دوباره رد شد و نتیجهٔ درخواست نخست همچنان معلوم نیست؛ ممکن است سفارش ثبت شده باشد.
+          فهرست سفارش‌ها را ببینید.
+        </Alert>
+      ) : null}
       <p className="text-sm text-content-muted">
         {offer ? `${offer.supplierOrganizationId} — ` : ''}
         تعداد {toPersianDigits(state.values.quantity)}
@@ -212,8 +218,8 @@ function UnconfirmedOrder({
         </a>
       </div>
       <p className="text-sm text-content-muted">
-        «ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال می‌فرستد؛ اگر سفارش پیش‌تر ثبت شده باشد،
-        همان سفارش برمی‌گردد و سفارش دومی ساخته نمی‌شود. «شروع سفارش تازه» درخواست جدیدی است.
+        «ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال می‌فرستد و ممکن است سفارش پیشین را
+        برگرداند، اما این تضمین نیست؛ فهرست سفارش‌ها مرجع است. «شروع سفارش تازه» درخواست جدیدی است.
       </p>
     </form>
   );

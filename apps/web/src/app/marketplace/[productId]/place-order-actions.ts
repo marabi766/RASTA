@@ -22,9 +22,20 @@ import type { PlaceOrderFormState } from './place-order-form-state';
  * back to the form, so a refresh cannot place a second one.
  */
 export async function submitPlaceOrder(
-  _previous: PlaceOrderFormState,
+  previous: PlaceOrderFormState,
   form: FormData,
 ): Promise<PlaceOrderFormState> {
+  const state = await attempt(form);
+  if (previous.kind !== 'UNCONFIRMED' || state.kind === 'UNCONFIRMED') return state;
+
+  // A retry of an unconfirmed submission: no answer to it but a successful one
+  // (which redirects, above) may claim the first request did not commit. The
+  // idempotency record can have expired and the offer can be gone, so a 404, 409
+  // or 422 on the retry says nothing about the original. The state stays.
+  return { ...previous, retryRefused: true };
+}
+
+async function attempt(form: FormData): Promise<PlaceOrderFormState> {
   const session = await currentSession();
   if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
 

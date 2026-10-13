@@ -177,6 +177,20 @@ describe('PlaceOrderForm', () => {
       expect(getByRole('link', { name: /فهرست سفارش/ })).toHaveAttribute('href', '/orders');
     });
 
+    it('after a refused retry keeps the warning, the orders link and the submission id, and says the outcome is unknown', () => {
+      const { container, getByRole } = renderForm({ ...UNCONFIRMED, retryRefused: true });
+      expect(container.textContent).toMatch(
+        /ارسال دوباره رد شد و نتیجهٔ درخواست نخست همچنان معلوم نیست/,
+      );
+      expect(container.textContent).toMatch(/ممکن است سفارش ثبت شده باشد/);
+      expect(container.textContent).not.toMatch(/سفارش ثبت نشد|سفارشی ثبت نشد/);
+      expect(container.textContent).toContain('COR_3');
+      expect(getByRole('link', { name: /فهرست سفارش/ })).toHaveAttribute('href', '/orders');
+      expect(container.querySelector('[name="submission"]')).toHaveValue(
+        'sub_CCCCCCCCCCCCCCCCCCCC',
+      );
+    });
+
     it('retries with the kept values and the kept submission id, not the page’s', () => {
       const { container, getByRole } = renderForm(UNCONFIRMED);
       expect(container.querySelector('[name="submission"]')).toHaveValue(
@@ -227,6 +241,16 @@ describe('PlaceOrderForm', () => {
         correlationId: 'COR_3',
         submissionId: SUBMISSION,
         values: { offerId: 'OFR_1', quantity: '2' },
+      },
+    ],
+    [
+      'unconfirmed, retry refused',
+      {
+        kind: 'UNCONFIRMED',
+        correlationId: 'COR_3',
+        submissionId: SUBMISSION,
+        values: { offerId: 'OFR_1', quantity: '2' },
+        retryRefused: true,
       },
     ],
   ])('has no accessibility violations (%s)', async (_name, state) => {
