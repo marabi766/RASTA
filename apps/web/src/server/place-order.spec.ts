@@ -185,7 +185,11 @@ describe('what the service can answer', () => {
       ),
     );
     expect(result.kind).toBe('INVALID');
-    expect(JSON.stringify(result)).not.toMatch(/‮|raw|bad/i);
+    // Without the correlation id: a random UUID can contain "bad" by chance.
+    const rendered = JSON.stringify(result, (key, value: unknown) =>
+      key === 'correlationId' ? undefined : value,
+    );
+    expect(rendered).not.toMatch(/‮|raw|bad/i);
   });
 
   it('says a reused key with another body (IDEMPOTENCY_KEY_REUSED) in closed Persian', async () => {
