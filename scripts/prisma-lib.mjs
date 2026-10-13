@@ -55,6 +55,41 @@ export const UTC_SESSION_OPTION = '-c TimeZone=UTC';
  * loses to this one; a URL already ending with it is returned unchanged.
  */
 export function withUtcSession(url) {
+  const { existing, withOptions } = splitOptions(url);
+  if (existing === UTC_SESSION_OPTION || existing.endsWith(` ${UTC_SESSION_OPTION}`)) return url;
+  return withOptions(existing ? `${existing} ${UTC_SESSION_OPTION}` : UTC_SESSION_OPTION);
+}
+
+/**
+ * The setting a migration that bounds its own table rewrite reads its
+ * `statement_timeout` from, in place of the default in the file (D-048).
+ */
+export const MIGRATION_STATEMENT_TIMEOUT_SETTING = 'rasta.migration_statement_timeout';
+
+/**
+ * `url` with `-c rasta.migration_statement_timeout=<value>` added to its
+ * `options`: one run's override of a rewrite migration's statement timeout,
+ * for a table an operator sized above the default (D-048 runbook). Unchanged
+ * when `value` is empty. Refused unless a positive whole number of ms, s, min
+ * or h — it becomes a startup option.
+ */
+export function withMigrationStatementTimeout(url, value) {
+  if (!value) return url;
+  if (!/^[1-9][0-9]*(ms|s|min|h)$/.test(value)) {
+    throw new Error(
+      `the migration statement timeout "${value}" is not a positive duration such as 90s or 15min`,
+    );
+  }
+  const { existing, withOptions } = splitOptions(url);
+  const option = `-c ${MIGRATION_STATEMENT_TIMEOUT_SETTING}=${value}`;
+  return withOptions(existing ? `${existing} ${option}` : option);
+}
+
+/**
+ * The `options` parameter of `url`, decoded, and a function that rebuilds
+ * `url` with it replaced — everything else byte for byte.
+ */
+function splitOptions(url) {
   const hashAt = url.indexOf('#');
   const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
   const hash = hashAt === -1 ? '' : url.slice(hashAt);
@@ -75,10 +110,10 @@ export function withUtcSession(url) {
     .map((pair) => decode(pair.slice(pair.indexOf('=') + 1 || pair.length)))
     .join(' ')
     .trim();
-
-  if (existing === UTC_SESSION_OPTION || existing.endsWith(` ${UTC_SESSION_OPTION}`)) return url;
-
-  const options = existing ? `${existing} ${UTC_SESSION_OPTION}` : UTC_SESSION_OPTION;
   const kept = pairs.filter((pair) => !isOptions(pair));
-  return `${base}?${[...kept, `options=${encodeURIComponent(options)}`].join('&')}${hash}`;
+  return {
+    existing,
+    withOptions: (options) =>
+      `${base}?${[...kept, `options=${encodeURIComponent(options)}`].join('&')}${hash}`,
+  };
 }

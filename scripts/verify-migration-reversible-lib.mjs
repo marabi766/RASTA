@@ -183,7 +183,17 @@ INSERT INTO "document" (
  * The steps run in the order the harness executes them: roll this migration
  * back to the init schema, seed the row that schema allowed, re-apply, and
  * assert the row came back **quarantined** rather than merely surviving.
+ *
+ * D-048's conversion (`20261012120000`) changes four of the columns this
+ * migration adds, so it is rolled back first and re-applied with it. Rolled
+ * back alone, the scan migration would drop the converted columns and its
+ * re-apply add them back as `timestamp(3)`, under a ledger still listing the
+ * conversion — which the chain reversal after this probe cannot see, since it
+ * compares each down with the state *before* that migration. The last step
+ * asserts the type.
  */
+const DOCUMENT_INSTANTS_TIMESTAMPTZ = '20261012120000_document_instants_timestamptz';
+
 export const DOCUMENT_DATA_ROLLBACK = {
   migration: '20260831180000_document_scan_lifecycle',
   label: 'an infected document registered before quarantine was recorded',
@@ -192,7 +202,7 @@ export const DOCUMENT_DATA_ROLLBACK = {
       // Run alone rather than as part of the chain: the init down script drops
       // the table, and this probe needs the init schema still standing.
       label: 'down: the rollback succeeds and leaves the init schema behind',
-      runDownScript: true,
+      runDownScript: [DOCUMENT_INSTANTS_TIMESTAMPTZ, '20260831180000_document_scan_lifecycle'],
     },
     {
       label: 'down: the init schema accepts an infected document with no quarantine',
@@ -229,6 +239,23 @@ export const DOCUMENT_DATA_ROLLBACK = {
               scan_lease_expires_at = NOW() + INTERVAL '1 minute'
              WHERE id = 'DOC_MIGCHECK_INFECTED';`,
       mustFail: 'ck_document_scan_lease_only_when_pending',
+    },
+    {
+      label: 'up again: every instant is timestamptz again, the re-added scan columns included',
+      sql: `
+        DO $$
+        DECLARE wrong TEXT;
+        BEGIN
+          SELECT string_agg(table_name || '.' || column_name, ', ') INTO wrong
+            FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND data_type = 'timestamp without time zone'
+             AND table_name <> '_prisma_migrations';
+          IF wrong IS NOT NULL THEN
+            RAISE EXCEPTION 'still timestamp(3) after the re-apply: %', wrong;
+          END IF;
+        END
+        $$;`,
     },
     {
       label: 'cleanup: the probe rows are removed before the chain reversal',

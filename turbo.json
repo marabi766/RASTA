@@ -18,10 +18,18 @@
     // .env — the connection strings come from the job environment — so without
     // these declarations every migration fails with "DATABASE_URL_<X> is not
     // set" while the same command works on a developer machine (D-005).
+    //
+    // RASTA_MIGRATION_STATEMENT_TIMEOUT is one run's override of a rewrite
+    // migration's statement timeout (D-048), read by scripts/prisma.mjs. The
+    // same trap: undeclared, `RASTA_MIGRATION_STATEMENT_TIMEOUT=15min pnpm
+    // db:migrate` ran with the migration's 30s default and said nothing.
+    // Hashing its value costs nothing — this task is never cached.
+    // scripts/prisma-turbo-env.test.mjs holds every task that runs prisma.mjs
+    // to every variable it reads.
     "db:migrate": {
       "cache": false,
       "persistent": false,
-      "env": ["DATABASE_URL", "DATABASE_URL_*"]
+      "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_MIGRATION_STATEMENT_TIMEOUT"]
     },
     // RASTA_ALLOW_DEMO_SEED is the seeds' explicit opt-in (packages/config
     // seed-guard). Undeclared, turbo would withhold it and every seed would
