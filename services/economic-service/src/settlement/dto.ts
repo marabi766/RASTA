@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { queryBoolean } from '@rasta/config';
+import { cursorQueryParameter } from '../shared/cursor';
 
 /**
  * Request shapes for the settlement API.
@@ -10,7 +11,7 @@ import { queryBoolean } from '@rasta/config';
  */
 export const listSettlementsQuerySchema = z
   .object({
-    cursor: z.string().optional(),
+    cursor: cursorQueryParameter,
     limit: z.coerce.number().int().min(1).max(100).default(25),
     /**
      * The payee view: settlements that paid this organization.
