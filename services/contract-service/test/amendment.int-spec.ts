@@ -575,7 +575,7 @@ describe('amendments of a signed contract', () => {
         ]);
       });
 
-      it('a separation-of-duties refusal that cannot be recorded is a retryable 503 and leaves its key free; recorded, it is replayed under the same key without a second event', async () => {
+      it('a separation-of-duties refusal that cannot be recorded is a retryable 503 and leaves its key free; recorded, a repeat under the same key is refused again without a second event', async () => {
         const c = await signed();
         const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;
         const both = person(c.employer, ['ORGANIZATION_ADMIN'], { memberships: [c.contractor] });

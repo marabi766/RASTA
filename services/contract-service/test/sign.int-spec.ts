@@ -326,7 +326,7 @@ describe('POST /v1/contracts/{id}/sign', () => {
       ]);
     });
 
-    it('a same-person refusal that cannot be recorded is a retryable 503; the retry records it once and the same key replays it', async () => {
+    it('a same-person refusal that cannot be recorded is a retryable 503; the retry records it once and a repeat under the same key adds no second event', async () => {
       const { id, employer, contractor } = await draft();
       const sub = `sub-${ulid()}`;
       await sign(
@@ -438,7 +438,7 @@ describe('POST /v1/contracts/{id}/sign', () => {
     it('a refusal that cannot be recorded is a retryable 503, not the normal refusal: nothing is signed and the repeated request leaves its trace', async () => {
       const { id, employer } = await draft();
       const retryKey = key();
-      // One caller: a key is replayed for the same user only.
+      // One caller: the audit is de-duplicated per user.
       const driver = person(employer, ['DRIVER']);
       const attempt = () => sign(id, driver, {}, retryKey);
       const publisher = api.app.get(EventPublisher);
@@ -461,13 +461,14 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
       expect(await signaturesOf(id)).toHaveLength(0);
 
-      // The same key, user and body again: the same refusal, replayed — and no second event.
+      // The same key, user and body again: refused again (nothing is stored; docs/06 § 6.8) — and
+      // no second event.
       const again = await attempt().expect(403);
       expect(bare(again.body)).toEqual(bare(first.body));
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
     });
 
-    it('a refusal of the policy (no policy in force) is recorded once under its key and replayed, whatever the retries', async () => {
+    it('a refusal is not terminal: the key is released, a repeat of the same refusal writes no second event, and activating the policy lets the same key sign', async () => {
       const { id, employer } = await seedDraft(w, organizations, {}, { signingPolicy: false });
       const repeatKey = key();
       const signer = employerSigner(employer);
@@ -477,19 +478,61 @@ describe('POST /v1/contracts/{id}/sign', () => {
       const again = await attempt().expect(422);
       expect(bare(again.body)).toEqual(bare(first.body));
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_REFUSED')).toHaveLength(1);
+      await attempt().expect(422);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_REFUSED')).toHaveLength(1);
+
+      // The conditions change; the request is the same, under the same key: it executes normally.
+      await activateSigningPolicy(w, employer);
+      await attempt().expect(200);
+      expect(await signaturesOf(id)).toHaveLength(1);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_REFUSED')).toHaveLength(1);
     });
 
-    it('a repeated refusal is replayed only for the same user and body; another user or body is a new request', async () => {
+    it('a different reason for the same key, user and body is a new audit event; the same reason again is not', async () => {
+      const { id, employer } = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const repeatKey = key();
+      const signer = employerSigner(employer);
+      const attempt = () => sign(id, signer, {}, repeatKey);
+      const refusedEvents = async () => [
+        ...(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_REFUSED')),
+        ...(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')),
+      ];
+      await attempt().expect(422);
+      expect(await refusedEvents()).toHaveLength(1);
+
+      // A policy now names another role: the same caller is refused for another reason.
+      await activateSigningPolicy(w, employer, ['FLEET_MANAGER']);
+      await attempt().expect(403);
+      expect((await refusedEvents()).map((e) => e.payload.reason)).toEqual([
+        'SIGNATURE_POLICY_REQUIRED',
+        'ROLE_NOT_PERMITTED',
+      ]);
+      await attempt().expect(403);
+      await attempt().expect(403);
+      expect(await refusedEvents()).toHaveLength(2);
+    });
+
+    it('the audit is deduplicated per request and user: another body or another user under the same key is its own refusal', async () => {
       const { id, employer } = await draft();
       const repeatKey = key();
       const driver = person(employer, ['DRIVER']);
       await sign(id, driver, {}, repeatKey).expect(403);
-      // Another body, or another user, under the key is refused as a key reused — not answered
-      // with the stored refusal.
-      await sign(id, driver, { expectedVersion: 1 }, repeatKey).expect(409);
-      const other = await sign(id, person(employer, ['DRIVER']), {}, repeatKey).expect(409);
-      expect(other.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      await sign(id, driver, {}, repeatKey).expect(403);
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      // Nothing is held under the key after a refusal, so these are fresh requests.
+      await sign(id, driver, { expectedVersion: 1 }, repeatKey).expect(403);
+      await sign(id, person(employer, ['DRIVER']), {}, repeatKey).expect(403);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(3);
+    });
+
+    it('the same key in another tenant is its own request: the refusal is audited there too', async () => {
+      const a = await draft();
+      const b = await draft();
+      const shared = key();
+      await sign(a.id, person(a.employer, ['DRIVER']), {}, shared).expect(403);
+      await sign(b.id, person(b.employer, ['DRIVER']), {}, shared).expect(403);
+      expect(await eventsOf(w.prisma, a.employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      expect(await eventsOf(w.prisma, b.employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
     });
 
     it('a policy that names another role signs for that role only — and the signature records the policy', async () => {
@@ -742,20 +785,17 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect(await signaturesOf(b.id)).toHaveLength(0);
     });
 
-    it('a refusal that was recorded is the key’s outcome: the key is not free for another caller, a new key signs', async () => {
+    it('a refused command releases its key, so a corrected retry with that key can run', async () => {
       const { id, employer } = await draft();
       const k = key();
-      // A person without the authority is refused, and the refusal recorded with the key…
+      // A person without the authority is refused…
       await sign(id, person(employer, ['DRIVER']), {}, k).expect(403);
-      // …so another caller cannot take the key over…
-      const reused = await sign(id, employerSigner(employer), {}, k).expect(409);
-      expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
-      // …and the corrected request goes under a key of its own.
-      await sign(id, employerSigner(employer)).expect(200);
+      // …and the key is free for a person with it.
+      await sign(id, employerSigner(employer), {}, k).expect(200);
       expect(await signaturesOf(id)).toHaveLength(1);
     });
 
-    it('every other failure still releases its key: a version conflict is retried under the same key once the version is right', async () => {
+    it('a version conflict releases its key too: retried under the same key once the version is right', async () => {
       const { id, employer } = await draft();
       const k = key();
       const token = employerSigner(employer);

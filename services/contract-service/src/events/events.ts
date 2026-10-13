@@ -439,6 +439,7 @@ export const contractMilestoneChangedPayload = z
  */
 export const AUTHORITY_REFUSED_ACTIONS = [
   'SIGN_CONTRACT',
+  'CANCEL_CONTRACT',
   'PROPOSE_AMENDMENT',
   'SIGN_AMENDMENT',
   'PLAN_MILESTONE',

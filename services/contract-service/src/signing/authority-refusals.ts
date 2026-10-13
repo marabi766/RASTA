@@ -46,10 +46,11 @@ export class AuthorityRefusals {
   /**
    * Records the refusal and throws it (or the 503 when it cannot be recorded).
    *
-   * With the request's idempotency `fence` the refusal is also stored as the key's outcome, **in
-   * the same transaction** as the event: a repeat of the request under the same key (and user and
-   * body) is answered with the same refusal and writes no second event. When the transaction rolls
-   * back, nothing of either is stored: the answer is the retryable 503 and the key is free.
+   * A refusal here is not terminal (docs/06 § 6.8): the request's idempotency claim is released
+   * and it may be made again. With the request's `fence` the event is de-duplicated durably —
+   * by tenant, user, key, request and reason, the record committed in the same transaction as the
+   * event — so the same refusal repeated writes no second event, a different reason writes a new
+   * one, and when the transaction rolls back neither exists: the answer is the retryable 503.
    */
   async refuse(
     refused: AuthorityRefusal,
@@ -57,7 +58,7 @@ export class AuthorityRefusals {
     fence?: RefusalFence,
   ): Promise<never> {
     try {
-      await this.record(refused, answer, fence);
+      await this.record(refused, fence);
     } catch (auditError: unknown) {
       this.logger.error(
         `Could not record the refusal of ${refused.action} (${refused.reason}): ` +
@@ -76,12 +77,9 @@ export class AuthorityRefusals {
     throw answer;
   }
 
-  private async record(
-    refused: AuthorityRefusal,
-    answer: RastaError,
-    fence: RefusalFence | undefined,
-  ): Promise<void> {
+  private async record(refused: AuthorityRefusal, fence: RefusalFence | undefined): Promise<void> {
     await this.prisma.transaction(async (tx) => {
+      if (fence && !(await fence.firstRefusal(tx, refused.reason))) return;
       const at = await transactionNow(tx);
       await this.publisher.enqueue(tx, {
         eventName: 'CONTRACT_AUTHORITY_REFUSED',
@@ -100,7 +98,6 @@ export class AuthorityRefusals {
         },
         occurredAt: at,
       });
-      if (fence) await fence.refuse(tx, answer);
     });
   }
 }

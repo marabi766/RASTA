@@ -546,6 +546,27 @@ model IdempotencyKey {
   @@map("idempotency_key")
 }
 
+/// Which refusals of a request already left their audit event (docs/06 § 6.8: a refusal is not
+/// terminal — its idempotency claim is released — but the audit must not repeat). One row per
+/// (tenant, user, idempotency key, request, reason), written in the same transaction as the event.
+model RefusalAuditDedupe {
+  organizationId String @map("organization_id")
+  userId         String @map("user_id")
+  key            String @map("key")
+  /// The request hash of the idempotency store: canonical request and caller.
+  requestHash    String @map("request_hash")
+  /// The closed reason (AUTHORITY_REFUSED_REASONS).
+  reason         String
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// CONTRACT_IDEMPOTENCY_TTL_HOURS after the first refusal, like a completed response.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([organizationId, userId, key, requestHash, reason])
+  @@index([expiresAt])
+  @@map("refusal_audit_dedupe")
+}
+
 // ---------------------------------------------------------------------------
 // Platform plumbing — identical in shape to every other service's
 // ---------------------------------------------------------------------------

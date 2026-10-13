@@ -115,8 +115,7 @@ export class ContractController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<ContractView> {
     const key = requiredIdempotencyKey(idempotencyKey);
-    // A replay answers the recorded outcome — a success, or the party's recorded refusal (403, with
-    // its audit event, same key, user and body) — but a success's body is
+    // A replay answers the recorded outcome (success — a refusal stores nothing), but the body is
     // the contract as it is now, re-read and scoped to the caller as a fresh GET would: the stored
     // one is a snapshot, and `authorityReviewRequired` or the status may have changed since (a
     // move flagged the signature, the other side signed). The same read is the check that the
@@ -131,8 +130,6 @@ export class ContractController {
       async (stored) => {
         current = await this.contracts.get(stored.id);
       },
-      // A recorded refusal is replayed too — to a caller who may still see the contract.
-      () => this.contracts.assertVisible(id),
     );
     return current ?? result;
   }

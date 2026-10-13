@@ -361,6 +361,9 @@ export class ContractService {
     fence: RefusalFence | undefined,
   ): Promise<void> {
     await this.prisma.transaction(async (tx) => {
+      // Not terminal (docs/06 § 6.8): the claim is released; this refusal's event is written once
+      // per (tenant, user, key, request, reason), the record committed with it.
+      if (fence && !(await fence.firstRefusal(tx, refused.reason))) return;
       const at = await transactionNow(tx);
       await this.publisher.enqueue(tx, {
         eventName: 'CONTRACT_SIGNATURE_REFUSED',
@@ -377,9 +380,6 @@ export class ContractService {
         },
         occurredAt: at,
       });
-      // The refusal is the key's outcome too, committed with the event: a repeat under the same
-      // key is answered with it and writes no second one; a rollback stores neither.
-      if (fence) await fence.refuse(tx, refused.refusal);
     });
   }
 
@@ -607,7 +607,24 @@ export class ContractService {
     const row = await this.findParty(acting.organizationId, id);
     const side = sideOf(row, acting.organizationId);
     if (!side) throw RastaError.notFound('Contract', id);
-    this.access.assertMayCancel(side);
+    try {
+      this.access.assertMayCancel(side);
+    } catch (error) {
+      if (!(error instanceof RastaError)) throw error;
+      // A party's refusal for want of authority is an audit record (S-06), like a signature's.
+      return this.refusals.refuse(
+        {
+          action: 'CANCEL_CONTRACT',
+          side,
+          contractId: row.id,
+          organizationId: row.organizationId,
+          subjectId: null,
+          reason: side === 'EMPLOYER' ? 'ROLE_NOT_PERMITTED' : 'NOT_EMPLOYER',
+        },
+        this.refused('cancel', error),
+        fence,
+      );
+    }
 
     if (!this.env.CONTRACT_CANCEL_REASON_CODES.includes(dto.reasonCode)) {
       throw this.refused(

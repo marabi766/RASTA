@@ -204,15 +204,15 @@ describe('milestones of a signed contract', () => {
         ]);
       });
 
-      it('a refused plan repeated under the same key and user is answered with the same 403 and recorded once; another body is 409', async () => {
+      it('a refused plan repeated under the same key and user is refused again and audited once; another body is its own request and its own event', async () => {
         const c = await signed();
         const key = idemKey('refused-plan');
         const first = await plan(c.id, c.contractorToken, body(), key).expect(403);
         const again = await plan(c.id, c.contractorToken, body(), key).expect(403);
         expect(reasons(again.body)).toEqual(reasons(first.body));
         expect(await refusedEvents(c.employer)).toHaveLength(1);
-        await plan(c.id, c.contractorToken, body({ title: 'Another' }), key).expect(409);
-        expect(await refusedEvents(c.employer)).toHaveLength(1);
+        await plan(c.id, c.contractorToken, body({ title: 'Another' }), key).expect(403);
+        expect(await refusedEvents(c.employer)).toHaveLength(2);
         expect(await milestoneRows(w, c.id)).toEqual([]);
       });
 

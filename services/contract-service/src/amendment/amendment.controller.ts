@@ -112,7 +112,6 @@ export class AmendmentController {
       201,
       (fence) => this.amendments.propose(id, dto, fence),
       (stored) => this.amendments.assertContractVisible(stored.contractId),
-      () => this.amendments.assertContractVisible(id),
     );
     return result;
   }
@@ -166,7 +165,6 @@ export class AmendmentController {
       async (stored) => {
         current = await this.amendments.get(stored.contractId, stored.id);
       },
-      () => this.amendments.assertContractVisible(id),
     );
     return current ?? result;
   }
