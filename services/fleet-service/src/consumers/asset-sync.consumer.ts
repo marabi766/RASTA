@@ -122,6 +122,8 @@ interface CurrentAssetRef {
   retainedCoverages: string[];
   /** Moved by every change to the insurance state, owner or generation (trigger, #240 r10). */
   insuranceRevision: bigint;
+  /** Moved by every `insurance:clear-transferred` run that targets the row (#240 r11). */
+  insuranceEpoch: bigint;
 }
 
 interface AssetRefPatch {
@@ -370,10 +372,13 @@ function withoutStateFields(patch: AssetRefPatch): AssetRefPatch {
  * to three, each bounded by its own deadline — and for the insurance decisions
  * that may wait on that lock behind it (#240 r10: they ask nobody themselves).
  * `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS`, checked at startup against the
- * upstream timeout (`assetSyncBudgetProblem`). Replays are rare operator
- * actions; original deliveries for that asset wait.
+ * upstream timeout and the consumer's session timeout (`assetSyncBudgetProblem`,
+ * #240 r11). Replays are rare operator actions; but what waits on the lock
+ * behind one may FAIL rather than wait — an ordinary delivery or an HTTP
+ * request's transaction has Prisma's 5 s (known limitation,
+ * docs/runbooks/replay-dlq.md).
  */
-export const DEFAULT_TRANSACTION_TIMEOUT_MS = 30_000;
+export const DEFAULT_TRANSACTION_TIMEOUT_MS = 15_000;
 
 const CONSUMER_NAME = 'fleet-service.asset-sync';
 
@@ -589,8 +594,9 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
 
     // An INSURANCE_RECORDED is verified at asset-service BEFORE the transaction,
     // with no lock held (#240 r10): the replica is read, the source asked, and the
-    // answer decided under the lock only if the replica's insurance revision has
-    // not moved meanwhile. Writers that take the lock never wait on the network.
+    // answer decided under the lock only if the replica's insurance revision and
+    // epoch (r11) have not moved meanwhile. Writers that take the lock never wait
+    // on the network.
     const verified =
       envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
         ? await this.askAboutRecordedPolicy(envelope.eventId, payload, assetId, organizationId)
@@ -893,8 +899,8 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * lock; the source is asked with no transaction open (a source with no answer
    * counts as an attempt); and the decision is taken in a second short
    * transaction that re-checks, under the lock, that nobody tried the row
-   * meanwhile and that the replica's insurance revision, owner and generation
-   * are still those the source was asked about (r10).
+   * meanwhile and that the replica's insurance revision, epoch (r11), owner and
+   * generation are still those the source was asked about (r10).
    *
    * A row whose attempts reached the maximum is dead-lettered in that decision's
    * transaction: the dead letter is enqueued in the outbox, and the row and the
@@ -1119,7 +1125,9 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * the replica is read first, its insurance revision with it; the source is
    * asked with no transaction open; and the answer is decided under the lock
    * only if that revision — moved by every change to the windows, the retained
-   * list, the lapses, the owner or the generation — still stands. Otherwise the
+   * list, the lapses, the owner or the generation — and the invalidation epoch
+   * — moved by every `insurance:clear-transferred` that targets the machine, even
+   * one with nothing to empty (r11) — still stand. Otherwise the
    * answer is discarded and the event verified again: a live delivery fails and
    * is retried with its marker rolled back, a parked one stays parked. A live
    * delivery's marker and effect still commit together, in its transaction.
@@ -1492,14 +1500,18 @@ type LiveAnswer =
 
 /**
  * Whether two reads of the replica show the same insurance state: the same
- * insurance revision (#240 r10), owner and ownership generation. The revision
- * moves with any of them; the owner and generation are compared too, so the
- * check does not rest on the trigger alone.
+ * insurance revision (#240 r10), invalidation epoch (r11), owner and ownership
+ * generation. The revision moves with any change to the state; the epoch with
+ * every `insurance:clear-transferred` that targets the row, including one that
+ * found nothing to empty and so changed no value the revision counts. The owner
+ * and generation are compared too, so the check does not rest on the trigger
+ * alone.
  */
 function sameInsuranceState(a: CurrentAssetRef | null, b: CurrentAssetRef | null): boolean {
   if (!a || !b) return a === b;
   return (
     a.insuranceRevision === b.insuranceRevision &&
+    a.insuranceEpoch === b.insuranceEpoch &&
     a.organizationId === b.organizationId &&
     (a.ownershipGeneration ?? null) === (b.ownershipGeneration ?? null)
   );

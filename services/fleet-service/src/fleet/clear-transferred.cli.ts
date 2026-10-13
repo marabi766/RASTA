@@ -50,7 +50,8 @@ async function main(): Promise<number> {
     logger.info(
       { report },
       `${args.dryRun ? 'DRY RUN — ' : ''}insurance windows of transferred machines: ` +
-        `${report.cleared} to clear, ${report.skipped} no longer qualified, ${report.scanned} scanned`,
+        `${report.cleared} to clear, ${report.invalidated} invalidated, ` +
+        `${report.skipped} no longer qualified, ${report.scanned} scanned`,
     );
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return 0;

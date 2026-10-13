@@ -1,5 +1,7 @@
+import { CONSUMER_SESSION_TIMEOUT_MS } from '@rasta/nest-common';
 import {
   assetSyncBudgetProblem,
+  assetSyncDeliveryWorstCaseMs,
   dispatchPolicyFromEnv,
   fleetEnvSchema,
   loadFleetEnv,
@@ -21,37 +23,60 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
   };
 
-  it('defaults to 30 s, which covers three calls at the default upstream timeout and the margin', () => {
+  it('defaults to 15 s, which covers three calls at the default upstream timeout and fits a delivery in the session (r11)', () => {
     const env = loadFleetEnv(MINIMAL);
-    expect(env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS).toBe(30_000);
+    expect(env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS).toBe(15_000);
     expect(env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS).toBe(3_000);
     expect(assetSyncBudgetProblem(env)).toBeUndefined();
+    // Three attempts of (3 s + 15 s) and pauses of 0.5 s and 1 s: under 60 s less the 3 s margin.
+    expect(assetSyncDeliveryWorstCaseMs(env)).toBe(55_500);
+    expect(CONSUMER_SESSION_TIMEOUT_MS).toBe(60_000);
   });
 
   it('refuses to start when the transactions would not outlive the upstream calls (fail closed)', () => {
-    // The largest upstream timeout the schema allows, with the default transaction timeout.
     expect(() =>
-      loadFleetEnv({ ...MINIMAL, ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000' }),
+      loadFleetEnv({ ...MINIMAL, ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '4000' }),
     ).toThrow(
-      /FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS \(30000 ms\) must exceed 3 × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS \(30000 ms\) \+ 5000 ms = 95000 ms/,
+      /FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS \(15000 ms\) must exceed 3 × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS \(4000 ms\) \+ 5000 ms = 17000 ms/,
     );
-    expect(
-      loadFleetEnv({
-        ...MINIMAL,
-        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000',
-        FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '95001',
-      }).FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
-    ).toBe(95_001);
   });
 
   it('holds the margin exactly: equal is refused, one millisecond more is accepted', () => {
     const at = (transaction: number) =>
       assetSyncBudgetProblem({
         FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: transaction,
-        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: 5_000,
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: 3_000,
       });
-    expect(at(20_000)).toMatch(/must exceed/);
-    expect(at(20_001)).toBeUndefined();
+    expect(at(14_000)).toMatch(/must exceed/);
+    expect(at(14_001)).toBeUndefined();
+  });
+
+  it('r11: refuses a delivery that could outlast the consumer session; the bound is exact', () => {
+    const at = (transaction: number, upstream = 3_000) =>
+      assetSyncBudgetProblem({
+        FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: transaction,
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: upstream,
+      });
+    // 3 × (3 s + 15.5 s) + 1.5 s = 57 s: allowed. One millisecond more is not.
+    expect(at(15_500)).toBeUndefined();
+    expect(at(15_501)).toMatch(
+      /one asset-sync delivery can take 3 × .* = 57003 ms, more than the consumer session timeout \(60000 ms\) less 3000 ms = 57000 ms/,
+    );
+    // The old default no longer starts.
+    expect(() =>
+      loadFleetEnv({ ...MINIMAL, FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '30000' }),
+    ).toThrow(/consumer session timeout/);
+    // While the refresh asks under the lock, no upstream timeout above about 3.37 s
+    // satisfies both rules: the smallest transaction it needs is already too long.
+    expect(at(3 * 3_374 + 5_001, 3_374)).toBeUndefined();
+    expect(at(3 * 3_375 + 5_001, 3_375)).toMatch(/consumer session timeout/);
+    expect(at(3 * 3_375 + 5_000, 3_375)).toMatch(/must exceed/);
+  });
+
+  it('refuses a transaction timeout longer than the session timeout in the schema', () => {
+    expect(() =>
+      loadFleetEnv({ ...MINIMAL, FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '60001' }),
+    ).toThrow();
   });
 });
 

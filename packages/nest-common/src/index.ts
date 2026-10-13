@@ -139,6 +139,9 @@ export {
   UnprocessableEventError,
   deadLetterHeaders,
   HANDLER_MESSAGE_MAX,
+  CONSUMER_SESSION_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BACKOFF_MS,
 } from './consumer/event-consumer';
 export type {
   DeadLetterDescription,

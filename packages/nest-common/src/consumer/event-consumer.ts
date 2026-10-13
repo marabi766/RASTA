@@ -231,8 +231,16 @@ export function subscribedTopics(topics: readonly string[]): string[] {
   return [...new Set(all)];
 }
 
-const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_BACKOFF_MS = 500;
+/** In-process attempts before dead-lettering, unless the consumer's options say otherwise. */
+export const DEFAULT_MAX_RETRIES = 3;
+/** The pause after failed attempt `n` is `n ×` this, unless the options say otherwise. */
+export const DEFAULT_BACKOFF_MS = 500;
+/**
+ * The group session timeout. kafkajs heartbeats between messages, not while a
+ * handler runs, so one message's attempts, their pauses and its dead letter
+ * must finish within it or the broker evicts the member and rebalances.
+ */
+export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
 
 export class EventConsumer {
   private readonly kafka: Kafka;
@@ -320,7 +328,7 @@ export class EventConsumer {
       // A projector doing database writes per message can exceed the default
       // 30s heartbeat window on a cold cache; 60s avoids a rebalance storm
       // that would only make the backlog worse.
-      sessionTimeout: 60_000,
+      sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
       allowAutoTopicCreation: false,
     });
 

@@ -7,6 +7,11 @@ import {
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
+import {
+  CONSUMER_SESSION_TIMEOUT_MS,
+  DEFAULT_BACKOFF_MS,
+  DEFAULT_MAX_RETRIES,
+} from '@rasta/nest-common';
 import { INSURANCE_COVERAGES, type DispatchPolicy } from '../fleet/dispatch-blocks';
 
 /**
@@ -157,15 +162,17 @@ export const fleetEnvSchema = baseEnvSchema
      * asset-service or maintenance-service is asked — since #240 r10 only a
      * replayed state event's refresh — and the insurance decisions (live and
      * parked) that ask nobody but may wait on that lock behind one. Must cover
-     * the refresh's chain of calls plus a margin ({@link assetSyncBudgetProblem});
-     * the service refuses to start otherwise.
+     * the refresh's chain of calls plus a margin, and every attempt of one
+     * delivery must still fit in the consumer's session timeout
+     * ({@link assetSyncBudgetProblem}); the service refuses to start otherwise.
+     * The default, 15 s, satisfies both at the default upstream timeout (#240 r11).
      */
     FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(1_000)
-      .max(300_000)
-      .default(30_000),
+      .max(CONSUMER_SESSION_TIMEOUT_MS)
+      .default(15_000),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;
@@ -212,29 +219,70 @@ export const ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK = 3;
 /** What every asset-sync transaction timeout must leave beyond those calls, for its own statements. */
 export const ASSET_SYNC_TRANSACTION_MARGIN_MS = 5_000;
 
+/** What one delivery must leave of the session timeout after its attempts: its dead letter and commit. */
+export const ASSET_SYNC_DELIVERY_MARGIN_MS = 3_000;
+
+type AssetSyncTimeouts = Pick<
+  FleetEnv,
+  'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS' | 'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS'
+>;
+
 /**
- * Why `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` cannot work with the upstream
- * timeout, or undefined when it can (#240 r9, r10). A replay's refresh asks
- * upstream under the lock and must outlive every call it makes: shorter, every
- * replay of a state event would expire mid-call and roll back. The insurance
- * decisions ask nobody; they share the timeout only so that one waiting on the
- * lock behind a replay outlives it.
+ * The longest one asset-sync delivery can take inside the consumer's handler
+ * (#240 r11). An attempt is at most one upstream call made before its
+ * transaction (an `INSURANCE_RECORDED`'s verification) plus the transaction,
+ * which its timeout ends — and a transaction ended while its refresh waits on a
+ * call returns once that call does, which the same term covers, a replay making
+ * no call before its transaction. The consumer makes {@link DEFAULT_MAX_RETRIES}
+ * attempts with growing pauses between them.
  */
-export function assetSyncBudgetProblem(
-  env: Pick<
-    FleetEnv,
-    'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS' | 'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS'
-  >,
-): string | undefined {
+export function assetSyncDeliveryWorstCaseMs(env: AssetSyncTimeouts): number {
+  const attempt =
+    env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS + env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS;
+  let pauses = 0;
+  for (let failed = 1; failed < DEFAULT_MAX_RETRIES; failed += 1)
+    pauses += DEFAULT_BACKOFF_MS * failed;
+  return DEFAULT_MAX_RETRIES * attempt + pauses;
+}
+
+/**
+ * Why the asset-sync timeouts cannot work together, or undefined when they can
+ * (#240 r9–r11).
+ *
+ *   - A replay's refresh asks upstream under the lock and must outlive every
+ *     call it makes: shorter, every replay of a state event would expire
+ *     mid-call and roll back. The insurance decisions ask nobody; they share the
+ *     timeout only so that one waiting on the lock behind a replay outlives it.
+ *   - One delivery's attempts must end within the consumer's session timeout
+ *     ({@link CONSUMER_SESSION_TIMEOUT_MS}), less a margin for its dead letter:
+ *     kafkajs does not heartbeat while a handler runs, and a longer delivery has
+ *     the member evicted and the partition rebalanced mid-message.
+ *
+ * Together they bound the upstream timeout too: at most about 3.3 s while the
+ * refresh asks under the lock (docs/runbooks/replay-dlq.md, known limitation).
+ */
+export function assetSyncBudgetProblem(env: AssetSyncTimeouts): string | undefined {
   const needed =
     ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK * env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS +
     ASSET_SYNC_TRANSACTION_MARGIN_MS;
-  if (env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS > needed) return undefined;
-  return (
-    `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS (${env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS} ms) must exceed ` +
-    `${ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK} × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS ` +
-    `(${env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS} ms) + ${ASSET_SYNC_TRANSACTION_MARGIN_MS} ms = ${needed} ms`
-  );
+  if (env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS <= needed) {
+    return (
+      `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS (${env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS} ms) must exceed ` +
+      `${ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK} × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS ` +
+      `(${env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS} ms) + ${ASSET_SYNC_TRANSACTION_MARGIN_MS} ms = ${needed} ms`
+    );
+  }
+  const worst = assetSyncDeliveryWorstCaseMs(env);
+  const allowed = CONSUMER_SESSION_TIMEOUT_MS - ASSET_SYNC_DELIVERY_MARGIN_MS;
+  if (worst > allowed) {
+    return (
+      `one asset-sync delivery can take ${DEFAULT_MAX_RETRIES} × (ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS ` +
+      `(${env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS} ms) + FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS ` +
+      `(${env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS} ms)) + pauses = ${worst} ms, more than the ` +
+      `consumer session timeout (${CONSUMER_SESSION_TIMEOUT_MS} ms) less ${ASSET_SYNC_DELIVERY_MARGIN_MS} ms = ${allowed} ms`
+    );
+  }
+  return undefined;
 }
 
 export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv {

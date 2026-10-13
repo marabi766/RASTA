@@ -411,6 +411,11 @@ model AssetRef {
   /// of an `INSURANCE_RECORDED` reads it before asking asset-service and applies
   /// its answer only if it is unchanged under the asset's lock.
   insuranceRevision        BigInt    @default(0) @map("insurance_revision")
+  /// Incremented by `insurance:clear-transferred` for every transferred replica
+  /// it targets, even one with nothing left to empty (#240 r11), and written by
+  /// nothing else. Compared with the revision by every verification: an answer
+  /// asked before a clear is never applied after it.
+  insuranceEpoch           BigInt    @default(0) @map("insurance_epoch")
 
   syncedAt    DateTime @map("synced_at")
   sourceEvent String   @map("source_event")

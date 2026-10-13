@@ -2316,6 +2316,10 @@ describe('AssetSyncConsumer', () => {
             revision += 1n;
             shown = { ...shown, insuranceRevision: revision };
           },
+          /** A clear of a row with nothing to empty: the epoch moves, the revision does not (r11). */
+          bumpEpoch: () => {
+            shown = { ...shown, insuranceEpoch: ((shown.insuranceEpoch as bigint) ?? 0n) + 1n };
+          },
         };
       }
 
@@ -2474,6 +2478,30 @@ describe('AssetSyncConsumer', () => {
         );
 
         // Still parked and due: the next run asks again, now under the new rule.
+        policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
+        expect(await consumer.sweepParked()).toMatchObject({ DROPPED: 1 });
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+      });
+
+      it('r11: only the invalidation epoch moved while the source was asked (a clear with nothing to empty) — kept, nothing applied', async () => {
+        const { consumer, recorded, policies, move, bumpEpoch } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        move(B, 4);
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+          const answer = await verify(...args);
+          bumpEpoch();
+          return answer;
+        });
+
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1, APPLIED: 0 });
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({ attempts: 0 });
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+
         policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
         expect(await consumer.sweepParked()).toMatchObject({ DROPPED: 1 });
         expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
@@ -2663,6 +2691,37 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.askedInTransaction).toEqual([false]);
 
         // The retry: the narrowed rule no longer counts the policy.
+        policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
+        await consumer.handle(recordedPolicy());
+        expect(policies.asked).toHaveLength(2);
+        expect(recorded.upserts.at(-1)).not.toHaveProperty('insuranceCover');
+      });
+
+      it('r11: only the invalidation epoch moved (a clear with nothing to empty): fails for a retry, nothing applied', async () => {
+        const policies = new FakePolicySource().set('INS-1', confirmed);
+        let shown: Record<string, unknown> = {
+          ...machine,
+          insuranceRevision: 7n,
+          insuranceEpoch: 2n,
+        };
+        const { consumer, recorded, repository } = buildConsumer({
+          replica: () => shown,
+          policies,
+        });
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+          const answer = await verify(...args);
+          // The revision cannot move: the clear changed no value.
+          shown = { ...shown, insuranceEpoch: 3n };
+          return answer;
+        });
+
+        await expect(consumer.handle(recordedPolicy())).rejects.toThrow(
+          /insurance state of AST-SEED-0001 changed while asset-service was asked/,
+        );
+        expect(recorded.upserts).toHaveLength(0);
+        expect(repository.parkInsuranceEvent).not.toHaveBeenCalled();
+
         policies.deny('INS-1', 'NOT_FOLLOWING_VEHICLE');
         await consumer.handle(recordedPolicy());
         expect(policies.asked).toHaveLength(2);

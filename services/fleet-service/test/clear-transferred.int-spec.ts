@@ -125,8 +125,18 @@ describe('insurance:clear-transferred (Q-101)', () => {
     expect(after.organizationId).toBe(org.b);
     expect(after.status).toBe(before.status);
 
-    // Nothing left to clear: a rerun is a no-op.
-    await expect(run({ organizationId: org.b })).resolves.toMatchObject({ scanned: 0, cleared: 0 });
+    // Nothing left to clear: a rerun changes no value, but still moves the
+    // invalidation epoch (r11) — and nothing else.
+    const emptied = (await row(assetId))!;
+    await expect(run({ organizationId: org.b })).resolves.toMatchObject({
+      scanned: 1,
+      cleared: 0,
+      invalidated: 1,
+      byOrganization: {},
+    });
+    const rerun = (await row(assetId))!;
+    expect(rerun.insuranceEpoch).toBe(emptied.insuranceEpoch + 1n);
+    expect(rerun.insuranceRevision).toBe(emptied.insuranceRevision);
   });
 
   it('ignores a delayed old-owner event for a coverage that followed at transfer time, and takes the current owner’s', async () => {
@@ -228,6 +238,78 @@ describe('insurance:clear-transferred (Q-101)', () => {
     expect(await marked()).toBe(0);
 
     // The retry asks again, under the narrowed rule: ignored, as processed.
+    policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
+    await consumer.handle(event);
+    expect(await windows(assetId)).toEqual([]);
+    expect(await marked()).toBe(1);
+  });
+
+  it('r11: a held answer for a transferred machine with nothing to clear restores nothing', async () => {
+    // Transferred with nothing following the vehicle: no window, no retained
+    // coverage. The clear has no value to change, so the revision cannot move.
+    const assetId = id('AST');
+    await consumer.handle(eventFor(org.a, 'ASSET_CREATED', { assetId, status: 'ACTIVE' }));
+    await transfer(assetId, { ownershipGeneration: 2, retainedCoverages: [] });
+    const before = (await row(assetId))!;
+    expect(before.insuranceCover).toEqual({});
+    expect(before.retainedCoverages).toEqual([]);
+
+    // A delayed event of the previous owner, which the rule of the moment lets
+    // follow the vehicle: the source counts it for org.b.
+    const policyId = id('INS');
+    const validFrom = new Date(Date.now() - 1000).toISOString();
+    const validTo = new Date(Date.now() + year).toISOString();
+    policies.set(policyId, {
+      counts: true,
+      organizationId: org.b,
+      coverage: 'THIRD_PARTY',
+      validFrom,
+      validUntil: validTo,
+      ownershipGeneration: 2,
+    });
+    const event = eventFor(org.a, 'INSURANCE_RECORDED', {
+      assetId,
+      policyId,
+      insurerName: 'بیمه ایران',
+      coverage: 'THIRD_PARTY',
+      validFrom,
+      validTo,
+      ownershipGeneration: 1,
+    });
+
+    // The old rule's answer is held while the rule is narrowed and the clear runs.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reached!: () => void;
+    const asking = new Promise<void>((resolve) => (reached = resolve));
+    const verify = policies.verify.bind(policies);
+    const paused = jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+      const answer = await verify(...args);
+      reached();
+      await held;
+      return answer;
+    });
+    const delivery = consumer.handle(event);
+    await asking;
+    const report = await run({ organizationId: org.b });
+    expect(report.invalidated).toBeGreaterThanOrEqual(1);
+    const after = (await row(assetId))!;
+    // Only the epoch says the row was cleared.
+    expect(after.insuranceRevision).toBe(before.insuranceRevision);
+    expect(after.insuranceEpoch).toBe(before.insuranceEpoch + 1n);
+    release();
+
+    // The held answer is discarded: no window, the marker rolled back.
+    await expect(delivery).rejects.toThrow(/changed while asset-service was asked/);
+    paused.mockRestore();
+    expect(await windows(assetId)).toEqual([]);
+    const marked = () =>
+      prisma.client.processedEvent.count({
+        where: { eventId: event.eventId, consumerName: CONSUMER_NAME },
+      });
+    expect(await marked()).toBe(0);
+
+    // The retry asks again, under the narrowed rule: nothing applied.
     policies.deny(policyId, 'NOT_FOLLOWING_VEHICLE');
     await consumer.handle(event);
     expect(await windows(assetId)).toEqual([]);
@@ -359,6 +441,45 @@ describe('insurance:clear-transferred (Q-101)', () => {
 
     expect(report.cleared).toBe(5);
     for (const assetId of assetIds) expect(await windows(assetId)).toEqual([]);
+  });
+
+  // Last: its org.a rows would change the counts the tests above expect.
+  it('r11: the epoch moves for exactly the rows a run targets, empty ones included', async () => {
+    const never = await insured();
+    const transferred = await insured();
+    await consumer.handle(
+      eventFor(org.a, 'ASSET_TRANSFERRED', {
+        assetId: transferred,
+        fromOrganizationId: org.b,
+        toOrganizationId: org.a,
+        transferredAt: new Date().toISOString(),
+        reason: 'واگذاری',
+        ownershipGeneration: 2,
+        retainedCoverages: [],
+      }),
+    );
+    // Nothing followed the vehicle: nothing left to clear.
+    expect(await windows(transferred)).toEqual([]);
+    const epoch = async (assetId: string) => (await row(assetId))!.insuranceEpoch;
+    const neverBefore = await epoch(never);
+    const transferredBefore = await epoch(transferred);
+
+    // Another organization's run, and a dry run, move nothing.
+    await run({ organizationId: org.b });
+    const dry = await run({ organizationId: org.a, dryRun: true });
+    expect(dry.invalidated).toBeGreaterThanOrEqual(1);
+    expect(await epoch(never)).toBe(neverBefore);
+    expect(await epoch(transferred)).toBe(transferredBefore);
+
+    // The organization's run: the transferred machine, empty as it is.
+    await run({ organizationId: org.a });
+    expect(await epoch(transferred)).toBe(transferredBefore + 1n);
+    expect(await epoch(never)).toBe(neverBefore);
+
+    // With the unknown generation asked for, the never-transferred one too.
+    await run({ organizationId: org.a, includeUnknownGeneration: true });
+    expect(await epoch(never)).toBe(neverBefore + 1n);
+    expect(await epoch(transferred)).toBe(transferredBefore + 2n);
   });
 
   it('refuses a page size outside 1 to 500', async () => {

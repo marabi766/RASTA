@@ -825,49 +825,67 @@ export class FleetRepository {
   }
 
   /**
-   * One keyset page of replica rows `insurance:clear-transferred` may clear, by
-   * id after `after`. Candidates only: {@link clearInsuranceCover} decides each
-   * under the asset's lock.
+   * One keyset page of the transferred replica rows `insurance:clear-transferred`
+   * targets, by id after `after` — those with nothing left to empty included
+   * (#240 r11): each has its invalidation epoch moved. Candidates only:
+   * {@link clearInsuranceCover} decides each under the asset's lock.
    */
   async listClearableInsuranceRefs(
     options: ClearableInsuranceOptions & { after: string; limit: number },
-  ): Promise<string[]> {
-    const rows = await runUnscoped(
+  ): Promise<ClearableInsuranceRef[]> {
+    return runUnscoped(
       'operator command over the platform-wide replica; the organization filter is applied in the predicate',
       () =>
-        this.client.$queryRaw<{ id: string }[]>`
-          SELECT r.id FROM asset_ref r
-           WHERE r.id > ${options.after} AND ${clearablePredicate(options)}
+        this.client.$queryRaw<ClearableInsuranceRef[]>`
+          SELECT r.id, r.organization_id AS "organizationId", ${holdsInsurance} AS "holdsInsurance"
+            FROM asset_ref r
+           WHERE r.id > ${options.after} AND ${transferredPredicate(options)}
            ORDER BY r.id
            LIMIT ${options.limit}`,
     );
-    return rows.map((row) => row.id);
   }
 
   /**
-   * Empties one replica row's insurance windows if it still qualifies. Under
-   * {@link lockAssetRef} in the caller's transaction, so a transfer or an event
-   * committed since the page was read is seen. The retained-coverage list is
-   * emptied in the same update: a delayed old-owner event for a coverage that
-   * followed at transfer time would otherwise still be exempted from the owner
-   * check and restore a window for the new owner. Lapses and the generation are
-   * left as they are. The row's `insurance_revision` moves with it (trigger,
-   * #240 r10), so a verification that asked asset-service before this commit
-   * cannot restore a window after it. Returns whether the row was cleared.
+   * Empties one transferred replica row's insurance windows and increments its
+   * invalidation epoch, if it is still targeted. Under {@link lockAssetRef} in
+   * the caller's transaction, so a transfer or an event committed since the page
+   * was read is seen. The retained-coverage list is emptied in the same update:
+   * a delayed old-owner event for a coverage that followed at transfer time
+   * would otherwise still be exempted from the owner check and restore a window
+   * for the new owner. Lapses and the generation are left as they are.
+   *
+   * The epoch moves on EVERY row, also one whose windows and retained list were
+   * already empty (#240 r11): there the update changes no value the
+   * `insurance_revision` trigger counts, and an answer asset-service gave under
+   * the previous rule would otherwise still match the row. With the epoch moved,
+   * a verification that read the row before this commit cannot apply after it.
+   *
+   * Returns the row's owner and whether it held anything to empty, or null when
+   * it no longer qualifies.
    */
   async clearInsuranceCover(
     tx: ExtendedPrismaClient,
     assetId: string,
     options: ClearableInsuranceOptions,
-  ): Promise<boolean> {
-    const changed = await runUnscoped(
+  ): Promise<{ organizationId: string; holdsInsurance: boolean } | null> {
+    // `before` is read in the statement's snapshot, so it shows the row as it
+    // was before this update; the caller holds the asset's lock.
+    const rows = await runUnscoped(
       'operator command over the platform-wide replica; the organization filter is applied in the predicate',
       () =>
-        tx.$executeRaw`
-          UPDATE asset_ref r SET insurance_cover = '{}'::jsonb, retained_coverages = '{}', synced_at = now()
-           WHERE r.id = ${assetId} AND ${clearablePredicate(options)}`,
+        tx.$queryRaw<{ organizationId: string; holdsInsurance: boolean }[]>`
+          WITH before AS (
+            SELECT r.id, ${holdsInsurance} AS holds FROM asset_ref r
+             WHERE r.id = ${assetId} AND ${transferredPredicate(options)}
+          )
+          UPDATE asset_ref a
+             SET insurance_cover = '{}'::jsonb, retained_coverages = '{}',
+                 insurance_epoch = a.insurance_epoch + 1, synced_at = now()
+            FROM before
+           WHERE a.id = before.id
+          RETURNING a.organization_id AS "organizationId", before.holds AS "holdsInsurance"`,
     );
-    return changed === 1;
+    return rows[0] ?? null;
   }
 
   async upsertAssetRef(
@@ -1177,17 +1195,28 @@ export interface ClearableInsuranceOptions {
   organizationId?: string;
 }
 
+/** A replica row `insurance:clear-transferred` targets, as a page names it. */
+export interface ClearableInsuranceRef {
+  id: string;
+  organizationId: string;
+  /** Whether it holds a window or a retained coverage to empty. */
+  holdsInsurance: boolean;
+}
+
+/** Whether replica row `r` holds a window or a retained coverage. */
+const holdsInsurance = Prisma.sql`(r.insurance_cover <> '{}'::jsonb OR cardinality(r.retained_coverages) > 0)`;
+
 /**
- * Which replica rows `insurance:clear-transferred` clears: those that have ever
- * been transferred and still hold a window. A stated ownership generation above
- * zero, a latest event that was a transfer, or a window revoked by one (all a
- * transfer without a generation leaves), and optionally every row whose
+ * Which replica rows `insurance:clear-transferred` targets: those that have
+ * ever been transferred, whether or not they still hold a window (#240 r11:
+ * every one has its invalidation epoch moved). A stated ownership generation
+ * above zero, a latest event that was a transfer, or a window revoked by one
+ * (all a transfer without a generation leaves), and optionally every row whose
  * generation is unknown.
  */
-function clearablePredicate(options: ClearableInsuranceOptions): Prisma.Sql {
+function transferredPredicate(options: ClearableInsuranceOptions): Prisma.Sql {
   return Prisma.sql`
-    (r.insurance_cover <> '{}'::jsonb OR cardinality(r.retained_coverages) > 0)
-    AND (${options.organizationId ?? null}::text IS NULL OR r.organization_id = ${options.organizationId ?? null})
+    (${options.organizationId ?? null}::text IS NULL OR r.organization_id = ${options.organizationId ?? null})
     AND (
       r.ownership_generation > 0
       OR r.source_event = 'ASSET_TRANSFERRED'
