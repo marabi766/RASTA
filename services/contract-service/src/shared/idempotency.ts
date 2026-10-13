@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
+import { ERROR_STATUS, type ErrorCode, type ErrorDetail } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import { isUniqueViolation } from './prisma-errors';
@@ -116,6 +117,27 @@ export interface ClaimFence<T> {
    * receive.
    */
   complete(tx: ExtendedPrismaClient, result: T): Promise<T>;
+  /**
+   * Stores a **terminal refusal** — a business refusal the same request will always meet again —
+   * as the key's completed outcome, locking the claim row itself. Called in the **same
+   * transaction** as the refusal's audit event, so the two commit together or not at all: when
+   * that transaction rolls back (the retryable 503) nothing is stored and the key stays
+   * retryable. The caller then throws the refusal; the same key, user and body is answered with
+   * it again, and no second event is written.
+   */
+  refuse(tx: ExtendedPrismaClient, answer: RastaError): Promise<void>;
+}
+
+/** The part of a fence a refusal needs; independent of the response type. */
+export type RefusalFence = Pick<ClaimFence<unknown>, 'refuse'>;
+
+/**
+ * What a recorded refusal keeps: the closed code, its fixed author-written message and the closed
+ * reason `details` — what the client was answered with and nothing else (no `internalContext`, no
+ * input, S-09).
+ */
+export interface StoredRefusal {
+  refusal: { code: ErrorCode; message: string; details?: ErrorDetail[] };
 }
 
 /**
@@ -201,16 +223,37 @@ export class IdempotencyStore {
     successStatus: number,
     work: (fence: ClaimFence<T>) => Promise<T>,
     stillVisible: ReplayGuard<T>,
+    /**
+     * Re-checks, before a stored **refusal** is replayed, that the caller may still see the
+     * contract it was refused on (a fresh request would be told 404). An endpoint that records
+     * refusals gives it; without it a stored refusal is a fault, never replayed.
+     */
+    stillVisibleForRefusal?: () => Promise<void>,
   ): Promise<{ result: T; executed: boolean }> {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') {
+      if (claim.status >= REFUSAL_STATUS_FLOOR) {
+        if (!stillVisibleForRefusal) throw replayedRefusal(undefined);
+        await stillVisibleForRefusal();
+        throw replayedRefusal(claim.body);
+      }
       const stored = claim.body as T;
       await stillVisible(stored);
       return { result: stored, executed: false };
     }
 
     let stored: { value: T } | undefined;
+    // The refusal stored in the work's transaction. The work throws that very object only once the
+    // transaction committed; a rollback (the audit's 503) throws another error, and the key is freed.
+    let refused: RastaError | undefined;
     const fence: ClaimFence<T> = {
+      refuse: async (tx, answer) => {
+        await this.hold(tx, endpoint, key, claim.token);
+        await this.storeResponse(tx, endpoint, key, claim.token, answer.status, {
+          refusal: { code: answer.code, message: answer.message, details: answer.details },
+        } satisfies StoredRefusal);
+        refused = answer;
+      },
       hold: (tx) => this.hold(tx, endpoint, key, claim.token),
       complete: async (tx, result) => {
         const value = JSON.parse(JSON.stringify(result)) as T;
@@ -228,7 +271,10 @@ export class IdempotencyStore {
       // would turn into an unrelated error: it is logged, and the claim simply stays until its
       // lease lapses (CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS, docs/06 § 6.8), after which a retry
       // takes the key over. Until then a retry with the same key is 409 CONFLICT with Retry-After.
-      await this.releaseQuietly(endpoint, key, claim.token);
+      // A committed refusal completed the claim and is replayed: there is nothing to release.
+      if (refused === undefined || error !== refused) {
+        await this.releaseQuietly(endpoint, key, claim.token);
+      }
       throw error;
     }
     // A work that returned without completing its claim committed nothing the key can
@@ -506,6 +552,45 @@ export class IdempotencyStore {
     );
     return result.count;
   }
+}
+
+/** A stored status at or above this is a recorded refusal, not a response body. */
+const REFUSAL_STATUS_FLOOR = 400;
+
+/**
+ * The error a recorded refusal is answered with: a code the platform declares with a client-error
+ * status, a string message and well-formed details. A record that is none of these is a fault,
+ * answered as a server error — never replayed as a refusal nobody can name.
+ */
+function replayedRefusal(stored: unknown): RastaError {
+  const refusal =
+    typeof stored === 'object' && stored !== null
+      ? (stored as Partial<StoredRefusal>).refusal
+      : undefined;
+  const status =
+    refusal && Object.prototype.hasOwnProperty.call(ERROR_STATUS, refusal.code)
+      ? ERROR_STATUS[refusal.code]
+      : 0;
+  const detailsOk =
+    refusal !== undefined &&
+    (refusal.details === undefined ||
+      (Array.isArray(refusal.details) &&
+        refusal.details.every(
+          (d) =>
+            typeof d?.path === 'string' &&
+            typeof d.code === 'string' &&
+            typeof d.message === 'string',
+        )));
+  if (
+    refusal &&
+    status >= REFUSAL_STATUS_FLOOR &&
+    status < 500 &&
+    typeof refusal.message === 'string' &&
+    detailsOk
+  ) {
+    return new RastaError(refusal.code, refusal.message, { details: refusal.details });
+  }
+  return RastaError.internal('A recorded refusal is not one this endpoint can replay');
 }
 
 /** A `lock_timeout` that elapsed, as Prisma reports it from a raw query. */

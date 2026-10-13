@@ -507,6 +507,7 @@ describe('the amendment and milestone events (CON-003 PR 3)', () => {
       'SIGNATURE_POLICY_REQUIRED',
       'POLICY_AUTHOR_NOT_GOVERNING',
       'MEMBER_OF_BOTH_PARTIES',
+      'SAME_PERSON_BOTH_SIDES',
     ]) {
       expect(
         validateContractPayload('CONTRACT_AUTHORITY_REFUSED', { ...refused, reason }),

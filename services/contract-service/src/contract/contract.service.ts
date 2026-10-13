@@ -8,10 +8,10 @@ import { SERVICE_NAME } from '../config/env';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import type { ClaimFence } from '../shared/idempotency';
+import type { ClaimFence, RefusalFence } from '../shared/idempotency';
 import { transactionNow } from '../shared/clock';
 import { forbiddenRefusal, refusal, ruleRefusal } from '../shared/refusal';
-import { AuthorityRefusals } from '../signing/authority-refusals';
+import { AuthorityRefusals, type AuthorityRefusal } from '../signing/authority-refusals';
 import { PolicySuspensionService } from '../policy/policy-suspension.service';
 import {
   SigningAuthority,
@@ -69,6 +69,20 @@ class SigningAuthorityRefused extends Error {
 class SigningRoleRefused extends Error {
   constructor(readonly answer: RastaError) {
     super('The signature was refused: the role is not permitted');
+  }
+}
+
+/**
+ * The caller already signed the other side, found inside the signing transaction: separation of
+ * duties, refused and audited like the rest of a party's refusals (S-06) once the transaction has
+ * rolled back.
+ */
+class SeparationOfDutiesRefused extends Error {
+  constructor(
+    readonly refused: AuthorityRefusal,
+    readonly answer: RastaError,
+  ) {
+    super('The signature was refused: one person cannot sign for both sides');
   }
 }
 
@@ -227,6 +241,7 @@ export class ContractService {
         return this.refusals.refuse(
           { ...base, reason: 'ROLE_NOT_PERMITTED' },
           this.refused('sign', error),
+          fence,
         );
       }
     }
@@ -242,6 +257,7 @@ export class ContractService {
             { contractId: id },
           ),
         ),
+        fence,
       );
     }
     // A person, with an identity that can be compared to another's: a token without it is
@@ -255,7 +271,7 @@ export class ContractService {
       return await this.prisma.transaction(
         async (tx) => {
           if (fence) await fence.hold(tx);
-          const view = await this.signLocked(tx, row, side, contractorRole, person, dto);
+          const view = await this.signLocked(tx, row, side, contractorRole, person, dto, base);
           return fence ? fence.complete(tx, view) : view;
         },
         // The hierarchy is asked inside it (`authorityOf`), under its own deadline.
@@ -263,7 +279,10 @@ export class ContractService {
       );
     } catch (error) {
       if (error instanceof SigningRoleRefused) {
-        return this.refusals.refuse({ ...base, reason: 'ROLE_NOT_PERMITTED' }, error.answer);
+        return this.refusals.refuse({ ...base, reason: 'ROLE_NOT_PERMITTED' }, error.answer, fence);
+      }
+      if (error instanceof SeparationOfDutiesRefused) {
+        return this.refusals.refuse(error.refused, error.answer, fence);
       }
       if (!(error instanceof SigningAuthorityRefused)) throw error;
       // Not only refused: a stranded policy is suspended, with the same event and audit as the
@@ -292,7 +311,7 @@ export class ContractService {
       // normal refusal — a retryable 503, the claim released by the caller's failure path, so the
       // same request can be made again and leave its trace. Nothing was signed either way.
       try {
-        await this.recordRefusal(error);
+        await this.recordRefusal(error, fence);
       } catch (auditError: unknown) {
         this.logger.error(
           `Could not record the refusal of a signature (${error.reason}): ` +
@@ -314,7 +333,10 @@ export class ContractService {
    * rolled back, and a refusal that left no trace would be invisible to the one audit that must
    * show who tried to sign for an employer when nobody had the authority (S-06).
    */
-  private async recordRefusal(refused: SigningAuthorityRefused): Promise<void> {
+  private async recordRefusal(
+    refused: SigningAuthorityRefused,
+    fence: RefusalFence | undefined,
+  ): Promise<void> {
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
       await this.publisher.enqueue(tx, {
@@ -332,6 +354,9 @@ export class ContractService {
         },
         occurredAt: at,
       });
+      // The refusal is the key's outcome too, committed with the event: a repeat under the same
+      // key is answered with it and writes no second one; a rollback stores neither.
+      if (fence) await fence.refuse(tx, refused.refusal);
     });
   }
 
@@ -404,6 +429,7 @@ export class ContractService {
     contractorRole: string | undefined,
     person: { userId: string; issuer: string | null; subject: string | null },
     dto: SignContractDto,
+    base: Omit<AuthorityRefusal, 'reason'>,
   ): Promise<ContractView> {
     const contract = await this.repository.lockContract(tx, found.organizationId, found.id);
     // Still a contract the caller is a party to, as it stands under the lock.
@@ -457,13 +483,16 @@ export class ContractService {
     if (other) {
       const comparison = compareActors(person, signerOf(other));
       if (comparison === 'SAME') {
-        throw this.refused(
-          'sign',
-          forbiddenRefusal(
-            'Separation of duties: one person cannot sign for both sides of a contract',
-            'signature',
-            ['SAME_PERSON_BOTH_SIDES'],
-            { contractId: contract.id },
+        throw new SeparationOfDutiesRefused(
+          { ...base, reason: 'SAME_PERSON_BOTH_SIDES' },
+          this.refused(
+            'sign',
+            forbiddenRefusal(
+              'Separation of duties: one person cannot sign for both sides of a contract',
+              'signature',
+              ['SAME_PERSON_BOTH_SIDES'],
+              { contractId: contract.id },
+            ),
           ),
         );
       }

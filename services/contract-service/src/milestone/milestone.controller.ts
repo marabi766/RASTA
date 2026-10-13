@@ -102,6 +102,7 @@ export class MilestoneController {
       201,
       (fence) => this.milestones.plan(id, dto, fence),
       (stored) => this.milestones.assertContractVisible(stored.contractId),
+      () => this.milestones.assertContractVisible(id),
     );
     return result;
   }
@@ -138,6 +139,7 @@ export class MilestoneController {
       200,
       (fence) => this.milestones.change(id, milestoneId, dto, fence),
       (stored) => this.milestones.assertContractVisible(stored.contractId),
+      () => this.milestones.assertContractVisible(id),
     );
     return result;
   }

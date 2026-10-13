@@ -22,6 +22,7 @@ import {
   seedSigned,
   signAmendment,
 } from './amendment-helpers';
+import { EventPublisher } from '../src/events/publisher';
 import {
   cleanup,
   eventsOf,
@@ -535,6 +536,18 @@ describe('amendments of a signed contract', () => {
           }),
         ).expect(403);
         expect(await amendmentSignatures(w, proposed.id)).toHaveLength(1);
+        // Each is an audit record, written before the 403 (S-06).
+        expect(
+          (await refusedEvents(c.employer)).map((e) => [
+            e.payload.action,
+            e.payload.side,
+            e.payload.subjectId,
+            e.payload.reason,
+          ]),
+        ).toEqual([
+          ['SIGN_AMENDMENT', 'CONTRACTOR', proposed.id, 'SAME_PERSON_BOTH_SIDES'],
+          ['SIGN_AMENDMENT', 'CONTRACTOR', proposed.id, 'SAME_PERSON_BOTH_SIDES'],
+        ]);
       });
 
       it('refuses a member of both parties, whichever side they act for', async () => {
@@ -553,6 +566,45 @@ describe('amendments of a signed contract', () => {
           proposed.id,
           person(c.contractor, ['CONTRACTOR'], { memberships: [c.employer] }),
         ).expect(403);
+        expect(await amendmentSignatures(w, proposed.id)).toEqual([]);
+        expect(
+          (await refusedEvents(c.employer)).map((e) => [e.payload.side, e.payload.reason]),
+        ).toEqual([
+          ['EMPLOYER', 'MEMBER_OF_BOTH_PARTIES'],
+          ['CONTRACTOR', 'MEMBER_OF_BOTH_PARTIES'],
+        ]);
+      });
+
+      it('a separation-of-duties refusal that cannot be recorded is a retryable 503 and leaves its key free; recorded, it is replayed under the same key without a second event', async () => {
+        const c = await signed();
+        const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;
+        const both = person(c.employer, ['ORGANIZATION_ADMIN'], { memberships: [c.contractor] });
+        const retryKey = idemKey('amend-sod');
+        const attempt = () => signAmendment(api, c.id, proposed.id, both, {}, retryKey);
+
+        const publisher = api.app.get(EventPublisher);
+        const original = publisher.enqueue.bind(publisher);
+        const failing = jest
+          .spyOn(publisher, 'enqueue')
+          .mockImplementation(async (...args: Parameters<typeof original>) => {
+            if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+            return original(...args);
+          });
+        try {
+          const down = await attempt().expect(503);
+          expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+          expect(down.headers['retry-after']).toBe('1');
+        } finally {
+          failing.mockRestore();
+        }
+        expect(await refusedEvents(c.employer)).toEqual([]);
+
+        const first = await attempt().expect(403);
+        expect(await refusedEvents(c.employer)).toHaveLength(1);
+        const again = await attempt().expect(403);
+        expect(again.body.code).toBe(first.body.code);
+        expect(reasons(again.body)).toEqual(['amendment:MEMBER_OF_BOTH_PARTIES']);
+        expect(await refusedEvents(c.employer)).toHaveLength(1);
         expect(await amendmentSignatures(w, proposed.id)).toEqual([]);
       });
 

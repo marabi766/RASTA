@@ -453,6 +453,8 @@ export const AUTHORITY_REFUSED_REASONS = [
   'POLICY_AUTHOR_NOT_GOVERNING',
   /** Separation of duties: the caller is a member of both parties to the contract. */
   'MEMBER_OF_BOTH_PARTIES',
+  /** Separation of duties: the caller already signed the other side. */
+  'SAME_PERSON_BOTH_SIDES',
 ] as const;
 
 export const contractAuthorityRefusedPayload = z

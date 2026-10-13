@@ -224,6 +224,7 @@ export class AmendmentService {
             'PROPOSER_NOT_EMPLOYER',
           ]),
         ),
+        fence,
       );
     }
     if (!this.access.mayProposeAmendment()) {
@@ -233,6 +234,7 @@ export class AmendmentService {
           'propose_amendment',
           RastaError.insufficientRole(this.access.amendmentRoles(), getContext().roles),
         ),
+        fence,
       );
     }
     if (!this.env.CONTRACT_AMENDMENT_REASON_CODES.includes(dto.reasonCode)) {
@@ -343,18 +345,24 @@ export class AmendmentService {
         return this.refusals.refuse(
           { ...base, reason: 'ROLE_NOT_PERMITTED' },
           this.refused('sign_amendment', error),
+          fence,
         );
       }
     }
     if (this.access.isMemberOfBothParties(row)) {
-      throw this.refused(
-        'sign_amendment',
-        forbiddenRefusal(
-          'Separation of duties: one person cannot be a member of both parties to a contract',
-          'amendment',
-          ['MEMBER_OF_BOTH_PARTIES'],
-          { contractId: row.id },
+      // A party's refusal, so an audit record (S-06) like the others of this command.
+      return this.refusals.refuse(
+        { ...base, reason: 'MEMBER_OF_BOTH_PARTIES' },
+        this.refused(
+          'sign_amendment',
+          forbiddenRefusal(
+            'Separation of duties: one person cannot be a member of both parties to a contract',
+            'amendment',
+            ['MEMBER_OF_BOTH_PARTIES'],
+            { contractId: row.id },
+          ),
         ),
+        fence,
       );
     }
     // A person, with an identity that can be compared to another's.
@@ -405,7 +413,7 @@ export class AmendmentService {
             );
           });
       }
-      return this.refusals.refuse(error.refused, error.answer);
+      return this.refusals.refuse(error.refused, error.answer, fence);
     }
   }
 
@@ -491,13 +499,24 @@ export class AmendmentService {
     if (other) {
       const comparison = compareActors(person, signerOf(other));
       if (comparison === 'SAME') {
-        throw this.refused(
-          'sign_amendment',
-          forbiddenRefusal(
-            'Separation of duties: one person cannot sign for both sides of an amendment',
-            'amendment',
-            ['SAME_PERSON_BOTH_SIDES'],
-            { contractId: contract.id, amendmentId },
+        // Audited once the transaction has rolled back, like a refusal of the authority.
+        throw new AmendmentAuthorityRefused(
+          {
+            action: 'SIGN_AMENDMENT',
+            side,
+            contractId: contract.id,
+            organizationId: contract.organizationId,
+            subjectId: amendment.id,
+            reason: 'SAME_PERSON_BOTH_SIDES',
+          },
+          this.refused(
+            'sign_amendment',
+            forbiddenRefusal(
+              'Separation of duties: one person cannot sign for both sides of an amendment',
+              'amendment',
+              ['SAME_PERSON_BOTH_SIDES'],
+              { contractId: contract.id, amendmentId },
+            ),
           ),
         );
       }

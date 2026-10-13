@@ -318,6 +318,53 @@ describe('POST /v1/contracts/{id}/sign', () => {
 
       expect(await signaturesOf(id)).toHaveLength(1);
       expect((await rowOf(id)).status).toBe('DRAFT');
+      // Each refusal is an audit record, written before the 403 (S-06).
+      const refused = await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['SIGN_CONTRACT', 'CONTRACTOR', 'SAME_PERSON_BOTH_SIDES'],
+        ['SIGN_CONTRACT', 'CONTRACTOR', 'SAME_PERSON_BOTH_SIDES'],
+      ]);
+    });
+
+    it('a same-person refusal that cannot be recorded is a retryable 503; the retry records it once and the same key replays it', async () => {
+      const { id, employer, contractor } = await draft();
+      const sub = `sub-${ulid()}`;
+      await sign(
+        id,
+        person(employer, ['ORGANIZATION_ADMIN'], { sub, rastaUserId: 'USR-CCCCCCCC' }),
+      ).expect(200);
+      const retryKey = key();
+      const attempt = () =>
+        sign(
+          id,
+          person(contractor, ['CONTRACTOR'], { sub, rastaUserId: 'USR-DDDDDDDD' }),
+          {},
+          retryKey,
+        );
+      const publisher = api.app.get(EventPublisher);
+      const original = publisher.enqueue.bind(publisher);
+      const failing = jest
+        .spyOn(publisher, 'enqueue')
+        .mockImplementation(async (...args: Parameters<typeof original>) => {
+          if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+          return original(...args);
+        });
+      try {
+        const down = await attempt().expect(503);
+        expect(down.body.code).toBe('UPSTREAM_UNAVAILABLE');
+        expect(down.headers['retry-after']).toBe('1');
+      } finally {
+        failing.mockRestore();
+      }
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
+
+      const first = await attempt().expect(403);
+      expect(reasons(first.body)).toEqual(['signature:SAME_PERSON_BOTH_SIDES']);
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      const again = await attempt().expect(403);
+      expect(bare(again.body)).toEqual(bare(first.body));
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+      expect(await signaturesOf(id)).toHaveLength(1);
     });
 
     it('refuses a member of both parties, whichever side they act for, before anything is signed', async () => {
@@ -391,7 +438,9 @@ describe('POST /v1/contracts/{id}/sign', () => {
     it('a refusal that cannot be recorded is a retryable 503, not the normal refusal: nothing is signed and the repeated request leaves its trace', async () => {
       const { id, employer } = await draft();
       const retryKey = key();
-      const attempt = () => sign(id, person(employer, ['DRIVER']), {}, retryKey);
+      // One caller: a key is replayed for the same user only.
+      const driver = person(employer, ['DRIVER']);
+      const attempt = () => sign(id, driver, {}, retryKey);
       const publisher = api.app.get(EventPublisher);
       const original = publisher.enqueue.bind(publisher);
       const failing = jest
@@ -408,9 +457,39 @@ describe('POST /v1/contracts/{id}/sign', () => {
         failing.mockRestore();
       }
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toEqual([]);
-      await attempt().expect(403);
+      const first = await attempt().expect(403);
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
       expect(await signaturesOf(id)).toHaveLength(0);
+
+      // The same key, user and body again: the same refusal, replayed — and no second event.
+      const again = await attempt().expect(403);
+      expect(bare(again.body)).toEqual(bare(first.body));
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
+    });
+
+    it('a refusal of the policy (no policy in force) is recorded once under its key and replayed, whatever the retries', async () => {
+      const { id, employer } = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const repeatKey = key();
+      const signer = employerSigner(employer);
+      const attempt = () => sign(id, signer, {}, repeatKey);
+      const first = await attempt().expect(422);
+      expect(reasons(first.body)).toEqual(['signature:SIGNATURE_POLICY_REQUIRED']);
+      const again = await attempt().expect(422);
+      expect(bare(again.body)).toEqual(bare(first.body));
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_REFUSED')).toHaveLength(1);
+    });
+
+    it('a repeated refusal is replayed only for the same user and body; another user or body is a new request', async () => {
+      const { id, employer } = await draft();
+      const repeatKey = key();
+      const driver = person(employer, ['DRIVER']);
+      await sign(id, driver, {}, repeatKey).expect(403);
+      // Another body, or another user, under the key is refused as a key reused — not answered
+      // with the stored refusal.
+      await sign(id, driver, { expectedVersion: 1 }, repeatKey).expect(409);
+      const other = await sign(id, person(employer, ['DRIVER']), {}, repeatKey).expect(409);
+      expect(other.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect(await eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED')).toHaveLength(1);
     });
 
     it('a policy that names another role signs for that role only — and the signature records the policy', async () => {
@@ -663,13 +742,26 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect(await signaturesOf(b.id)).toHaveLength(0);
     });
 
-    it('a refused command releases its key, so a corrected retry with that key can run', async () => {
+    it('a refusal that was recorded is the key’s outcome: the key is not free for another caller, a new key signs', async () => {
       const { id, employer } = await draft();
       const k = key();
-      // A person without the authority is refused…
+      // A person without the authority is refused, and the refusal recorded with the key…
       await sign(id, person(employer, ['DRIVER']), {}, k).expect(403);
-      // …and the key is free for a person with it.
-      await sign(id, employerSigner(employer), {}, k).expect(200);
+      // …so another caller cannot take the key over…
+      const reused = await sign(id, employerSigner(employer), {}, k).expect(409);
+      expect(reused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      // …and the corrected request goes under a key of its own.
+      await sign(id, employerSigner(employer)).expect(200);
+      expect(await signaturesOf(id)).toHaveLength(1);
+    });
+
+    it('every other failure still releases its key: a version conflict is retried under the same key once the version is right', async () => {
+      const { id, employer } = await draft();
+      const k = key();
+      const token = employerSigner(employer);
+      await sign(id, token, { expectedVersion: 99 }, k).expect(409);
+      // Not replayed — the body differs, so a retry is a different request under a free key.
+      await sign(id, token, { expectedVersion: 1 }, k).expect(200);
       expect(await signaturesOf(id)).toHaveLength(1);
     });
 
