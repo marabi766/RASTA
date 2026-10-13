@@ -41,7 +41,9 @@ import {
  * offers. The gateway requires it on the `products` and `offers` prefixes
  * for unsafe methods, and the service again, because the gateway is not the
  * only way to reach this port. The response is stored in the write's own
- * transaction, as for orders.
+ * transaction, as for orders. A replay is bound to the caller who sent the
+ * original request and re-runs the current read/owner check of the product or
+ * offer it names before the stored body is returned (#253).
  */
 @ApiTags('products')
 @Controller({ path: 'products', version: '1' })
@@ -103,8 +105,13 @@ export class ProductController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const key = requireIdempotencyKey(idempotencyKey);
-    return this.idempotency.run<ProductView>('POST /v1/products', key, dto, 201, (record) =>
-      this.catalogue.createProduct(dto, record),
+    return this.idempotency.run<ProductView>(
+      'POST /v1/products',
+      key,
+      dto,
+      201,
+      (record) => this.catalogue.createProduct(dto, record),
+      (stored) => this.catalogue.assertProductReplayVisible(stored.id),
     );
   }
 }
@@ -150,8 +157,13 @@ export class OfferController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const key = requireIdempotencyKey(idempotencyKey);
-    return this.idempotency.run<OfferView>('POST /v1/offers', key, dto, 201, (record) =>
-      this.catalogue.createOffer(dto, record),
+    return this.idempotency.run<OfferView>(
+      'POST /v1/offers',
+      key,
+      dto,
+      201,
+      (record) => this.catalogue.createOffer(dto, record),
+      (stored) => this.catalogue.assertOfferReplayVisible(stored.id),
     );
   }
 
@@ -177,6 +189,7 @@ export class OfferController {
       targeted(id, dto),
       200,
       (record) => this.catalogue.updateOffer(id, dto, record),
+      () => this.catalogue.assertOfferReplayVisible(id),
     );
   }
 }

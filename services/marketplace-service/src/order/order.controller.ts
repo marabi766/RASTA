@@ -18,7 +18,7 @@ import {
   type RecordResponse,
 } from '../shared/idempotency';
 import { OrderSagaClient } from '../temporal/saga.client';
-import { OrderService } from './order.service';
+import { OrderService, type OrderCommand } from './order.service';
 import {
   cancelOrderSchema,
   confirmReceiptSchema,
@@ -102,6 +102,7 @@ export class OrderController {
       dto,
       201,
       (record) => this.orders.place(dto, key, record),
+      (stored) => this.orders.assertReplayVisible(stored.id, 'place'),
     );
 
     // After the order is committed. A saga started before the commit could
@@ -143,6 +144,7 @@ export class OrderController {
   })
   async confirm(@Param('id') id: string, @Headers('idempotency-key') idempotencyKey?: string) {
     return this.command('POST /v1/orders/:id/confirm', id, idempotencyKey, undefined, {
+      command: 'confirm',
       work: (record) => this.orders.confirm(id, record),
       signal: ['orderConfirmed'],
     });
@@ -163,6 +165,7 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/fulfill', id, idempotencyKey, dto, {
+      command: 'fulfill',
       work: (record) => this.orders.fulfill(id, dto, record),
       signal: ['orderFulfilled'],
     });
@@ -184,6 +187,7 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/confirm-receipt', id, idempotencyKey, dto, {
+      command: 'confirmReceipt',
       work: (record) => this.orders.confirmReceipt(id, dto, record),
       signal: ['receiptConfirmed'],
     });
@@ -204,6 +208,7 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/disputes', id, idempotencyKey, dto, {
+      command: 'raiseDispute',
       work: (record) => this.orders.raiseDispute(id, dto, record),
       signal: ['orderDisputed', dto.reason],
     });
@@ -224,6 +229,7 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/disputes/resolve', id, idempotencyKey, dto, {
+      command: 'resolveDispute',
       work: (record) => this.orders.resolveDispute(id, dto, record),
       signal: ['disputeResolved', dto.outcome],
     });
@@ -244,6 +250,7 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/cancel', id, idempotencyKey, dto, {
+      command: 'cancel',
       work: (record) => this.orders.cancel(id, dto, record),
       signal: ['orderCancelled', dto.reason],
     });
@@ -270,6 +277,7 @@ export class OrderController {
       targeted(id, dto),
       201,
       (record) => this.orders.submitReview(id, dto, record),
+      () => this.orders.assertReplayVisible(id, 'review'),
     );
   }
 
@@ -299,6 +307,11 @@ export class OrderController {
    * the order on its timer (ADR-039), not a client retry's. The workflow does
    * not do that re-read yet; it is tracked with the saga's other failure
    * windows.
+   *
+   * **A replay is re-authorized** (#253): before the stored response is
+   * returned, the caller must still see the order and still be the party
+   * `step.command` requires, by the rules as they are now — otherwise the
+   * live command's 404 or 403, never the stored body.
    */
   private async command<T>(
     endpoint: string,
@@ -306,6 +319,7 @@ export class OrderController {
     idempotencyKey: string | undefined,
     body: unknown,
     step: {
+      command: OrderCommand;
       work: (record: RecordResponse<T>) => Promise<T>;
       signal: [name: string, ...args: unknown[]];
     },
@@ -317,6 +331,7 @@ export class OrderController {
       targeted(id, body),
       200,
       step.work,
+      () => this.orders.assertReplayVisible(id, step.command),
     );
     if (executed) await this.saga.signal(id, ...step.signal);
     return result;

@@ -197,8 +197,11 @@ export function enrichOpenApiDocument(
             required: true,
             schema: { type: 'string', minLength: 8, maxLength: 128 },
             description:
-              'Required. A retry with the same key returns the first response without ' +
-              'executing again; the same key with a different body is refused with 409 ' +
+              'Required. A retry by the same user with the same key returns the first ' +
+              'response without executing again — once the caller has passed the current ' +
+              'read and owner check of what it names; otherwise the caller gets the refusal ' +
+              'the route itself would give. The same key with ' +
+              'a different body, or from another user, is refused with 409 ' +
               'IDEMPOTENCY_KEY_REUSED, and while the first request is still in flight with ' +
               'CONFLICT and a Retry-After header, in seconds. ' +
               `Keys are honoured for ${retention}, which is ` +

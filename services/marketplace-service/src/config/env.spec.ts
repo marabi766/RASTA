@@ -51,3 +51,48 @@ describe('MARKETPLACE_TEMPORAL_ENABLED', () => {
     expect(() => load(value)).toThrow(EnvValidationError);
   });
 });
+
+/**
+ * `MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS` — how long a claim in flight
+ * blocks identical retries before one may take it over (#253). Fail closed: a
+ * value the store cannot honour refuses to start rather than being clamped.
+ */
+describe('MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS', () => {
+  const withIdempotency = (values: NodeJS.ProcessEnv) => loadMarketplaceEnv({ ...BASE, ...values });
+
+  it('defaults to 60 seconds, well short of the 24-hour retention', () => {
+    const env = withIdempotency({});
+    expect(env.MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS).toBe(60);
+    expect(env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS).toBe(24);
+  });
+
+  it.each(['30', '120', '3599'])('accepts %p', (value) => {
+    expect(
+      withIdempotency({ MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: value })
+        .MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS,
+    ).toBe(Number(value));
+  });
+
+  it.each(['0', '-1', '29', '3601', '60.5', 'sixty', ''])('refuses %p at startup', (value) => {
+    expect(() => withIdempotency({ MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: value })).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('refuses a lease that is not shorter than the retention', () => {
+    // One hour of retention, one hour of lease: a stuck claim would block for
+    // as long as a completed response is kept.
+    expect(() =>
+      withIdempotency({
+        MARKETPLACE_IDEMPOTENCY_TTL_HOURS: '1',
+        MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '3600',
+      }),
+    ).toThrow(/MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS/);
+    expect(
+      withIdempotency({
+        MARKETPLACE_IDEMPOTENCY_TTL_HOURS: '1',
+        MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '3599',
+      }).MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS,
+    ).toBe(3599);
+  });
+});

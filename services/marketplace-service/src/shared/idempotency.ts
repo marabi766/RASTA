@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { idempotentReplaysTotal } from '../observability/metrics';
@@ -65,6 +65,15 @@ function claimLost(endpoint: string): RastaError {
 export type RecordResponse<T> = (tx: ExtendedPrismaClient, response: T) => Promise<void>;
 
 /**
+ * Runs before a stored response is replayed: the **current** read and object
+ * authorization of what the stored response names, by the rule a fresh request
+ * would meet now — not the one that held when it was stored. No mutation and
+ * no state-transition check. Throws what the live endpoint would answer (403
+ * or 404); the stored body is then never returned (#253).
+ */
+export type ReplayGuard<T> = (stored: T) => Promise<void>;
+
+/**
  * Idempotent financial writes (docs/06 § 6.8).
  *
  * The platform has declared this mechanism since the API architecture was
@@ -79,13 +88,28 @@ export type RecordResponse<T> = (tx: ExtendedPrismaClient, response: T) => Promi
  * | situation                          | response                              |
  * | ---------------------------------- | ------------------------------------- |
  * | new key                            | execute, store the response, return   |
- * | same key, same body                | the stored response, no re-execution  |
- * | same key, different body           | `409 IDEMPOTENCY_KEY_REUSED`          |
+ * | same key, same body, same caller   | the stored response, no re-execution  |
+ * |                                    | — if the caller may still see what it |
+ * |                                    | names ({@link ReplayGuard})           |
+ * | same key, different body or caller | `409 IDEMPOTENCY_KEY_REUSED`          |
  * | key currently in flight            | `409 CONFLICT` + `Retry-After: 1`     |
  * | missing key on a required endpoint | `400 VALIDATION_FAILED`               |
  *
- * Retention is 24 hours, configurable. Body matching is SHA-256 over a
- * canonical form.
+ * Retention is 24 hours, configurable. Request matching is SHA-256 over a
+ * canonical form of the body **and the authenticated caller** ({@link hash}).
+ *
+ * ## A replay is bound to its caller and re-authorized (#253)
+ *
+ * Keys are the organization's, and the stored response was produced under the
+ * original caller's authority. Hashed over the body alone, a supplier in the
+ * same organization who sent an operator's key, target and body received the
+ * operator's response — another organization's draft offer — without any owner
+ * check. So the caller is part of the request: another user's identical
+ * request is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. And before the
+ * stored response is returned, the endpoint's {@link ReplayGuard} re-runs the
+ * current read and object check for what it names: an original caller who has
+ * since lost the role or the ownership gets the 403 or 404 the live endpoint
+ * would give, not the stored body.
  *
  * ## Why the claim is its own committed transaction
  *
@@ -98,11 +122,16 @@ export type RecordResponse<T> = (tx: ExtendedPrismaClient, response: T) => Promi
  * `IN_PROGRESS` immediately and back off, which is the behaviour the table
  * above describes.
  *
- * The cost of that choice is stated honestly in {@link release}: a process that
- * dies mid-execution leaves an `IN_PROGRESS` row, and a retry gets `409
- * CONFLICT` rather than a re-execution until the record expires. For a
- * financial write that is the right way round — a caller retrying too early is
- * a nuisance, and a caller charged twice is an incident.
+ * The cost of that choice: a process that dies mid-execution, or a release that
+ * fails on the failure path, leaves an `IN_PROGRESS` row, and a retry gets `409
+ * CONFLICT` rather than a re-execution — but only for the claim's **lease**
+ * (`MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS`, 60 s by default), not for
+ * the response's retention. While in flight the row's `expiresAt` is the lease;
+ * {@link complete} moves it to the retention. Past the lease a retry removes
+ * the lapsed row — only while it is still lapsed — and claims the key under a
+ * new token. The token fences the old holder: its {@link complete} matches no
+ * row and its work rolls back, and its {@link release} frees nothing. Exactly
+ * one of the two commits.
  *
  * ## Why the response is stored inside the work's transaction
  *
@@ -132,9 +161,24 @@ export class IdempotencyStore {
     @Inject(ENV) private readonly env: MarketplaceEnv,
   ) {}
 
-  /** SHA-256 over the canonical form. See {@link hashRequestBody}. */
+  /**
+   * SHA-256 over the canonical form of the request **and the caller who sent
+   * it** (see {@link hashRequestBody}): another user's identical request is a
+   * different request, refused as a reused key, never a replay of a response
+   * produced under someone else's authority (#253).
+   */
   hash(body: unknown): string {
-    return hashRequestBody(body);
+    return hashRequestBody({ caller: callerIdentity(), body });
+  }
+
+  /** When a **completed** response stops being replayed. */
+  private expiry(from: Date): Date {
+    return new Date(from.getTime() + this.env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000);
+  }
+
+  /** When a claim still **in flight** may be taken over by a retry. */
+  private lease(from: Date): Date {
+    return new Date(from.getTime() + this.env.MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS * 1000);
   }
 
   /**
@@ -181,6 +225,9 @@ export class IdempotencyStore {
    * An expired row is removed **only while it is still expired**. Deleting by
    * key alone could remove the fresh claim a concurrent request had just put
    * in its place, and a `delete` of a row a racer had already removed threw.
+   * An `IN_PROGRESS` row expires with its lease; if its holder is completing it
+   * right now, the removal waits for that lock (within the budget) and then
+   * finds the row completed with a fresh lifetime, so it removes nothing.
    */
   private async claimOnce(
     endpoint: string,
@@ -194,9 +241,6 @@ export class IdempotencyStore {
   > {
     const organizationId = getOrganizationId();
     const now = new Date();
-    const expiresAt = new Date(
-      now.getTime() + this.env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
-    );
 
     const token = randomUUID();
     try {
@@ -210,7 +254,8 @@ export class IdempotencyStore {
             requestHash,
             claimToken: token,
             state: 'IN_PROGRESS',
-            expiresAt,
+            // The lease, not the response's lifetime: `complete` moves it to that.
+            expiresAt: this.lease(now),
           },
         }),
       );
@@ -244,7 +289,6 @@ export class IdempotencyStore {
 
     if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint);
 
-    idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
     return {
       kind: 'REPLAY',
       status: existing.responseStatus ?? 200,
@@ -287,9 +331,11 @@ export class IdempotencyStore {
    * transaction** `tx`, as its last statement.
    *
    * Matches only the row this claim's `token` was minted for. If it matches
-   * nothing — the claim expired and was purged, perhaps re-taken by another
-   * request — it throws, and the work's transaction rolls back with it: the
-   * work is never committed without its key, and never twice under one.
+   * nothing — the lease lapsed and the row was removed, perhaps re-taken by
+   * another request under a new token — it throws, and the work's transaction
+   * rolls back with it: the work is never committed without its key, and never
+   * twice under one. The key then lives `MARKETPLACE_IDEMPOTENCY_TTL_HOURS`
+   * from now — from the response, not the claim, which only held a lease.
    */
   async complete(
     tx: ExtendedPrismaClient,
@@ -302,7 +348,12 @@ export class IdempotencyStore {
     const organizationId = getOrganizationId();
     const { count } = await tx.idempotencyKey.updateMany({
       where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
-      data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
+      data: {
+        state: 'COMPLETED',
+        responseStatus: status,
+        responseBody: body as object,
+        expiresAt: this.expiry(new Date()),
+      },
     });
     if (count === 0) {
       this.logLostClaim('complete', endpoint);
@@ -327,10 +378,51 @@ export class IdempotencyStore {
     if (count === 0) this.logLostClaim('release', endpoint);
   }
 
+  /**
+   * {@link release} on a failure path: never throws, so it can never replace
+   * the failure being answered (#253). The database that refused the work may
+   * refuse this too; the claim then stays `IN_PROGRESS` until its lease lapses,
+   * after which an identical retry takes the key over. The log names the
+   * endpoint and the error's class and code — nothing of the key, the token or
+   * the request (S-09).
+   */
+  private async releaseQuietly(endpoint: string, key: string, token: string): Promise<void> {
+    try {
+      await this.release(endpoint, key, token);
+    } catch (releaseError: unknown) {
+      this.logger.error(
+        { endpoint, ...errorIdentity(releaseError) },
+        'Could not release the idempotency claim after its work failed; it lapses with its lease',
+      );
+    }
+  }
+
+  /**
+   * Keeps a claim whose work returned without recording its response blocked
+   * for the full retention rather than its lease — a programming error, after
+   * which the work may well have committed, so the key must not be taken over
+   * for a second execution a minute later. Never throws, for the same reason
+   * as {@link releaseQuietly}.
+   */
+  private async pinQuietly(endpoint: string, key: string, token: string): Promise<void> {
+    const organizationId = getOrganizationId();
+    try {
+      await this.prisma.client.idempotencyKey.updateMany({
+        where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
+        data: { expiresAt: this.expiry(new Date()) },
+      });
+    } catch (pinError: unknown) {
+      this.logger.error(
+        { endpoint, ...errorIdentity(pinError) },
+        'Could not hold the idempotency claim of a work that did not record its response',
+      );
+    }
+  }
+
   /** Nothing of the key or token in the log (S-09): the endpoint locates it. */
   private logLostClaim(operation: 'complete' | 'release', endpoint: string): void {
     this.logger.warn(
-      `idempotency ${operation} matched no in-progress row for this claim (expired, purged or already finished); left untouched: ${endpoint}`,
+      `idempotency ${operation} matched no in-progress row for this claim (lapsed, purged, re-taken or already finished); left untouched: ${endpoint}`,
     );
   }
 
@@ -345,6 +437,10 @@ export class IdempotencyStore {
    * `work` receives `record`, which it must call inside its own transaction
    * with the response it is about to return. That is what makes the change
    * and its completed key one commit.
+   *
+   * `stillVisible` is required, so no endpoint can replay without it: it runs
+   * before a stored response is returned and throws what the live endpoint
+   * would answer if the caller may no longer see what that response names.
    */
   async run<T>(
     endpoint: string,
@@ -352,8 +448,9 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (record: RecordResponse<T>) => Promise<T>,
+    stillVisible: ReplayGuard<T>,
   ): Promise<T> {
-    return (await this.execute(endpoint, key, body, successStatus, work)).result;
+    return (await this.execute(endpoint, key, body, successStatus, work, stillVisible)).result;
   }
 
   /**
@@ -364,7 +461,9 @@ export class IdempotencyStore {
    * nothing: no party check, no transition check, no write. Anything the
    * caller does next on the strength of a replayed response is done without
    * any of those checks having run, which is how a replay once delivered a
-   * saga signal to an order the caller had no right to touch.
+   * saga signal to an order the caller had no right to touch. Only the read
+   * and object check runs on a replay — `stillVisible` — never a transition
+   * check and never a write.
    */
   async execute<T>(
     endpoint: string,
@@ -372,9 +471,17 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (record: RecordResponse<T>) => Promise<T>,
+    stillVisible: ReplayGuard<T>,
   ): Promise<{ result: T; executed: boolean }> {
     const claim = await this.claim(endpoint, key, body);
-    if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
+    if (claim.kind === 'REPLAY') {
+      const stored = claim.body as T;
+      // The live endpoint's answer when the caller may no longer see it; the
+      // stored body is then never returned.
+      await stillVisible(stored);
+      idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
+      return { result: stored, executed: false };
+    }
 
     let recorded = false;
     let result: T;
@@ -388,14 +495,17 @@ export class IdempotencyStore {
       // transaction committed finds the row COMPLETED and removes nothing; a
       // transaction that rolled back — the response store's own failure
       // included — took its completion with it, so the claim is freed and a
-      // retry with the same key runs (the order does not exist).
-      await this.release(endpoint, key, claim.token);
+      // retry with the same key runs (the order does not exist). The work's
+      // own error is the answer: a release that fails on top of it is logged,
+      // never thrown in its place, and the claim lapses with its lease.
+      await this.releaseQuietly(endpoint, key, claim.token);
       throw error;
     }
     if (!recorded) {
-      // A programming error: the work committed without its key. The claim is
-      // left IN_PROGRESS — retries are refused until it expires — rather than
-      // released for a second execution.
+      // A programming error: the work may have committed without its key. The
+      // claim stays IN_PROGRESS for the full retention — retries are refused —
+      // rather than lapsing with its lease into a second execution.
+      await this.pinQuietly(endpoint, key, claim.token);
       throw new Error(`Idempotent work for ${endpoint} did not record its response`);
     }
     return { result, executed: true };
@@ -415,6 +525,8 @@ export class IdempotencyStore {
    * is `expiresAt < now` and nothing else, so it can only ever remove records
    * that are already unusable — a key past its window is refused on read by
    * `claim()` regardless of who asks. It reads no tenant data and returns none.
+   * A claim past its lease is one of them: `claim()` would take it over, and its
+   * holder can no longer complete it either way, because its token is gone.
    */
   async purgeExpired(): Promise<number> {
     const result = await runUnscoped(
@@ -513,6 +625,35 @@ function sortKeys(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+/**
+ * Who sent the request, as the request hash includes it (#253): the
+ * authenticated user, or for a service token the calling service. Two tokens of
+ * the same person can carry two user ids (`RequestContext.platformUserId`); the
+ * second is then a different caller, and its retry is refused as a reused key
+ * rather than answered with a response it may not be entitled to — the
+ * conservative side of that ambiguity.
+ */
+function callerIdentity(): { authType: string; userId: string | null; service: string | null } {
+  const context = getContext();
+  return {
+    authType: context.authType,
+    userId: context.userId ?? null,
+    service: context.callerService ?? null,
+  };
+}
+
+/**
+ * What a failure-path log may say about an error (S-09): its class and a
+ * driver code such as Prisma's `P1001` — never its message, which can quote
+ * the statement's values.
+ */
+function errorIdentity(error: unknown): { errorName: string; errorCode?: string } {
+  if (typeof error !== 'object' || error === null) return { errorName: typeof error };
+  const name = error instanceof Error ? error.name : 'unknown';
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? { errorName: name, errorCode: code } : { errorName: name };
 }
 
 /** A `lock_timeout` that elapsed, as Prisma reports it. */

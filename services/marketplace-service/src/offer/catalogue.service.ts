@@ -447,6 +447,31 @@ export class CatalogueService {
     });
   }
 
+  /**
+   * The replay guard of `POST /v1/products` (#253): the product a stored
+   * response names must still be readable by the caller, by `getProduct`'s
+   * rule as it is now — otherwise its 404, never the stored body.
+   */
+  async assertProductReplayVisible(productId: string): Promise<void> {
+    await this.getProduct(productId);
+  }
+
+  /**
+   * The replay guard of `POST /v1/offers` and `PATCH /v1/offers/{id}` (#253):
+   * the object check `updateOffer` runs before it writes — the offer exists
+   * (404) and `assertOfferOwner` passes by the caller's roles and organization
+   * as they are now (403 for the role, 404 for a stranger's offer). Nothing is
+   * locked or written and no state is checked.
+   */
+  async assertOfferReplayVisible(offerId: string): Promise<void> {
+    const existing = await runUnscoped('an offer is located before its owner is checked', () =>
+      this.prisma.client.offer.findUnique({ where: { id: offerId } }),
+    );
+    if (!existing) throw RastaError.notFound('Offer', offerId);
+
+    assertOfferOwner(existing);
+  }
+
   /** A supplier's own offers, in whatever state. */
   async listOwnOffers(): Promise<OfferView[]> {
     assertNotAuditor();

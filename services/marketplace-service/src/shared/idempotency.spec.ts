@@ -1,9 +1,31 @@
-import type { ArgumentsHost } from '@nestjs/common';
+import { Logger as NestLogger, type ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
-import { AllExceptionsFilter, createSystemContext, runWithContext } from '@rasta/nest-common';
+import {
+  AllExceptionsFilter,
+  RastaError,
+  createSystemContext,
+  runWithContext,
+} from '@rasta/nest-common';
 import { IdempotencyStore, hashRequestBody } from './idempotency';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { MarketplaceEnv } from '../config/env';
+
+const LEASE_SECONDS = 60;
+const ENV = {
+  MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
+  MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: LEASE_SECONDS,
+} as MarketplaceEnv;
+
+/**
+ * The hash a request with `body` has **for the caller in context** — the
+ * caller is part of it (#253). Called from inside a mock, so it is evaluated
+ * in the context of the claim that reads the row.
+ */
+const sameRequest = (body: unknown): string =>
+  new IdempotencyStore(null as unknown as PrismaService, ENV).hash(body);
+
+/** A guard that lets every replay through. */
+const stillVisible = (): Promise<void> => Promise.resolve();
 
 /**
  * A claim-side statement runs in a short transaction of its own, its lock
@@ -35,14 +57,16 @@ const uniqueViolation = Object.assign(new Error('Unique constraint failed'), { c
 function storeFinding(state: 'IN_PROGRESS' | 'COMPLETED'): IdempotencyStore {
   const idempotencyKey = {
     create: jest.fn().mockRejectedValue(uniqueViolation),
-    findUnique: jest.fn().mockResolvedValue({
-      requestHash: hashRequestBody({}),
-      state,
-      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
-    }),
+    findUnique: jest.fn(() =>
+      Promise.resolve({
+        requestHash: sameRequest({}),
+        state,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+    ),
   };
   const prisma = withTransaction(idempotencyKey);
-  return new IdempotencyStore(prisma, { MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24 } as MarketplaceEnv);
+  return new IdempotencyStore(prisma, ENV);
 }
 
 /** Everything a value carries, Errors included (`JSON.stringify` drops their message and stack). */
@@ -157,9 +181,7 @@ describe('IdempotencyStore.claim — who may proceed', () => {
       delete: jest.fn().mockResolvedValue({}),
     };
     const prisma = withTransaction(idempotencyKey);
-    const store = new IdempotencyStore(prisma, {
-      MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
-    } as MarketplaceEnv);
+    const store = new IdempotencyStore(prisma, ENV);
     return { store, idempotencyKey };
   }
 
@@ -226,14 +248,92 @@ describe('IdempotencyStore.claim — who may proceed', () => {
     expect(idempotencyKey.create).toHaveBeenCalledTimes(2);
   });
 
+  it('reserves the key for its lease only, not for the retention', async () => {
+    const { store, idempotencyKey } = storeWith({ create: jest.fn().mockResolvedValue({}) });
+    const before = Date.now();
+
+    await asTenant(() => store.claim('POST /v1/orders', 'K', {}));
+
+    const { data } = (idempotencyKey.create.mock.calls[0] as [{ data: { expiresAt: Date } }])[0];
+    expect(data).toMatchObject({ state: 'IN_PROGRESS' });
+    expect(data.expiresAt.getTime()).toBeGreaterThanOrEqual(before + LEASE_SECONDS * 1000);
+    expect(data.expiresAt.getTime()).toBeLessThan(before + LEASE_SECONDS * 1000 + 5_000);
+  });
+
+  it('takes over a claim whose lease lapsed: removed while still lapsed, then a new insert', async () => {
+    // The holder's release failed, or its process died: an IN_PROGRESS row
+    // past its lease no longer blocks an identical retry (#253).
+    const { store, idempotencyKey } = storeWith({
+      create: jest.fn().mockRejectedValueOnce(uniqueViolation).mockResolvedValueOnce({}),
+      findUnique: jest.fn(() =>
+        Promise.resolve({
+          requestHash: sameRequest({}),
+          state: 'IN_PROGRESS',
+          expiresAt: new Date(Date.now() - 1),
+        }),
+      ),
+    });
+
+    await expect(asTenant(() => store.claim('POST /v1/orders', 'K', {}))).resolves.toEqual({
+      kind: 'PROCEED',
+      token: expect.any(String),
+    });
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ expiresAt: { lte: expect.any(Date) } }),
+    });
+    // A new token: the old holder's complete and release match nothing.
+    const tokens = idempotencyKey.create.mock.calls.map(
+      (call) => (call as [{ data: { claimToken: string } }])[0].data.claimToken,
+    );
+    expect(new Set(tokens).size).toBe(2);
+  });
+
+  it('refuses another caller’s identical request as a reused key, even in flight (#253)', async () => {
+    // The row was written by user A; user B in the same organization sends the
+    // same key and body. Never a replay of A's response, never news of A's
+    // request being in flight.
+    const asUser = <T>(userId: string, fn: () => Promise<T>) =>
+      runWithContext(
+        createSystemContext({
+          correlationId: 'unit-claim',
+          organizationId: 'ORG-UNIT',
+          authType: 'USER',
+          userId,
+        }),
+        fn,
+      );
+    for (const state of ['IN_PROGRESS', 'COMPLETED'] as const) {
+      const writtenByA = await asUser('USR_A', () => Promise.resolve(sameRequest({})));
+      const { store } = storeWith({
+        create: jest.fn().mockRejectedValue(uniqueViolation),
+        findUnique: jest.fn().mockResolvedValue({
+          requestHash: writtenByA,
+          state,
+          responseBody: { id: 'OFFER_OF_ANOTHER_ORG' },
+          expiresAt: new Date(Date.now() + hour),
+        }),
+      });
+
+      await expect(
+        asUser('USR_B', () => store.claim('PATCH /v1/offers/:id', 'K', {})),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
+      // The same user is the same request: replayed, or told it is in flight.
+      const own = asUser('USR_A', () => store.claim('PATCH /v1/offers/:id', 'K', {}));
+      if (state === 'COMPLETED') await expect(own).resolves.toMatchObject({ kind: 'REPLAY' });
+      else await expect(own).rejects.toMatchObject({ code: 'CONFLICT' });
+    }
+  });
+
   it('still refuses a live key in flight at once', async () => {
     const { store, idempotencyKey } = storeWith({
       create: jest.fn().mockRejectedValue(uniqueViolation),
-      findUnique: jest.fn().mockResolvedValue({
-        requestHash: hashRequestBody({}),
-        state: 'IN_PROGRESS',
-        expiresAt: new Date(Date.now() + hour),
-      }),
+      findUnique: jest.fn(() =>
+        Promise.resolve({
+          requestHash: sameRequest({}),
+          state: 'IN_PROGRESS',
+          expiresAt: new Date(Date.now() + hour),
+        }),
+      ),
     });
 
     await expect(asTenant(() => store.claim('POST /v1/orders', 'K', {}))).rejects.toMatchObject({
@@ -270,9 +370,7 @@ describe('IdempotencyStore.execute — the response is stored in the work’s tr
       deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
     const prisma = withTransaction(idempotencyKey);
-    const store = new IdempotencyStore(prisma, {
-      MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
-    } as MarketplaceEnv);
+    const store = new IdempotencyStore(prisma, ENV);
     // The work's own transaction: a delegate of its own, so a write through
     // the store's client instead of `tx` would not count.
     const workTx = { idempotencyKey: { updateMany: jest.fn() } };
@@ -299,18 +397,39 @@ describe('IdempotencyStore.execute — the response is stored in the work’s tr
     const { store, idempotencyKey, workTx } = claimedStore();
     workTx.idempotencyKey.updateMany.mockResolvedValue({ count: 1 });
 
+    const guard = jest.fn(stillVisible);
+    const before = Date.now();
     const outcome = await asTenant(() =>
-      store.execute('POST /v1/orders', 'K', {}, 201, async (record) => {
-        await record(workTx as never, { id: 'ORD_UNIT' });
-        return { id: 'ORD_UNIT' };
-      }),
+      store.execute(
+        'POST /v1/orders',
+        'K',
+        {},
+        201,
+        async (record) => {
+          await record(workTx as never, { id: 'ORD_UNIT' });
+          return { id: 'ORD_UNIT' };
+        },
+        guard,
+      ),
     );
 
     expect(outcome).toEqual({ result: { id: 'ORD_UNIT' }, executed: true });
     expect(workTx.idempotencyKey.updateMany).toHaveBeenCalledWith({
       where: released.where,
-      data: { state: 'COMPLETED', responseStatus: 201, responseBody: { id: 'ORD_UNIT' } },
+      data: {
+        state: 'COMPLETED',
+        responseStatus: 201,
+        responseBody: { id: 'ORD_UNIT' },
+        expiresAt: expect.any(Date),
+      },
     });
+    // The response lives the retention from now — the lease is over.
+    const { data } = (
+      workTx.idempotencyKey.updateMany.mock.calls[0] as [{ data: { expiresAt: Date } }]
+    )[0];
+    expect(data.expiresAt.getTime()).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
+    // The work ran: there was nothing to replay, so nothing to re-authorize.
+    expect(guard).not.toHaveBeenCalled();
     // Nothing through the store's own client: no second, after-commit write.
     expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
     expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
@@ -324,11 +443,18 @@ describe('IdempotencyStore.execute — the response is stored in the work’s tr
 
     await expect(
       asTenant(() =>
-        store.execute('POST /v1/orders', 'K', {}, 201, async (record) => {
-          // A real transaction rolls the order back with this rejection.
-          await record(workTx as never, { id: 'ORD_UNIT' });
-          return { id: 'ORD_UNIT' };
-        }),
+        store.execute(
+          'POST /v1/orders',
+          'K',
+          {},
+          201,
+          async (record) => {
+            // A real transaction rolls the order back with this rejection.
+            await record(workTx as never, { id: 'ORD_UNIT' });
+            return { id: 'ORD_UNIT' };
+          },
+          stillVisible,
+        ),
       ),
     ).rejects.toThrow('connection reset while recording');
     expect(idempotencyKey.deleteMany).toHaveBeenCalledWith(released);
@@ -341,10 +467,17 @@ describe('IdempotencyStore.execute — the response is stored in the work’s tr
     workTx.idempotencyKey.updateMany.mockResolvedValue({ count: 0 });
 
     const error = await asTenant(() =>
-      store.execute('POST /v1/orders', 'K', {}, 201, async (record) => {
-        await record(workTx as never, { id: 'ORD_UNIT' });
-        return { id: 'ORD_UNIT' };
-      }),
+      store.execute(
+        'POST /v1/orders',
+        'K',
+        {},
+        201,
+        async (record) => {
+          await record(workTx as never, { id: 'ORD_UNIT' });
+          return { id: 'ORD_UNIT' };
+        },
+        stillVisible,
+      ),
     ).catch((thrown: unknown) => thrown);
 
     expect(error).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
@@ -352,16 +485,34 @@ describe('IdempotencyStore.execute — the response is stored in the work’s tr
     expect(idempotencyKey.deleteMany).toHaveBeenCalledWith(released);
   });
 
-  it('a work that returns without recording is a defect, and its claim is kept', async () => {
+  it('a work that returns without recording is a defect, and its claim is kept for the retention', async () => {
     const { store, idempotencyKey } = claimedStore();
+    idempotencyKey.updateMany.mockResolvedValue({ count: 1 });
+    const before = Date.now();
 
     await expect(
       asTenant(() =>
-        store.execute('POST /v1/orders', 'K', {}, 201, () => Promise.resolve({ id: 'ORD_UNIT' })),
+        store.execute(
+          'POST /v1/orders',
+          'K',
+          {},
+          201,
+          () => Promise.resolve({ id: 'ORD_UNIT' }),
+          stillVisible,
+        ),
       ),
     ).rejects.toThrow('did not record its response');
-    // Released, a retry would run the committed work a second time.
+    // Released — or left to lapse with its lease — a retry would run the
+    // committed work a second time.
     expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+    expect(idempotencyKey.updateMany).toHaveBeenCalledWith({
+      where: released.where,
+      data: { expiresAt: expect.any(Date) },
+    });
+    const { data } = (
+      idempotencyKey.updateMany.mock.calls[0] as [{ data: { expiresAt: Date } }]
+    )[0];
+    expect(data.expiresAt.getTime()).toBeGreaterThanOrEqual(before + 24 * 60 * 60 * 1000);
   });
 
   it('releases the claim when the work itself fails, so a corrected retry can run', async () => {
@@ -369,36 +520,91 @@ describe('IdempotencyStore.execute — the response is stored in the work’s tr
     const work = jest.fn().mockRejectedValue(new Error('insufficient stock'));
 
     await expect(
-      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
+      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work, stillVisible)),
     ).rejects.toThrow('insufficient stock');
     expect(idempotencyKey.deleteMany).toHaveBeenCalledWith(released);
     expect(workTx.idempotencyKey.updateMany).not.toHaveBeenCalled();
   });
 
-  it('a replay runs nothing and stores nothing', async () => {
+  it('a release that fails too keeps the original error, and logs nothing of the request (#253)', async () => {
+    // The domain transaction rolled back and the database is now down: the
+    // release fails as well. The caller must get the work's error, not the
+    // release's; the claim lapses with its lease.
+    const { store, idempotencyKey } = claimedStore();
+    idempotencyKey.deleteMany.mockRejectedValue(
+      Object.assign(new Error(`Can't reach database server: ${RAW_KEY}`), { code: 'P1001' }),
+    );
+    const original = RastaError.businessRule('Offer is not available in that quantity');
+    const logged = jest.spyOn(NestLogger.prototype, 'error').mockImplementation(() => undefined);
+
+    try {
+      const error = await asTenant(() =>
+        store.execute(
+          'POST /v1/orders',
+          RAW_KEY,
+          { note: 'SENTINEL-body' },
+          201,
+          () => Promise.reject(original),
+          stillVisible,
+        ),
+      ).catch((thrown: unknown) => thrown);
+
+      expect(error).toBe(original);
+      expect(idempotencyKey.deleteMany).toHaveBeenCalledTimes(1);
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged.mock.calls[0]?.[0]).toEqual({
+        endpoint: 'POST /v1/orders',
+        errorName: 'Error',
+        errorCode: 'P1001',
+      });
+      expect(dump(logged.mock.calls)).not.toContain('SENTINEL');
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  function storeReplaying(responseBody: unknown) {
     const idempotencyKey = {
       create: jest.fn().mockRejectedValue(uniqueViolation),
-      findUnique: jest.fn().mockResolvedValue({
-        requestHash: hashRequestBody({}),
-        state: 'COMPLETED',
-        responseStatus: 201,
-        responseBody: { id: 'ORD_STORED' },
-        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
-      }),
+      findUnique: jest.fn(() =>
+        Promise.resolve({
+          requestHash: sameRequest({}),
+          state: 'COMPLETED',
+          responseStatus: 201,
+          responseBody,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        }),
+      ),
       updateMany: jest.fn(),
       deleteMany: jest.fn(),
     };
-    const store = new IdempotencyStore(withTransaction(idempotencyKey), {
-      MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
-    } as MarketplaceEnv);
+    return { store: new IdempotencyStore(withTransaction(idempotencyKey), ENV), idempotencyKey };
+  }
+
+  it('a replay runs nothing and stores nothing, once the guard has seen the stored response', async () => {
+    const { store, idempotencyKey } = storeReplaying({ id: 'ORD_STORED' });
     const work = jest.fn();
+    const guard = jest.fn(stillVisible);
 
     await expect(
-      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
+      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work, guard)),
     ).resolves.toEqual({ result: { id: 'ORD_STORED' }, executed: false });
+    expect(guard).toHaveBeenCalledWith({ id: 'ORD_STORED' });
     expect(work).not.toHaveBeenCalled();
     expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
     expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a replay the caller may no longer see answers the guard’s refusal, never the stored body (#253)', async () => {
+    const { store } = storeReplaying({ id: 'OFFER_STORED', unitPriceMinor: 'SENTINEL-price' });
+    const refusal = RastaError.notFound('Offer', 'OFFER_STORED');
+
+    const error = await asTenant(() =>
+      store.execute('PATCH /v1/offers/:id', 'K', {}, 200, jest.fn(), () => Promise.reject(refusal)),
+    ).catch((thrown: unknown) => thrown);
+
+    expect(error).toBe(refusal);
+    expect(dump(error)).not.toContain('SENTINEL');
   });
 });
 
