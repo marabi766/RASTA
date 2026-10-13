@@ -49,6 +49,23 @@ If a run is killed or crashes between filing a request and recording its id, the
 next run stops at the check above. Reset the stack (CI never needs this), or
 cancel the named requests yourself, and run again.
 
+## Settlements (`settlements.spec.ts`) — the one scenario that settles
+
+`/settlements` is read-only, so the scenario has to make settlements before it
+can read them. It does that **through the gateway, as ORG-DEH-0001's
+administrator** (top-up → obligation → authorise → settle), which is a ledger
+movement and is why the sentence above ("no browser test may start money moving")
+carries this one exception. Nothing real moves: economic-service's only payment
+provider is the mock one, and the browser job starts it for this spec alone.
+
+- It has no cleanup, because a settlement is final and append-only: each run adds
+  two, found by the ids it just made, so earlier runs on the same stack do not
+  disturb it (the one-run-per-stack rule above still holds).
+- The "another tenant's settlement" check uses ORG-DEH-0002's administrator as
+  the non-party and a settlement ORG-DEH-0001 made to an id (`ORG-E2E-THIRD`) no
+  seeded person belongs to, because the development realm has no third tenant
+  administrator. The service's rule is the same either way.
+
 ## Adding a live scenario
 
 - Record the id of everything the scenario creates and clean up by id, not by

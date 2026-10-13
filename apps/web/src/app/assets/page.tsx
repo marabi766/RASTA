@@ -5,7 +5,7 @@ import { fetchAssets, type AssetListQuery } from '@/server/assets';
 import { canManageAssets } from '@/server/asset-commands';
 import { fetchCurrentUser } from '@/server/identity';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
 import { RegisterAssetForm } from './RegisterAssetForm';
@@ -67,7 +67,7 @@ export default async function AssetsPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/assets" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/assets" />}
     >
       <AssetsScreen
         result={result}

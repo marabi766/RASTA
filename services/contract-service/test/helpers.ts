@@ -584,6 +584,9 @@ export async function cleanup(organizationIds: string[]): Promise<void> {
     });
     // The idempotency keys are the calling organization's — either party's.
     await owner.idempotencyKey.deleteMany({ where: { organizationId: { in: organizationIds } } });
+    await owner.refusalAuditDedupe.deleteMany({
+      where: { organizationId: { in: organizationIds } },
+    });
     await owner.outboxMessage.deleteMany({ where: { organizationId: { in: organizationIds } } });
   } finally {
     await owner.$disconnect();

@@ -2,6 +2,7 @@ import { ulid } from 'ulid';
 import { SENSITIVE_KEYS, REDACTED } from '@rasta/logging';
 import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
+import { toContractRefusalProjection } from './contract-refusal-projection';
 import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-producer-topology';
 
 /**
@@ -258,6 +259,11 @@ export function toAuditEventRecord(
   const rawActorId = envelope.actor ? envelope.actor.id : envelope.producer;
   const actorId = boundOptional(rawActorId, LIMITS.actorId);
 
+  // The one family of published events that records a refusal: contract-service's (S-06). Its
+  // closed action and reason replace the event name and the default SUCCESS; nothing else of the
+  // payload is read.
+  const refusal = toContractRefusalProjection(envelope, delivery);
+
   return {
     ...toEnvelopeProvenance(envelope, delivery),
 
@@ -269,13 +275,18 @@ export function toAuditEventRecord(
 
     organizationId: boundOptional(envelope.tenantId, LIMITS.organizationId),
 
-    action: bound(ACTION_BY_EVENT_NAME[envelope.eventName] ?? envelope.eventName, LIMITS.action),
+    action: bound(
+      refusal?.action ?? ACTION_BY_EVENT_NAME[envelope.eventName] ?? envelope.eventName,
+      LIMITS.action,
+    ),
     resourceType: bound(envelope.aggregateType, LIMITS.resourceType),
     resourceId: boundOptional(envelope.aggregateId, LIMITS.resourceId),
 
-    // A published domain event is a change that already happened. A refusal
-    // never reaches a topic, which is precisely why path B exists.
-    outcome: 'SUCCESS',
+    // A published domain event is a change that already happened — except the contract refusals
+    // above. Every other refusal never reaches a topic, which is why path B exists.
+    outcome: refusal ? 'REFUSED' : 'SUCCESS',
     occurrenceCount: 1,
+    // Absent, not null, on every other path-A record: its hash is unchanged.
+    ...(refusal ? { reason: refusal.reason } : {}),
   };
 }

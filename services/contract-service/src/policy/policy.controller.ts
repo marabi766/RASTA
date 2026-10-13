@@ -39,8 +39,8 @@ const PLATFORM_NOTE =
  * The approval policies a contract's employer is governed by (ADR-068 § 5): who may accept a
  * contract for it. HTTP ↔ DTO and nothing else (AGENTS.md A-10).
  */
-@ApiTags('approval-policies')
-@Controller({ path: 'approval-policies', version: '1' })
+@ApiTags('contract-approval-policies')
+@Controller({ path: 'contract-approval-policies', version: '1' })
 export class PolicyController {
   constructor(
     private readonly policies: PolicyService,

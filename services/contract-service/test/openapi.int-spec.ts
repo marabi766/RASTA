@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import request from 'supertest';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { ulid } from 'ulid';
+import { EventPublisher } from '../src/events/publisher';
 import { buildContractOpenApiDocument, formatDocument } from '../src/openapi/document';
 import { person, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, seedDraft, wire, type Wiring } from './helpers';
@@ -114,6 +115,22 @@ describe('the published OpenAPI contract (real application)', () => {
     await note(post('sign', id, employerToken, { side: 'EMPLOYER' })); // 400
     await note(post('sign', id, undefined, {})); // 401
     await note(post('sign', id, person(employer, ['DRIVER']), {})); // 403
+    // 503: the refusal of a party is an audit record that could not be written.
+    const publisher = api.app.get(EventPublisher);
+    const original = publisher.enqueue.bind(publisher);
+    const failing = jest
+      .spyOn(publisher, 'enqueue')
+      .mockImplementation(async (...args: Parameters<typeof original>) => {
+        if (args[1].eventName === 'CONTRACT_AUTHORITY_REFUSED') throw new Error('outbox down');
+        return original(...args);
+      });
+    try {
+      // On a draft nobody has signed: on `id` the employer's side is already taken.
+      const other = await seedDraft(w, organizations);
+      await note(post('sign', other.id, person(other.employer, ['DRIVER']), {})); // 503
+    } finally {
+      failing.mockRestore();
+    }
     await note(post('sign', id, person(stranger, ['ORGANIZATION_ADMIN']), {})); // 404
     await note(post('sign', id, person(employer, ['ORGANIZATION_ADMIN']), {})); // 409 SIDE_ALREADY_SIGNED
     await note(post('cancel', id, employerToken, { reasonCode: 'BECAUSE' })); // 422
@@ -129,7 +146,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
   it('can produce every documented status of the approval-policy routes except 500', async () => {
     const operations = Object.entries(document.paths ?? {})
-      .filter(([path]) => path.startsWith('/v1/approval-policies'))
+      .filter(([path]) => path.startsWith('/v1/contract-approval-policies'))
       .flatMap(([, item]) =>
         Object.values(item as Record<string, { responses: Record<string, unknown> }>),
       );
@@ -168,14 +185,14 @@ describe('the published OpenAPI contract (real application)', () => {
       payload: object,
       key: string | undefined = `oas-${ulid()}`,
     ) => {
-      const r = http().post('/v1/approval-policies');
+      const r = http().post('/v1/contract-approval-policies');
       if (token) r.set('authorization', `Bearer ${token}`);
       if (key) r.set('idempotency-key', key);
       return r.send(payload);
     };
     const act = (token: string, id: string, verb: string, payload: object) =>
       http()
-        .post(`/v1/approval-policies/${id}/${verb}`)
+        .post(`/v1/contract-approval-policies/${id}/${verb}`)
         .set('authorization', `Bearer ${token}`)
         .send(payload);
 
@@ -209,15 +226,17 @@ describe('the published OpenAPI contract (real application)', () => {
     await note(act(unionToken, written.body.id, 'retire', { expectedVersion: 2 })); // 422 (not ACTIVE)
     await note(act(unionToken, `APL_${ulid()}`, 'submit', { expectedVersion: 1 })); // 404
     await note(act(unionToken, written.body.id, 'submit', { expectedVersion: 99 })); // 409 version
-    await note(http().get('/v1/approval-policies').set('authorization', `Bearer ${unionToken}`)); // 200
+    await note(
+      http().get('/v1/contract-approval-policies').set('authorization', `Bearer ${unionToken}`),
+    ); // 200
     await note(
       http()
-        .get(`/v1/approval-policies/${written.body.id}`)
+        .get(`/v1/contract-approval-policies/${written.body.id}`)
         .set('authorization', `Bearer ${platformToken}`),
     ); // 200
     await note(
       http()
-        .get('/v1/approval-policies/pending-platform-approval')
+        .get('/v1/contract-approval-policies/pending-platform-approval')
         .set('authorization', `Bearer ${platformToken}`),
     ); // 200
     await note(act(platformToken, written.body.id, 'approve', { expectedVersion: 2 })); // 200
