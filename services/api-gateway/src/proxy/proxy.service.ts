@@ -4,6 +4,7 @@ import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import type { GatewayEnv } from '../config/env';
 import {
   TENDER_OPENING_ROUTES,
+  deadlineMethodOf,
   serviceUrl,
   type ServiceName,
   type ServiceUrls,
@@ -114,7 +115,7 @@ export class ProxyService {
 
   /** How long this request may wait for its upstream. */
   deadlineFor(request: Pick<ProxyRequest, 'service' | 'method' | 'path'>): number {
-    const method = request.method.toUpperCase();
+    const method = deadlineMethodOf(request.method);
     const route = this.options.routeDeadlines?.find(
       (candidate) =>
         candidate.service === request.service &&

@@ -505,6 +505,8 @@ export const REFUSAL_REASONS: Record<string, RouteRefusals> = {
       'BIDDER_NOT_ELIGIBLE',
       'UNKNOWN_CRITERION',
       'BID_TOO_LARGE',
+      'TENDER_RECEIPT_LIMIT',
+      'TENDER_BID_LIMIT',
     ],
   },
   'PUT /v1/tenders/{id}/bids/{bidId}': {
@@ -516,6 +518,8 @@ export const REFUSAL_REASONS: Record<string, RouteRefusals> = {
       'BID_NOT_SUBMITTED',
       'UNKNOWN_CRITERION',
       'BID_TOO_LARGE',
+      'BID_REVISION_LIMIT',
+      'TENDER_RECEIPT_LIMIT',
     ],
   },
   'POST /v1/tenders/{id}/bids/{bidId}/withdraw': {
@@ -528,6 +532,7 @@ export const REFUSAL_REASONS: Record<string, RouteRefusals> = {
       'PROPOSAL_REQUIRED',
       'SECOND_PERSON_REQUIRED',
       'INTEGRITY',
+      'TENDER_OVER_LIMIT',
     ],
   },
   'POST /v1/tenders/{id}/open-bids/proposal': { opening: ['CONFLICT_OF_INTEREST', 'NOT_CLOSED'] },

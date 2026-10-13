@@ -206,6 +206,11 @@ export class TenderOpenRepository {
     return tx.bid.findMany({ where: { tenderId }, orderBy: { id: 'asc' } });
   }
 
+  /** How many bids stand (SUBMITTED): what an opening would decrypt. A count, no bid is read. */
+  countStandingBids(tx: ExtendedPrismaClient, tenderId: string): Promise<number> {
+    return tx.bid.count({ where: { tenderId, status: 'SUBMITTED' } });
+  }
+
   /** Every organization that bid on the tender, withdrawn bids included: for the conflict of interest. */
   async listBidderOrganizationIds(tx: ExtendedPrismaClient, tenderId: string): Promise<string[]> {
     const rows = await tx.bid.findMany({

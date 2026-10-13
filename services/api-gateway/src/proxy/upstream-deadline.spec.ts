@@ -144,7 +144,7 @@ async function startGateway(upstream: Upstream, env: GatewayEnv) {
         },
       );
       req.on('error', reject);
-      req.end(method === 'GET' ? undefined : '{}');
+      req.end(method === 'GET' || method === 'HEAD' ? undefined : '{}');
     });
 
   return {
@@ -182,6 +182,10 @@ describe('the tender opening routes wait for construction-service (Codex r2 on #
     ['GET', '/v1/tenders/TND_1/bids'],
     ['GET', '/v1/tenders/TND_1/bids?limit=50'],
     ['POST', '/v1/tenders/TND_1/open-bids/'],
+    // Codex r3 on #250, F2: construction-service routes case-insensitively.
+    ['POST', '/v1/tenders/TND_1/OPEN-BIDS'],
+    ['POST', '/v1/tenders/TND_1/Open-Bids/'],
+    ['GET', '/v1/tenders/TND_1/BIDS'],
   ])(
     '%s %s: answered after the default deadline, and no failure is counted',
     async (method, path) => {
@@ -213,6 +217,32 @@ describe('the tender opening routes wait for construction-service (Codex r2 on #
 
     expect(response.status).toBe(504);
     expect(JSON.parse(response.body)).toEqual({ code: 'UPSTREAM_TIMEOUT' });
+    expect(response.elapsedMs).toBeLessThan(SLOW_UPSTREAM_MS);
+  });
+
+  // A HEAD answer has no body: only the status and the time are compared.
+  it.each(['/v1/tenders/TND_1/bids', '/v1/tenders/TND_1/Bids/'])(
+    'HEAD %s: the GET handler runs upstream, so it waits as GET does (Codex r3 on #250, F2)',
+    async (path) => {
+      const response = await gateway.send('HEAD', path);
+
+      expect(response.status).toBe(200);
+      expect(response.elapsedMs).toBeGreaterThanOrEqual(SLOW_UPSTREAM_MS - 50);
+      expect(upstream.received).toEqual([`HEAD ${path}`]);
+      expect(gateway.proxy.circuitStates().construction).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['HEAD', '/v1/tenders/TND_1/bids/BID_1'],
+    ['HEAD', '/v1/tenders/TND_1/open-bids'],
+    // Reach no handler upstream (percent-encoded letter, doubled slash): nothing slow to wait for.
+    ['POST', '/v1/tenders/TND_1/open%2Dbids'],
+    ['GET', '/v1/tenders/TND_1//bids'],
+  ])('%s %s: keeps the default deadline', async (method, path) => {
+    const response = await gateway.send(method, path);
+
+    expect(response.status).toBe(504);
     expect(response.elapsedMs).toBeLessThan(SLOW_UPSTREAM_MS);
   });
 
@@ -252,6 +282,88 @@ describe('the deadlines AppModule configures (proxyOptionsOf)', () => {
     expect(
       proxy.deadlineFor({ service: 'contract', method: 'GET', path: '/v1/tenders/TND_1/bids' }),
     ).toBe(3_000);
+  });
+
+  it('matches them as the upstream routes them: any case, a trailing slash, HEAD as GET (Codex r3 on #250, F2)', () => {
+    const proxy = proxyFor();
+    const at = (method: string, path: string) =>
+      proxy.deadlineFor({ service: 'construction', method, path });
+
+    expect(at('POST', '/v1/tenders/T/OPEN-BIDS')).toBe(60_000);
+    expect(at('POST', '/v1/TENDERS/T/Open-Bids/')).toBe(60_000);
+    expect(at('GET', '/v1/tenders/T/BIDS/')).toBe(60_000);
+    expect(at('HEAD', '/v1/tenders/T/bids')).toBe(60_000);
+    expect(at('head', '/v1/tenders/T/Bids')).toBe(60_000);
+    // HEAD is GET: GET open-bids is no slow route, nor is POST bids under HEAD.
+    expect(at('HEAD', '/v1/tenders/T/open-bids')).toBe(3_000);
+    expect(at('HEAD', '/v1/tenders/T/bids/BID_1')).toBe(3_000);
+    expect(at('OPTIONS', '/v1/tenders/T/bids')).toBe(3_000);
+    expect(at('POST', '/v1/tenders/T/open%2Dbids')).toBe(3_000);
+    expect(at('POST', '/v1/tenders/T//open-bids')).toBe(3_000);
+  });
+
+  /**
+   * The rule the deadline must keep: a request that reaches one of the two handlers in an Express 5
+   * router declared as construction-service declares them gets the tender deadline, and no other
+   * request does. Asked of the router itself, so a change in its matching shows here.
+   */
+  it('gives the tender deadline exactly to the requests an Express router sends to those handlers', async () => {
+    // Marked by a header, not the status: Express answers OPTIONS itself (200, `Allow`), and a
+    // HEAD answer has no body.
+    const slowHandler = (
+      _req: never,
+      res: { set: (n: string, v: string) => { end: () => void } },
+    ) => res.set('x-slow-handler', '1').end();
+    const upstreamLike = new ExpressAdapter().getInstance();
+    upstreamLike.post('/v1/tenders/:id/open-bids', slowHandler);
+    upstreamLike.get('/v1/tenders/:id/bids', slowHandler);
+    const server = createServer(upstreamLike);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const reachesSlowHandler = (method: string, path: string) =>
+      new Promise<boolean>((resolve, reject) => {
+        const req = httpRequest({ host: '127.0.0.1', port, method, path }, (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.headers['x-slow-handler'] === '1'));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+
+    const proxy = proxyFor();
+    const variants: [string, string][] = [];
+    for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      for (const path of [
+        '/v1/tenders/T/open-bids',
+        '/v1/tenders/T/OPEN-BIDS',
+        '/v1/tenders/T/Open-Bids/',
+        '/v1/tenders/T/open-bids//',
+        '/v1/tenders/T/open%2Dbids',
+        '/v1/tenders/T//open-bids',
+        '/v1/tenders/T/open-bids/proposal',
+        '/v1/tenders/T/bids',
+        '/v1/tenders/T/BIDS',
+        '/v1/tenders/T/bids/',
+        '/v1/tenders/T/Bids/',
+        '/v1/tenders/T/bids.json',
+        '/v1/tenders/T/bids/mine',
+        '/v1/tenders/T%2Fx/bids',
+      ]) {
+        variants.push([method, path]);
+      }
+    }
+    try {
+      for (const [method, path] of variants) {
+        const slow = await reachesSlowHandler(method, path);
+        expect([
+          method,
+          path,
+          proxy.deadlineFor({ service: 'construction', method, path }),
+        ]).toEqual([method, path, slow ? 60_000 : 3_000]);
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it('follows GATEWAY_TENDER_OPEN_TIMEOUT_MS for those two routes only', () => {

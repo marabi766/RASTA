@@ -63,6 +63,7 @@ export const OPENING_REFUSALS = [
   'PROPOSAL_REQUIRED',
   'SECOND_PERSON_REQUIRED',
   'NO_PROPOSAL',
+  'TENDER_OVER_LIMIT',
 ] as const;
 export type OpeningRefusal = (typeof OPENING_REFUSALS)[number];
 
@@ -140,7 +141,9 @@ interface Opened {
  * reuses (`VerifiedReceipts`), not once per bid: at the permitted caps that was 200 walks of
  * 10,000 links inside the transaction (Codex r1 on #250, R2). The transaction runs under
  * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS`, not Prisma's 5 s default; the worst case the default
- * caps allow is opened within it in `tender-open-scale.int-spec.ts`.
+ * caps allow is opened within it in `tender-open-scale.int-spec.ts`. A tender with more standing
+ * bids than `CONSTRUCTION_TENDER_MAX_STANDING_BIDS` (the cap lowered after they came in) is outside
+ * that bound and is refused `TENDER_OVER_LIMIT` before the evidence is read (Codex r3 on #250, F1).
  *
  * ## The key
  *
@@ -249,6 +252,9 @@ export class TenderOpenService {
       let evidence: Evidence | undefined;
       let people: ApprovalPeople | undefined;
       if (found.status === 'CLOSED') {
+        // Before anything is asked, written or decrypted: an opening the timeout cannot finish is
+        // refused at once, not rolled back after 30 s on every retry (Codex r3 on #250, F1).
+        await this.assertWithinStandingLimit(tenderId);
         people = await this.readApprovalPeople(principal, found);
         // A proposer who now belongs to a bidder, or who may no longer open these bids, neither
         // stands nor blocks: the proposal is cleared.
@@ -344,9 +350,14 @@ export class TenderOpenService {
     // It was PUBLISHED when the evidence was to be read, and has been closed since: ask again.
     if (!evidence) throw RastaError.optimisticLockFailed('Tender', tenderId);
 
+    const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
+    // The backstop of the check before the evidence read, under the lock and before any decryption.
+    if (standing.length > this.env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS) {
+      throw this.refused('TENDER_OVER_LIMIT');
+    }
+
     await this.assertAgrees(tx, tenderId, evidence.chain, bids);
 
-    const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
     // The point of the whole exercise: every standing bid is opened against the evidence
     // and what it says is checked against its commitment. Nothing is kept of the content.
     await this.withPrivateKey(tx, tenderId, standing.length > 0, (privateKey, keyId) => {
@@ -840,6 +851,23 @@ export class TenderOpenService {
     throw integrityRefusal();
   }
 
+  /**
+   * Refuses to open a tender with more standing bids than `CONSTRUCTION_TENDER_MAX_STANDING_BIDS`
+   * (Codex r3 on #250, F1). Submission never admits more, but a tender can exceed the cap if it was
+   * lowered after the bids came in; opening it would decrypt more than the timeout was sized for,
+   * roll back, and do the same on every retry. A fixed refusal with no count in it (`TENDER_OVER_LIMIT`,
+   * like `TENDER_BID_LIMIT`), before the evidence is read, a proposal cleared or a key unwrapped.
+   * What becomes of such a tender is an operator's decision (Q-117); nothing here decides it.
+   */
+  private async assertWithinStandingLimit(tenderId: string): Promise<void> {
+    const standing = await this.prisma.transaction((tx) =>
+      this.opens.countStandingBids(tx, tenderId),
+    );
+    if (standing > this.env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS) {
+      throw this.refused('TENDER_OVER_LIMIT');
+    }
+  }
+
   /** The conflict check before anything is said about the tender's state: the bidders are read on their own. */
   private async assertNotConflicted(principal: Principal, tenderId: string): Promise<void> {
     const bidders = await this.prisma.transaction((tx) =>
@@ -1219,7 +1247,8 @@ export class TenderOpenService {
       reason === 'NOT_OPENED' ||
       reason === 'PROPOSAL_REQUIRED' ||
       reason === 'SECOND_PERSON_REQUIRED' ||
-      reason === 'NO_PROPOSAL'
+      reason === 'NO_PROPOSAL' ||
+      reason === 'TENDER_OVER_LIMIT'
     ) {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
     }
