@@ -190,29 +190,45 @@ describe('placing an order — what the service answers', () => {
     });
   });
 
-  it('carries the correlation id of a forbidden or failed attempt', async () => {
+  it('carries the correlation id of a forbidden attempt', async () => {
     placeOrder.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'COR_1' });
     expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD))).toEqual({
       kind: 'FORBIDDEN',
       correlationId: 'COR_1',
     });
-
-    placeOrder.mockResolvedValue({ kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_2' });
-    expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD))).toEqual({
-      kind: 'FAILED',
-      status: 503,
-      correlationId: 'COR_2',
-    });
   });
 
   it.each(['UNKNOWN_OUTCOME', 'IN_PROGRESS'])(
-    'never says nothing was ordered after %s',
+    'never says nothing was ordered after %s, and keeps the values and the submission id',
     async (kind) => {
       placeOrder.mockResolvedValue({ kind, retryAfterSeconds: 1, correlationId: 'COR_3' });
-      expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD))).toEqual({
-        kind: 'UNCONFIRMED',
-        correlationId: 'COR_3',
-      });
+      const submission = mintSubmissionId(SESSION);
+      expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }))).toEqual(
+        {
+          kind: 'UNCONFIRMED',
+          correlationId: 'COR_3',
+          submissionId: submission,
+          values: GOOD,
+        },
+      );
     },
   );
+
+  it('retries an uncertain order with the same body and the same submission id, then goes to the order', async () => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_4' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    expect(first).toMatchObject({ kind: 'UNCONFIRMED' });
+    if (first.kind !== 'UNCONFIRMED') return;
+
+    // The retry posts exactly what the state kept: the form's hidden fields.
+    const retry = formData(first.values, { submission: first.submissionId });
+    await expect(submitPlaceOrder(first, retry)).rejects.toThrow(/NEXT_REDIRECT/);
+
+    expect(placeOrder).toHaveBeenCalledTimes(2);
+    const [firstCall, secondCall] = placeOrder.mock.calls as [unknown[], unknown[]];
+    expect(secondCall[1]).toEqual(firstCall[1]);
+    expect(secondCall[2]).toBe(submission);
+    expect(firstCall[2]).toBe(submission);
+  });
 });

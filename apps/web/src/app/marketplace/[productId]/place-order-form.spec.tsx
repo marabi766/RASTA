@@ -52,6 +52,7 @@ function renderForm(state: PlaceOrderFormState = { kind: 'IDLE' }, isPending = f
       offers={[OFFER, { ...OFFER, id: 'OFR_2', supplierOrganizationId: 'ORG-DEH-0003' }]}
       csrfToken={CSRF}
       submissionId={SUBMISSION}
+      newOrderHref="/marketplace/PRD_1"
     />,
   );
 }
@@ -94,7 +95,7 @@ describe('PlaceOrderForm', () => {
     const { getByText, container } = renderForm({
       kind: 'INVALID',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_1', quantity: '0', note: '' },
+      values: { offerId: 'OFR_1', quantity: '0' },
       fieldErrors: { quantity: 'تعداد باید دست‌کم ۱ باشد' },
       message: null,
     });
@@ -106,7 +107,7 @@ describe('PlaceOrderForm', () => {
     const { container } = renderForm({
       kind: 'INVALID',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_2', quantity: '5', note: '' },
+      values: { offerId: 'OFR_2', quantity: '5' },
       fieldErrors: {},
       message: 'سفارش با شرایط کنونی این پیشنهاد جور نیست',
     });
@@ -118,7 +119,7 @@ describe('PlaceOrderForm', () => {
     const { container } = renderForm({
       kind: 'INVALID',
       submissionId: 'sub_BBBBBBBBBBBBBBBBBBBB',
-      values: { offerId: 'OFR_1', quantity: '0', note: '' },
+      values: { offerId: 'OFR_1', quantity: '0' },
       fieldErrors: {},
       message: null,
     });
@@ -129,7 +130,7 @@ describe('PlaceOrderForm', () => {
     const { getByText } = renderForm({
       kind: 'INVALID',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_1', quantity: '1', note: '' },
+      values: { offerId: 'OFR_1', quantity: '1' },
       fieldErrors: {},
       message: 'سازمان شما نمی‌تواند از پیشنهاد خودش سفارش بدهد.',
     });
@@ -140,7 +141,7 @@ describe('PlaceOrderForm', () => {
     const { getByText } = renderForm({
       kind: 'NOT_FOUND',
       submissionId: SUBMISSION,
-      values: { offerId: 'OFR_1', quantity: '1', note: '' },
+      values: { offerId: 'OFR_1', quantity: '1' },
     });
     expect(getByText(/این پیشنهاد دیگر در دسترس نیست و سفارشی ثبت نشد/)).toBeInTheDocument();
   });
@@ -154,19 +155,47 @@ describe('PlaceOrderForm', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows the correlation id on a forbidden or failed attempt', () => {
+  it('shows the correlation id on a forbidden attempt', () => {
     expect(
       renderForm({ kind: 'FORBIDDEN', correlationId: 'COR_1' }).getByText(/COR_1/),
     ).toBeInTheDocument();
-    expect(
-      renderForm({ kind: 'FAILED', status: 503, correlationId: 'COR_2' }).getByText(/COR_2/),
-    ).toBeInTheDocument();
   });
 
-  it('never claims nothing was ordered when the outcome is unknown', () => {
-    const { container } = renderForm({ kind: 'UNCONFIRMED', correlationId: 'COR_3' });
-    expect(container.textContent).toMatch(/نتوانستیم تأیید کنیم/);
-    expect(container.textContent).not.toMatch(/سفارشی ثبت نشد/);
+  describe('an unconfirmed order', () => {
+    const UNCONFIRMED: PlaceOrderFormState = {
+      kind: 'UNCONFIRMED',
+      correlationId: 'COR_3',
+      submissionId: 'sub_CCCCCCCCCCCCCCCCCCCC',
+      values: { offerId: 'OFR_2', quantity: '5' },
+    };
+
+    it('never claims nothing was ordered, and links to the orders list', () => {
+      const { container, getByRole } = renderForm(UNCONFIRMED);
+      expect(container.textContent).toMatch(/ممکن است سفارش ثبت شده باشد/);
+      expect(container.textContent).not.toMatch(/سفارش ثبت نشد|سفارشی ثبت نشد/);
+      expect(container.textContent).toContain('COR_3');
+      expect(getByRole('link', { name: /فهرست سفارش/ })).toHaveAttribute('href', '/orders');
+    });
+
+    it('retries with the kept values and the kept submission id, not the page’s', () => {
+      const { container, getByRole } = renderForm(UNCONFIRMED);
+      expect(container.querySelector('[name="submission"]')).toHaveValue(
+        'sub_CCCCCCCCCCCCCCCCCCCC',
+      );
+      expect(container.querySelector('[name="offerId"]')).toHaveValue('OFR_2');
+      expect(container.querySelector('[name="quantity"]')).toHaveValue('5');
+      expect(container.querySelector('[name="csrf"]')).toHaveValue(CSRF);
+      expect(getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
+    });
+
+    it('offers a new order as a separate, labelled action — a navigation, not a submit', () => {
+      const { getByRole, getAllByRole } = renderForm(UNCONFIRMED);
+      expect(getByRole('link', { name: 'شروع سفارش تازه' })).toHaveAttribute(
+        'href',
+        '/marketplace/PRD_1',
+      );
+      expect(getAllByRole('button')).toHaveLength(1);
+    });
   });
 
   it('disables submission while pending', () => {
@@ -186,12 +215,20 @@ describe('PlaceOrderForm', () => {
       {
         kind: 'INVALID',
         submissionId: SUBMISSION,
-        values: { offerId: 'OFR_1', quantity: '0', note: '' },
+        values: { offerId: 'OFR_1', quantity: '0' },
         fieldErrors: { quantity: 'تعداد باید دست‌کم ۱ باشد', offerId: 'پیشنهاد را انتخاب کنید' },
         message: 'پیام',
       },
     ],
-    ['unconfirmed', { kind: 'UNCONFIRMED', correlationId: 'COR_3' }],
+    [
+      'unconfirmed',
+      {
+        kind: 'UNCONFIRMED',
+        correlationId: 'COR_3',
+        submissionId: SUBMISSION,
+        values: { offerId: 'OFR_1', quantity: '2' },
+      },
+    ],
   ])('has no accessibility violations (%s)', async (_name, state) => {
     const { container } = renderForm(state);
     expect(await axe(container)).toHaveNoViolations();

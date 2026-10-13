@@ -1,4 +1,3 @@
-import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { PlaceOrderField, PlaceOrderFormValues } from '@/lib/place-order-fields';
 
 /**
@@ -29,7 +28,16 @@ export type PlaceOrderFormState =
       readonly submissionId: string;
       readonly values: PlaceOrderFormValues;
     }
-  | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
-  | UnconfirmedWriteState;
+  /**
+   * Sent, maybe committed, not confirmed: a 5xx, a timeout, an in-flight 409.
+   * Carries the values and the submission id so "retry the same request" sends
+   * the same body under the same key; only "start a new order" mints another.
+   */
+  | {
+      readonly kind: 'UNCONFIRMED';
+      readonly correlationId: string;
+      readonly submissionId: string;
+      readonly values: PlaceOrderFormValues;
+    };
 
 export const IDLE_PLACE_ORDER_FORM: PlaceOrderFormState = { kind: 'IDLE' };

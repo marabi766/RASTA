@@ -169,7 +169,12 @@ const CASES = [
     form: 'place order',
     select: 'offerId',
     mount: () => (
-      <PlaceOrderForm offers={PLACE_ORDER_OFFERS} csrfToken={CSRF} submissionId={SUBMISSION} />
+      <PlaceOrderForm
+        offers={PLACE_ORDER_OFFERS}
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        newOrderHref="/marketplace/PRD_1"
+      />
     ),
   },
   {

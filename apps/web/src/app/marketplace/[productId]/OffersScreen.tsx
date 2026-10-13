@@ -139,10 +139,14 @@ function OfferRows({ offers }: { offers: OffersPage }) {
 function OrderSection({
   offers,
   ordering,
+  productId,
 }: {
   offers: OffersPage;
   ordering: NonNullable<OffersScreenProps['ordering']>;
+  productId: string;
 }) {
+  // A plain link back to this page: a full navigation, so a new submission id is minted.
+  const newOrderHref = `/marketplace/${encodeURIComponent(productId)}`;
   // An organization cannot order from itself; the service refuses it, and
   // offering the choice only to refuse it would be a form built to fail.
   const orderable = offers.items.filter(
@@ -161,6 +165,7 @@ function OrderSection({
           offers={orderable}
           csrfToken={ordering.csrfToken}
           submissionId={ordering.mintSubmissionId()}
+          newOrderHref={newOrderHref}
         />
       )}
     </Section>
@@ -222,7 +227,7 @@ export function OffersScreen({ product, offers, productId, sort, ordering }: Off
       ) : null}
 
       {product.kind === 'OK' && offers.kind === 'OK' && ordering ? (
-        <OrderSection offers={offers.data} ordering={ordering} />
+        <OrderSection offers={offers.data} ordering={ordering} productId={productId} />
       ) : null}
     </>
   );

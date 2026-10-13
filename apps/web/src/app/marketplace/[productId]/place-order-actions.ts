@@ -64,13 +64,12 @@ export async function submitPlaceOrder(
       return { kind: 'FORBIDDEN', correlationId: result.correlationId };
     case 'NOT_FOUND':
       return { kind: 'NOT_FOUND', submissionId, values };
-    case 'UNAVAILABLE':
-      return { kind: 'FAILED', status: result.status, correlationId: result.correlationId };
     case 'IN_PROGRESS':
     case 'UNKNOWN_OUTCOME':
       // Sent, maybe committed, not confirmed: never "nothing was ordered". In
       // progress is the same unknown: another request with this submission id
-      // is still in flight.
-      return { kind: 'UNCONFIRMED', correlationId: result.correlationId };
+      // is still in flight. The values and the id come back so the retry is the
+      // same request: same body, same key; the service replays or completes it.
+      return { kind: 'UNCONFIRMED', correlationId: result.correlationId, submissionId, values };
   }
 }

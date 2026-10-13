@@ -8,6 +8,10 @@
  *
  * ## What the form does not do
  *
+ * It sends **no note**. marketplace-service accepts one but never stores it (no
+ * column), so a field for it would promise the supplier something the platform
+ * drops. It returns when the service keeps it.
+ *
  * It sends **no price**. marketplace-service prices an order from its own
  * current offers and refuses a body that carries one (`createOrderSchema` is
  * `.strict()`, ADR-037 § 5). The price a person saw in the table is therefore
@@ -16,7 +20,7 @@
  */
 
 /** `createOrderSchema` — one line per order from this form; the cart is deferred (ADR-037 § 3). */
-export const PLACE_ORDER_FIELDS = ['offerId', 'quantity', 'note'] as const;
+export const PLACE_ORDER_FIELDS = ['offerId', 'quantity'] as const;
 
 export type PlaceOrderField = (typeof PLACE_ORDER_FIELDS)[number];
 export type PlaceOrderFormValues = Readonly<Record<PlaceOrderField, string>>;
@@ -24,11 +28,9 @@ export type PlaceOrderFormValues = Readonly<Record<PlaceOrderField, string>>;
 export const EMPTY_PLACE_ORDER_FORM: PlaceOrderFormValues = {
   offerId: '',
   quantity: '',
-  note: '',
 };
 
 /** Copied from marketplace-service `createOrderSchema`; the service enforces them again. */
 export const PLACE_ORDER_LIMITS = {
   quantity: { max: 1_000_000 },
-  note: { max: 1000 },
 } as const;

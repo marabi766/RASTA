@@ -1,16 +1,12 @@
 'use client';
 
+import Link from 'next/link';
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
-import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
-import {
-  EMPTY_PLACE_ORDER_FORM,
-  PLACE_ORDER_LIMITS as LIMITS,
-  type PlaceOrderFormValues,
-} from '@/lib/place-order-fields';
+import { EMPTY_PLACE_ORDER_FORM, type PlaceOrderFormValues } from '@/lib/place-order-fields';
 import type { Offer } from '@/server/marketplace';
 
 import { submitPlaceOrder } from './place-order-actions';
@@ -39,12 +35,28 @@ export function PlaceOrderForm({
   offers,
   csrfToken,
   submissionId,
+  newOrderHref,
 }: {
   offers: readonly Offer[];
   csrfToken: string;
   submissionId: string;
+  /** This page's own address: following it is a full navigation that mints a new submission id. */
+  newOrderHref: string;
 }) {
   const [state, action, pending] = useActionState(submitPlaceOrder, IDLE_PLACE_ORDER_FORM);
+
+  if (state.kind === 'UNCONFIRMED') {
+    return (
+      <UnconfirmedOrder
+        state={state}
+        action={action}
+        pending={pending}
+        csrfToken={csrfToken}
+        offers={offers}
+        newOrderHref={newOrderHref}
+      />
+    );
+  }
 
   const kept = state.kind === 'INVALID' || state.kind === 'NOT_FOUND';
   const values: PlaceOrderFormValues = kept ? state.values : EMPTY_PLACE_ORDER_FORM;
@@ -103,19 +115,6 @@ export function PlaceOrderForm({
         )}
       </Field>
 
-      <Field label="یادداشت" hint="اختیاری؛ برای تأمین‌کننده" error={errors.note}>
-        {(control) => (
-          <textarea
-            {...control}
-            name="note"
-            rows={2}
-            defaultValue={values.note}
-            maxLength={LIMITS.note.max}
-            className={controlClassName}
-          />
-        )}
-      </Field>
-
       <div>
         <Button type="submit" disabled={pending}>
           {pending ? 'در حال ثبت…' : 'ثبت سفارش'}
@@ -156,17 +155,66 @@ function FormBanner({ state }: { state: PlaceOrderFormState }) {
     );
   }
 
-  if (state.kind === 'UNCONFIRMED') {
-    return <UnconfirmedWriteAlert correlationId={state.correlationId} />;
-  }
-
-  if (state.kind === 'FAILED') {
-    return (
-      <Alert tone="danger">
-        سفارش ثبت نشد. می‌توانید دوباره بفرستید. کد پیگیری: {state.correlationId}
-      </Alert>
-    );
-  }
-
   return null;
+}
+
+/**
+ * Sent, maybe placed, not confirmed. The service stores its idempotency answer
+ * after the order's transaction, so even a 5xx can follow a committed order —
+ * this never says "not placed". The retry re-sends the kept values under the kept
+ * submission id (the service replays or completes the first request); starting a
+ * new order is a separate, labelled action and the only one that mints a new id.
+ */
+function UnconfirmedOrder({
+  state,
+  action,
+  pending,
+  csrfToken,
+  offers,
+  newOrderHref,
+}: {
+  state: Extract<PlaceOrderFormState, { kind: 'UNCONFIRMED' }>;
+  action: (form: FormData) => void;
+  pending: boolean;
+  csrfToken: string;
+  offers: readonly Offer[];
+  newOrderHref: string;
+}) {
+  const offer = offers.find((candidate) => candidate.id === state.values.offerId);
+  return (
+    <form action={action} aria-labelledby="place-order-heading" className="flex flex-col gap-4">
+      <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
+      <input type="hidden" name={SUBMISSION_FIELD} value={state.submissionId} />
+      <input type="hidden" name="offerId" value={state.values.offerId} />
+      <input type="hidden" name="quantity" value={state.values.quantity} />
+
+      <h3 id="place-order-heading" className="text-base font-medium">
+        ثبت سفارش
+      </h3>
+      <Alert tone="warning">
+        نتوانستیم تأیید کنیم که سفارش ثبت شد یا نه؛ ممکن است سفارش ثبت شده باشد. پیش از هر کار دیگر،{' '}
+        <Link href="/orders" className="underline">
+          فهرست سفارش‌های
+        </Link>{' '}
+        خود را ببینید. کد پیگیری: {state.correlationId}
+      </Alert>
+      <p className="text-sm text-content-muted">
+        {offer ? `${offer.supplierOrganizationId} — ` : ''}
+        تعداد {toPersianDigits(state.values.quantity)}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" disabled={pending}>
+          {pending ? 'در حال ارسال…' : 'ارسال دوبارهٔ همین درخواست'}
+        </Button>
+        {/* A full navigation: the page mints a fresh submission id. */}
+        <a href={newOrderHref} className="underline self-center text-sm">
+          شروع سفارش تازه
+        </a>
+      </div>
+      <p className="text-sm text-content-muted">
+        «ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال می‌فرستد؛ اگر سفارش پیش‌تر ثبت شده باشد،
+        همان سفارش برمی‌گردد و سفارش دومی ساخته نمی‌شود. «شروع سفارش تازه» درخواست جدیدی است.
+      </p>
+    </form>
+  );
 }

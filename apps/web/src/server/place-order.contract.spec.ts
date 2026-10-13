@@ -82,26 +82,25 @@ describe('the body', () => {
     expect(schema).toContain('quantity:z.number().int().positive()');
   });
 
-  it('caps the quantity and the note where the portal does', () => {
+  it('caps the quantity where the portal does', () => {
     expect(PLACE_ORDER_LIMITS.quantity.max).toBe(1_000_000);
     expect(schema).toContain('.max(1_000_000)');
-    expect(schema).toContain(`note:plainText().max(${PLACE_ORDER_LIMITS.note.max}).optional()`);
   });
 
-  it('is what the portal sends: every form field maps to one of these, and nothing else', () => {
-    expect([...PLACE_ORDER_FIELDS].sort()).toEqual(['note', 'offerId', 'quantity']);
+  it('is what the portal sends: lines only — the note the schema accepts is not persisted, so not sent', () => {
+    expect([...PLACE_ORDER_FIELDS].sort()).toEqual(['offerId', 'quantity']);
     const parsed = parsePlaceOrderForm(
       placeOrderFormValues(
         (() => {
           const data = new FormData();
           data.set('offerId', 'OFR_1');
           data.set('quantity', '2');
-          data.set('note', 'x');
+          data.set('note', 'x'); // a posted note is ignored, not forwarded
           return data;
         })(),
       ),
     );
-    expect(parsed.ok && Object.keys(parsed.request).sort()).toEqual(['lines', 'note']);
+    expect(parsed.ok && Object.keys(parsed.request).sort()).toEqual(['lines']);
     expect(parsed.ok && Object.keys(parsed.request.lines[0]!).sort()).toEqual([
       'offerId',
       'quantity',

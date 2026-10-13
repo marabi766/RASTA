@@ -36,7 +36,7 @@ function form(fields: Record<string, string>): FormData {
   return data;
 }
 
-const values = (fields: Partial<Record<'offerId' | 'quantity' | 'note', string>>) => ({
+const values = (fields: Partial<Record<'offerId' | 'quantity', string>>) => ({
   ...EMPTY_PLACE_ORDER_FORM,
   ...fields,
 });
@@ -81,16 +81,13 @@ describe('parsing the form', () => {
     });
   });
 
-  it('carries a note when there is one and leaves it out when blank', () => {
-    const withNote = parsePlaceOrderForm(
-      values({ offerId: 'OFR_1', quantity: '3', note: 'تحویل صبح' }),
-    );
-    expect(withNote).toMatchObject({ ok: true, request: { note: 'تحویل صبح' } });
-
-    const blank = parsePlaceOrderForm(values({ offerId: 'OFR_1', quantity: '3', note: '   ' }));
-    expect(blank).toMatchObject({ ok: true });
-    expect(blank.ok && 'note' in blank.request).toBe(false);
-  });
+  it.each(['OFR_‮1', 'OFR_‏1', 'OFR_\u00001', 'OFR_\n1'])(
+    'refuses an offer id with a bidi or control character (%j)',
+    (offerId) => {
+      const parsed = parsePlaceOrderForm(values({ offerId, quantity: '1' }));
+      expect(parsed).toEqual({ ok: false, fieldErrors: { offerId: 'پیشنهاد را انتخاب کنید' } });
+    },
+  );
 
   it.each([
     ['', 'quantity'],
@@ -112,13 +109,6 @@ describe('parsing the form', () => {
   it('asks for an offer when none is chosen', () => {
     const parsed = parsePlaceOrderForm(values({ quantity: '2' }));
     expect(parsed).toEqual({ ok: false, fieldErrors: { offerId: 'پیشنهاد را انتخاب کنید' } });
-  });
-
-  it('refuses a note past the service’s limit', () => {
-    const parsed = parsePlaceOrderForm(
-      values({ offerId: 'OFR_1', quantity: '1', note: 'x'.repeat(1001) }),
-    );
-    expect(parsed.ok).toBe(false);
   });
 });
 
@@ -177,7 +167,44 @@ describe('what the service can answer', () => {
         ]),
       ),
     );
-    expect(result).toMatchObject({ kind: 'INVALID', fieldErrors: { quantity: 'Too small' } });
+    // Never the service's English: the code's closed Persian sentence.
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { quantity: PLACE_ORDER_FIELD_MAPPING.byCode?.VALIDATION_FAILED },
+    });
+    expect(JSON.stringify(result)).not.toContain('Too small');
+  });
+
+  it('never renders service text for a validation detail it has no path for (a bidi control)', async () => {
+    const result = await send(
+      jest.fn(async () =>
+        problem(400, 'VALIDATION_FAILED', 'Request validation failed', [
+          { path: 'lines[0].offerId', message: 'bad ‮ id' },
+          { path: 'somewhere', code: 'weird', message: 'raw ‮ text' },
+        ]),
+      ),
+    );
+    expect(result.kind).toBe('INVALID');
+    expect(JSON.stringify(result)).not.toMatch(/‮|raw|bad/i);
+  });
+
+  it('says a reused key with another body (IDEMPOTENCY_KEY_REUSED) in closed Persian', async () => {
+    const result = await send(
+      jest.fn(async () =>
+        problem(409, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used'),
+      ),
+    );
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      message: PLACE_ORDER_FIELD_MAPPING.byCode?.IDEMPOTENCY_KEY_REUSED,
+    });
+    expect(JSON.stringify(result)).not.toContain('Idempotency');
+  });
+
+  it('uses a fixed Persian fallback for a code it has no sentence for', async () => {
+    const result = await send(jest.fn(async () => problem(422, 'SOMETHING_NEW', 'English text')));
+    expect(result).toMatchObject({ kind: 'INVALID', message: PLACE_ORDER_FIELD_MAPPING.fallback });
+    expect(JSON.stringify(result)).not.toContain('English');
   });
 
   it('translates the self-order refusal and says it in Persian', async () => {
@@ -249,8 +276,25 @@ describe('what the service can answer', () => {
     expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
   });
 
-  it('reads a 5xx as unavailable', async () => {
-    const result = await send(jest.fn(async () => problem(503, 'UPSTREAM_UNAVAILABLE', 'down')));
-    expect(result).toMatchObject({ kind: 'UNAVAILABLE', status: 503 });
+  it.each([500, 502, 503])(
+    'reads a %i as an unknown outcome — the order may have committed before it',
+    async (status) => {
+      const result = await send(jest.fn(async () => problem(status, 'INTERNAL_ERROR', 'down')));
+      expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
+    },
+  );
+
+  it('reads a failure with no problem body as an unknown outcome too', async () => {
+    const result = await send(jest.fn(async () => new Response('<html>', { status: 502 })));
+    expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
+  });
+
+  it('reads a dropped connection as an unknown outcome', async () => {
+    const result = await send(
+      jest.fn(async () => {
+        throw new TypeError('fetch failed');
+      }),
+    );
+    expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
   });
 });

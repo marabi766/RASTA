@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
+import { BIDI_CONTROL, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   EMPTY_PLACE_ORDER_FORM,
   PLACE_ORDER_FIELDS,
@@ -62,12 +62,7 @@ export function placeOrderFormValues(form: FormData): PlaceOrderFormValues {
     if (typeof raw !== 'string') continue;
     // An id is compared, not read: it is trimmed and nothing else. A quantity
     // is typed on a Persian keyboard as often as not.
-    values[field] =
-      field === 'quantity'
-        ? toLatinDigits(raw).trim()
-        : field === 'note'
-          ? normalizePersianText(raw)
-          : raw.trim();
+    values[field] = field === 'quantity' ? toLatinDigits(raw).trim() : raw.trim();
   }
   return values;
 }
@@ -89,21 +84,21 @@ const quantitySchema = z
   );
 
 const placeOrderSchema = z.object({
-  offerId: z.string().min(1, 'پیشنهاد را انتخاب کنید').max(64, 'پیشنهاد را انتخاب کنید'),
-  quantity: quantitySchema,
-  note: z
+  // An id is picked from a list; anything with control or bidi characters is not
+  // one, and is refused here rather than echoed back by the service.
+  offerId: z
     .string()
-    .trim()
-    .max(
-      LIMITS.note.max,
-      `یادداشت نباید بیش از ${toPersianDigits(String(LIMITS.note.max))} نویسه باشد`,
-    )
-    .transform((value) => (value.length === 0 ? undefined : value)),
+    .min(1, 'پیشنهاد را انتخاب کنید')
+    .max(64, 'پیشنهاد را انتخاب کنید')
+    .refine(
+      (value) => !BIDI_CONTROL.test(value) && !/\p{Cc}/u.test(value),
+      'پیشنهاد را انتخاب کنید',
+    ),
+  quantity: quantitySchema,
 });
 
 export interface PlaceOrderRequest {
   readonly lines: readonly { readonly offerId: string; readonly quantity: number }[];
-  readonly note?: string;
 }
 
 export type ParsedPlaceOrderForm =
@@ -123,18 +118,14 @@ export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOr
     return { ok: false, fieldErrors };
   }
 
-  const { offerId, quantity, note } = parsed.data;
-  return {
-    ok: true,
-    request: { lines: [{ offerId, quantity }], ...(note === undefined ? {} : { note }) },
-  };
+  const { offerId, quantity } = parsed.data;
+  return { ok: true, request: { lines: [{ offerId, quantity }] } };
 }
 
 export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
   paths: {
     'lines[0].offerId': 'offerId',
     'lines[0].quantity': 'quantity',
-    note: 'note',
   },
   messages: {
     'An organization cannot order from itself': 'سازمان شما نمی‌تواند از پیشنهاد خودش سفارش بدهد.',
@@ -148,19 +139,35 @@ export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
       'سفارش با شرایط کنونی این پیشنهاد جور نیست؛ کمینهٔ سفارش یا موجودی ممکن است عوض شده باشد. صفحه را تازه کنید و دوباره بسنجید.',
     CONFLICT:
       'با همین ارسال پیش‌تر سفارشی ثبت شده است. فهرست سفارش‌ها را ببینید، و اگر لازم است سفارش تازه‌ای بدهید.',
+    IDEMPOTENCY_KEY_REUSED:
+      'این فرم پیش‌تر با اطلاعات دیگری فرستاده شده بود و ممکن است سفارش ثبت شده باشد. فهرست سفارش‌ها را ببینید و اگر لازم بود سفارش تازه‌ای بدهید.',
+    VALIDATION_FAILED: 'اطلاعات واردشده پذیرفته نشد؛ پیشنهاد و تعداد را بررسی کنید.',
   },
+  // Never the service's own sentence: it is English and may echo input.
+  fallback: 'سفارش با این اطلاعات پذیرفته نشد و ثبت نشد؛ پیشنهاد و تعداد را بررسی کنید.',
 };
 
 /** What the redirect needs of the placed order: only that it exists. */
 const placedOrderSchema = z.object({ id: z.string().min(1) });
 
-export function placeOrder(
+export type PlaceOrderResult = Exclude<
+  WriteResult<z.infer<typeof placedOrderSchema>, PlaceOrderField>,
+  { readonly kind: 'UNAVAILABLE' }
+>;
+
+/**
+ * The service stores its idempotency response *after* its transaction, so a 5xx
+ * can follow a committed order. On this write only a definite refusal (a 4xx with
+ * a code, mapped above) means "not placed": every `UNAVAILABLE` — a 5xx, or a
+ * status with no problem body — is unconfirmed.
+ */
+export async function placeOrder(
   session: WebSession,
   request: PlaceOrderRequest,
   submissionId: string,
   fetchImpl?: typeof fetch,
-): Promise<WriteResult<z.infer<typeof placedOrderSchema>, PlaceOrderField>> {
-  return writeThroughGateway(session, {
+): Promise<PlaceOrderResult> {
+  const result = await writeThroughGateway(session, {
     path: '/v1/orders',
     body: request,
     submissionId,
@@ -168,4 +175,8 @@ export function placeOrder(
     mapping: PLACE_ORDER_FIELD_MAPPING,
     fetchImpl,
   });
+  if (result.kind === 'UNAVAILABLE') {
+    return { kind: 'UNKNOWN_OUTCOME', correlationId: result.correlationId };
+  }
+  return result;
 }
