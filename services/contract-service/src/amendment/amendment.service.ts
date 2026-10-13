@@ -51,7 +51,8 @@ const factOf = (
 });
 
 /**
- * The caller has no authority to sign an amendment for the employer, as the policies stand. Thrown
+ * The caller has no authority to sign an amendment for their side — for the employer, as the
+ * policies stand; for the contractor, the role — or would sign both sides. Thrown
  * from inside the signing transaction — which rolls back, so nothing is recorded — and turned by
  * `sign` into the caller's refusal after two things written in transactions of their own, because
  * anything written inside the rolled-back one would be lost with it: the stranded policy's
@@ -337,6 +338,9 @@ export class AmendmentService {
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);
 
+    // The authority of either side — the contractor's role included — is judged under the locks,
+    // and only for a NEW signature (`signLocked`): a signer signing again is answered as `get`
+    // answers them, whatever their roles now, and no refusal of authority is recorded for it.
     const base = {
       action: 'SIGN_AMENDMENT',
       side,
@@ -344,20 +348,6 @@ export class AmendmentService {
       organizationId: row.organizationId,
       subjectId: amendmentId,
     } as const;
-
-    let contractorRole: string | undefined;
-    if (side === 'CONTRACTOR') {
-      try {
-        contractorRole = this.access.contractorSigningRole();
-      } catch (error) {
-        if (!(error instanceof RastaError)) throw error;
-        return this.refusals.refuse(
-          { ...base, reason: 'ROLE_NOT_PERMITTED' },
-          this.refused('sign_amendment', error),
-          fence,
-        );
-      }
-    }
     if (this.access.isMemberOfBothParties(row)) {
       // A party's refusal, so an audit record (S-06) like the others of this command.
       return this.refusals.refuse(
@@ -384,15 +374,7 @@ export class AmendmentService {
       return await this.prisma.transaction(
         async (tx) => {
           if (fence) await fence.hold(tx);
-          const view = await this.signLocked(
-            tx,
-            row,
-            amendmentId,
-            side,
-            contractorRole,
-            person,
-            dto,
-          );
+          const view = await this.signLocked(tx, row, amendmentId, side, person, dto);
           return fence ? fence.complete(tx, view) : view;
         },
         // The hierarchy is asked inside it, under its own deadline.
@@ -431,7 +413,6 @@ export class AmendmentService {
     found: Contract,
     amendmentId: string,
     side: ContractSideName,
-    contractorRole: string | undefined,
     person: { userId: string; issuer: string | null; subject: string | null },
     dto: SignAmendmentDto,
   ): Promise<AmendmentView> {
@@ -453,25 +434,49 @@ export class AmendmentService {
       amendment.id,
     );
 
-    // The same person on the same side again: nothing to do, whatever the state has become.
+    // The same person on the same side again: nothing to do, whatever the state has become — and
+    // whatever their roles have become. The answer is the amendment as it stands, so it is given
+    // only to a caller who may read it now — the check `get` makes, with its refusal: a signer whose
+    // roles were revoked since learns nothing by signing again, and is neither refused nor audited
+    // as a new signature would be. The signature stays; nothing is written.
     const mine = signatures.find((signature) => signature.side === side);
-    if (mine) {
-      const comparison = compareActors(person, signerOf(mine));
-      if (comparison === 'SAME') {
-        // The answer is the amendment as it stands, so it is given only to a caller who may read it
-        // now — the check `get` makes, with its refusal: a signer whose roles were revoked since
-        // learns nothing by signing again. The signature stays; nothing is written.
-        this.assertMayRead(contract);
-        contractCommandsTotal.inc({
-          service: SERVICE_NAME,
-          command: 'sign_amendment',
-          outcome: 'unchanged',
-        });
-        return toAmendmentView(amendment, signatures.map(factOf));
+    const again = mine ? compareActors(person, signerOf(mine)) : null;
+    if (again === 'SAME') {
+      this.assertMayRead(contract);
+      contractCommandsTotal.inc({
+        service: SERVICE_NAME,
+        command: 'sign_amendment',
+        outcome: 'unchanged',
+      });
+      return toAmendmentView(amendment, signatures.map(factOf));
+    }
+
+    // A new signature from here. The contractor's authority is its fixed role, judged first: a
+    // caller without it is told nothing of the signatures. Refused, it is a party's refusal of
+    // authority, audited once the transaction has rolled back like the employer's (judged below).
+    let contractorRole: string | undefined;
+    if (side === 'CONTRACTOR') {
+      try {
+        contractorRole = this.access.contractorSigningRole();
+      } catch (error) {
+        if (!(error instanceof RastaError)) throw error;
+        throw new AmendmentAuthorityRefused(
+          {
+            action: 'SIGN_AMENDMENT',
+            side,
+            contractId: contract.id,
+            organizationId: contract.organizationId,
+            subjectId: amendment.id,
+            reason: 'ROLE_NOT_PERMITTED',
+          },
+          this.refused('sign_amendment', error),
+        );
       }
+    }
+    if (mine) {
       throw this.refused(
         'sign_amendment',
-        comparison === 'DISTINCT'
+        again === 'DISTINCT'
           ? refusal(
               ERROR_CODES.ALREADY_EXISTS,
               'This side of the amendment has already signed',

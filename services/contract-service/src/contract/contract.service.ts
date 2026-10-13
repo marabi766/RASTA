@@ -62,9 +62,9 @@ class SigningAuthorityRefused extends Error {
 }
 
 /**
- * The caller's role is not one the policy in force (employer) names, found inside the signing
- * transaction, which rolls back. `sign` records it as an authority refusal afterwards, like the
- * refusal of a role for an amendment.
+ * The caller's role is not one the policy in force (employer) names, or not the contractor's
+ * signing role, found inside the signing transaction, which rolls back. `sign` records it as an
+ * authority refusal afterwards, like the refusal of a role for an amendment.
  */
 class SigningRoleRefused extends Error {
   constructor(readonly answer: RastaError) {
@@ -248,10 +248,11 @@ export class ContractService {
     const side = sideOf(row, acting.organizationId);
     if (!side) throw RastaError.notFound('Contract', id);
 
-    // The contractor's side is a fixed role of its own organization and is judged now. The
-    // employer's is the `contract.signature` policy of its organization, which can change under
-    // a concurrent approval or retirement: it is read and judged under the contract's lock, in
-    // the transaction that records the signature (`signLocked`).
+    // The authority of either side is judged under the contract's lock, in the transaction that
+    // records the signature (`signLocked`), and only for a NEW signature: the employer's is the
+    // `contract.signature` policy of its organization, which can change under a concurrent approval
+    // or retirement; the contractor's, a fixed role of its own organization. A signer signing again
+    // is answered as `get` answers them, whatever their roles now.
     // A party's refusal for want of authority is an audit record, like an amendment's (S-06).
     const base = {
       action: 'SIGN_CONTRACT',
@@ -260,19 +261,6 @@ export class ContractService {
       organizationId: row.organizationId,
       subjectId: null,
     } as const;
-    let contractorRole: string | undefined;
-    if (side === 'CONTRACTOR') {
-      try {
-        contractorRole = this.access.contractorSigningRole();
-      } catch (error) {
-        if (!(error instanceof RastaError)) throw error;
-        return this.refusals.refuse(
-          { ...base, reason: 'ROLE_NOT_PERMITTED' },
-          this.refused('sign', error),
-          fence,
-        );
-      }
-    }
     if (this.access.isMemberOfBothParties(row)) {
       return this.refusals.refuse(
         { ...base, reason: 'MEMBER_OF_BOTH_PARTIES' },
@@ -299,7 +287,7 @@ export class ContractService {
       return await this.prisma.transaction(
         async (tx) => {
           if (fence) await fence.hold(tx);
-          const view = await this.signLocked(tx, row, side, contractorRole, person, dto, base);
+          const view = await this.signLocked(tx, row, side, person, dto, base);
           return fence ? fence.complete(tx, view) : view;
         },
         // The hierarchy is asked inside it (`authorityOf`), under its own deadline.
@@ -455,7 +443,6 @@ export class ContractService {
     tx: ExtendedPrismaClient,
     found: Contract,
     side: ContractSideName,
-    contractorRole: string | undefined,
     person: { userId: string; issuer: string | null; subject: string | null },
     dto: SignContractDto,
     base: Omit<AuthorityRefusal, 'reason'>,
@@ -471,21 +458,35 @@ export class ContractService {
       contract.id,
     );
 
-    // The same person on the same side again: nothing to do, whatever the state has become.
+    // The same person on the same side again: nothing to do, whatever the state has become — and
+    // whatever their roles have become. The answer is the contract as it stands, so it is given
+    // only to a caller who may read it now — the check `get` makes, with its refusal: a signer whose
+    // roles were revoked since learns nothing by signing again, and is not refused as a new
+    // signature would be. The signature stays; nothing is written.
     const mine = signatures.find((signature) => signature.side === side);
-    if (mine) {
-      const comparison = compareActors(person, signerOf(mine));
-      if (comparison === 'SAME') {
-        // The answer is the contract as it stands, so it is given only to a caller who may read it
-        // now — the check `get` makes, with its refusal: a signer whose roles were revoked since
-        // learns nothing by signing again. The signature stays; nothing is written.
-        this.assertMayRead(contract);
-        contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'unchanged' });
-        return toContractView(contract, signatures.map(factOf));
+    const again = mine ? compareActors(person, signerOf(mine)) : null;
+    if (again === 'SAME') {
+      this.assertMayRead(contract);
+      contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'unchanged' });
+      return toContractView(contract, signatures.map(factOf));
+    }
+
+    // A new signature from here. The contractor's authority is its fixed role, judged first: a
+    // caller without it is told nothing of the signatures (the employer's is judged below), and is
+    // refused and audited once the transaction has rolled back (`sign`).
+    let contractorRole: string | undefined;
+    if (side === 'CONTRACTOR') {
+      try {
+        contractorRole = this.access.contractorSigningRole();
+      } catch (error) {
+        if (!(error instanceof RastaError)) throw error;
+        throw new SigningRoleRefused(this.refused('sign', error));
       }
+    }
+    if (mine) {
       throw this.refused(
         'sign',
-        comparison === 'DISTINCT'
+        again === 'DISTINCT'
           ? refusal(
               ERROR_CODES.ALREADY_EXISTS,
               'This side of the contract has already signed',
