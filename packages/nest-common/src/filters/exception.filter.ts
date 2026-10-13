@@ -28,6 +28,12 @@ interface MinimalResponse {
   setHeader(name: string, value: string): unknown;
 }
 
+interface MinimalRequest {
+  method?: string;
+  originalUrl?: string;
+  url?: string;
+}
+
 /**
  * Turns every thrown value into the platform error shape.
  *
@@ -60,10 +66,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
   constructor(@Inject(EXCEPTION_FILTER_LOGGER) private readonly logger: Logger) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
-    const response = host.switchToHttp().getResponse<MinimalResponse>();
+    const http = host.switchToHttp();
+    const response = http.getResponse<MinimalResponse>();
     const context = tryGetContext();
 
-    const { status, code, message, details, internalContext, logged } = this.normalize(exception);
+    const { status, code, message, details, internalContext, logged } = this.normalize(
+      exception,
+      () => http.getRequest<MinimalRequest | undefined>(),
+    );
     // The middleware already records the path alone; a context built anywhere
     // else is held to the same rule here, where it leaves the service.
     const path = context?.path ? requestPath(context.path) : undefined;
@@ -107,7 +117,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
     response.status(status).json(body);
   }
 
-  private normalize(exception: unknown): {
+  private normalize(
+    exception: unknown,
+    request: () => MinimalRequest | undefined,
+  ): {
     status: number;
     code: ErrorCode;
     message: string;
@@ -189,12 +202,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
       }
       const message = extractHttpMessage(exception);
       // Nest's own answer to a route nothing matched (`RoutesResolver`) is
-      // `Cannot GET <originalUrl>` — the target as received, query and all.
-      // The path stays, because clients tell a route-level 404 from a missing
-      // record by this text; the query goes, from the response and the log.
-      const routeNotFound = ROUTE_NOT_FOUND.exec(message);
-      if (exception instanceof NotFoundException && routeNotFound) {
-        const reported = `${routeNotFound[1]}${requestPath(routeNotFound[2] ?? '')}`;
+      // `Cannot <method> <originalUrl>` — the target as received, query and
+      // all. The shape stays, because clients tell a route-level 404 from a
+      // missing record by this text; but none of Nest's text is kept. It is
+      // written again from the request itself — its method and its path — so
+      // what the client sent after the path cannot survive however the method
+      // is spelt (`M-SEARCH`) or the target is formed.
+      if (exception instanceof NotFoundException && message.startsWith(ROUTE_NOT_FOUND_PREFIX)) {
+        const reported = routeNotFoundMessage(request());
         return {
           status,
           code: httpStatusToCode(status),
@@ -247,8 +262,25 @@ const MALFORMED_JSON_BODY = 'The request body is not valid JSON';
 /** What a client is told about any other request the framework could not read. */
 const MALFORMED_REQUEST = 'The request could not be read';
 
-/** Nest's route-not-found text: `Cannot <METHOD> <request target>`. */
-const ROUTE_NOT_FOUND = /^(Cannot [A-Z]+ )(.*)$/s;
+/** How Nest's route-not-found text begins: `Cannot <method> <request target>`. */
+const ROUTE_NOT_FOUND_PREFIX = 'Cannot ';
+
+/** What a client is told about an unmatched route when the request names no method. */
+const ROUTE_NOT_FOUND = 'No route matches the request';
+
+/**
+ * Nest's route-not-found text rebuilt from the request: `Cannot <method>
+ * <path>`, the path without its query or fragment. The method is the one
+ * Node's parser accepted — a token from its fixed list, never client free text.
+ */
+function routeNotFoundMessage(request: MinimalRequest | undefined): string {
+  const method = request?.method;
+  if (!method) return ROUTE_NOT_FOUND;
+  const target = request.originalUrl ?? request.url;
+  return target === undefined
+    ? `${ROUTE_NOT_FOUND_PREFIX}${method}`
+    : `${ROUTE_NOT_FOUND_PREFIX}${method} ${requestPath(target)}`;
+}
 
 /**
  * body-parser's refusals this filter answers, by the `type` body-parser sets
