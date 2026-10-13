@@ -393,14 +393,39 @@ export const OUTBOX_PURGE_TRANSACTION_MARGIN_MS = 5_000;
  * The longest one purge batch can take: waiting for a connection, then
  * running to Prisma's transaction timeout. A stopping scheduler waits for at
  * most one batch, so this is also what shutdown waits for the purge, and
- * `loadEnv` refuses a configuration where it does not end before
- * `SHUTDOWN_TIMEOUT_MS`.
+ * `loadEnv` refuses a configuration where it does not fit the shutdown's
+ * outbox budget ({@link outboxShutdownBudgetMs}).
  */
 export function outboxPurgeBatchBoundMs(settings: {
   maxWaitMs: number;
   statementTimeoutMs: number;
 }): number {
   return settings.maxWaitMs + settings.statementTimeoutMs + OUTBOX_PURGE_TRANSACTION_MARGIN_MS;
+}
+
+/**
+ * The part of `SHUTDOWN_TIMEOUT_MS` kept back from the outbox drain, for what
+ * `app.close()` still does after it: Nest's `beforeApplicationShutdown`, the
+ * HTTP server close and `onApplicationShutdown`. Those wait on nothing of the
+ * outbox's — the drain has returned, its abandoned work bounded by the
+ * database's own timeouts — so they need a short, fixed allowance, not a share
+ * of a batch. 2 s is that allowance; with the default timeout (25 s) the
+ * budget is 23 s, which the relay's default grace (20 s) and the purge's
+ * default batch bound (12 s) both fit.
+ */
+export const OUTBOX_SHUTDOWN_RESERVE_MS = 2_000;
+
+/**
+ * How long the outbox drain may take in a service that runs both the relay
+ * and the purge (`OutboxShutdown` in @rasta/nest-common): one deadline, shared
+ * by the two, which drain concurrently from the start of Nest's destroy phase.
+ * `loadEnv` refuses a configuration in which either one's own bound — the
+ * relay's grace, the purge's batch bound — does not fit inside it, so the
+ * shared deadline only ever cuts a wait that something else already went
+ * wrong in.
+ */
+export function outboxShutdownBudgetMs(env: { SHUTDOWN_TIMEOUT_MS: number }): number {
+  return env.SHUTDOWN_TIMEOUT_MS - OUTBOX_SHUTDOWN_RESERVE_MS;
 }
 
 /** Services that use cache, distributed locks or rate limiting. */
@@ -480,26 +505,32 @@ export function loadEnv<S extends z.ZodTypeAny>(
 
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxGraceWithinShutdown(result.data);
-  assertOutboxPurgeWithinShutdown(result.data);
+  assertOutboxShutdownWithinTimeout(result.data);
   return result.data;
 }
 
 /**
- * Shutdown waits for the purge batch in flight — its wait for a connection
- * and its transaction both ({@link outboxPurgeBatchBoundMs}) — so that whole
- * bound must end before the process's own shutdown timeout, or a slow batch
- * turns every shutdown into a forced exit. Budgeting the statement alone
- * missed the wait for a connection, which can be as long again.
+ * The whole outbox shutdown path of a service with the purge, as one worst
+ * case. The relay's grace and the purge's batch bound
+ * ({@link outboxPurgeBatchBoundMs}: the wait for a connection and the
+ * transaction both) run concurrently against one deadline (`OutboxShutdown`),
+ * so the path takes the longer of the two — never their sum — and that must
+ * fit in {@link outboxShutdownBudgetMs}, which leaves
+ * {@link OUTBOX_SHUTDOWN_RESERVE_MS} of `SHUTDOWN_TIMEOUT_MS` for the rest of
+ * the close. Checking each bound against the timeout on its own let a
+ * configuration pass whose two waits, run one after the other, overran it.
  */
-function assertOutboxPurgeWithinShutdown(parsed: unknown): void {
+function assertOutboxShutdownWithinTimeout(parsed: unknown): void {
   if (typeof parsed !== 'object' || parsed === null) return;
   const {
     OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: statementTimeoutMs,
     OUTBOX_PURGE_MAX_WAIT_MS: maxWaitMs,
+    OUTBOX_SHUTDOWN_GRACE_SECONDS: grace,
     SHUTDOWN_TIMEOUT_MS: timeoutMs,
   } = parsed as {
     OUTBOX_PURGE_STATEMENT_TIMEOUT_MS?: unknown;
     OUTBOX_PURGE_MAX_WAIT_MS?: unknown;
+    OUTBOX_SHUTDOWN_GRACE_SECONDS?: unknown;
     SHUTDOWN_TIMEOUT_MS?: unknown;
   };
   if (
@@ -509,20 +540,34 @@ function assertOutboxPurgeWithinShutdown(parsed: unknown): void {
   ) {
     return;
   }
-  const boundMs = outboxPurgeBatchBoundMs({ maxWaitMs, statementTimeoutMs });
-  if (boundMs < timeoutMs) return;
-  throw new EnvValidationError([
-    {
+  const purgeMs = outboxPurgeBatchBoundMs({ maxWaitMs, statementTimeoutMs });
+  const graceMs = typeof grace === 'number' ? grace * 1000 : 0;
+  const budgetMs = outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: timeoutMs });
+  const issues: EnvIssue[] = [];
+  if (purgeMs > budgetMs) {
+    issues.push({
       path: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
       message:
-        `with OUTBOX_PURGE_MAX_WAIT_MS, one purge batch may take ${boundMs} ms ` +
+        `with OUTBOX_PURGE_MAX_WAIT_MS, one purge batch may take ${purgeMs} ms ` +
         `(${maxWaitMs} ms waiting for a connection + ${statementTimeoutMs} ms statement + ` +
-        `${OUTBOX_PURGE_TRANSACTION_MARGIN_MS} ms transaction margin), which must be shorter than ` +
-        `SHUTDOWN_TIMEOUT_MS (${timeoutMs} ms): shutdown waits for the batch in flight. Lower ` +
-        'either purge setting, or raise SHUTDOWN_TIMEOUT_MS (and keep it under the ' +
-        'orchestrator’s termination period)',
-    },
-  ]);
+        `${OUTBOX_PURGE_TRANSACTION_MARGIN_MS} ms transaction margin), more than the outbox ` +
+        `shutdown budget of ${budgetMs} ms (SHUTDOWN_TIMEOUT_MS ${timeoutMs} ms − ` +
+        `${OUTBOX_SHUTDOWN_RESERVE_MS} ms for the rest of the close): shutdown waits for the ` +
+        'batch in flight. Lower either purge setting, or raise SHUTDOWN_TIMEOUT_MS (and keep it ' +
+        'under the orchestrator’s termination period)',
+    });
+  }
+  if (graceMs > budgetMs) {
+    issues.push({
+      path: 'OUTBOX_SHUTDOWN_GRACE_SECONDS',
+      message:
+        `(${grace} s) is more than the outbox shutdown budget of ${budgetMs} ms ` +
+        `(SHUTDOWN_TIMEOUT_MS ${timeoutMs} ms − ${OUTBOX_SHUTDOWN_RESERVE_MS} ms for the rest of ` +
+        'the close), which the relay shares with the purge. Lower the grace or raise ' +
+        'SHUTDOWN_TIMEOUT_MS (and keep it under the orchestrator’s termination period)',
+    });
+  }
+  if (issues.length > 0) throw new EnvValidationError(issues);
 }
 
 /**

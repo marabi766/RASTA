@@ -5,6 +5,7 @@ import {
   outboxPurgeRunsTotal,
 } from '@rasta/observability';
 
+import { withinDeadline, type OutboxStopOptions } from './outbox';
 import type { PurgePublishedBatch, PurgePublishedOptions } from './outbox-sql';
 
 /**
@@ -30,11 +31,14 @@ import type { PurgePublishedBatch, PurgePublishedOptions } from './outbox-sql';
  * - **Shutdown waits for at most one batch** — `stop()` starts no further
  *   batch or run and waits for the one in flight no longer than its bound
  *   (`outboxPurgeBatchBoundMs`: the wait for a connection plus the
- *   transaction), which `loadEnv` holds under SHUTDOWN_TIMEOUT_MS. It is
- *   called from `onModuleDestroy`, so the purge halts as Nest's destroy phase
- *   begins, alongside the Prisma disconnect. From `onApplicationShutdown`
- *   alone, which Nest runs only after every provider was destroyed, a run
- *   would go on starting batches on a client that reconnects on demand.
+ *   transaction) or the shutdown's shared deadline, whichever is earlier.
+ *   `OutboxShutdown` calls it in Nest's destroy phase, concurrently with the
+ *   relay's drain and against one deadline for both, so the two waits overlap
+ *   instead of adding up; `loadEnv` holds the longer of the two under
+ *   SHUTDOWN_TIMEOUT_MS (`outboxShutdownBudgetMs`). From
+ *   `onApplicationShutdown` alone, which Nest runs only after every provider
+ *   was destroyed, a run would go on starting batches on a client that
+ *   reconnects on demand, and its wait would come on top of the relay's.
  */
 
 /** Persistence port, implemented by each service's outbox store. */
@@ -113,6 +117,8 @@ export class OutboxPurgeScheduler {
   /** `stop()` was called: a run in flight ends after its current batch. */
   private halting = false;
   private current?: Promise<OutboxPurgeRun>;
+  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  private stopping?: Promise<void>;
   private readonly now: () => number;
   /** The most `stop()` waits for the batch in flight. */
   readonly stopBoundMs: number;
@@ -157,6 +163,7 @@ export class OutboxPurgeScheduler {
 
     this.stopped = false;
     this.halting = false;
+    this.stopping = undefined;
     this.options.logger?.info(
       { service, retentionHours, intervalMs, batchSize, maxBatchesPerRun },
       'Outbox purge scheduled',
@@ -167,12 +174,22 @@ export class OutboxPurgeScheduler {
   /**
    * Stops the purge: no further run is scheduled, a run in flight starts no
    * further batch, and the batch in flight is waited for at most
-   * `stopBoundMs` — the longest it can take. Past that it is abandoned with a
-   * warning rather than awaited: the database's `statement_timeout` and the
-   * transaction timeout still end it, and the rows it would have deleted are
-   * due again at the next start. Idempotent.
+   * `stopBoundMs` — the longest it can take — or until `deadlineAt`, the
+   * shutdown's shared deadline (`OutboxShutdown`), whichever comes first. Past
+   * that it is abandoned with a warning rather than awaited: the database's
+   * `statement_timeout` and the transaction timeout still end it, and the rows
+   * it would have deleted are due again at the next start.
+   *
+   * One stop per `start()`: a second call joins the first, and once that one
+   * has returned — an abandoned batch included — returns at once rather than
+   * waiting a second bound on the same batch.
    */
-  async stop(): Promise<void> {
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     this.halting = true;
     if (this.timer) clearTimeout(this.timer);
@@ -180,27 +197,14 @@ export class OutboxPurgeScheduler {
 
     const current = this.current;
     if (!current) return;
-    let deadline: NodeJS.Timeout | undefined;
-    const outcome = await Promise.race([
-      current.then(() => 'finished' as const),
-      new Promise<'abandoned'>((resolve) => {
-        deadline = setTimeout(() => resolve('abandoned'), this.stopBoundMs);
-        deadline.unref?.();
-      }),
-    ]);
-    clearTimeout(deadline);
-    if (outcome === 'abandoned') {
+    const boundMs = Math.min(this.stopBoundMs, (deadlineAt ?? Infinity) - this.now());
+    if ((await withinDeadline(current, boundMs)) === 'abandoned') {
       this.options.logger?.warn(
-        { service: this.options.service, stopBoundMs: this.stopBoundMs },
-        'Outbox purge batch still running at its bound on shutdown; abandoned. Its statement ' +
+        { service: this.options.service, stopBoundMs: this.stopBoundMs, waitedMs: boundMs },
+        'Outbox purge batch still running at its shutdown bound; abandoned. Its statement ' +
           'and transaction timeouts end it, and the rows stay due for the next start',
       );
     }
-  }
-
-  /** Nest's destroy phase, alongside the Prisma disconnect (see the class comment). */
-  async onModuleDestroy(): Promise<void> {
-    await this.stop();
   }
 
   /**

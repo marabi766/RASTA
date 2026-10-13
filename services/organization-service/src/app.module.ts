@@ -13,6 +13,7 @@ import {
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxPurgeScheduler,
+  OutboxShutdown,
   OutboxRelay,
   outboxPurgeSettings,
   RequestContextMiddleware,
@@ -22,6 +23,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -133,6 +135,14 @@ export const LOGGER = Symbol('ORGANIZATION_LOGGER');
           ...outboxPurgeSettings(env),
         }),
     },
+    {
+      // D-052: the relay and the purge drain together in the destroy phase,
+      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
+      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: OrganizationEnv) =>
+        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+    },
 
     {
       provide: AUTH_OPTIONS,
@@ -166,6 +176,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
     private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
   ) {}
 
@@ -201,10 +212,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart. The
-    // purge has already stopped in its own onModuleDestroy, within its batch
-    // bound; this call only confirms it.
-    await Promise.all([this.relay.stop(), this.purge.stop()]);
+    // The relay and the purge already drained in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop
+    // and returns at once.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 }

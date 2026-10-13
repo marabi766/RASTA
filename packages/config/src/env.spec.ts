@@ -11,6 +11,8 @@ import {
   outboxPurgeEnvSchema,
   OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
   outboxPurgeBatchBoundMs,
+  OUTBOX_SHUTDOWN_RESERVE_MS,
+  outboxShutdownBudgetMs,
 } from './env';
 
 describe('loadEnv', () => {
@@ -273,26 +275,37 @@ describe('outbox purge (D-052)', () => {
     expect(outboxPurgeBatchBoundMs({ maxWaitMs: 2000, statementTimeoutMs: 5000 })).toBe(12_000);
   });
 
+  it('the outbox shutdown budget is the timeout less the reserve for the rest of the close', () => {
+    expect(OUTBOX_SHUTDOWN_RESERVE_MS).toBe(2000);
+    expect(outboxShutdownBudgetMs({ SHUTDOWN_TIMEOUT_MS: 25_000 })).toBe(23_000);
+  });
+
   // Codex r1 on #247: the check used to budget the statement alone, while
-  // each batch also waits for a connection and runs to Prisma's timeout.
-  it('refuses a configuration whose whole batch bound shutdown could not wait out', () => {
-    // 2000 + 17999 + 5000 = 24999: just inside 25000.
+  // each batch also waits for a connection and runs to Prisma's timeout. r2:
+  // the batch bound is held to the outbox shutdown budget, not the bare timeout.
+  it('refuses a configuration whose whole batch bound the shutdown budget could not wait out', () => {
+    // 2000 + 16000 + 5000 = 23000: exactly the budget of a 25000 ms timeout.
     expect(
       load({
         OUTBOX_PURGE_MAX_WAIT_MS: '2000',
-        OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '17999',
+        OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '16000',
         SHUTDOWN_TIMEOUT_MS: '25000',
       }).OUTBOX_PURGE_STATEMENT_TIMEOUT_MS,
-    ).toBe(17_999);
+    ).toBe(16_000);
     // One millisecond more, from either side, is refused.
     for (const overrides of [
-      { OUTBOX_PURGE_MAX_WAIT_MS: '2000', OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '18000' },
-      { OUTBOX_PURGE_MAX_WAIT_MS: '2001', OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '17999' },
+      { OUTBOX_PURGE_MAX_WAIT_MS: '2000', OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '16001' },
+      { OUTBOX_PURGE_MAX_WAIT_MS: '2001', OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '16000' },
     ]) {
       expect(() => load({ ...overrides, SHUTDOWN_TIMEOUT_MS: '25000' })).toThrow(
-        /one purge batch may take 25000 ms .*must be shorter than SHUTDOWN_TIMEOUT_MS \(25000 ms\)/,
+        /one purge batch may take 23001 ms .*more than the outbox shutdown budget of 23000 ms \(SHUTDOWN_TIMEOUT_MS 25000 ms − 2000 ms/,
       );
     }
+    // The r1 boundary (a 24999 ms batch under a 25000 ms timeout) left nothing
+    // for the rest of the close; it is refused now.
+    expect(() =>
+      load({ OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '17999', SHUTDOWN_TIMEOUT_MS: '25000' }),
+    ).toThrow(/24999 ms/);
     // The statement alone under the shutdown timeout is no longer enough: the
     // r1 configuration (statement 24999) is refused.
     expect(() =>
@@ -302,6 +315,81 @@ describe('outbox purge (D-052)', () => {
     expect(() => load({ OUTBOX_PURGE_MAX_WAIT_MS: '20000', SHUTDOWN_TIMEOUT_MS: '25000' })).toThrow(
       /20000 ms waiting for a connection/,
     );
+  });
+});
+
+/**
+ * Codex r2 on #247: a service with the relay and the purge drains both in one
+ * shutdown. They run concurrently against one deadline (`OutboxShutdown`), so
+ * the worst case is the longer of the relay's grace and the purge's batch
+ * bound — and that, not each on its own against the bare timeout, is what
+ * must fit the outbox shutdown budget.
+ */
+describe('the outbox shutdown path as one worst case (relay + purge)', () => {
+  const schema = baseEnvSchema.merge(kafkaEnvSchema).merge(outboxPurgeEnvSchema);
+  const source = {
+    SERVICE_NAME: 'fleet-service',
+    PORT: '3104',
+    KAFKA_BROKERS: 'localhost:9092',
+    KAFKA_CLIENT_ID: 'fleet-service',
+  };
+  const load = (overrides: Record<string, string> = {}) =>
+    loadEnv(schema, { ...source, ...overrides } as NodeJS.ProcessEnv);
+
+  it('accepts the defaults: max(20 s grace, 12 s batch) inside 25 s − 2 s', () => {
+    const env = load();
+    expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS).toBe(20);
+    expect(env.SHUTDOWN_TIMEOUT_MS).toBe(25_000);
+  });
+
+  it('accepts the r2 example — a 10 s batch beside a 20 s grace — because they overlap', () => {
+    // 1000 + 4000 + 5000 = 10 s, and 20 s: 30 s in sequence, 20 s concurrently.
+    expect(
+      load({
+        OUTBOX_PURGE_MAX_WAIT_MS: '1000',
+        OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '4000',
+        OUTBOX_SHUTDOWN_GRACE_SECONDS: '20',
+        SHUTDOWN_TIMEOUT_MS: '25000',
+      }).OUTBOX_SHUTDOWN_GRACE_SECONDS,
+    ).toBe(20);
+  });
+
+  it('holds the grace to the budget too, where the relay alone only needs it under the timeout', () => {
+    // 23 s fits 25 s − 2 s; 24 s passes the relay-only rule (< 25 s) but not the shared budget.
+    expect(
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '23', SHUTDOWN_TIMEOUT_MS: '25000' })
+        .OUTBOX_SHUTDOWN_GRACE_SECONDS,
+    ).toBe(23);
+    expect(() =>
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '24', SHUTDOWN_TIMEOUT_MS: '25000' }),
+    ).toThrow(
+      /OUTBOX_SHUTDOWN_GRACE_SECONDS: \(24 s\) is more than the outbox shutdown budget of 23000 ms/,
+    );
+    // A relay-only service keeps its own rule.
+    expect(
+      loadEnv(baseEnvSchema.merge(kafkaEnvSchema), {
+        ...source,
+        OUTBOX_SHUTDOWN_GRACE_SECONDS: '24',
+        SHUTDOWN_TIMEOUT_MS: '25000',
+      } as NodeJS.ProcessEnv).OUTBOX_SHUTDOWN_GRACE_SECONDS,
+    ).toBe(24);
+  });
+
+  it('reports both when both overrun the budget', () => {
+    let issues: { path: string }[] = [];
+    try {
+      load({
+        OUTBOX_SHUTDOWN_GRACE_SECONDS: '9',
+        OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '3000',
+        SHUTDOWN_TIMEOUT_MS: '10000',
+      });
+    } catch (error) {
+      issues = (error as EnvValidationError).issues;
+    }
+    expect(issues.map((issue) => issue.path)).toEqual([
+      'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
+      'OUTBOX_SHUTDOWN_GRACE_SECONDS',
+    ]);
   });
 });
 

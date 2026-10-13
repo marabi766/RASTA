@@ -41,8 +41,10 @@
 //   3. Assign `base_seq + row_number() OVER (PARTITION BY topic, partition_key
 //      ORDER BY created_at, id)`. The window is computed by PostgreSQL from
 //      column values; no JavaScript clock or array order decides a sequence.
+//   4. Move each touched stream's counter (`next_seq`) past the positions just
+//      assigned, in the same statement — the watermark (see «Purged history»).
 //
-// Counters (once, after the last batch):
+// Counters (once, after the last batch; `next_seq` also per batch, step 4):
 //
 //   `next_seq`      = max(stream_seq) + 1 — the position B3 will hand out next,
 //                     matching D-2's `RETURNING next_seq - 1 AS allocated`.
@@ -98,6 +100,18 @@
 // could no longer prove the surviving rows sort after the positions already
 // handed out, and B2 numbers nothing it cannot check. Run it before the purge
 // is enabled on a service (runbook).
+//
+// The check needs the counter to exist, and B2 used to create it only once,
+// after the last batch: a truncated run committed positions with no counter
+// at all, and once the relay had published those rows and the purge deleted
+// them, nothing recorded that the positions were ever handed out — a resumed
+// run numbered the stream from 1 again and verified clean (Codex r2 on #247).
+// So each batch now writes its streams' `next_seq` in the statement that
+// assigns the positions (step 4): one transaction, never one without the
+// other. The counter row is the durable per-stream watermark — the purge
+// deletes outbox rows only, never a counter — and it is the same `next_seq`
+// B3 continues from, so a truncated run also leaves B3 a counter that no
+// longer hands out a position already on a row.
 // -----------------------------------------------------------------------------
 
 import { assertB1Definitions } from './verify-outbox-b1-lib.mjs';
@@ -366,7 +380,8 @@ SELECT
  * `stream_seq` still present is lower — or no sequenced row is left at all.
  *
  * Only a deletion makes that true. B3 allocates and inserts in one
- * transaction, so a committed counter always has its row; the D-052 purge (or
+ * transaction, and so does each B2 batch (its watermark, `assignBatchSql`),
+ * so a committed counter always has its rows; the D-052 purge (or
  * an operator's DELETE) removes published, sequenced rows and leaves the
  * counter where it was. B2 numbers a stream from its highest *surviving*
  * row, so on such a stream it would hand out positions consumers already
@@ -456,6 +471,8 @@ purged AS (
 ),
 numbered AS (
   SELECT b."id",
+         b."topic",
+         b."partition_key",
          a.base_seq + row_number() OVER (
            PARTITION BY b."topic", b."partition_key"
            ORDER BY b."created_at", b."id"
@@ -472,12 +489,31 @@ updated AS (
     FROM numbered n
    WHERE o."id" = n."id"
   RETURNING o."id"
+),
+-- The watermark (D-052, Codex r2 on #247): the stream's counter moves past
+-- every position this batch hands out, in this statement and so in this
+-- batch's transaction. Positions are never committed without it, a truncated
+-- run included, and the purge never deletes a counter row — so once the rows
+-- holding those positions are published and purged, the counter stays ahead
+-- of what survives and the history check refuses the stream. A fresh row
+-- takes the column default for published_seq (0, as B3's own insert does);
+-- finalisation raises it.
+watermark AS (
+  INSERT INTO "${SEQUENCE_TABLE}" AS s ("topic", "partition_key", "next_seq")
+  SELECT n."topic", n."partition_key", max(n.seq) + 1
+    FROM numbered n
+   GROUP BY n."topic", n."partition_key"
+  ON CONFLICT ("topic", "partition_key") DO UPDATE
+     SET "next_seq" = GREATEST(s."next_seq", EXCLUDED."next_seq")
+   WHERE s."next_seq" < EXCLUDED."next_seq"
+  RETURNING 1
 )
 SELECT (SELECT violations FROM guard)   AS violations,
        (SELECT streams FROM purged)     AS history_purged,
        (SELECT count(*) FROM batch)::bigint   AS selected,
        (SELECT count(*) FROM updated)::bigint AS updated,
-       (SELECT count(*) FROM streams)::bigint AS streams`;
+       (SELECT count(*) FROM streams)::bigint AS streams,
+       (SELECT count(*) FROM watermark)::bigint AS watermarks`;
 }
 
 /**
@@ -772,6 +808,7 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
       selected: result.selected,
       updated: result.updated,
       streams: result.streams,
+      watermarks: result.watermarks,
       remaining,
       elapsedMs: now() - batchStartedAt,
     });
@@ -791,8 +828,9 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
   const truncated = remaining > 0;
 
   // Counters and heads describe the state the assignment produced, so they run
-  // once at the end. A truncated run leaves them for the next invocation:
-  // both fields are still inert in B2, so the intermediate state is safe.
+  // once at the end. A truncated run leaves `published_seq` and the heads for
+  // the next invocation (nothing reads either before B4); its `next_seq` is
+  // already written, batch by batch, with the positions it covers.
   if (!truncated) {
     const [counters] = (await db.query(counterUpsertSql())).map(mapRow);
     counterWrites = counters.written;

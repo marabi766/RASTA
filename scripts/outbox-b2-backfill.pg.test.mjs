@@ -39,8 +39,9 @@ import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(REPO_ROOT, 'scripts', 'outbox-b2-backfill.mjs');
 
-// The services' own purge statement (D-052), as built — not a copy of its SQL.
-const { purgePublishedSql } = createRequire(import.meta.url)(
+// The services' own purge statement (D-052) and B3 allocation, as built — not
+// copies of their SQL.
+const { allocateStreamSeqSql, purgePublishedSql } = createRequire(import.meta.url)(
   path.join(REPO_ROOT, 'packages', 'nest-common', 'dist', 'index.js'),
 );
 
@@ -755,6 +756,47 @@ async function purgedHistory(db, ownerUrl) {
 
 const survivor = (db) => rows(db, `SELECT "id", "stream_seq" FROM "outbox_message" ORDER BY "id"`);
 
+/** Every counter row, beside the highest position still on a row of its stream. */
+const watermarks = (db) =>
+  rows(
+    db,
+    `SELECT s."partition_key", s."next_seq"::int AS next_seq, s."published_seq"::int AS published_seq,
+            (SELECT max(m."stream_seq") FROM "outbox_message" m
+              WHERE m."topic" = s."topic" AND m."partition_key" = s."partition_key")::int AS max_seq
+       FROM "outbox_stream_sequence" s ORDER BY s."topic", s."partition_key"`,
+  );
+
+/**
+ * Codex r2 on #247, exactly: a truncated run (`--batch-size 1 --max-batches
+ * 1`) numbers T-1 as position 1 and stops. The relay publishes T-1 and the
+ * purge deletes it. Before the watermark the truncated run had written no
+ * counter, so nothing recorded that position 1 was ever handed out: the
+ * resumed run passed both history checks, numbered T-2 as 1 again, and
+ * verified clean.
+ */
+async function interruptedThenPurged({ cli, db, url, ownerUrl }) {
+  await db.execute(insertRowsSql({ prefix: 'T', topic: 't.a', partitionKey: 'CUT', count: 3 }));
+  const argv = ['--apply', '--batch-size', '1', '--max-batches', '1'];
+  if (cli) {
+    const slice = runCli(['--service', 'document', ...argv], { DATABASE_URL_DOCUMENT: url });
+    assert.equal(slice.of('incomplete').length, 1, `${slice.stdout}${slice.stderr}`);
+  } else {
+    const slice = await backfill(db, argv);
+    assert.equal(slice.result.truncated, true);
+    assert.equal(slice.event('counters'), undefined, 'a truncated run must not finalise');
+  }
+  // The watermark committed with the batch, not at finalisation.
+  assert.deepEqual(await watermarks(db), [
+    { partition_key: 'CUT', next_seq: 2, published_seq: 0, max_seq: 1 },
+  ]);
+  await db.execute(publishSql('^T-00000001$'));
+  assert.deepEqual(await purgeLikeTheService(ownerUrl), { deleted: 1, busy: false });
+  assert.deepEqual(await survivor(db), [
+    { id: 'T-00000002', stream_seq: null },
+    { id: 'T-00000003', stream_seq: null },
+  ]);
+}
+
 test('a stream whose numbered history the purge deleted is refused, dry run and apply, nothing written', async () => {
   await withOutbox('document', async ({ db, ownerUrl }) => {
     assert.deepEqual(await purgedHistory(db, ownerUrl), { deleted: 3, busy: false });
@@ -852,6 +894,107 @@ test('a purge that runs during the backfill is caught by the batch guard', async
     );
     assert.deepEqual(purged, { deleted: 3, busy: false });
     assert.deepEqual(await survivor(db), [{ id: 'H-00000004', stream_seq: null }]);
+  });
+});
+
+test('an interrupted backfill, then publish and purge: the resume is refused, dry run and apply', async () => {
+  await withOutbox('document', async ({ db, url, ownerUrl }) => {
+    await interruptedThenPurged({ cli: false, db, url, ownerUrl });
+    const untouched = await fingerprint(db);
+
+    for (const argv of [[], ['--apply']]) {
+      const events = [];
+      await assert.rejects(
+        () =>
+          runServiceBackfill({
+            service: 'document',
+            db,
+            options: options(argv),
+            emit: (event) => events.push(event),
+          }),
+        (error) => {
+          assert.ok(error instanceof B2RefusalError);
+          assert.match(
+            error.message,
+            /1 stream\(s\) have an outbox_stream_sequence\.next_seq ahead/,
+          );
+          assert.match(error.message, /Nothing was written/);
+          return true;
+        },
+      );
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ['plan'],
+      );
+      assert.equal(events[0].streams_history_purged, 1);
+      assert.equal(await fingerprint(db), untouched, `${argv.join(' ') || 'dry run'} wrote`);
+    }
+    // Position 1 was never handed out a second time.
+    assert.deepEqual(await survivor(db), [
+      { id: 'T-00000002', stream_seq: null },
+      { id: 'T-00000003', stream_seq: null },
+    ]);
+  });
+});
+
+test('through the CLI an interrupted, published and purged stream refuses the resume with exit 1', async () => {
+  await withOutbox('document', async ({ db, url, ownerUrl }) => {
+    await interruptedThenPurged({ cli: true, db, url, ownerUrl });
+    const untouched = await fingerprint(db);
+
+    for (const argv of [
+      ['--service', 'document'],
+      ['--service', 'document', '--apply'],
+    ]) {
+      const run = runCli(argv, { DATABASE_URL_DOCUMENT: url });
+      assert.equal(
+        run.status,
+        1,
+        `${argv.join(' ')} exited ${run.status}:\n${run.stdout}${run.stderr}`,
+      );
+      const [refused] = run.of('refused');
+      assert.equal(refused?.service, 'document');
+      assert.match(refused.reason, /next_seq ahead of their highest surviving stream_seq/);
+      assert.equal(run.of('done').length, 0);
+      assert.equal(run.of('batch').length, 0);
+      assert.deepEqual(tally(run), { ok: 0, incomplete: 0, refused: 1 });
+      assert.equal(await fingerprint(db), untouched);
+    }
+  });
+});
+
+test('a batch the ordering guard refuses writes no watermark either', async () => {
+  await withOutbox('document', async ({ db }) => {
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 4 }));
+    await backfill(db, ['--apply', '--batch-size', '2', '--max-batches', '1']);
+    assert.deepEqual(await watermarks(db), [
+      { partition_key: 'K1', next_seq: 3, published_seq: 0, max_seq: 2 },
+    ]);
+    // A row that sorts before the anchor: the next batch is refused whole.
+    await db.execute(
+      insertRowsSql({ prefix: 'LATE', topic: 't.a', partitionKey: 'K1', count: 1, msOffsets: [1] }),
+    );
+    await assert.rejects(
+      () => backfill(db, ['--apply', '--batch-size', '2']),
+      /sort before an already-sequenced row/,
+    );
+    assert.deepEqual(await watermarks(db), [
+      { partition_key: 'K1', next_seq: 3, published_seq: 0, max_seq: 2 },
+    ]);
+  });
+});
+
+test('B3 continues a truncated stream after its watermark instead of reusing a position', async () => {
+  await withOutbox('document', async ({ db }) => {
+    await db.execute(insertRowsSql({ prefix: 'A', topic: 't.a', partitionKey: 'K1', count: 3 }));
+    await backfill(db, ['--apply', '--batch-size', '2', '--max-batches', '1']);
+    // B3's own allocation (nest-common dist), as a producer runs it.
+    const allocated = await allocateStreamSeqSql(
+      { $queryRawUnsafe: (sql, ...params) => db.query(sql, params) },
+      't.a',
+      'K1',
+    );
+    assert.equal(allocated, 3, 'B3 was handed a position B2 had already assigned');
   });
 });
 
@@ -1089,13 +1232,18 @@ test('the CLI exit status separates a dry run, a bounded slice and a converged a
     // even though the run is reported incomplete.
     assert.equal(bounded.events.find((e) => e.type === 'done').mutated, true);
 
-    // Resumability: the one batch is committed, and the counters and heads are
-    // deliberately left unfinalised for the run that converges.
+    // Resumability: the one batch is committed with its watermark — each
+    // touched stream's next_seq past the positions it holds (D-052, Codex r2
+    // on #247) — while published_seq and the heads are left unfinalised for
+    // the run that converges.
     assert.equal(
       await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "stream_seq" IS NOT NULL`),
       4,
     );
-    assert.equal(await scalar(db, 'SELECT count(*) FROM "outbox_stream_sequence"'), 0);
+    assert.deepEqual(await watermarks(db), [
+      { partition_key: 'K1', next_seq: 3, published_seq: 0, max_seq: 2 },
+      { partition_key: 'K2', next_seq: 3, published_seq: 0, max_seq: 2 },
+    ]);
     assert.equal(
       await scalar(db, `SELECT count(*) FROM "outbox_message" WHERE "is_stream_head"`),
       0,

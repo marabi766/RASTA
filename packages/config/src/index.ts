@@ -11,6 +11,8 @@ export {
   outboxPurgeEnvSchema,
   OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
   outboxPurgeBatchBoundMs,
+  OUTBOX_SHUTDOWN_RESERVE_MS,
+  outboxShutdownBudgetMs,
   KAFKA_SASL_MECHANISMS,
   kafkaSaslConfigured,
   kafkaPlaintextAllowed,

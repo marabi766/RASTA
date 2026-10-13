@@ -166,6 +166,7 @@ export type {
   OutboxStore,
   EventPublisher,
   OutboxRelayOptions,
+  OutboxStopOptions,
   BuildOutboxOptions,
   OutboxClaim,
   ClaimRequest,
@@ -204,6 +205,8 @@ export type {
   OutboxPurgeOutcome,
   OutboxPurgeRun,
 } from './outbox/outbox-purge';
+export { OutboxShutdown } from './outbox/outbox-shutdown';
+export type { OutboxShutdownOptions, OutboxStoppable } from './outbox/outbox-shutdown';
 
 // Lifecycle ------------------------------------------------------------------
 export {

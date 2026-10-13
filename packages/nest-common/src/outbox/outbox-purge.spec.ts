@@ -372,29 +372,104 @@ describe('OutboxPurgeScheduler — schedule', () => {
     expect(store.calls).toHaveLength(0);
   });
 
-  it('stops in onModuleDestroy, as the destroy phase that disconnects Prisma begins', async () => {
-    let release!: () => void;
+  /** A batch stuck past every timeout, and a scheduler with it in flight. */
+  async function stuckInFlight(overrides: Partial<OutboxPurgeSchedulerOptions> = {}) {
     const store: OutboxPurgeStore & { calls: number } = {
       calls: 0,
-      async purgePublished() {
+      purgePublished() {
         this.calls += 1;
-        await new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        return { deleted: 100, busy: false };
+        return new Promise<PurgePublishedBatch>(() => undefined);
       },
     };
-    const purge = scheduler(store, { maxBatchesPerRun: 5 });
+    const { logger, lines } = recordingLogger();
+    // Bound: 1000 + 2000 + 5000 = 8000 ms.
+    const purge = scheduler(store, {
+      maxWaitMs: 1000,
+      statementTimeoutMs: 2000,
+      logger,
+      ...overrides,
+    });
     purge.start();
     await jest.advanceTimersByTimeAsync(0);
+    expect(store.calls).toBe(1);
+    return { purge, store, lines };
+  }
 
-    const destroyed = purge.onModuleDestroy();
-    release();
-    await destroyed;
-    expect(store.calls).toBe(1);
-    // onApplicationShutdown's later stop() returns at once.
+  const settledAt = (promise: Promise<void>) => {
+    const at: { ms?: number } = {};
+    void promise.then(() => {
+      at.ms = Date.now();
+    });
+    return at;
+  };
+
+  it('a repeated stop() joins the first and returns at once after the abandonment (Codex r2 #247)', async () => {
+    const { purge, lines } = await stuckInFlight();
+    const startedAt = Date.now();
+
+    const first = settledAt(purge.stop());
+    await jest.advanceTimersByTimeAsync(3000);
+    // A second call while the first waits: the same wait, not a second one.
+    const second = settledAt(purge.stop());
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(first.ms).toBe(startedAt + 8000);
+    expect(second.ms).toBe(startedAt + 8000);
+
+    // After the abandonment the batch is still "in flight", and a later stop
+    // (onApplicationShutdown, a second signal) does not wait for it again.
+    const third = settledAt(purge.stop());
+    await jest.advanceTimersByTimeAsync(0);
+    expect(third.ms).toBe(startedAt + 8000);
+    expect(lines.filter((line) => line.level === 'warn')).toHaveLength(1);
+  });
+
+  it('stop() ends by a shared deadline earlier than its own bound', async () => {
+    const { purge, lines } = await stuckInFlight();
+    const startedAt = Date.now();
+
+    const stopped = settledAt(purge.stop({ deadlineAt: startedAt + 3000 }));
+    await jest.advanceTimersByTimeAsync(2999);
+    expect(stopped.ms).toBeUndefined();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(stopped.ms).toBe(startedAt + 3000);
+    expect(lines.find((line) => line.level === 'warn')?.obj).toMatchObject({
+      stopBoundMs: 8000,
+      waitedMs: 3000,
+    });
+  });
+
+  it('stop() keeps its own bound when the shared deadline is later', async () => {
+    const { purge } = await stuckInFlight();
+    const startedAt = Date.now();
+    const stopped = settledAt(purge.stop({ deadlineAt: startedAt + 60_000 }));
+    await jest.advanceTimersByTimeAsync(8000);
+    expect(stopped.ms).toBe(startedAt + 8000);
+  });
+
+  it('a deadline already passed abandons the batch at once', async () => {
+    const { purge } = await stuckInFlight();
+    const startedAt = Date.now();
+    const stopped = settledAt(purge.stop({ deadlineAt: startedAt - 1 }));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(stopped.ms).toBe(startedAt);
+  });
+
+  it('start() after a stop arms a new stop for the next shutdown', async () => {
+    const store = new ScriptedStore([]);
+    const purge = scheduler(store, { initialDelayMs: 60_000 });
+    purge.start();
     await purge.stop();
-    expect(store.calls).toBe(1);
+    purge.start();
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(store.calls).toHaveLength(1);
+    await purge.stop();
+    await jest.advanceTimersByTimeAsync(10 * 300_000);
+    expect(store.calls).toHaveLength(1);
+  });
+
+  it('has no destroy hook of its own: OutboxShutdown drains it with the relay', () => {
+    const purge = scheduler(new ScriptedStore([]));
+    expect('onModuleDestroy' in purge).toBe(false);
   });
 
   it('stop() with no run in flight returns at once', async () => {

@@ -28,6 +28,14 @@ import { databaseUrl } from './helpers';
 const SCHEMA = 'outbox_purge_test';
 const RETENTION_HOURS = 168;
 const TOPIC = 'rasta.purge-test.v1';
+/**
+ * Two tenants. The purge is cross-tenant by design — within this service’s own
+ * database, a published row past the retention goes whichever organization it
+ * belongs to — so the fixtures hold rows of both, and each must be treated by
+ * the same rule.
+ */
+const ORG_A = 'ORG-PURGE-A';
+const ORG_B = 'ORG-PURGE-B';
 
 /** The owner of the database: the runtime role may create nothing (D-045). */
 function ownerUrl(): string {
@@ -59,6 +67,8 @@ interface Seed {
   lastError?: string;
   partitionKey?: string;
   streamSeq?: number;
+  /** Default ORG_A. */
+  organizationId?: string;
 }
 
 describe('maintenance-service outbox purge (D-052)', () => {
@@ -88,7 +98,7 @@ describe('maintenance-service outbox purge (D-052)', () => {
           payload, headers, organization_id, correlation_id, created_at, published_at,
           attempts, last_error, claim_token, claim_owner, claim_expires_at, claim_count, stream_seq)
        VALUES ($1, 'PurgeProbe', $1, 'PURGE_PROBE', 1, $2, $3, '{}'::jsonb, '{}'::jsonb,
-               'ORG-PURGE', $1,
+               $9, $1,
                now() - make_interval(hours => $4::int),
                CASE WHEN $5::int IS NULL THEN NULL ELSE now() - make_interval(hours => $5::int) END,
                0, $6,
@@ -105,6 +115,7 @@ describe('maintenance-service outbox purge (D-052)', () => {
       row.lastError ?? null,
       row.claimed ?? false,
       row.streamSeq ?? null,
+      row.organizationId ?? ORG_A,
     );
     return id;
   };
@@ -115,6 +126,16 @@ describe('maintenance-service outbox purge (D-052)', () => {
         `SELECT id FROM outbox_message ORDER BY id`,
       )
     ).map((row) => row.id);
+
+  /** Surviving ids per organization. */
+  const idsByOrganization = async (): Promise<Record<string, string[]>> => {
+    const rows = await runtime.client.$queryRawUnsafe<{ id: string; organization_id: string }[]>(
+      `SELECT id, organization_id FROM outbox_message ORDER BY organization_id, id`,
+    );
+    const byOrg: Record<string, string[]> = {};
+    for (const row of rows) (byOrg[row.organization_id] ??= []).push(row.id);
+    return byOrg;
+  };
 
   /** Holds `sql` inside an open transaction on the second connection until released. */
   const hold = async (sql: string, ...values: unknown[]) => {
@@ -210,17 +231,42 @@ describe('maintenance-service outbox purge (D-052)', () => {
       publishedHoursAgo: 299,
       lastError: 'KafkaJSError: timeout',
     });
+    // The second organization: one row of each kind that decides the rule.
+    await seed('H_B_OLD_PUBLISHED', {
+      createdHoursAgo: 250,
+      publishedHoursAgo: 249,
+      organizationId: ORG_B,
+    });
+    await seed('I_B_YOUNG_PUBLISHED', {
+      createdHoursAgo: 2,
+      publishedHoursAgo: 1,
+      organizationId: ORG_B,
+    });
+    await seed('J_B_OLD_UNPUBLISHED', {
+      createdHoursAgo: 400,
+      publishedHoursAgo: null,
+      organizationId: ORG_B,
+    });
+    await seed('K_B_MANUALLY_SKIPPED', {
+      createdHoursAgo: 400,
+      publishedHoursAgo: 399,
+      lastError: 'MANUALLY SKIPPED — incident 43',
+      organizationId: ORG_B,
+    });
 
     const run = await purge().runOnce();
 
-    expect(run).toMatchObject({ outcome: 'completed', deleted: 3, batches: 1 });
-    expect(await ids()).toEqual([
-      'B_YOUNG_PUBLISHED',
-      'C_LATE_PUBLISHED',
-      'D_OLD_UNPUBLISHED',
-      'E_OLD_CLAIMED',
-      'F_MANUALLY_SKIPPED',
-    ]);
+    expect(run).toMatchObject({ outcome: 'completed', deleted: 4, batches: 1 });
+    expect(await idsByOrganization()).toEqual({
+      [ORG_A]: [
+        'B_YOUNG_PUBLISHED',
+        'C_LATE_PUBLISHED',
+        'D_OLD_UNPUBLISHED',
+        'E_OLD_CLAIMED',
+        'F_MANUALLY_SKIPPED',
+      ],
+      [ORG_B]: ['I_B_YOUNG_PUBLISHED', 'J_B_OLD_UNPUBLISHED', 'K_B_MANUALLY_SKIPPED'],
+    });
   });
 
   it('stays bounded: batch size and batches per run cap a run, and the next one continues', async () => {
@@ -228,6 +274,7 @@ describe('maintenance-service outbox purge (D-052)', () => {
       await seed(`OLD_${String(i).padStart(2, '0')}`, {
         createdHoursAgo: 200,
         publishedHoursAgo: 199,
+        organizationId: i % 2 === 0 ? ORG_A : ORG_B,
       });
     }
     const scheduler = purge({ batchSize: 10, maxBatchesPerRun: 2 });
@@ -358,11 +405,12 @@ describe('maintenance-service outbox purge (D-052)', () => {
              (id, aggregate_type, aggregate_id, event_name, event_version, topic, partition_key,
               payload, headers, organization_id, correlation_id, stream_seq)
            VALUES ($1, 'PurgeProbe', $1, 'PURGE_PROBE', 1, $2, $3, '{}'::jsonb, '{}'::jsonb,
-                   'ORG-PURGE', $1, $4)`,
+                   $5, $1, $4)`,
           id,
           TOPIC,
           KEY,
           streamSeq,
+          ORG_A,
         );
         return streamSeq;
       });
