@@ -337,7 +337,8 @@ export class ContractService {
       }
       // The refusal is an audit fact (S-06): when it cannot be recorded it is not answered as the
       // normal refusal — a retryable 503, the claim released by the caller's failure path, so the
-      // same request can be made again and leave its trace. Nothing was signed either way.
+      // same request can be made again and leave its trace. Nothing was signed either way; the
+      // suspension above is independent of the command and stands.
       try {
         await this.recordRefusal(error, fence);
       } catch (auditError: unknown) {

@@ -34,8 +34,12 @@ export interface AuthorityRefusal {
  * to act for an employer without the authority.
  *
  * When the record cannot be written the caller is not answered with the normal refusal: it gets a
- * retryable 503, so the same request can be made again and leave its trace. Nothing was done either way.
- * A caller who is not a party never reaches this: they are told the contract does not exist.
+ * retryable 503, so the same request can be made again and leave its trace. The requested command had
+ * no effect either way; what may already have happened is independent of it — an amendment signature
+ * refused `POLICY_AUTHOR_NOT_GOVERNING` suspends the stranded policy (Q-83) before the refusal is
+ * recorded, and that suspension stands.
+ * A caller who is not a party never reaches this: they are told the contract does not exist. The one
+ * exception is the platform administrator (`commandingCaller`), whose 503 is a narrow existence signal.
  *
  * Only these refusals are audited. A refusal of the contract's state — a contract that is no longer
  * a draft, a version that moved on, an invalid transition — is answered and leaves no record.
@@ -57,6 +61,13 @@ export class AuthorityRefusals {
    * (`PLATFORM_ADMINISTRATOR`) before it is answered; for any other contract it is answered alone.
    * The answer is the same `403` either way. Every other refusal of `assertCaller` (the oversight
    * role, a service, no organization) comes before any contract is read and is not audited here.
+   *
+   * **The one existence signal (accepted, #243 review):** when the record cannot be written, a
+   * contract the acting organization is a party to is answered with the retryable `503` while a
+   * missing contract, or one it is not a party to, is still answered `403`. So the platform
+   * administrator — and only while refusal audit writes fail — can tell that a contract exists with
+   * that organization as a party. No other caller gets this: a non-party is told `404` before any
+   * audit is attempted.
    */
   async commandingCaller(
     assertCaller: () => Acting,
@@ -105,6 +116,10 @@ export class AuthorityRefusals {
         `Could not record the refusal of ${refused.action} (${refused.reason}): ` +
           `${auditError instanceof RastaError ? auditError.code : 'INTERNAL'}`,
       );
+      // "Nothing was done": the requested command had no effect. An independent policy suspension
+      // made before the refusal (amendment signature, POLICY_AUTHOR_NOT_GOVERNING) stands. For the
+      // platform administrator this 503, unlike the 403, says the contract exists — see
+      // `commandingCaller`.
       throw new RastaError(
         ERROR_CODES.UPSTREAM_UNAVAILABLE,
         'The refusal could not be recorded; nothing was done. Retry shortly',
