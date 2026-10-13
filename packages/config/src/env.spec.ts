@@ -9,6 +9,8 @@ import {
   loadEnv,
   EnvValidationError,
   outboxPurgeEnvSchema,
+  OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
+  outboxPurgeBatchBoundMs,
 } from './env';
 
 describe('loadEnv', () => {
@@ -229,6 +231,7 @@ describe('outbox purge (D-052)', () => {
     expect(env.OUTBOX_PURGE_BATCH_SIZE).toBe(1000);
     expect(env.OUTBOX_PURGE_MAX_BATCHES_PER_RUN).toBe(10);
     expect(env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS).toBe(5000);
+    expect(env.OUTBOX_PURGE_MAX_WAIT_MS).toBe(2000);
   });
 
   it('reads explicit values', () => {
@@ -239,6 +242,7 @@ describe('outbox purge (D-052)', () => {
       OUTBOX_PURGE_BATCH_SIZE: '250',
       OUTBOX_PURGE_MAX_BATCHES_PER_RUN: '4',
       OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '2000',
+      OUTBOX_PURGE_MAX_WAIT_MS: '750',
     });
 
     expect(env.OUTBOX_PURGE_ENABLED).toBe(false);
@@ -247,6 +251,7 @@ describe('outbox purge (D-052)', () => {
     expect(env.OUTBOX_PURGE_BATCH_SIZE).toBe(250);
     expect(env.OUTBOX_PURGE_MAX_BATCHES_PER_RUN).toBe(4);
     expect(env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS).toBe(2000);
+    expect(env.OUTBOX_PURGE_MAX_WAIT_MS).toBe(750);
   });
 
   it.each([
@@ -255,6 +260,7 @@ describe('outbox purge (D-052)', () => {
     ['OUTBOX_PURGE_BATCH_SIZE', ['0', '10001', '', '100.5']],
     ['OUTBOX_PURGE_MAX_BATCHES_PER_RUN', ['0', '1001', '', 'x']],
     ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', ['99', '60001', '', '5s']],
+    ['OUTBOX_PURGE_MAX_WAIT_MS', ['99', '60001', '', '2s', '-1']],
     ['OUTBOX_PURGE_ENABLED', ['maybe', '2', 'enabled']],
   ])('refuses an invalid %s', (name, values) => {
     for (const value of values) {
@@ -262,14 +268,40 @@ describe('outbox purge (D-052)', () => {
     }
   });
 
-  it('refuses a statement timeout that shutdown could not wait out', () => {
-    expect(() =>
-      load({ OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '25000', SHUTDOWN_TIMEOUT_MS: '25000' }),
-    ).toThrow(/OUTBOX_PURGE_STATEMENT_TIMEOUT_MS/);
+  it('the batch bound is the connection wait, the statement and the transaction margin', () => {
+    expect(OUTBOX_PURGE_TRANSACTION_MARGIN_MS).toBe(5000);
+    expect(outboxPurgeBatchBoundMs({ maxWaitMs: 2000, statementTimeoutMs: 5000 })).toBe(12_000);
+  });
+
+  // Codex r1 on #247: the check used to budget the statement alone, while
+  // each batch also waits for a connection and runs to Prisma's timeout.
+  it('refuses a configuration whose whole batch bound shutdown could not wait out', () => {
+    // 2000 + 17999 + 5000 = 24999: just inside 25000.
     expect(
-      load({ OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '24999', SHUTDOWN_TIMEOUT_MS: '25000' })
-        .OUTBOX_PURGE_STATEMENT_TIMEOUT_MS,
-    ).toBe(24_999);
+      load({
+        OUTBOX_PURGE_MAX_WAIT_MS: '2000',
+        OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '17999',
+        SHUTDOWN_TIMEOUT_MS: '25000',
+      }).OUTBOX_PURGE_STATEMENT_TIMEOUT_MS,
+    ).toBe(17_999);
+    // One millisecond more, from either side, is refused.
+    for (const overrides of [
+      { OUTBOX_PURGE_MAX_WAIT_MS: '2000', OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '18000' },
+      { OUTBOX_PURGE_MAX_WAIT_MS: '2001', OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '17999' },
+    ]) {
+      expect(() => load({ ...overrides, SHUTDOWN_TIMEOUT_MS: '25000' })).toThrow(
+        /one purge batch may take 25000 ms .*must be shorter than SHUTDOWN_TIMEOUT_MS \(25000 ms\)/,
+      );
+    }
+    // The statement alone under the shutdown timeout is no longer enough: the
+    // r1 configuration (statement 24999) is refused.
+    expect(() =>
+      load({ OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '24999', SHUTDOWN_TIMEOUT_MS: '25000' }),
+    ).toThrow(/OUTBOX_PURGE_STATEMENT_TIMEOUT_MS/);
+    // A long connection wait alone is refused too.
+    expect(() => load({ OUTBOX_PURGE_MAX_WAIT_MS: '20000', SHUTDOWN_TIMEOUT_MS: '25000' })).toThrow(
+      /20000 ms waiting for a connection/,
+    );
   });
 });
 

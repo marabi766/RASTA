@@ -292,7 +292,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // The worker first: it releases the claims it has not started, so a rolling
     // deploy does not park those documents until their leases expire.
     await this.scanWorker.stop();
-    // A purge batch in flight is bounded by its statement timeout.
+    // The purge has already stopped in its own onModuleDestroy, within its
+    // batch bound; this call only confirms it.
     await Promise.all([this.relay.stop(), this.purge.stop()]);
   }
 }

@@ -1409,8 +1409,15 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   (`@rasta/config`):
   - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
   - `OUTBOX_PURGE_RETENTION_HOURS` پیش‌فرض ۱۶۸ است: همان هفت روز ADR-050، و برابر نگه‌داری هفت‌روزهٔ Topicهای دامنه در Kafka.
-  - تنظیم‌های دیگر: `_INTERVAL_SECONDS`، `_BATCH_SIZE`، `_MAX_BATCHES_PER_RUN`، `_STATEMENT_TIMEOUT_MS`.
-  - هر مقدار کران دارد و مقدار نامعتبر سرویس را در شروع متوقف می‌کند.
+  - تنظیم‌های دیگر: `_INTERVAL_SECONDS`، `_BATCH_SIZE`، `_MAX_BATCHES_PER_RUN`، `_STATEMENT_TIMEOUT_MS`،
+    `_MAX_WAIT_MS`.
+  - هر مقدار کران دارد و مقدار نامعتبر سرویس را در شروع متوقف می‌کند. `turbo.json` همهٔ `OUTBOX_PURGE_*` را به `dev`،
+    `test` و `test:integration` می‌دهد؛ وگرنه `OUTBOX_PURGE_ENABLED=false pnpm dev` بی‌صدا نادیده گرفته می‌شد
+    (`scripts/outbox-purge-turbo-env.test.mjs`).
+  - **کران خاموش‌شدن:** هر Batch دو کران جدا دارد: انتظار برای Connection (`_MAX_WAIT_MS`، همان `maxWait` پریزما) و
+    تراکنش (`statement_timeout` به‌اضافهٔ ۵ ثانیه حاشیه). `loadEnv` سرویسی را که مجموع این سه از `SHUTDOWN_TIMEOUT_MS`
+    کمتر نباشد راه نمی‌اندازد. `stop()` (از `onModuleDestroy`، هم‌زمان با قطع اتصال Prisma) Batch تازه‌ای شروع نمی‌کند
+    و برای Batch جاری حداکثر همین مجموع صبر می‌کند؛ پس از آن Batch را با هشدار رها می‌کند.
 
   هر Batch یک تراکنش کوتاه است:
   - `SET LOCAL statement_timeout`؛
@@ -1425,8 +1432,12 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
   `test/outbox-purge.int-spec.ts` در هر پنج سرویس این را نشان می‌دهد.
 
-  **پیش‌شرط:** در اجرای B2 (`outbox-b2-backfill.md`) `OUTBOX_PURGE_ENABLED=false` باشد. B2 شماره‌گذاری را از بیشینهٔ
-  `stream_seq` باقی‌مانده در جدول می‌گیرد، نه از شمارنده.
+  **B2 پیش از Purge:** B2 (`outbox-b2-backfill.md`) شماره‌گذاری را از بیشینهٔ `stream_seq` باقی‌مانده در جدول می‌گیرد،
+  نه از شمارنده. پس B2 هر سرویس را **پیش از روشن شدن Purge آن** اجرا کن. اگر Purge ردیف‌های شماره‌دار یک Stream را
+  پاک کرده باشد، `next_seq` آن Stream از بالاترین ردیف باقی‌مانده جلوتر است. B2 آن سرویس را **رد می‌کند**: کد خروج ۱،
+  پیش از هر نوشتن، Dry-Run هم. اگر Purge حین اجرا برسد، Guard هر Batch همین را می‌گیرد. B2 از شمارنده هم شماره را
+  ادامه نمی‌دهد: ردیف لنگر و `(created_at, id)` آن با Purge رفته‌اند، و Guard ترتیب دیگر چیزی برای سنجیدن ندارد.
+  همچنین Apply نهایی‌شده با `*_mismatch` غیرصفر دیگر موفق شمرده نمی‌شود (Codex r1 روی #247).
 
   **مانده (فازهای بعد، با مالک هر سرویس):**
   - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست؛

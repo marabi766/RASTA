@@ -102,12 +102,16 @@ export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
    * that has not reached anybody yet, and deleting it would lose it silently.
    * `ck_outbox_published_is_clean` guarantees a published row holds no live
    * claim, so this can never delete a row somebody is still publishing. The
-   * limit, the timeout and the replica lock are in `purgePublishedSql`.
+   * limit, the timeouts and the replica lock are in `purgePublishedSql`.
+   *
+   * The wait for a connection and the transaction are bounded separately
+   * (`OUTBOX_PURGE_MAX_WAIT_MS`, then the statement timeout plus its margin),
+   * and their sum is what `loadEnv` holds under SHUTDOWN_TIMEOUT_MS.
    */
   async purgePublished(options: PurgePublishedOptions): Promise<PurgePublishedBatch> {
     return purgePublishedSql(
-      (fn, timeoutMs) =>
-        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      (fn, { timeoutMs, maxWaitMs }) =>
+        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: maxWaitMs }),
       options,
     );
   }

@@ -1,4 +1,4 @@
-import type { OutboxPurgeEnv } from '@rasta/config';
+import { outboxPurgeBatchBoundMs, type OutboxPurgeEnv } from '@rasta/config';
 import {
   outboxPurgedTotal,
   outboxPurgeLastSuccessSeconds,
@@ -27,6 +27,14 @@ import type { PurgePublishedBatch, PurgePublishedOptions } from './outbox-sql';
  *   lock per batch; a replica that finds it held ends its run as `busy`.
  * - **Never takes the service down** — a failed run is logged and counted, and
  *   the next one is scheduled as usual.
+ * - **Shutdown waits for at most one batch** — `stop()` starts no further
+ *   batch or run and waits for the one in flight no longer than its bound
+ *   (`outboxPurgeBatchBoundMs`: the wait for a connection plus the
+ *   transaction), which `loadEnv` holds under SHUTDOWN_TIMEOUT_MS. It is
+ *   called from `onModuleDestroy`, so the purge halts as Nest's destroy phase
+ *   begins, alongside the Prisma disconnect. From `onApplicationShutdown`
+ *   alone, which Nest runs only after every provider was destroyed, a run
+ *   would go on starting batches on a client that reconnects on demand.
  */
 
 /** Persistence port, implemented by each service's outbox store. */
@@ -41,6 +49,8 @@ export interface OutboxPurgeSettings {
   batchSize: number;
   maxBatchesPerRun: number;
   statementTimeoutMs: number;
+  /** Longest wait for a pooled connection before a batch's transaction starts. */
+  maxWaitMs: number;
 }
 
 /** The validated environment (`outboxPurgeEnvSchema`) as scheduler settings. */
@@ -52,6 +62,7 @@ export function outboxPurgeSettings(env: OutboxPurgeEnv): OutboxPurgeSettings {
     batchSize: env.OUTBOX_PURGE_BATCH_SIZE,
     maxBatchesPerRun: env.OUTBOX_PURGE_MAX_BATCHES_PER_RUN,
     statementTimeoutMs: env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS,
+    maxWaitMs: env.OUTBOX_PURGE_MAX_WAIT_MS,
   };
 }
 
@@ -84,7 +95,7 @@ export interface OutboxPurgeSchedulerOptions extends OutboxPurgeSettings {
  *   run continues. Persistently truncated means the purge is falling behind.
  * - `busy` — another replica held the purge lock; it is purging instead.
  * - `failed` — a batch threw. Rows already deleted stay deleted.
- * - `stopped` — shutdown began between batches.
+ * - `stopped` — shutdown began before the next batch.
  */
 export type OutboxPurgeOutcome = 'completed' | 'truncated' | 'busy' | 'failed' | 'stopped';
 
@@ -103,6 +114,8 @@ export class OutboxPurgeScheduler {
   private halting = false;
   private current?: Promise<OutboxPurgeRun>;
   private readonly now: () => number;
+  /** The most `stop()` waits for the batch in flight. */
+  readonly stopBoundMs: number;
 
   constructor(private readonly options: OutboxPurgeSchedulerOptions) {
     // The environment schema already bounds these; a direct caller is held to
@@ -114,6 +127,7 @@ export class OutboxPurgeScheduler {
       'batchSize',
       'maxBatchesPerRun',
       'statementTimeoutMs',
+      'maxWaitMs',
     ] as const) {
       const value = options[name];
       if (!Number.isSafeInteger(value) || value < 1) {
@@ -123,6 +137,7 @@ export class OutboxPurgeScheduler {
       }
     }
     this.now = options.now ?? Date.now;
+    this.stopBoundMs = outboxPurgeBatchBoundMs(options);
   }
 
   /** Schedules the first run. A no-op when disabled, apart from saying so. */
@@ -150,15 +165,42 @@ export class OutboxPurgeScheduler {
   }
 
   /**
-   * Stops scheduling and waits for a run in flight. That run ends after its
-   * current batch, and a batch is bounded by `statement_timeout`.
+   * Stops the purge: no further run is scheduled, a run in flight starts no
+   * further batch, and the batch in flight is waited for at most
+   * `stopBoundMs` — the longest it can take. Past that it is abandoned with a
+   * warning rather than awaited: the database's `statement_timeout` and the
+   * transaction timeout still end it, and the rows it would have deleted are
+   * due again at the next start. Idempotent.
    */
   async stop(): Promise<void> {
     this.stopped = true;
     this.halting = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
-    await this.current;
+
+    const current = this.current;
+    if (!current) return;
+    let deadline: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      current.then(() => 'finished' as const),
+      new Promise<'abandoned'>((resolve) => {
+        deadline = setTimeout(() => resolve('abandoned'), this.stopBoundMs);
+        deadline.unref?.();
+      }),
+    ]);
+    clearTimeout(deadline);
+    if (outcome === 'abandoned') {
+      this.options.logger?.warn(
+        { service: this.options.service, stopBoundMs: this.stopBoundMs },
+        'Outbox purge batch still running at its bound on shutdown; abandoned. Its statement ' +
+          'and transaction timeouts end it, and the rows stay due for the next start',
+      );
+    }
+  }
+
+  /** Nest's destroy phase, alongside the Prisma disconnect (see the class comment). */
+  async onModuleDestroy(): Promise<void> {
+    await this.stop();
   }
 
   /**
@@ -183,12 +225,14 @@ export class OutboxPurgeScheduler {
   }
 
   private async run(): Promise<OutboxPurgeRun> {
-    const { store, service, batchSize, maxBatchesPerRun, statementTimeoutMs } = this.options;
+    const { store, service, batchSize, maxBatchesPerRun, statementTimeoutMs, maxWaitMs } =
+      this.options;
     const startedAt = this.now();
     const request: PurgePublishedOptions = {
       retentionSeconds: this.options.retentionHours * 3600,
       limit: batchSize,
       statementTimeoutMs,
+      maxWaitMs,
     };
 
     let deleted = 0;
@@ -197,9 +241,10 @@ export class OutboxPurgeScheduler {
 
     try {
       while (batches < maxBatchesPerRun) {
-        // Checked only between batches: a batch already sent runs to its end
-        // (or its timeout), and stopping here leaves nothing half-done.
-        if (batches > 0 && this.halting) {
+        // Checked before every batch, the first included, so nothing starts
+        // once `stop()` was called; a batch already sent runs to its end (or
+        // its timeout), and stopping here leaves nothing half-done.
+        if (this.halting) {
           outcome = 'stopped';
           break;
         }

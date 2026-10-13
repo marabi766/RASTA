@@ -9,6 +9,8 @@ export {
   databaseEnvSchema,
   kafkaEnvSchema,
   outboxPurgeEnvSchema,
+  OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
+  outboxPurgeBatchBoundMs,
   KAFKA_SASL_MECHANISMS,
   kafkaSaslConfigured,
   kafkaPlaintextAllowed,

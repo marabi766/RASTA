@@ -76,6 +76,7 @@ describe('fleet-service outbox purge (D-052)', () => {
       batchSize: 1000,
       maxBatchesPerRun: 10,
       statementTimeoutMs: 5000,
+      maxWaitMs: 2000,
       ...overrides,
     });
 
@@ -278,6 +279,62 @@ describe('fleet-service outbox purge (D-052)', () => {
     } finally {
       await release();
     }
+  });
+
+  // Codex r1 on #247: the wait for a connection was given the transaction's
+  // own timeout (statement + 5 s) and was in no shutdown budget. Now it is
+  // OUTBOX_PURGE_MAX_WAIT_MS on its own, and stop() is bounded by the sum.
+  it('gives up on a busy pool after maxWaitMs, and stop() returns within the batch bound', async () => {
+    await seed('OLD', { createdHoursAgo: 200, publishedHoursAgo: 199 });
+    const single = new URL(schemaUrl());
+    single.searchParams.set('connection_limit', '1');
+    const starved = new PrismaService(single.toString());
+    await starved.onModuleInit();
+    // The pool's one connection, held in an open transaction.
+    let letGo!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    let ready!: () => void;
+    const held = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const holding = starved.client.$transaction(
+      async (tx) => {
+        await tx.$queryRawUnsafe('SELECT 1');
+        ready();
+        await gate;
+      },
+      { timeout: 60_000, maxWait: 60_000 },
+    );
+    try {
+      await held;
+      const scheduler = purge({
+        store: new PrismaOutboxStore(starved),
+        maxWaitMs: 300,
+        statementTimeoutMs: 5000,
+        initialDelayMs: 0,
+      });
+      // Before r1 this waited statement + 5 s = 10 s for the connection.
+      const startedAt = Date.now();
+      const run = await scheduler.runOnce();
+      expect(run).toMatchObject({ outcome: 'failed', deleted: 0, batches: 0 });
+      expect(Date.now() - startedAt).toBeLessThan(3000);
+
+      // Shutdown with a batch stuck waiting for that connection.
+      scheduler.start();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const stopAt = Date.now();
+      await scheduler.stop();
+      expect(Date.now() - stopAt).toBeLessThan(scheduler.stopBoundMs);
+      expect(await ids()).toEqual(['OLD']);
+    } finally {
+      letGo();
+      await holding;
+      await starved.onModuleDestroy();
+    }
+    // The pool free again, the same row goes.
+    expect(await purge().runOnce()).toMatchObject({ outcome: 'completed', deleted: 1 });
   });
 
   it('leaves the relay and the stream sequence exactly as they were', async () => {

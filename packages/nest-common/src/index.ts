@@ -191,6 +191,7 @@ export type {
   OutboxClaimResult,
   ClaimOptions,
   OutboxTxRunner,
+  OutboxPurgeTxRunner,
   PurgePublishedOptions,
   PurgePublishedBatch,
 } from './outbox/outbox-sql';

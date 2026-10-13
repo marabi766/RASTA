@@ -14,8 +14,8 @@ import {
 import {
   MANUALLY_SKIPPED_PREFIX,
   purgePublishedSql,
+  type OutboxPurgeTxRunner,
   type OutboxSqlClient,
-  type OutboxTxRunner,
   type PurgePublishedBatch,
   type PurgePublishedOptions,
 } from './outbox-sql';
@@ -66,6 +66,7 @@ function scheduler(
     batchSize: 100,
     maxBatchesPerRun: 3,
     statementTimeoutMs: 5000,
+    maxWaitMs: 2000,
     initialDelayMs: 0,
     ...overrides,
   });
@@ -89,16 +90,17 @@ async function lastSuccess(service: string): Promise<number | undefined> {
 }
 
 describe('OutboxPurgeScheduler — one run', () => {
-  it('asks for the retention in seconds, the batch size and the timeout', async () => {
+  it('asks for the retention in seconds, the batch size and both bounds', async () => {
     const store = new ScriptedStore([{ deleted: 7, busy: false }]);
     await scheduler(store, {
       retentionHours: 72,
       batchSize: 50,
       statementTimeoutMs: 1234,
+      maxWaitMs: 321,
     }).runOnce();
 
     expect(store.calls).toEqual([
-      { retentionSeconds: 72 * 3600, limit: 50, statementTimeoutMs: 1234 },
+      { retentionSeconds: 72 * 3600, limit: 50, statementTimeoutMs: 1234, maxWaitMs: 321 },
     ]);
   });
 
@@ -211,6 +213,7 @@ describe('OutboxPurgeScheduler — one run', () => {
     ['batchSize', 0],
     ['maxBatchesPerRun', 1.5],
     ['statementTimeoutMs', Number.NaN],
+    ['maxWaitMs', 0],
   ] as const)('refuses %s = %p rather than running a purge that cannot be right', (name, value) => {
     expect(() => scheduler(new ScriptedStore([]), { [name]: value })).toThrow(name);
   });
@@ -320,6 +323,85 @@ describe('OutboxPurgeScheduler — schedule', () => {
     expect(await counterValue(outboxPurgeRunsTotal, { service, outcome: 'stopped' })).toBe(1);
     expect(await counterValue(outboxPurgedTotal, { service })).toBe(100);
   });
+
+  it('stop() waits no longer than one batch bound for a batch that never ends (Codex r1 #247)', async () => {
+    // A batch stuck past every timeout — the case the bound exists for.
+    const store: OutboxPurgeStore & { calls: number } = {
+      calls: 0,
+      purgePublished() {
+        this.calls += 1;
+        return new Promise<PurgePublishedBatch>(() => undefined);
+      },
+    };
+    const { logger, lines } = recordingLogger();
+    const purge = scheduler(store, { maxWaitMs: 1000, statementTimeoutMs: 2000, logger });
+    // Connection wait + statement + the transaction margin.
+    expect(purge.stopBoundMs).toBe(1000 + 2000 + 5000);
+
+    purge.start();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(store.calls).toBe(1);
+
+    let stopped = false;
+    const stopping = purge.stop().then(() => {
+      stopped = true;
+    });
+    await jest.advanceTimersByTimeAsync(7999);
+    expect(stopped).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    await stopping;
+    expect(stopped).toBe(true);
+    const warning = lines.find((line) => line.level === 'warn');
+    expect(warning?.obj).toMatchObject({ stopBoundMs: 8000 });
+    expect(warning?.msg).toMatch(/abandoned/);
+    // Nothing new is started afterwards, by the timer or otherwise.
+    await jest.advanceTimersByTimeAsync(10 * 300_000);
+    expect(store.calls).toBe(1);
+  });
+
+  it('starts no batch once stopped, not even a first one', async () => {
+    const store = new ScriptedStore([{ deleted: 100, busy: false }]);
+    const service = freshService();
+    const purge = scheduler(store, { service });
+    purge.start();
+    await purge.stop();
+
+    // A run requested after the stop (an operator task, a late timer) does nothing.
+    expect(await purge.runOnce()).toMatchObject({ outcome: 'stopped', batches: 0, deleted: 0 });
+    await jest.advanceTimersByTimeAsync(10 * 300_000);
+    expect(store.calls).toHaveLength(0);
+  });
+
+  it('stops in onModuleDestroy, as the destroy phase that disconnects Prisma begins', async () => {
+    let release!: () => void;
+    const store: OutboxPurgeStore & { calls: number } = {
+      calls: 0,
+      async purgePublished() {
+        this.calls += 1;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { deleted: 100, busy: false };
+      },
+    };
+    const purge = scheduler(store, { maxBatchesPerRun: 5 });
+    purge.start();
+    await jest.advanceTimersByTimeAsync(0);
+
+    const destroyed = purge.onModuleDestroy();
+    release();
+    await destroyed;
+    expect(store.calls).toBe(1);
+    // onApplicationShutdown's later stop() returns at once.
+    await purge.stop();
+    expect(store.calls).toBe(1);
+  });
+
+  it('stop() with no run in flight returns at once', async () => {
+    const purge = scheduler(new ScriptedStore([]), { initialDelayMs: 60_000 });
+    purge.start();
+    await expect(purge.stop()).resolves.toBeUndefined();
+  });
 });
 
 describe('outboxPurgeSettings', () => {
@@ -332,6 +414,7 @@ describe('outboxPurgeSettings', () => {
         OUTBOX_PURGE_BATCH_SIZE: 500,
         OUTBOX_PURGE_MAX_BATCHES_PER_RUN: 8,
         OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: 3000,
+        OUTBOX_PURGE_MAX_WAIT_MS: 1500,
       }),
     ).toEqual({
       enabled: false,
@@ -340,6 +423,7 @@ describe('outboxPurgeSettings', () => {
       batchSize: 500,
       maxBatchesPerRun: 8,
       statementTimeoutMs: 3000,
+      maxWaitMs: 1500,
     });
   });
 });
@@ -348,7 +432,7 @@ describe('purgePublishedSql', () => {
   /** A transaction runner over a fake client that records every statement. */
   function fakeTx(acquired: boolean, deleted = 0) {
     const statements: string[] = [];
-    let txTimeoutMs = 0;
+    let bounds = { timeoutMs: 0, maxWaitMs: 0 };
     const client: OutboxSqlClient = {
       async $queryRawUnsafe<T>(query: string): Promise<T> {
         statements.push(query);
@@ -359,14 +443,19 @@ describe('purgePublishedSql', () => {
         return query.includes('DELETE') ? deleted : 0;
       },
     };
-    const run: OutboxTxRunner = (fn, timeoutMs) => {
-      txTimeoutMs = timeoutMs;
+    const run: OutboxPurgeTxRunner = (fn, given) => {
+      bounds = given;
       return fn(client);
     };
-    return { run, statements, txTimeoutMs: () => txTimeoutMs };
+    return { run, statements, bounds: () => bounds };
   }
 
-  const options = { retentionSeconds: 604_800, limit: 1000, statementTimeoutMs: 5000 };
+  const options = {
+    retentionSeconds: 604_800,
+    limit: 1000,
+    statementTimeoutMs: 5000,
+    maxWaitMs: 2000,
+  };
   const flat = (sql: string) => sql.replace(/\s+/g, ' ');
 
   it('bounds the batch, takes the replica lock, and deletes only published, unclaimed, old rows', async () => {
@@ -389,8 +478,9 @@ describe('purgePublishedSql', () => {
     );
     // The database clock decides, never the caller's.
     expect(del).not.toMatch(/\$\d/);
-    // The transaction outlives the statement, so statement_timeout is what applies.
-    expect(tx.txTimeoutMs()).toBe(10_000);
+    // The transaction outlives the statement, so statement_timeout is what
+    // applies; the wait for a connection is its own, separate bound.
+    expect(tx.bounds()).toEqual({ timeoutMs: 10_000, maxWaitMs: 2000 });
   });
 
   it('reports `busy` and deletes nothing when another session holds the lock', async () => {
@@ -405,6 +495,8 @@ describe('purgePublishedSql', () => {
     { limit: 0 },
     { limit: 10.5 },
     { statementTimeoutMs: Number.NaN },
+    { maxWaitMs: 0 },
+    { maxWaitMs: -1 },
     { retentionSeconds: Number.MAX_VALUE },
   ])('refuses %p before touching the database (S-05)', async (bad) => {
     const tx = fakeTx(true);

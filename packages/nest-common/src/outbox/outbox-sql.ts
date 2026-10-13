@@ -1,3 +1,4 @@
+import { OUTBOX_PURGE_TRANSACTION_MARGIN_MS } from '@rasta/config';
 import { toStreamSeq } from '@rasta/contracts';
 
 import { orderForPublish, type OutboxRow } from './outbox';
@@ -596,7 +597,22 @@ export interface PurgePublishedOptions {
   limit: number;
   /** `statement_timeout` for the batch, in milliseconds. */
   statementTimeoutMs: number;
+  /** Longest wait for a pooled connection before the transaction starts. */
+  maxWaitMs: number;
 }
+
+/**
+ * Runs one purge batch in a transaction with both of its bounds: `maxWaitMs`
+ * to obtain a connection (Prisma's `maxWait`) and `timeoutMs` for the
+ * transaction once it has one (Prisma's `timeout`). Separate from
+ * {@link OutboxTxRunner}, whose single number a store used for both — so a
+ * batch could wait as long for a connection as it was allowed to run, and
+ * neither wait was in the shutdown budget (Codex r1 on #247).
+ */
+export type OutboxPurgeTxRunner = <T>(
+  fn: (tx: OutboxSqlClient) => Promise<T>,
+  bounds: { timeoutMs: number; maxWaitMs: number },
+) => Promise<T>;
 
 export interface PurgePublishedBatch {
   /** Rows deleted. */
@@ -655,24 +671,26 @@ export interface PurgePublishedBatch {
  * so nothing but digits reaches the SQL (S-05).
  */
 export async function purgePublishedSql(
-  runTransaction: OutboxTxRunner,
+  runTransaction: OutboxPurgeTxRunner,
   options: PurgePublishedOptions,
 ): Promise<PurgePublishedBatch> {
   const retentionSeconds = positiveInteger(options.retentionSeconds, 'retentionSeconds');
   const limit = positiveInteger(options.limit, 'limit');
   const timeoutMs = positiveInteger(options.statementTimeoutMs, 'statementTimeoutMs');
+  const maxWaitMs = positiveInteger(options.maxWaitMs, 'maxWaitMs');
 
-  return runTransaction(async (tx) => {
-    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+  return runTransaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
 
-    const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
-      `SELECT pg_try_advisory_xact_lock(hashtext('rasta.outbox_purge'), hashtext(current_schema()))
+      const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
+        `SELECT pg_try_advisory_xact_lock(hashtext('rasta.outbox_purge'), hashtext(current_schema()))
               AS acquired`,
-    );
-    if (lock[0]?.acquired !== true) return { deleted: 0, busy: true };
+      );
+      if (lock[0]?.acquired !== true) return { deleted: 0, busy: true };
 
-    const deleted = await tx.$executeRawUnsafe(
-      `WITH doomed AS (
+      const deleted = await tx.$executeRawUnsafe(
+        `WITH doomed AS (
          SELECT id FROM outbox_message
           WHERE published_at IS NOT NULL
             AND published_at < now() - make_interval(secs => ${retentionSeconds})
@@ -686,11 +704,15 @@ export async function purgePublishedSql(
         WHERE o.id = doomed.id
           AND o.published_at IS NOT NULL
           AND o.claim_token IS NULL`,
-    );
-    return { deleted, busy: false };
-    // Outlives the statement, as in `renewSql`, so the bound that applies is
-    // `statement_timeout` rather than Prisma aborting the transaction first.
-  }, timeoutMs + 5_000);
+      );
+      return { deleted, busy: false };
+      // The transaction outlives the statement by the margin, so the bound that
+      // ends a slow DELETE is `statement_timeout` rather than Prisma abandoning
+      // the transaction first. Wait + timeout is `outboxPurgeBatchBoundMs`,
+      // which `loadEnv` holds under SHUTDOWN_TIMEOUT_MS.
+    },
+    { timeoutMs: timeoutMs + OUTBOX_PURGE_TRANSACTION_MARGIN_MS, maxWaitMs },
+  );
 }
 
 function positiveInteger(value: number, name: string): number {

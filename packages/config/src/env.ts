@@ -361,14 +361,47 @@ export const outboxPurgeEnvSchema = z.object({
 
   /**
    * `statement_timeout` for each batch. Bounds how long one batch can hold its
-   * row locks or keep a migration's lock request queued behind it. Must be
-   * shorter than `SHUTDOWN_TIMEOUT_MS` (`loadEnv` refuses otherwise), because
-   * shutdown waits for the batch in flight.
+   * row locks or keep a migration's lock request queued behind it. Part of the
+   * batch bound that `loadEnv` holds under `SHUTDOWN_TIMEOUT_MS`
+   * ({@link outboxPurgeBatchBoundMs}).
    */
   OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
+  /**
+   * How long a batch may wait for a pooled connection before its transaction
+   * starts (Prisma's `maxWait`). Not covered by `statement_timeout`, which
+   * starts only once there is a connection, so it is budgeted on its own: a
+   * pool busy with request traffic makes a batch give up and the run end as
+   * `failed`, rather than queue behind the service's own work. Part of the
+   * batch bound ({@link outboxPurgeBatchBoundMs}).
+   */
+  OUTBOX_PURGE_MAX_WAIT_MS: z.coerce.number().int().min(100).max(60_000).default(2000),
 });
 
 export type OutboxPurgeEnv = z.infer<typeof outboxPurgeEnvSchema>;
+
+/**
+ * Prisma's transaction `timeout` for a purge batch is its `statement_timeout`
+ * plus this, so the database's statement timeout is what ends a slow DELETE
+ * (a clean error, locks released) rather than Prisma abandoning the
+ * transaction first. The margin also covers the batch's other round trips —
+ * `SET LOCAL`, the advisory-lock probe and COMMIT.
+ */
+export const OUTBOX_PURGE_TRANSACTION_MARGIN_MS = 5_000;
+
+/**
+ * The longest one purge batch can take: waiting for a connection, then
+ * running to Prisma's transaction timeout. A stopping scheduler waits for at
+ * most one batch, so this is also what shutdown waits for the purge, and
+ * `loadEnv` refuses a configuration where it does not end before
+ * `SHUTDOWN_TIMEOUT_MS`.
+ */
+export function outboxPurgeBatchBoundMs(settings: {
+  maxWaitMs: number;
+  statementTimeoutMs: number;
+}): number {
+  return settings.maxWaitMs + settings.statementTimeoutMs + OUTBOX_PURGE_TRANSACTION_MARGIN_MS;
+}
 
 /** Services that use cache, distributed locks or rate limiting. */
 export const redisEnvSchema = z.object({
@@ -452,22 +485,42 @@ export function loadEnv<S extends z.ZodTypeAny>(
 }
 
 /**
- * Shutdown waits for the purge batch in flight, which `statement_timeout`
- * bounds — so that bound must end before the process's own shutdown timeout,
- * or a slow batch turns every shutdown into a forced exit.
+ * Shutdown waits for the purge batch in flight — its wait for a connection
+ * and its transaction both ({@link outboxPurgeBatchBoundMs}) — so that whole
+ * bound must end before the process's own shutdown timeout, or a slow batch
+ * turns every shutdown into a forced exit. Budgeting the statement alone
+ * missed the wait for a connection, which can be as long again.
  */
 function assertOutboxPurgeWithinShutdown(parsed: unknown): void {
   if (typeof parsed !== 'object' || parsed === null) return;
-  const { OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: statementMs, SHUTDOWN_TIMEOUT_MS: timeoutMs } =
-    parsed as { OUTBOX_PURGE_STATEMENT_TIMEOUT_MS?: unknown; SHUTDOWN_TIMEOUT_MS?: unknown };
-  if (typeof statementMs !== 'number' || typeof timeoutMs !== 'number') return;
-  if (statementMs < timeoutMs) return;
+  const {
+    OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: statementTimeoutMs,
+    OUTBOX_PURGE_MAX_WAIT_MS: maxWaitMs,
+    SHUTDOWN_TIMEOUT_MS: timeoutMs,
+  } = parsed as {
+    OUTBOX_PURGE_STATEMENT_TIMEOUT_MS?: unknown;
+    OUTBOX_PURGE_MAX_WAIT_MS?: unknown;
+    SHUTDOWN_TIMEOUT_MS?: unknown;
+  };
+  if (
+    typeof statementTimeoutMs !== 'number' ||
+    typeof maxWaitMs !== 'number' ||
+    typeof timeoutMs !== 'number'
+  ) {
+    return;
+  }
+  const boundMs = outboxPurgeBatchBoundMs({ maxWaitMs, statementTimeoutMs });
+  if (boundMs < timeoutMs) return;
   throw new EnvValidationError([
     {
       path: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
       message:
-        `(${statementMs} ms) must be shorter than SHUTDOWN_TIMEOUT_MS (${timeoutMs} ms): shutdown ` +
-        'waits for the purge batch in flight, so a longer bound could never finish',
+        `with OUTBOX_PURGE_MAX_WAIT_MS, one purge batch may take ${boundMs} ms ` +
+        `(${maxWaitMs} ms waiting for a connection + ${statementTimeoutMs} ms statement + ` +
+        `${OUTBOX_PURGE_TRANSACTION_MARGIN_MS} ms transaction margin), which must be shorter than ` +
+        `SHUTDOWN_TIMEOUT_MS (${timeoutMs} ms): shutdown waits for the batch in flight. Lower ` +
+        'either purge setting, or raise SHUTDOWN_TIMEOUT_MS (and keep it under the ' +
+        'orchestrator’s termination period)',
     },
   ]);
 }

@@ -591,6 +591,7 @@ describe('the outbox store, against a real database', () => {
       retentionSeconds: 7 * 24 * 60 * 60,
       limit: 10_000,
       statementTimeoutMs: 5000,
+      maxWaitMs: 2000,
     });
 
     expect(await rowsOf(old)).toHaveLength(0);

@@ -381,8 +381,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart; a
-    // purge batch in flight is bounded by its statement timeout.
+    // Let an in-flight batch finish so it is not republished on restart. The
+    // purge has already stopped in its own onModuleDestroy, within its batch
+    // bound; this call only confirms it.
     await Promise.all([this.relay.stop(), this.purge.stop()]);
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     if (this.sweepTimer) clearInterval(this.sweepTimer);
