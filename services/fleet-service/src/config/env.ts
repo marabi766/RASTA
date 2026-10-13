@@ -151,6 +151,21 @@ export const fleetEnvSchema = baseEnvSchema
       .max(3_600)
       .default(60),
     FLEET_INSURANCE_PARKED_SWEEP_BATCH: z.coerce.number().int().min(1).max(1_000).default(50),
+
+    /**
+     * The asset-sync consumer's transactions that hold a machine's lock while
+     * asset-service or maintenance-service is asked (a replayed state event, a
+     * live `INSURANCE_RECORDED`), and those that wait on that lock to decide a
+     * parked event (#240 r9). Must cover the longest chain of such calls plus a
+     * margin ({@link assetSyncBudgetProblem}); the service refuses to start
+     * otherwise.
+     */
+    FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(300_000)
+      .default(30_000),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;
@@ -184,8 +199,45 @@ export function parkingFromEnv(
   };
 }
 
+/**
+ * The most upstream calls one asset-sync transaction makes while it holds a
+ * machine's lock, one after another: a replayed state event asks asset-service
+ * for the snapshot, maintenance-service for the in-maintenance flag, and
+ * asset-service whether a stale fence's transfer was recorded. Each is bounded
+ * by `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS`.
+ */
+export const ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK = 3;
+
+/** What every asset-sync transaction timeout must leave beyond those calls, for its own statements. */
+export const ASSET_SYNC_TRANSACTION_MARGIN_MS = 5_000;
+
+/**
+ * Why `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` cannot work with the upstream
+ * timeout, or undefined when it can (#240 r9). A transaction that asks upstream
+ * under the lock must outlive every call it makes; one that only waits on that
+ * lock (deciding a parked event) must outlive the holder. Shorter, the
+ * transaction expires mid-call, rolls back and records nothing — a parked
+ * event's attempts would then never advance.
+ */
+export function assetSyncBudgetProblem(
+  env: Pick<
+    FleetEnv,
+    'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS' | 'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS'
+  >,
+): string | undefined {
+  const needed =
+    ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK * env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS +
+    ASSET_SYNC_TRANSACTION_MARGIN_MS;
+  if (env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS > needed) return undefined;
+  return (
+    `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS (${env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS} ms) must exceed ` +
+    `${ASSET_SYNC_UPSTREAM_CALLS_UNDER_LOCK} × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS ` +
+    `(${env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS} ms) + ${ASSET_SYNC_TRANSACTION_MARGIN_MS} ms = ${needed} ms`
+  );
+}
+
 export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv {
-  return loadEnv(fleetEnvSchema, {
+  const env = loadEnv(fleetEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? 'fleet-service',
     PORT: source.PORT ?? source.PORT_FLEET ?? '3104',
@@ -194,6 +246,11 @@ export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv 
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'fleet-service.main',
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  // Fail closed at startup: an invalid combination would fail every
+  // re-verification at run time instead (#240 r9).
+  const problem = assetSyncBudgetProblem(env);
+  if (problem) throw new Error(`Invalid fleet-service configuration: ${problem}`);
+  return env;
 }
 
 export function corsOrigins(env: FleetEnv): string[] {
@@ -214,6 +271,8 @@ export const FLEET_TOPIC = 'rasta.fleet.v1';
  * group's lag, cannot drift apart.
  */
 export const ASSET_SYNC_GROUP = 'fleet-service.asset-sync';
+/** Where the asset-sync consumer, and the parked-insurance sweep through the outbox, dead-letter. */
+export const ASSET_SYNC_DEAD_LETTER_TOPIC = 'rasta.fleet.v1.dlq';
 export const ASSET_SYNC_TOPICS = [
   'rasta.asset.v1',
   'rasta.insurance.v1',

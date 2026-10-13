@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { ulid } from 'ulid';
+import type { EventEnvelope } from '@rasta/contracts';
 import {
   allocateStreamSeqSql,
   buildOutboxRow,
@@ -87,6 +89,37 @@ export class FleetRepository {
     });
 
     return row.id;
+  }
+
+  /**
+   * Enqueues a dead letter in the caller's transaction (#240 r9, ADR-021): the
+   * outbox relay publishes it to its topic once that transaction commits, and
+   * never if it rolls back. The row carries the original envelope, key and
+   * headers as they are to be published; its id is fresh, never the event's —
+   * a replayed event can be dead-lettered again. No stream sequence: a dead
+   * letter is in no fleet stream.
+   */
+  async enqueueDeadLetter(
+    tx: ExtendedPrismaClient,
+    letter: DeadLetterOutboxInput,
+  ): Promise<string> {
+    const id = ulid();
+    await tx.outboxMessage.create({
+      data: {
+        id,
+        aggregateType: letter.envelope.aggregateType,
+        aggregateId: letter.envelope.aggregateId,
+        eventName: letter.envelope.eventName,
+        eventVersion: letter.envelope.eventVersion,
+        topic: letter.topic,
+        partitionKey: letter.key,
+        payload: letter.envelope as unknown as Prisma.InputJsonValue,
+        headers: letter.headers,
+        organizationId: letter.organizationId,
+        correlationId: letter.envelope.correlationId,
+      },
+    });
+    return id;
   }
 
   // -------------------------------------------------------------------------
@@ -1058,6 +1091,16 @@ export class FleetRepository {
       throw error;
     }
   }
+}
+
+/** A dead letter for the outbox (#240 r9): published as `key`, `envelope` and `headers` to `topic`. */
+export interface DeadLetterOutboxInput {
+  topic: string;
+  key: string;
+  envelope: EventEnvelope;
+  headers: Record<string, string>;
+  /** The original envelope's tenant. */
+  organizationId: string;
 }
 
 /** What parking an `INSURANCE_RECORDED` stores (#240 r8). */

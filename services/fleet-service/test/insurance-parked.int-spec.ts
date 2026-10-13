@@ -1,5 +1,5 @@
 import type { EventEnvelope } from '@rasta/contracts';
-import { runUnscoped, type DeferredDeadLetter } from '@rasta/nest-common';
+import { OutboxRelay, RastaError, runUnscoped, type OutboxRow } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
@@ -8,6 +8,8 @@ import {
   CONSUMER_NAME,
   type ParkingOptions,
 } from '../src/consumers/asset-sync.consumer';
+import { PrismaOutboxStore } from '../src/outbox/outbox.store';
+import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { FakePolicySource } from './policy-source.fake';
 import { asActor, cleanup, id, newPrisma, producerShaped, tenants } from './helpers';
 
@@ -28,8 +30,9 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
   let repository: FleetRepository;
   let policies: FakePolicySource;
   let consumer: AssetSyncConsumer;
-  let letters: DeferredDeadLetter[];
-  let failLetters: boolean;
+  /** The real outbox relay, publishing to memory instead of Kafka. */
+  let relay: OutboxRelay;
+  let publisher: InMemoryEventPublisher;
   /** Only comprehensive cover is required, so one policy makes a machine dispatchable. */
   let comprehensive: AssignmentService;
 
@@ -38,12 +41,6 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     maxAttempts: 2,
     sweepIntervalMs: 60_000,
     batchSize: 1_000,
-    deadLetters: {
-      publish: async (letter) => {
-        if (failLetters) throw new Error('broker down');
-        letters.push(letter);
-      },
-    },
   };
 
   beforeAll(async () => {
@@ -64,13 +61,14 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
       blockingCoverages: ['COMPREHENSIVE'],
       requiredCoverages: ['COMPREHENSIVE'],
     });
+    publisher = new InMemoryEventPublisher();
+    relay = new OutboxRelay({ store: new PrismaOutboxStore(prisma), publisher });
     await cleanup(prisma, [org.a, org.b]);
   });
 
   beforeEach(() => {
-    letters = [];
-    failLetters = false;
     policies.unreachable(false);
+    publisher.clear();
   });
 
   afterAll(async () => {
@@ -180,6 +178,21 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
       where: { eventId, consumerName: CONSUMER_NAME },
     })) === 1;
 
+  /** The dead letters of an event waiting in the outbox, or published. */
+  const deadLetterRows = (eventId: string) =>
+    prisma.client.outboxMessage.findMany({
+      where: { topic: 'rasta.fleet.v1.dlq', headers: { path: ['x-event-id'], equals: eventId } },
+    });
+
+  /** Runs the relay until the outbox is drained; what it published for `eventId` to the DLQ. */
+  async function relayDeadLetters(eventId: string): Promise<OutboxRow[]> {
+    let ticks = 0;
+    while (ticks < 50 && (await relay.tick()) > 0) ticks += 1;
+    return publisher.published.filter(
+      (row) => row.topic === 'rasta.fleet.v1.dlq' && row.headers['x-event-id'] === eventId,
+    );
+  }
+
   /** Makes a parked row, and its last attempt, an hour old by the database's clock. */
   const age = (eventId: string) =>
     prisma.client.$executeRaw`
@@ -277,7 +290,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     });
   });
 
-  it('the sweep dead-letters a row still unverified after the maximum attempts — never applied — and a replay of it is applied', async () => {
+  it('the sweep dead-letters through the outbox: a rollback publishes nothing and keeps the row and marker; a commit is published by the relay and its replay applied', async () => {
     const assetId = await machineOfA();
     const { policyId, envelope } = newOwnersPolicy(assetId);
     await consumer.handle(envelope, {
@@ -291,44 +304,98 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     await age(envelope.eventId);
     await consumer.sweepParked();
     expect(await parked(envelope.eventId)).toMatchObject({ attempts: 1 });
-    expect(letters).toHaveLength(0);
+    expect(await deadLetterRows(envelope.eventId)).toHaveLength(0);
 
-    // Attempt 2 reaches the maximum, but the dead letter cannot be written:
-    // the attempt rolls back, the row and the marker stay.
+    // Attempt 2 reaches the maximum. The transaction dies after the dead letter
+    // was enqueued (a lost connection, an expired transaction): all of it rolls
+    // back — no dead letter to publish, the row and the marker stay.
     await age(envelope.eventId);
-    failLetters = true;
-    await consumer.sweepParked();
+    const crash = jest
+      .spyOn(repository, 'unmarkEventProcessed')
+      .mockRejectedValueOnce(new Error('connection lost'));
+    expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 0 });
+    expect(crash).toHaveBeenCalledTimes(1);
+    crash.mockRestore();
     expect(await parked(envelope.eventId)).toMatchObject({ attempts: 1 });
     expect(await marked(envelope.eventId)).toBe(true);
+    expect(await deadLetterRows(envelope.eventId)).toHaveLength(0);
+    expect(await relayDeadLetters(envelope.eventId)).toHaveLength(0);
 
-    failLetters = false;
-    await consumer.sweepParked();
-
+    // Committed: the row and the marker are gone with the dead letter enqueued.
+    expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
     expect(await parked(envelope.eventId)).toBeNull();
-    expect(letters).toHaveLength(1);
-    expect(letters[0]).toMatchObject({
-      key: assetId,
-      originalTopic: 'rasta.insurance.v1',
-      originalPartition: 3,
-      originalOffset: '40',
-      reason: 'PARKED_VERIFICATION_EXHAUSTED',
-      attempts: 2,
-    });
-    expect(JSON.parse(letters[0]!.value.toString('utf8'))).toMatchObject({
-      eventId: envelope.eventId,
-      payload: { policyId },
-    });
-    expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
-    // The marker is gone with the row, so a replay is not stopped as a duplicate.
     expect(await marked(envelope.eventId)).toBe(false);
+    expect(await deadLetterRows(envelope.eventId)).toMatchObject([
+      { organizationId: org.b, publishedAt: null },
+    ]);
+    expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+
+    // The relay publishes it, as the original was published.
+    const published = await relayDeadLetters(envelope.eventId);
+    expect(published).toHaveLength(1);
+    const letter = published[0]!;
+    expect(letter.partitionKey).toBe(assetId);
+    expect(letter.headers).toMatchObject({
+      'x-event-id': envelope.eventId,
+      'x-event-name': 'INSURANCE_RECORDED',
+      'x-tenant-id': org.b,
+      'x-dlq-reason': 'PARKED_VERIFICATION_EXHAUSTED',
+      'x-dlq-original-topic': 'rasta.insurance.v1',
+      'x-dlq-original-partition': '3',
+      'x-dlq-original-offset': '40',
+      'x-dlq-attempts': '2',
+    });
+    const body = JSON.parse(JSON.stringify(letter.payload)) as EventEnvelope;
+    expect(body).toMatchObject({ eventId: envelope.eventId, payload: { policyId } });
+    expect((await deadLetterRows(envelope.eventId))[0]!.publishedAt).not.toBeNull();
 
     // The transfer is consumed at last; the operator replays the dead letter.
     await transferToB(assetId);
-    await consumer.handle(envelope, { topic: 'rasta.insurance.v1.retry', partition: 0 });
+    await consumer.handle(body, {
+      topic: 'rasta.insurance.v1.retry',
+      partition: 0,
+      key: letter.partitionKey,
+    });
     expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toMatchObject({
       COMPREHENSIVE: [{ policyId, generation: 1 }],
     });
   });
+
+  it('r9: a source slower than the transaction timeout still has each attempt recorded, and the last one dead-letters', async () => {
+    const assetId = await machineOfA();
+    const { envelope } = newOwnersPolicy(assetId);
+    await consumer.handle(envelope, { topic: 'rasta.insurance.v1', partition: 0, key: assetId });
+
+    // Each question outlives the 1 s transaction timeout, then times out. Asked
+    // inside a transaction, the attempt would roll back with it, every time.
+    const slow = {
+      verify: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        throw RastaError.upstreamTimeout('asset-service', 1_500);
+      },
+    };
+    const impatient = new AssetSyncConsumer(
+      null,
+      repository,
+      undefined,
+      undefined,
+      undefined,
+      slow,
+      PARKING,
+      1_000,
+    );
+
+    await age(envelope.eventId);
+    expect(await impatient.sweepParked()).toMatchObject({ KEPT: 1 });
+    expect(await parked(envelope.eventId)).toMatchObject({ attempts: 1, reason: 'NO_ANSWER' });
+
+    await age(envelope.eventId);
+    expect(await impatient.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
+    expect(await parked(envelope.eventId)).toBeNull();
+    expect(await marked(envelope.eventId)).toBe(false);
+    expect(await deadLetterRows(envelope.eventId)).toHaveLength(1);
+    expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+  }, 30_000);
 
   it('is tenant data: each organization reads only the rows parked under it', async () => {
     const assetOfA = await machineOfA();

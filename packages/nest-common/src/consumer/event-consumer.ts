@@ -135,23 +135,24 @@ export interface EventDelivery {
 }
 
 /**
- * A dead letter a handler writes itself, after the delivery it came from was
- * acknowledged: the body and the platform headers as the producer published
- * them, the key the record carried, and where it sat. Written with the same
- * DLQ headers and counted under the same metric as the consumer's own.
+ * Why and from where a message is dead-lettered: what {@link deadLetterHeaders}
+ * writes beside the original's platform headers.
  */
-export interface DeferredDeadLetter {
-  readonly value: Buffer;
-  readonly key: string | null;
-  /** The platform headers of the original (`EVENT_HEADERS`); any other is dropped. */
-  readonly headers: IHeaders;
+export interface DeadLetterDescription {
+  readonly reason: DlqReason;
   readonly originalTopic: string;
+  /** Omitted when unknown (a dead letter written later, from what was kept). */
   readonly originalPartition?: number;
   readonly originalOffset?: string;
-  readonly reason: DlqReason;
-  /** Fixed text and identifiers only (S-09), like an {@link UnprocessableEventError}'s message. */
-  readonly detail: string;
   readonly attempts: number;
+  /**
+   * Fixed text and identifiers only (S-09), like an {@link UnprocessableEventError}'s
+   * message; cut to 1000 characters, never otherwise rewritten.
+   */
+  readonly detail: string;
+  /** Who writes the dead letter: the consumer's client id, never the original producer. */
+  readonly producer: string;
+  readonly failedAt: Date;
 }
 
 /**
@@ -546,35 +547,10 @@ export class EventConsumer {
    * the closed set the metric declares — this consumer's `clientId`, the source
    * topic and the `DlqReason` — and never an event, tenant or error value.
    */
-  /**
-   * Writes a dead letter for an event a handler held back after its delivery was
-   * acknowledged ({@link DeferredDeadLetter}). Throws when it could not be
-   * written — the caller keeps what it holds and tries again — and when this
-   * consumer has no dead-letter topic: such a letter would be dropped.
-   */
-  async publishDeadLetter(letter: DeferredDeadLetter): Promise<void> {
-    if (!this.options.deadLetterTopic) {
-      throw new Error(`No dead-letter topic configured for ${this.options.groupId}`);
-    }
-    await this.deadLetter(
-      {
-        topic: letter.originalTopic,
-        partition: letter.originalPartition,
-        offset: letter.originalOffset,
-        key: letter.key === null ? null : Buffer.from(letter.key, 'utf8'),
-      },
-      letter.value,
-      letter.headers,
-      letter.reason,
-      safeLogText(letter.detail, HANDLER_MESSAGE_MAX),
-      letter.attempts,
-    );
-  }
-
   private async deadLetter(
     original: {
       topic: string;
-      partition: number | undefined;
+      partition: number;
       offset: string | undefined;
       key?: Buffer | null;
     },
@@ -604,21 +580,16 @@ export class EventConsumer {
           // ordering, and a replay cannot always rebuild it from the body.
           key: original.key ?? null,
           value,
-          headers: {
-            ...forwardedHeaders(headers),
-            [DLQ_HEADERS.reason]: reason,
-            [DLQ_HEADERS.originalTopic]: originalTopic,
-            ...(original.partition === undefined
-              ? {}
-              : { [DLQ_HEADERS.originalPartition]: String(original.partition) }),
-            ...(original.offset === undefined
-              ? {}
-              : { [DLQ_HEADERS.originalOffset]: original.offset }),
-            [DLQ_HEADERS.attempts]: String(attempts),
-            [DLQ_HEADERS.error]: detail.slice(0, 1000),
-            [DLQ_HEADERS.firstFailedAt]: new Date().toISOString(),
-            [EVENT_HEADERS.producer]: this.options.clientId,
-          },
+          headers: deadLetterHeaders(headers, {
+            reason,
+            originalTopic,
+            originalPartition: original.partition,
+            ...(original.offset === undefined ? {} : { originalOffset: original.offset }),
+            attempts,
+            detail,
+            producer: this.options.clientId,
+            failedAt: new Date(),
+          }),
         },
       ],
     });
@@ -691,6 +662,35 @@ export function forwardedHeaders(headers: IHeaders | undefined): IHeaders {
     if (FORWARDED_HEADERS.has(name) && value !== undefined) kept[name] = value;
   }
   return kept;
+}
+
+/**
+ * The headers of a dead letter: the original's platform headers
+ * ({@link forwardedHeaders}; any other is dropped), then why and from where
+ * (`DLQ_HEADERS`) and who wrote it. The consumer's own dead letters use it, and
+ * so does a service that dead-letters through its outbox an event it held back
+ * (fleet's parked insurance events, #240 r9), so the replay tool and the
+ * runbook read both alike.
+ */
+export function deadLetterHeaders(
+  original: IHeaders | undefined,
+  letter: DeadLetterDescription,
+): IHeaders {
+  return {
+    ...forwardedHeaders(original),
+    [DLQ_HEADERS.reason]: letter.reason,
+    [DLQ_HEADERS.originalTopic]: letter.originalTopic,
+    ...(letter.originalPartition === undefined
+      ? {}
+      : { [DLQ_HEADERS.originalPartition]: String(letter.originalPartition) }),
+    ...(letter.originalOffset === undefined
+      ? {}
+      : { [DLQ_HEADERS.originalOffset]: letter.originalOffset }),
+    [DLQ_HEADERS.attempts]: String(letter.attempts),
+    [DLQ_HEADERS.error]: letter.detail.slice(0, 1000),
+    [DLQ_HEADERS.firstFailedAt]: letter.failedAt.toISOString(),
+    [EVENT_HEADERS.producer]: letter.producer,
+  };
 }
 
 /** The longest handler message a log line or `x-dlq-error` repeats, in characters. */

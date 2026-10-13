@@ -70,6 +70,7 @@ import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
 import {
+  ASSET_SYNC_DEAD_LETTER_TOPIC,
   ASSET_SYNC_GROUP,
   ASSET_SYNC_TOPICS,
   dispatchPolicyFromEnv,
@@ -205,7 +206,7 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
                 // would see half the stream (docs/07 § 7.10).
                 groupId: ASSET_SYNC_GROUP,
                 topics: CONSUMED_TOPICS,
-                deadLetterTopic: 'rasta.fleet.v1.dlq',
+                deadLetterTopic: ASSET_SYNC_DEAD_LETTER_TOPIC,
                 // The replica reads from the start. A fleet that only knows
                 // about machines registered after this service was first
                 // deployed is not a fleet.
@@ -243,8 +244,14 @@ const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
           }),
           // #240 r8: an INSURANCE_RECORDED the source answers for a later owner
           // is parked, re-verified on the transfer and by this sweep, and
-          // dead-lettered to rasta.fleet.v1.dlq when its attempts run out.
-          parkingFromEnv(env),
+          // dead-lettered to rasta.fleet.v1.dlq when its attempts run out —
+          // through the outbox (r9), counted under the consumer's own label.
+          {
+            ...parkingFromEnv(env),
+            dlqMetricService: `${env.KAFKA_CLIENT_ID}-asset-sync`,
+          },
+          // Checked against ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS at startup (r9).
+          env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
         ),
     },
 

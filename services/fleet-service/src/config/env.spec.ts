@@ -1,4 +1,59 @@
-import { dispatchPolicyFromEnv, fleetEnvSchema, parkingFromEnv } from './env';
+import {
+  assetSyncBudgetProblem,
+  dispatchPolicyFromEnv,
+  fleetEnvSchema,
+  loadFleetEnv,
+  parkingFromEnv,
+} from './env';
+
+/** #240 r9: no asset-sync transaction may expire while it holds, or waits on, a lock across upstream calls. */
+describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
+  const MINIMAL: NodeJS.ProcessEnv = {
+    NODE_ENV: 'test',
+    DATABASE_URL: 'postgresql://rasta_fleet:pw@127.0.0.1:5433/rasta_fleet?schema=public',
+    KAFKA_BROKERS: 'localhost:9092',
+    REDIS_URL: 'redis://127.0.0.1:6379',
+    OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+    OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
+    OIDC_AUDIENCE: 'rasta-api',
+    INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
+    ASSET_SERVICE_URL: 'http://localhost:3102',
+    MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
+  };
+
+  it('defaults to 30 s, which covers three calls at the default upstream timeout and the margin', () => {
+    const env = loadFleetEnv(MINIMAL);
+    expect(env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS).toBe(30_000);
+    expect(env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS).toBe(3_000);
+    expect(assetSyncBudgetProblem(env)).toBeUndefined();
+  });
+
+  it('refuses to start when the transactions would not outlive the upstream calls (fail closed)', () => {
+    // The largest upstream timeout the schema allows, with the default transaction timeout.
+    expect(() =>
+      loadFleetEnv({ ...MINIMAL, ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000' }),
+    ).toThrow(
+      /FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS \(30000 ms\) must exceed 3 × ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS \(30000 ms\) \+ 5000 ms = 95000 ms/,
+    );
+    expect(
+      loadFleetEnv({
+        ...MINIMAL,
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000',
+        FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '95001',
+      }).FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
+    ).toBe(95_001);
+  });
+
+  it('holds the margin exactly: equal is refused, one millisecond more is accepted', () => {
+    const at = (transaction: number) =>
+      assetSyncBudgetProblem({
+        FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: transaction,
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: 5_000,
+      });
+    expect(at(20_000)).toMatch(/must exceed/);
+    expect(at(20_001)).toBeUndefined();
+  });
+});
 
 /** #240 r8: the parked-insurance sweep. */
 describe('FLEET_INSURANCE_PARKED_*', () => {

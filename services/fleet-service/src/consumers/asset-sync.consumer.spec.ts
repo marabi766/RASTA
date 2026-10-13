@@ -1,18 +1,20 @@
 import type { EventEnvelope } from '@rasta/contracts';
-import {
-  tryGetContext,
-  type DeferredDeadLetter,
-  type OutboxMessageInput,
-} from '@rasta/nest-common';
+import { RastaError, tryGetContext, type OutboxMessageInput } from '@rasta/nest-common';
+import { dlqMessagesTotal } from '@rasta/observability';
 import {
   AssetSyncConsumer,
   CONSUMER_NAME,
   DEFAULT_PARKING,
   type ParkingOptions,
 } from './asset-sync.consumer';
-import type { FleetRepository, ParkedInsuranceInput } from '../fleet/fleet.repository';
+import type {
+  DeadLetterOutboxInput,
+  FleetRepository,
+  ParkedInsuranceInput,
+} from '../fleet/fleet.repository';
 import { CONSUMED_EVENTS, CONSUMED_PAYLOADS } from '../fleet/events';
 import { FakePolicySource, echoing } from '../../test/policy-source.fake';
+import type { InsurancePolicySource } from './replica-sources';
 import { activeDispatchBlocks } from '../fleet/dispatch-blocks';
 
 /**
@@ -31,7 +33,16 @@ interface Recorded {
   parked: Map<string, ParkedRow>;
   /** Every outbox row, with the actor and tenant of the context it was built in. */
   events: (OutboxMessageInput & { callerService?: string; contextTenant?: string })[];
+  /** Dead letters enqueued in the outbox (#240 r9), with the transaction each was written in. */
+  deadLetters: (DeadLetterOutboxInput & { tx: number })[];
+  /** The transaction each parked row was removed in, and each marker. */
+  removedIn: { parked: number[]; unmarked: number[] };
+  /** For each question to asset-service: whether a transaction was open (#240 r9). */
+  askedInTransaction: boolean[];
 }
+
+/** The fake transaction handle: which `transaction()` call it belongs to. */
+const txOf = (tx: unknown): number => (tx as { id: number }).id;
 
 /** An assignment still open on the machine, as the repository hands it back once ended. */
 interface OpenAssignment {
@@ -70,8 +81,13 @@ function buildConsumer(options: {
     unmarked: [],
     parked: new Map(),
     events: [],
+    deadLetters: [],
+    removedIn: { parked: [], unmarked: [] },
+    askedInTransaction: [],
   };
   const replica = options.replica ?? (() => options.existing ?? null);
+  let transactions = 0;
+  let open = 0;
 
   const repository = {
     endActiveAssignmentsForAsset: jest.fn(async (_tx: unknown, _assetId: string, at: Date) =>
@@ -96,14 +112,27 @@ function buildConsumer(options: {
     findAssetRefUnscoped: jest.fn(async () => replica()),
     lockAssetRef: jest.fn(async () => undefined),
     dropTransferFences: jest.fn(async () => 0),
-    transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
+    transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+      transactions += 1;
+      open += 1;
+      try {
+        return await fn({ id: transactions });
+      } finally {
+        open -= 1;
+      }
+    }),
     markEventProcessed: jest.fn(async (_tx: unknown, eventId: string) => {
       if (options.alreadyProcessed) return false;
       recorded.processed.push(eventId);
       return true;
     }),
-    unmarkEventProcessed: jest.fn(async (_tx: unknown, eventId: string) => {
+    unmarkEventProcessed: jest.fn(async (tx: unknown, eventId: string) => {
       recorded.unmarked.push(eventId);
+      recorded.removedIn.unmarked.push(txOf(tx));
+    }),
+    enqueueDeadLetter: jest.fn(async (tx: unknown, letter: DeadLetterOutboxInput) => {
+      recorded.deadLetters.push({ ...letter, tx: txOf(tx) });
+      return 'OUTBOX-DLQ-1';
     }),
     upsertAssetRef: jest.fn(async (_tx: unknown, data: Record<string, unknown>) => {
       recorded.upserts.push(data);
@@ -112,9 +141,11 @@ function buildConsumer(options: {
     parkInsuranceEvent: jest.fn(async (_tx: unknown, row: ParkedInsuranceInput) => {
       recorded.parked.set(row.eventId, { ...row, attempts: 0, due: true });
     }),
-    findParkedInsurance: jest.fn(
-      async (_tx: unknown, eventId: string) => recorded.parked.get(eventId) ?? null,
-    ),
+    // A copy, as a read from the database is: a later change is not seen in it.
+    findParkedInsurance: jest.fn(async (_tx: unknown, eventId: string) => {
+      const row = recorded.parked.get(eventId);
+      return row ? { ...row } : null;
+    }),
     listParkedInsuranceForAsset: jest.fn(async (assetId: string) =>
       [...recorded.parked.values()]
         .filter((row) => row.assetId === assetId)
@@ -131,15 +162,24 @@ function buildConsumer(options: {
       row.reason = reason;
       return row.attempts;
     }),
-    deleteParkedInsurance: jest.fn(async (_tx: unknown, eventId: string) =>
-      recorded.parked.delete(eventId),
-    ),
+    deleteParkedInsurance: jest.fn(async (tx: unknown, eventId: string) => {
+      recorded.removedIn.parked.push(txOf(tx));
+      return recorded.parked.delete(eventId);
+    }),
   } as unknown as FleetRepository;
 
   const policies = options.policies ?? new FakePolicySource();
   policies.replica = () => replica();
+  // What the consumer is given: the fake, noting whether a transaction is open
+  // at each question. A test that replaces `policies.verify` is still noted.
+  const source: InsurancePolicySource = {
+    verify: async (...args) => {
+      recorded.askedInTransaction.push(open > 0);
+      return policies.verify(...args);
+    },
+  };
   const consumer = echoing(
-    new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies, {
+    new AssetSyncConsumer(null, repository, undefined, undefined, undefined, source, {
       ...DEFAULT_PARKING,
       ...options.parking,
     }),
@@ -2323,14 +2363,13 @@ describe('AssetSyncConsumer', () => {
       });
 
       it('the transfer path never dead-letters, even past the maximum', async () => {
-        const deadLetters = { publish: jest.fn(async () => undefined) };
-        const { consumer, recorded, move } = parkedSetup(C, 5, { maxAttempts: 1, deadLetters });
+        const { consumer, recorded, move } = parkedSetup(C, 5, { maxAttempts: 1 });
         await consumer.handle(recordedPolicy());
 
         move(B, 4);
         await consumer.handle(transferTo(B, 4));
 
-        expect(deadLetters.publish).not.toHaveBeenCalled();
+        expect(recorded.deadLetters).toHaveLength(0);
         expect(recorded.parked.size).toBe(1);
       });
 
@@ -2367,9 +2406,94 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts).toBe(0);
       });
 
-      it('exhausted: dead-lettered as PARKED_VERIFICATION_EXHAUSTED with its key and headers; row and marker removed', async () => {
-        const deadLetters = { publish: jest.fn(async (_letter: DeferredDeadLetter) => undefined) };
-        const { consumer, recorded } = parkedSetup(B, 4, { maxAttempts: 2, deadLetters });
+      it('r9: asset-service is never asked inside a transaction when a parked event is re-verified', async () => {
+        const { consumer, recorded, move } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        // The live delivery asks inside its own transaction, with its marker.
+        expect(recorded.askedInTransaction).toEqual([true]);
+
+        move(B, 4);
+        await consumer.handle(transferTo(B, 4));
+        await consumer.sweepParked();
+
+        expect(recorded.askedInTransaction).toEqual([true, false]);
+        expect(recorded.parked.size).toBe(0);
+      });
+
+      it('r9: an upstream timeout is counted as an attempt each run, and the maximum dead-letters it', async () => {
+        const { consumer, recorded, policies } = parkedSetup(B, 4, { maxAttempts: 3 });
+        await consumer.handle(recordedPolicy(), {
+          topic: 'rasta.insurance.v1',
+          partition: 1,
+          key: 'AST-SEED-0001',
+          offset: '9',
+        });
+        jest
+          .spyOn(policies, 'verify')
+          .mockRejectedValue(RastaError.upstreamTimeout('asset-service', 30_000));
+
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1 });
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({
+          attempts: 1,
+          reason: 'NO_ANSWER',
+        });
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1 });
+        expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
+
+        expect(recorded.parked.size).toBe(0);
+        expect(recorded.deadLetters).toHaveLength(1);
+        expect(recorded.deadLetters[0]!.headers).toMatchObject({
+          'x-dlq-reason': 'PARKED_VERIFICATION_EXHAUSTED',
+          'x-dlq-attempts': '3',
+        });
+        expect(recorded.deadLetters[0]!.headers['x-dlq-error']).toMatch(/\(last: NO_ANSWER\)/);
+        expect(recorded.askedInTransaction.slice(1)).toEqual([false, false, false]);
+      });
+
+      it('r9: decided again under the lock — an attempt another run counted meanwhile is not counted twice', async () => {
+        const { consumer, recorded, policies } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+          // The transfer's re-verification (or another instance) tried it first.
+          recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts += 1;
+          return verify(...args);
+        });
+
+        expect(await consumer.sweepParked()).toMatchObject({ NOT_DUE: 1, KEPT: 0 });
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')!.attempts).toBe(1);
+      });
+
+      it('r9: the replica moved while the source was asked — kept, not decided on an answer about another owner', async () => {
+        const { consumer, recorded, policies, move } = parkedSetup(B, 4);
+        await consumer.handle(recordedPolicy());
+        const verify = policies.verify.bind(policies);
+        jest.spyOn(policies, 'verify').mockImplementationOnce(async (...args) => {
+          const answer = await verify(...args);
+          move(B, 4); // the transfer committed in between
+          return answer;
+        });
+
+        expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1 });
+        expect(recorded.parked.get('01JBQ8Z4K7M2N5P8R1T3V6X9Y2')).toMatchObject({ attempts: 0 });
+        expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
+          false,
+        );
+      });
+
+      it('exhausted: one transaction enqueues the dead letter in the outbox and removes the row and the marker', async () => {
+        const counted = async () =>
+          (await dlqMessagesTotal.get()).values.find(
+            (sample) =>
+              sample.labels.service === 'fleet-service-asset-sync' &&
+              sample.labels.topic === 'rasta.insurance.v1' &&
+              sample.labels.reason === 'PARKED_VERIFICATION_EXHAUSTED',
+          )?.value ?? 0;
+        const { consumer, recorded } = parkedSetup(B, 4, {
+          maxAttempts: 2,
+          dlqMetricService: 'fleet-service-asset-sync',
+        });
+        const before = await counted();
         await consumer.handle(recordedPolicy(), {
           topic: 'rasta.insurance.v1',
           partition: 1,
@@ -2378,31 +2502,35 @@ describe('AssetSyncConsumer', () => {
         });
 
         expect(await consumer.sweepParked()).toMatchObject({ KEPT: 1, DEAD_LETTERED: 0 });
-        expect(deadLetters.publish).not.toHaveBeenCalled();
+        expect(recorded.deadLetters).toHaveLength(0);
         expect(await consumer.sweepParked()).toMatchObject({ DEAD_LETTERED: 1 });
 
-        expect(deadLetters.publish).toHaveBeenCalledTimes(1);
-        const letter = deadLetters.publish.mock.calls[0]![0];
+        expect(recorded.deadLetters).toHaveLength(1);
+        const letter = recorded.deadLetters[0]!;
         expect(letter).toMatchObject({
+          topic: 'rasta.fleet.v1.dlq',
           key: 'AST-SEED-0001',
-          originalTopic: 'rasta.insurance.v1',
-          originalPartition: 1,
-          originalOffset: '9',
-          reason: 'PARKED_VERIFICATION_EXHAUSTED',
-          attempts: 2,
-        });
-        expect(letter.detail).toMatch(
-          /PARKED_VERIFICATION_EXHAUSTED.*after 2 attempts \(last: NOT_CURRENT_OWNER\)/,
-        );
-        expect(JSON.parse(letter.value.toString('utf8'))).toMatchObject({
-          eventId: '01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
-          eventName: 'INSURANCE_RECORDED',
+          organizationId: OWNER,
+          envelope: { eventId: '01JBQ8Z4K7M2N5P8R1T3V6X9Y2', eventName: 'INSURANCE_RECORDED' },
         });
         expect(letter.headers).toMatchObject({
           'x-event-id': '01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
           'x-event-name': 'INSURANCE_RECORDED',
           'x-tenant-id': OWNER,
+          'x-dlq-reason': 'PARKED_VERIFICATION_EXHAUSTED',
+          'x-dlq-original-topic': 'rasta.insurance.v1',
+          'x-dlq-original-partition': '1',
+          'x-dlq-original-offset': '9',
+          'x-dlq-attempts': '2',
+          // Written by fleet's consumer, not by the original producer.
+          'x-producer': 'fleet-service-asset-sync',
         });
+        expect(letter.headers['x-dlq-error']).toMatch(
+          /PARKED_VERIFICATION_EXHAUSTED.*after 2 attempts \(last: NOT_CURRENT_OWNER\)/,
+        );
+        // The same transaction: published exactly when the row and the marker are gone.
+        expect(recorded.removedIn.parked.at(-1)).toBe(letter.tx);
+        expect(recorded.removedIn.unmarked).toEqual([letter.tx]);
         expect(recorded.parked.size).toBe(0);
         // A replay of the dead letter is applied, not stopped at the marker.
         expect(recorded.unmarked).toEqual(['01JBQ8Z4K7M2N5P8R1T3V6X9Y2']);
@@ -2410,32 +2538,20 @@ describe('AssetSyncConsumer', () => {
         expect(recorded.upserts.some((row) => row.sourceEvent === 'INSURANCE_RECORDED')).toBe(
           false,
         );
+        expect((await counted()) - before).toBe(1);
       });
 
-      it('exhausted but the dead letter cannot be written: the row and the marker stay', async () => {
-        const deadLetters = {
-          publish: jest.fn(async () => {
-            throw new Error('broker down');
-          }),
-        };
-        const { consumer, recorded } = parkedSetup(B, 4, { maxAttempts: 1, deadLetters });
+      it('exhausted but the dead letter cannot be enqueued: nothing removed, nothing counted', async () => {
+        const { consumer, recorded, repository } = parkedSetup(B, 4, { maxAttempts: 1 });
         await consumer.handle(recordedPolicy());
+        (repository.enqueueDeadLetter as jest.Mock).mockRejectedValueOnce(new Error('db down'));
 
         const counts = await consumer.sweepParked();
 
         expect(counts.DEAD_LETTERED).toBe(0);
         expect(recorded.parked.size).toBe(1);
         expect(recorded.unmarked).toHaveLength(0);
-      });
-
-      it('exhausted with no dead-letter topic at all (no consumer, no sink): kept, never dropped', async () => {
-        const { consumer, recorded } = parkedSetup(B, 4, { maxAttempts: 1 });
-        await consumer.handle(recordedPolicy());
-
-        await consumer.sweepParked();
-
-        expect(recorded.parked.size).toBe(1);
-        expect(recorded.unmarked).toHaveLength(0);
+        expect(recorded.deadLetters).toHaveLength(0);
       });
     });
 
