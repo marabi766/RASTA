@@ -307,6 +307,69 @@ export const kafkaEnvSchema = z.object({
 
 export type KafkaEnv = z.infer<typeof kafkaEnvSchema>;
 
+/**
+ * The scheduled purge of published outbox rows (D-052), for a service that
+ * runs one (`OutboxPurgeScheduler` in @rasta/nest-common).
+ *
+ * Its own schema rather than part of {@link kafkaEnvSchema}: a service merges
+ * it when it wires the purge, so a service that has not yet done so does not
+ * accept settings it would silently ignore. Every value is bounded and an
+ * invalid one stops the service at boot — an empty or misspelled retention
+ * must never fall through to "delete everything published".
+ */
+export const outboxPurgeEnvSchema = z.object({
+  /**
+   * On by default. Off is a deliberate operator choice, logged at startup,
+   * because without the purge `outbox_message` grows without bound (D-052).
+   */
+  OUTBOX_PURGE_ENABLED: booleanEnv(true),
+
+  /**
+   * How long a row is kept after it was published, by the database clock.
+   *
+   * 168 h is not a new number: it is the seven days `purgePublished` has
+   * defaulted to since ADR-050, the window that ADR's sizing argument assumes.
+   * The relay never reads a published row again, nor does `stream_seq`
+   * allocation (it reads `outbox_stream_sequence` only), so the window serves
+   * operators — answering "was this event published, and when?" from the
+   * producer's own table during an incident — and is theirs to tune. The floor
+   * of one hour refuses a typo that would empty that record as fast as it
+   * fills; the ceiling of a year refuses one that would make the purge a no-op.
+   */
+  OUTBOX_PURGE_RETENTION_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+
+  /**
+   * Pause between the end of one run and the start of the next. A row outlives
+   * its retention by at most one interval plus one run — five minutes against a
+   * 168-hour window — while an idle run costs a single indexed probe.
+   */
+  OUTBOX_PURGE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(86_400).default(300),
+
+  /**
+   * Rows deleted per statement. 1000 is the ceiling `OUTBOX_BATCH_SIZE`
+   * already allows the relay to lock in one claim, so a purge batch locks no
+   * more outbox rows at once than the platform's own relay may.
+   */
+  OUTBOX_PURGE_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(1000),
+
+  /**
+   * Batches per run, so one run is bounded in time too. A run that hits the
+   * cap reports `truncated` and the next continues; together with the defaults
+   * above that is 10 000 rows per run, 120 000 an hour.
+   */
+  OUTBOX_PURGE_MAX_BATCHES_PER_RUN: z.coerce.number().int().min(1).max(1000).default(10),
+
+  /**
+   * `statement_timeout` for each batch. Bounds how long one batch can hold its
+   * row locks or keep a migration's lock request queued behind it. Must be
+   * shorter than `SHUTDOWN_TIMEOUT_MS` (`loadEnv` refuses otherwise), because
+   * shutdown waits for the batch in flight.
+   */
+  OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+});
+
+export type OutboxPurgeEnv = z.infer<typeof outboxPurgeEnvSchema>;
+
 /** Services that use cache, distributed locks or rate limiting. */
 export const redisEnvSchema = z.object({
   REDIS_URL: redisUrlSchema,
@@ -384,7 +447,29 @@ export function loadEnv<S extends z.ZodTypeAny>(
 
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxGraceWithinShutdown(result.data);
+  assertOutboxPurgeWithinShutdown(result.data);
   return result.data;
+}
+
+/**
+ * Shutdown waits for the purge batch in flight, which `statement_timeout`
+ * bounds — so that bound must end before the process's own shutdown timeout,
+ * or a slow batch turns every shutdown into a forced exit.
+ */
+function assertOutboxPurgeWithinShutdown(parsed: unknown): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const { OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: statementMs, SHUTDOWN_TIMEOUT_MS: timeoutMs } =
+    parsed as { OUTBOX_PURGE_STATEMENT_TIMEOUT_MS?: unknown; SHUTDOWN_TIMEOUT_MS?: unknown };
+  if (typeof statementMs !== 'number' || typeof timeoutMs !== 'number') return;
+  if (statementMs < timeoutMs) return;
+  throw new EnvValidationError([
+    {
+      path: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
+      message:
+        `(${statementMs} ms) must be shorter than SHUTDOWN_TIMEOUT_MS (${timeoutMs} ms): shutdown ` +
+        'waits for the purge batch in flight, so a longer bound could never finish',
+    },
+  ]);
 }
 
 /**

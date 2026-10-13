@@ -182,6 +182,8 @@ export {
   toOutboxRow,
   allocateStreamSeqSql,
   STREAM_SEQUENCE_TABLE,
+  purgePublishedSql,
+  MANUALLY_SKIPPED_PREFIX,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,
@@ -189,7 +191,18 @@ export type {
   OutboxClaimResult,
   ClaimOptions,
   OutboxTxRunner,
+  PurgePublishedOptions,
+  PurgePublishedBatch,
 } from './outbox/outbox-sql';
+export { OutboxPurgeScheduler, outboxPurgeSettings } from './outbox/outbox-purge';
+export type {
+  OutboxPurgeStore,
+  OutboxPurgeSettings,
+  OutboxPurgeLogger,
+  OutboxPurgeSchedulerOptions,
+  OutboxPurgeOutcome,
+  OutboxPurgeRun,
+} from './outbox/outbox-purge';
 
 // Lifecycle ------------------------------------------------------------------
 export {

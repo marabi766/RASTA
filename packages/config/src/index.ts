@@ -8,6 +8,7 @@ export {
   queryBooleanDefault,
   databaseEnvSchema,
   kafkaEnvSchema,
+  outboxPurgeEnvSchema,
   KAFKA_SASL_MECHANISMS,
   kafkaSaslConfigured,
   kafkaPlaintextAllowed,
@@ -26,7 +27,7 @@ export {
   redisUrlSchema,
 } from './env';
 
-export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, EnvIssue } from './env';
+export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, OutboxPurgeEnv, EnvIssue } from './env';
 
 export { UTC_SESSION_OPTION, withUtcSession } from './database-session';
 

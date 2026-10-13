@@ -579,6 +579,127 @@ export async function oldestPendingAgeSecondsSql(client: OutboxSqlClient): Promi
   return result[0]?.age ?? 0;
 }
 
+// ---------------------------------------------------------------------------
+// D-052 — purge of published rows
+// ---------------------------------------------------------------------------
+
+/**
+ * The `last_error` prefix `docs/runbooks/outbox-stuck.md` writes when it
+ * marks an undeliverable event published by hand. The purge keeps such rows.
+ */
+export const MANUALLY_SKIPPED_PREFIX = 'MANUALLY SKIPPED';
+
+export interface PurgePublishedOptions {
+  /** Delete rows published longer ago than this, by the database clock. */
+  retentionSeconds: number;
+  /** Most rows this one statement may delete. */
+  limit: number;
+  /** `statement_timeout` for the batch, in milliseconds. */
+  statementTimeoutMs: number;
+}
+
+export interface PurgePublishedBatch {
+  /** Rows deleted. */
+  deleted: number;
+  /** Another session held the purge lock, so nothing was attempted. */
+  busy: boolean;
+}
+
+/**
+ * Deletes at most `limit` published rows older than the retention, in one
+ * short transaction.
+ *
+ * ## Which rows, and why only those
+ *
+ * `published_at IS NOT NULL AND published_at < now() - retention`, and the
+ * DELETE re-checks `published_at IS NOT NULL AND claim_token IS NULL` on the
+ * locked row. An unpublished row is an event nobody has received yet; it is
+ * never selected, however old. A published row holds no claim
+ * (`ck_outbox_published_is_clean`), the relay never reads one again, and
+ * `stream_seq` allocation reads `outbox_stream_sequence`, never this table —
+ * so deleting it changes neither delivery, nor ordering, nor any sequence a
+ * consumer checks for gaps.
+ *
+ * The one published row that was never delivered is kept: `outbox-stuck.md`
+ * (cause C) unblocks a queue by setting `published_at` on a poisoned
+ * non-financial event with `last_error = 'MANUALLY SKIPPED — incident …'`,
+ * and promises the data is kept for the incident. Those rows are never
+ * purged; an operator removes them by hand once the incident is closed.
+ *
+ * `created_at < cutoff` is redundant as a rule — a row is created before it is
+ * published — and is there as an access path: every service's table carries a
+ * B-tree on `created_at` (or, in document, on `(published_at, created_at)`),
+ * so the scan visits rows older than the cutoff only and stops at `limit`. A
+ * row whose `created_at` is later than its `published_at` (a producer clock
+ * ahead of the database's) is merely kept until it passes the cutoff too.
+ *
+ * ## Why it cannot hurt the relay or another replica
+ *
+ * - **Bounded.** `LIMIT` caps the rows, `statement_timeout` caps the time, and
+ *   each batch commits on its own, so no lock outlives one batch.
+ * - **`FOR UPDATE SKIP LOCKED`.** A row another session has locked is passed
+ *   over, never waited for.
+ * - **One purger per schema at a time.** `pg_try_advisory_xact_lock` on a key
+ *   derived from the schema: a second replica's batch gets `busy` at once and
+ *   stops its run, instead of scanning the same rows to skip them. The lock is
+ *   transaction-scoped, so it can never be left behind by a crashed process
+ *   or a pooled connection.
+ *
+ * ## Interpolation
+ *
+ * The retention, the limit and the timeout are written into the statement,
+ * the one guarded exception {@link renewSql} also makes: `SET LOCAL` takes no
+ * bind parameter, and a literal cutoff lets the planner estimate it, which a
+ * parameter in a generic plan would not. All three come from validated
+ * configuration and are refused here unless they are positive safe integers,
+ * so nothing but digits reaches the SQL (S-05).
+ */
+export async function purgePublishedSql(
+  runTransaction: OutboxTxRunner,
+  options: PurgePublishedOptions,
+): Promise<PurgePublishedBatch> {
+  const retentionSeconds = positiveInteger(options.retentionSeconds, 'retentionSeconds');
+  const limit = positiveInteger(options.limit, 'limit');
+  const timeoutMs = positiveInteger(options.statementTimeoutMs, 'statementTimeoutMs');
+
+  return runTransaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+
+    const lock = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
+      `SELECT pg_try_advisory_xact_lock(hashtext('rasta.outbox_purge'), hashtext(current_schema()))
+              AS acquired`,
+    );
+    if (lock[0]?.acquired !== true) return { deleted: 0, busy: true };
+
+    const deleted = await tx.$executeRawUnsafe(
+      `WITH doomed AS (
+         SELECT id FROM outbox_message
+          WHERE published_at IS NOT NULL
+            AND published_at < now() - make_interval(secs => ${retentionSeconds})
+            AND created_at   < now() - make_interval(secs => ${retentionSeconds})
+            AND (last_error IS NULL OR last_error NOT LIKE '${MANUALLY_SKIPPED_PREFIX}%')
+          LIMIT ${limit}
+            FOR UPDATE SKIP LOCKED
+       )
+       DELETE FROM outbox_message o
+        USING doomed
+        WHERE o.id = doomed.id
+          AND o.published_at IS NOT NULL
+          AND o.claim_token IS NULL`,
+    );
+    return { deleted, busy: false };
+    // Outlives the statement, as in `renewSql`, so the bound that applies is
+    // `statement_timeout` rather than Prisma aborting the transaction first.
+  }, timeoutMs + 5_000);
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`outbox purge: ${name} must be a positive integer, received ${value}`);
+  }
+  return value;
+}
+
 /** Rows held under a live lease right now. Sampled for the gauge, never inferred. */
 export async function activeLeaseCountSql(client: OutboxSqlClient): Promise<number> {
   const result = await client.$queryRawUnsafe<{ count: bigint }[]>(
