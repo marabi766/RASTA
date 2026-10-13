@@ -174,6 +174,9 @@ const CASES = [
         csrfToken={CSRF}
         submissionId={SUBMISSION}
         newOrderHref="/marketplace/PRD_1"
+        productId="PRD_1"
+        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        sessionMaxAgeSeconds={3600}
       />
     ),
   },

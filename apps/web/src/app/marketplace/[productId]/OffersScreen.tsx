@@ -43,6 +43,10 @@ export interface OffersScreenProps {
     readonly csrfToken: string;
     readonly mintSubmissionId: () => string;
     readonly organizationId: string | null;
+    /** One-way tags of this login, so a form can recognise its own remembered order (`submissionBinding`). */
+    readonly binding: { readonly owner: string; readonly session: string };
+    /** The session's lifetime: a remembered unresolved order is not kept longer than that. */
+    readonly sessionMaxAgeSeconds: number;
   };
 }
 
@@ -166,6 +170,9 @@ function OrderSection({
           csrfToken={ordering.csrfToken}
           submissionId={ordering.mintSubmissionId()}
           newOrderHref={newOrderHref}
+          productId={productId}
+          binding={ordering.binding}
+          sessionMaxAgeSeconds={ordering.sessionMaxAgeSeconds}
         />
       )}
     </Section>

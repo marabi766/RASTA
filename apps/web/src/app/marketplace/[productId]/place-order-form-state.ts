@@ -36,6 +36,14 @@ export type PlaceOrderFormState =
    * Once unconfirmed, only a successful answer to a retry of the same submission
    * ends the doubt. `retryRefused` is set when a retry was answered with a
    * refusal: that proves nothing about the first request, so the state stays.
+   *
+   * The correlation id, the submission id and the values are always the
+   * *original* request's: no later answer to a retry replaces them. What a retry
+   * left behind is only a note on top — `retryRefused` (answered with a
+   * refusal), `retryUnknown` (answered with nothing that can be judged, or a
+   * status the portal cannot tell from "maybe"), `sessionEnded` (the portal's
+   * own gate refused the call, so no answer came back at all). `viewOnly` is a
+   * restored order whose submission id this login can no longer send.
    */
   | {
       readonly kind: 'UNCONFIRMED';
@@ -43,6 +51,28 @@ export type PlaceOrderFormState =
       readonly submissionId: string;
       readonly values: PlaceOrderFormValues;
       readonly retryRefused?: true;
+      readonly retryUnknown?: true;
+      readonly sessionEnded?: true;
+      readonly viewOnly?: true;
     };
 
+export type UnconfirmedPlaceOrder = Extract<PlaceOrderFormState, { kind: 'UNCONFIRMED' }>;
+
 export const IDLE_PLACE_ORDER_FORM: PlaceOrderFormState = { kind: 'IDLE' };
+
+/**
+ * The same unresolved order after another retry: the original identifiers and
+ * values, and only the latest note about what the retry came to.
+ */
+export function withRetryNote(
+  order: UnconfirmedPlaceOrder,
+  note: 'retryRefused' | 'retryUnknown' | 'sessionEnded',
+): UnconfirmedPlaceOrder {
+  return {
+    kind: 'UNCONFIRMED',
+    correlationId: order.correlationId,
+    submissionId: order.submissionId,
+    values: order.values,
+    [note]: true,
+  };
+}

@@ -1,4 +1,4 @@
-import { isBoundSubmissionId, mintSubmissionId } from './submission';
+import { isBoundSubmissionId, mintSubmissionId, submissionBinding } from './submission';
 import type { WebSession } from './session';
 
 /**
@@ -141,5 +141,48 @@ describe('submission ids', () => {
     expect(isBoundSubmissionId(id.slice(0, -1), SESSION)).toBe(false);
     expect(isBoundSubmissionId(`${id}A`, SESSION)).toBe(false);
     expect(isBoundSubmissionId(`${id.slice(0, -1)}/`, SESSION)).toBe(false);
+  });
+
+  describe('the binding a browser may remember', () => {
+    it('tells a re-login from another person, and is stable for one login', () => {
+      const binding = submissionBinding(SESSION);
+      expect(submissionBinding({ ...SESSION })).toEqual(binding);
+
+      const relogin = submissionBinding({ ...SESSION, csrfToken: 'a-new-login' });
+      expect(relogin.owner).toBe(binding.owner);
+      expect(relogin.session).not.toBe(binding.session);
+
+      expect(submissionBinding({ ...SESSION, subject: 'USR_2' }).owner).not.toBe(binding.owner);
+      expect(submissionBinding({ ...SESSION, organizationId: 'ORG_2' }).owner).not.toBe(
+        binding.owner,
+      );
+      expect(submissionBinding({ ...SESSION, organizationId: null }).owner).not.toBe(binding.owner);
+    });
+
+    it('reveals none of the session’s values, and depends on the server’s secret', () => {
+      const binding = submissionBinding(SESSION);
+      const text = JSON.stringify(binding);
+      for (const value of [
+        SESSION.subject,
+        SESSION.csrfToken,
+        SESSION.accessToken,
+        SESSION.refreshToken,
+      ]) {
+        expect(text).not.toContain(value);
+      }
+      expect(binding.owner).toMatch(/^[A-Za-z0-9_-]{16}$/);
+      expect(binding.session).toMatch(/^[A-Za-z0-9_-]{16}$/);
+
+      // `webServerEnv()` caches per module instance: load one with another secret.
+      let other = binding;
+      jest.isolateModules(() => {
+        process.env.WEB_SESSION_SECRET = 'a-different-secret-that-is-also-long-enough';
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        other = (require('./submission') as typeof import('./submission')).submissionBinding(
+          SESSION,
+        );
+      });
+      expect(other).not.toEqual(binding);
+    });
   });
 });

@@ -7,7 +7,7 @@ import { verifyCsrf } from '@/server/csrf';
 import { placeOrder, parsePlaceOrderForm, placeOrderFormValues } from '@/server/place-order';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
-import type { PlaceOrderFormState } from './place-order-form-state';
+import { withRetryNote, type PlaceOrderFormState } from './place-order-form-state';
 
 /**
  * The place-order form's one server action.
@@ -26,13 +26,16 @@ export async function submitPlaceOrder(
   form: FormData,
 ): Promise<PlaceOrderFormState> {
   const state = await attempt(form);
-  if (previous.kind !== 'UNCONFIRMED' || state.kind === 'UNCONFIRMED') return state;
+  if (previous.kind !== 'UNCONFIRMED') return state;
 
   // A retry of an unconfirmed submission: no answer to it but a successful one
   // (which redirects, above) may claim the first request did not commit. The
   // idempotency record can have expired and the offer can be gone, so a 404, 409
-  // or 422 on the retry says nothing about the original. The state stays.
-  return { ...previous, retryRefused: true };
+  // or 422 on the retry says nothing about the original. The state stays — the
+  // original correlation id, key and values with it: a retry that itself came
+  // back unconfirmed (a 5xx, a 401/405/429 the portal cannot tell from "maybe")
+  // must not swap them for the retry's own.
+  return withRetryNote(previous, state.kind === 'UNCONFIRMED' ? 'retryUnknown' : 'retryRefused');
 }
 
 async function attempt(form: FormData): Promise<PlaceOrderFormState> {

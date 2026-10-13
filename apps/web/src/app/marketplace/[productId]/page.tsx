@@ -3,7 +3,8 @@ import { AppShell, Button, Sidebar, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchCurrentUser } from '@/server/identity';
 import { canPlaceOrder } from '@/server/place-order';
-import { mintSubmissionId } from '@/server/submission';
+import { webServerEnv } from '@/server/env';
+import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { fetchOffers, fetchProduct, OFFER_SORTS } from '@/server/marketplace';
 import { PORTAL_NAV } from '@/app/nav';
 import { OffersScreen } from './OffersScreen';
@@ -77,6 +78,8 @@ export default async function ProductOffersPage({
                 csrfToken: session.csrfToken,
                 mintSubmissionId: () => mintSubmissionId(session),
                 organizationId: session.organizationId,
+                binding: submissionBinding(session),
+                sessionMaxAgeSeconds: webServerEnv().WEB_SESSION_MAX_AGE_SECONDS,
               }
             : undefined
         }

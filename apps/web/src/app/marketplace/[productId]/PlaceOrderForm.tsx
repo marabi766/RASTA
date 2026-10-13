@@ -1,16 +1,28 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState } from 'react';
+import { useActionState, useCallback, useEffect, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import { EMPTY_PLACE_ORDER_FORM, type PlaceOrderFormValues } from '@/lib/place-order-fields';
+import {
+  clearUnresolvedOrder,
+  restoreUnresolvedOrder,
+  saveUnresolvedOrder,
+  type Binding,
+  type RestoredOrder,
+} from '@/lib/unresolved-order';
 import type { Offer } from '@/server/marketplace';
 
 import { submitPlaceOrder } from './place-order-actions';
-import { IDLE_PLACE_ORDER_FORM, type PlaceOrderFormState } from './place-order-form-state';
+import {
+  IDLE_PLACE_ORDER_FORM,
+  withRetryNote,
+  type PlaceOrderFormState,
+  type UnconfirmedPlaceOrder,
+} from './place-order-form-state';
 
 /**
  * Placing an order for one offer.
@@ -31,19 +43,97 @@ import { IDLE_PLACE_ORDER_FORM, type PlaceOrderFormState } from './place-order-f
  * an order from oneself on its own account.
  */
 
-export function PlaceOrderForm({
+export interface PlaceOrderFormProps {
+  readonly offers: readonly Offer[];
+  readonly csrfToken: string;
+  readonly submissionId: string;
+  /** This page's own address: following it is a full navigation that mints a new submission id. */
+  readonly newOrderHref: string;
+  /** The product this form orders for: an unresolved order is remembered per product. */
+  readonly productId: string;
+  /** Whose login this page was drawn for (`submissionBinding`); one-way tags, not session values. */
+  readonly binding: Binding;
+  /** How long a remembered order outlives its login at most: the session's lifetime. */
+  readonly sessionMaxAgeSeconds: number;
+}
+
+/**
+ * Remembers an unresolved order across a reload (F1): the form that mounts
+ * looks for one in `sessionStorage` and, if there is one for this person, draws
+ * the uncertainty view with its original key. The first paint is the server's
+ * (blank), so hydration agrees; the remembered order replaces it right after
+ * mount, by remounting the form with that order as its starting state.
+ */
+export function PlaceOrderForm(props: PlaceOrderFormProps) {
+  const { productId, binding, sessionMaxAgeSeconds } = props;
+  const [restored, setRestored] = useState<RestoredOrder | null>(null);
+
+  useEffect(() => {
+    setRestored(restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds));
+  }, [productId, binding, sessionMaxAgeSeconds]);
+
+  return (
+    <OrderForm
+      key={restored ? restored.order.submissionId : 'blank'}
+      {...props}
+      initial={restored ? unconfirmedFrom(restored) : IDLE_PLACE_ORDER_FORM}
+    />
+  );
+}
+
+function unconfirmedFrom(restored: RestoredOrder): UnconfirmedPlaceOrder {
+  const { correlationId, submissionId, values } = restored.order;
+  return {
+    kind: 'UNCONFIRMED',
+    correlationId,
+    submissionId,
+    values,
+    ...(restored.kind === 'VIEW_ONLY' ? { viewOnly: true as const } : {}),
+  };
+}
+
+/** A redirect from a server action reaches the client as a rejection whose digest says so. */
+function isRedirect(error: unknown): boolean {
+  const digest = (error as { digest?: unknown } | null)?.digest;
+  return typeof digest === 'string' && digest.startsWith('NEXT_REDIRECT');
+}
+
+function OrderForm({
   offers,
   csrfToken,
   submissionId,
   newOrderHref,
-}: {
-  offers: readonly Offer[];
-  csrfToken: string;
-  submissionId: string;
-  /** This page's own address: following it is a full navigation that mints a new submission id. */
-  newOrderHref: string;
-}) {
-  const [state, action, pending] = useActionState(submitPlaceOrder, IDLE_PLACE_ORDER_FORM);
+  productId,
+  binding,
+  initial,
+}: PlaceOrderFormProps & { initial: PlaceOrderFormState }) {
+  const send = useCallback(
+    async (previous: PlaceOrderFormState, form: FormData): Promise<PlaceOrderFormState> => {
+      let next: PlaceOrderFormState;
+      try {
+        next = await submitPlaceOrder(previous, form);
+      } catch (error) {
+        // The order was placed: the action redirects to it. Nothing is unresolved now.
+        if (isRedirect(error)) {
+          clearUnresolvedOrder(productId);
+          throw error;
+        }
+        // The call itself failed — most often the portal's own gate answering 401
+        // JSON to an action POST whose session has ended, which Next rejects as an
+        // "unexpected response". For an unresolved order that must not throw the
+        // view away: the doubt is still there, and so is the stored entry.
+        if (previous.kind === 'UNCONFIRMED') return withRetryNote(previous, 'sessionEnded');
+        throw error;
+      }
+      // Remember it the moment it becomes unresolved, before anything can navigate away.
+      if (next.kind === 'UNCONFIRMED' && previous.kind !== 'UNCONFIRMED') {
+        saveUnresolvedOrder(productId, next, binding);
+      }
+      return next;
+    },
+    [productId, binding],
+  );
+  const [state, action, pending] = useActionState(send, initial);
 
   if (state.kind === 'UNCONFIRMED') {
     return (
@@ -54,6 +144,7 @@ export function PlaceOrderForm({
         csrfToken={csrfToken}
         offers={offers}
         newOrderHref={newOrderHref}
+        onStartNew={() => clearUnresolvedOrder(productId)}
       />
     );
   }
@@ -172,15 +263,22 @@ function UnconfirmedOrder({
   csrfToken,
   offers,
   newOrderHref,
+  onStartNew,
 }: {
-  state: Extract<PlaceOrderFormState, { kind: 'UNCONFIRMED' }>;
+  state: UnconfirmedPlaceOrder;
   action: (form: FormData) => void;
   pending: boolean;
   csrfToken: string;
   offers: readonly Offer[];
   newOrderHref: string;
+  /** Forgets the unresolved order: called by the one action that is allowed to. */
+  onStartNew: () => void;
 }) {
   const offer = offers.find((candidate) => candidate.id === state.values.offerId);
+  // A restored order from another login, or a call the gate refused because the
+  // session ended: its id cannot be sent now, and sending it after a re-login is
+  // not an option either (the id is bound to the old login).
+  const canRetry = !state.viewOnly && !state.sessionEnded;
   return (
     <form action={action} aria-labelledby="place-order-heading" className="flex flex-col gap-4">
       <input type="hidden" name={CSRF_FIELD} value={csrfToken} />
@@ -204,22 +302,49 @@ function UnconfirmedOrder({
           فهرست سفارش‌ها را ببینید.
         </Alert>
       ) : null}
+      {state.retryUnknown ? (
+        <Alert tone="warning">
+          ارسال دوباره نیز نتیجهٔ روشنی نداشت و وضعیت درخواست نخست همچنان معلوم نیست؛ ممکن است سفارش
+          ثبت شده باشد. فهرست سفارش‌ها را ببینید.
+        </Alert>
+      ) : null}
+      {state.sessionEnded ? (
+        <Alert tone="danger">
+          نشست شما پایان یافته است. دوباره وارد شوید و پیش از ثبت سفارش تازه، فهرست سفارش‌ها را
+          ببینید؛ ممکن است سفارش ثبت شده باشد.
+        </Alert>
+      ) : null}
+      {state.viewOnly ? (
+        <Alert tone="warning">
+          این سفارش در نشست پیشین فرستاده شده بود و از این نشست نمی‌توان آن را دوباره فرستاد. پیش از
+          ثبت سفارش تازه، فهرست سفارش‌ها را ببینید.
+        </Alert>
+      ) : null}
       <p className="text-sm text-content-muted">
         {offer ? `${offer.supplierOrganizationId} — ` : ''}
         تعداد {toPersianDigits(state.values.quantity)}
       </p>
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" disabled={pending}>
-          {pending ? 'در حال ارسال…' : 'ارسال دوبارهٔ همین درخواست'}
-        </Button>
-        {/* A full navigation: the page mints a fresh submission id. */}
-        <a href={newOrderHref} className="underline self-center text-sm">
+        {canRetry ? (
+          <Button type="submit" disabled={pending}>
+            {pending ? 'در حال ارسال…' : 'ارسال دوبارهٔ همین درخواست'}
+          </Button>
+        ) : null}
+        {/* A full navigation: the page mints a fresh submission id. Forgets the unresolved order first. */}
+        <a
+          href={newOrderHref}
+          onClick={onStartNew}
+          onAuxClick={onStartNew}
+          className="underline self-center text-sm"
+        >
           شروع سفارش تازه
         </a>
       </div>
       <p className="text-sm text-content-muted">
-        «ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال می‌فرستد و ممکن است سفارش پیشین را
-        برگرداند، اما این تضمین نیست؛ فهرست سفارش‌ها مرجع است. «شروع سفارش تازه» درخواست جدیدی است.
+        {canRetry
+          ? '«ارسال دوباره» همان درخواست را با همان شناسهٔ ارسال می‌فرستد و ممکن است سفارش پیشین را برگرداند، اما این تضمین نیست؛ فهرست سفارش‌ها مرجع است. '
+          : 'فهرست سفارش‌ها مرجع است. '}
+        «شروع سفارش تازه» درخواست جدیدی است.
       </p>
     </form>
   );

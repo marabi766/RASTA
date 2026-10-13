@@ -275,6 +275,59 @@ describe('placing an order — what the service answers', () => {
     });
   });
 
+  // The gateway answers these before the service acts. The portal cannot tell
+  // them from "maybe" (`placeOrder`: every UNAVAILABLE is unconfirmed), and
+  // whichever it is, the retry's own correlation id must not replace the
+  // original request's — that is the id the person is told to quote.
+  it.each([401, 405, 429])(
+    'keeps the original correlation id, key and values when the retry is answered %i',
+    async (status) => {
+      const submission = mintSubmissionId(SESSION);
+      placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_FIRST' });
+      const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+      if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+
+      const realPlaceOrder = jest.requireActual('@/server/place-order').placeOrder;
+      placeOrder.mockImplementation(realPlaceOrder);
+      const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ code: 'REFUSED' }), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+      try {
+        const retry = await submitPlaceOrder(first, formData(first.values, { submission }));
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(retry).toEqual({
+          kind: 'UNCONFIRMED',
+          correlationId: 'COR_FIRST',
+          submissionId: submission,
+          values: GOOD,
+          retryUnknown: true,
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    },
+  );
+
+  it('shows only the latest note after a second retry, never both', async () => {
+    const submission = mintSubmissionId(SESSION);
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_FIRST' });
+    const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+    if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+
+    placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_2' });
+    const unknown = await submitPlaceOrder(first, formData(first.values, { submission }));
+    expect(unknown).toMatchObject({ correlationId: 'COR_FIRST', retryUnknown: true });
+
+    placeOrder.mockResolvedValueOnce({ kind: 'NOT_FOUND', correlationId: 'COR_3' });
+    const refused = await submitPlaceOrder(unknown, formData(first.values, { submission }));
+    expect(refused).toEqual({ ...first, retryRefused: true });
+    expect(refused).not.toHaveProperty('retryUnknown');
+  });
+
   it('lets a successful retry replace the unconfirmed state', async () => {
     const submission = mintSubmissionId(SESSION);
     placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_5' });

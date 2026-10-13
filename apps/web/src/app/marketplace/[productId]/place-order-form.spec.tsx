@@ -53,6 +53,9 @@ function renderForm(state: PlaceOrderFormState = { kind: 'IDLE' }, isPending = f
       csrfToken={CSRF}
       submissionId={SUBMISSION}
       newOrderHref="/marketplace/PRD_1"
+      productId="PRD_1"
+      binding={{ owner: 'owner-tag', session: 'session-tag' }}
+      sessionMaxAgeSeconds={3600}
     />,
   );
 }
@@ -191,6 +194,34 @@ describe('PlaceOrderForm', () => {
       );
     });
 
+    it('after a retry whose outcome is unknown keeps the original correlation id and the retry button', () => {
+      const { container, getByRole } = renderForm({ ...UNCONFIRMED, retryUnknown: true });
+      expect(container.textContent).toMatch(/ارسال دوباره نیز نتیجهٔ روشنی نداشت/);
+      expect(container.textContent).toContain('COR_3');
+      expect(container.textContent).not.toMatch(/ارسال دوباره رد شد/);
+      expect(getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeEnabled();
+    });
+
+    it('after the session ended says to sign in again and check the orders list, with no retry button', () => {
+      const { container, getByRole, queryByRole } = renderForm({
+        ...UNCONFIRMED,
+        sessionEnded: true,
+      });
+      expect(container.textContent).toMatch(/نشست شما پایان یافته است. دوباره وارد شوید/);
+      expect(container.textContent).toMatch(/فهرست سفارش‌ها را\s*ببینید/);
+      expect(container.textContent).toContain('COR_3');
+      expect(queryByRole('button')).toBeNull();
+      expect(getByRole('link', { name: 'شروع سفارش تازه' })).toBeInTheDocument();
+    });
+
+    it('a restored order of another login is shown without a retry button, and says to check the orders list', () => {
+      const { container, queryByRole } = renderForm({ ...UNCONFIRMED, viewOnly: true });
+      expect(container.textContent).toMatch(/در نشست پیشین فرستاده شده بود/);
+      expect(container.textContent).toMatch(/فهرست سفارش‌ها را ببینید/);
+      expect(container.textContent).toContain('COR_3');
+      expect(queryByRole('button')).toBeNull();
+    });
+
     it('retries with the kept values and the kept submission id, not the page’s', () => {
       const { container, getByRole } = renderForm(UNCONFIRMED);
       expect(container.querySelector('[name="submission"]')).toHaveValue(
@@ -251,6 +282,36 @@ describe('PlaceOrderForm', () => {
         submissionId: SUBMISSION,
         values: { offerId: 'OFR_1', quantity: '2' },
         retryRefused: true,
+      },
+    ],
+    [
+      'unconfirmed, retry unknown',
+      {
+        kind: 'UNCONFIRMED',
+        correlationId: 'COR_3',
+        submissionId: SUBMISSION,
+        values: { offerId: 'OFR_1', quantity: '2' },
+        retryUnknown: true,
+      },
+    ],
+    [
+      'unconfirmed, session ended',
+      {
+        kind: 'UNCONFIRMED',
+        correlationId: 'COR_3',
+        submissionId: SUBMISSION,
+        values: { offerId: 'OFR_1', quantity: '2' },
+        sessionEnded: true,
+      },
+    ],
+    [
+      'unconfirmed, restored view only',
+      {
+        kind: 'UNCONFIRMED',
+        correlationId: 'COR_3',
+        submissionId: SUBMISSION,
+        values: { offerId: 'OFR_1', quantity: '2' },
+        viewOnly: true,
       },
     ],
   ])('has no accessibility violations (%s)', async (_name, state) => {

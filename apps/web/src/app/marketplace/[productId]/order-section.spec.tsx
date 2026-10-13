@@ -39,6 +39,8 @@ const ORDERING = {
   csrfToken: 'csrf-token-for-this-session',
   mintSubmissionId: () => 'sub_AAAAAAAAAAAAAAAAAAAA',
   organizationId: 'ORG-DEH-0001',
+  binding: { owner: 'owner-tag', session: 'session-tag' },
+  sessionMaxAgeSeconds: 3600,
 };
 
 function screen(
