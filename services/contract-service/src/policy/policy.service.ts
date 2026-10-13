@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
+import { ERROR_CODES } from '@rasta/contracts';
 import {
   RastaError,
   actorIdentityUnknown,
@@ -16,7 +17,7 @@ import { OrganizationDirectory } from '../organization/organization-directory';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { CursorPage } from '../contract/dto';
 import type { ClaimFence } from '../shared/idempotency';
-import { transactionNow } from '../shared/clock';
+import { databaseClock, transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { ruleRefusal } from '../shared/refusal';
 import { storedActor, storedIdentityOf } from '../shared/stable-actor';
@@ -42,7 +43,18 @@ export const POLICY_ID_PREFIX = ID_PREFIX.policy;
 export const POLICY_STEP_ID_PREFIX = ID_PREFIX.policyStep;
 
 /** The route template the idempotency store keys on: a closed set, never an id. */
-export const CREATE_POLICY_ENDPOINT = 'POST /v1/approval-policies';
+export const CREATE_POLICY_ENDPOINT = 'POST /v1/contract-approval-policies';
+
+/**
+ * Four eyes refused an approval: the approver wrote or submitted the policy. Separation of duties,
+ * so `approve` records it (`refuseApproval`) — once the transaction it may be found in has rolled
+ * back — and answers `answer`.
+ */
+class SelfApprovalRefused extends Error {
+  constructor(readonly answer: RastaError) {
+    super('The approval was refused: the approver wrote or submitted the policy');
+  }
+}
 
 /**
  * Approval policies: who writes them, who puts them in force (ADR-023, ADR-063, ADR-068 § 5,
@@ -256,7 +268,12 @@ export class PolicyService implements OnModuleInit {
     const { actor } = this.access.assertPlatformAdministrator();
     const approver = currentActor();
     const found = await this.policyOrNotFound(this.prisma.client, policyId);
-    this.assertFourEyes(found, approver);
+    try {
+      this.assertFourEyes(found, approver);
+    } catch (error) {
+      if (!(error instanceof SelfApprovalRefused)) throw error;
+      return this.refuseApproval(found, error.answer);
+    }
     await this.assertMayGovern(
       found.authorRole as PolicyAuthorRole,
       found.authorOrganizationId,
@@ -265,7 +282,6 @@ export class PolicyService implements OnModuleInit {
 
     await this.prisma
       .transaction(async (tx) => {
-        const at = await transactionNow(tx);
         // Serialise with every signature being recorded on this workflow, and with any other
         // approval or retirement of it (no contract lock is held here, so the one lock order
         // holds). Organization and workflow key never change, so `found` names the slot;
@@ -279,6 +295,10 @@ export class PolicyService implements OnModuleInit {
         this.assertVersion(policy.id, policy.version, dto.expectedVersion);
         assertPolicyTransition(policyId, policy.status as PolicyStateName, 'ACTIVE');
         this.assertFourEyes(policy, approver);
+        // One instant for the activation, the retirement it makes and their events: read now,
+        // under the slot's lock, not at the transaction's start — a signature that held the lock
+        // first committed before this, and nothing here may be dated before it (#248 follow-up).
+        const at = await databaseClock(tx);
 
         const workflowKey = policy.workflowKey as WorkflowKey;
         const current = await this.repository.findActivePolicyOf(
@@ -324,6 +344,8 @@ export class PolicyService implements OnModuleInit {
       })
       .catch((error: unknown) => {
         if (isUniqueViolation(error)) throw this.conflict(policyId);
+        // Found again under the lock, after the transaction rolled back.
+        if (error instanceof SelfApprovalRefused) return this.refuseApproval(found, error.answer);
         throw error;
       });
 
@@ -382,7 +404,6 @@ export class PolicyService implements OnModuleInit {
     const { actor } = this.access.assertCanRetirePolicy(found);
 
     await this.prisma.transaction(async (tx) => {
-      const at = await transactionNow(tx);
       // Taking a policy out of force is serialised with signatures being recorded under it
       // (PolicyRepository.lockPolicySlot); re-read under the lock.
       await this.repository.lockPolicySlot(
@@ -393,6 +414,8 @@ export class PolicyService implements OnModuleInit {
       const policy = await this.policyOrNotFound(tx, policyId);
       this.assertVersion(policy.id, policy.version, dto.expectedVersion);
       assertPolicyTransition(policyId, policy.status as PolicyStateName, 'RETIRED');
+      // Read under the lock, as `approve` does: never before a signature that held it first.
+      const at = await databaseClock(tx);
 
       const matched = await this.repository.transitionPolicy(tx, {
         organizationId: policy.organizationId,
@@ -476,6 +499,10 @@ export class PolicyService implements OnModuleInit {
    * ids, which one person can hold two of. An author or submitter whose identity was not recorded
    * cannot be told apart from the approver: where the rule applies, that is `422
    * ACTOR_IDENTITY_UNKNOWN`, never a pass.
+   *
+   * The approver proven to be the author or submitter is `403` and an audit record
+   * ({@link SelfApprovalRefused}); an identity that proves nothing either way is not audited, like
+   * the same finding when a contract is signed.
    */
   private assertFourEyes(policy: PolicyWithSteps, approver: ActorIdentity): void {
     const people: ActorComparison[] = [
@@ -500,14 +527,53 @@ export class PolicyService implements OnModuleInit {
         'the approver of a policy is neither its author nor its submitter',
       );
     }
-    if (policy.authorRole === UNION_ROLE) {
-      throw RastaError.forbidden(
-        'A policy written by a union is approved by a different person, always',
+    throw new SelfApprovalRefused(
+      RastaError.forbidden(
+        policy.authorRole === UNION_ROLE
+          ? 'A policy written by a union is approved by a different person, always'
+          : 'A different platform administrator must approve this policy (CONTRACT_POLICY_FOUR_EYES)',
+      ),
+    );
+  }
+
+  /**
+   * Records a refused approval (`APPROVAL_POLICY_APPROVAL_REFUSED`, S-06) in a transaction of its own
+   * — the approval's rolled back, or never began — and throws the refusal. When it cannot be
+   * recorded the answer is a retryable 503, not the refusal: the approval can be asked again and
+   * leave its trace. The policy is unchanged either way.
+   */
+  private async refuseApproval(policy: PolicyWithSteps, answer: RastaError): Promise<never> {
+    try {
+      await this.prisma.transaction(async (tx) => {
+        const at = await transactionNow(tx);
+        await this.events.enqueue(tx, {
+          eventName: 'APPROVAL_POLICY_APPROVAL_REFUSED',
+          aggregateId: policy.id,
+          organizationId: policy.organizationId,
+          payload: {
+            policyId: policy.id,
+            organizationId: policy.organizationId,
+            workflowKey: policy.workflowKey as WorkflowKey,
+            policyVersion: policy.policyVersion,
+            reason: 'SELF_APPROVAL',
+            refusedBy: getContext().userId ?? 'unknown',
+            refusedAt: at.toISOString(),
+          },
+          occurredAt: at,
+        });
+      });
+    } catch (auditError: unknown) {
+      this.logger.error(
+        `Could not record the refusal of a policy approval (SELF_APPROVAL): ` +
+          `${auditError instanceof RastaError ? auditError.code : 'INTERNAL'}`,
+      );
+      throw new RastaError(
+        ERROR_CODES.UPSTREAM_UNAVAILABLE,
+        'The refusal could not be recorded; nothing was done. Retry shortly',
+        { cause: auditError, retryAfterSeconds: 1, internalContext: { policyId: policy.id } },
       );
     }
-    throw RastaError.forbidden(
-      'A different platform administrator must approve this policy (CONTRACT_POLICY_FOUR_EYES)',
-    );
+    throw answer;
   }
 
   private async announceRetired(

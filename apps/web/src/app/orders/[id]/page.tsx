@@ -5,7 +5,7 @@ import { isOrderCommand } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
 import { fetchOrder } from '@/server/orders';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 
 import { OrderDetailScreen } from './OrderDetailScreen';
 
@@ -50,7 +50,7 @@ export default async function OrderPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/orders" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/orders" />}
     >
       <PageHeader
         title="جزئیات سفارش"

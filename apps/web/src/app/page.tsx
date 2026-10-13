@@ -14,7 +14,7 @@ import {
 } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { activeMembership, displayName, fetchCurrentUser } from '@/server/identity';
-import { PORTAL_NAV } from './nav';
+import { portalNavFor } from './portal-nav';
 
 /**
  * The dashboard (docs/16 § 16.6, `/`).
@@ -61,7 +61,7 @@ export default async function HomePage() {
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/" />}
     >
       <PageHeader title="خانه" description="وضعیت حساب و سازمان فعال شما." />
 

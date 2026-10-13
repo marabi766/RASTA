@@ -53,14 +53,32 @@ cancel the named requests yourself, and run again.
 
 Needs marketplace-service in the stack, started with `MARKETPLACE_TEMPORAL_ENABLED=false`
 (ADR-039's no-Temporal mode): no saga runs, so an order stays `PENDING`, no wallet is
-touched, and economic-service is not in the stack. The scenario places orders and reads
-them; it never confirms receipt and never settles.
+touched, and no order reaches economic-service (which is in the stack for the settlements
+scenario only). The scenario places orders and reads them; it never confirms receipt and
+never settles.
 
 It places orders against the seeded `OFR_SEED_AGGREGATE_D2` (220 available) and **does not
 cancel them**: they stay as records on that stack, and each run uses up a little of the
 offer's availability. CI starts a fresh stack, so that is nothing there; a local re-run on
 the same stack keeps consuming it (and, like the other write scenarios, assumes it is the
 only run). The scenarios run in order and share the id the first one places.
+
+## Settlements (`settlements.spec.ts`) — the one scenario that settles
+
+`/settlements` is read-only, so the scenario has to make settlements before it
+can read them. It does that **through the gateway, as ORG-DEH-0001's
+administrator** (top-up → obligation → authorise → settle), which is a ledger
+movement and is why the sentence above ("no browser test may start money moving")
+carries this one exception. Nothing real moves: economic-service's only payment
+provider is the mock one, and the browser job starts it for this spec alone.
+
+- It has no cleanup, because a settlement is final and append-only: each run adds
+  two, found by the ids it just made, so earlier runs on the same stack do not
+  disturb it (the one-run-per-stack rule above still holds).
+- The "another tenant's settlement" check uses ORG-DEH-0002's administrator as
+  the non-party and a settlement ORG-DEH-0001 made to an id (`ORG-E2E-THIRD`) no
+  seeded person belongs to, because the development realm has no third tenant
+  administrator. The service's rule is the same either way.
 
 ## Adding a live scenario
 
