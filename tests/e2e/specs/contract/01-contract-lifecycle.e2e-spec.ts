@@ -16,8 +16,10 @@ import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-a
  *
  * - **Organizations** (`system.admin`): the **owner** (the employer), under the union so that
  *   `union.admin` may write its approval policies (Q-70 (7)); contractors **C1** and **C2**, who
- *   both bid on both tenders — C1 wins tender A, C2 wins tender B, so each is a party to one
- *   contract and a stranger to the other — and **C3**, a contractor that bid on nothing.
+ *   both bid on all three tenders — C1 wins tender A, C2 wins tenders B and C, so each is a
+ *   stranger to the other's contracts — and **C3**, a contractor that bid on nothing. Contract
+ *   C exists only for the organization move: its employer signature is made immediately before
+ *   the move, so the D-050 review flag does not depend on how long the run took.
  *   `tenantB` (`ORG-DEH-0002`) is the other seeded tenant.
  * - **People** (`system.admin`, identity-service — real memberships): in the owner, all
  *   `ORGANIZATION_ADMIN`: `author`, `p1`, `p2`, `evaluator`, `awarder` (the tender flow),
@@ -45,7 +47,16 @@ const config = e2eConfig();
 const RUN = randomUUID().slice(0, 8);
 
 /** How long the bidding window stays open: both tenders' publication, bids and nothing else. */
-const BIDDING_WINDOW_MS = 75_000;
+const BIDDING_WINDOW_MS = 90_000;
+
+/**
+ * The longest the employer's signature on the fresh contract may precede the move that
+ * strands its policy. D-050 reviews a signature only while the move's instant is no later than
+ * the signature's commit deadline plus CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS (300 s by
+ * default, which CI does not override); the bound is well inside it, and the test asserts it
+ * rather than hoping a slow runner stays under it.
+ */
+const FLAG_WINDOW_BOUND_MS = 120_000;
 
 /** The least that must be left of the window when a step that needs it open starts. */
 const WINDOW_MARGIN_MS = 15_000;
@@ -91,19 +102,22 @@ const CRITERIA = [
 ] as const;
 
 type Contractor = 'c1' | 'c2';
-type TenderKey = 'A' | 'B';
+type TenderKey = 'A' | 'B' | 'C';
+const TENDERS = ['A', 'B', 'C'] as const;
 
 /** The prices bid, minor units. The winner of each tender is the one with the higher score. */
 const PRICE: Record<TenderKey, Record<Contractor, string>> = {
   A: { c1: '4200000000', c2: '4600000000' },
   B: { c1: '3900000000', c2: '3500000000' },
+  C: { c1: '3100000000', c2: '2800000000' },
 };
-const WINNER: Record<TenderKey, Contractor> = { A: 'c1', B: 'c2' };
+const WINNER: Record<TenderKey, Contractor> = { A: 'c1', B: 'c2', C: 'c2' };
 
 /** Scores (scaled) per contractor on each tender: the winner's are the higher. */
 const SCORES: Record<TenderKey, Record<Contractor, [number, number]>> = {
   A: { c1: [900, 100], c2: [700, 100] },
   B: { c1: [700, 100], c2: [900, 100] },
+  C: { c1: [700, 100], c2: [900, 100] },
 };
 
 const AMENDMENT_ONE = '500000000';
@@ -253,9 +267,16 @@ function refusalOf(response: ApiResponse<unknown>): {
   status: number;
   code?: string;
   message?: string;
+  details?: unknown;
 } {
-  const body = response.body as { message?: string };
-  return { status: response.status, code: errorCode(response.body), message: body?.message };
+  // Request ids, timestamps and the echoed path differ by construction and are left out.
+  const body = response.body as { message?: string; details?: unknown } | null;
+  return {
+    status: response.status,
+    code: errorCode(response.body),
+    message: body?.message,
+    details: body?.details,
+  };
 }
 
 async function tender(owner: Actor, id: string): Promise<TenderBody> {
@@ -295,45 +316,65 @@ async function assertInvisibleToStranger(
   ids: { contractId: string; amendmentIds?: string[]; milestoneIds?: string[] },
   who: string,
 ): Promise<void> {
-  const c = `/v1/contracts/${ids.contractId}`;
-  const probes: [string, () => Promise<ApiResponse<unknown>>][] = [
-    ['read the contract', () => stranger.get(c)],
-    ['list its amendments', () => stranger.get(`${c}/amendments`)],
-    ['list its milestones', () => stranger.get(`${c}/milestones`)],
-    ['sign it', () => send(stranger, 'POST', `${c}/sign`, {})],
-    ['cancel it', () => send(stranger, 'POST', `${c}/cancel`, { reasonCode: 'OTHER' })],
-    [
-      'propose an amendment',
-      () =>
-        send(stranger, 'POST', `${c}/amendments`, {
-          deltaMinor: '1000',
-          reasonCode: 'OTHER',
-          reasonText: 'Probe from another organization',
-        }),
-    ],
-    [
-      'plan a milestone',
-      () =>
-        send(stranger, 'POST', `${c}/milestones`, { title: 'Probe', plannedDate: '2027-06-01' }),
-    ],
-  ];
-  for (const id of ids.amendmentIds ?? []) {
-    probes.push(
-      [`read amendment ${id}`, () => stranger.get(`${c}/amendments/${id}`)],
-      [`sign amendment ${id}`, () => send(stranger, 'POST', `${c}/amendments/${id}/sign`, {})],
-    );
-  }
-  for (const id of ids.milestoneIds ?? []) {
-    probes.push(
-      [`read milestone ${id}`, () => stranger.get(`${c}/milestones/${id}`)],
+  const probesOf = (target: typeof ids): [string, () => Promise<ApiResponse<unknown>>][] => {
+    const c = `/v1/contracts/${target.contractId}`;
+    const probes: [string, () => Promise<ApiResponse<unknown>>][] = [
+      ['read the contract', () => stranger.get(c)],
+      ['list its amendments', () => stranger.get(`${c}/amendments`)],
+      ['list its milestones', () => stranger.get(`${c}/milestones`)],
+      ['sign it', () => send(stranger, 'POST', `${c}/sign`, {})],
+      ['cancel it', () => send(stranger, 'POST', `${c}/cancel`, { reasonCode: 'OTHER' })],
       [
-        `change milestone ${id}`,
-        () => send(stranger, 'PATCH', `${c}/milestones/${id}`, { title: 'Probe change' }),
+        'propose an amendment',
+        () =>
+          send(stranger, 'POST', `${c}/amendments`, {
+            deltaMinor: '1000',
+            reasonCode: 'OTHER',
+            reasonText: 'Probe from another organization',
+          }),
       ],
-    );
-  }
-  for (const [what, probe] of probes) {
-    expectRefusal(await probe(), NOT_FOUND, `${who} tried to ${what}`);
+      [
+        'plan a milestone',
+        () =>
+          send(stranger, 'POST', `${c}/milestones`, { title: 'Probe', plannedDate: '2027-06-01' }),
+      ],
+    ];
+    (target.amendmentIds ?? []).forEach((id, index) => {
+      probes.push(
+        [`read amendment ${index + 1}`, () => stranger.get(`${c}/amendments/${id}`)],
+        [
+          `sign amendment ${index + 1}`,
+          () => send(stranger, 'POST', `${c}/amendments/${id}/sign`, {}),
+        ],
+      );
+    });
+    (target.milestoneIds ?? []).forEach((id, index) => {
+      probes.push(
+        [`read milestone ${index + 1}`, () => stranger.get(`${c}/milestones/${id}`)],
+        [
+          `change milestone ${index + 1}`,
+          () => send(stranger, 'PATCH', `${c}/milestones/${id}`, { title: 'Probe change' }),
+        ],
+      );
+    });
+    return probes;
+  };
+  // The same requests against records that do not exist: the answers must be identical in
+  // status, code, message and details — nothing tells a stranger the record is there.
+  const missing = {
+    contractId: `CTR_${RUN}_MISSING`,
+    amendmentIds: (ids.amendmentIds ?? []).map((_, index) => `AMD_${RUN}_MISSING_${index}`),
+    milestoneIds: (ids.milestoneIds ?? []).map((_, index) => `MLS_${RUN}_MISSING_${index}`),
+  };
+  const real = probesOf(ids);
+  const absent = probesOf(missing);
+  for (const [index, [what, probe]] of real.entries()) {
+    const response = await probe();
+    expectRefusal(response, NOT_FOUND, `${who} tried to ${what}`);
+    expect(
+      refusalOf(response),
+      `${who} tried to ${what}: against a record that is not there`,
+    ).toEqual(refusalOf(await absent[index]![1]()));
   }
   const list = await stranger.get('/v1/contracts?limit=100');
   expect(list.status, JSON.stringify(list.body)).toBe(200);
@@ -367,12 +408,13 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   >;
 
   let projectId = '';
-  const tenderId: Record<TenderKey, string> = { A: '', B: '' };
+  const tenderId: Record<TenderKey, string> = { A: '', B: '', C: '' };
   const bid: Record<TenderKey, Record<Contractor, string>> = {
     A: { c1: '', c2: '' },
     B: { c1: '', c2: '' },
+    C: { c1: '', c2: '' },
   };
-  const contractId: Record<TenderKey, string> = { A: '', B: '' };
+  const contractId: Record<TenderKey, string> = { A: '', B: '', C: '' };
   let policyId = '';
   const amendmentId = { one: '', two: '' };
   let milestoneId = '';
@@ -389,7 +431,13 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   };
 
   /** Correlated calls whose events (and audit records) are asserted at the end. */
-  const evidence: { label: string; correlationId: string; events: string[] }[] = [];
+  const evidence: {
+    label: string;
+    correlationId: string;
+    events: string[];
+    /** A refusal: the one event, and the audit record, it must leave behind, with its payload. */
+    refusal?: { event: string; contractId: string; payload: Record<string, unknown> };
+  }[] = [];
 
   test.beforeAll(async ({ playwright }) => {
     context = await playwright.request.newContext();
@@ -618,7 +666,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
 
   test('two tenders are drafted, shaped, invited and given criteria', async () => {
     const { author } = people;
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const created = await author.post(`/v1/projects/${projectId}/tenders`, {
         body: {
           title: `Access road works ${key}`,
@@ -665,8 +713,9 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const approved: Record<TenderKey, { version: number; step: string }> = {
       A: { version: 0, step: '' },
       B: { version: 0, step: '' },
+      C: { version: 0, step: '' },
     };
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const current = await tender(author, tenderId[key]);
       const window = await send(author, 'PATCH', `/v1/tenders/${tenderId[key]}`, {
         expectedVersion: current.version,
@@ -676,7 +725,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       expect(window.status, JSON.stringify(window.body)).toBe(200);
       approved[key].version = (window.body as TenderBody).version;
     }
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const asked = await inWindow(`the publication request of ${key}`, () =>
         send(author, 'POST', `/v1/tenders/${tenderId[key]}/publish`, {
           expectedVersion: approved[key].version,
@@ -685,13 +734,13 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       expect(asked.status, JSON.stringify(asked.body)).toBe(202);
       approved[key].step = (asked.body as RequestBody).steps[0]!.approvalId;
     }
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const granted = await inWindow(`the publication approval of ${key}`, () =>
         decide(p1, approved[key].step),
       );
       expect(granted.status, JSON.stringify(granted.body)).toBe(200);
     }
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const published = await inWindow(`the publication of ${key}`, () =>
         send(author, 'POST', `/v1/tenders/${tenderId[key]}/publish`, {
           expectedVersion: approved[key].version,
@@ -701,7 +750,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       expect(published.body).toMatchObject({ id: tenderId[key], status: 'PUBLISHED' });
     }
 
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       for (const [who, contractor] of [
         ['c1', c1],
         ['c2', c2],
@@ -727,7 +776,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const waitMs = Math.max(0, closingAt - Date.now()) + 60_000;
     test.setTimeout(waitMs + 240_000);
 
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       await until(
         `the sweeper to close tender ${key}`,
         async () => ((await tender(author, tenderId[key])).status === 'CLOSED' ? true : undefined),
@@ -735,7 +784,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       );
     }
 
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const proposed = await send(
         p1,
         'POST',
@@ -759,7 +808,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
 
   test('the evaluator qualifies and scores the bids and completes both evaluations', async () => {
     const { evaluator } = people;
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       for (const who of ['c1', 'c2'] as const) {
         const qualified = await send(
           evaluator,
@@ -789,7 +838,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
 
   test('each tender is awarded to its winner, through the award approval', async () => {
     const { p1, awarder } = people;
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const winner = WINNER[key];
       const body = { bidId: bid[key][winner] };
       const asked = await send(awarder, 'POST', `/v1/tenders/${tenderId[key]}/award`, body);
@@ -832,7 +881,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         },
         90_000,
       );
-    for (const key of ['A', 'B'] as const) {
+    for (const key of TENDERS) {
       const draft = await mine(key);
       contractId[key] = draft.id;
       const winner = WINNER[key];
@@ -850,22 +899,23 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         authorityReviewRequired: false,
       });
     }
-    expect(contractId.A).not.toBe(contractId.B);
+    expect(new Set(Object.values(contractId)).size).toBe(3);
 
     // Exactly one per award: the owner's list holds one contract per tender, not two.
     const all = await author.get('/v1/contracts?limit=100');
     const ours = (all.body as { items: ContractBody[] }).items.filter((item) =>
-      [tenderId.A, tenderId.B].includes(item.tenderId),
+      TENDERS.some((key) => tenderId[key] === item.tenderId),
     );
-    expect(ours).toHaveLength(2);
+    expect(ours).toHaveLength(3);
 
-    // Each party reads its own contract, and is a stranger to the other's.
+    // Each party reads its own contracts, and is a stranger to the other's.
     expect(await contract(c1, contractId.A)).toMatchObject({ id: contractId.A, status: 'DRAFT' });
     expect(await contract(c2, contractId.B)).toMatchObject({ id: contractId.B, status: 'DRAFT' });
+    expect(await contract(c2, contractId.C)).toMatchObject({ id: contractId.C, status: 'DRAFT' });
     const c1List = (await c1.get('/v1/contracts?limit=100')).body as { items: ContractBody[] };
     expect(c1List.items.map((item) => item.id)).toEqual([contractId.A]);
     const c2List = (await c2.get('/v1/contracts?limit=100')).body as { items: ContractBody[] };
-    expect(c2List.items.map((item) => item.id)).toEqual([contractId.B]);
+    expect(c2List.items.map((item) => item.id).sort()).toEqual([contractId.B, contractId.C].sort());
 
     // A third organization gets exactly what it gets for a contract that does not exist.
     const missing = `CTR_${RUN}_MISSING`;
@@ -874,6 +924,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       ['the other tenant’s administrator', tenantB, 'A'],
       ['the other bidder', c2, 'A'],
       ['the other bidder', c1, 'B'],
+      ['the other bidder', c1, 'C'],
     ] as const) {
       const response = await stranger.get(`/v1/contracts/${contractId[key]}`);
       expectRefusal(response, NOT_FOUND, `${who} reading contract ${key}`);
@@ -885,6 +936,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     await assertInvisibleToStranger(tenantB, { contractId: contractId.A }, 'another tenant');
     await assertInvisibleToStranger(c2, { contractId: contractId.A }, 'the other bidder');
     await assertInvisibleToStranger(c1, { contractId: contractId.B }, 'the other bidder');
+    await assertInvisibleToStranger(c1, { contractId: contractId.C }, 'the other bidder');
+    await assertInvisibleToStranger(c3, { contractId: contractId.C }, 'an uninvolved contractor');
 
     // No route creates a contract, edits its terms or removes one (ADR-068): they answer
     // as a route that does not exist.
@@ -923,6 +976,17 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       label: 'signature refused for want of a policy',
       correlationId: noPolicy,
       events: ['CONTRACT_SIGNATURE_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_SIGNATURE_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          organizationId: org.owner,
+          side: 'EMPLOYER',
+          reason: 'SIGNATURE_POLICY_REQUIRED',
+          policyId: null,
+        },
+      },
     });
     expect(await contract(author, contractId.A)).toMatchObject({
       status: 'DRAFT',
@@ -1195,6 +1259,17 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       label: 'contractor proposal refused',
       correlationId: byContractor,
       events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'PROPOSE_AMENDMENT',
+          side: 'CONTRACTOR',
+          subjectId: null,
+          reason: 'NOT_EMPLOYER',
+        },
+      },
     });
     expectRefusal(
       await send(author, 'POST', base, { ...body, deltaMinor: '-1000' }),
@@ -1356,6 +1431,17 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       label: 'contractor milestone refused',
       correlationId: byContractor,
       events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'PLAN_MILESTONE',
+          side: 'CONTRACTOR',
+          subjectId: null,
+          reason: 'NOT_EMPLOYER',
+        },
+      },
     });
     expectRefusal(
       await send(author, 'POST', `/v1/contracts/${contractId.B}/milestones`, {
@@ -1430,11 +1516,34 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     });
     expect(unchanged.status, JSON.stringify(unchanged.body)).toBe(200);
     expect(unchanged.body).toMatchObject({ version: 2 });
+    const contractorChanges = correlation('contractor-changes');
     expectRefusal(
-      await send(c1, 'PATCH', `${base}/${milestoneId}`, { title: 'Contractor edit' }),
+      await send(
+        c1,
+        'PATCH',
+        `${base}/${milestoneId}`,
+        { title: 'Contractor edit' },
+        contractorChanges,
+      ),
       { status: 403, code: 'FORBIDDEN', reason: 'EDITOR_NOT_EMPLOYER' },
       'the contractor changing a milestone',
     );
+    evidence.push({
+      label: 'contractor milestone change refused',
+      correlationId: contractorChanges,
+      events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'CHANGE_MILESTONE',
+          side: 'CONTRACTOR',
+          subjectId: milestoneId,
+          reason: 'NOT_EMPLOYER',
+        },
+      },
+    });
 
     // There is no delete (Q-100).
     const removal = await author.call('DELETE', `${base}/${milestoneId}`, {
@@ -1461,7 +1570,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     systemAdmin,
     platformAdmin,
   }) => {
-    const { signer, c1, author } = people;
+    const { signer, c1, c2, author } = people;
     const policyPath = `/v1/approval-policies/${policyId}`;
 
     // The union is the policy's author and governs the employer: the policy is in force.
@@ -1469,10 +1578,36 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     expect(inForce.status, JSON.stringify(inForce.body)).toBe(200);
     expect(inForce.body).toMatchObject({ id: policyId, status: 'ACTIVE' });
 
+    // D-050 flags an employer signature only while the move's instant is within the signature's
+    // commit deadline plus the skew margin. So the signature that is to be flagged is made here,
+    // on the fresh contract C, immediately before the move, and the gap between the two is
+    // asserted: a slow run fails on its own timing, never on a correct product.
+    const pathC = `/v1/contracts/${contractId.C}/sign`;
+    const contractorSignsC = await send(c2, 'POST', pathC, {});
+    expect(contractorSignsC.status, JSON.stringify(contractorSignsC.body)).toBe(200);
+
+    const signingC = correlation('fresh-employer-signs');
+    const signStartedAt = Date.now();
+    const employerSignsC = await send(signer, 'POST', pathC, {}, signingC);
+    expect(employerSignsC.status, JSON.stringify(employerSignsC.body)).toBe(200);
+    expect(employerSignsC.body).toMatchObject({ id: contractId.C, status: 'SIGNED' });
+    evidence.push({
+      label: 'employer signature on the fresh contract',
+      correlationId: signingC,
+      events: ['CONTRACT_SIGNATURE_RECORDED', 'CONTRACT_SIGNED'],
+    });
+
     const moved = await systemAdmin.post(`/v1/organizations/${org.owner}/move`, {
       body: { parentId: null, reason: 'E2E: the employer leaves the union that wrote its policy' },
     });
+    const signToMoveMs = Date.now() - signStartedAt;
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(
+      signToMoveMs,
+      `${signToMoveMs} ms from the employer's signature to the end of the move: the signature ` +
+        `is only flagged within the commit deadline plus the skew margin (D-050); this runner ` +
+        `is too slow for FLAG_WINDOW_BOUND_MS (${FLAG_WINDOW_BOUND_MS} ms)`,
+    ).toBeLessThan(FLAG_WINDOW_BOUND_MS);
 
     // The sweeper (Q-83, D-051) suspends the policy the move stranded; nothing is waited
     // for but that state.
@@ -1487,7 +1622,22 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       120_000,
     );
     expect(suspended.body).toMatchObject({ id: policyId, status: 'SUSPENDED' });
-    expect(await contract(author, contractId.A)).toMatchObject({ authorityReviewRequired: true });
+    // The signature made just before the move is flagged for review: a flag is never a
+    // revocation — the contract stays SIGNED, its total unchanged — and both parties see it.
+    await until(
+      'the signature on the fresh contract to be flagged for review',
+      async () =>
+        (await contract(author, contractId.C)).authorityReviewRequired ? true : undefined,
+      60_000,
+    );
+    for (const party of [author, c2]) {
+      expect(await contract(party, contractId.C)).toMatchObject({
+        status: 'SIGNED',
+        amendmentsTotalMinor: '0',
+        authorityReviewRequired: true,
+        authorityReviewReason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+      });
+    }
 
     // With no policy in force the employer's signature of the pending amendment is refused —
     // and the amendment and the contract stay exactly as they were. A flag is never a revocation.
@@ -1507,21 +1657,28 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       label: 'amendment signature refused after the move',
       correlationId: stranded,
       events: ['CONTRACT_AUTHORITY_REFUSED'],
+      refusal: {
+        event: 'CONTRACT_AUTHORITY_REFUSED',
+        contractId: contractId.A,
+        payload: {
+          contractId: contractId.A,
+          action: 'SIGN_AMENDMENT',
+          side: 'EMPLOYER',
+          subjectId: amendmentId.two,
+          reason: 'SIGNATURE_POLICY_REQUIRED',
+        },
+      },
     });
     expect(await amendment(author, contractId.A, amendmentId.two)).toMatchObject({
       status: 'PROPOSED',
       employerSignedAt: null,
     });
-    // The contract was signed minutes before the move, inside the window D-050 reviews
-    // (the commit deadline plus the clock-skew margin): the employer's signature is flagged for
-    // review. A flag is never a revocation — the contract stays SIGNED, its total unchanged —
-    // and both parties see it.
+    // Contract A was signed long before the move, so whether it is flagged depends on how long
+    // the run took and is not asserted; what is, is that nothing about it was revoked.
     for (const party of [author, c1]) {
       expect(await contract(party, contractId.A)).toMatchObject({
         status: 'SIGNED',
         amendmentsTotalMinor: AMENDMENT_ONE,
-        authorityReviewRequired: true,
-        authorityReviewReason: 'AUTHORITY_CHANGED_DURING_SIGNING',
       });
     }
   });
@@ -1538,7 +1695,10 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       correlationId: string;
       sourceTopic: string;
       sourceEventName: string;
+      action: string;
+      resourceType: string;
       resourceId: string | null;
+      outcome: string;
     }
     const expectedByContract: Record<TenderKey, Record<string, number>> = {
       A: {
@@ -1553,11 +1713,22 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         CONTRACT_MILESTONE_CHANGED: 1,
       },
       B: { CONTRACT_DRAFTED: 1, CONTRACT_CANCELLED: 1 },
+      // The contract signed just before the move: its employer signature flagged, once.
+      C: {
+        CONTRACT_DRAFTED: 1,
+        CONTRACT_SIGNATURE_RECORDED: 2,
+        CONTRACT_SIGNED: 1,
+        CONTRACT_SIGNATURE_AUTHORITY_FLAGGED: 1,
+      },
     };
-    // Refusals of a party for want of authority: the contractor proposing an amendment,
-    // planning a milestone and changing one, and the employer signing after its policy was
-    // suspended. At least those four, on contract A.
-    const authorityRefusals = 4;
+    // Refusals of a party for want of authority, on contract A: the contractor proposing an
+    // amendment, planning a milestone and changing one, and the employer signing after its
+    // policy was suspended. Each is in `evidence` with its correlation id.
+    const refusals = evidence.filter((entry) => entry.refusal);
+    const authorityRefusals = refusals.filter(
+      (entry) => entry.refusal!.event === 'CONTRACT_AUTHORITY_REFUSED',
+    );
+    expect(authorityRefusals).toHaveLength(4);
 
     const records = await until(
       'audit records of every contract decision and refusal',
@@ -1585,9 +1756,10 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
             (item) => item.resourceId === contractId[key] && item.sourceEventName === name,
           ).length;
         const complete =
-          countOf('A', 'CONTRACT_AUTHORITY_REFUSED') >= authorityRefusals &&
-          countOf('A', 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED') >= 1 &&
-          (['A', 'B'] as const).every((key) =>
+          refusals.every((entry) =>
+            items.some((item) => item.correlationId === entry.correlationId),
+          ) &&
+          TENDERS.every((key) =>
             Object.entries(expectedByContract[key]).every(
               ([name, count]) => countOf(key, name) >= count,
             ),
@@ -1597,8 +1769,9 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       180_000,
     );
     // Exactly once where once is the rule: not a second CONTRACT_DRAFTED, CONTRACT_SIGNED or
-    // CONTRACT_AMENDED for the replays, the repeated signatures and the redelivered award.
-    for (const key of ['A', 'B'] as const) {
+    // CONTRACT_AMENDED for the replays and the repeated signatures. (A redelivered award is not
+    // exercised here: nothing in the black-box surface redelivers one.)
+    for (const key of TENDERS) {
       for (const [name, count] of Object.entries(expectedByContract[key])) {
         expect(
           records.filter(
@@ -1608,12 +1781,35 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         ).toHaveLength(count);
       }
     }
+    // Exactly the four authority refusals, no more: one audit record per refusal, found by the
+    // correlation id the call carried, naming the refusal's event, its contract and the tenant.
+    expect(
+      records
+        .filter((item) => item.sourceEventName === 'CONTRACT_AUTHORITY_REFUSED')
+        .map((item) => item.correlationId)
+        .sort(),
+      'the CONTRACT_AUTHORITY_REFUSED records of the employer',
+    ).toEqual(authorityRefusals.map((entry) => entry.correlationId).sort());
+    for (const entry of refusals) {
+      const recorded = records.filter((item) => item.correlationId === entry.correlationId);
+      expect(recorded, `audit records of "${entry.label}"`).toHaveLength(1);
+      expect(recorded[0], entry.label).toMatchObject({
+        organizationId: org.owner,
+        action: entry.refusal!.event,
+        sourceEventName: entry.refusal!.event,
+        resourceType: 'Contract',
+        resourceId: entry.refusal!.contractId,
+      });
+    }
+    // At most one flag on contract A (whether it falls in the window depends on the run's
+    // length); exactly one on C is in `expectedByContract`.
     expect(
       records.filter(
         (item) =>
-          item.resourceId === contractId.A && item.sourceEventName === 'CONTRACT_AUTHORITY_REFUSED',
+          item.resourceId === contractId.A &&
+          item.sourceEventName === 'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
       ).length,
-    ).toBeGreaterThanOrEqual(authorityRefusals);
+    ).toBeLessThanOrEqual(1);
     for (const record of records) {
       expect(record.organizationId).toBe(org.owner);
     }
@@ -1626,37 +1822,14 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const payloadOf = (events: ObservedEvent[], name: string): Record<string, unknown> =>
       events.find((event) => event.eventName === name)!.payload;
 
-    expect(
-      payloadOf(await seen('signature refused for want of a policy'), 'CONTRACT_SIGNATURE_REFUSED'),
-    ).toMatchObject({
-      contractId: contractId.A,
-      organizationId: org.owner,
-      side: 'EMPLOYER',
-      reason: 'SIGNATURE_POLICY_REQUIRED',
-      policyId: null,
-    });
-    expect(
-      payloadOf(await seen('contractor proposal refused'), 'CONTRACT_AUTHORITY_REFUSED'),
-    ).toMatchObject({
-      contractId: contractId.A,
-      action: 'PROPOSE_AMENDMENT',
-      side: 'CONTRACTOR',
-      reason: 'NOT_EMPLOYER',
-    });
-    expect(
-      payloadOf(await seen('contractor milestone refused'), 'CONTRACT_AUTHORITY_REFUSED'),
-    ).toMatchObject({ action: 'PLAN_MILESTONE', side: 'CONTRACTOR', reason: 'NOT_EMPLOYER' });
-    expect(
-      payloadOf(
-        await seen('amendment signature refused after the move'),
-        'CONTRACT_AUTHORITY_REFUSED',
-      ),
-    ).toMatchObject({
-      action: 'SIGN_AMENDMENT',
-      side: 'EMPLOYER',
-      reason: 'SIGNATURE_POLICY_REQUIRED',
-      subjectId: amendmentId.two,
-    });
+    // Each refusal left exactly one event on the topic, with the action, subject and reason
+    // that were refused (the audit record above is its one row).
+    for (const entry of refusals) {
+      const { event, payload } = entry.refusal!;
+      const published = (await seen(entry.label)).filter((item) => item.eventName === event);
+      expect(published, `${event} of "${entry.label}" on the topic`).toHaveLength(1);
+      expect(published[0]!.payload, entry.label).toMatchObject(payload);
+    }
     expect(payloadOf(await seen('draft cancelled'), 'CONTRACT_CANCELLED')).toMatchObject({
       contractId: contractId.B,
       reasonCode: 'AWARD_ERROR',
@@ -1672,6 +1845,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       PRICE.A.c2,
       PRICE.B.c1,
       PRICE.B.c2,
+      PRICE.C.c1,
+      PRICE.C.c2,
       AMENDMENT_ONE,
       AMENDMENT_TWO,
       'wrong lot',
@@ -1680,7 +1855,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     for (const entry of evidence) {
       for (const event of tap.correlated(entry.correlationId)) {
         expect(event.tenantId, entry.label).toBe(org.owner);
-        expect([contractId.A, contractId.B], entry.label).toContain(event.key);
+        expect(Object.values(contractId), entry.label).toContain(event.key);
         for (const leak of amounts) {
           expect(JSON.stringify(event.payload), entry.label).not.toContain(leak);
         }

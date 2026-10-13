@@ -18,7 +18,7 @@ Kafka منتشر می‌شود:
 | `05-correlation`           | یک `correlationId` از HTTP تا Header و Envelope رویداد روی Kafka                                                                                       |
 | `construction/01-…`        | CON-001: بسته بودن بی‌توکن، ساخت Idempotent، چرخهٔ پروژه و نیاز، ۴۰۹ نسخهٔ کهنه، ۴۰۴ میان‌مستأجری، رکورد Audit                                         |
 | `construction/03-…`        | CON-002: مناقصه سرتاسر — موافقت‌ها، پیشنهاد مهرشده، بستن، بازگشایی چهارچشمی، ارزیابی، انتخاب، ابطال، ۴۰۴                                               |
-| `contract/01-…`            | CON-003: دو مناقصهٔ منتخب → دو پیش‌نویس قرارداد؛ امضا (سیاست `contract.signature`)، لغو، الحاقیه، Milestone، ۴۰۴ میان‌مستأجری، جابه‌جایی سازمان، Audit |
+| `contract/01-…`            | CON-003: سه مناقصهٔ منتخب → سه پیش‌نویس قرارداد؛ امضا (سیاست `contract.signature`)، لغو، الحاقیه، Milestone، ۴۰۴ میان‌مستأجری، جابه‌جایی سازمان، Audit |
 
 سیاست `contract.signature` فقط مستقیم روی contract-service (`E2E_CONTRACT_URL`، :3111) نوشته و تأیید می‌شود:
 Gateway مسیر را با بخش نخست آدرس می‌یابد و `approval-policies` را به construction-service می‌فرستد
