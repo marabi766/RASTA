@@ -25,6 +25,15 @@ export const CONSTRUCTION_TOPIC = 'rasta.construction.v1';
 export const DEFAULT_PORT = '3110';
 
 /**
+ * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS` (Codex r1 on #250, R2): never below Prisma's own 5 s default,
+ * which the opening used to inherit; never above two minutes of the tender's lock. The default
+ * leaves wide headroom over the measured worst case at the default caps (`tender-open-scale.int-spec`).
+ */
+export const TENDER_OPEN_TIMEOUT_MIN_MS = 5_000;
+export const TENDER_OPEN_TIMEOUT_MAX_MS = 120_000;
+export const TENDER_OPEN_TIMEOUT_DEFAULT_MS = 30_000;
+
+/**
  * The oversight role. Refused by this service whatever the configuration says
  * (`docs/09` § 9.3: aggregate access only), so naming it in a role list below
  * is a configuration error rather than a grant.
@@ -143,6 +152,9 @@ function roleList(name: string, options: { min: number }) {
  *                                       audit-service returns, 10,000).
  *   CONSTRUCTION_BID_MAX_REVISIONS      PROVISIONAL (F2, D1): revisions one
  *                                       bid may have, the submission included.
+ *   CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS How long the opening's transaction (and
+ *                                       the owner's read of every opened bid)
+ *                                       may run; 5,000–120,000, default 30,000.
  *
  * `SYSTEM_ADMIN` is always accepted for project and policy commands, as
  * everywhere on the platform, and never needs to be listed. It is **not**
@@ -524,6 +536,20 @@ export const constructionEnvSchema = baseEnvSchema
       .min(1)
       .max(EVIDENCE_MAX_CHAIN_LINKS)
       .default(50),
+    /**
+     * How long the transaction that opens a tender's bids — and the owner's read of every opened
+     * bid, which repeats the same work — may run (Codex r1 on #250, R2). It decrypts every
+     * standing bid and writes an access row and event for each, under the tender's lock; Prisma's
+     * 5 s default would roll a large opening back every time. Out of range is a startup failure,
+     * never a silent default: too short refuses the openings the caps permit, too long holds the
+     * tender's lock past any sane request.
+     */
+    CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(TENDER_OPEN_TIMEOUT_MIN_MS)
+      .max(TENDER_OPEN_TIMEOUT_MAX_MS)
+      .default(TENDER_OPEN_TIMEOUT_DEFAULT_MS),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),

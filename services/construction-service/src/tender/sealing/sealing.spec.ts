@@ -13,6 +13,8 @@ import {
   privateKeyFromDer,
   sealBid,
   verifyReceiptChain,
+  verifyReceipts,
+  VerifiedReceipts,
   type BidBinding,
   type ReceiptLink,
   type SealedBid,
@@ -85,13 +87,22 @@ const receiptsOf = (bids: Issued[], tenderId = BINDING.tenderId): TrustedReceipt
   return { links, head: previous };
 };
 
-/** Opens `sealed`; unless told otherwise, against the receipts that were issued for it alone. */
+/**
+ * Opens `sealed`; unless told otherwise, against the receipts that were issued for it alone,
+ * verified for the tender the binding names (as opening verifies them, once per tender).
+ */
 const open = (
   sealed: SealedBid,
   binding: BidBinding = BINDING,
   key: KeyObject = privateKey,
   receipts: TrustedReceipts = receiptsOf([{ sealed, binding }], binding.tenderId),
-) => openBid({ privateKey: key, binding, sealed, receipts });
+) =>
+  openBid({
+    privateKey: key,
+    binding,
+    sealed,
+    receipts: verifyReceipts(binding.tenderId, receipts),
+  });
 
 const flip = (bytes: Buffer, index = 0): Buffer => {
   const copy = Buffer.from(bytes);
@@ -303,6 +314,72 @@ describe('sealing and opening a bid', () => {
     expect(() => open(first, BINDING, privateKey, cut)).toThrow(
       expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
     );
+  });
+
+  describe('the receipts verified once per tender (Codex r1 on #250, R2)', () => {
+    const openWith = (sealed: SealedBid, receipts: VerifiedReceipts, binding = BINDING) =>
+      openBid({ privateKey, binding, sealed, receipts });
+
+    it('opens every bid of a tender against one verification', () => {
+      const bindings = [1, 2, 3].map((n) => ({
+        ...BINDING,
+        bidId: `BID_${n}`,
+        bidderOrganizationId: `ORG_${n}`,
+      }));
+      const sealed = bindings.map((binding) => seal(binding));
+      const verified = verifyReceipts(
+        BINDING.tenderId,
+        receiptsOf(sealed.map((s, i) => ({ sealed: s, binding: bindings[i] }))),
+      );
+      expect(verified.head).toBe(
+        receiptsOf(sealed.map((s, i) => ({ sealed: s, binding: bindings[i] }))).head,
+      );
+      sealed.forEach((s, i) => expect(openWith(s, verified, bindings[i])).toEqual(CONTENT));
+    });
+
+    it('refuses to verify a chain that does not end at the trusted head', () => {
+      const trusted = receiptsOf([seal()]);
+      const rebuilt = receiptsOf([seal(BINDING, { ...CONTENT, priceMinor: '1' })]);
+      expect(() =>
+        verifyReceipts(BINDING.tenderId, { links: rebuilt.links, head: trusted.head }),
+      ).toThrow(expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }));
+    });
+
+    it('is for one tender: verified for TND_A, it opens nothing of TND_B', () => {
+      const sealedB = seal({ ...BINDING, tenderId: 'TND_B' });
+      const verifiedA = verifyReceipts('TND_A', receiptsOf([seal()]));
+      expect(() => openWith(sealedB, verifiedA, { ...BINDING, tenderId: 'TND_B' })).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+      );
+    });
+
+    it('cannot be forged: an object that did not come from verifyReceipts opens nothing', () => {
+      const sealed = seal();
+      const verified = verifyReceipts(BINDING.tenderId, receiptsOf([sealed]));
+      const lookalike = Object.create(VerifiedReceipts.prototype as object) as VerifiedReceipts;
+      Object.assign(lookalike, { tenderId: verified.tenderId, head: verified.head });
+      (lookalike as unknown as { newestOf: VerifiedReceipts['newestOf'] }).newestOf = (id) =>
+        verified.newestOf(id);
+      expect(() => openWith(sealed, lookalike)).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+      );
+      expect(openWith(sealed, verified)).toEqual(CONTENT);
+    });
+
+    it('reads only what it verified: editing the receipts afterwards changes nothing', () => {
+      const original = seal();
+      const forged = seal(BINDING, { ...CONTENT, priceMinor: '1' });
+      const receipts = receiptsOf([original]);
+      const verified = verifyReceipts(BINDING.tenderId, receipts);
+      // The caller's copy rewritten to vouch for the forgery after the check.
+      const link = receipts.links[0] as { ciphertextSha256: string; contentCommitment: string };
+      link.ciphertextSha256 = forged.ciphertextSha256;
+      link.contentCommitment = forged.contentCommitment;
+      expect(() => openWith(forged, verified)).toThrow(
+        expect.objectContaining({ code: 'RECEIPT_MISMATCH' }),
+      );
+      expect(openWith(original, verified)).toEqual(CONTENT);
+    });
   });
 
   it('opens each bid of a longer chain against its own receipt, and only the newest revision', () => {

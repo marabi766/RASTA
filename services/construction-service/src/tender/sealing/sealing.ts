@@ -278,16 +278,78 @@ export interface TrustedReceipts {
   readonly head: string;
 }
 
+type Receipted = ReceiptLink & { readonly receipt: string };
+
+/** Only what {@link verifyReceipts} made: `openBid` accepts nothing else. */
+const VERIFIED = new WeakSet<VerifiedReceipts>();
+
+/**
+ * A tender's receipts after their chain was verified against the trusted head — **once** — with
+ * the newest receipt of each bid indexed by bid id.
+ *
+ * The chain is immutable once the tender is closed, so verifying it again for every bid opened
+ * proves nothing more and costs O(receipts) each time: at the permitted caps (200 bids, 10,000
+ * receipts) that was some 30 s of hashing inside the opening's transaction (Codex r1 on #250,
+ * R2). Made only by {@link verifyReceipts}, from a copy of what it verified, so nothing changed
+ * after the check is ever read; `openBid` refuses any other object.
+ */
+export class VerifiedReceipts {
+  private constructor(
+    readonly tenderId: string,
+    readonly head: string,
+    private readonly newest: ReadonlyMap<string, Receipted>,
+  ) {}
+
+  /** See {@link verifyReceipts}. */
+  static verify(tenderId: string, receipts: TrustedReceipts): VerifiedReceipts {
+    // One copy, verified and then indexed: what is read later is exactly what was checked.
+    const links = receipts.links.map((link) =>
+      Object.freeze({
+        bidId: link.bidId,
+        revision: link.revision,
+        receivedAt: new Date(link.receivedAt.getTime()),
+        ciphertextSha256: link.ciphertextSha256,
+        contentCommitment: link.contentCommitment,
+        receipt: link.receipt,
+      }),
+    );
+    if (!verifyReceiptChain(tenderId, links, receipts.head).ok) {
+      throw new SealingError('RECEIPT_CHAIN_BROKEN');
+    }
+    // In chain order, so each bid's entry ends as its newest receipt.
+    const newest = new Map<string, Receipted>();
+    for (const link of links) newest.set(link.bidId, link);
+    const verified = new VerifiedReceipts(tenderId, receipts.head, newest);
+    VERIFIED.add(verified);
+    return verified;
+  }
+
+  /** The newest receipt issued for `bidId`, or undefined when it has none. */
+  newestOf(bidId: string): Receipted | undefined {
+    return this.newest.get(bidId);
+  }
+}
+
+/**
+ * Verifies a tender's receipts — the chain, link by link, from the genesis to the trusted head —
+ * and indexes them for opening. `RECEIPT_CHAIN_BROKEN` when they do not verify: an edited, removed,
+ * reordered, spliced or truncated chain, or one that ends somewhere the trusted copy does not.
+ */
+export function verifyReceipts(tenderId: string, receipts: TrustedReceipts): VerifiedReceipts {
+  return VerifiedReceipts.verify(tenderId, receipts);
+}
+
 /**
  * Opens a sealed bid with the tender's private key — **only** against the receipts
- * that were issued when it was submitted (Codex review of #163).
+ * that were issued when it was submitted (Codex review of #163), verified once for
+ * the whole tender ({@link verifyReceipts}).
  *
  * Opening compares the bid with what the bidder was given, not with what the
  * database now says about itself. In order, before any decryption:
  *
- *   1. the receipt chain verifies, link by link, and ends at the trusted head
- *      (`RECEIPT_CHAIN_BROKEN`: an edited, removed, reordered, spliced or
- *      truncated chain, or one that ends somewhere the trusted copy does not);
+ *   1. the receipts are a {@link VerifiedReceipts} of this tender: their chain
+ *      verified, link by link, and ended at the trusted head
+ *      (`RECEIPT_CHAIN_BROKEN` otherwise);
  *   2. the bid has a receipt, and the newest one it has is for this revision
  *      (`RECEIPT_MISMATCH`: a stale or invented revision);
  *   3. the digest **recomputed** from the stored ciphertext, tag, nonce, wrapped
@@ -304,18 +366,19 @@ export function openBid(input: {
   privateKey: KeyObject;
   binding: BidBinding;
   sealed: SealedBid;
-  receipts: TrustedReceipts;
+  receipts: VerifiedReceipts;
 }): unknown {
   const { sealed, binding, receipts } = input;
   if (sealed.version !== SEAL_VERSION || sealed.keyId !== binding.keyId) {
     throw new SealingError('TAMPERED');
   }
 
-  const verdict = verifyReceiptChain(binding.tenderId, receipts.links, receipts.head);
-  if (!verdict.ok) throw new SealingError('RECEIPT_CHAIN_BROKEN');
+  // Verified once for the tender (`verifyReceipts`), and for this one.
+  if (!VERIFIED.has(receipts) || receipts.tenderId !== binding.tenderId) {
+    throw new SealingError('RECEIPT_CHAIN_BROKEN');
+  }
 
-  const receiptsOfBid = receipts.links.filter((link) => link.bidId === binding.bidId);
-  const receipted = receiptsOfBid[receiptsOfBid.length - 1];
+  const receipted = receipts.newestOf(binding.bidId);
   if (!receipted || receipted.revision !== binding.revision) {
     throw new SealingError('RECEIPT_MISMATCH');
   }

@@ -1,7 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
-import { brokersOf, corsOrigins, DEFAULT_PORT, loadConstructionEnv, SERVICE_NAME } from './env';
+import {
+  brokersOf,
+  corsOrigins,
+  DEFAULT_PORT,
+  loadConstructionEnv,
+  SERVICE_NAME,
+  TENDER_OPEN_TIMEOUT_DEFAULT_MS,
+  TENDER_OPEN_TIMEOUT_MAX_MS,
+  TENDER_OPEN_TIMEOUT_MIN_MS,
+} from './env';
 
 /**
  * Configuration parsing, the fallbacks a deployment relies on, and the four
@@ -237,6 +246,30 @@ describe('project roles (Q-69)', () => {
       );
       const declared = /export const MAX_CHAIN_LINKS = ([\d_]+);/.exec(source)?.[1];
       expect(Number(declared?.replaceAll('_', ''))).toBe(EVIDENCE_MAX_CHAIN_LINKS);
+    });
+  });
+
+  describe('how long opening a tender’s bids may take (Codex r1 on #250, R2)', () => {
+    it('has an explicit default, not Prisma’s 5 s, and takes a value in range', () => {
+      expect(load().CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS).toBe(TENDER_OPEN_TIMEOUT_DEFAULT_MS);
+      expect(TENDER_OPEN_TIMEOUT_DEFAULT_MS).toBeGreaterThan(5_000);
+      expect(
+        load({ CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: '60000' }).CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS,
+      ).toBe(60_000);
+    });
+
+    it.each([
+      String(TENDER_OPEN_TIMEOUT_MIN_MS - 1),
+      String(TENDER_OPEN_TIMEOUT_MAX_MS + 1),
+      '0',
+      '-1',
+      '7500.5',
+      'forever',
+      '',
+    ])('refuses %j at startup rather than falling back', (value) => {
+      expect(() => load({ CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: value })).toThrow(
+        /CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS/,
+      );
     });
   });
 

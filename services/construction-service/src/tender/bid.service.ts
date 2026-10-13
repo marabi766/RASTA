@@ -19,7 +19,7 @@ import {
 } from '../shared/idempotency';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { ENV, TENDER_KEY_PROVIDER } from '../tokens';
-import type { TenderKeyProvider } from './sealing/key-provider';
+import type { RequestDigestContext, TenderKeyProvider } from './sealing/key-provider';
 import { StandingAuthority } from './standing-authority';
 import { BidRepository, type LockedTenderForBid } from './bid.repository';
 import { TenderClock, insideWindow } from './tender-clock';
@@ -109,13 +109,18 @@ export class BidService {
   ) {}
 
   /**
-   * The bid's request, recognised under a keyed digest (see `submit`). No KEK means no tender
-   * could have been published, so no bid can arrive; it is an error, never an unkeyed fallback.
+   * The bid's request, recognised under a keyed, salted digest bound to the bidder organization and
+   * user who made it (see `submit`). No KEK means no tender could have been published, so no bid can
+   * arrive; it is an error, never an unkeyed fallback.
    */
-  private readonly requestHasher: RequestHasher = {
-    hash: (body) => this.digestOrFail(() => this.keys.requestDigest(canonicalise(body))),
-    matches: (stored, body) => this.keys.matchesRequestDigest(stored, canonicalise(body)),
-  };
+  private requestHasherOf(requester: RequestDigestContext): RequestHasher {
+    return {
+      hash: (body) =>
+        this.digestOrFail(() => this.keys.requestDigest(requester, canonicalise(body))),
+      matches: (stored, body) =>
+        this.keys.matchesRequestDigest(stored, requester, canonicalise(body)),
+    };
+  }
 
   private digestOrFail(digest: () => string): string {
     try {
@@ -169,7 +174,13 @@ export class BidService {
    *
    * The stored request hash is **keyed** (`TenderKeyProvider.requestDigest`), not the plain SHA-256
    * the other construction commands store: the body is the price, and an unkeyed hash of a
-   * low-entropy price would let a reader of a backup guess it (ADR-066 § 1).
+   * low-entropy price would let a reader of a backup guess it (ADR-066 § 1). It is also salted per
+   * claim and bound to the bidder organization **and** user (Codex r1 on #250, R1): the claim is
+   * committed before eligibility, uniqueness and the window are judged, so a digest comparable
+   * across claims would let anyone with read access to the database and a contractor account
+   * confirm a competitor's guessed price by submitting candidates. A replay is recognised with the
+   * stored salt; the same key from another user of the organization is a different request
+   * (`409 IDEMPOTENCY_KEY_REUSED`), as with a score's evaluator.
    */
   async submit(
     tenderId: string,
@@ -184,7 +195,7 @@ export class BidService {
       targeted(tenderId, dto),
       201,
       (record) => this.submitOnce(tenderId, dto, bidder, actor, record),
-      this.requestHasher,
+      this.requestHasherOf({ organizationId: bidder, userId: actor }),
     );
   }
 

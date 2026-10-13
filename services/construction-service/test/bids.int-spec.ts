@@ -16,6 +16,7 @@ import {
   privateKeyFromDer,
   sealBid,
   verifyReceiptChain,
+  verifyReceipts,
   type SealedBid,
 } from '../src/tender/sealing/sealing';
 import {
@@ -773,6 +774,26 @@ describe('bids', () => {
           links.map((link) => link.receipt),
         );
         expect(verifyReceiptChain(tenderId, links, evidence.head)).toEqual({ ok: true });
+
+        // And a tender filled to its caps is opened — through the opening itself, not by checking
+        // the chain on the side (Codex r1 on #250, R2): every standing bid against one verification.
+        await runUnscoped('the suite lets the deadline pass', () =>
+          w.prisma.client.$executeRawUnsafe(
+            `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+               "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
+          ),
+        );
+        await limited.tenderClose.close({ organizationId: owner, tenderId });
+        // Four eyes: one proposes, another approves and opens.
+        await asAdmin(owner, () => limited.tenderOpen.proposeOpening(tenderId));
+        const opened = await asAdmin(owner, () => limited.tenderOpen.open(tenderId));
+        expect(opened).toMatchObject({ status: 'EVALUATING', bidCount: 3, alreadyOpened: false });
+        const standing = await runUnscoped('the suite reads the bids it opened', () =>
+          w.prisma.client.bid.findMany({ where: { tenderId }, select: { status: true } }),
+        );
+        expect(standing.map((bid) => bid.status)).toEqual(['OPENED', 'OPENED', 'OPENED']);
+        const read = await asAdmin(owner, () => limited.tenderOpen.listBids(tenderId));
+        expect(read.bids).toHaveLength(3);
       } finally {
         await limited.close();
       }
@@ -855,20 +876,11 @@ describe('bids', () => {
         { tenderId, keyId },
       );
       try {
-        expect(() =>
-          openBid({
-            privateKey: privateKeyFromDer(der),
-            binding: {
-              tenderId,
-              bidId: target.bidId,
-              bidderOrganizationId: bidders[1]!,
-              revision: 1,
-              keyId,
-            },
-            sealed: forged,
-            receipts: { links: rewritten, head: externalHead },
-          }),
-        ).toThrow(expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }));
+        // The rewritten links are never verified against the external head, so nothing can be
+        // opened with them.
+        expect(() => verifyReceipts(tenderId, { links: rewritten, head: externalHead })).toThrow(
+          expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+        );
 
         // And with the receipts themselves taken from the evidence — which is how opening
         // reads them — the substituted bid does not match what was announced for it.

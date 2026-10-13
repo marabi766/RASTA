@@ -64,7 +64,10 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * How a request is stored to be recognised again: by default the unkeyed SHA-256 of its canonical
  * form ({@link hashRequestBody}). An endpoint whose body must say nothing to a reader of the
  * database (a sealed bid's price) brings a keyed one; `matches` compares a stored hash with a
- * request, so a hash made under an older key is still recognised.
+ * request, so a hash made under an older key, or with a salt of its own, is still recognised. The
+ * claim — and its hash — is committed before the work judges anything, so a hash that could be
+ * guessed at must not be comparable across claims either (Codex r1 on #250, R1): the bid's is salted
+ * per claim and bound to the requester.
  */
 export interface RequestHasher {
   hash(body: unknown): string;

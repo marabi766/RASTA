@@ -35,7 +35,7 @@ import {
 import { compareChains } from './chain-agreement';
 import type { LiveAnswer, MembershipSource } from './membership.client';
 import { BidContentReader, integrityRefusal, type Evidence } from './bid-content-reader';
-import type { TrustedReceipts } from './sealing/sealing';
+import type { VerifiedReceipts } from './sealing/sealing';
 import { OwnerIdentity, type LivePrincipal, type Principal } from './owner-identity';
 import type { TenderChain } from './tender-evidence.client';
 import { assertTenderTransition } from './tender.state-machine';
@@ -135,6 +135,12 @@ interface Opened {
  * audit-service yet — retry), differing, forged. There is no fallback to the local head.
  * The read happens **outside** the transaction and before it takes the lock: it must not
  * hold the tender row while it waits on a network, and CLOSED is stable.
+ *
+ * The chain is verified **once** per opening, into receipts indexed by bid that every bid
+ * reuses (`VerifiedReceipts`), not once per bid: at the permitted caps that was 200 walks of
+ * 10,000 links inside the transaction (Codex r1 on #250, R2). The transaction runs under
+ * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS`, not Prisma's 5 s default; the worst case the default
+ * caps allow is opened within it in `tender-open-scale.int-spec.ts`.
  *
  * ## The key
  *
@@ -256,7 +262,9 @@ export class TenderOpenService {
       return withFinancialSpan(
         'construction.bid.open',
         () =>
-          this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence, people)),
+          this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence, people), {
+            timeoutMs: this.env.CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS,
+          }),
         { 'rasta.tender.command': 'open-bids' },
       );
     });
@@ -524,10 +532,13 @@ export class TenderOpenService {
         found.openedAt !== null
           ? await this.readEvidence(principal.organizationId, tenderId)
           : undefined;
-      return this.prisma.transaction((tx) =>
-        this.readIn(tx, principal, tenderId, evidence, { purpose: 'LIST_BIDS' }).then(
-          (result) => result.view,
-        ),
+      // Every opened bid is decrypted and logged, as at the opening: the same bound.
+      return this.prisma.transaction(
+        (tx) =>
+          this.readIn(tx, principal, tenderId, evidence, { purpose: 'LIST_BIDS' }).then(
+            (result) => result.view,
+          ),
+        { timeoutMs: this.env.CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS },
       );
     });
   }
@@ -1182,7 +1193,7 @@ export class TenderOpenService {
     keyId: string,
     tenderId: string,
     bid: Bid,
-    receipts: TrustedReceipts,
+    receipts: VerifiedReceipts,
   ): BidContent {
     return this.reader.openOne(privateKey, keyId, tenderId, bid, receipts);
   }
