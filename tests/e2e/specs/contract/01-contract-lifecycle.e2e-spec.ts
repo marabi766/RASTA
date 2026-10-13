@@ -57,6 +57,8 @@ const BIDDING_WINDOW_MS = 90_000;
  * rather than hoping a slow runner stays under it.
  */
 const FLAG_WINDOW_BOUND_MS = 120_000;
+const SUSPENSION_WAIT_MS = 120_000;
+const FLAG_WAIT_MS = 60_000;
 
 /** The least that must be left of the window when a step that needs it open starts. */
 const WINDOW_MARGIN_MS = 15_000;
@@ -261,6 +263,21 @@ function expectRefusal(
 }
 
 const NOT_FOUND = { status: 404, code: 'NOT_FOUND' } as const;
+
+/**
+ * A stranger's write must be a 404 that is, in status, code, message and details, the answer
+ * the same request gets against a record that does not exist.
+ */
+async function expectMissingLike(
+  response: ApiResponse<unknown>,
+  againstMissing: Promise<ApiResponse<unknown>>,
+  what: string,
+): Promise<void> {
+  expectRefusal(response, NOT_FOUND, what);
+  expect(refusalOf(response), `${what}: against a record that is not there`).toEqual(
+    refusalOf(await againstMissing),
+  );
+}
 
 /** The same refusal: status, platform code and message (which never names a record). */
 function refusalOf(response: ApiResponse<unknown>): {
@@ -1109,8 +1126,17 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       'a member of both parties signing',
     );
     // Not a party at all.
-    expectRefusal(await send(c3, 'POST', path, {}), NOT_FOUND, 'a stranger signing');
-    expectRefusal(await send(tenantB, 'POST', path, {}), NOT_FOUND, 'another tenant signing');
+    const missingSign = `/v1/contracts/CTR_${RUN}_MISSING/sign`;
+    await expectMissingLike(
+      await send(c3, 'POST', path, {}),
+      send(c3, 'POST', missingSign, {}),
+      'a stranger signing',
+    );
+    await expectMissingLike(
+      await send(tenantB, 'POST', path, {}),
+      send(tenantB, 'POST', missingSign, {}),
+      'another tenant signing',
+    );
     // Nothing signed yet on the employer's side.
     expect(await contract(author, contractId.A)).toMatchObject({
       status: 'DRAFT',
@@ -1177,10 +1203,15 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       { status: 422, code: 'BUSINESS_RULE_VIOLATION', reason: 'CANCEL_REASON_NOT_ALLOWED' },
       'cancelling for a reason outside the closed list',
     );
-    expectRefusal(await send(c3, 'POST', path, { reasonCode: 'OTHER' }), NOT_FOUND, 'a stranger');
-    expectRefusal(
+    const missingCancel = `/v1/contracts/CTR_${RUN}_MISSING/cancel`;
+    await expectMissingLike(
+      await send(c3, 'POST', path, { reasonCode: 'OTHER' }),
+      send(c3, 'POST', missingCancel, { reasonCode: 'OTHER' }),
+      'a stranger',
+    );
+    await expectMissingLike(
       await send(tenantB, 'POST', path, { reasonCode: 'OTHER' }),
-      NOT_FOUND,
+      send(tenantB, 'POST', missingCancel, { reasonCode: 'OTHER' }),
       'tenant B',
     );
     expect(await contract(author, contractId.B)).toMatchObject({ status: 'DRAFT' });
@@ -1333,7 +1364,16 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     expect((employerSigns.body as AmendmentBody).employerSignedAt).not.toBeNull();
     expect(await contract(author, contractId.A)).toMatchObject({ amendmentsTotalMinor: '0' });
 
-    expectRefusal(await send(c3, 'POST', path, {}), NOT_FOUND, 'a stranger signing the amendment');
+    await expectMissingLike(
+      await send(c3, 'POST', path, {}),
+      send(
+        c3,
+        'POST',
+        `/v1/contracts/CTR_${RUN}_MISSING/amendments/AMD_${RUN}_MISSING_0/sign`,
+        {},
+      ),
+      'a stranger signing the amendment',
+    );
 
     const effecting = correlation('amendment-effective');
     const key = idempotencyKey(`contract-amendment-${RUN}`);
@@ -1570,6 +1610,9 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     systemAdmin,
     platformAdmin,
   }) => {
+    // The declared waits (suspension, then flag) plus the HTTP work around them: two signatures,
+    // the move, the reads and the refusal. The signature-to-move bound is asserted separately.
+    test.setTimeout(SUSPENSION_WAIT_MS + FLAG_WAIT_MS + 120_000);
     const { signer, c1, c2, author } = people;
     const policyPath = `/v1/approval-policies/${policyId}`;
 
@@ -1577,6 +1620,23 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const inForce = await platformAdmin.get(policyPath, { baseUrl: config.contractUrl });
     expect(inForce.status, JSON.stringify(inForce.body)).toBe(200);
     expect(inForce.body).toMatchObject({ id: policyId, status: 'ACTIVE' });
+
+    // Every monetary field of A and C, as both parties read them before the move.
+    const moneyOf = (c: ContractBody) => ({
+      amountMinor: c.amountMinor,
+      currentAmountMinor: c.currentAmountMinor,
+      amendmentsTotalMinor: c.amendmentsTotalMinor,
+    });
+    const moneyBefore = {
+      A: [
+        moneyOf(await contract(author, contractId.A)),
+        moneyOf(await contract(c1, contractId.A)),
+      ],
+      C: [
+        moneyOf(await contract(author, contractId.C)),
+        moneyOf(await contract(c2, contractId.C)),
+      ],
+    };
 
     // D-050 flags an employer signature only while the move's instant is within the signature's
     // commit deadline plus the skew margin. So the signature that is to be flagged is made here,
@@ -1619,7 +1679,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
           ? read
           : undefined;
       },
-      120_000,
+      SUSPENSION_WAIT_MS,
     );
     expect(suspended.body).toMatchObject({ id: policyId, status: 'SUSPENDED' });
     // The signature made just before the move is flagged for review: a flag is never a
@@ -1628,7 +1688,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       'the signature on the fresh contract to be flagged for review',
       async () =>
         (await contract(author, contractId.C)).authorityReviewRequired ? true : undefined,
-      60_000,
+      FLAG_WAIT_MS,
     );
     for (const party of [author, c2]) {
       expect(await contract(party, contractId.C)).toMatchObject({
@@ -1680,6 +1740,18 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
         status: 'SIGNED',
         amendmentsTotalMinor: AMENDMENT_ONE,
       });
+    }
+    // No amount moved on either contract, for either party.
+    for (const [key, parties] of [
+      ['A', [author, c1]],
+      ['C', [author, c2]],
+    ] as const) {
+      for (const [index, party] of parties.entries()) {
+        expect(
+          moneyOf(await contract(party, contractId[key])),
+          `contract ${key}, party ${index + 1}: amounts after the move`,
+        ).toEqual(moneyBefore[key][index]);
+      }
     }
   });
 
