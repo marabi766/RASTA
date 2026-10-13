@@ -131,8 +131,8 @@ date -u +%Y-%m-%dT%H:%M:%SZ
    ```
 
    `consumed_since_run >= emitted` (رویدادهای `rasta.asset.v1` هم شمرده می‌شوند). `parked` باید **۰** باشد: هر ردیف رویدادی است که هنوز اعمال نشده
-   (بخش «تأیید در منبع» پایین؛ جارو آن را دوباره می‌سنجد). و `increase(rasta_dlq_messages_total{service="fleet-service"}[…])` از `<t0>` تا کنون **۰**؛
-   وگرنه [replay-dlq](replay-dlq.md). مصرف‌شده یعنی پردازش‌شده، نه لزوماً اعمال‌شده (تأییدنشده‌ها با `ignored: …` در لاگ): گام ۳ همین را می‌سنجد.
+   (بخش «تأیید در منبع» پایین؛ جارو آن را دوباره می‌سنجد). و `increase(rasta_dlq_messages_total{service="fleet-service-asset-sync"}[…])` از `<t0>` تا کنون **۰**
+   (Label همان Client id مصرف‌کننده است، `<KAFKA_CLIENT_ID>-asset-sync`، و DLQ پارک‌شده‌ها هم زیر همین شمرده می‌شود)؛ وگرنه [replay-dlq](replay-dlq.md). مصرف‌شده یعنی پردازش‌شده، نه لزوماً اعمال‌شده (تأییدنشده‌ها با `ignored: …` در لاگ): گام ۳ همین را می‌سنجد.
 
 3. **وضعیت Replica** (پایگاه fleet، فقط‌خواندنی):
 
