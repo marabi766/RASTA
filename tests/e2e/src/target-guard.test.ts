@@ -155,7 +155,7 @@ describe('isLoopbackHost', () => {
 });
 
 describe('a URL with credentials in it (Codex r6 on #241)', () => {
-  const PASSWORD = 'pw-CANARY-91c2';
+  const PASSWORD = 'pw-canary';
 
   for (const [field, setting] of [
     ['keycloakUrl', 'KEYCLOAK_URL'],
