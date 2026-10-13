@@ -25,6 +25,8 @@ import { clearingOwners } from './transfer-clearance.fake';
  */
 describe('insurance re-projection command (Q-101)', () => {
   const org = tenants();
+  /** An organization no plain run ever touches before its own test: a first rollout. */
+  const rollout = tenants().a;
   const day = 86_400_000;
   const rule = { coveragesFollowingVehicle: INSURANCE_COVERAGES };
   interface Envelope {
@@ -131,7 +133,7 @@ describe('insurance re-projection command (Q-101)', () => {
     repository = new AssetRepository(prisma);
     assets = new AssetService(repository, undefined, clearingOwners());
     insurance = new InsuranceService(repository, assets, 30);
-    for (const organizationId of [org.a, org.b]) {
+    for (const organizationId of [org.a, org.b, rollout]) {
       await repository.upsertOrganizationRef({
         id: organizationId,
         name: 'سازمان آزمون',
@@ -143,7 +145,7 @@ describe('insurance re-projection command (Q-101)', () => {
   });
 
   afterAll(async () => {
-    const orgs = [org.a, org.b];
+    const orgs = [org.a, org.b, rollout];
     await owner.client.$executeRawUnsafe(
       `DELETE FROM outbox_message WHERE organization_id = ANY($1::text[])`,
       orgs,
@@ -284,6 +286,45 @@ describe('insurance re-projection command (Q-101)', () => {
     // A plain run reproduces the earlier plain run's ids: nothing new.
     expect((await run()).emitted).toBe(0);
     expect(await count()).toBe(4);
+  });
+
+  it('after a reissue first, a plain dry run still counts every counting policy and writes nothing; only after a plain run does it count zero (runbook, verification after --reissue)', async () => {
+    // The first rollout: no plain run has ever covered this organization.
+    const assetId = await machine(rollout);
+    const policies = [
+      await record(rollout, assetId, 'THIRD_PARTY', -1, 100),
+      await record(rollout, assetId, 'LIABILITY', 10, 300),
+    ];
+    const plainIds: string[] = [];
+    for (const policyId of policies) plainIds.push(await expectId(policyId));
+    const outbox = async () =>
+      (
+        await owner.client.$queryRawUnsafe<{ id: string }[]>(
+          `SELECT id FROM outbox_message WHERE organization_id = $1 ORDER BY id`,
+          rollout,
+        )
+      ).map((r) => r.id);
+    const scoped = (options: { dryRun?: boolean; reissue?: boolean } = {}) =>
+      run({ ...options, organizationId: rollout });
+
+    const reissued = await scoped({ reissue: true });
+    expect(reissued).toMatchObject({ emitted: 2, alreadyEmitted: 0, notCounting: 0 });
+    const afterReissue = await outbox();
+
+    // The reissue's ids carry its run id; the plain dry run looks for the ids
+    // without one, which nothing has written. So it counts both policies as
+    // still to emit — the documented behaviour, not an unpublished event.
+    const dry = await scoped({ dryRun: true });
+    expect(dry).toMatchObject({ dryRun: true, scanned: 2, emitted: 2, alreadyEmitted: 0 });
+    expect(dry.byOrganization).toEqual({ [rollout]: { emitted: 2, alreadyEmitted: 0 } });
+    expect(dry.reissueRunId).toBeUndefined();
+    expect(await outbox()).toEqual(afterReissue);
+    for (const plainId of plainIds) expect(afterReissue).not.toContain(plainId);
+
+    // The zero-emission check belongs after an ordinary deterministic run.
+    expect(await scoped()).toMatchObject({ emitted: 2, alreadyEmitted: 0 });
+    expect(await outbox()).toEqual(expect.arrayContaining(plainIds));
+    expect(await scoped({ dryRun: true })).toMatchObject({ emitted: 0, alreadyEmitted: 2 });
   });
 
   it('derives another id for a reissue run id, and the same one without', () => {

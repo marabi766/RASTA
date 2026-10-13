@@ -72,13 +72,89 @@
 
    ردیف‌های باقی‌مانده با `{}` یا واقعاً بی‌بیمه‌اند (رد‌شدنشان درست است) یا رویدادشان مصرف نشده — DLQ را ببین ([replay-dlq](replay-dlq.md)).
 
-5. **اجرای دوباره** باید `emitted: 0` بدهد، با `alreadyEmitted` برابر شمارش گام ۱:
+5. **اجرای دوباره** باید `emitted: 0` بدهد، با `alreadyEmitted` برابر شمارش گام ۱ — **فقط وقتی گام ۲ اجرای ساده (بی `--reissue`) بوده است**:
 
    ```bash
    pnpm --filter @rasta/asset-service insurance:reproject -- --dry-run
    ```
 
-6. **سپس** اعزام را روشن کن / `FLEET_DISPATCH_REQUIRED_COVERAGES` را روشن بگذار. در نخستین استقرار این گام‌ها **به‌تنهایی کافی نیستند**: بخش بعد.
+   پس از یک `--reissue` این بررسی معنا ندارد: بخش «راستی‌آزمایی پس از `--reissue`».
+
+6. **سپس** اعزام را روشن کن / `FLEET_DISPATCH_REQUIRED_COVERAGES` را روشن بگذار. در نخستین استقرار این گام‌ها **به‌تنهایی کافی نیستند**: بخش «نخستین استقرار».
+
+## راستی‌آزمایی پس از `--reissue` (#240 دور ۱۶)
+
+**Dry-run ساده اینجا معیار نیست.** شناسهٔ هر رویداد `--reissue` شناسهٔ همان اجرا را در خود دارد؛ Dry-run بدون `--reissue` شناسهٔ قطعیِ **بی** شناسهٔ اجرا را
+می‌سازد و همان را در Outbox می‌جوید. پس پس از یک `--reissue` — به‌ویژه در نخستین استقرار، که هیچ اجرای سادهٔ پیشینی نیست — Dry-run ساده برای هر بیمه‌نامهٔ
+شمارنده‌ای که شناسهٔ قطعی‌اش هنوز نوشته نشده `emitted` می‌شمارد. این **درست** است، نه نشانهٔ انتشارنیافتن. `emitted: 0` فقط پس از یک اجرای سادهٔ قطعی
+انتظار می‌رود (گام ۵ بالا). اجرای سادهٔ واقعی پس از `--reissue` لازم نیست؛ اگر اجرا شود همان بیمه‌نامه‌ها را با شناسهٔ دیگر می‌گوید و fleet هر کدام را مثل هر
+`INSURANCE_RECORDED` دیگری از منبع تأیید می‌کند (یک پنجره به ازای هر `policyId`؛ اثر دومی نمی‌ماند).
+
+به‌جای آن سه چیز بررسی می‌شود: **انتشار**، **مصرف** و **وضعیت Replica**. پیش از `--reissue` زمان را یادداشت کن (`<t0>`؛ چند دقیقه زودتر بی‌اشکال است،
+بررسی‌های پایین کران پایین‌اند و ساعت دو پایگاه یکی نیست):
+
+```bash
+date -u +%Y-%m-%dT%H:%M:%SZ
+```
+
+و از خط JSON خروجی `--reissue` این‌ها را نگه دار: `reissueRunId`، `emitted` و `byOrganization`.
+
+1. **انتشار** (asset-service؛ Relay همان سرویسِ تازه راه‌افتاده است):
+
+   ```bash
+   pnpm --filter @rasta/asset-service insurance:drain-check
+   ```
+
+   کد ۰ یعنی هیچ ردیف منتشرنشده‌ای روی هیچ Topicی نیست، پس رویدادهای این اجرا هم منتشر شده‌اند؛ کد ۱ ⇐ چند ثانیه بعد دوباره (Relay در کار است)،
+   ماندگار ⇐ [outbox-stuck](outbox-stuck.md). شمارش در پایگاه asset-service (فقط‌خواندنی):
+
+   ```sql
+   SELECT count(*) AS since_run, count(*) FILTER (WHERE published_at IS NULL) AS unpublished
+     FROM outbox_message
+    WHERE event_name = 'INSURANCE_RECORDED' AND topic = 'rasta.insurance.v1' AND created_at >= '<t0>';
+   ```
+
+   `unpublished = 0` و `since_run >= emitted` (بیشتر = بیمه‌نامه‌ای که از `<t0>` به بعد ثبت شده).
+
+2. **مصرف** (fleet-service):
+
+   ```bash
+   pnpm --filter @rasta/fleet-service insurance:drain-check
+   ```
+
+   کد ۰ (Lag صفر گروه `fleet-service.asset-sync` روی `rasta.insurance.v1` و دوقلوی `.retry`). در پایگاه fleet (فقط‌خواندنی):
+
+   ```sql
+   SELECT count(*) AS consumed_since_run FROM processed_event
+    WHERE consumer_name = 'fleet-service.asset-sync' AND processed_at >= '<t0>';
+   SELECT count(*) AS parked FROM insurance_pending_verification;
+   ```
+
+   `consumed_since_run >= emitted` (رویدادهای `rasta.asset.v1` هم شمرده می‌شوند). `parked` باید **۰** باشد: هر ردیف رویدادی است که هنوز اعمال نشده
+   (بخش «تأیید در منبع» پایین؛ جارو آن را دوباره می‌سنجد). و `increase(rasta_dlq_messages_total{service="fleet-service"}[…])` از `<t0>` تا کنون **۰**؛
+   وگرنه [replay-dlq](replay-dlq.md). مصرف‌شده یعنی پردازش‌شده، نه لزوماً اعمال‌شده (تأییدنشده‌ها با `ignored: …` در لاگ): گام ۳ همین را می‌سنجد.
+
+3. **وضعیت Replica** (پایگاه fleet، فقط‌خواندنی):
+
+   ```sql
+   SELECT count(*) FILTER (WHERE ownership_generation IS NULL AND insurance_cover <> '{}'::jsonb) AS unknown_with_windows
+     FROM asset_ref;
+   SELECT r.organization_id, count(*) AS open_windows
+     FROM asset_ref r
+    CROSS JOIN LATERAL jsonb_each(r.insurance_cover) AS c(coverage, windows)
+    CROSS JOIN LATERAL jsonb_array_elements(c.windows) AS w
+    WHERE (w->>'validTo')::timestamptz > now()
+    GROUP BY r.organization_id
+    ORDER BY r.organization_id;
+   ```
+
+   `unknown_with_windows` باید **۰** باشد. `open_windows` هر سازمان باید با `byOrganization[<سازمان>].emitted` همان اجرا برابر باشد: هر بیمه‌نامهٔ
+   فرستاده‌شده یک پنجره روی ردیفِ مالک جاری می‌سازد، نه بیشتر. کمتر ⇐ رویدادی تأیید نشده، پارک یا DLQ شده (گام ۲)؛ بیشتر ⇐ پنجره‌ای که asset-service برای
+   آن مالک دیگر نمی‌گوید — پیش از روشن‌کردن اعزام ماشین‌های آن سازمان را با asset-service مقایسه کن. تنها اختلاف پذیرفتنی بیمه‌نامه‌ای است که از `<t0>` به بعد
+   ثبت، لغو یا تمام شده است.
+
+(آزمون: `services/asset-service/test/insurance-reproject.int-spec.ts` — «نخست `--reissue`، سپس Dry-run ساده» همین `emitted` را نشان می‌دهد و چیزی نمی‌نویسد؛
+پس از یک اجرای ساده همان Dry-run `emitted: 0` می‌دهد.)
 
 ## نخستین استقرار (#240 دور ۱۵)
 
@@ -119,16 +195,17 @@ asset-service ردیف را مقداردهی کند: Refresh از منبع، ی�
    fleet هر رویداد را از asset-service می‌پرسد؛ پاسخِ تأیید، ردیفِ نسل‌نامعلوم را با نسلِ منبع مقداردهی می‌کند و پنجرهٔ معتبر را با همان نسل می‌نویسد.
 
 5. صبر برای Relay و مصرف (گام ۳ بخش «گام‌ها»).
-6. **راستی‌آزمایی در پایگاه fleet** (فقط‌خواندنی):
+6. **راستی‌آزمایی**: هر سه بررسی بخش «راستی‌آزمایی پس از `--reissue`» (انتشار، مصرف، وضعیت Replica با `unknown_with_windows = 0`)، و در پایگاه fleet
+   (فقط‌خواندنی):
 
    ```sql
-   SELECT count(*) FILTER (WHERE ownership_generation IS NULL) AS unknown_generation,
-          count(*) FILTER (WHERE ownership_generation IS NULL AND insurance_cover <> '{}'::jsonb) AS unknown_with_windows
+   SELECT count(*) FILTER (WHERE ownership_generation IS NULL) AS unknown_generation
      FROM asset_ref;
    ```
 
-   `unknown_with_windows` باید **۰** باشد. `unknown_generation` ماشین‌هایی است که asset-service هیچ بیمه‌نامهٔ شمارنده‌ای برایشان ندارد: برای اعزام رد می‌شوند،
-   همان‌طور که ماشین بی‌بیمه رد می‌شود، و با نخستین بیمه‌نامهٔ تأییدشده یا Refresh مقداردهی می‌شوند. سپس اجرای دوبارهٔ Dry-run بدون `--reissue` باید `emitted: 0` بدهد.
+   `unknown_generation` ماشین‌هایی است که asset-service هیچ بیمه‌نامهٔ شمارنده‌ای برایشان ندارد: برای اعزام رد می‌شوند،
+   همان‌طور که ماشین بی‌بیمه رد می‌شود، و با نخستین بیمه‌نامهٔ تأییدشده یا Refresh مقداردهی می‌شوند. Dry-run بدون `--reissue` اینجا معیار **نیست**: چون پیش
+   از این هیچ اجرای ساده‌ای نبوده، برای هر بیمه‌نامهٔ شمارنده `emitted` می‌شمارد (دور ۱۶؛ همان بخش).
 
 7. **سپس** اعزام را روشن کن / `FLEET_DISPATCH_REQUIRED_COVERAGES` را روشن بگذار.
 
@@ -250,7 +327,7 @@ pnpm --filter @rasta/fleet-service insurance:drain-check
 
    همین رویدادها پنجره‌های معتبرِ هر ماشین را با فهرست امروز برمی‌گردانند. **تا پایانِ مصرفِ آن‌ها** (گام ۳ بالا) ماشین‌های بالا برای اعزام رد می‌شوند — پنجرهٔ تعمیر را برنامه‌ریزی کن.
 
-5. راستی‌آزمایی گام ۴ بالا، و اجرای دوبارهٔ بدون `--reissue` باید `emitted: 0` بدهد.
+5. راستی‌آزمایی: هر سه بررسی بخش «راستی‌آزمایی پس از `--reissue`» (انتشار، مصرف، وضعیت Replica). Dry-run بدون `--reissue` اینجا معیار نیست.
 
 اعمال‌نشدن پ‌۰ تا پ‌۲ و گام‌های ۲–۴ پس از تغییر فهرست: پنجره‌های قدیمی همچنان در Replica برقرارند و اعزام را مجاز می‌کنند. این Runbook شرطِ تغییر فهرست است، نه اختیاری.
 
