@@ -21,6 +21,8 @@ export type PlaceOrderFormState =
       readonly message: string | null;
     }
   | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
+  /** Nothing was sent: this browser could not keep a record of the order, so it could not be placed safely. */
+  | { readonly kind: 'STORAGE_UNAVAILABLE' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /** The offer is gone, or not published — the service says 404 for both. */
   | {

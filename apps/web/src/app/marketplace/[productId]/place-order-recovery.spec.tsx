@@ -5,6 +5,8 @@ import { refuseBeforeBody } from '@/server/request-gate';
 import { sealSession, type WebSession } from '@/server/session';
 import type { Offer } from '@/server/marketplace';
 
+import { markAccountOpen, purgeAllUnresolvedOrders } from '@/lib/unresolved-order';
+
 import { PlaceOrderForm, type PlaceOrderFormProps } from './PlaceOrderForm';
 import type { PlaceOrderFormState } from './place-order-form-state';
 
@@ -166,6 +168,56 @@ class Catch extends Component<{ children: ReactNode; onError: (error: unknown) =
 beforeEach(() => {
   submit.mockReset();
   window.sessionStorage.clear();
+  markAccountOpen();
+});
+
+describe('the record is a precondition of sending, and logout is final (r6)', () => {
+  it('storage that refuses the PENDING entry: the action is never called, a fixed text is shown', async () => {
+    const setItem = jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('full', 'QuotaExceededError');
+    });
+    try {
+      const { container } = loadPage();
+      await fillAndSend(container);
+
+      expect(submit).not.toHaveBeenCalled();
+      expect(screen.getByText(/سفارش ارسال نشد/)).toBeInTheDocument();
+      expect(screen.getByText(/مرورگر دیگری/)).toBeInTheDocument();
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('unavailable storage (the property itself throws): the action is never called', async () => {
+    const getter = jest.spyOn(window, 'sessionStorage', 'get').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    try {
+      const { container } = loadPage();
+      await fillAndSend(container);
+
+      expect(submit).not.toHaveBeenCalled();
+      expect(screen.getByText(/سفارش ارسال نشد/)).toBeInTheDocument();
+    } finally {
+      getter.mockRestore();
+    }
+  });
+
+  it('pending send → logout purge → UNCONFIRMED arrives: nothing is stored', async () => {
+    let answer!: (state: PlaceOrderFormState) => void;
+    submit.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const { container } = loadPage();
+    await fillAndSend(container);
+    expect(stored()).toMatchObject({ pending: true });
+
+    purgeAllUnresolvedOrders();
+    expect(stored()).toBeNull();
+
+    await act(async () => answer(UNCONFIRMED));
+
+    expect(stored()).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+  });
 });
 
 describe('an unresolved order survives a navigation (F1)', () => {
@@ -338,7 +390,7 @@ describe('an unresolved order survives a navigation (F1)', () => {
   describe('when storage is unavailable', () => {
     afterEach(() => jest.restoreAllMocks());
 
-    it('still places an order and still shows the uncertainty view, just without the memory', async () => {
+    it('does not place an order it cannot remember (r6), and the page still loads', async () => {
       jest.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
         throw new Error('SecurityError');
       });
@@ -354,12 +406,8 @@ describe('an unresolved order survives a navigation (F1)', () => {
       expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
       await fillAndSend(container);
 
-      expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
-      expect(container.querySelector('[name="submission"]')).toHaveValue(KEY);
-      // Starting a new order must not throw either, whatever storage does.
-      const link = screen.getByRole('link', { name: 'شروع سفارش تازه' });
-      link.addEventListener('click', (event) => event.preventDefault());
-      fireEvent.click(link);
+      expect(submit).not.toHaveBeenCalled();
+      expect(screen.getByText(/سفارش ارسال نشد/)).toBeInTheDocument();
     });
 
     it('works when there is no sessionStorage at all', async () => {

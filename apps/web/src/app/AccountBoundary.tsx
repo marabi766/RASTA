@@ -2,7 +2,11 @@
 
 import { useEffect } from 'react';
 
-import { purgeAllUnresolvedOrders, purgeForeignUnresolvedOrders } from '@/lib/unresolved-order';
+import {
+  markAccountOpen,
+  purgeAllUnresolvedOrders,
+  purgeForeignUnresolvedOrders,
+} from '@/lib/unresolved-order';
 
 /**
  * The browser's side of an account boundary: what an unresolved order left in
@@ -17,13 +21,21 @@ import { purgeAllUnresolvedOrders, purgeForeignUnresolvedOrders } from '@/lib/un
  *   tracking code, even when the first one never pressed "log out" (a session
  *   that expired, a closed laptop). The same person after a re-login keeps theirs.
  *
+ * - **Nothing is written after a logout starts.** The purge also sets an in-memory
+ *   flag that `saveUnresolvedOrder` honours, so the answer to a send still in
+ *   flight cannot store the order again. The sign-in page does not purge on load
+ *   instead: that would also drop the order of a person whose session merely
+ *   expired and who may still be in doubt (view-only after the re-login).
+ *
  * `owner` is the one-way tag `submissionBinding` computes — null on a page with
  * no login (the sign-in page), where nothing is removed: the person signing back
  * in may be the one whose order is still in doubt.
  */
 export function AccountBoundary({ owner }: { readonly owner: string | null }) {
   useEffect(() => {
-    if (owner !== null) purgeForeignUnresolvedOrders(owner);
+    if (owner === null) return;
+    markAccountOpen();
+    purgeForeignUnresolvedOrders(owner);
   }, [owner]);
 
   useEffect(() => {

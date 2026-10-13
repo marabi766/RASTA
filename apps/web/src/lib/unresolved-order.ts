@@ -22,8 +22,16 @@ import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fiel
  * request (`place-order-actions.ts`).
  *
  * Storage can be absent (private mode, a blocked cookie policy, a full quota).
- * Every call here swallows that: the page works exactly as it did before, only
- * without the memory.
+ * Reads and removals swallow that. Saving does not: it reports whether the entry
+ * is really there, and the form does not send without the PENDING entry — an
+ * order that may commit with no memory of its key would be placed twice by a
+ * reload.
+ *
+ * ## After logout starts
+ *
+ * `markAccountClosing` (the logout submit) is an in-memory flag for this document:
+ * from then on nothing is written, so an answer that arrives before the old
+ * document unloads cannot put the signed-out person's order back after the purge.
  */
 
 const KEY_PREFIX = 'rasta.unresolved-order.';
@@ -61,6 +69,17 @@ export type RestoredOrder =
   | { readonly kind: 'RETRYABLE'; readonly order: UnresolvedOrder }
   /** Same person, another login: the id is refused by the server now; show it, never re-send it. */
   | { readonly kind: 'VIEW_ONLY'; readonly order: UnresolvedOrder };
+
+/** Set when a logout starts; this document writes no entry after it. Cleared by a page drawn for a login. */
+let accountClosing = false;
+
+export function markAccountClosing(): void {
+  accountClosing = true;
+}
+
+export function markAccountOpen(): void {
+  accountClosing = false;
+}
 
 function storage(): Storage | null {
   try {
@@ -135,6 +154,7 @@ function ownKeys(store: Storage): string[] {
  * is not a logout: the same person's next login keeps theirs, below.)
  */
 export function purgeAllUnresolvedOrders(): void {
+  markAccountClosing();
   try {
     const store = storage();
     if (!store) return;
@@ -163,12 +183,14 @@ export function purgeForeignUnresolvedOrders(owner: string): void {
   }
 }
 
+/** True when the entry is stored. False: storage refused it, or a logout has started. */
 export function saveUnresolvedOrder(
   productId: string,
   order: Omit<UnresolvedOrder, 'savedAt'>,
   binding: Binding,
   now: number = Date.now(),
-): void {
+): boolean {
+  if (accountClosing) return false;
   try {
     const stored: Stored = {
       v: VERSION,
@@ -181,9 +203,13 @@ export function saveUnresolvedOrder(
       owner: binding.owner,
       session: binding.session,
     };
-    storage()?.setItem(keyOf(productId), JSON.stringify(stored));
+    const store = storage();
+    if (!store) return false;
+    store.setItem(keyOf(productId), JSON.stringify(stored));
+    return true;
   } catch {
-    // No storage: the page works, without the memory.
+    // Unavailable or full: the caller decides what that means.
+    return false;
   }
 }
 

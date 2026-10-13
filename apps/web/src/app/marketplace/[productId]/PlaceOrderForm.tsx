@@ -136,7 +136,11 @@ function OrderForm({
       // Remember it BEFORE it is sent (F1): from here until an answer, a reload or
       // a lost response must find the same key, not mint another.
       const unsent = firstSend ? pendingFrom(form) : null;
-      if (unsent) saveUnresolvedOrder(productId, unsent, binding);
+      // If it cannot be remembered it is not sent: a lost response would leave a
+      // committed order and a reload that mints another key.
+      if (unsent && !saveUnresolvedOrder(productId, unsent, binding)) {
+        return { kind: 'STORAGE_UNAVAILABLE' };
+      }
 
       let next: PlaceOrderFormState;
       try {
@@ -257,6 +261,16 @@ function FormBanner({ state }: { state: PlaceOrderFormState }) {
         {state.reason === 'NO_SESSION'
           ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
           : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
+      </Alert>
+    );
+  }
+
+  if (state.kind === 'STORAGE_UNAVAILABLE') {
+    return (
+      <Alert tone="danger">
+        سفارش ارسال نشد: در این مرورگر نمی‌توان سفارش را به‌طور امن ثبت کرد، چون ذخیره‌سازی مرورگر
+        در دسترس نیست (مثلاً حالت خصوصی یا حافظهٔ پر). از مرورگر دیگری استفاده کنید یا فضا را آزاد
+        کنید و دوباره تلاش کنید.
       </Alert>
     );
   }
