@@ -8,9 +8,8 @@ import { defineConfig } from '@playwright/test';
  * `apps/web` and `apps/admin` are empty directories. A browser scenario would
  * have to drive a page that does not exist, so the only honest browser test
  * today is one that tests its own fixture. The `economic-api` project below
- * drives the same stack through the same gateway with Playwright's
- * `APIRequestContext` — real tokens, real routing, real database, real broker,
- * nothing mocked.
+ * drives the same stack through the same gateway with API calls (`src/actor.ts`)
+ * — real tokens, real routing, real database, real broker, nothing mocked.
  *
  * When `apps/web` lands, add a second project here:
  *
@@ -68,9 +67,16 @@ export default defineConfig({
     : [['list'], ['html', { open: 'never' }]],
 
   use: {
-    trace: 'retain-on-failure',
+    // No traces. An API trace records every request's headers and bodies — the
+    // bearer token, a password grant and the token it returns — and the HTML
+    // report CI uploads on failure embeds the trace (Codex r5 on #241).
+    // Authenticated calls no longer go through Playwright at all (`src/http.ts`),
+    // so a trace would hold only the anonymous ones; it stays off so that a
+    // credential added to a Playwright request later cannot reach the artifact.
+    trace: 'off',
     // Every assertion in this suite is about an HTTP status, a JSON body or a
-    // Kafka header. Screenshots and video would be empty files.
+    // Kafka header. Screenshots and video would be empty files, and there is no
+    // page that could show a token.
     screenshot: 'off',
     video: 'off',
   },
@@ -121,6 +127,15 @@ export default defineConfig({
       // No dependency on the others. construction-service moves no money and
       // shares no row with them; its lifecycle is found by its own project id
       // and correlation id (CON-001).
+    },
+    {
+      name: 'contract-api',
+      testDir: './specs/contract',
+      // After the construction project: a contract exists only because a tender
+      // was awarded (ADR-068), so a broken tender flow should name itself there
+      // rather than surface as a draft that never appeared. It provisions its own
+      // organizations, people and tenders and shares no row with that project.
+      dependencies: ['construction-api'],
     },
   ],
 });
