@@ -8,6 +8,12 @@
 // a copy of another service's data: `ownerResourceType` and `ownerResourceId`
 // are plain strings naming an asset, contract or supplier that this service
 // deliberately does not resolve (AGENTS.md A-01).
+//
+// Every DateTime here is an instant and is `timestamptz(3)` (D-048, migration
+// 20261012120000_document_instants_timestamptz): raw SQL — `now()`, a column
+// default — then stores the same moment whatever the session's zone. A new
+// instant column takes `@db.Timestamptz(3)`; a calendar day would take
+// `@db.Date`, and this schema has none.
 
 generator client {
   provider      = "prisma-client-js"
@@ -112,13 +118,13 @@ model UploadIntent {
   declaredFilename    String @map("declared_filename")
 
   state     UploadIntentState @default(ISSUED)
-  expiresAt DateTime          @map("expires_at")
+  expiresAt DateTime          @map("expires_at") @db.Timestamptz(3)
 
   /// Set when redeemed, so a replay is distinguishable from a first use.
-  consumedAt         DateTime? @map("consumed_at")
+  consumedAt         DateTime? @map("consumed_at") @db.Timestamptz(3)
   consumedDocumentId String?   @map("consumed_document_id")
 
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   createdBy String   @map("created_by")
 
   @@index([organizationId, state], map: "ix_upload_intent_org_state")
@@ -135,14 +141,14 @@ model Document {
   organizationId String @map("organization_id")
 
   /// Opaque, server-owned, unique platform-wide.
-  objectKey     String        @unique @map("object_key")
-  documentClass DocumentClass @map("document_class")
+  objectKey     String         @unique @map("object_key")
+  documentClass DocumentClass  @map("document_class")
   status        DocumentStatus @default(REGISTERED)
 
   /// What the bytes actually are, established by magic number at finalize.
-  contentType String @map("content_type")
+  contentType String  @map("content_type")
   /// What storage reported. Never what the client claimed.
-  sizeBytes   Int    @map("size_bytes")
+  sizeBytes   Int     @map("size_bytes")
   /// Sanitised client filename, for display and `Content-Disposition` only.
   filename    String
   checksum    String? @map("checksum")
@@ -152,7 +158,7 @@ model Document {
   scanEngine    String?   @map("scan_engine")
   scanVersion   String?   @map("scan_version")
   scanSignature String?   @map("scan_signature")
-  scannedAt     DateTime? @map("scanned_at")
+  scannedAt     DateTime? @map("scanned_at") @db.Timestamptz(3)
 
   /// The signature database the verdict was reached with.
   ///
@@ -170,7 +176,7 @@ model Document {
   // undownloadable. The worker needs the difference; nobody else does.
 
   /// When this document entered the scan queue. Drives the pending-age metric.
-  scanQueuedAt DateTime? @map("scan_queued_at")
+  scanQueuedAt DateTime? @map("scan_queued_at") @db.Timestamptz(3)
 
   /// Completed attempts. Bounded by configuration; at the ceiling the document
   /// goes to `FAILED` rather than retrying forever.
@@ -182,7 +188,7 @@ model Document {
   scanFailureReason String? @map("scan_failure_reason")
 
   /// Not before this instant. The backoff between retries, as data.
-  scanNextAttemptAt DateTime? @map("scan_next_attempt_at")
+  scanNextAttemptAt DateTime? @map("scan_next_attempt_at") @db.Timestamptz(3)
 
   /// The worker holding this document, and until when.
   ///
@@ -192,7 +198,7 @@ model Document {
   /// stalled past its lease finds its result refused rather than overwriting
   /// the verdict the worker that took over already reached.
   scanLeaseOwner     String?   @map("scan_lease_owner")
-  scanLeaseExpiresAt DateTime? @map("scan_lease_expires_at")
+  scanLeaseExpiresAt DateTime? @map("scan_lease_expires_at") @db.Timestamptz(3)
 
   // ---- Quarantine (ADR-049) ---------------------------------------------
   //
@@ -201,8 +207,8 @@ model Document {
   // destroying the one artefact an investigation would need is not a security
   // control. It simply becomes unreachable — no signed URL is ever issued for
   // it, because `canDownload` allows CLEAN and nothing else.
-  quarantinedAt     DateTime? @map("quarantined_at")
-  quarantineReason  String?   @map("quarantine_reason")
+  quarantinedAt    DateTime? @map("quarantined_at") @db.Timestamptz(3)
+  quarantineReason String?   @map("quarantine_reason")
 
   // ---- Ownership by another service's resource --------------------------
   //
@@ -213,15 +219,15 @@ model Document {
   ownerResourceId   String? @map("owner_resource_id")
 
   // ---- Deletion tombstone ------------------------------------------------
-  deletedAt     DateTime? @map("deleted_at")
-  deletedBy     String?   @map("deleted_by")
-  deletionReason String?  @map("deletion_reason")
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(3)
+  deletedBy      String?   @map("deleted_by")
+  deletionReason String?   @map("deletion_reason")
 
   uploadIntentId String @unique @map("upload_intent_id")
 
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   createdBy String   @map("created_by")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   /// Optimistic concurrency for the grant and deletion paths.
   version   Int      @default(1)
 
@@ -257,9 +263,9 @@ model AccessGrant {
   subjectType String @map("subject_type")
   subjectId   String @map("subject_id")
 
-  grantedAt DateTime  @default(now()) @map("granted_at")
+  grantedAt DateTime  @default(now()) @map("granted_at") @db.Timestamptz(3)
   grantedBy String    @map("granted_by")
-  revokedAt DateTime? @map("revoked_at")
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
   revokedBy String?   @map("revoked_by")
 
   document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
@@ -281,7 +287,7 @@ model OutboxMessage {
   eventName     String @map("event_name")
   eventVersion  Int    @default(1) @map("event_version")
 
-  topic String
+  topic        String
   /// What the message is ordered by — the document id for every document
   /// event (ADR-036 applied to this domain).
   partitionKey String @map("partition_key")
@@ -292,8 +298,8 @@ model OutboxMessage {
   organizationId String? @map("organization_id")
   correlationId  String  @map("correlation_id")
 
-  createdAt   DateTime  @default(now()) @map("created_at")
-  publishedAt DateTime? @map("published_at")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  publishedAt DateTime? @map("published_at") @db.Timestamptz(3)
   attempts    Int       @default(0)
   lastError   String?   @map("last_error")
 
@@ -304,11 +310,11 @@ model OutboxMessage {
   /// still acknowledge with its token.
   claimToken     String?   @map("claim_token")
   claimOwner     String?   @map("claim_owner")
-  claimExpiresAt DateTime? @map("claim_expires_at")
+  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz(3)
   claimCount     Int       @default(0) @map("claim_count")
   /// Set only by a failure, cleared by an acknowledgement. Computed with the
   /// database clock so replica skew cannot move it.
-  nextAttemptAt  DateTime? @map("next_attempt_at")
+  nextAttemptAt  DateTime? @map("next_attempt_at") @db.Timestamptz(3)
 
   /// ADR-051 Phase B1 — inert until B3/B4. `streamSeq` is the position of this
   /// row within its ordered stream (`topic + partitionKey`, never the
@@ -321,8 +327,8 @@ model OutboxMessage {
   ///
   /// Nothing sets either field in B1: no allocation, no head maintenance, no
   /// ordering guarantee. D-027 stays open until B2–B6 ship and are accepted.
-  streamSeq      BigInt?   @map("stream_seq")
-  isStreamHead   Boolean   @default(false) @map("is_stream_head")
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
 
   @@index([publishedAt, createdAt], map: "ix_outbox_pending")
   @@map("outbox_message")

@@ -139,7 +139,9 @@ export class AmendmentController {
       '`POLICY_AUTHOR_NOT_GOVERNING`), the contractor’s by the CONTRACTOR role of its own ' +
       'organization. One person cannot sign for both sides (403 `MEMBER_OF_BOTH_PARTIES`, 403 ' +
       '`SAME_PERSON_BOTH_SIDES`; identities that cannot be told apart are 422 ' +
-      '`ACTOR_IDENTITY_UNKNOWN`). The same person signing the same side again changes nothing; ' +
+      '`ACTOR_IDENTITY_UNKNOWN`). The same person signing the same side again changes nothing and ' +
+      'answers with the amendment as it is — to a caller who may still read it, anyone else getting ' +
+      'the refusal GET gives; ' +
       'another person for a side that has signed is 409 `SIDE_ALREADY_SIGNED`; an amendment that is ' +
       'no longer proposed is 422 `AMENDMENT_NOT_PROPOSED`, a contract that is not signed 422 ' +
       '`CONTRACT_NOT_SIGNED`. `expectedVersion` is optional. ' +

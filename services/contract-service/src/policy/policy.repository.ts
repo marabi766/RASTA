@@ -173,11 +173,27 @@ export class PolicyRepository {
    * suspended it before the move's event arrived, and a signature that raced that very move still
    * rests on it: the task reaches `suspend`, which flags those signatures (D-050) and changes
    * nothing else about a policy already out of force.
+   *
+   * A RETIRED one (retired, or replaced by a newer version) is listed for the same reason, but only
+   * when the move can have raced a signature under it (contract audit F3): it has an employer
+   * signature — the contract's or an amendment's — not yet reviewed, that recorded a hierarchy
+   * version lower than the move's (or none; any, for a move without a version) and whose commit
+   * deadline plus the clock-skew margin reaches the move's instant — the predicates
+   * `flagRacedSignatures` applies (D-050). The task reaches `suspend`, which flags them and leaves
+   * the policy RETIRED. Retired policies with nothing to review are not queued: they accumulate.
+   *
    * Nothing but identifiers is read, and the caller acts on each in the tenant that row names. A
    * union's policy for itself needs no hierarchy, and a platform administrator's is never stranded
    * by a move.
    */
-  async listUnionPoliciesToReconfirm(): Promise<
+  async listUnionPoliciesToReconfirm(move: {
+    /** The move's instant (`occurredAt`). */
+    movedAt: Date;
+    /** The move's hierarchy version; null for an event that carries none. */
+    movedVersion: number | null;
+    /** The D-050 clock-skew allowance on a signature's commit deadline. */
+    clockSkewMarginSeconds: number;
+  }): Promise<
     {
       id: string;
       organizationId: string;
@@ -186,13 +202,46 @@ export class PolicyRepository {
       policyVersion: number;
     }[]
   > {
+    // `deadline + margin >= moved at`, as `flagRacedSignatures` writes it.
+    const skewedBound = new Date(move.movedAt.getTime() - move.clockSkewMarginSeconds * 1000);
+    const raceable = {
+      side: 'EMPLOYER',
+      review: null,
+      AND: [
+        ...(move.movedVersion === null
+          ? []
+          : [
+              {
+                OR: [
+                  { hierarchyVersion: null },
+                  { hierarchyVersion: { lt: BigInt(move.movedVersion) } },
+                ],
+              },
+            ]),
+        {
+          OR: [
+            { hierarchyCommitDeadline: null },
+            { hierarchyCommitDeadline: { gte: skewedBound } },
+          ],
+        },
+      ],
+    } satisfies Prisma.ContractSignatureWhereInput & Prisma.AmendmentSignatureWhereInput;
     const rows = await runUnscoped(
       'an organization move re-confirms every union-written policy in force, in any tenant (Q-83)',
       () =>
         this.prisma.client.approvalPolicy.findMany({
           where: {
-            status: { in: ['ACTIVE', 'PENDING_PLATFORM_APPROVAL', 'SUSPENDED'] },
             authorRole: 'UNION_ADMIN',
+            OR: [
+              { status: { in: ['ACTIVE', 'PENDING_PLATFORM_APPROVAL', 'SUSPENDED'] } },
+              {
+                status: 'RETIRED',
+                OR: [
+                  { signatures: { some: raceable } },
+                  { amendmentSignatures: { some: raceable } },
+                ],
+              },
+            ],
           },
           select: {
             id: true,
