@@ -1,4 +1,6 @@
+import { ulid } from 'ulid';
 import type { PrismaClient } from '../src/generated/prisma';
+import { StockRepository } from '../src/stock/stock.repository';
 import { client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import {
   cleanup,
@@ -118,6 +120,39 @@ describe('concurrency (ADR-056 § 3)', () => {
         .map((response) => response.body.movement.itemVersion as number)
         .sort((x, y) => x - y),
     ).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+    await expectReconciled(raw, [a]);
+  });
+
+  it('moves a stock item for a command whose transaction began before the item existed (found by CI)', async () => {
+    // The race behind it: two first receipts of one product begin in one order, the later one
+    // creates the stock item, and the earlier one — waiting on it — moves it with an instant
+    // older than its creation. Reproduced exactly: a movement at an instant before `created_at`.
+    const a = org();
+    const { stockItemId } = await seedStock(api, a, 5);
+    const stock = api.app.get(StockRepository);
+    const [{ createdAt }] = await raw.$queryRaw<{ createdAt: Date }[]>`
+      SELECT "created_at" AS "createdAt" FROM "stock_item" WHERE "id" = ${stockItemId}`;
+    const before = new Date(createdAt.getTime() - 5_000);
+
+    await api.prisma.transaction(async (tx) => {
+      const item = await stock.lock(tx, a, stockItemId);
+      const moved = await stock.move(tx, item!, { onHand: 1, reserved: 0 }, 'USR-TEST', before);
+      expect(moved.updatedAt.getTime()).toBeGreaterThanOrEqual(createdAt.getTime());
+      await stock.insertMovement(tx, {
+        id: `SMV_${ulid()}`,
+        item: moved,
+        type: 'RECEIPT',
+        onHandDelta: 1,
+        reservedDelta: 0,
+        reservationId: null,
+        sourceReference: null,
+        commandKeyHash: 'b'.repeat(64),
+        correlationId: 'corr-early',
+        actor: 'USR-TEST',
+        at: before,
+      });
+    });
+    expect((await client(api, orgAdmin(a)).stockItem(stockItemId)).body.onHandQuantity).toBe(6);
     await expectReconciled(raw, [a]);
   });
 

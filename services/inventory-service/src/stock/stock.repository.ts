@@ -134,6 +134,12 @@ export class StockRepository {
   /**
    * Moves the balance of a locked item by the deltas, one ledger position on, and returns the
    * row as it now is. The CHECKs refuse a negative or over-reserved result.
+   *
+   * `updated_at` never moves backwards. `at` is the command's transaction instant (D-5), fixed
+   * when the transaction began — and a transaction can begin before another one that then takes
+   * the lock first: two first receipts of a product start in one order, and the second to start
+   * creates the stock item while the first waits on it. The waiting one's instant is then older
+   * than the item itself, and `ck_stock_item_timestamps_ordered` would refuse the write.
    */
   async move(
     tx: ExtendedPrismaClient,
@@ -147,7 +153,7 @@ export class StockRepository {
          SET "on_hand_quantity" = "on_hand_quantity" + ${deltas.onHand}::integer,
              "reserved_quantity" = "reserved_quantity" + ${deltas.reserved}::integer,
              "version" = "version" + 1,
-             "updated_at" = ${at},
+             "updated_at" = GREATEST("updated_at", ${at}::timestamptz),
              "updated_by" = ${actor}
        WHERE "organization_id" = ${item.organizationId} AND "id" = ${item.id}
        RETURNING ${ITEM_COLUMNS}`;
