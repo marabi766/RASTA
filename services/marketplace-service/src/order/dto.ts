@@ -58,9 +58,27 @@ export const fulfillOrderSchema = z
 
 export type FulfillOrderDto = z.infer<typeof fulfillOrderSchema>;
 
+/** The refusal of a non-empty receipt note; it repeats nothing of the input (S-09). */
+export const RECEIPT_NOTE_NOT_STORED =
+  'A receipt confirmation note is not stored yet (open question Q-110); leave it out';
+
 export const confirmReceiptSchema = z
   .object({
-    note: plainText().max(1000).optional(),
+    /**
+     * Refused unless empty (Q-110, temporary decision). Confirming receipt
+     * records who confirmed and when — no column and no event field for a
+     * note — and where a buyer's note should go is an open product question.
+     * Accepting it dropped the text without a word; refusing it says so.
+     * Trimmed first, so whitespace is empty.
+     */
+    note: plainText()
+      .max(0, RECEIPT_NOTE_NOT_STORED)
+      .optional()
+      .describe(
+        'Not supported yet: must be absent or empty. Confirming receipt does not store a ' +
+          'note (open question Q-110), so a non-empty one is refused with VALIDATION_FAILED ' +
+          'rather than silently dropped.',
+      ),
   })
   .strict();
 

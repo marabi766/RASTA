@@ -13,6 +13,7 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import { cleanup } from './helpers';
+import { RECEIPT_NOTE_NOT_STORED } from '../src/order/dto';
 
 /**
  * The order HTTP surface, every path including the refusals.
@@ -519,6 +520,42 @@ describe('order API', () => {
 
       expect(confirmed.body.status).toBe('RECEIPT_CONFIRMED');
       expect(confirmed.body.receiptConfirmedAt).toBeTruthy();
+    });
+
+    it('refuses a non-empty receipt note with 400 and confirms nothing, rather than dropping it (Q-110)', async () => {
+      // Confirming receipt has nowhere to keep a note. Accepted, the buyer's
+      // text was silently dropped; refused, the buyer learns it was not sent.
+      const orderId = await deliveredOrder();
+
+      const response = await request(http)
+        .post(`/v1/orders/${orderId}/confirm-receipt`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', apiKey('api-receipt-note'))
+        .send({ note: 'arrived with a dented casing' })
+        .expect(400);
+
+      expect(response.body.code).toBe('VALIDATION_FAILED');
+      expect(response.body.details).toEqual([
+        expect.objectContaining({ message: RECEIPT_NOTE_NOT_STORED }),
+      ]);
+      expect(JSON.stringify(response.body)).not.toContain('dented');
+
+      // The refusal released nothing: the order still awaits the buyer.
+      const unchanged = await request(http)
+        .get(`/v1/orders/${orderId}`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .expect(200);
+      expect(unchanged.body.status).toBe('AWAITING_RECEIPT_CONFIRMATION');
+      expect(unchanged.body.receiptConfirmedAt ?? null).toBeNull();
+
+      // An empty note has nothing to drop, and is accepted as before.
+      const confirmed = await request(http)
+        .post(`/v1/orders/${orderId}/confirm-receipt`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', apiKey('api-receipt-note-empty'))
+        .send({ note: '' })
+        .expect(200);
+      expect(confirmed.body.status).toBe('RECEIPT_CONFIRMED');
     });
 
     it('raises a dispute and refuses a one-word reason with 400', async () => {

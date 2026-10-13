@@ -223,6 +223,35 @@ describe('enrichOpenApiDocument', () => {
     );
   });
 
+  it('publishes the receipt note as empty-only, and says why (Q-110)', () => {
+    // A generated client must not offer a field the service refuses whenever it
+    // is filled in: maxLength 0 is the contract, the description the reason.
+    const document = emptyDocument();
+    document.paths = { '/v1/orders/{id}/confirm-receipt': { post: { responses: {} } } } as never;
+
+    const enriched = enrichOpenApiDocument(document, OPTIONS);
+    const operation = (enriched.paths['/v1/orders/{id}/confirm-receipt'] as Record<string, never>)
+      .post as unknown as {
+      requestBody: {
+        content: {
+          'application/json': {
+            schema: {
+              properties: Record<string, { maxLength?: number; description?: string }>;
+              required?: string[];
+              additionalProperties?: unknown;
+            };
+          };
+        };
+      };
+    };
+    const schema = operation.requestBody.content['application/json'].schema;
+
+    expect(schema.properties.note?.maxLength).toBe(0);
+    expect(schema.properties.note?.description).toContain('Q-110');
+    expect(schema.required ?? []).not.toContain('note');
+    expect(schema.additionalProperties).toBe(false);
+  });
+
   it('leaves a route it knows nothing about with a success response and no body', () => {
     const document = emptyDocument();
     document.paths = { '/v1/not-a-real-route': { get: { responses: {} } } } as never;
