@@ -373,13 +373,16 @@ export class ContractRepository {
    * When each side accepted, for contracts the caller has been shown to be a party to — by
    * explicit (organization, contract) pairs, whichever side the caller is.
    */
-  async signatureFacts(contracts: readonly Contract[]): Promise<Map<string, SignatureFact[]>> {
+  async signatureFacts(
+    contracts: readonly Contract[],
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<Map<string, SignatureFact[]>> {
     const facts = new Map<string, SignatureFact[]>();
     if (contracts.length === 0) return facts;
     const rows = await runUnscoped(
       'a party sees when each side accepted its contract, by the organization and id of contracts it is a party to',
       () =>
-        this.prisma.client.contractSignature.findMany({
+        client.contractSignature.findMany({
           where: {
             OR: contracts.map((contract) => ({
               organizationId: contract.organizationId,
@@ -428,12 +431,15 @@ export class ContractRepository {
 
   // -- the employer's side (through the tenant guard) --------------------------
 
-  findOwn(id: string): Promise<Contract | null> {
-    return this.prisma.client.contract.findFirst({ where: { id } });
+  findOwn(id: string, client: ExtendedPrismaClient = this.prisma.client): Promise<Contract | null> {
+    return client.contract.findFirst({ where: { id } });
   }
 
-  listOwn(filter: ContractListFilter): Promise<Contract[]> {
-    return this.prisma.client.contract.findMany({
+  listOwn(
+    filter: ContractListFilter,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<Contract[]> {
+    return client.contract.findMany({
       where: {
         ...(filter.status ? { status: filter.status } : {}),
         ...(filter.cursor ? { id: { lt: filter.cursor } } : {}),
@@ -445,11 +451,15 @@ export class ContractRepository {
 
   // -- the contractor's side (across the boundary, on purpose) ------------------
 
-  findAsContractor(contractorOrganizationId: string, id: string): Promise<Contract | null> {
+  findAsContractor(
+    contractorOrganizationId: string,
+    id: string,
+    client: ExtendedPrismaClient = this.prisma.client,
+  ): Promise<Contract | null> {
     return runUnscoped(
       'the winning contractor reads one contract it is a party to, found by id and its own organization',
       () =>
-        this.prisma.client.contract.findFirst({
+        client.contract.findFirst({
           where: { id, contractorOrganizationId },
         }),
     );
@@ -458,11 +468,12 @@ export class ContractRepository {
   listAsContractor(
     contractorOrganizationId: string,
     filter: ContractListFilter,
+    client: ExtendedPrismaClient = this.prisma.client,
   ): Promise<Contract[]> {
     return runUnscoped(
       'the winning contractor lists the contracts it is a party to, by its own organization',
       () =>
-        this.prisma.client.contract.findMany({
+        client.contract.findMany({
           where: {
             contractorOrganizationId,
             ...(filter.status ? { status: filter.status } : {}),
