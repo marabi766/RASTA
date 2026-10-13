@@ -42,15 +42,11 @@ import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-a
  *   contract-service, naming the owner's own `FLEET_MANAGER` role. Samples; no legal authority
  *   is claimed (ADR-023, Q-02).
  *
- * ## Through the front door — with one labelled exception
+ * ## Through the front door
  *
- * Every call goes through api-gateway except the three that write and approve the
- * `contract.signature` policy (`signingPolicy` below). The gateway resolves a route from the
- * first path segment only and sends `approval-policies` to construction-service, which has no
- * `contract.signature` workflow; contract-service serves the same path itself, so through the
- * gateway that policy cannot be written and nobody can sign for an employer. Those calls carry
- * real user tokens and go straight to contract-service (`CallOptions.baseUrl`); nothing else does.
- * It is reported as a product gap on the PR, not worked around in the product.
+ * Every call goes through api-gateway with a real user token, the `contract.signature` policy
+ * included: contract-service serves it under `/v1/contract-approval-policies`, a first path
+ * segment the gateway routes to it (#243). Nothing here reaches a service directly.
  */
 
 const config = e2eConfig();
@@ -1102,17 +1098,14 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
   });
 
   /**
-   * The three calls that go to contract-service directly (see the header): the signing policy
-   * is written and submitted by `union.admin` and approved by a different person, the platform
-   * administrator (CONTRACT_POLICY_FOUR_EYES).
+   * Through the gateway: the signing policy is written and submitted by `union.admin` and
+   * approved by a different person, the platform administrator (CONTRACT_POLICY_FOUR_EYES).
    */
   test('the union writes the contract.signature policy and the platform approves it', async ({
     platformAdmin,
     systemAdmin,
   }) => {
-    const direct = { baseUrl: config.contractUrl } as const;
-    const created = await platformAdmin.post('/v1/approval-policies', {
-      ...direct,
+    const created = await platformAdmin.post('/v1/contract-approval-policies', {
       idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
       body: {
         organizationId: org.owner,
@@ -1132,15 +1125,16 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     policyId = (created.body as PolicyBody).id;
 
-    const submitted = await platformAdmin.post(`/v1/approval-policies/${policyId}/submit`, {
-      ...direct,
-      idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
-      body: { expectedVersion: (created.body as PolicyBody).version },
-    });
+    const submitted = await platformAdmin.post(
+      `/v1/contract-approval-policies/${policyId}/submit`,
+      {
+        idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
+        body: { expectedVersion: (created.body as PolicyBody).version },
+      },
+    );
     expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
 
-    const approved = await systemAdmin.post(`/v1/approval-policies/${policyId}/approve`, {
-      ...direct,
+    const approved = await systemAdmin.post(`/v1/contract-approval-policies/${policyId}/approve`, {
       idempotencyKey: idempotencyKey(`contract-policy-${RUN}`),
       body: { expectedVersion: (submitted.body as PolicyBody).version },
     });
@@ -1650,10 +1644,10 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     // the move, the reads and the refusal. The signature-to-move bound is asserted separately.
     test.setTimeout(SUSPENSION_WAIT_MS + FLAG_WAIT_MS + HTTP_WORK_MS);
     const { signer, c1, c2, author } = people;
-    const policyPath = `/v1/approval-policies/${policyId}`;
+    const policyPath = `/v1/contract-approval-policies/${policyId}`;
 
     // The union is the policy's author and governs the employer: the policy is in force.
-    const inForce = await platformAdmin.get(policyPath, { baseUrl: config.contractUrl });
+    const inForce = await platformAdmin.get(policyPath);
     expect(inForce.status, JSON.stringify(inForce.body)).toBe(200);
     expect(inForce.body).toMatchObject({ id: policyId, status: 'ACTIVE' });
 
@@ -1704,7 +1698,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     const suspended = await until(
       'the sweeper to suspend the signing policy the move stranded',
       async () => {
-        const read = await platformAdmin.get(policyPath, { baseUrl: config.contractUrl });
+        const read = await platformAdmin.get(policyPath);
         return read.status === 200 && (read.body as PolicyBody).status === 'SUSPENDED'
           ? read
           : undefined;

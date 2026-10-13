@@ -112,11 +112,8 @@ export interface E2eConfig {
    */
   supplierUrl: string;
   /**
-   * contract-service directly (CON-003).
-   *
-   * The contract scenario goes through the **gateway**, like every other. This URL is for
-   * health gating, and for exactly one labelled exception: the `contract.signature` approval
-   * policy, whose route the gateway sends to construction-service (first path segment only).
+   * contract-service directly — health gating only (CON-003). The contract scenario goes
+   * through the gateway, its signing policy included (`/v1/contract-approval-policies`).
    */
   contractUrl: string;
   /** Topic contract-service publishes to. */
