@@ -263,9 +263,20 @@ describe('GET /v1/organizations/:id for construction-service (Q-70 (7) contract)
       .set('x-internal-token', token)
       .expect(200);
     expect(within.body).toEqual({ id: dehyari, hierarchyVersion: expect.any(Number) });
-    await http().get(`/v1/organizations/${stranger}`).set('x-internal-token', token).expect(404);
+    // "Outside" is this service's own error body, not merely the status: contract-service reads
+    // only this body as "not within", and any other 404 (a proxy's, a missing route's) as
+    // unavailable — a valid policy is never suspended on an infrastructure error.
+    const outside = await http()
+      .get(`/v1/organizations/${stranger}`)
+      .set('x-internal-token', token)
+      .expect(404);
+    expect(outside.body).toMatchObject({ code: 'NOT_FOUND', message: 'Organization not found' });
     const downward = await serviceToken('contract-service', dehyari);
-    await http().get(`/v1/organizations/${union}`).set('x-internal-token', downward).expect(404);
+    const upward = await http()
+      .get(`/v1/organizations/${union}`)
+      .set('x-internal-token', downward)
+      .expect(404);
+    expect(upward.body).toMatchObject({ code: 'NOT_FOUND', message: 'Organization not found' });
     // And only that route: contract-service reads nothing else here.
     await http()
       .get(`/v1/organizations/${union}/subtree`)

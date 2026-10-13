@@ -63,7 +63,8 @@ function errorCodeOf(error: unknown): string {
  *     the task stays until an answer comes. Meanwhile the signing-time check refuses.
  *
  * A task whose policy is no longer ACTIVE or PENDING (retired, replaced, already suspended) is DONE
- * as a no-op. One task failing never stalls the batch. Each task is handled in the tenant of its
+ * with no change to the policy — only the signatures the move raced under it are flagged (D-050).
+ * One task failing never stalls the batch. Each task is handled in the tenant of its
  * policy.
  *
  * The bound on the work is the batch size and the per-call deadline of `OrganizationDirectory`
