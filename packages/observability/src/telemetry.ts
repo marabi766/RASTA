@@ -4,11 +4,13 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 import {
+  BatchSpanProcessor,
   ParentBasedSampler,
   TraceIdRatioBasedSampler,
   SamplingDecision,
   type Sampler,
   type SamplingResult,
+  type SpanExporter,
 } from '@opentelemetry/sdk-trace-node';
 import {
   trace,
@@ -20,6 +22,7 @@ import {
   type SpanKind,
   type Link,
 } from '@opentelemetry/api';
+import { UrlQueryRedactingSpanProcessor } from './url-redaction';
 
 /**
  * OpenTelemetry bootstrap.
@@ -45,6 +48,12 @@ export interface TelemetryConfig {
    * audit is the wrong economy. See {@link RastaSampler}.
    */
   sampleRatio?: number;
+  /**
+   * Where finished spans go. Defaults to OTLP over HTTP at `otlpEndpoint`, or
+   * at the `OTEL_EXPORTER_OTLP_*` environment when that is unset. Tests pass an
+   * in-memory exporter here.
+   */
+  traceExporter?: SpanExporter;
 }
 
 /** Span attribute marking an operation that must always be traced. */
@@ -97,12 +106,20 @@ export function initTelemetry(config: TelemetryConfig): NodeSDK | undefined {
     'deployment.environment': config.environment ?? process.env.NODE_ENV ?? 'development',
   });
 
+  const traceExporter =
+    config.traceExporter ??
+    new OTLPTraceExporter(
+      config.otlpEndpoint
+        ? { url: `${config.otlpEndpoint.replace(/\/$/, '')}/v1/traces` }
+        : undefined,
+    );
+
   sdk = new NodeSDK({
     resource,
     sampler: new RastaSampler(config.sampleRatio ?? 1),
-    traceExporter: config.otlpEndpoint
-      ? new OTLPTraceExporter({ url: `${config.otlpEndpoint.replace(/\/$/, '')}/v1/traces` })
-      : undefined,
+    // The redacting processor rewrites a span before it ends, so the batch
+    // processor only ever sees — and exports — the query-free URL.
+    spanProcessors: [new UrlQueryRedactingSpanProcessor(), new BatchSpanProcessor(traceExporter)],
     instrumentations: [
       getNodeAutoInstrumentations({
         // Filesystem spans are enormous in volume and near-useless for
