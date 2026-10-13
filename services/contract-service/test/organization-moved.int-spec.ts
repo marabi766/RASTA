@@ -1,9 +1,13 @@
 import request from 'supertest';
-import { runUnscoped } from '@rasta/nest-common';
+import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { InternalTokenService, runUnscoped } from '@rasta/nest-common';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { OrganizationMovedConsumer } from '../src/events/organization-moved.consumer';
 import { EventPublisher } from '../src/events/publisher';
+import { OrganizationDirectory } from '../src/organization/organization-directory';
 import { IdempotencyStore } from '../src/shared/idempotency';
 import { PolicyReconciliationRepository } from '../src/policy/policy-reconciliation.repository';
 import { PolicyReconciliationSweeper } from '../src/policy/policy-reconciliation.sweeper';
@@ -323,6 +327,56 @@ describe('a signing policy follows an organization move', () => {
       ).not.toContain('APPROVAL_POLICY_SUSPENDED');
     });
 
+    it('a 404 that is not organization-service’s own answer is no "outside": the policy stays in force and the task is retried (audit F2)', async () => {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+
+      // The real HTTP client, behind a proxy that answers every path with a page of its own.
+      const proxy = createServer((_req, res) => {
+        res.writeHead(404, { 'content-type': 'text/html' });
+        res.end('<html><body><h1>404 Not Found</h1>nginx</body></html>');
+      });
+      await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+      const directory = new OrganizationDirectory(
+        testEnv({
+          ORGANIZATION_SERVICE_URL: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`,
+        }),
+        new InternalTokenService(randomBytes(24).toString('hex'), 'rasta-internal', 300),
+      );
+      const throughProxy = new PolicyReconciliationSweeper(
+        api.app.get(PolicyReconciliationRepository),
+        api.app.get(PolicySuspensionService),
+        directory,
+        {
+          intervalMs: 60_000,
+          batchSize: 100,
+          leaseSeconds: 60,
+          backoffSeconds: 1,
+          backoffMaxSeconds: 5,
+        },
+      );
+      try {
+        await consumer.handle(moved(draft.employer));
+        const outcome = await throughProxy.runOnce();
+        expect(outcome.retried).toBeGreaterThanOrEqual(1);
+        expect(outcome.suspended).toBe(0);
+      } finally {
+        proxy.closeAllConnections();
+        await new Promise((resolve) => proxy.close(resolve));
+      }
+
+      expect((await policyRow(policyId)).status).toBe('ACTIVE');
+      expect((await tasksOf(policyId))[0]).toMatchObject({
+        status: 'PENDING',
+        attempts: 1,
+        lastErrorCode: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect(
+        (await policyEventsOf(api.prisma, draft.employer)).map((e) => e.eventName),
+      ).not.toContain('APPROVAL_POLICY_SUSPENDED');
+    });
+
     it('a policy still PENDING_PLATFORM_APPROVAL is suspended too, and approval then refuses it', async () => {
       const union = newOrg();
       const employer = newOrg();
@@ -515,10 +569,9 @@ describe('a signing policy follows an organization move', () => {
       expect(evidence.hierarchyAnswer).toBe('WITHIN');
       // The version of the employer's tree the answer came from: what a move is ordered against.
       expect(evidence.hierarchyVersion).toBe(BigInt(api.hierarchy.versionOf(draft.employer)));
-      // Asked after the transaction began, and the commit cannot come later than its deadline.
-      expect(evidence.hierarchyReadAt!.getTime()).toBeGreaterThanOrEqual(
-        evidence.signedAt.getTime(),
-      );
+      // Asked before the signature was recorded — its instant is read after the authority is
+      // confirmed (audit F4) — and the commit cannot come later than its deadline.
+      expect(evidence.hierarchyReadAt!.getTime()).toBeLessThanOrEqual(evidence.signedAt.getTime());
       expect(evidence.hierarchyCommitDeadline!.getTime()).toBeGreaterThan(
         evidence.hierarchyReadAt!.getTime(),
       );
@@ -791,6 +844,63 @@ describe('a signing policy follows an organization move', () => {
       await sweeper.runOnce();
       expect(await reviewsOf(draft.id)).toHaveLength(1);
       expect(await flaggedEventsOf(draft.employer)).toHaveLength(1);
+    });
+
+    it('a policy retired before the move’s event arrives is still reconciled: the raced signature is flagged and the policy stays RETIRED (audit F3)', async () => {
+      const { union, draft, policyId, evidence } = await signedUnderUnion();
+      // The union retires the policy before the move's event arrives.
+      await command(person(union, ['UNION_ADMIN']), policyId, 'retire', {
+        expectedVersion: (await policyRow(policyId)).version,
+      }).expect(200);
+      const retired = await policyRow(policyId);
+      expect(retired.status).toBe('RETIRED');
+
+      // A retired policy with nothing a move could have raced — no signature under it — is not
+      // queued: only the retired ones a review may still be owed on are.
+      const idleUnion = newOrg();
+      const idle = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const idlePolicy = await activeUnionPolicy(idleUnion, idle.employer);
+      await command(person(idleUnion, ['UNION_ADMIN']), idlePolicy, 'retire', {
+        expectedVersion: (await policyRow(idlePolicy)).version,
+      }).expect(200);
+
+      // The employer had left the union while the signature was being made.
+      api.hierarchy.adopt(newOrg(), draft.employer);
+      const movedVersion = api.hierarchy.bump(draft.employer);
+      const event = moved(draft.employer, inWindow(evidence), movedVersion);
+      await consumer.handle(event);
+      expect(await tasksOf(policyId)).toEqual([expect.objectContaining({ status: 'PENDING' })]);
+      expect(await tasksOf(idlePolicy)).toEqual([]);
+
+      await sweeper.runOnce();
+      expect((await tasksOf(policyId))[0]!.status).toBe('DONE');
+      const reviews = await reviewsOf(draft.id);
+      expect(reviews).toHaveLength(1);
+      expect(reviews[0]).toMatchObject({
+        policyId,
+        reason: 'AUTHORITY_CHANGED_DURING_SIGNING',
+        detectedBy: 'MOVE_RECHECK',
+        causeEventId: null,
+        movedVersion: BigInt(movedVersion),
+        recordedVersion: evidence.hierarchyVersion,
+      });
+      expect(await flaggedEventsOf(draft.employer)).toHaveLength(1);
+
+      // Retired it stays: not suspended, no suspension event, nothing about it changed.
+      const after = await policyRow(policyId);
+      expect(after).toMatchObject({
+        status: 'RETIRED',
+        version: retired.version,
+        suspendedAt: null,
+        suspendedBy: null,
+      });
+      expect(
+        (await policyEventsOf(api.prisma, draft.employer)).map((e) => e.eventName),
+      ).not.toContain('APPROVAL_POLICY_SUSPENDED');
+
+      // Its signature reviewed, the retired policy owes nothing more: a redelivery queues no task.
+      await consumer.handle(event);
+      expect(await tasksOf(policyId)).toHaveLength(1);
     });
   });
 

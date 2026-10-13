@@ -104,7 +104,8 @@ export class ContractController {
       'of both organizations is refused (403 `MEMBER_OF_BOTH_PARTIES`) and so is one who already ' +
       'signed the other side (403 `SAME_PERSON_BOTH_SIDES`); two signers whose identities cannot ' +
       'be told apart are 422 `ACTOR_IDENTITY_UNKNOWN`. The same person signing the same side ' +
-      'again changes nothing and answers with the contract as it is; another person for a side ' +
+      'again changes nothing and answers with the contract as it is — to a caller who may still ' +
+      'read it, anyone else getting the refusal GET gives; another person for a side ' +
       'that has signed is 409 `SIDE_ALREADY_SIGNED`; a contract that is not a draft is 422 ' +
       '`CONTRACT_NOT_DRAFT`. `expectedVersion` is optional. ' +
       COMMAND_NOTE,
