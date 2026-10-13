@@ -4002,6 +4002,18 @@ Migration روی هر هشت پایگاه داده، جداسازی مستأجر
 کامل `main`؛ (۳) یک **ثبت پذیرش دوم صاحب محصول** روی شواهد اجرا. تحویل همچنان
 **At-Least-Once** است، نه Exactly-Once؛ A-09 الزامی می‌ماند.
 
+**جریان‌های متأثر: رویدادهای محموله (2026-10-13، Codex روی #257 r1).** `rasta.inventory.v1`
+با کلید `shipmentId`، یعنی `SHIPMENT_CREATED` · `SHIPMENT_DISPATCHED` · `SHIPMENT_DELIVERED`
+(COM-006 PR دوم، ADR-056 § ۶)، STRICT اعلام شده ولی از همان Relay مشترک می‌گذرد. پس
+`DISPATCHED`/`DELIVERED` یک محموله می‌توانند میان دو Relay، پس از Backoff یا در مسیر
+تک‌ردیفی وارونه یا تکراری منتشر شوند. همین برای جریان `stockItemId` (`STOCK_*`، #246)
+صادق است. سازوکار تازه‌ای ساخته نشد. قرارداد این است: هر رویداد محموله `streamSeq`
+به‌ازای همان محموله دارد (برابر `shipmentVersion`، در Envelope و Header `x-stream-seq`)، و تا
+بسته شدن D-027 مصرف‌کننده **باید** با آن مرتب و تکراری‌زدایی کند
+(`packages/contracts/src/events/inventory-shipments.ts`، `docs/events/README.md` § Inventory،
+ADR-056 § ۶). امروز تنها مصرف‌کننده `audit-service` است: الحاقی، `streamSeq` را ذخیره
+می‌کند و به ترتیب وابسته نیست.
+
 **دو یافتهٔ جانبی، خارج از دامنهٔ آن بررسی و گزارش‌شده، نه اصلاح‌شده:**
 
 - `docs/runbooks/replay-dlq.md` اجرای `dist/scripts/replay-dlq.js` را دستور

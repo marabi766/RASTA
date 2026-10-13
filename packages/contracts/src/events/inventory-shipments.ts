@@ -13,8 +13,16 @@ import { ID_PREFIXES, organizationIdSchema } from '../common/identifiers';
  *
  * Every event here is keyed by `shipmentId` — the STRICT stream of ADR-056 § 6: a shipment is
  * created, then dispatched, then delivered, and an inversion would be a shipment "delivered
- * before it left". `shipmentVersion` is the shipment's position in its own history (1, 2, 3); a
- * consumer reads order from it and from the envelope's `streamSeq`, never from arrival (D-027).
+ * before it left". `shipmentVersion` is the shipment's position in its own history (1, 2, 3).
+ *
+ * **STRICT is the intent, not today's delivery (D-027, open).** The shared relay claims outbox rows
+ * independently, so two relays, a backoff or the one-by-one publish fallback can deliver
+ * `SHIPMENT_DELIVERED` before `SHIPMENT_DISPATCHED`, or twice. Until D-027 is closed (ADR-051 B4) a
+ * consumer of these events **MUST** order and de-duplicate them by the envelope's `streamSeq`
+ * (`streamKey` = `shipmentId`; header `x-stream-seq`; equal to `shipmentVersion`): a sequence at or
+ * below the last one it applied for the shipment is a duplicate or stale and has no effect, and an
+ * event after a gap is not applied as the next one. Arrival order is never the order. Every
+ * shipment event carries `streamSeq` and `streamKey`.
  *
  * ## What these payloads never carry
  *
