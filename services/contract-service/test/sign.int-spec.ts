@@ -253,6 +253,32 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect(await eventsOf(w.prisma, employer)).toHaveLength(events);
     });
 
+    it('a signer whose roles were revoked since is refused as GET refuses them — a new key reads nothing, the signature stays, nothing is written (audit F1)', async () => {
+      const { id, employer, contractor } = await draft();
+      const claims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      await sign(id, person(employer, ['ORGANIZATION_ADMIN'], claims)).expect(200);
+      await sign(id, contractorSigner(contractor)).expect(200);
+      const events = (await eventsOf(w.prisma, employer)).length;
+
+      // The same person, every reading role revoked: only DRIVER is left.
+      const revoked = person(employer, ['DRIVER'], claims);
+      const read = await get(id, revoked).expect(403);
+      const again = await sign(id, revoked, {}, key()).expect(403);
+      // GET's refusal, word for word — and not the contract (nor its price) in any form.
+      expect(bare(again.body)).toEqual(bare(read.body));
+      expect(again.body).not.toHaveProperty('id');
+      expect(JSON.stringify(again.body)).not.toMatch(/amount|SIGNED/i);
+
+      // The signature made while the person had the authority stands; nothing new is recorded.
+      const signatures = await signaturesOf(id);
+      expect(signatures).toHaveLength(2);
+      expect(signatures.find((s) => s.side === 'EMPLOYER')).toMatchObject({
+        signedBy: claims.rastaUserId,
+      });
+      expect(await eventsOf(w.prisma, employer)).toHaveLength(events);
+      expect((await rowOf(id)).status).toBe('SIGNED');
+    });
+
     it('the same person is the same on another token of theirs: one subject, two user ids', async () => {
       const { id, employer } = await draft();
       const sub = `sub-${ulid()}`;
@@ -680,6 +706,61 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect(row).toMatchObject({ status: 'SIGNED', version: 2 });
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNED')).toHaveLength(1);
       expect(await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_RECORDED')).toHaveLength(2);
+    });
+
+    it('a signature queued behind the lock records the instant it signed — after the lock was released, never its transaction’s start (audit F4)', async () => {
+      const { id, employer, contractor } = await draft();
+      const first = await sign(id, employerSigner(employer)).expect(200);
+
+      // Hold the contract's row lock and queue the second signature behind it: its transaction
+      // starts now, and signs only once the lock is released.
+      let release!: () => void;
+      let locked!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const gotLock = new Promise<void>((resolve) => (locked = resolve));
+      let releasedAt: Date | undefined;
+      const holder = w.prisma.transaction(
+        async (tx) => {
+          await tx.$queryRaw`SELECT 1 FROM contract WHERE id = ${id} FOR UPDATE`;
+          locked();
+          await released;
+          releasedAt = (await tx.$queryRaw<{ at: Date }[]>`SELECT clock_timestamp() AS at`)[0]!.at;
+        },
+        { timeoutMs: 60_000 },
+      );
+      await gotLock;
+      // Awaiting starts the request (supertest is lazy until then).
+      const running = Promise.all([sign(id, contractorSigner(contractor))]);
+      try {
+        await untilSessionsWaitOnALock(w.prisma, 1);
+        // The queued transaction's start is now measurably before the release.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } finally {
+        release();
+        await Promise.allSettled([holder, running]);
+      }
+      await holder;
+      const [second] = await running;
+      expect(second!.status).toBe(200);
+      expect(second!.body.status).toBe('SIGNED');
+
+      const signedAt = second!.body.contractorSignedAt as string;
+      expect(new Date(signedAt).getTime()).toBeGreaterThanOrEqual(releasedAt!.getTime());
+      expect(new Date(signedAt).getTime()).toBeGreaterThan(
+        new Date(first.body.employerSignedAt as string).getTime(),
+      );
+      // One instant for the signature row, the contract's move and both events.
+      const contractorSignature = (await signaturesOf(id)).find((s) => s.side === 'CONTRACTOR');
+      expect(contractorSignature!.signedAt.toISOString()).toBe(signedAt);
+      expect((await rowOf(id)).statusChangedAt.toISOString()).toBe(signedAt);
+      const recorded = await eventsOf(w.prisma, employer, 'CONTRACT_SIGNATURE_RECORDED');
+      expect(recorded[1]!.payload).toMatchObject({ side: 'CONTRACTOR', signedAt });
+      const [completed] = await eventsOf(w.prisma, employer, 'CONTRACT_SIGNED');
+      expect(completed!.payload).toMatchObject({
+        employerSignedAt: first.body.employerSignedAt,
+        contractorSignedAt: signedAt,
+        signedAt,
+      });
     });
 
     it('the same person double-submitting with two keys: one signature, the second answers it', async () => {
