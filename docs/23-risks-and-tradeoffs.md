@@ -1159,11 +1159,12 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-02 (#191)
 
-### D-048 · ۳۲۲ ستونِ لحظه هنوز `timestamp(3)` بی منطقهٔ زمانی است
+### D-048 · ۳۰۵ ستونِ لحظه هنوز `timestamp(3)` بی منطقهٔ زمانی است (document تبدیل شد)
 
 - **چه چیزی:** بیشتر ستون‌های لحظه در Schemaها `DateTime` بی `@db.Timestamptz` اند، یعنی `timestamp(3) without time zone`:
-  ۳۲۲ ستون در ۱۲ سرویس (construction ۵۷، economic ۵۵، asset ۳۲، maintenance ۳۲، identity ۳۰، marketplace ۲۸، supplier ۲۵،
-  fleet ۲۳، organization ۱۸، document ۱۷، notification ۴، audit ۱) در برابر ۸۶ ستونِ `timestamptz`. Prisma این ستون‌ها را
+  هنگام ثبت ۳۲۲ ستون در ۱۲ سرویس (construction ۵۷، economic ۵۵، asset ۳۲، maintenance ۳۲، identity ۳۰، marketplace ۲۸،
+  supplier ۲۵، fleet ۲۳، organization ۱۸، document ۱۷، notification ۴، audit ۱) در برابر ۸۶ ستونِ `timestamptz`؛ پس از
+  پایلوت document (#242) **۳۰۵ ستون در ۱۱ سرویس** مانده است. Prisma این ستون‌ها را
   به‌صورت ساعت دیواریِ UTC می‌نویسد و می‌خواند و درست است؛ اما SQL خام — `now()`، `CURRENT_TIMESTAMP`، پیش‌فرضِ ستون،
   Trigger یا Backfill در Migration — ساعت دیواریِ **نشست** را ذخیره می‌کند (L7-37).
 - **کاهش ریسک (#214):** هر نشست پایگاه داده با `options=-c TimeZone=UTC` باز می‌شود — نشانی زمان اجرای سرویس‌ها
@@ -1180,11 +1181,102 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   لحظهٔ خام را جابه‌جا می‌نویسد یا می‌خواند (با تهران ۳٫۵ ساعت) و هیچ خطایی نمی‌دهد. مقایسهٔ این ستون‌ها با `now()` در همان نشست هم به همین دلیل وابسته به منطقهٔ زمانی نشست است.
 - **کنترل (تا رفع):** اتصالِ تازه فقط از `withUtcSession` (`@rasta/config` یا `scripts/prisma-lib.mjs`)؛ پیش‌فرض
   `timezone` سرور و Roleها UTC؛ ستونِ لحظهٔ تازه `TIMESTAMPTZ` (`@db.Timestamptz`).
-- **رفع:** انتقال این ستون‌ها به `timestamptz` با Migrationهای قابل بازگشت به‌ازای هر سرویس
-  (`ALTER COLUMN … TYPE timestamptz USING col AT TIME ZONE 'UTC'`، که جدول را بازنویسی و قفل می‌کند، پس در پنجرهٔ
-  نگه‌داری و جدول به جدول)، همراه `@db.Timestamptz(3)` در Schema.
+- **رفع:** انتقال این ستون‌ها به `timestamptz` با Migrationهای قابل بازگشت به‌ازای هر سرویس، همراه `@db.Timestamptz(3)`
+  در Schema — به دستورالعمل زیر، یک PR برای هر سرویس.
+- **پیشرفت:** **document — انجام شد (پایلوت، #242).** هر ۱۷ ستون لحظه‌اند (هیچ تاریخ تقویمی یا ساعت دیواری محلی در این
+  سرویس نیست) و `20261012120000_document_instants_timestamptz` همه را تبدیل کرد. آزمون
+  `document-service/test/instants-timestamptz.int-spec.ts` ردیف‌های نوشته‌شده با Schema قدیم را از up، down و up دوباره
+  می‌گذراند (همهٔ لحظه‌ها تا میلی‌ثانیه برابر، از SQL و از Prisma)، و نشان می‌دهد که `now()` خامِ نشست `Asia/Tehran` — Lease
+  اسکن و Default ستون — در `timestamp(3)` به اندازهٔ اختلاف منطقه جابه‌جا ذخیره می‌شد و در `timestamptz(3)` درست است.
+  مانده: ۱۱ سرویس.
 - **اولویت:** متوسط
 - **ثبت‌شده:** 2026-10-03 (#214)
+
+#### دستورالعمل تبدیل یک سرویس (Runbook، از پایلوت document)
+
+PR هر سرویس همین گام‌ها را برمی‌دارد و نمونهٔ هر کدام در #242 است.
+
+1. **رده‌بندی.** هر `DateTime` Schema در یکی از سه رده، در STEP 0 همان PR: **لحظه** (رخداد، مهلت، Lease، `now()`
+   یا Default) ← تبدیل؛ **روز تقویمی** (مثلاً تاریخ سررسید بیمه) ← تبدیل نمی‌شود؛ `@db.Date` تصمیم جداست؛ **ساعت دیواری
+   محلی** ← می‌ماند، با دلیل. پیش از حکم، SQL خام سرویس (`$queryRaw`، Migrationها، Triggerها) را برای `now()`،
+   `CURRENT_TIMESTAMP` و مقایسه با `now()` بگرد — همان‌ها مسیرهایی‌اند که تبدیل درستشان می‌کند.
+2. **اندازه و پنجره.** روی هر محیطی که Migration در آن اجرا می‌شود، با اتصال Migrator (آزمون
+   `instants-timestamptz.int-spec.ts` همین Query را از همین فایل می‌خواند و اجرا می‌کند):
+
+   ```sql
+   SELECT relname, n_live_tup, pg_size_pretty(pg_total_relation_size(relid)) AS size
+     FROM pg_stat_user_tables
+    WHERE schemaname = current_schema()
+    ORDER BY pg_total_relation_size(relid) DESC;
+   ```
+
+   بازنویسی زیر ACCESS EXCLUSIVE است و همهٔ Indexها را از نو می‌سازد؛ روی میزبان توسعه، ۱٬۰۰۰٬۰۰۰ ردیف `document`
+   (۵۷۶ MB) ۴۶ ثانیه و ۲٬۰۰۰٬۰۰۰ ردیف `outbox_message` (۹۵۷ MB) ۲۹ ثانیه گرفت. حذف `USING` (میان‌بُر PG12+ برای نشست UTC)
+   بازنویسی را **حذف نمی‌کند** — Typmod `(3)` آن را لازم می‌کند (اندازه‌گیری‌شده). Migration یک تراکنش است و قفل هر جدول
+   تا Commit **کل** آن می‌ماند، پس **پنجرهٔ نگه‌داری با جمع زمان تراکنش** (همهٔ جدول‌ها، با حاشیه) اندازه می‌شود. جدولی که
+   بازنویسی‌اش از ۳۰ ثانیهٔ پیش‌فرض گام ۳ بیشتر برآورد می‌شود، Timeout بالاتری برای همان اجرا می‌خواهد (گام ۷).
+   `outbox_message` منتشرشده‌ها را هرگز پاک نمی‌کند (D-052)، پس همهٔ آن‌ها در برآورد می‌آیند و در Production بزرگ‌ترین
+   جدول خواهد بود.
+
+3. **Migration.** یک `ALTER TABLE` برای هر جدول با همهٔ ستون‌های لحظه‌اش (یک بازنویسی، نه یکی برای هر ستون):
+   `ALTER COLUMN "c" TYPE TIMESTAMPTZ(3) USING "c" AT TIME ZONE 'UTC'` — صریح، پس مستقل از منطقهٔ نشست Migrator. در آغاز
+   فایل `SET LOCAL lock_timeout = '5s'` (اگر چیزی — Replicaی که متوقف نشده، تراکنشی بلند — هنوز جدولی را دارد، اجرا منتظر
+   نمی‌ماند و شکست می‌خورد) و `statement_timeout` از
+   `set_config('statement_timeout', COALESCE(NULLIF(current_setting('rasta.migration_statement_timeout', true), ''), '30s'), true)`:
+   پیش‌فرض ۳۰ ثانیه برای هر دستور — هیچ محیط مستقری امروز داده‌ای ندارد، و جدولی بزرگ‌تر از برآورد اجرا را **بسته شکست**
+   می‌دهد به‌جای آنکه از پنجره بگذرد — و برای یک اجرا، بی ویرایش فایل، قابل افزایش (گام ۷). Prisma کل فایل را در یک تراکنش
+   ضمنی می‌فرستد، پس هر شکست ALTERهای پیش از خود را هم برمی‌گرداند: جدول نیمه‌تبدیل‌شده نمی‌ماند. `down.sql` وارونهٔ
+   دقیق است — `TYPE TIMESTAMP(3) USING "c" AT TIME ZONE 'UTC'` و حذف ردیف دفتر Migration. Index (حتی Expression مثل
+   `GREATEST(...)`)، CHECK و Default `CURRENT_TIMESTAMP` را خود PostgreSQL منتقل می‌کند.
+4. **Schema.** `@db.Timestamptz(3)` روی هر فیلد، و آزمون واحدی که `DateTime` بی آن را رد کند
+   (`document-service/src/prisma/instant-columns.spec.ts`).
+5. **Verifierها.** `verify-migration-reversible.mjs <svc>` باید بی تغییر سبز شود (Snapshot کاتالوگ، نوع ستون را هم
+   می‌سنجد). دو جای دیگر Migration قدیمی‌تری را زیر تبدیل برمی‌گردانند و باید تبدیل را **اول** برگردانند و با آن دوباره
+   اعمال کنند، وگرنه ستون‌های تبدیل‌شده `timestamp(3)` برمی‌گردند در حالی که دفتر تبدیل را فهرست می‌کند:
+   - `scripts/verify-outbox-claim-migration.mjs` — نام Migration را در `LATER_CLAIM_COLUMN_MIGRATIONS` بیفزا (identity،
+     organization، asset، fleet، maintenance، economic و marketplace؛ بدون آن Verifier از همان `up` با نام سرویس رد می‌کند)؛
+   - `dataRollback` همان سرویس در `verify-migration-reversible-lib.mjs`، اگر Migrationی را برمی‌گرداند که ستون تبدیل‌شده
+     ساخته — `runDownScript` به‌صورت فهرست (تبدیل اول) و گامی که نوع را پس از اعمال دوباره بسنجد (`DOCUMENT_DATA_ROLLBACK`).
+     هر بررسی‌ای که `timestamp without time zone` را سخت‌کد کرده هم عوض می‌شود — مثلاً امضای
+     `audit_correction_command.created_at` در `verify-audit-correction-command-lib.mjs` برای identity.
+6. **آزمون یکپارچگی** به الگوی `instants-timestamptz.int-spec.ts`: Schema دورانداختنی از Migrationهای پیش از تبدیل با
+   `psql --file`؛ ردیف با همهٔ ستون‌های لحظه (Literal UTC و `now()`)؛ up ← down ← up با برابری `extract(epoch …)` همهٔ
+   ستون‌ها و برابری تعریف Indexها و Constraintها؛ نشست غیر UTC که یک مسیر `now()` خام سرویس را پیش و پس از تبدیل اجرا کند؛
+   و یک `prisma migrate deploy` واقعی (از `scripts/prisma.mjs`، روی Schema دورانداختنی) زیر قفلی نگه‌داشته‌شده: با
+   `lock timeout` بی هیچ تغییری شکست، سپس P3009، `migrate resolve --rolled-back` و اجرای دوباره (همچنین Override
+   یک‌ثانیه‌ای که پیش از `lock_timeout` به `statement timeout` بخورد).
+7. **استقرار: سرویس در تمام مدت Migration متوقف است.** هر Replica پیش از `migrate deploy` (یا `down.sql`) متوقف می‌شود
+   و سرویس فقط پس از Commit آن بالا می‌آید؛ اجرای این Migrationها کنار سرویس زنده **مجاز نیست**. دو دلیل، هر دو
+   اندازه‌گیری‌شده: (۱) قفل ACCESS EXCLUSIVE هر جدول تا Commit کل Migration می‌ماند (در نمونهٔ اندازه‌گیری‌شده، قفل جدول
+   نخست حدود ۴۲ ثانیه)، در حالی که Gateway پس از ۳ ثانیه از انتظار درخواست دست می‌کشد — هیچ Timeoutی نگه‌داشتن قفل را از
+   انتظار درخواست کوتاه‌تر نمی‌کند؛ (۲) اتصالی که پیش از تبدیل Statementی روی این جدول‌ها Prepare کرده، پس از آن همان Query
+   را با `cached plan must not change result type` (0A000) شکست می‌دهد و Prisma آن Statement را نگه می‌دارد، پس تا جایگزینی
+   اتصال **هر بار** شکست می‌خورد (اندازه‌گیری‌شده در همان آزمون). پنجرهٔ نگه‌داری = جمع زمان تراکنش (گام ۲). در توسعه هم:
+   سرویس را متوقف کن، `pnpm db:migrate`، سپس بالا بیاور. برای جدولی بزرگ‌تر از پیش‌فرض، Timeout همان یک اجرا:
+   `RASTA_MIGRATION_STATEMENT_TIMEOUT=15min pnpm --dir services/<svc> db:migrate` — `scripts/prisma.mjs` آن را (پس از
+   اعتبارسنجی) به‌صورت گزینهٔ آغاز نشست `rasta.migration_statement_timeout` می‌فرستد، پس نشانی پایگاه داده (Credential)
+   بازنویسی نمی‌شود و نه کد عوض می‌شود نه پیش‌فرض؛ برای `down.sql` (با
+   `psql -X -v ON_ERROR_STOP=1 --single-transaction --file down.sql`) همان با
+   `PGOPTIONS='-c rasta.migration_statement_timeout=15min'`. کد لازم نیست هم‌زمان برگردد: زیر نشست UTC (#214) هر دو
+   Client هر دو نوع ستون را درست می‌خوانند و می‌نویسند.
+8. **بازیابی پس از شکست** (`lock timeout` یا `statement timeout`). تراکنش برمی‌گردد و Schema دست‌نخورده است، اما Prisma
+   رکورد شکست‌خورده را در `_prisma_migrations` نگه می‌دارد (`finished_at` و `rolled_back_at` هر دو تهی) و **هر**
+   `migrate deploy` بعدی با P3009 رد می‌شود. سرویس متوقف می‌ماند و:
+   1. بسنج که Schema تغییر نکرده — هر ستون لحظهٔ این Migration هنوز `timestamp without time zone` است:
+      `SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() AND data_type LIKE 'timestamp%' AND table_name <> '_prisma_migrations'`.
+      اگر حتی یکی `with time zone` است، Resolve نکن و گزارش کن.
+   2. علت را بردار: Replica یا تراکنشی که جدول را نگه داشته بود را ببند، یا Timeout این اجرا را بالا ببر (گام ۷).
+   3. به‌عنوان مالک Migration، با Credential از env (`.env.migrator`، نه خط فرمان):
+      `pnpm --dir services/document-service exec node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate resolve --rolled-back 20261012120000_document_instants_timestamptz`.
+   4. دوباره: `pnpm --dir services/document-service db:migrate`.
+
+   همین زنجیره (شکست واقعی ← P3009 ← Resolve ← اجرای دوباره) در `instants-timestamptz.int-spec.ts` آزموده می‌شود.
+
+**مسیر برخط** (فقط وقتی پنجرهٔ نگه‌داری‌ای که جمع زمان تراکنش لازم دارد پذیرفتنی نیست؛ تا امروز لازم نشده و هنوز
+پیاده نشده): ستون تازهٔ `<c>_tz TIMESTAMPTZ(3)` (افزایشی، بی بازنویسی) ← Trigger `BEFORE INSERT OR UPDATE` که آن را
+از ستون قدیم پر کند ← Backfill دسته‌ای در تراکنش‌های جدا ← `CREATE INDEX CONCURRENTLY` جای هر Index ستون قدیم ← در یک تراکنش کوتاه با
+`lock_timeout`: حذف Trigger، جابه‌جایی نام دو ستون، Default و `NOT NULL` (با CHECK از پیش `VALID`). هر گام down خودش را
+دارد؛ نخستین سرویسی که نیازش شود آن را در PR خودش طراحی و آزمون می‌کند.
 
 ### D-049 · غیرفعال‌سازی از کنسول Keycloak در پنجرهٔ نخستین فعال‌سازی ممکن است بازنویسی شود
 
@@ -1297,6 +1389,23 @@ policies (1186 entries in 27.1s)`. (۲) همان فرمان پیش از افزو
   تغییر نکرد: خط‌مبنای تأییدشده است و ورود قلم با امتیاز به تصمیم مالک محصول نیاز دارد.)
 - **اولویت:** پایین
 - **ثبت‌شده:** 2026-10-08 (#231 r9)
+
+### D-052 · ردیف‌های منتشرشدهٔ Outbox هرگز پاک نمی‌شوند
+
+- **چه چیزی:** `OutboxStore` هر دوازده سرویس دارای Outbox متد `purgePublished(retentionDays = 7)` دارد، ولی جز آزمون‌ها
+  هیچ کدی — Worker، زمان‌بند یا CLI — آن را صدا نمی‌زند. پس هر رویداد منتشرشده برای همیشه در `outbox_message` می‌ماند.
+- **چرا:** ADR-050 کوچک ماندن جدول را بر پاک‌سازی بنا کرد، ولی زمان‌بندی آن هرگز ساخته نشد. در پایلوت D-048 (#242)، هنگام
+  اندازه‌گیری بازنویسی جدول‌ها، دیده شد.
+- **ریسک:** `outbox_message` بی‌کران رشد می‌کند و در Production بزرگ‌ترین جدول هر سرویس خواهد بود: Backup و Vacuum
+  سنگین‌تر، و هر Migration که جدول را بازنویسی کند (تبدیل‌های D-048) پنجرهٔ نگه‌داری بزرگ‌تری می‌خواهد (۲٬۰۰۰٬۰۰۰ ردیف:
+  ۹۵۷ MB، ۲۹ ثانیه بازنویسی روی میزبان توسعه). `docs/runbooks/audit-gap-detected.md` هم همین نبود را فرض می‌گیرد.
+- **تصمیم موقت:** تا پیش از Production پذیرفته است — هیچ محیط مستقری امروز حجم واقعی ندارد. **پیش از Production هر سرویس
+  یک Job پاک‌سازی با نگه‌داری (Retention) قابل پیکربندی لازم دارد**؛ بی آن، Production آماده نیست. تا آن زمان برآورد
+  هر Migration بازنویسی (D-048، گام ۲) همهٔ ردیف‌های منتشرشده را حساب می‌کند.
+- **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
+  صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
+- **اولویت:** متوسط (پیش‌نیاز Production)
+- **ثبت‌شده:** 2026-10-13 (#242 r1)
 
 ## ۲۳٫۶ ثبت بدهی معماری
 

@@ -75,7 +75,7 @@
     "test:supplier-privilege-split": "node --env-file-if-exists=.env --env-file-if-exists=.env.migrator --test scripts/supplier-privilege-split.pg.test.mjs",
     "test:db-runtime-privileges": "node --env-file-if-exists=.env --test scripts/check-db-runtime-privileges.pg.test.mjs",
     "test:db-session-utc": "node --test scripts/db-session-utc.pg.test.mjs",
-    "test:db-runtime-privileges-lib": "node --test scripts/check-db-runtime-privileges-lib.test.mjs scripts/prisma-lib.test.mjs",
+    "test:db-runtime-privileges-lib": "node --test scripts/check-db-runtime-privileges-lib.test.mjs scripts/prisma-lib.test.mjs scripts/prisma-turbo-env.test.mjs",
     "test:boot-guard": "node --test scripts/service-boot-guard.test.mjs",
     "check:db-runtime-privileges": "node --env-file-if-exists=.env scripts/check-db-runtime-privileges.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
