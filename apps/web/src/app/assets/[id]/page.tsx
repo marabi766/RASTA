@@ -37,7 +37,7 @@ import { fetchCurrentUser } from '@/server/identity';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { DossierScreen } from './DossierScreen';
 import { UpdateAssetForm } from './UpdateAssetForm';
 import { LifecycleControls, type LifecycleToken } from './LifecycleControls';
@@ -205,7 +205,7 @@ export default async function AssetDossierPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/assets" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/assets" />}
     >
       <DossierScreen
         result={result}

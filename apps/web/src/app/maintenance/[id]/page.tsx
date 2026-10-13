@@ -14,7 +14,7 @@ import {
   type RepairCommandName,
 } from '@/lib/repair-order-fields';
 import { readFlash } from '@/server/flash';
-import { PORTAL_NAV } from '@/app/nav';
+import { portalNavFor } from '@/app/portal-nav';
 import { RequestDetailScreen, type OrderForms } from './RequestDetailScreen';
 import { ApproveRequestForm, AssignWorkshopForm, CancelRequestForm } from './RequestCommandForms';
 import {
@@ -141,7 +141,7 @@ export default async function MaintenanceRequestPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={PORTAL_NAV} currentHref="/maintenance" />}
+      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/maintenance" />}
     >
       <RequestDetailScreen
         result={result}

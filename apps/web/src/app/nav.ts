@@ -22,3 +22,9 @@ export const PORTAL_NAV: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },
   { href: '/organizations', label: 'سازمان و اعضا' },
 ];
+
+/**
+ * Offered only to the roles `GET /v1/settlements` admits, so it is not in
+ * `PORTAL_NAV`; `portal-nav.ts` adds it for them.
+ */
+export const SETTLEMENTS_NAV_ITEM: SidebarItem = { href: '/settlements', label: 'تسویه‌ها' };
