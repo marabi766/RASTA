@@ -60,6 +60,7 @@ CREATE TABLE "tracking_event" (
     "organization_id" TEXT NOT NULL,
     "shipment_id" TEXT NOT NULL,
     "type" TEXT NOT NULL,
+    "shipment_version" INTEGER NOT NULL,
     "occurred_at" TIMESTAMPTZ(3) NOT NULL,
     "recorded_at" TIMESTAMPTZ(3) NOT NULL,
     "recorded_by" TEXT NOT NULL,
@@ -88,9 +89,14 @@ CREATE UNIQUE INDEX "ux_shipment_leg_sequence" ON "shipment_leg"("organization_i
 CREATE UNIQUE INDEX "ux_tracking_event_once" ON "tracking_event"("organization_id", "shipment_id", "type")
   WHERE "type" IN ('CREATED', 'DISPATCHED', 'DELIVERED');
 
+-- A tracking event's place in its shipment's lifecycle: the shipment version it records (1, 2, 3 —
+-- the event's `shipmentVersion` and its stream's `streamSeq`), given under the shipment's row lock.
+-- The history reads in this order, never by time or id: two steps can carry one instant, and an
+-- id is minted by a process clock.
+CREATE UNIQUE INDEX "ux_tracking_event_sequence" ON "tracking_event"("organization_id", "shipment_id", "shipment_version");
+
 -- Reads.
 CREATE INDEX "ix_shipment_org_status" ON "shipment"("organization_id", "status", "id");
-CREATE INDEX "ix_tracking_event_org_shipment" ON "tracking_event"("organization_id", "shipment_id", "occurred_at", "id");
 
 -- The consignee's read (ADR-056 § 5): shipments sent **to** an organization, which owns none of
 -- them. A counterparty index, by necessity not led by the owner's organization_id
@@ -328,20 +334,21 @@ CREATE TRIGGER "tg_shipment_leg_no_truncate"
 
 -- ---- tracking history: append-only, in order, and the status it records ------
 --
--- An event is inserted after its shipment reached the status it records, and never before an
--- earlier event of the same shipment: the history reads in the order things happened.
+-- An event is inserted after its shipment reached the status it records, carrying the version that
+-- status gave the shipment, and never before an earlier event of the same shipment: the history
+-- reads in the order things happened.
 
 CREATE FUNCTION "tracking_event_guard"() RETURNS trigger AS $$
 DECLARE
-  parent_status TEXT;
+  parent RECORD;
   latest TIMESTAMPTZ;
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    SELECT "status" INTO parent_status
+    SELECT "status", "version" INTO parent
       FROM "shipment"
      WHERE "organization_id" = NEW."organization_id" AND "id" = NEW."shipment_id";
-    IF NOT FOUND OR parent_status <> NEW."type" THEN
-      RAISE EXCEPTION 'ck_tracking_event_matches_shipment: a tracking event records the status its shipment now has'
+    IF NOT FOUND OR parent."status" <> NEW."type" OR parent."version" <> NEW."shipment_version" THEN
+      RAISE EXCEPTION 'ck_tracking_event_matches_shipment: a tracking event records the status and version its shipment now has'
         USING ERRCODE = 'check_violation';
     END IF;
     SELECT max("occurred_at") INTO latest

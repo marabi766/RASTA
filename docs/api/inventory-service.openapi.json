@@ -3411,7 +3411,7 @@
     },
     "/v1/shipments/{id}/tracking": {
       "get": {
-        "description": "The tracking history — one event per status the shipment reached (CREATED, DISPATCHED, DELIVERED), ordered by when it happened. Closed by default (S-02). Read by the two organizations of a shipment (ADR-056 § 5): the owner of its origin warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (Q-103) — and its consignee — a role of INVENTORY_CONSIGNEE_READER_ROLES (Q-113); all three ORGANIZATION_ADMIN by default, held in the organization the request acts for. Any other organization, or a side the caller’s roles do not open, gets 404, never 403 (S-03). No user id is shown. AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
+        "description": "The tracking history — one event per status the shipment reached (CREATED, DISPATCHED, DELIVERED), in lifecycle order (the shipment version each step gave it), never by time; the status and the history are read together, so they always agree. Closed by default (S-02). Read by the two organizations of a shipment (ADR-056 § 5): the owner of its origin warehouse — a role of INVENTORY_READER_ROLES or INVENTORY_OPERATOR_ROLES (Q-103) — and its consignee — a role of INVENTORY_CONSIGNEE_READER_ROLES (Q-113); all three ORGANIZATION_ADMIN by default, held in the organization the request acts for. Any other organization, or a side the caller’s roles do not open, gets 404, never 403 (S-03). No user id is shown. AUDITOR, SYSTEM_ADMIN and service tokens are refused (403).",
         "operationId": "ShipmentController_tracking_v1",
         "parameters": [
           {
@@ -3467,7 +3467,7 @@
                         "required": ["id", "type", "occurredAt", "recordedAt"],
                         "additionalProperties": false
                       },
-                      "description": "What happened to the shipment, in the order it happened."
+                      "description": "What happened to the shipment, in lifecycle order: CREATED, then DISPATCHED, then DELIVERED."
                     }
                   },
                   "required": [

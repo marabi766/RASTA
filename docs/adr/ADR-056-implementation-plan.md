@@ -154,7 +154,8 @@ ADR-056 § ۸ نشان داد وابستگی رسمی `COM-006 → COM-005` در
   استنتاج می‌شود، نه ستون تکراری).
 - ماشین حالت: `CREATED → DISPATCHED → DELIVERED` (یا `FAILED`).
 - `tracking_event` فقط‌الحاقی، مرتب بر `occurred_at`؛ ترتیب انتشار از
-  `streamSeq` جریان `shipmentId` می‌آید (گام ۹).
+  `streamSeq` جریان `shipmentId` می‌آید (گام ۹). _پیاده‌سازی (#257 r2):_ مرتب بر
+  جایگاه چرخهٔ عمر (`shipment_version`)، نه زمان — دو گام می‌توانند یک لحظه داشته باشند.
 
 **دروازهٔ گام ۸:** Migration رفت‌وبرگشت سبز؛ گذار نامعتبر (`DELIVERED` قبل از
 `DISPATCHED`) → `409`.
@@ -349,7 +350,7 @@ Dockerfile مشتق می‌شود)، برخلاف «در این گام ساخت�
 **اجراشده — فاز B، گام ۸ و ۱۰، و گام ۹ بی آزمون Kafka واقعی:** Migration دوم برگشت‌پذیر (`20261014120000_shipments`، `EXPECTED.inventory`)
 با `shipment` · `shipment_leg` · `tracking_event`؛ ماشین حالت `CREATED → DISPATCHED → DELIVERED` که پایگاه داده هم نگهش می‌دارد (گذار یک‌طرفه و
 یک‌باره، `version` برابر جایگاه وضعیت، هر وضعیت با `tracking_event` خودش در لحظهٔ Commit، ساق‌ها فقط همراه محموله و تغییرناپذیر، تاریخچهٔ
-رهگیری الحاقی و مرتب بر `occurred_at`)؛ فرمان‌های ساخت، ارسال و تحویل، هرکدام در یک تراکنش (`CommandRunner`) با قفل **فقط ردیف محموله** و
+رهگیری الحاقی و مرتب بر جایگاه چرخهٔ عمر `shipment_version`، نه بر زمان یا شناسه — Codex #257 r1)؛ فرمان‌های ساخت، ارسال و تحویل، هرکدام در یک تراکنش (`CommandRunner`) با قفل **فقط ردیف محموله** و
 Compare-and-Set؛ `GET /v1/shipments/{id}/tracking` و مجوزدهی گیرنده — گیرنده **یا** مالک انبار مبدأ، هرکدام با نقش‌های خودش، سومی `404`، و
 گیرنده فقط می‌خواند (`403` روی ارسال/تحویل)؛ سه رویداد `SHIPMENT_*` روی جریان STRICT `shipmentId` با قرارداد در `packages/contracts`؛ پرچم
 `requiresIdempotencyKey` برای Prefix `shipments` در Gateway. **دروازهٔ گام ۸** (`DELIVERED` پیش از `DISPATCHED` ⇒ `409`) و **دروازهٔ گام ۱۰**

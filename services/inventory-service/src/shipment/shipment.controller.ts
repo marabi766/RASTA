@@ -66,7 +66,8 @@ export class ShipmentController {
     summary: 'Track a shipment: its status and what happened to it, in order',
     description:
       'The tracking history — one event per status the shipment reached (CREATED, DISPATCHED, ' +
-      'DELIVERED), ordered by when it happened. ' +
+      'DELIVERED), in lifecycle order (the shipment version each step gave it), never by time; ' +
+      'the status and the history are read together, so they always agree. ' +
       SHIPMENT_READ_NOTE,
   })
   async tracking(@Param('id') id: string): Promise<TrackingView> {

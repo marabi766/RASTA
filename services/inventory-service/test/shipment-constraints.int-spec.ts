@@ -25,21 +25,26 @@ describe('the database keeps the shipment invariants', () => {
   const refusedWith = (sql: Promise<unknown>, pattern: RegExp) =>
     expect(sql).rejects.toThrow(pattern);
   const hash = (): string => randomBytes(32).toString('hex');
+  /** The shipment version each status gives it (`ck_shipment_version_matches_status`). */
+  const VERSION_OF: Record<string, number> = { CREATED: 1, DISPATCHED: 2, DELIVERED: 3 };
   const trackingEvent = (
     tx: Sql,
     organizationId: string,
     shipmentId: string,
     type: string,
     occurredAt = 'now()',
+    shipmentVersion = VERSION_OF[type] ?? 1,
   ) =>
     tx.$executeRawUnsafe(
-      `INSERT INTO "tracking_event" ("id", "organization_id", "shipment_id", "type", "occurred_at",
-                                     "recorded_at", "recorded_by", "correlation_id", "command_key_hash")
-       VALUES ($1, $2, $3, $4, ${occurredAt}, now(), 'USR-RAW', 'corr-raw', $5)`,
+      `INSERT INTO "tracking_event" ("id", "organization_id", "shipment_id", "type",
+                                     "shipment_version", "occurred_at", "recorded_at",
+                                     "recorded_by", "correlation_id", "command_key_hash")
+       VALUES ($1, $2, $3, $4, $5::integer, ${occurredAt}, now(), 'USR-RAW', 'corr-raw', $6)`,
       `TRK_${ulid()}`,
       organizationId,
       shipmentId,
       type,
+      shipmentVersion,
       hash(),
     );
   const insertShipment = (
@@ -193,13 +198,25 @@ describe('the database keeps the shipment invariants', () => {
     );
   });
 
-  it('records only the status the shipment has, never before an earlier event', async () => {
+  it('records only the status the shipment has, at the version it has, never before an earlier event', async () => {
     const a = org();
     const { shipmentId } = await seedShipment(api, a, org());
 
     // DELIVERED while the shipment is CREATED.
     await refusedWith(
       trackingEvent(raw, a, shipmentId, 'DELIVERED'),
+      /ck_tracking_event_matches_shipment/,
+    );
+    // The right status at a place in the lifecycle the shipment is not at: the history's order
+    // is the shipment's version, so it cannot be claimed.
+    await refusedWith(
+      raw.$transaction(async (tx) => {
+        await tx.$executeRaw`UPDATE "shipment"
+           SET "status" = 'DISPATCHED', "dispatched_at" = now(), "dispatched_by" = 'X',
+               "version" = 2, "updated_at" = now()
+         WHERE "id" = ${shipmentId}`;
+        await trackingEvent(tx, a, shipmentId, 'DISPATCHED', 'now()', 7);
+      }),
       /ck_tracking_event_matches_shipment/,
     );
     // A second CREATED: one per status.

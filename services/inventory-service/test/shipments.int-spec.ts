@@ -1,6 +1,8 @@
+import { randomBytes } from 'node:crypto';
 import { eventEnvelopeSchema, shipmentCreatedPayloadSchema } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import type { PrismaClient } from '../src/generated/prisma';
+import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { PrismaClient as Owner } from '../src/generated/prisma';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
 import request from 'supertest';
@@ -41,7 +43,7 @@ describe('shipments', () => {
   const trackingRows = async (shipmentId: string) =>
     raw.$queryRaw<{ type: string }[]>`
       SELECT "type" FROM "tracking_event" WHERE "shipment_id" = ${shipmentId}
-       ORDER BY "occurred_at", "id"`;
+       ORDER BY "shipment_version"`;
   const outboxOf = (organizationId: string) =>
     api.prisma.client.outboxMessage.findMany({
       where: { organizationId, aggregateType: 'Shipment' },
@@ -216,6 +218,107 @@ describe('shipments', () => {
       expect([...times].sort()).toEqual(times);
       expect(times[1]).toBe(dispatched.body.dispatchedAt);
       expect(times[2]).toBe(delivered.body.deliveredAt);
+    });
+
+    it('reads the history in lifecycle order when every step carries one instant — never by id', async () => {
+      // Equal instants are real: a delivery that waited on its dispatch takes the dispatch's
+      // instant. Ids are minted by a process clock, here in the opposite order of the steps, so
+      // an order by (time, id) would read this history backwards.
+      const a = org();
+      const owner = client(api, orgAdmin(a));
+      const warehouseId = (await owner.createWarehouse()).body.id as string;
+      const shipmentId = `SHP_${ulid()}`;
+      const [created, dispatched, delivered] = [ulid(), ulid(), ulid()]
+        .sort()
+        .reverse()
+        .map((id) => `TRK_${id}`);
+      const hash = (): string => randomBytes(32).toString('hex');
+      await raw.$transaction(async (tx) => {
+        // One transaction, so now() is one instant for all three steps.
+        const step = (id: string | undefined, type: string, version: number) => tx.$executeRaw`
+          INSERT INTO "tracking_event" ("id", "organization_id", "shipment_id", "type",
+                                        "shipment_version", "occurred_at", "recorded_at",
+                                        "recorded_by", "correlation_id", "command_key_hash")
+          VALUES (${id}, ${a}, ${shipmentId}, ${type}, ${version}::integer, now(), now(),
+                  'USR-RAW', 'corr-raw', ${hash()})`;
+        await tx.$executeRaw`
+          INSERT INTO "shipment" ("id", "organization_id", "origin_warehouse_id",
+                                  "consignee_organization_id", "status", "leg_count",
+                                  "command_key_hash", "created_at", "created_by",
+                                  "created_correlation_id", "updated_at", "version")
+          VALUES (${shipmentId}, ${a}, ${warehouseId}, ${a}, 'CREATED', 1, ${hash()}, now(),
+                  'USR-RAW', 'corr-raw', now(), 1)`;
+        await tx.$executeRaw`
+          INSERT INTO "shipment_leg" ("id", "organization_id", "shipment_id", "sequence",
+                                      "carrier_name", "created_at")
+          VALUES (${`SHL_${ulid()}`}, ${a}, ${shipmentId}, 1, 'Raw carrier', now())`;
+        await step(created, 'CREATED', 1);
+        await tx.$executeRaw`
+          UPDATE "shipment" SET "status" = 'DISPATCHED', "dispatched_at" = now(),
+                 "dispatched_by" = 'USR-RAW', "updated_at" = now(), "version" = 2
+           WHERE "id" = ${shipmentId}`;
+        await step(dispatched, 'DISPATCHED', 2);
+        await tx.$executeRaw`
+          UPDATE "shipment" SET "status" = 'DELIVERED', "delivered_at" = now(),
+                 "delivered_by" = 'USR-RAW', "updated_at" = now(), "version" = 3
+           WHERE "id" = ${shipmentId}`;
+        await step(delivered, 'DELIVERED', 3);
+      });
+
+      const tracking = (await owner.tracking(shipmentId)).body;
+      const events = tracking.events as { id: string; type: string; occurredAt: string }[];
+      expect(new Set(events.map((event) => event.occurredAt)).size).toBe(1);
+      expect(events.map((event) => [event.type, event.id])).toEqual([
+        ['CREATED', created],
+        ['DISPATCHED', dispatched],
+        ['DELIVERED', delivered],
+      ]);
+    });
+
+    it('answers the status and the history of one instant, even when a delivery commits between reads', async () => {
+      // The barrier: the first read of the shipment this tracking request makes returns, then a
+      // delivery commits, and only then does the request go on. Read in two statements, the
+      // answer would say DISPATCHED beside a DELIVERED event.
+      const a = org();
+      const owner = client(api, orgAdmin(a));
+      const { shipmentId } = await seedShipment(api, a, org());
+      expect((await owner.dispatch(shipmentId)).status).toBe(200);
+
+      const service = api.prisma as unknown as { client: ExtendedPrismaClient };
+      const real = service.client;
+      let deliveredBetween: number | undefined;
+      service.client = new Proxy(real, {
+        get(target, property) {
+          if (property === '$queryRaw') {
+            return async (query: TemplateStringsArray, ...values: unknown[]) => {
+              const rows: unknown = await target.$queryRaw(query, ...values);
+              if (deliveredBetween === undefined && query.join('').includes('FROM "shipment"')) {
+                deliveredBetween = (await owner.deliver(shipmentId)).status;
+              }
+              return rows;
+            };
+          }
+          const value: unknown = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      let tracking: { status: number; body: Record<string, unknown> };
+      try {
+        tracking = await owner.tracking(shipmentId);
+      } finally {
+        service.client = real;
+      }
+
+      expect(deliveredBetween).toBe(200);
+      expect(tracking.status).toBe(200);
+      const types = (tracking.body.events as { type: string }[]).map((event) => event.type);
+      expect({ status: tracking.body.status, types }).toEqual({
+        status: 'DISPATCHED',
+        types: ['CREATED', 'DISPATCHED'],
+      });
+      const after = (await owner.tracking(shipmentId)).body;
+      expect(after.status).toBe('DELIVERED');
+      expect((after.events as unknown[]).length).toBe(3);
     });
 
     it('refuses DELIVERED before DISPATCHED with 409 SHIPMENT_NOT_DISPATCHED (the step 8 gate)', async () => {
@@ -393,9 +496,9 @@ describe('shipments', () => {
                WHERE "id" = ${shipmentId}`;
             await tx.$executeRaw`
               INSERT INTO "tracking_event" ("id", "organization_id", "shipment_id", "type",
-                                            "occurred_at", "recorded_at", "recorded_by",
-                                            "correlation_id", "command_key_hash")
-              VALUES (${`TRK_${ulid()}`}, ${a}, ${shipmentId}, 'DISPATCHED',
+                                            "shipment_version", "occurred_at", "recorded_at",
+                                            "recorded_by", "correlation_id", "command_key_hash")
+              VALUES (${`TRK_${ulid()}`}, ${a}, ${shipmentId}, 'DISPATCHED', 2,
                       now() + interval '2 seconds', now() + interval '2 seconds', 'USR-HOLDER',
                       'corr-holder', ${'b'.repeat(64)})`;
           },
@@ -434,9 +537,18 @@ describe('shipments', () => {
       expect(rows.map((row) => row.partitionKey)).toEqual(Array(3).fill(shipmentId));
       expect(rows.map((row) => row.streamSeq)).toEqual([1n, 2n, 3n]);
       const tracked = (await owner.tracking(shipmentId)).body.events as { id: string }[];
+      const versions = await raw.$queryRaw<{ shipmentVersion: number }[]>`
+        SELECT "shipment_version" AS "shipmentVersion" FROM "tracking_event"
+         WHERE "shipment_id" = ${shipmentId} ORDER BY "shipment_version"`;
       rows.forEach((row, index) => {
         const envelope = eventEnvelopeSchema.parse(row.payload);
         expect(envelope).toMatchObject({ producer: 'inventory-service', tenantId: a });
+        // What a consumer orders and de-duplicates by until D-027 is closed (the contract):
+        // every shipment event carries its per-shipment sequence on the envelope and the header,
+        // and it is the event's `shipmentVersion` and its tracking event's place in the history.
+        expect(envelope).toMatchObject({ streamSeq: index + 1, streamKey: shipmentId });
+        expect(row.headers).toMatchObject({ 'x-stream-seq': String(index + 1) });
+        expect(versions[index]?.shipmentVersion).toBe(index + 1);
         expect(row).toMatchObject({ topic: 'rasta.inventory.v1', aggregateId: shipmentId });
         const payload = validateInventoryPayload(
           row.eventName as InventoryEventName,

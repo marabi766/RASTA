@@ -30,6 +30,8 @@ export interface TrackingEventRow {
   id: string;
   shipmentId: string;
   type: ShipmentStatus;
+  /** The shipment version this event records: its place in the lifecycle (1, 2, 3). */
+  shipmentVersion: number;
   occurredAt: Date;
   recordedAt: Date;
 }
@@ -55,8 +57,8 @@ const LEG_COLUMNS = Prisma.sql`
   "id", "sequence", "carrier_name" AS "carrierName", "carrier_reference" AS "carrierReference"`;
 
 const EVENT_COLUMNS = Prisma.sql`
-  "id", "shipment_id" AS "shipmentId", "type", "occurred_at" AS "occurredAt",
-  "recorded_at" AS "recordedAt"`;
+  "id", "shipment_id" AS "shipmentId", "type", "shipment_version" AS "shipmentVersion",
+  "occurred_at" AS "occurredAt", "recorded_at" AS "recordedAt"`;
 
 /**
  * The rows a reader may see, as one predicate that names the organization in each column it
@@ -139,7 +141,10 @@ export class ShipmentRepository {
     return rows[0] as ShipmentLegRow;
   }
 
-  /** Records the status the shipment has just reached — after it reached it. */
+  /**
+   * Records the status the shipment has just reached — after it reached it, with the version that
+   * gave it: the event's place in the history, which the database checks against the shipment.
+   */
   async insertTrackingEvent(
     tx: ExtendedPrismaClient,
     input: {
@@ -147,6 +152,7 @@ export class ShipmentRepository {
       organizationId: string;
       shipmentId: string;
       type: ShipmentStatus;
+      shipmentVersion: number;
       commandKeyHash: string;
       actor: string;
       correlationId: string;
@@ -155,11 +161,11 @@ export class ShipmentRepository {
   ): Promise<TrackingEventRow> {
     const rows = await tx.$queryRaw<TrackingEventRow[]>`
       INSERT INTO "tracking_event" ("id", "organization_id", "shipment_id", "type",
-                                    "occurred_at", "recorded_at", "recorded_by",
-                                    "correlation_id", "command_key_hash")
+                                    "shipment_version", "occurred_at", "recorded_at",
+                                    "recorded_by", "correlation_id", "command_key_hash")
       VALUES (${input.id}, ${input.organizationId}, ${input.shipmentId}, ${input.type},
-              ${input.at}, ${input.at}, ${input.actor}, ${input.correlationId},
-              ${input.commandKeyHash})
+              ${input.shipmentVersion}::integer, ${input.at}, ${input.at}, ${input.actor},
+              ${input.correlationId}, ${input.commandKeyHash})
       RETURNING ${EVENT_COLUMNS}`;
     return rows[0] as TrackingEventRow;
   }
@@ -251,13 +257,58 @@ export class ShipmentRepository {
     return legs;
   }
 
-  /** The tracking history of a shipment already found visible, through its owner, in order. */
-  async eventsOf(
-    shipment: Pick<ShipmentRow, 'organizationId' | 'id'>,
-  ): Promise<TrackingEventRow[]> {
-    return this.prisma.client.$queryRaw<TrackingEventRow[]>`
-      SELECT ${EVENT_COLUMNS} FROM "tracking_event"
-       WHERE "organization_id" = ${shipment.organizationId} AND "shipment_id" = ${shipment.id}
-       ORDER BY "occurred_at", "id"`;
+  /**
+   * One shipment the reader may see and its tracking history, in lifecycle order — **one
+   * statement**, so one snapshot: the status and the history are what a single instant held, never
+   * a status read before a move committed beside a history read after it. The history is read
+   * through the owner's `organization_id` of the shipment found.
+   */
+  async findTracked(
+    reader: Visibility,
+    id: string,
+  ): Promise<{ shipment: ShipmentRow; events: TrackingEventRow[] } | null> {
+    const visible = visibleTo(reader);
+    if (visible === null) return null;
+    const rows = await this.prisma.client.$queryRaw<TrackedRow[]>`
+      WITH "s" AS (SELECT ${COLUMNS} FROM "shipment" WHERE "id" = ${id} AND ${visible})
+      SELECT "s".*, "e"."id" AS "eventId", "e"."type" AS "eventType",
+             "e"."shipment_version" AS "eventShipmentVersion",
+             "e"."occurred_at" AS "eventOccurredAt", "e"."recorded_at" AS "eventRecordedAt"
+        FROM "s"
+        LEFT JOIN "tracking_event" "e"
+          ON "e"."organization_id" = "s"."organizationId" AND "e"."shipment_id" = "s"."id"
+       ORDER BY "e"."shipment_version"`;
+    const first = rows[0];
+    if (first === undefined) return null;
+    const {
+      eventId: _id,
+      eventType: _type,
+      eventShipmentVersion: _version,
+      eventOccurredAt: _occurredAt,
+      eventRecordedAt: _recordedAt,
+      ...shipment
+    } = first;
+    const events: TrackingEventRow[] = [];
+    for (const row of rows) {
+      if (row.eventId === null) continue;
+      events.push({
+        id: row.eventId,
+        shipmentId: row.id,
+        type: row.eventType as ShipmentStatus,
+        shipmentVersion: row.eventShipmentVersion as number,
+        occurredAt: row.eventOccurredAt as Date,
+        recordedAt: row.eventRecordedAt as Date,
+      });
+    }
+    return { shipment, events };
   }
 }
+
+/** A shipment beside one of its tracking events (all `null` for a shipment without any). */
+type TrackedRow = ShipmentRow & {
+  eventId: string | null;
+  eventType: string | null;
+  eventShipmentVersion: number | null;
+  eventOccurredAt: Date | null;
+  eventRecordedAt: Date | null;
+};

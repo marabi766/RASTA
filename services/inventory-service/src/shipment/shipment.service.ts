@@ -96,6 +96,7 @@ export class ShipmentService {
         organizationId: shipment.organizationId,
         shipmentId: shipment.id,
         type: 'CREATED',
+        shipmentVersion: shipment.version,
         commandKeyHash: command.keyHash,
         actor: acting.userId,
         correlationId,
@@ -175,6 +176,7 @@ export class ShipmentService {
         organizationId: moved.organizationId,
         shipmentId: moved.id,
         type: to,
+        shipmentVersion: moved.version,
         commandKeyHash: command.keyHash,
         actor: acting.userId,
         correlationId,
@@ -246,10 +248,15 @@ export class ShipmentService {
     return toShipmentView(row, legs.get(row.id) ?? []);
   }
 
-  /** `TrackShipment`: the shipment's status and its tracking history, in order. */
+  /**
+   * `TrackShipment`: the shipment's status and its tracking history, in lifecycle order, read
+   * together in one statement — so the status and the history always agree.
+   */
   async tracking(id: string): Promise<TrackingView> {
-    const row = await this.visible(id);
-    return toTrackingView(row, await this.shipments.eventsOf(row));
+    const reader = this.access.assertShipmentReader();
+    const tracked = await this.shipments.findTracked(reader, id);
+    if (!tracked) throw RastaError.notFound('Shipment', id);
+    return toTrackingView(tracked.shipment, tracked.events);
   }
 
   async list(query: ListShipmentsQuery): Promise<CursorPage<ShipmentView>> {

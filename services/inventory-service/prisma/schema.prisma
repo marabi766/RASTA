@@ -241,18 +241,21 @@ model ShipmentLeg {
 model TrackingEvent {
   id String @id
 
-  organizationId String   @map("organization_id")
-  shipmentId     String   @map("shipment_id")
+  organizationId  String   @map("organization_id")
+  shipmentId      String   @map("shipment_id")
   /// CREATED | DISPATCHED | DELIVERED (CHECK ck_tracking_event_type).
-  type           String
-  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(3)
-  recordedAt     DateTime @map("recorded_at") @db.Timestamptz(3)
-  recordedBy     String   @map("recorded_by")
-  correlationId  String   @map("correlation_id")
-  commandKeyHash String   @map("command_key_hash")
+  type            String
+  /// The shipment version this event records — its place in the lifecycle, the order the history
+  /// reads in (= the event's `shipmentVersion` and `streamSeq`; `tg_tracking_event_guard`).
+  shipmentVersion Int      @map("shipment_version")
+  occurredAt      DateTime @map("occurred_at") @db.Timestamptz(3)
+  recordedAt      DateTime @map("recorded_at") @db.Timestamptz(3)
+  recordedBy      String   @map("recorded_by")
+  correlationId   String   @map("correlation_id")
+  commandKeyHash  String   @map("command_key_hash")
 
   @@unique([organizationId, commandKeyHash], map: "ux_tracking_event_command")
-  @@index([organizationId, shipmentId, occurredAt, id], map: "ix_tracking_event_org_shipment")
+  @@unique([organizationId, shipmentId, shipmentVersion], map: "ux_tracking_event_sequence")
   @@map("tracking_event")
 }
 

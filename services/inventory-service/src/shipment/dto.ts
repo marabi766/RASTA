@@ -144,7 +144,9 @@ export const trackingViewSchema = z
     consigneeOrganizationId: z.string(),
     events: z
       .array(trackingEventViewSchema)
-      .describe('What happened to the shipment, in the order it happened.'),
+      .describe(
+        'What happened to the shipment, in lifecycle order: CREATED, then DISPATCHED, then DELIVERED.',
+      ),
   })
   .strict();
 export type TrackingView = z.infer<typeof trackingViewSchema>;
