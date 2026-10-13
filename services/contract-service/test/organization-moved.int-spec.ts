@@ -67,6 +67,13 @@ describe('a signing policy follows an organization move', () => {
 
   /** A policy written by `unionOrg` for `employer`, submitted and approved: ACTIVE. */
   async function activeUnionPolicy(unionOrg: string, employer: string): Promise<string> {
+    const id = await submittedUnionPolicy(unionOrg, employer);
+    await command(platform(), id, 'approve', { expectedVersion: 2 }).expect(200);
+    return id;
+  }
+
+  /** A policy written by `unionOrg` for `employer` and submitted: PENDING_PLATFORM_APPROVAL, version 2. */
+  async function submittedUnionPolicy(unionOrg: string, employer: string): Promise<string> {
     api.hierarchy.adopt(unionOrg, employer);
     const unionAdmin = person(unionOrg, ['UNION_ADMIN']);
     const written = await http()
@@ -89,7 +96,6 @@ describe('a signing policy follows an organization move', () => {
       })
       .expect(201);
     await command(unionAdmin, written.body.id, 'submit', { expectedVersion: 1 }).expect(200);
-    await command(platform(), written.body.id, 'approve', { expectedVersion: 2 }).expect(200);
     return written.body.id as string;
   }
 
@@ -497,7 +503,7 @@ describe('a signing policy follows an organization move', () => {
       expect(api.hierarchy.asked).toEqual([]);
     });
 
-    it('is asked under the policy slot’s lock: a retirement queued behind the signature waits for it, so the answer and the signature are one decision', async () => {
+    it('is asked under the policy slot’s lock: a retirement queued behind the signature waits for it, so the answer and the signature are one decision — and the retirement is dated after the signature', async () => {
       const union = newOrg();
       const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
       const policyId = await activeUnionPolicy(union, draft.employer);
@@ -512,6 +518,8 @@ describe('a signing policy follows an organization move', () => {
           }).then((res) => res),
         );
         await untilSessionsWaitOnALock(api.prisma, 1);
+        // The queued retirement's transaction start is now measurably before the signature's.
+        await new Promise((resolve) => setTimeout(resolve, 50));
         return original(scope, organizationId);
       };
       try {
@@ -521,9 +529,123 @@ describe('a signing policy follows an organization move', () => {
         api.hierarchy.isWithin = original;
       }
       // The signature recorded the policy it rested on; the retirement then took effect.
-      expect((await signaturesOf(draft.id))[0]).toMatchObject({ policyId, policyVersion: 1 });
+      const [signature] = await signaturesOf(draft.id);
+      expect(signature).toMatchObject({ policyId, policyVersion: 1 });
       expect((await retired!).status).toBe(200);
-      expect((await policyRow(policyId)).status).toBe('RETIRED');
+      const row = await policyRow(policyId);
+      expect(row.status).toBe('RETIRED');
+
+      // Dated under the lock it waited on — after the signature that held it, never at its own
+      // transaction's start (#248 follow-up) — and the event carries that one instant.
+      expect(row.retiredAt!.getTime()).toBeGreaterThanOrEqual(signature!.signedAt.getTime());
+      const announced = (await policyEventsOf(api.prisma, draft.employer)).filter(
+        (e) => e.eventName === 'APPROVAL_POLICY_RETIRED',
+      );
+      expect(announced).toHaveLength(1);
+      expect(announced[0]!.occurredAt).toBe(row.retiredAt!.toISOString());
+      expect(announced[0]!.payload).toMatchObject({ retiredAt: row.retiredAt!.toISOString() });
+    });
+
+    it('a replacement approved behind the signature is dated after it: the retirement it makes, the activation and both events, at one instant', async () => {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+      const replacementId = await submittedUnionPolicy(union, draft.employer);
+
+      const original = api.hierarchy.isWithin.bind(api.hierarchy);
+      let approved: Promise<request.Response> | undefined;
+      api.hierarchy.isWithin = async (scope: string, organizationId: string) => {
+        // The signature is asking (approval asks too, before its transaction: only once here).
+        if (!approved) {
+          approved = Promise.resolve(
+            command(platform(), replacementId, 'approve', { expectedVersion: 2 }).then(
+              (res) => res,
+            ),
+          );
+          await untilSessionsWaitOnALock(api.prisma, 1);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return original(scope, organizationId);
+      };
+      try {
+        const signed = await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN']));
+        expect(signed.status).toBe(200);
+      } finally {
+        api.hierarchy.isWithin = original;
+      }
+      const [signature] = await signaturesOf(draft.id);
+      expect(signature).toMatchObject({ policyId, policyVersion: 1 });
+      expect((await approved!).status).toBe(200);
+
+      const replaced = await policyRow(policyId);
+      const replacement = await policyRow(replacementId);
+      expect(replaced.status).toBe('RETIRED');
+      expect(replacement.status).toBe('ACTIVE');
+      expect(replaced.retiredAt!.getTime()).toBeGreaterThanOrEqual(signature!.signedAt.getTime());
+      expect(replacement.activatedAt!.toISOString()).toBe(replaced.retiredAt!.toISOString());
+      const at = replaced.retiredAt!.toISOString();
+      const events = (await policyEventsOf(api.prisma, draft.employer)).filter(
+        (e) =>
+          (e.eventName === 'APPROVAL_POLICY_RETIRED' && e.payload.policyId === policyId) ||
+          (e.eventName === 'APPROVAL_POLICY_ACTIVATED' && e.payload.policyId === replacementId),
+      );
+      expect(events.map((e) => [e.eventName, e.occurredAt])).toEqual([
+        ['APPROVAL_POLICY_RETIRED', at],
+        ['APPROVAL_POLICY_ACTIVATED', at],
+      ]);
+    });
+
+    it('a suspension queued behind a signature the move raced is dated after it, and so is the flag it raises on that signature (D-050)', async () => {
+      const union = newOrg();
+      const draft = await seedDraft(w, organizations, {}, { signingPolicy: false });
+      const policyId = await activeUnionPolicy(union, draft.employer);
+
+      const original = api.hierarchy.withinVersion.bind(api.hierarchy);
+      let swept: Promise<unknown> | undefined;
+      api.hierarchy.withinVersion = async (scope: string, organizationId: string) => {
+        // The signature has its answer — the tree before the move — and is still holding the slot.
+        const answer = await original(scope, organizationId);
+        if (!swept) {
+          // The move commits meanwhile; its re-check finds the union gone and queues behind it.
+          api.hierarchy.adopt(newOrg(), draft.employer);
+          const version = api.hierarchy.bump(draft.employer);
+          await consumer.handle(moved(draft.employer, new Date(), version));
+          swept = sweeper.runOnce();
+          await untilSessionsWaitOnALock(api.prisma, 1);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return answer;
+      };
+      try {
+        const signed = await sign(draft.id, person(draft.employer, ['ORGANIZATION_ADMIN']));
+        expect(signed.status).toBe(200);
+        await swept;
+      } finally {
+        api.hierarchy.withinVersion = original;
+      }
+      const [signature] = await signaturesOf(draft.id);
+      const row = await policyRow(policyId);
+      expect(row.status).toBe('SUSPENDED');
+      expect(row.suspensionReason).toMatch(/^MOVE_RECHECK: /);
+
+      const reviews = await runUnscoped('the suite reads the reviews', () =>
+        w.prisma.client.signatureAuthorityReview.findMany({ where: { contractId: draft.id } }),
+      );
+      expect(reviews).toHaveLength(1);
+      // The suspension, the flag and both events: one instant, after the signature it flags.
+      const at = row.suspendedAt!.toISOString();
+      expect(row.suspendedAt!.getTime()).toBeGreaterThanOrEqual(signature!.signedAt.getTime());
+      expect(reviews[0]!.flaggedAt.toISOString()).toBe(at);
+      const flagged = await eventsOf(
+        api.prisma,
+        draft.employer,
+        'CONTRACT_SIGNATURE_AUTHORITY_FLAGGED',
+      );
+      expect(flagged.map((e) => e.occurredAt)).toEqual([at]);
+      const suspended = (await policyEventsOf(api.prisma, draft.employer)).filter(
+        (e) => e.eventName === 'APPROVAL_POLICY_SUSPENDED',
+      );
+      expect(suspended.map((e) => [e.occurredAt, e.payload.suspendedAt])).toEqual([[at, at]]);
     });
   });
 

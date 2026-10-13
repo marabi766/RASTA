@@ -6,7 +6,7 @@ import { SERVICE_NAME, type ContractEnv } from '../config/env';
 import { ContractRepository } from '../contract/contract.repository';
 import { EventPublisher } from '../events/publisher';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import { transactionNow } from '../shared/clock';
+import { databaseClock, transactionNow } from '../shared/clock';
 import { ENV } from '../tokens';
 import { UNION_ROLE } from './policy.access';
 import {
@@ -264,7 +264,6 @@ export class PolicySuspensionService {
     currentVersion: number | null,
   ): Promise<boolean> {
     if (cause.reason === 'SIGNING_RECHECK') return false;
-    const at = await transactionNow(tx);
     const found = await this.repository.findPolicy(tx, policyId);
     if (!found) return false;
     await this.repository.lockPolicySlot(
@@ -274,7 +273,8 @@ export class PolicySuspensionService {
     );
     const policy = await this.repository.findPolicy(tx, policyId);
     if (!policy || policy.authorRole !== UNION_ROLE) return false;
-    await this.flagRaced(tx, policy, cause, at, currentVersion);
+    // Under the lock (`suspendIn`): a flag is never dated before the signature it flags.
+    await this.flagRaced(tx, policy, cause, await databaseClock(tx), currentVersion);
     return false;
   }
 
@@ -283,8 +283,6 @@ export class PolicySuspensionService {
     policyId: string,
     cause: SuspensionCause,
   ): Promise<boolean> {
-    const at = await transactionNow(tx);
-
     // Organization and workflow key never change, so this read names the slot; everything else is
     // re-read under the lock, because approve, retire or a replay may have run since.
     const found = await this.repository.findPolicy(tx, policyId);
@@ -301,12 +299,20 @@ export class PolicySuspensionService {
     if (policy.status === 'SUSPENDED' || policy.status === 'RETIRED') {
       // Out of force already — a signature attempt found it stranded first, or it was replaced —
       // but a signature that raced this very move may rest on it all the same (D-050).
-      if (cause.reason !== 'SIGNING_RECHECK') await this.flagRaced(tx, policy, cause, at);
+      if (cause.reason !== 'SIGNING_RECHECK') {
+        await this.flagRaced(tx, policy, cause, await databaseClock(tx));
+      }
       return false;
     }
     if (policy.status !== 'ACTIVE' && policy.status !== 'PENDING_PLATFORM_APPROVAL') return false;
     const from = policy.status as PolicyStateName;
     assertPolicyTransition(policy.id, from, 'SUSPENDED');
+
+    // One instant for the suspension, its event and the flags: read now, under the slot's lock
+    // and with the state checked, not at the transaction's start — a signature that held the lock
+    // first committed before this, and neither the suspension nor a flag on that signature may be
+    // dated before it (#248 follow-up). The flags' D-050 window is the signatures' own deadline.
+    const at = await databaseClock(tx);
 
     const matched = await this.repository.transitionPolicy(tx, {
       organizationId: policy.organizationId,

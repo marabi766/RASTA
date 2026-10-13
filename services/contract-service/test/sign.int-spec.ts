@@ -279,6 +279,36 @@ describe('POST /v1/contracts/{id}/sign', () => {
       expect((await rowOf(id)).status).toBe('SIGNED');
     });
 
+    it('a contractor whose role was revoked since they signed is refused as GET refuses them — not as a new signature without the role: the signature stays, nothing is written (#248 follow-up)', async () => {
+      const { id, employer, contractor } = await draft();
+      const claims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      await sign(id, person(contractor, ['CONTRACTOR'], claims)).expect(200);
+      const events = (await eventsOf(w.prisma, employer)).length;
+
+      // The same person, the CONTRACTOR role revoked: only DRIVER is left.
+      const revoked = person(contractor, ['DRIVER'], claims);
+      const read = await get(id, revoked).expect(403);
+      const again = await sign(id, revoked, {}, key()).expect(403);
+      // GET's refusal, word for word — not the signing role's — and not the contract in any form.
+      expect(bare(again.body)).toEqual(bare(read.body));
+      expect(again.body).not.toHaveProperty('id');
+      expect(JSON.stringify(again.body)).not.toMatch(/amount|DRAFT/i);
+
+      const signatures = await signaturesOf(id);
+      expect(signatures).toHaveLength(1);
+      expect(signatures[0]).toMatchObject({ side: 'CONTRACTOR', signedBy: claims.rastaUserId });
+      // No event at all — no refusal recorded for a signer signing again.
+      expect(await eventsOf(w.prisma, employer)).toHaveLength(events);
+      expect((await rowOf(id)).status).toBe('DRAFT');
+
+      // Another person without the role, on the side already signed, is a new signature: refused
+      // for the role — not 409, which would tell them the side has signed.
+      const other = await sign(id, person(contractor, ['DRIVER'])).expect(403);
+      expect(other.body.code).toBe('INSUFFICIENT_ROLE');
+      expect(bare(other.body)).not.toEqual(bare(read.body));
+      expect(await signaturesOf(id)).toHaveLength(1);
+    });
+
     it('the same person is the same on another token of theirs: one subject, two user ids', async () => {
       const { id, employer } = await draft();
       const sub = `sub-${ulid()}`;

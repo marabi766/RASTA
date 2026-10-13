@@ -217,11 +217,11 @@ export class ContractService {
     const side = sideOf(row, acting.organizationId);
     if (!side) throw RastaError.notFound('Contract', id);
 
-    // The contractor's side is a fixed role of its own organization and is judged now. The
-    // employer's is the `contract.signature` policy of its organization, which can change under
-    // a concurrent approval or retirement: it is read and judged under the contract's lock, in
-    // the transaction that records the signature (`signLocked`).
-    const contractorRole = side === 'CONTRACTOR' ? this.access.contractorSigningRole() : undefined;
+    // The authority of either side is judged under the contract's lock, in the transaction that
+    // records the signature (`signLocked`), and only for a NEW signature: the employer's is the
+    // `contract.signature` policy of its organization, which can change under a concurrent approval
+    // or retirement; the contractor's, a fixed role of its own organization. A signer signing again
+    // is answered as `get` answers them, whatever their roles now.
     if (this.access.isMemberOfBothParties(row)) {
       throw this.refused(
         'sign',
@@ -244,7 +244,7 @@ export class ContractService {
       return await this.prisma.transaction(
         async (tx) => {
           if (fence) await fence.hold(tx);
-          const view = await this.signLocked(tx, row, side, contractorRole, person, dto);
+          const view = await this.signLocked(tx, row, side, person, dto);
           return fence ? fence.complete(tx, view) : view;
         },
         // The hierarchy is asked inside it (`authorityOf`), under its own deadline.
@@ -388,7 +388,6 @@ export class ContractService {
     tx: ExtendedPrismaClient,
     found: Contract,
     side: ContractSideName,
-    contractorRole: string | undefined,
     person: { userId: string; issuer: string | null; subject: string | null },
     dto: SignContractDto,
   ): Promise<ContractView> {
@@ -403,21 +402,26 @@ export class ContractService {
       contract.id,
     );
 
-    // The same person on the same side again: nothing to do, whatever the state has become.
+    // The same person on the same side again: nothing to do, whatever the state has become — and
+    // whatever their roles have become. The answer is the contract as it stands, so it is given
+    // only to a caller who may read it now — the check `get` makes, with its refusal: a signer whose
+    // roles were revoked since learns nothing by signing again, and is not refused as a new
+    // signature would be. The signature stays; nothing is written.
     const mine = signatures.find((signature) => signature.side === side);
+    const again = mine ? compareActors(person, signerOf(mine)) : null;
+    if (again === 'SAME') {
+      this.assertMayRead(contract);
+      contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'unchanged' });
+      return toContractView(contract, signatures.map(factOf));
+    }
+
+    // A new signature from here. The contractor's authority is its fixed role, judged first: a
+    // caller without it is told nothing of the signatures (the employer's is judged below).
+    const contractorRole = side === 'CONTRACTOR' ? this.access.contractorSigningRole() : undefined;
     if (mine) {
-      const comparison = compareActors(person, signerOf(mine));
-      if (comparison === 'SAME') {
-        // The answer is the contract as it stands, so it is given only to a caller who may read it
-        // now — the check `get` makes, with its refusal: a signer whose roles were revoked since
-        // learns nothing by signing again. The signature stays; nothing is written.
-        this.assertMayRead(contract);
-        contractCommandsTotal.inc({ service: SERVICE_NAME, command: 'sign', outcome: 'unchanged' });
-        return toContractView(contract, signatures.map(factOf));
-      }
       throw this.refused(
         'sign',
-        comparison === 'DISTINCT'
+        again === 'DISTINCT'
           ? refusal(
               ERROR_CODES.ALREADY_EXISTS,
               'This side of the contract has already signed',
