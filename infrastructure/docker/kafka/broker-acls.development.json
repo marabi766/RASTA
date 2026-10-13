@@ -10,6 +10,7 @@
     "economic-service",
     "fleet-service",
     "identity-service",
+    "inventory-service",
     "itest-observer",
     "kafka-exporter",
     "kafka-ui",
@@ -242,6 +243,20 @@
       "principal": "audit-service",
       "resourceType": "TOPIC",
       "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "audit-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -589,6 +604,13 @@
       "operation": "WRITE"
     },
     {
+      "principal": "inventory-service",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
       "principal": "itest-observer",
       "resourceType": "GROUP",
       "resourceName": "itest-observer.",
@@ -767,6 +789,20 @@
       "principal": "itest-observer",
       "resourceType": "TOPIC",
       "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "itest-observer",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },
@@ -1404,6 +1440,27 @@
       "principal": "ops-replay",
       "resourceType": "TOPIC",
       "resourceName": "rasta.insurance.v1",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "READ"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1.retry",
+      "patternType": "LITERAL",
+      "operation": "WRITE"
+    },
+    {
+      "principal": "ops-replay",
+      "resourceType": "TOPIC",
+      "resourceName": "rasta.inventory.v1",
       "patternType": "LITERAL",
       "operation": "READ"
     },

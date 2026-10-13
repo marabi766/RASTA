@@ -370,6 +370,15 @@ marketplace (گام ۵) پیاده شده‌اند؛ موتور محاسبه (گ
 > امروز: ADR-041 § ۲ و ADR-056 § ۷ هر دو ثبت کرده‌اند که این مصرف‌کننده هنوز
 > فعال نشده — گام `RESERVE_STOCK` در Saga سفارش `DEFERRED` می‌ماند.
 
+> **وضعیت پیاده‌سازی (COM-006 PR نخست، 2026-10-13).** ساخته شد: `warehouse` · `stock_item` · `stock_movement` ·
+> `stock_reservation` و فرمان‌های `CreateWarehouse` · `ReceiveStock` · `AdjustStock` (تعدیل، و «صدور مستقیم بی رزرو» ADR-056 § ۳) ·
+> `ReserveStock` · `ReleaseReservation` · `IssueStock`، پرس‌وجوهای `GetStockLevel` · `ListMovements`، و رویدادهای
+> `STOCK_RECEIVED` · `STOCK_RESERVED` · `STOCK_RELEASED` · `STOCK_ISSUED` به‌علاوهٔ `WAREHOUSE_CREATED` و `STOCK_ADJUSTED`
+> (`docs/events/README.md`). مسیرها: `POST/GET /v1/warehouses` · `GET /v1/stock` · `GET /v1/stock/{id}` ·
+> `GET /v1/stock/movements` · `POST /v1/stock/receipts` · `POST /v1/stock/adjustments` · `POST/GET /v1/stock/reservations` ·
+> `POST /v1/stock/reservations/{id}/release|issue` (`docs/api/inventory-service.openapi.json`). **هنوز نه:** محموله و
+> رهگیری (PR دوم)، `LOW_STOCK_DETECTED` (Q-106)، `FindNearestWarehouse`، و هیچ Consumerی. پرسش‌های باز Q-102 تا Q-109.
+
 ---
 
 ## ۴٫۱۲ construction-service — «رستا عمران»

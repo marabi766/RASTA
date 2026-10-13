@@ -147,8 +147,12 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'rfqs', service: 'procurement' },
   { prefix: 'purchase-orders', service: 'procurement', requiresIdempotencyKey: true },
   { prefix: 'suppliers', service: 'supplier' },
-  { prefix: 'warehouses', service: 'inventory' },
-  { prefix: 'stock', service: 'inventory' },
+  // Every unsafe method of inventory-service creates a warehouse or moves stock — an
+  // irreversible effect a retried POST must not repeat (ADR-056 plan step 6). The key is
+  // required here (unsafe methods only) and again by the service, which also keeps a key's
+  // effect once per stock item for good. `shipments` gains the flag with its routes (PR 2).
+  { prefix: 'warehouses', service: 'inventory', requiresIdempotencyKey: true },
+  { prefix: 'stock', service: 'inventory', requiresIdempotencyKey: true },
   { prefix: 'shipments', service: 'inventory' },
 
   // ---- civil works -------------------------------------------------------

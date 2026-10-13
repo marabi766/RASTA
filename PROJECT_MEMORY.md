@@ -2739,6 +2739,32 @@ Point، نزولی‌نشدنی مگر با پیکربندی)، پایان با 
 
 ---
 
+## ۷-ز. inventory-service — ورودی کامل حافظه
+
+> **وضعیت (2026-10-13):** **SKELETON + STOCK CORE** — COM-006 PR 1 (شاخهٔ `feat/inventory-service-skeleton`، PR #246). پورت **۳۱۰۹**،
+> پایگاه داده `rasta_inventory`، Topic ‏`rasta.inventory.v1`. تصمیم: [ADR-056](docs/adr/ADR-056-inventory-forward-logistics.md) (`Accepted`)
+> و برنامه‌اش (§ «وضعیت پیاده‌سازی و انحراف‌ها» با چهار انحراف تأییدشده). پرسش‌های باز **Q-102..Q-109**، همه با پاسخ موقت پیکربندی‌پذیر یا محدودکننده.
+
+**آنچه ساخته شد:** `warehouse` (مالک = `organization_id`، هر نوع سازمان؛ موقعیت PostGIS)، `stock_item` (`on_hand`، `reserved`،
+`available` Generated، سه `CHECK` ADR-056 § ۳)، `stock_movement` (دفتر فقط‌الحاقی)، `stock_reservation` (`ACTIVE → CONSUMED|RELEASED|EXPIRED`)،
+انبار `Idempotency-Key` خود سرویس و Outbox؛ فرمان‌های `CreateWarehouse`، `ReceiveStock`، `AdjustStock`، `ReserveStock` (چندسطری، همه یا هیچ،
+یک انبار)، `ReleaseReservation`، `IssueStock` (تمام رزرو، Q-107)؛ خواندن مانده، دفتر و رزروها؛ شش رویداد (`WAREHOUSE_CREATED`، `STOCK_*`،
+`productId` به‌جای `sku`)؛ Gateway: `requiresIdempotencyKey` روی `warehouses` و `stock`؛ Dockerfile، CI (دروازهٔ پوشش ۸۵٪).
+
+**هم‌روندی:** هر فرمان یک تراکنش: نگه‌داشتن ادعای کلید ← `lock_timeout` (`INVENTORY_LOCK_TIMEOUT_MS`) ← `SELECT … FOR UPDATE` کالاها **یکی‌یکی به ترتیب صعودی id**
+← انقضای رزروهای سررسیده ← نوشتن مانده، حرکت، رزرو و Outbox ← ذخیرهٔ پاسخ. **آشتی ساختاری در پایگاه داده:** هر تغییر مانده `version` کالا را دقیقاً یکی جلو
+می‌برد؛ حرکت همان موقعیت (`item_version`) باید مانده را بگوید و زنجیره را با دلتاهایش ادامه دهد (Trigger قبل از درج)؛ Constraint Trigger تعویقی مانده‌ای را
+که موقعیتش حرکت ندارد در Commit رد می‌کند؛ حرکت رزرو با وضعیت و مقدار رزرو جور است. پس مانده = جمع دفتر، و رزروشده = جمع رزروهای `ACTIVE`.
+پشتوانهٔ کلید: `command_key_hash` یکتا به‌ازای کالا. Redis نیست (ADR-056 § ۴).
+
+**شواهد محلی (نه CI):** ۲۲۸ تست (۱۵۹ واحد + ۶۹ یکپارچگی روی PostgreSQL واقعی)، پوشش ترکیبی ۹۳٫۹٪ گزاره / ۸۷٫۸٪ شاخه / ۹۱٫۸٪ تابع / ۹۶٫۶٪ خط؛
+۵۰ رزرو موازی روی ۱۰ واحد ⇒ دقیقاً ۱۰ موفق؛ ۲۰۰ دور ترتیب وارونه ⇒ صفر Deadlock؛ طوفان ترکیبی آشتی می‌شود؛ منفی‌های ۱، ۲ و ۵ ADR-056 § ۵.
+
+**ساخته نشده (صادقانه):** محموله و رهگیری (PR 2)، پورت‌های یکپارچگی `Unavailable*` و دارندهٔ غیرمالک (PR 3، Q-104)، `LOW_STOCK_DETECTED` (Q-106)،
+`FindNearestWarehouse`، E2E و لایهٔ محصولی گام ۱۲. **هیچ Consumerی نیست** — سفارش marketplace هنوز موجودی را رزرو نمی‌کند (ADR-041 § ۲). `COM-006` `READY` می‌ماند.
+
+---
+
 ## ۸. Domain Ownership
 
 | دامنه                                   | سرویس مالک             | یادداشت                                                 |

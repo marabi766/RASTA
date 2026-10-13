@@ -9,6 +9,7 @@ document-service
 economic-service
 fleet-service
 identity-service
+inventory-service
 itest-observer
 kafka-exporter
 kafka-ui
