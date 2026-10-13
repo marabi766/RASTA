@@ -166,37 +166,15 @@ export class SettlementController {
   @AllowService('marketplace-service', 'contract-service')
   @ApiOperation({
     summary: 'Settlements this organization paid, or was paid',
-    description: 'Set `incoming=true` for the payee view. Cursor-paginated.',
+    description:
+      'Set `incoming=true` for the payee view. Cursor-paginated: `cursor` is the id of the last ' +
+      'settlement of the previous page of the same view. One that is not a row of that view — ' +
+      'unknown, another organization’s, or from the other view — is refused with 400 ' +
+      'VALIDATION_FAILED, identically in every case.',
   })
   async list(@Query(zodPipe(listSettlementsQuerySchema)) query: ListSettlementsQuery) {
     assertNotAuditor();
-    const organizationId = getOrganizationId();
-
-    const page = {
-      orderBy: [{ settledAt: 'desc' as const }, { id: 'desc' as const }],
-      take: query.limit,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-    };
-
-    // `settlement.organization_id` is the **payer**, so the tenant guard alone
-    // answers only "what did I pay". The payee view has to cross it — ANDing
-    // the guard's filter with a payee filter would ask for a settlement whose
-    // payer and payee are the same organization, which
-    // `ck_settlement_distinct_parties` makes impossible, so it would always
-    // return nothing.
-    //
-    // The crossing is narrowed to exactly the caller's own id on the payee
-    // column, so it can only ever return settlements the caller was party to.
-    const rows = query.incoming
-      ? await runUnscoped(
-          'a payee reads settlements where it is the counterparty, narrowed to its own id',
-          () =>
-            this.prisma.client.settlement.findMany({
-              where: { payeeOrganizationId: organizationId },
-              ...page,
-            }),
-        )
-      : await this.prisma.client.settlement.findMany({ where: { organizationId }, ...page });
+    const rows = await this.settlements.list(getOrganizationId(), query);
 
     return {
       items: rows.map((row) => ({

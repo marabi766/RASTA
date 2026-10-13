@@ -1,6 +1,9 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
+import { PrismaClient } from '../src/generated/prisma';
+import type { PrismaService } from '../src/prisma/prisma.service';
+import { TenderCloseRepository } from '../src/tender/tender-close.repository';
 import {
   asAdmin,
   asBidder,
@@ -9,6 +12,7 @@ import {
   loadStanding,
   newOrganizationId,
   outboxFor,
+  ownerDatabaseUrl,
   publishedForBids,
   qualify,
   untilASessionWaitsOnALock,
@@ -496,31 +500,112 @@ describe('tender close sweeper', () => {
   });
 
   describe('the queries the sweeper runs', () => {
-    /** The plan of `statement` with sequential scans discouraged, as the planner would choose it on a large table. */
-    const planOf = (statement: string) =>
-      runUnscoped('the suite reads a query plan', () =>
-        w.prisma.transaction(async (tx) => {
-          await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
-          const rows = await tx.$queryRawUnsafe<Record<string, string>[]>(`EXPLAIN ${statement}`);
-          return rows.map((r) => r['QUERY PLAN']).join('\n');
-        }),
-      );
+    interface Statement {
+      sql: string;
+      params: unknown[];
+    }
 
-    const claimScan = (predicate: string) =>
-      `SELECT "id" FROM "tender" WHERE ${predicate} AND "bid_closing_at" <= clock_timestamp()
-        ORDER BY "bid_closing_at", "id" LIMIT 20`;
+    /** The statement the repository sends for `call`, recorded instead of run: the plans below are of its own text. */
+    const statementOf = async (
+      call: (repository: TenderCloseRepository) => Promise<unknown>,
+    ): Promise<Statement> => {
+      let sent: Statement | undefined;
+      const recorder = {
+        client: {
+          $queryRawUnsafe: (sql: string, ...params: unknown[]) => {
+            sent = { sql, params };
+            return Promise.resolve([]);
+          },
+        },
+      };
+      await call(new TenderCloseRepository(recorder as unknown as PrismaService));
+      if (!sent) throw new Error('the repository sent no statement');
+      return sent;
+    };
+
+    /**
+     * The plans of `statements` where `ix_tender_close_due` is the only way into "tender" the planner may take
+     * without a penalty: in one owner transaction, always rolled back, every other index over "status" or
+     * "bid_closing_at" is dropped and sequential and bitmap scans are disabled. Asking only which plan is
+     * cheapest, as `enable_seqscan = off` alone did, is a cost race the partial index can lose on a small table
+     * with stale statistics (a bitmap scan of `ix_tender_org_status` plus a sort did, in CI); here a statement
+     * the index can serve always gets it, and one it cannot serve must take a disabled scan instead.
+     */
+    const plansWhereOnlyThePartialIndexServes = async (
+      statements: Statement[],
+    ): Promise<string[]> => {
+      const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const rollback = new Error('the suite puts the dropped indexes back');
+      const plans: string[] = [];
+      try {
+        await expect(
+          owner.$transaction(
+            async (tx) => {
+              await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '10s'`);
+              const competitors = await tx.$queryRawUnsafe<{ name: string }[]>(
+                `SELECT DISTINCT c."relname" AS "name"
+                   FROM pg_index i
+                   JOIN pg_class c ON c."oid" = i."indexrelid"
+                   JOIN pg_attribute a ON a."attrelid" = i."indrelid" AND a."attnum" = ANY (i."indkey")
+                  WHERE i."indrelid" = '"tender"'::regclass
+                    AND c."relname" <> 'ix_tender_close_due'
+                    AND a."attname" IN ('status', 'bid_closing_at')`,
+              );
+              // An index a constraint needs cannot be dropped: the suite fails here, loudly, rather than race it.
+              for (const { name } of competitors) {
+                await tx.$executeRawUnsafe(`DROP INDEX "${name}"`);
+              }
+              await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
+              await tx.$executeRawUnsafe('SET LOCAL enable_bitmapscan = off');
+              for (const { sql, params } of statements) {
+                const rows = await tx.$queryRawUnsafe<Record<string, string>[]>(
+                  `EXPLAIN ${sql}`,
+                  ...params,
+                );
+                plans.push(rows.map((r) => r['QUERY PLAN']).join('\n'));
+              }
+              throw rollback;
+            },
+            { timeout: 30_000 },
+          ),
+        ).rejects.toBe(rollback);
+      } finally {
+        await owner.$disconnect();
+      }
+      return plans;
+    };
+
+    const ENUM_FORM = `"status" = 'PUBLISHED'`;
+    const CAST_FORM = `"status"::text = 'PUBLISHED'`;
+
+    /** The same statement with the status predicate spelled as a text comparison, and nothing else changed. */
+    const castForm = ({ sql, params }: Statement): Statement => ({
+      sql: sql.replaceAll(ENUM_FORM, CAST_FORM),
+      params,
+    });
 
     it('use the partial index on PUBLISHED tenders, which the text-cast form cannot', async () => {
-      expect(await planOf(claimScan(`"status" = 'PUBLISHED'`))).toContain('ix_tender_close_due');
-      expect(
-        await planOf(
-          `SELECT count(*) FROM "tender" WHERE "status" = 'PUBLISHED' AND "bid_closing_at" <= clock_timestamp()`,
-        ),
-      ).toContain('ix_tender_close_due');
-      // Why the repository never writes `"status"::text = 'PUBLISHED'`.
-      expect(await planOf(claimScan(`"status"::text = 'PUBLISHED'`))).not.toContain(
-        'ix_tender_close_due',
-      );
+      const claim = await statementOf((r) => r.claimDue(20, 60, 'PLAN'));
+      const backlog = await statementOf((r) => r.backlog());
+
+      const [claimPlan, backlogPlan, castClaimPlan, castBacklogPlan] =
+        await plansWhereOnlyThePartialIndexServes([
+          claim,
+          backlog,
+          castForm(claim),
+          castForm(backlog),
+        ]);
+
+      expect(claimPlan).toContain('ix_tender_close_due');
+      expect(backlogPlan).toContain('ix_tender_close_due');
+      // Why the repository never writes `"status"::text = 'PUBLISHED'`: in the same transaction, the very same
+      // statements with that spelling alone changed pass the index over for a disabled sequential scan.
+      expect(claim.sql).toContain(ENUM_FORM);
+      expect(backlog.sql).toContain(ENUM_FORM);
+      for (const plan of [castClaimPlan, castBacklogPlan]) {
+        expect(plan).not.toContain('ix_tender_close_due');
+        expect(plan).toContain('Seq Scan on tender');
+      }
     });
   });
 

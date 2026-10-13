@@ -29,7 +29,10 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
  *   held and the authority confirmed, and reused for every row and event of that signature: two
  *   signatures are ordered by the contract's lock, and a transaction that started first but took
  *   the lock second must not record an instant before the other's (contract audit F4). The one
- *   reading is still one instant for the row and its events (D-5).
+ *   reading is still one instant for the row and its events (D-5);
+ * - the instant a policy is put in force, retired, replaced or suspended, and a signature flagged
+ *   for review (D-050): read once after the policy slot's lock is held and the state checked, for
+ *   the same reason — a signature that held the slot first is never dated after them.
  *
  * Never stamped on a row beside `transactionNow`'s instant as if they were one reading (D-5). The
  * D-050 commit deadline stays on the transaction's start: it bounds when the transaction can commit.

@@ -1,9 +1,15 @@
 import { SETTLEMENT_READ_ROLES } from '@/lib/settlement-fields';
-import { fetchCurrentUser } from '@/server/identity';
-import type { WebSession } from '@/server/session';
 import type { SidebarItem } from '@/ui';
 
-import { PORTAL_NAV, SETTLEMENTS_NAV_ITEM } from './nav';
+import { portalNavFor } from './nav';
+
+/**
+ * Whether the roles admit `GET /v1/settlements`, so the Settlements link is
+ * worth drawing. `null` is "roles could not be read".
+ */
+export function canReadSettlements(roles: readonly string[] | null): boolean {
+  return roles !== null && SETTLEMENT_READ_ROLES.some((role) => roles.includes(role));
+}
 
 /**
  * The navigation a person is offered, given the roles they hold.
@@ -13,19 +19,10 @@ import { PORTAL_NAV, SETTLEMENTS_NAV_ITEM } from './nav';
  * and the service decide on every request. When the roles cannot be read the
  * gated entry is left out: the route still answers to anyone who types it,
  * and a link that leads to a refusal is the worse mistake.
+ *
+ * This is the settlements half only; `PortalSidebar` (through
+ * `server/portal-nav.ts`) adds the Projects entry, which has its own setting.
  */
 export function navForRoles(roles: readonly string[] | null): readonly SidebarItem[] {
-  const mayReadSettlements =
-    roles !== null && SETTLEMENT_READ_ROLES.some((role) => roles.includes(role));
-  if (!mayReadSettlements) return PORTAL_NAV;
-
-  // After the wallet, the other money screen.
-  const at = PORTAL_NAV.findIndex((item) => item.href === '/wallet');
-  const index = at === -1 ? PORTAL_NAV.length : at + 1;
-  return [...PORTAL_NAV.slice(0, index), SETTLEMENTS_NAV_ITEM, ...PORTAL_NAV.slice(index)];
-}
-
-export async function portalNavFor(session: WebSession): Promise<readonly SidebarItem[]> {
-  const result = await fetchCurrentUser(session);
-  return navForRoles(result.kind === 'USER' ? result.user.effectiveRoles : null);
+  return portalNavFor({ canReadProjects: false, canReadSettlements: canReadSettlements(roles) });
 }

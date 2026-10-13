@@ -15,6 +15,7 @@ import {
 import { assertSufficient } from '../wallet/balances';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
+import { after, resolveCursor } from '../shared/cursor';
 import {
   financialTransactionDuration,
   paymentIntentsTotal,
@@ -1335,12 +1336,20 @@ export class PaymentService {
     return intent;
   }
 
-  list(limit: number, cursor?: string) {
+  /** This organization's intents, newest first. The cursor is resolved in the
+   *  same scope as the page, so it cannot probe another tenant's intents
+   *  (shared/cursor.ts). */
+  async list(limit: number, cursor?: string) {
+    const scope = { organizationId: getOrganizationId() };
+    const boundary = await resolveCursor(cursor, (id) =>
+      this.prisma.client.paymentIntent
+        .findFirst({ where: { ...scope, id }, select: { id: true, createdAt: true } })
+        .then((row) => (row ? { at: row.createdAt, id: row.id } : null)),
+    );
     return this.prisma.client.paymentIntent.findMany({
-      where: { organizationId: getOrganizationId() },
+      where: boundary ? { ...scope, ...after('createdAt', boundary) } : scope,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
   }
 }

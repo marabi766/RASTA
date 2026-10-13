@@ -1,9 +1,9 @@
 import { redirect } from 'next/navigation';
 
-import { AppShell, Button, ButtonLink, PageHeader, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchSettlement } from '@/server/settlements';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SettlementDetailScreen } from '../SettlementDetailScreen';
 
@@ -19,7 +19,7 @@ export default async function SettlementPage({ params }: { params: Promise<{ id:
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/settlements/${id}`)}`);
 
-  const [result, nav] = await Promise.all([fetchSettlement(session, id), portalNavFor(session)]);
+  const result = await fetchSettlement(session, id);
 
   return (
     <AppShell
@@ -33,7 +33,7 @@ export default async function SettlementPage({ params }: { params: Promise<{ id:
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={nav} currentHref="/settlements" />}
+      sidebar={<PortalSidebar session={session} currentHref="/settlements" />}
     >
       <PageHeader title="جزئیات تسویه" description="مبلغ‌ها و طرف‌های این تسویه؛ فقط خواندنی." />
       <div className="mt-2">

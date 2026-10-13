@@ -520,6 +520,65 @@ describe('amendments of a signed contract', () => {
       expect(await refusedEvents(c.employer)).toEqual([]);
     });
 
+    it('a contractor whose role was revoked since they signed is refused as GET refuses them — not as a new signature without the role: nothing is audited or written (#248 follow-up)', async () => {
+      const c = await signed();
+      const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;
+      const claims = { sub: `sub-${ulid()}`, rastaUserId: `USR-${ulid().slice(-8)}` };
+      await signAmendment(
+        api,
+        c.id,
+        proposed.id,
+        person(c.contractor, ['CONTRACTOR'], claims),
+      ).expect(200);
+      const events = (await eventsOf(w.prisma, c.employer)).length;
+
+      // The same person, the CONTRACTOR role revoked: GET's refusal, word for word, whatever it is
+      // — 403 with no reading role left, and 404 with only an employer's reading role, which reads
+      // nothing in the contractor's organization (a new signature without the role would be 403).
+      for (const [roles, status] of [
+        [['DRIVER'], 403],
+        [['ORGANIZATION_ADMIN'], 404],
+      ] as const) {
+        const revoked = person(c.contractor, [...roles], claims);
+        const read = await get(c.id, proposed.id, revoked).expect(status);
+        const again = await signAmendment(
+          api,
+          c.id,
+          proposed.id,
+          revoked,
+          {},
+          idemKey(`amd-sign-contractor-revoked-${status}`),
+        ).expect(status);
+        expect(bare(again.body)).toEqual(bare(read.body));
+        expect(again.body).not.toHaveProperty('id');
+        expect(JSON.stringify(again.body)).not.toMatch(/delta|amount|PROPOSED/i);
+      }
+
+      const signatures = await amendmentSignatures(w, proposed.id);
+      expect(signatures).toHaveLength(1);
+      expect(signatures[0]).toMatchObject({ side: 'CONTRACTOR', signedBy: claims.rastaUserId });
+      const rows = await amendmentRows(w, c.id);
+      expect(rows.map((a) => a.status)).toEqual(['PROPOSED']);
+      expect(await eventsOf(w.prisma, c.employer)).toHaveLength(events);
+      // A signer signing again is not a refusal of authority: no CONTRACT_AUTHORITY_REFUSED.
+      expect(await refusedEvents(c.employer)).toEqual([]);
+
+      // Another person without the role, on the side already signed, is a new signature: refused
+      // for the role — told nothing of the signature there — and that refusal is audited.
+      const other = await signAmendment(
+        api,
+        c.id,
+        proposed.id,
+        person(c.contractor, ['ORGANIZATION_ADMIN']),
+      ).expect(403);
+      expect(other.body.code).toBe('INSUFFICIENT_ROLE');
+      const refused = await refusedEvents(c.employer);
+      expect(refused.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+        ['SIGN_AMENDMENT', 'CONTRACTOR', 'ROLE_NOT_PERMITTED'],
+      ]);
+      expect(await amendmentSignatures(w, proposed.id)).toHaveLength(1);
+    });
+
     it('another person for a side that has signed is 409 SIDE_ALREADY_SIGNED and writes nothing', async () => {
       const c = await signed();
       const proposed = (await propose(api, c.id, c.employerToken).expect(201)).body;

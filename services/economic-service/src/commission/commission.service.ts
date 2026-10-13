@@ -8,6 +8,7 @@ import { computeCommission, type CommissionDecision, type CommissionRuleView } f
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
+import { after, resolveCursor } from '../shared/cursor';
 import { commissionApplicationsTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import type { Prisma, TransactionType } from '../generated/prisma';
@@ -327,14 +328,21 @@ export class CommissionService {
    * Commission charged to the caller's organization.
    *
    * `GET /v1/commissions` in docs/06 § 6.10. Scoped by the tenant guard, so
-   * one organization can never read another's charges.
+   * one organization can never read another's charges — including through
+   * the cursor, which is resolved in the same scope as the page
+   * (shared/cursor.ts).
    */
-  listCommissions(limit: number, cursor?: string) {
+  async listCommissions(limit: number, cursor?: string) {
+    const scope = { organizationId: getOrganizationId() };
+    const boundary = await resolveCursor(cursor, (id) =>
+      this.prisma.client.commission
+        .findFirst({ where: { ...scope, id }, select: { id: true, appliedAt: true } })
+        .then((row) => (row ? { at: row.appliedAt, id: row.id } : null)),
+    );
     return this.prisma.client.commission.findMany({
-      where: { organizationId: getOrganizationId() },
+      where: boundary ? { ...scope, ...after('appliedAt', boundary) } : scope,
       orderBy: [{ appliedAt: 'desc' }, { id: 'desc' }],
       take: limit,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
   }
 }

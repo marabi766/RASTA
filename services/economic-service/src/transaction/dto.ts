@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, currencySchema, organizationIdSchema } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
+import { cursorQueryParameter } from '../shared/cursor';
 
 /**
  * Request and response shapes for transactions.
@@ -96,7 +97,7 @@ export const listTransactionsQuerySchema = z
      * read the word "false".
      */
     includeIncoming: queryBoolean(false),
-    cursor: z.string().optional(),
+    cursor: cursorQueryParameter,
     limit: z.coerce.number().int().min(1).max(100).default(25),
   })
   .strict();

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import type { WebSession } from './session';
 
 /**
@@ -36,7 +37,7 @@ const assetSchema = z.object({
   manufacturer: z.string().nullable().default(null),
   model: z.string().nullable().default(null),
   manufactureYear: z.number().int().nullable().default(null),
-  commissionedAt: z.string().nullable().default(null),
+  commissionedAt: renderableDate.nullable().default(null),
   /**
    * What an edit is made against (`expectedVersion`). Absent from a service
    * that predates it, and then the edit form is not offered: an edit with no
@@ -63,7 +64,7 @@ const complianceSchema = z.object({
     .object({
       policyNumber: z.string(),
       insurerName: z.string(),
-      validTo: z.string(),
+      validTo: renderableDate,
       daysUntilExpiry: z.number().int(),
     })
     .nullable()
@@ -72,7 +73,7 @@ const complianceSchema = z.object({
     .object({
       certificateNo: z.string().nullable().default(null),
       centerName: z.string().nullable().default(null),
-      validTo: z.string(),
+      validTo: renderableDate,
       result: z.string(),
       daysUntilExpiry: z.number().int(),
     })
@@ -87,7 +88,7 @@ const timelineEntrySchema = z.object({
   description: z.string().nullable().default(null),
   /** Minor units as a string — a rial total does not survive a JSON number. */
   amountMinor: z.string().nullable().default(null),
-  occurredAt: z.string(),
+  occurredAt: renderableDate,
 });
 
 export type TimelineEntry = z.infer<typeof timelineEntrySchema>;
@@ -101,8 +102,8 @@ export const assetDocumentSchema = z.object({
   documentId: z.string(),
   kind: z.string(),
   title: z.string(),
-  issuedAt: z.string().nullable().default(null),
-  expiresAt: z.string().nullable().default(null),
+  issuedAt: renderableDate.nullable().default(null),
+  expiresAt: renderableDate.nullable().default(null),
 });
 
 export type AssetDocumentSummary = z.infer<typeof assetDocumentSchema>;
