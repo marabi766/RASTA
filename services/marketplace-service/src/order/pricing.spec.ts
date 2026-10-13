@@ -97,6 +97,36 @@ describe('an offer that is not for sale does not exist', () => {
       expect.objectContaining({ code: 'NOT_FOUND' }),
     );
   });
+
+  it.each([
+    ['never loaded', catalogue(), [{ offerId: 'token=secret123', quantity: 1 }]],
+    [
+      'not published',
+      catalogue(offer({ id: 'token=secret123', status: 'DRAFT' })),
+      [{ offerId: 'token=secret123', quantity: 1 }],
+    ],
+    [
+      'repeated',
+      catalogue(),
+      [
+        { offerId: 'token=secret123', quantity: 1 },
+        { offerId: 'token=secret123', quantity: 1 },
+      ],
+    ],
+  ])(
+    'an offer id %s is the client’s text: not in the refusal’s context (S-09)',
+    (_, offers, lines) => {
+      let error: unknown;
+      try {
+        priceOrder(lines, offers);
+      } catch (thrown) {
+        error = thrown;
+      }
+      expect(isRastaError(error)).toBe(true);
+      const { message, internalContext } = error as { message: string; internalContext?: unknown };
+      expect(JSON.stringify([message, internalContext ?? null])).not.toContain('secret123');
+    },
+  );
 });
 
 describe('the request has to match what the catalogue offers', () => {

@@ -166,7 +166,8 @@ export class CriteriaService {
             let templateId: string | null = null;
             if (dto.templateId !== undefined) {
               const template = await this.repository.findTemplate(dto.templateId, tx);
-              if (!template) throw RastaError.notFound('CriteriaTemplate', dto.templateId);
+              // The unrecognised id is the client's text: not logged (S-09).
+              if (!template) throw RastaError.notFound('CriteriaTemplate');
               this.assertOwnTemplate(template, organizationId);
               // Re-checked on the way out: a template is data, and data is not trusted
               // just because this service once wrote it.

@@ -1203,7 +1203,8 @@ export class AssetService {
       found.organizationId === organizationId &&
       found.status === 'REGISTERED' &&
       (found.ownerResourceType !== 'Asset' || found.ownerResourceId === assetId);
-    if (!theirs) throw RastaError.notFound('Document', documentId);
+    // `documentId` is the client's text and may name nothing: not logged (S-09).
+    if (!theirs) throw RastaError.notFound('Document');
   }
 
   /**

@@ -190,7 +190,8 @@ export class CatalogueService {
       this.prisma.client.product.findUnique({ where: { id: dto.productId } }),
     );
     if (!product || product.status !== 'ACTIVE') {
-      throw RastaError.notFound('Product', dto.productId);
+      // The id is the client's text and may name nothing: not logged (S-09).
+      throw RastaError.notFound('Product');
     }
 
     const offerId = newId(ID_PREFIX.offer);

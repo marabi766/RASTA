@@ -95,9 +95,10 @@ export function assertDeclarationAllowed(
   const declared = declaredMime.trim().toLowerCase();
 
   if (!(policy.allowed as readonly string[]).includes(declared)) {
+    // Not the declared type itself: one that is not on the list is whatever
+    // the client typed, and is not logged (S-09).
     throw RastaError.businessRule('This content type is not accepted for this document class', {
       documentClass,
-      declaredMime: declared,
       allowed: policy.allowed,
     });
   }
