@@ -95,6 +95,15 @@ class ErrorPathModule implements NestModule {
   }
 }
 
+type Send = (url: string) => request.Test;
+
+function respondJson(status: number, body: unknown): (res: ServerResponse) => void {
+  return (res) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(body));
+  };
+}
+
 /** An upstream error envelope whose `path` still carries the query. */
 function upstreamEnvelope(status: number, code: string): (res: ServerResponse) => void {
   return (res) => {
@@ -169,6 +178,21 @@ describe('gateway error path carries no query (S-09)', () => {
     expectNoSecret(response.body);
   });
 
+  it('a method spelt with a hyphen (`M-SEARCH`): Nest’s 404 is written again, no query', async () => {
+    // supertest's typings name only the common methods; Node's parser knows this one.
+    const mSearch = (request(app.getHttpServer()) as unknown as Record<string, Send>)['m-search'];
+    const response = await mSearch!('/nowhere?access_token=secret123');
+
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({
+      code: 'NOT_FOUND',
+      message: 'Cannot M-SEARCH /nowhere',
+      path: '/nowhere',
+    });
+    expect(logged[0]).toMatchObject({ payload: { method: 'M-SEARCH', path: '/nowhere' } });
+    expect(JSON.stringify([response.body, logged])).not.toContain('secret123');
+  });
+
   it.each([
     [400, 'VALIDATION_FAILED'],
     [404, 'NOT_FOUND'],
@@ -180,6 +204,99 @@ describe('gateway error path carries no query (S-09)', () => {
 
     expect(response.status).toBe(status);
     expect(response.body).toMatchObject({ code, path: '/v1/registration-requests' });
+    expectNoSecret(response.body);
+  });
+
+  it.each([400, 404, 409, 503])(
+    'an upstream %s envelope: only the envelope’s own fields travel — no `url`, no nested `error.path`',
+    async (status) => {
+      upstreamRespond = respondJson(status, {
+        code: 'SOMETHING',
+        message: 'Refused',
+        details: [{ path: 'cursor', message: 'Invalid', echo: `/v1/x${QUERY}` }],
+        correlationId: 'corr-upstream',
+        traceId: 'trace-upstream',
+        timestamp: '2026-10-13T00:00:00.000Z',
+        path: `/v1/registration-requests${QUERY}`,
+        url: `/v1/registration-requests${QUERY}`,
+        error: { path: `/v1/registration-requests${QUERY}` },
+        stack: `at handler (${SECRET})`,
+      });
+
+      const response = await request(app.getHttpServer()).get(`/v1/registration-requests${QUERY}`);
+
+      expect(response.status).toBe(status);
+      expect(response.body).toEqual({
+        code: 'SOMETHING',
+        message: 'Refused',
+        details: [{ path: 'cursor', message: 'Invalid' }],
+        correlationId: 'corr-upstream',
+        traceId: 'trace-upstream',
+        timestamp: '2026-10-13T00:00:00.000Z',
+        path: '/v1/registration-requests',
+      });
+      expectNoSecret(response.body);
+    },
+  );
+
+  it('an upstream’s route-not-found `message` that quotes the query is written again', async () => {
+    upstreamRespond = respondJson(404, {
+      code: 'NOT_FOUND',
+      message: `Cannot GET /v1/registration-requests${QUERY}`,
+      correlationId: 'corr-upstream',
+      timestamp: '2026-10-13T00:00:00.000Z',
+    });
+
+    const response = await request(app.getHttpServer()).get(`/v1/registration-requests${QUERY}`);
+
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({
+      code: 'NOT_FOUND',
+      message: 'Cannot GET /v1/registration-requests',
+    });
+    expectNoSecret(response.body);
+  });
+
+  it.each([
+    ['HTML', 'text/html', `<p>Cannot GET /v1/registration-requests${QUERY}</p>`],
+    ['plain text', 'text/plain', `not found: /v1/registration-requests${QUERY}`],
+    ['truncated JSON', 'application/json', `{"code":"NOT_FOUND","path":"/v1/x${QUERY}`],
+    [
+      'JSON of another shape',
+      'application/json',
+      JSON.stringify({ error: { path: `/v1/x${QUERY}` }, url: `/v1/x${QUERY}` }),
+    ],
+    ['an empty body', 'application/json', ''],
+  ])('an upstream 4xx with %s: a fixed envelope, nothing of the body', async (_, type, text) => {
+    upstreamRespond = (res) => {
+      res.writeHead(404, { 'content-type': type });
+      res.end(text);
+    };
+
+    const response = await request(app.getHttpServer()).get(`/v1/registration-requests${QUERY}`);
+
+    expect(response.status).toBe(404);
+    expect(response.headers['content-type']).toMatch(/^application\/json/);
+    expect(response.body).toEqual({
+      code: 'NOT_FOUND',
+      message: 'The request was refused',
+      correlationId: expect.any(String),
+      timestamp: expect.any(String),
+      path: '/v1/registration-requests',
+    });
+    expectNoSecret(response.body);
+  });
+
+  it('a 4xx status with no code of its own keeps its status and a generic code', async () => {
+    upstreamRespond = (res) => {
+      res.writeHead(405, { 'content-type': 'text/html' });
+      res.end(`<p>${SECRET}</p>`);
+    };
+
+    const response = await request(app.getHttpServer()).get(`/v1/registration-requests${QUERY}`);
+
+    expect(response.status).toBe(405);
+    expect(response.body).toMatchObject({ code: 'MALFORMED_REQUEST' });
     expectNoSecret(response.body);
   });
 

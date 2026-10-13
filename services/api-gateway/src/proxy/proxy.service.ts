@@ -1,5 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { RastaError, getContext, requestPath, type InternalTokenService } from '@rasta/nest-common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
+import {
+  RastaError,
+  getContext,
+  httpStatusToCode,
+  requestPath,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
 import { serviceUrl, type ServiceName, type ServiceUrls } from '../config/routes';
 
@@ -160,7 +166,7 @@ export class ProxyService {
         // schema accepting a body says nothing about what else the body held:
         // a `stack` or an internal field beside a valid envelope would reach
         // the caller if the original object were forwarded.
-        const envelope = platformErrorEnvelope(text);
+        const envelope = platformErrorEnvelope(response.status, text, request);
         if (envelope) {
           return {
             status: response.status,
@@ -180,11 +186,18 @@ export class ProxyService {
         throw new UpstreamMalformedError(request.service, response.status);
       }
 
+      if (response.status >= 400) {
+        return {
+          status: response.status,
+          headers: this.responseHeaders(response),
+          body: this.relayedClientError(request, response, text),
+        };
+      }
+
       return {
         status: response.status,
         headers: this.responseHeaders(response),
-        body:
-          text.length > 0 ? clientErrorPathOnly(response.status, this.parseJson(text)) : undefined,
+        body: text.length > 0 ? this.parseJson(text) : undefined,
       };
     } catch (error) {
       // Not recorded twice: a 5xx already counted when its status arrived. A
@@ -352,6 +365,38 @@ export class ProxyService {
     return JSON.stringify(body ?? {});
   }
 
+  /**
+   * What the caller receives for an upstream 4xx: the platform error envelope,
+   * rebuilt from its allow-listed fields — never the body as it came.
+   *
+   * The query is the caller's data — a cursor, a search term, a token pasted
+   * into a link — and the gateway forwarded it, so what it hands back does not
+   * rest on every service's filter having kept it out (S-09). A field beside
+   * the envelope's own (`url`, a nested `error.path`) is dropped; `path` is
+   * reduced to the path; a route-not-found text is written again from the
+   * request. A body that is not an envelope at all — HTML, plain text, JSON of
+   * another shape, nothing — is replaced by a fixed one; like a malformed 5xx,
+   * its shape is logged and its content never is.
+   */
+  private relayedClientError(request: ProxyRequest, response: Response, text: string): ApiError {
+    const envelope = platformErrorEnvelope(response.status, text, request);
+    if (envelope) return envelope;
+
+    this.logger.warn(
+      `${request.service} answered ${response.status} without a platform error body ` +
+        `(content-type ${response.headers.get('content-type') ?? 'none'}, ${text.length} chars)`,
+    );
+    const context = getContext();
+    return {
+      code: httpStatusToCode(response.status),
+      message: UPSTREAM_REFUSED,
+      correlationId: context.correlationId,
+      ...(context.traceId ? { traceId: context.traceId } : {}),
+      timestamp: new Date().toISOString(),
+      ...(context.path ? { path: requestPath(context.path) } : {}),
+    };
+  }
+
   private parseJson(text: string): unknown {
     try {
       return JSON.parse(text);
@@ -379,9 +424,15 @@ class UpstreamMalformedError extends Error {
  *
  * Rebuilt field by field rather than trusting the schema's output: which keys
  * reach a caller is a security property, so it is written down here, not
- * inherited from however the schema happens to treat unknown keys.
+ * inherited from however the schema happens to treat unknown keys. `path` is
+ * the path alone and a route-not-found `message` is the request's own
+ * (see {@link relayedMessage}).
  */
-function platformErrorEnvelope(text: string): ApiError | null {
+function platformErrorEnvelope(
+  status: number,
+  text: string,
+  request: ProxyRequest,
+): ApiError | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -394,7 +445,7 @@ function platformErrorEnvelope(text: string): ApiError | null {
   const { code, message, details, correlationId, traceId, timestamp, path } = result.data;
   return {
     code,
-    message,
+    message: relayedMessage(status, message, request),
     ...(details
       ? {
           details: details.map((detail) => ({
@@ -411,16 +462,21 @@ function platformErrorEnvelope(text: string): ApiError | null {
   };
 }
 
+/** What a caller is told when an upstream refused it without a platform error body. */
+const UPSTREAM_REFUSED = 'The request was refused';
+
+/** How Nest's route-not-found text begins: `Cannot <method> <request target>`. */
+const ROUTE_NOT_FOUND_PREFIX = 'Cannot ';
+
 /**
- * An upstream's 4xx platform error envelope with its `path` reduced to the
- * path alone; any other body exactly as it came.
- *
- * Every service's exception filter already writes `path` without the query.
- * What the gateway hands its caller does not rest on that (S-09): the query is
- * the caller's data — a cursor, a search term — and the gateway forwarded it.
+ * An upstream envelope's `message`, except a route-not-found text: that is
+ * written again as `Cannot <method> <path>` from the forwarded request, so the
+ * query the upstream may have quoted back — an older filter, another framework
+ * — does not travel. Nothing of the upstream's wording is kept for it.
  */
-function clientErrorPathOnly(status: number, body: unknown): unknown {
-  if (status < 400 || !apiErrorSchema.safeParse(body).success) return body;
-  const { path } = body as ApiError;
-  return path === undefined ? body : { ...(body as ApiError), path: requestPath(path) };
+function relayedMessage(status: number, message: string, request: ProxyRequest): string {
+  if (status !== HttpStatus.NOT_FOUND || !message.startsWith(ROUTE_NOT_FOUND_PREFIX)) {
+    return message;
+  }
+  return `${ROUTE_NOT_FOUND_PREFIX}${request.method.toUpperCase()} ${requestPath(request.path)}`;
 }

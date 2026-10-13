@@ -272,9 +272,14 @@ not be read»)؛ متن Parser که بایت‌های کلاینت را نقل �
 **`path` فقط مسیر است.** `path` پاکت خطا و `path` خط Log همان خطا مسیر درخواست‌اند **بی Query و بی Fragment**
 (`/v1/x?cursor=…` ← `/v1/x`)؛ مقدار Query دادهٔ کلاینت است (Cursor، عبارت جست‌وجو) و S-09 بازتابش را در پیام خطا و Log
 نمی‌پذیرد. `RequestContextMiddleware` همین را در زمینهٔ درخواست ثبت می‌کند (`requestPath`) و `AllExceptionsFilter` دوباره
-اعمالش می‌کند. پاسخ 404 خود Nest برای مسیری که Route ندارد همان `Cannot GET <path>` می‌ماند — کلاینت‌ها 404 مسیر را از
-404 رکورد با همین متن جدا می‌کنند — اما بی Query. Gateway `path` پاکت خطای Upstream (4xx و 5xx) را نیز به همین شکل کوتاه
-می‌کند. مسیریابی و خود Query دست نمی‌خورند: Query بی‌تغییر به سرویس مالک می‌رسد.
+اعمالش می‌کند. پاسخ 404 خود Nest برای مسیری که Route ندارد همان شکل `Cannot <METHOD> <path>` را دارد — کلاینت‌ها 404 مسیر
+را از 404 رکورد با همین متن جدا می‌کنند — اما متن Nest نگه داشته نمی‌شود: Filter آن را از Method و `requestPath` خود درخواست
+از نو می‌سازد، پس Query با هر شکل Method (`M-SEARCH`) یا Target نمی‌ماند. Gateway خطای 4xx و 5xx Upstream را **بازسازی**
+می‌کند، نه عبور: فقط میدان‌های پاکت پلتفرم (`code`، `message`، `details[].{path,message,code}`، `correlationId`، `traceId`،
+`timestamp`، `path`) می‌روند و هر میدان دیگر (`url`، `error.path`، `stack`) می‌افتد؛ `path` کوتاه می‌شود و متن 404 مسیر از
+Method و مسیر درخواست Forwardشده از نو نوشته می‌شود. بدنهٔ 4xxی که پاکت پلتفرم نیست (HTML، متن، JSON ناقص یا شکل دیگر، خالی)
+با پاکتی ثابت جایگزین می‌شود («The request was refused»، `code` از Status) و فقط شکلش (Status، Content-Type، طول) Log
+می‌شود. مسیریابی و خود Query دست نمی‌خورند: Query بی‌تغییر به سرویس مالک می‌رسد.
 
 **دلیل بستهٔ امتناع در `details`.** امتناعی که دلیلش یکی از فهرستی بسته است، آن دلیل را در `details[].code` می‌آورد.
 `code` سطح بالا (`FORBIDDEN`، `CONFLICT`، `BUSINESS_RULE_VIOLATION` …) و `message` همان می‌مانند. کلاینت اول روی `code` و سپس روی `details[].code`
