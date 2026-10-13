@@ -1,6 +1,6 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -26,11 +26,14 @@ import { newPrisma, ownerDatabaseUrl } from './helpers';
  * `timestamp(3)`, which every reader then took for UTC. In `timestamptz(3)` it
  * stores the instant, whatever the session's zone.
  *
- * Everything runs in a throwaway schema built by applying the real migrations
- * through `psql --file`, as the database's owner, and is dropped at the end.
+ * Everything runs in throwaway schemas built by applying the real migrations
+ * through `psql --file` — or through `prisma migrate deploy`, where the deploy's
+ * failure and recovery are what is tested — as the database's owner, and is
+ * dropped at the end.
  */
 
-const MIGRATIONS = join(__dirname, '..', 'prisma', 'migrations');
+const SERVICE = join(__dirname, '..');
+const MIGRATIONS = join(SERVICE, 'prisma', 'migrations');
 const CONVERSION = '20261012120000_document_instants_timestamptz';
 const CHAIN = readdirSync(MIGRATIONS)
   .filter((name) => /^\d{14}_/.test(name))
@@ -117,15 +120,19 @@ const DOC_A_EXPECTED = {
 describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session now stores them right`, () => {
   jest.setTimeout(120_000);
   const schema = `tz_${ulid().toLowerCase()}`;
+  /** Where the conversion is deployed by Prisma itself, failures and all. */
+  const deploySchema = `${schema}_deploy`;
   const rawOwnerUrl = process.env.DATABASE_URL_DOCUMENT_MIGRATOR;
 
-  /** A url for the scratch schema; UTC unless a zone is named. */
-  const urlFor = (zone?: string): string => {
+  /** A url for `inSchema`; UTC unless a zone is named. */
+  const urlIn = (inSchema: string, zone?: string): string => {
     const url = new URL(zone ? rawOwnerUrl! : ownerDatabaseUrl());
-    url.searchParams.set('schema', schema);
+    url.searchParams.set('schema', inSchema);
     if (zone) url.searchParams.set('options', `-c TimeZone=${zone}`);
     return url.toString();
   };
+  /** A url for the scratch schema; UTC unless a zone is named. */
+  const urlFor = (zone?: string): string => urlIn(schema, zone);
 
   /**
    * psql as the owner, in `inSchema` and `zone`. The password travels in
@@ -199,16 +206,17 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
     await utc?.onModuleDestroy();
     await tehran?.onModuleDestroy();
     psql(['-c', `DROP SCHEMA IF EXISTS "${schema}" CASCADE`], 'UTC', 'public');
+    psql(['-c', `DROP SCHEMA IF EXISTS "${deploySchema}" CASCADE`], 'UTC', 'public');
   });
 
   /** Every instant of every seeded row, as epoch milliseconds, keyed `table.id.column`. */
-  const instants = async (): Promise<Record<string, string | null>> => {
+  const instants = async (db = utc): Promise<Record<string, string | null>> => {
     const out: Record<string, string | null> = {};
     for (const [table, columns] of Object.entries(INSTANTS)) {
       const select = columns
         .map((c) => `(round(extract(epoch FROM "${c}") * 1000))::bigint::text AS "${c}"`)
         .join(', ');
-      const rows = await utc.client.$queryRawUnsafe<Record<string, string | null>[]>(
+      const rows = await db.client.$queryRawUnsafe<Record<string, string | null>[]>(
         `SELECT id, ${select} FROM "${table}" ORDER BY id`,
       );
       for (const row of rows) {
@@ -218,8 +226,8 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
     return out;
   };
 
-  const types = async (): Promise<string[]> => {
-    const rows = await utc.client.$queryRawUnsafe<{ t: string }[]>(
+  const types = async (db = utc): Promise<string[]> => {
+    const rows = await db.client.$queryRawUnsafe<{ t: string }[]>(
       `SELECT table_name || '.' || column_name || ' ' || data_type || '(' || datetime_precision || ') '
               || coalesce(column_default, '-') AS t
          FROM information_schema.columns
@@ -396,32 +404,156 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
     expect(iso(await docA())).toEqual(DOC_A_EXPECTED);
   });
 
-  it('fails closed, changing nothing, when a transaction holds the table past lock_timeout', async () => {
-    // Whatever state the test above left: roll the conversion back if it is applied.
-    if ((await types())[0]?.includes('with time zone')) down();
-    await reconnect();
-    const before = await instants();
+  /**
+   * The Prisma CLI through `scripts/prisma.mjs`, exactly as `pnpm db:migrate`
+   * runs it, on the deploy schema as the owner. The owner's URL — a credential
+   * — goes in the child's environment, never on its command line. Resolves,
+   * never rejects, so a failure's output can be asserted on.
+   */
+  const prismaCli = (
+    args: string[],
+    statementTimeout = '',
+  ): Promise<{ ok: boolean; output: string; seconds: number }> => {
+    const url = new URL(rawOwnerUrl!);
+    url.searchParams.set('schema', deploySchema);
+    const started = Date.now();
+    return new Promise((resolve) => {
+      execFile(
+        process.execPath,
+        [join(SERVICE, '..', '..', 'scripts', 'prisma.mjs'), ...args],
+        {
+          cwd: SERVICE,
+          env: {
+            ...process.env,
+            DATABASE_URL_DOCUMENT_MIGRATOR: url.toString(),
+            RASTA_MIGRATION_STATEMENT_TIMEOUT: statementTimeout,
+            PATH: [join(SERVICE, 'node_modules', '.bin'), process.env.PATH].join(delimiter),
+          },
+        },
+        (error, stdout, stderr) =>
+          resolve({
+            ok: !error,
+            output: `${stdout}${stderr}`,
+            seconds: (Date.now() - started) / 1000,
+          }),
+      );
+    });
+  };
+  const deploy = (statementTimeout = '') => prismaCli(['migrate', 'deploy'], statementTimeout);
 
-    // Another session holds a lock that conflicts with ACCESS EXCLUSIVE.
-    await tehran.client.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe(`LOCK TABLE document IN ROW EXCLUSIVE MODE`);
-        const started = Date.now();
-        expect(up).toThrow(/lock timeout/);
-        // Gave up at lock_timeout rather than queueing behind the transaction.
-        expect(Date.now() - started).toBeLessThan(15_000);
-      },
-      { timeout: 60_000 },
-    );
+  /** `fn` while another session holds a lock on `document` that conflicts with ACCESS EXCLUSIVE. */
+  const whileDocumentLocked = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const holder = new PrismaService(urlIn(deploySchema));
+    try {
+      return await holder.client.$transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe(`LOCK TABLE document IN ROW EXCLUSIVE MODE`);
+          return fn();
+        },
+        { timeout: 120_000 },
+      );
+    } finally {
+      await holder.onModuleDestroy();
+    }
+  };
 
-    expect((await types()).every((t) => t.includes('timestamp without time zone(3)'))).toBe(true);
-    expect(await instants()).toEqual(before);
-    expect(
-      psql([
+  /** The conversion's ledger rows, oldest first: `finished|rolled back`. */
+  const ledger = () =>
+    psql(
+      [
         '-c',
-        `SELECT count(*) FROM "_prisma_migrations" WHERE migration_name = '${CONVERSION}'`,
-      ]),
-    ).toBe('0');
+        `SELECT (finished_at IS NOT NULL) || '|' || (rolled_back_at IS NOT NULL)
+           FROM "_prisma_migrations" WHERE migration_name = '${CONVERSION}' ORDER BY started_at`,
+      ],
+      'UTC',
+      deploySchema,
+    ).split('\n');
+
+  it('a real deploy that times out changes nothing, refuses to deploy (P3009) until resolved, then applies', async () => {
+    // The state a deploy of this conversion meets: the chain before it, by
+    // `prisma migrate deploy` (then the conversion rolled back), and rows.
+    psql(['-c', `CREATE SCHEMA "${deploySchema}"`], 'UTC', 'public');
+    const built = await deploy();
+    expect(built.output).toContain(CONVERSION);
+    expect(built.ok).toBe(true);
+    psql(
+      ['--single-transaction', '--file', join(MIGRATIONS, CONVERSION, 'down.sql')],
+      'UTC',
+      deploySchema,
+    );
+    psql(['-c', SEED], 'UTC', deploySchema);
+    expect(ledger()).toEqual(['']);
+
+    // Closed and reopened around the conversion, as the runbook's stopped service is.
+    const db = new PrismaService(urlIn(deploySchema));
+    const unconverted = async () => {
+      const now = await types(db);
+      expect(now).toHaveLength(17);
+      expect(now.every((t) => t.includes('timestamp without time zone(3)'))).toBe(true);
+    };
+    await unconverted();
+    const before = await instants(db);
+    expect(Object.values(before).filter((v) => v !== null).length).toBeGreaterThan(25);
+
+    // 1. A transaction (a replica left running) holds `document`: the deploy
+    //    gives up at lock_timeout. `upload_intent`, converted before it in the
+    //    same transaction, is rolled back with it: nothing half converted.
+    const timedOut = await whileDocumentLocked(() => deploy());
+    expect(timedOut.ok).toBe(false);
+    expect(timedOut.output).toContain('P3018');
+    expect(timedOut.output).toMatch(/canceling statement due to lock timeout/);
+    expect(timedOut.seconds).toBeLessThan(30);
+    await unconverted();
+    expect(await instants(db)).toEqual(before);
+    // Prisma keeps the failed attempt: neither finished nor rolled back.
+    expect(ledger()).toEqual(['false|false']);
+
+    // 2. Every later deploy is refused until the failure is resolved.
+    const refused = await deploy();
+    expect(refused.ok).toBe(false);
+    expect(refused.output).toContain('P3009');
+    expect(refused.output).toContain(CONVERSION);
+    await unconverted();
+
+    // 3. The runbook: schema verified unchanged (above), then resolve as rolled back.
+    const resolved = await prismaCli(['migrate', 'resolve', '--rolled-back', CONVERSION]);
+    expect(resolved.ok).toBe(true);
+    expect(ledger()).toEqual(['false|true']);
+
+    // 4. The per-run statement timeout reaches the migration: at 1 s it fires
+    //    before the 5 s lock_timeout does. (Resolved the same way.)
+    const shortened = await whileDocumentLocked(() => deploy('1s'));
+    expect(shortened.ok).toBe(false);
+    expect(shortened.output).toMatch(/canceling statement due to statement timeout/);
+    await unconverted();
+    expect((await prismaCli(['migrate', 'resolve', '--rolled-back', CONVERSION])).ok).toBe(true);
+
+    // 5. Retry: the conversion applies, every instant unchanged.
+    const applied = await deploy();
+    expect(applied.ok).toBe(true);
+    expect(ledger()).toEqual(['false|true', 'false|true', 'true|false']);
+    await db.onModuleDestroy();
+    const restarted = new PrismaService(urlIn(deploySchema));
+    try {
+      const converted = await types(restarted);
+      expect(converted).toHaveLength(17);
+      expect(converted.every((t) => t.includes('timestamp with time zone(3)'))).toBe(true);
+      expect(await instants(restarted)).toEqual(before);
+    } finally {
+      await restarted.onModuleDestroy();
+    }
+  }, 300_000);
+
+  it("the runbook's sizing query (docs/23 D-048) runs, and lists this schema's tables", async () => {
+    const runbook = readFileSync(
+      join(SERVICE, '..', '..', 'docs', '23-risks-and-tradeoffs.md'),
+      'utf8',
+    );
+    const query = /```sql\n\s*(SELECT relname, n_live_tup[\s\S]*?;)\s*```/.exec(runbook)?.[1];
+    expect(query).toBeDefined();
+    const rows = await utc.client.$queryRawUnsafe<{ relname: string; size: string }[]>(query!);
+    expect(rows.map((row) => row.relname)).toEqual(expect.arrayContaining(Object.keys(INSTANTS)));
+    for (const row of rows) expect(row.size).toMatch(/^\d+ (bytes|kB|MB|GB|TB)$/);
   });
 });
 
