@@ -28,6 +28,10 @@ export const ORDER_STATUSES = [
   'FAILED',
 ] as const;
 
+/** The refusal of a non-empty order note; it repeats nothing of the input (S-09). */
+export const ORDER_NOTE_NOT_STORED =
+  'An order note is not stored yet (open question Q-110); leave it out';
+
 export const createOrderSchema = z
   .object({
     lines: z
@@ -41,8 +45,20 @@ export const createOrderSchema = z
       )
       .min(1)
       .max(50),
-    /** Free text from the buyer, carried through to the supplier. */
-    note: plainText().max(1000).optional(),
+    /**
+     * Refused unless empty (Q-110, temporary decision). The order has nowhere
+     * to keep a note — no column, no event field — and where one should go is
+     * an open product question. Accepting it dropped the buyer's text without
+     * a word; refusing it says so. Trimmed first, so whitespace is empty.
+     */
+    note: plainText()
+      .max(0, ORDER_NOTE_NOT_STORED)
+      .optional()
+      .describe(
+        'Not supported yet: must be absent or empty. An order does not store a note ' +
+          '(open question Q-110), so a non-empty one is refused with VALIDATION_FAILED ' +
+          'rather than silently dropped.',
+      ),
   })
   .strict();
 

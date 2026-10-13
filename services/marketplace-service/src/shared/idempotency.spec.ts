@@ -254,24 +254,29 @@ describe('IdempotencyStore.claim — who may proceed', () => {
 });
 
 /**
- * Which failure frees the key (review of #141). The work's own failure does,
- * so a corrected retry can run; a failure to record the response does not,
- * because by then the work has committed — freeing the key there let a retry
- * place a second order. The same fault against the real database and the real
- * order route is `test/idempotency-claim-race.int-spec.ts`.
+ * Where the response is stored, and which failure frees the key. The response
+ * is written by the work's own transaction, as its last statement (docs/06
+ * § 6.8), so a failure to store it is a failure of the work: the transaction
+ * rolls back — no order — and the claim is released for a retry. Stored after
+ * the commit, the same failure answered 500 for an order that existed. The
+ * same faults against the real database and the real order route are
+ * `test/idempotency-response-in-transaction.int-spec.ts`.
  */
-describe('IdempotencyStore.execute — when the claim is released', () => {
-  function claimedStore(updateMany: jest.Mock) {
+describe('IdempotencyStore.execute — the response is stored in the work’s transaction', () => {
+  function claimedStore() {
     const idempotencyKey = {
       create: jest.fn().mockResolvedValue({}),
-      updateMany,
+      updateMany: jest.fn(),
       deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
     const prisma = withTransaction(idempotencyKey);
     const store = new IdempotencyStore(prisma, {
       MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
     } as MarketplaceEnv);
-    return { store, idempotencyKey };
+    // The work's own transaction: a delegate of its own, so a write through
+    // the store's client instead of `tx` would not count.
+    const workTx = { idempotencyKey: { updateMany: jest.fn() } };
+    return { store, idempotencyKey, workTx };
   }
 
   const asTenant = <T>(fn: () => Promise<T>) =>
@@ -280,36 +285,120 @@ describe('IdempotencyStore.execute — when the claim is released', () => {
       fn,
     );
 
-  it('keeps the claim, and surfaces the error, when recording fails after the work committed', async () => {
-    const { store, idempotencyKey } = claimedStore(
-      jest.fn().mockRejectedValueOnce(new Error('connection reset while recording')),
+  const released = {
+    where: {
+      organizationId: 'ORG-UNIT',
+      endpoint: 'POST /v1/orders',
+      key: 'K',
+      claimToken: expect.any(String),
+      state: 'IN_PROGRESS',
+    },
+  };
+
+  it('stores the response through the work’s transaction, on this claim’s own row', async () => {
+    const { store, idempotencyKey, workTx } = claimedStore();
+    workTx.idempotencyKey.updateMany.mockResolvedValue({ count: 1 });
+
+    const outcome = await asTenant(() =>
+      store.execute('POST /v1/orders', 'K', {}, 201, async (record) => {
+        await record(workTx as never, { id: 'ORD_UNIT' });
+        return { id: 'ORD_UNIT' };
+      }),
     );
-    const work = jest.fn().mockResolvedValue({ id: 'ORD_UNIT' });
+
+    expect(outcome).toEqual({ result: { id: 'ORD_UNIT' }, executed: true });
+    expect(workTx.idempotencyKey.updateMany).toHaveBeenCalledWith({
+      where: released.where,
+      data: { state: 'COMPLETED', responseStatus: 201, responseBody: { id: 'ORD_UNIT' } },
+    });
+    // Nothing through the store's own client: no second, after-commit write.
+    expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('a failure to store the response fails the work, and the claim is released', async () => {
+    const { store, idempotencyKey, workTx } = claimedStore();
+    workTx.idempotencyKey.updateMany.mockRejectedValue(
+      new Error('connection reset while recording'),
+    );
 
     await expect(
-      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
+      asTenant(() =>
+        store.execute('POST /v1/orders', 'K', {}, 201, async (record) => {
+          // A real transaction rolls the order back with this rejection.
+          await record(workTx as never, { id: 'ORD_UNIT' });
+          return { id: 'ORD_UNIT' };
+        }),
+      ),
     ).rejects.toThrow('connection reset while recording');
-    expect(work).toHaveBeenCalledTimes(1);
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith(released);
+  });
+
+  it('a claim lost under the work refuses the commit with a retryable 409', async () => {
+    // Expired and purged, perhaps re-taken: completing it would commit a
+    // second execution under one key.
+    const { store, idempotencyKey, workTx } = claimedStore();
+    workTx.idempotencyKey.updateMany.mockResolvedValue({ count: 0 });
+
+    const error = await asTenant(() =>
+      store.execute('POST /v1/orders', 'K', {}, 201, async (record) => {
+        await record(workTx as never, { id: 'ORD_UNIT' });
+        return { id: 'ORD_UNIT' };
+      }),
+    ).catch((thrown: unknown) => thrown);
+
+    expect(error).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
+    expect(dump(error)).not.toContain('"K"');
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith(released);
+  });
+
+  it('a work that returns without recording is a defect, and its claim is kept', async () => {
+    const { store, idempotencyKey } = claimedStore();
+
+    await expect(
+      asTenant(() =>
+        store.execute('POST /v1/orders', 'K', {}, 201, () => Promise.resolve({ id: 'ORD_UNIT' })),
+      ),
+    ).rejects.toThrow('did not record its response');
+    // Released, a retry would run the committed work a second time.
     expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
   });
 
   it('releases the claim when the work itself fails, so a corrected retry can run', async () => {
-    const { store, idempotencyKey } = claimedStore(jest.fn());
+    const { store, idempotencyKey, workTx } = claimedStore();
     const work = jest.fn().mockRejectedValue(new Error('insufficient stock'));
 
     await expect(
       asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
     ).rejects.toThrow('insufficient stock');
-    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith({
-      where: {
-        organizationId: 'ORG-UNIT',
-        endpoint: 'POST /v1/orders',
-        key: 'K',
-        claimToken: expect.any(String),
-        state: 'IN_PROGRESS',
-      },
-    });
+    expect(idempotencyKey.deleteMany).toHaveBeenCalledWith(released);
+    expect(workTx.idempotencyKey.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a replay runs nothing and stores nothing', async () => {
+    const idempotencyKey = {
+      create: jest.fn().mockRejectedValue(uniqueViolation),
+      findUnique: jest.fn().mockResolvedValue({
+        requestHash: hashRequestBody({}),
+        state: 'COMPLETED',
+        responseStatus: 201,
+        responseBody: { id: 'ORD_STORED' },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+      updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+    };
+    const store = new IdempotencyStore(withTransaction(idempotencyKey), {
+      MARKETPLACE_IDEMPOTENCY_TTL_HOURS: 24,
+    } as MarketplaceEnv);
+    const work = jest.fn();
+
+    await expect(
+      asTenant(() => store.execute('POST /v1/orders', 'K', {}, 201, work)),
+    ).resolves.toEqual({ result: { id: 'ORD_STORED' }, executed: false });
+    expect(work).not.toHaveBeenCalled();
     expect(idempotencyKey.updateMany).not.toHaveBeenCalled();
+    expect(idempotencyKey.deleteMany).not.toHaveBeenCalled();
   });
 });
 

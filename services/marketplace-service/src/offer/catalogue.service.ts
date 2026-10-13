@@ -15,6 +15,7 @@ import type {
   UpdateOfferPriceDto,
 } from './dto';
 import { isUniqueViolation } from '../shared/prisma-errors';
+import type { RecordResponse } from '../shared/idempotency';
 
 /**
  * Products and the offers made against them.
@@ -36,7 +37,10 @@ export class CatalogueService {
   // Products
   // =========================================================================
 
-  async createProduct(dto: CreateProductDto): Promise<ProductView> {
+  async createProduct(
+    dto: CreateProductDto,
+    record?: RecordResponse<ProductView>,
+  ): Promise<ProductView> {
     assertNotAuditor();
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
@@ -44,9 +48,9 @@ export class CatalogueService {
     const productId = newId(ID_PREFIX.product);
 
     try {
-      // The product and its audit record commit together (AGENTS.md S-06,
-      // A-08; global audit L7-14).
-      const row = await this.prisma.transaction(async (tx) => {
+      // The product, its audit record and its idempotent response commit
+      // together (AGENTS.md S-06, A-08; global audit L7-14; docs/06 § 6.8).
+      return await this.prisma.transaction(async (tx) => {
         const created = await tx.product.create({
           data: {
             id: productId,
@@ -79,9 +83,10 @@ export class CatalogueService {
           },
         });
 
-        return created;
+        const view = toProductView(created);
+        await record?.(tx, view);
+        return view;
       });
-      return toProductView(row);
     } catch (error) {
       if (isUniqueViolation(error)) {
         throw RastaError.alreadyExists('Product', dto.sku);
@@ -178,7 +183,7 @@ export class CatalogueService {
   // Offers
   // =========================================================================
 
-  async createOffer(dto: CreateOfferDto): Promise<OfferView> {
+  async createOffer(dto: CreateOfferDto, record?: RecordResponse<OfferView>): Promise<OfferView> {
     assertNotAuditor();
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
@@ -196,7 +201,7 @@ export class CatalogueService {
     const offerId = newId(ID_PREFIX.offer);
     const publishedAt = dto.publish ? new Date() : null;
 
-    const row = await this.prisma.transaction(async (tx) => {
+    return this.prisma.transaction(async (tx) => {
       const created = await tx.offer.create({
         data: {
           id: offerId,
@@ -267,10 +272,11 @@ export class CatalogueService {
         });
       }
 
-      return created;
+      // The last statement: the offer and its completed key commit together.
+      const view = toOfferView(created);
+      await record?.(tx, view);
+      return view;
     });
-
-    return toOfferView(row);
   }
 
   /**
@@ -284,7 +290,11 @@ export class CatalogueService {
    * **Orders already placed are untouched.** They copied the price at
    * placement (ADR-037 § 5), so a supplier cannot reprice work already sold.
    */
-  async updateOffer(offerId: string, dto: UpdateOfferPriceDto): Promise<OfferView> {
+  async updateOffer(
+    offerId: string,
+    dto: UpdateOfferPriceDto,
+    record?: RecordResponse<OfferView>,
+  ): Promise<OfferView> {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
@@ -322,7 +332,11 @@ export class CatalogueService {
       // An update that changes nothing writes nothing and announces nothing
       // (Codex #115 R1-2) — not even `updatedBy`/`updatedAt`, and not a
       // re-publication of terms nobody changed.
-      if (changedFields.length === 0) return toOfferView(existing);
+      if (changedFields.length === 0) {
+        const unchanged = toOfferView(existing);
+        await record?.(tx, unchanged);
+        return unchanged;
+      }
 
       const repriced = changedFields.includes('unitPriceMinor');
       const nextVersion = repriced ? existing.version + 1 : existing.version;
@@ -427,7 +441,9 @@ export class CatalogueService {
         });
       }
 
-      return toOfferView(updated);
+      const view = toOfferView(updated);
+      await record?.(tx, view);
+      return view;
     });
   }
 

@@ -135,8 +135,17 @@ export const ROUTES: readonly RouteRule[] = [
   // ---- commerce ----------------------------------------------------------
   // Search is read-heavy and cheap to abuse, so it carries the tighter limit
   // docs/06 § 6.9 sets for search rather than the default per-user one.
-  { prefix: 'products', service: 'marketplace', rateLimit: { limit: 60, windowSeconds: 60 } },
-  { prefix: 'offers', service: 'marketplace' },
+  // Creating a product and publishing or editing an offer need an
+  // Idempotency-Key (docs/06 § 6.8 lists publishing an offer): a double submit
+  // created two. Unsafe methods only, so search and reads need none, and
+  // marketplace-service enforces it again, storing the response with the write.
+  {
+    prefix: 'products',
+    service: 'marketplace',
+    rateLimit: { limit: 60, windowSeconds: 60 },
+    requiresIdempotencyKey: true,
+  },
+  { prefix: 'offers', service: 'marketplace', requiresIdempotencyKey: true },
   // `cart` is deferred, not removed (ADR-037 § 3): the prefix stays so the
   // routing table still reflects docs/04, and reaches a service that has no
   // handler for it — which answers 404, exactly what "not built yet" means.

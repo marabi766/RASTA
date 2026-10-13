@@ -45,6 +45,26 @@ function inFlight(endpoint: string): RastaError {
 }
 
 /**
+ * The claim this request took is no longer its own — it expired and was purged,
+ * perhaps re-taken by a retry — so its work must not commit. Retryable: the
+ * key is either free again or another request's, and a retry learns which.
+ */
+function claimLost(endpoint: string): RastaError {
+  return new RastaError(
+    'CONFLICT',
+    'This request took too long and its Idempotency-Key lapsed; retry shortly',
+    { internalContext: { endpoint }, retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS },
+  );
+}
+
+/**
+ * Stores the response for replay **inside the work's own transaction** `tx`,
+ * as its last statement. The work and its completed key commit together, or
+ * neither does.
+ */
+export type RecordResponse<T> = (tx: ExtendedPrismaClient, response: T) => Promise<void>;
+
+/**
  * Idempotent financial writes (docs/06 § 6.8).
  *
  * The platform has declared this mechanism since the API architecture was
@@ -83,6 +103,25 @@ function inFlight(endpoint: string): RastaError {
  * CONFLICT` rather than a re-execution until the record expires. For a
  * financial write that is the right way round — a caller retrying too early is
  * a nuisance, and a caller charged twice is an incident.
+ *
+ * ## Why the response is stored inside the work's transaction
+ *
+ * The work receives {@link RecordResponse} and calls it as the last statement
+ * of its own transaction, as construction-service does (docs/06 § 6.8). The
+ * change and its completed key are one commit:
+ *
+ * - a failure to store the response rolls the change back with it — no order
+ *   exists, the claim is released, and a retry with the same key runs. Stored
+ *   after the commit, the same failure answered 500 for an order that existed;
+ * - a crash after the commit leaves a `COMPLETED` key, never an `IN_PROGRESS`
+ *   one;
+ * - a claim that expired and was re-taken while the work ran fails the token
+ *   check in {@link complete}, and the change rolls back: two requests can
+ *   never both commit under one key.
+ *
+ * No marketplace endpoint stores its response after the commit any more: each
+ * one's work is a single transaction that already holds the response it
+ * returns.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -244,22 +283,16 @@ export class IdempotencyStore {
   }
 
   /**
-   * Records the response so a retry can replay it.
+   * Records the response so a retry can replay it — **inside the work's own
+   * transaction** `tx`, as its last statement.
    *
-   * Matches only the row this claim's `token` was minted for. A claim that
-   * expired, was purged and was re-taken by another request leaves that
-   * request's row untouched: the late completion is a logged no-op, never an
-   * error (the work has committed, and failing here would not undo it).
-   *
-   * Deliberately **not** inside the caller's transaction. Recording the
-   * response is not part of the financial effect: if the effect committed and
-   * this write then failed, the money has moved and a retry would find
-   * `IN_PROGRESS` and be refused — annoying, and safe. If it shared the
-   * transaction, a failure here would roll back a settlement that had already
-   * succeeded, which is not. "Safe" holds only because {@link execute} never
-   * releases the claim after this fails.
+   * Matches only the row this claim's `token` was minted for. If it matches
+   * nothing — the claim expired and was purged, perhaps re-taken by another
+   * request — it throws, and the work's transaction rolls back with it: the
+   * work is never committed without its key, and never twice under one.
    */
   async complete(
+    tx: ExtendedPrismaClient,
     endpoint: string,
     key: string,
     token: string,
@@ -267,11 +300,14 @@ export class IdempotencyStore {
     body: unknown,
   ): Promise<void> {
     const organizationId = getOrganizationId();
-    const { count } = await this.prisma.client.idempotencyKey.updateMany({
+    const { count } = await tx.idempotencyKey.updateMany({
       where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
       data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
     });
-    if (count === 0) this.logLostClaim('complete', endpoint);
+    if (count === 0) {
+      this.logLostClaim('complete', endpoint);
+      throw claimLost(endpoint);
+    }
   }
 
   /**
@@ -305,13 +341,17 @@ export class IdempotencyStore {
    * sequence is written once. A handler that forgot the `release` on failure
    * would leave a key wedged until expiry, and that is exactly the kind of
    * detail that is got wrong when it is repeated per endpoint.
+   *
+   * `work` receives `record`, which it must call inside its own transaction
+   * with the response it is about to return. That is what makes the change
+   * and its completed key one commit.
    */
   async run<T>(
     endpoint: string,
     key: string,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
+    work: (record: RecordResponse<T>) => Promise<T>,
   ): Promise<T> {
     return (await this.execute(endpoint, key, body, successStatus, work)).result;
   }
@@ -331,24 +371,33 @@ export class IdempotencyStore {
     key: string,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
+    work: (record: RecordResponse<T>) => Promise<T>,
   ): Promise<{ result: T; executed: boolean }> {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') return { result: claim.body as T, executed: false };
 
-    // Only a failure of `work` releases the claim. A failure to record the
-    // response comes after the work committed — the order exists — so the
-    // claim is kept and the error surfaces: retries meet the in-flight 409
-    // until the claim expires, rather than a freed key placing a second
-    // order (review of #141). The release used to cover both.
+    let recorded = false;
     let result: T;
     try {
-      result = await work();
+      result = await work(async (tx, response) => {
+        await this.complete(tx, endpoint, key, claim.token, successStatus, response);
+        recorded = true;
+      });
     } catch (error) {
+      // Unconditional, and safe to be: a failure that surfaced after the
+      // transaction committed finds the row COMPLETED and removes nothing; a
+      // transaction that rolled back — the response store's own failure
+      // included — took its completion with it, so the claim is freed and a
+      // retry with the same key runs (the order does not exist).
       await this.release(endpoint, key, claim.token);
       throw error;
     }
-    await this.complete(endpoint, key, claim.token, successStatus, result);
+    if (!recorded) {
+      // A programming error: the work committed without its key. The claim is
+      // left IN_PROGRESS — retries are refused until it expires — rather than
+      // released for a second execution.
+      throw new Error(`Idempotent work for ${endpoint} did not record its response`);
+    }
     return { result, executed: true };
   }
 
@@ -377,6 +426,29 @@ export class IdempotencyStore {
     );
     return result.count;
   }
+}
+
+/**
+ * Refuses an unsafe request that arrived without a key.
+ *
+ * `400 VALIDATION_FAILED` exactly as `docs/06` § 6.8's table specifies. The
+ * gateway enforces this for the `orders`, `products` and `offers` prefixes
+ * too; both exist because the gateway is not the only way to reach this port.
+ */
+export function requireIdempotencyKey(value: string | undefined): string {
+  if (!value || value.trim().length < 8) {
+    throw RastaError.validation(
+      [
+        {
+          path: 'Idempotency-Key',
+          code: 'required',
+          message: 'This operation requires an Idempotency-Key header of at least 8 characters',
+        },
+      ],
+      'Idempotency-Key is required for this operation',
+    );
+  }
+  return value.trim();
 }
 
 /**

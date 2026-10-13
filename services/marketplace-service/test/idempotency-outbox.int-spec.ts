@@ -14,6 +14,7 @@ import {
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { hashRequestBody } from '../src/shared/idempotency';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import type { OrderView } from '../src/order/dto';
 
 /**
  * Idempotency and the outbox, against a real database.
@@ -57,13 +58,13 @@ describe('idempotency and outbox (real database)', () => {
       const body = { lines: [{ offerId, quantity: 2 }] };
 
       const first = await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
+        wiring.idempotency.run<OrderView>('POST /v1/orders', idempotencyKey, body, 201, (record) =>
+          wiring.orders.place(body, idempotencyKey, record),
         ),
       );
       const replay = await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
+        wiring.idempotency.run<OrderView>('POST /v1/orders', idempotencyKey, body, 201, (record) =>
+          wiring.orders.place(body, idempotencyKey, record),
         ),
       );
 
@@ -88,30 +89,32 @@ describe('idempotency and outbox (real database)', () => {
       const idempotencyKey = key('reused');
 
       await asBuyer(() =>
-        wiring.idempotency.run(
+        wiring.idempotency.run<OrderView>(
           'POST /v1/orders',
           idempotencyKey,
           { lines: [{ offerId: first.offerId, quantity: 1 }] },
           201,
-          () =>
+          (record) =>
             wiring.orders.place(
               { lines: [{ offerId: first.offerId, quantity: 1 }] },
               idempotencyKey,
+              record,
             ),
         ),
       );
 
       await expect(
         asBuyer(() =>
-          wiring.idempotency.run(
+          wiring.idempotency.run<OrderView>(
             'POST /v1/orders',
             idempotencyKey,
             { lines: [{ offerId: second.offerId, quantity: 1 }] },
             201,
-            () =>
+            (record) =>
               wiring.orders.place(
                 { lines: [{ offerId: second.offerId, quantity: 1 }] },
                 idempotencyKey,
+                record,
               ),
           ),
         ),
@@ -124,12 +127,17 @@ describe('idempotency and outbox (real database)', () => {
       const shared = key('shared');
 
       const first = await asBuyer(() =>
-        wiring.idempotency.run(
+        wiring.idempotency.run<OrderView>(
           'POST /v1/orders',
           shared,
           { lines: [{ offerId: mine.offerId, quantity: 1 }] },
           201,
-          () => wiring.orders.place({ lines: [{ offerId: mine.offerId, quantity: 1 }] }, shared),
+          (record) =>
+            wiring.orders.place(
+              { lines: [{ offerId: mine.offerId, quantity: 1 }] },
+              shared,
+              record,
+            ),
         ),
       );
 
@@ -138,13 +146,17 @@ describe('idempotency and outbox (real database)', () => {
       const second = await asActor(
         { organizationId: org.other, roles: ['PROCUREMENT_USER'], userId: 'USR-OTHER' },
         () =>
-          wiring.idempotency.run(
+          wiring.idempotency.run<OrderView>(
             'POST /v1/orders',
             shared,
             { lines: [{ offerId: theirs.offerId, quantity: 1 }] },
             201,
-            () =>
-              wiring.orders.place({ lines: [{ offerId: theirs.offerId, quantity: 1 }] }, shared),
+            (record) =>
+              wiring.orders.place(
+                { lines: [{ offerId: theirs.offerId, quantity: 1 }] },
+                shared,
+                record,
+              ),
           ),
       );
 
@@ -162,8 +174,12 @@ describe('idempotency and outbox (real database)', () => {
 
       await expect(
         asBuyer(() =>
-          wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-            wiring.orders.place(body, idempotencyKey),
+          wiring.idempotency.run<OrderView>(
+            'POST /v1/orders',
+            idempotencyKey,
+            body,
+            201,
+            (record) => wiring.orders.place(body, idempotencyKey, record),
           ),
         ),
       ).rejects.toThrow();
@@ -173,8 +189,8 @@ describe('idempotency and outbox (real database)', () => {
       );
 
       const order = await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
+        wiring.idempotency.run<OrderView>('POST /v1/orders', idempotencyKey, body, 201, (record) =>
+          wiring.orders.place(body, idempotencyKey, record),
         ),
       );
       expect(order.totalAmountMinor).toBe('1250000');
@@ -220,8 +236,8 @@ describe('idempotency and outbox (real database)', () => {
       const body = { lines: [{ offerId, quantity: 1 }] };
 
       const first = await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
+        wiring.idempotency.run<OrderView>('POST /v1/orders', idempotencyKey, body, 201, (record) =>
+          wiring.orders.place(body, idempotencyKey, record),
         ),
       );
 
@@ -240,10 +256,16 @@ describe('idempotency and outbox (real database)', () => {
 
       let placed = 0;
       const second = asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () => {
-          placed += 1;
-          return wiring.orders.place(body, idempotencyKey);
-        }),
+        wiring.idempotency.run<OrderView>(
+          'POST /v1/orders',
+          idempotencyKey,
+          body,
+          201,
+          (record) => {
+            placed += 1;
+            return wiring.orders.place(body, idempotencyKey, record);
+          },
+        ),
       );
 
       // Not the old response handed back: the work ran again (a fresh claim)…
@@ -270,8 +292,8 @@ describe('idempotency and outbox (real database)', () => {
       const body = { lines: [{ offerId, quantity: 1 }] };
 
       await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
+        wiring.idempotency.run<OrderView>('POST /v1/orders', idempotencyKey, body, 201, (record) =>
+          wiring.orders.place(body, idempotencyKey, record),
         ),
       );
 
@@ -291,8 +313,8 @@ describe('idempotency and outbox (real database)', () => {
       const body = { lines: [{ offerId, quantity: 1 }] };
 
       await asBuyer(() =>
-        wiring.idempotency.run('POST /v1/orders', idempotencyKey, body, 201, () =>
-          wiring.orders.place(body, idempotencyKey),
+        wiring.idempotency.run<OrderView>('POST /v1/orders', idempotencyKey, body, 201, (record) =>
+          wiring.orders.place(body, idempotencyKey, record),
         ),
       );
 

@@ -20,6 +20,7 @@ import {
   remindersRecordedTotal,
 } from '../observability/metrics';
 import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
+import type { RecordResponse } from '../shared/idempotency';
 import { OrderRepository, type LockedOrderRow } from './order.repository';
 import { assertTransition } from './state-machine';
 import { availableOrderActions } from './order-actions';
@@ -98,7 +99,11 @@ export class OrderService {
    * No money moves here. The order is `PENDING` until the saga's first
    * activity creates the obligation.
    */
-  async place(dto: CreateOrderDto, idempotencyKey: string): Promise<OrderView> {
+  async place(
+    dto: CreateOrderDto,
+    idempotencyKey: string,
+    record?: RecordResponse<OrderView>,
+  ): Promise<OrderView> {
     const context = getContext();
     const buyerOrganizationId = getOrganizationId();
     const actor = context.userId ?? context.callerService ?? SERVICE_NAME;
@@ -214,7 +219,10 @@ export class OrderService {
           },
         });
 
-        return this.load(tx, orderId);
+        const view = await this.load(tx, orderId);
+        // The last statement: the order and its completed key commit together.
+        await record?.(tx, view);
+        return view;
       });
     } catch (error) {
       // The key already placed an order in this organization, and its
@@ -262,8 +270,9 @@ export class OrderService {
   // =========================================================================
 
   /** The supplier accepts the order. */
-  async confirm(orderId: string): Promise<OrderView> {
+  async confirm(orderId: string, record?: RecordResponse<OrderView>): Promise<OrderView> {
     return this.transition(orderId, 'CONFIRMED', {
+      record,
       authorise: (order) => assertSupplier(order, 'confirm this order'),
       apply: async (tx, order) => {
         // The order row is scoped to the **buyer** (ADR-037 § 8) and the actor
@@ -297,7 +306,11 @@ export class OrderService {
    * what matters next is that the platform is waiting for the buyer, and
    * nothing here releases money (ADR-038 § 2).
    */
-  async fulfill(orderId: string, dto: FulfillOrderDto): Promise<OrderView> {
+  async fulfill(
+    orderId: string,
+    dto: FulfillOrderDto,
+    record?: RecordResponse<OrderView>,
+  ): Promise<OrderView> {
     const context = getContext();
     const fulfilledAt = new Date();
     const receiptDueAt = new Date(
@@ -305,6 +318,7 @@ export class OrderService {
     );
 
     return this.transition(orderId, 'AWAITING_RECEIPT_CONFIRMATION', {
+      record,
       authorise: (order) => assertSupplier(order, 'record fulfilment for this order'),
       apply: async (tx, order) => {
         const fulfillmentId = newId(ID_PREFIX.fulfillment);
@@ -356,11 +370,16 @@ export class OrderService {
    * confirming their own delivery; not a platform operator, who was not there
    * (ADR-038 § 5).
    */
-  async confirmReceipt(orderId: string, _dto: ConfirmReceiptDto): Promise<OrderView> {
+  async confirmReceipt(
+    orderId: string,
+    _dto: ConfirmReceiptDto,
+    record?: RecordResponse<OrderView>,
+  ): Promise<OrderView> {
     const context = getContext();
     const confirmedAt = new Date();
 
     return this.transition(orderId, 'RECEIPT_CONFIRMED', {
+      record,
       // Never from DISPUTED. That edge belongs to `resolveDispute` and to a
       // platform operator; a buyer travelling it would be resolving their own
       // dispute in their own favour.
@@ -395,10 +414,15 @@ export class OrderService {
   }
 
   /** A dispute stops settlement completely, on both sides (ADR-040 § 5). */
-  async raiseDispute(orderId: string, dto: RaiseDisputeDto): Promise<OrderView> {
+  async raiseDispute(
+    orderId: string,
+    dto: RaiseDisputeDto,
+    record?: RecordResponse<OrderView>,
+  ): Promise<OrderView> {
     const context = getContext();
 
     const view = await this.transition(orderId, 'DISPUTED', {
+      record,
       authorise: (order) => assertBuyer(order, 'raise a dispute'),
       apply: async (tx, order) => {
         await runUnscoped('a dispute is filed under the order it belongs to', () =>
@@ -452,12 +476,17 @@ export class OrderService {
    * and `REFUND` moves it to `CANCELLING` so the saga compensates. Neither
    * moves money here.
    */
-  async resolveDispute(orderId: string, dto: ResolveDisputeDto): Promise<OrderView> {
+  async resolveDispute(
+    orderId: string,
+    dto: ResolveDisputeDto,
+    record?: RecordResponse<OrderView>,
+  ): Promise<OrderView> {
     const context = getContext();
     const target: OrderStatus = dto.outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING';
     const resolvedAt = new Date();
 
     return this.transition(orderId, target, {
+      record,
       // The mirror of the restriction on `confirmReceipt`: an operator resolves
       // a dispute, and there is nothing to resolve on an order that has none.
       from: ['DISPUTED'],
@@ -527,8 +556,13 @@ export class OrderService {
   }
 
   /** The buyer cancels. Compensation is the saga's job, not this method's. */
-  async cancel(orderId: string, dto: CancelOrderDto): Promise<OrderView> {
+  async cancel(
+    orderId: string,
+    dto: CancelOrderDto,
+    record?: RecordResponse<OrderView>,
+  ): Promise<OrderView> {
     return this.transition(orderId, 'CANCELLING', {
+      record,
       // Narrower than the transition table, for the same reason
       // `confirmReceipt` is. `ORDER_TRANSITIONS` has `DISPUTED → CANCELLING`
       // because a platform operator's `ResolveDispute(REFUND)` travels it
@@ -561,6 +595,7 @@ export class OrderService {
   async submitReview(
     orderId: string,
     dto: SubmitReviewDto,
+    record?: RecordResponse<{ id: string; rating: number }>,
   ): Promise<{ id: string; rating: number }> {
     const context = getContext();
 
@@ -611,7 +646,9 @@ export class OrderService {
         },
       });
 
-      return { id: reviewId, rating: dto.rating };
+      const review = { id: reviewId, rating: dto.rating };
+      await record?.(tx, review);
+      return review;
     });
   }
 
@@ -957,6 +994,8 @@ export class OrderService {
     orderId: string,
     to: OrderStatus,
     handlers: {
+      /** Stores the idempotent response, as the transaction's last statement. */
+      record: RecordResponse<OrderView> | undefined;
       authorise: (order: LockedOrderRow) => void;
       apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<void>;
       reason?: string;
@@ -1016,7 +1055,9 @@ export class OrderService {
         reason: handlers.reason ?? null,
       });
 
-      return this.load(tx, order.id);
+      const loaded = await this.load(tx, order.id);
+      await handlers.record?.(tx, loaded);
+      return loaded;
     });
 
     orderTransitionsTotal.inc({ service: SERVICE_NAME, to });
