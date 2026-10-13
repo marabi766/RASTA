@@ -9,13 +9,16 @@ import type { WebSession } from './session';
 /**
  * Which navigation a signed-in person is shown.
  *
- * The one entry that depends on the person is Projects. Whether they may read
- * projects is construction-service's decision and stays there: this only
+ * The entries that depend on the person are Projects and Tenders. Whether they
+ * may read them is construction-service's decision and stays there: this only
  * decides whether to *draw the link*, from a setting that mirrors the
  * service's (`WEB_PROJECT_ROLES` / `WEB_PROJECT_READER_ROLES`, which must be
  * changed together with `CONSTRUCTION_PROJECT_ROLES` /
- * `CONSTRUCTION_PROJECT_READER_ROLES`). A person who types `/projects` anyway
- * is given the service's own answer.
+ * `CONSTRUCTION_PROJECT_READER_ROLES`). Tenders reuse those two settings for the
+ * owner's side — the service gates tender reads by the same configured roles —
+ * and add the bidder's side, whose `CONTRACTOR` role is fixed in the service.
+ * A person who types `/projects` or `/tenders` anyway is given the service's
+ * own answer.
  */
 
 /** Always accepted by construction-service, so always shown the link. */
@@ -36,6 +39,62 @@ export function canReadProjects(
   );
 }
 
+/** The bidder's role in its own organization (construction-service `CONTRACTOR_ROLE`, ADR-066 § 4). */
+const BIDDER_ROLE = 'CONTRACTOR';
+
+/**
+ * Roles construction-service refuses on the bidder's side, whenever present and
+ * whatever else the person holds: a token with `SYSTEM_ADMIN` and `CONTRACTOR`
+ * is not a contractor (`BIDDER_EXCLUDED_ROLES`). The role itself is not
+ * configurable there, so there is no setting here either.
+ */
+const BIDDER_EXCLUDED_ROLES: readonly string[] = [ALWAYS_READS_PROJECTS, NEVER_READS_PROJECTS];
+
+/**
+ * Which of the two tender doors a person is worth *offering* (EXP-004 slice 2):
+ *
+ * - `owner` — `GET /v1/tenders`, gated by construction-service exactly as
+ *   projects are (the same configured roles; docs/24 Q-69), so it is the same
+ *   test as {@link canReadProjects}, `AUDITOR` rule included;
+ * - `bidder` — `GET /v1/open-tenders`, which needs `CONTRACTOR` and refuses
+ *   `SYSTEM_ADMIN` and `AUDITOR` whenever present.
+ *
+ * Like the Projects link, this decides what to draw and which door to knock on
+ * first; the service still decides on every request.
+ */
+export function tenderSidesFor(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_PROJECT_ROLES' | 'WEB_PROJECT_READER_ROLES'>,
+): { readonly owner: boolean; readonly bidder: boolean } {
+  return {
+    owner: canReadProjects(roles, settings),
+    bidder:
+      roles.includes(BIDDER_ROLE) && !BIDDER_EXCLUDED_ROLES.some((role) => roles.includes(role)),
+  };
+}
+
+/**
+ * Which doors `/tenders` knocks on for a person. The bidder's door for a
+ * bidder; the owner's door for an owner — and also for somebody the settings say
+ * is neither, so that a person who types the address gets construction-service's
+ * own refusal rather than the portal's guess about it.
+ */
+export function tenderDoorsFor(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_PROJECT_ROLES' | 'WEB_PROJECT_READER_ROLES'>,
+): { readonly own: boolean; readonly open: boolean } {
+  const sides = tenderSidesFor(roles, settings);
+  return { own: sides.owner || !sides.bidder, open: sides.bidder };
+}
+
+export function canReadTenders(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_PROJECT_ROLES' | 'WEB_PROJECT_READER_ROLES'>,
+): boolean {
+  const sides = tenderSidesFor(roles, settings);
+  return sides.owner || sides.bidder;
+}
+
 /**
  * The navigation for a person, from the roles identity-service reports for the
  * organization they are acting in.
@@ -52,6 +111,7 @@ export async function loadPortalNav(
   const roles = result.kind === 'USER' ? result.user.effectiveRoles : [];
   return portalNavFor({
     canReadProjects: canReadProjects(roles, webServerEnv()),
+    canReadTenders: canReadTenders(roles, webServerEnv()),
     canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
   });
 }

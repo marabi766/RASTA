@@ -4,7 +4,13 @@
 import { portalNavFor } from '@/app/nav';
 
 import type { CurrentUserResult } from './identity';
-import { canReadProjects, loadPortalNav } from './portal-nav';
+import {
+  canReadProjects,
+  canReadTenders,
+  loadPortalNav,
+  tenderDoorsFor,
+  tenderSidesFor,
+} from './portal-nav';
 import type { WebSession } from './session';
 
 /**
@@ -49,7 +55,81 @@ describe('canReadProjects', () => {
   });
 });
 
+describe('tenderSidesFor / canReadTenders', () => {
+  it('offers the owner’s side to whoever may read projects, as the service gates both alike', () => {
+    expect(tenderSidesFor(['ORGANIZATION_ADMIN'], DEFAULTS)).toEqual({
+      owner: true,
+      bidder: false,
+    });
+    expect(tenderSidesFor(['SYSTEM_ADMIN'], DEFAULTS)).toEqual({ owner: true, bidder: false });
+    const settings = { ...DEFAULTS, WEB_PROJECT_READER_ROLES: ['FLEET_MANAGER'] };
+    expect(tenderSidesFor(['FLEET_MANAGER'], settings).owner).toBe(true);
+    expect(tenderSidesFor(['FLEET_MANAGER'], DEFAULTS).owner).toBe(false);
+  });
+
+  it('offers the bidder’s side to CONTRACTOR only', () => {
+    expect(tenderSidesFor(['CONTRACTOR'], DEFAULTS)).toEqual({ owner: false, bidder: true });
+    for (const role of ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'SUPPLIER', 'DRIVER']) {
+      expect(tenderSidesFor([role], DEFAULTS).bidder).toBe(false);
+    }
+  });
+
+  it('refuses the bidder’s side to SYSTEM_ADMIN and AUDITOR whenever present, as the service does', () => {
+    expect(tenderSidesFor(['CONTRACTOR', 'SYSTEM_ADMIN'], DEFAULTS).bidder).toBe(false);
+    expect(tenderSidesFor(['CONTRACTOR', 'AUDITOR'], DEFAULTS).bidder).toBe(false);
+  });
+
+  it('offers neither side to AUDITOR, whatever else the person holds or the settings say', () => {
+    for (const roles of [
+      ['AUDITOR'],
+      ['AUDITOR', 'ORGANIZATION_ADMIN'],
+      ['AUDITOR', 'CONTRACTOR'],
+    ]) {
+      expect(tenderSidesFor(roles, DEFAULTS)).toEqual({ owner: false, bidder: false });
+      expect(canReadTenders(roles, DEFAULTS)).toBe(false);
+    }
+  });
+
+  it('draws the link for an owner, a bidder or both, and for nobody else', () => {
+    expect(canReadTenders(['ORGANIZATION_ADMIN'], DEFAULTS)).toBe(true);
+    expect(canReadTenders(['CONTRACTOR'], DEFAULTS)).toBe(true);
+    expect(canReadTenders(['ORGANIZATION_ADMIN', 'CONTRACTOR'], DEFAULTS)).toBe(true);
+    expect(canReadTenders(['DRIVER'], DEFAULTS)).toBe(false);
+    expect(canReadTenders([], DEFAULTS)).toBe(false);
+  });
+});
+
+describe('tenderDoorsFor', () => {
+  it('asks the door that matches the roles, both for somebody who is both', () => {
+    expect(tenderDoorsFor(['ORGANIZATION_ADMIN'], DEFAULTS)).toEqual({ own: true, open: false });
+    expect(tenderDoorsFor(['CONTRACTOR'], DEFAULTS)).toEqual({ own: false, open: true });
+    expect(tenderDoorsFor(['ORGANIZATION_ADMIN', 'CONTRACTOR'], DEFAULTS)).toEqual({
+      own: true,
+      open: true,
+    });
+  });
+
+  it('still asks the owner’s door for anyone else, so the service gives its own refusal', () => {
+    expect(tenderDoorsFor(['DRIVER'], DEFAULTS)).toEqual({ own: true, open: false });
+    expect(tenderDoorsFor(['AUDITOR'], DEFAULTS)).toEqual({ own: true, open: false });
+    expect(tenderDoorsFor([], DEFAULTS)).toEqual({ own: true, open: false });
+  });
+});
+
 describe('portalNavFor', () => {
+  it('puts Tenders right after Projects, and only when allowed', () => {
+    const shown = hrefs(portalNavFor({ canReadProjects: true, canReadTenders: true }));
+    const hidden = hrefs(portalNavFor({ canReadProjects: true, canReadTenders: false }));
+    const contractor = hrefs(portalNavFor({ canReadProjects: false, canReadTenders: true }));
+
+    expect(shown.indexOf('/tenders')).toBe(shown.indexOf('/projects') + 1);
+    expect(shown.indexOf('/wallet')).toBe(shown.indexOf('/tenders') + 1);
+    expect(hidden).not.toContain('/tenders');
+    expect(contractor).toContain('/tenders');
+    expect(contractor).not.toContain('/projects');
+    expect(contractor.indexOf('/tenders')).toBe(contractor.indexOf('/marketplace') + 1);
+  });
+
   it('puts Projects between the marketplace and the wallet, and only when allowed', () => {
     const shown = hrefs(portalNavFor({ canReadProjects: true }));
     const hidden = hrefs(portalNavFor({ canReadProjects: false }));
@@ -100,6 +180,13 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/projects');
   });
 
+  it('offers the Tenders link to an owner and to a contractor, not to the oversight role', async () => {
+    expect(hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])))).toContain('/tenders');
+    expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/tenders');
+    expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/tenders');
+    expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/tenders');
+  });
+
   it('keeps the settlements link for the roles that read settlements, next to Projects', async () => {
     const admin = hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])));
     expect(admin).toContain('/settlements');
@@ -116,6 +203,7 @@ describe('loadPortalNav', () => {
     async (result) => {
       const items = hrefs(await loadPortalNav(SESSION, result));
       expect(items).not.toContain('/projects');
+      expect(items).not.toContain('/tenders');
       expect(items).not.toContain('/settlements');
       expect(items).toContain('/assets');
       expect(items).toContain('/organizations');
