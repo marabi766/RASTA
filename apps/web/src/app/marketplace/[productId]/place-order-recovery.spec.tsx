@@ -59,7 +59,7 @@ const OFFER: Offer = {
 
 const KEY = 'sub_KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKE';
 const PAGE_KEY = 'sub_PAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPAGEPA';
-const STORAGE_KEY = 'rasta.unresolved-order.PRD_1';
+const STORAGE_KEY = 'rasta.unresolved-order.PRD_1'; // gitleaks:allow
 
 const LOGIN_1 = { owner: 'owner-1', session: 'login-1' };
 const LOGIN_2 = { owner: 'owner-1', session: 'login-2' };
