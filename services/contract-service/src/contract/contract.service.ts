@@ -148,17 +148,33 @@ export class ContractService {
   async get(id: string): Promise<ContractView> {
     const parties = this.access.assertCanRead();
 
-    let row: Contract | null = null;
-    if (parties.employer) row = await this.repository.findOwn(id);
-    if (!row && parties.contractor) {
-      row = await this.repository.findAsContractor(parties.organizationId, id);
-    }
-    if (!row) throw RastaError.notFound('Contract', id);
+    // The contract and its signatures from ONE snapshot: read apart, a signature committing
+    // between the two reads showed a DRAFT at its old version with both signatures.
+    return this.readSnapshot(async (tx) => {
+      let row: Contract | null = null;
+      if (parties.employer) row = await this.repository.findOwn(id, tx);
+      if (!row && parties.contractor) {
+        row = await this.repository.findAsContractor(parties.organizationId, id, tx);
+      }
+      if (!row) throw RastaError.notFound('Contract', id);
 
-    // The row-level half of the guard: whatever query produced the row, it is a party's.
-    assertPartyOf(row, parties);
-    const facts = await this.repository.signatureFacts([row]);
-    return toContractView(row, facts.get(row.id));
+      // The row-level half of the guard: whatever query produced the row, it is a party's.
+      assertPartyOf(row, parties);
+      const facts = await this.repository.signatureFacts([row], tx);
+      return toContractView(row, facts.get(row.id));
+    });
+  }
+
+  /** A read-only REPEATABLE READ transaction: every query in `fn` sees the same committed state. */
+  private readSnapshot<T>(fn: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.prisma.transaction(
+      async (tx) => {
+        // Allowed until the first query, which is what takes the snapshot.
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        return fn(tx);
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
   }
 
   /** The caller's contracts, newest first: as employer, as winning contractor, or both. */
@@ -170,20 +186,27 @@ export class ContractService {
       limit: query.limit,
     };
 
-    const found: Contract[] = [];
-    if (parties.employer) found.push(...(await this.repository.listOwn(filter)));
-    if (parties.contractor) {
-      found.push(...(await this.repository.listAsContractor(parties.organizationId, filter)));
-    }
+    // Rows and signatures from ONE snapshot, as in `get`.
+    const { visible, hasMore, facts } = await this.readSnapshot(async (tx) => {
+      const found: Contract[] = [];
+      if (parties.employer) found.push(...(await this.repository.listOwn(filter, tx)));
+      if (parties.contractor) {
+        found.push(...(await this.repository.listAsContractor(parties.organizationId, filter, tx)));
+      }
 
-    // Newest first across the two sides; one contract is never both (the employer is not its
-    // own contractor — `ck_contract_parties_distinct`), so nothing is listed twice.
-    found.sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-    const hasMore = found.length > query.limit;
-    const visible = hasMore ? found.slice(0, query.limit) : found;
-    visible.forEach((row) => assertPartyOf(row, parties));
+      // Newest first across the two sides; one contract is never both (the employer is not its
+      // own contractor — `ck_contract_parties_distinct`), so nothing is listed twice.
+      found.sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      const more = found.length > query.limit;
+      const shown = more ? found.slice(0, query.limit) : found;
+      shown.forEach((row) => assertPartyOf(row, parties));
 
-    const facts = await this.repository.signatureFacts(visible);
+      return {
+        visible: shown,
+        hasMore: more,
+        facts: await this.repository.signatureFacts(shown, tx),
+      };
+    });
     return {
       items: visible.map((row) => toContractView(row, facts.get(row.id))),
       nextCursor: hasMore ? (visible[visible.length - 1]?.id ?? null) : null,
