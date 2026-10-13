@@ -51,7 +51,7 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
+      sidebar={<PortalSidebar session={session} currentHref="/drivers" current={currentUser} />}
     >
       <DriverDetailScreen
         result={result}

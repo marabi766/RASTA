@@ -205,7 +205,7 @@ export default async function AssetDossierPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/assets" />}
+      sidebar={<PortalSidebar session={session} currentHref="/assets" current={currentUser} />}
     >
       <DossierScreen
         result={result}

@@ -37,13 +37,29 @@ const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/organizations', label: 'سازمان و اعضا' },
 ];
 
+/** The entries every signed-in person is offered, none of them role-gated. */
+export const PORTAL_NAV: readonly SidebarItem[] = [...NAV_BEFORE_PROJECTS, ...NAV_AFTER_PROJECTS];
+
+/**
+ * Offered only to the roles `GET /v1/settlements` admits, so it is not in
+ * `PORTAL_NAV`; `portalNavFor` adds it for them.
+ */
+export const SETTLEMENTS_NAV_ITEM: SidebarItem = { href: '/settlements', label: 'تسویه‌ها' };
+
 /** The navigation for a caller, with role-gated entries only when they apply. */
 export function portalNavFor(options: {
   readonly canReadProjects: boolean;
+  readonly canReadSettlements?: boolean;
 }): readonly SidebarItem[] {
-  return [
+  const items = [
     ...NAV_BEFORE_PROJECTS,
     ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
     ...NAV_AFTER_PROJECTS,
   ];
+  if (!options.canReadSettlements) return items;
+
+  // After the wallet, the other money screen.
+  const at = items.findIndex((item) => item.href === '/wallet');
+  const index = at === -1 ? items.length : at + 1;
+  return [...items.slice(0, index), SETTLEMENTS_NAV_ITEM, ...items.slice(index)];
 }

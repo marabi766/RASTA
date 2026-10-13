@@ -100,6 +100,14 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/projects');
   });
 
+  it('keeps the settlements link for the roles that read settlements, next to Projects', async () => {
+    const admin = hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])));
+    expect(admin).toContain('/settlements');
+    expect(admin).toContain('/projects');
+    expect(admin.indexOf('/settlements')).toBe(admin.indexOf('/wallet') + 1);
+    expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/settlements');
+  });
+
   it.each([
     { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
     { kind: 'MALFORMED', correlationId: 'c' },
@@ -108,6 +116,7 @@ describe('loadPortalNav', () => {
     async (result) => {
       const items = hrefs(await loadPortalNav(SESSION, result));
       expect(items).not.toContain('/projects');
+      expect(items).not.toContain('/settlements');
       expect(items).toContain('/assets');
       expect(items).toContain('/organizations');
     },

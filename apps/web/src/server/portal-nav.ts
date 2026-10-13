@@ -1,4 +1,5 @@
 import { portalNavFor } from '@/app/nav';
+import { canReadSettlements } from '@/app/portal-nav';
 import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
@@ -49,5 +50,8 @@ export async function loadPortalNav(
 ): Promise<readonly SidebarItem[]> {
   const result = current ?? (await fetchCurrentUser(session));
   const roles = result.kind === 'USER' ? result.user.effectiveRoles : [];
-  return portalNavFor({ canReadProjects: canReadProjects(roles, webServerEnv()) });
+  return portalNavFor({
+    canReadProjects: canReadProjects(roles, webServerEnv()),
+    canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
+  });
 }

@@ -9,7 +9,7 @@ import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { contractCommandsTotal } from '../observability/metrics';
 import { PrismaService } from '../prisma/prisma.service';
 import { transactionNow } from '../shared/clock';
-import type { ClaimFence } from '../shared/idempotency';
+import type { ClaimFence, RefusalFence } from '../shared/idempotency';
 import { forbiddenRefusal, ruleRefusal } from '../shared/refusal';
 import { AuthorityRefusals } from '../signing/authority-refusals';
 import { ENV } from '../tokens';
@@ -82,11 +82,15 @@ export class MilestoneService {
     dto: PlanMilestoneDto,
     fence?: ClaimFence<MilestoneView>,
   ): Promise<MilestoneView> {
-    const acting = this.access.assertCanCommandAmendments();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandAmendments(),
+      { action: 'PLAN_MILESTONE', contractId, subjectId: null },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);
-    await this.assertMayEdit(row, side, 'PLAN_MILESTONE', null, 'plan_milestone');
+    await this.assertMayEdit(row, side, 'PLAN_MILESTONE', null, 'plan_milestone', fence);
     const person = currentActor({ requirePlatformUserId: true });
 
     return this.prisma.transaction(async (tx) => {
@@ -155,11 +159,15 @@ export class MilestoneService {
     dto: ChangeMilestoneDto,
     fence?: ClaimFence<MilestoneView>,
   ): Promise<MilestoneView> {
-    const acting = this.access.assertCanCommandAmendments();
+    const acting = await this.refusals.commandingCaller(
+      () => this.access.assertCanCommandAmendments(),
+      { action: 'CHANGE_MILESTONE', contractId, subjectId: milestoneId },
+      fence,
+    );
     const row = await this.contracts.findParty(acting.organizationId, contractId);
     const side = row ? sideOf(row, acting.organizationId) : null;
     if (!row || !side) throw RastaError.notFound('Contract', contractId);
-    await this.assertMayEdit(row, side, 'CHANGE_MILESTONE', milestoneId, 'change_milestone');
+    await this.assertMayEdit(row, side, 'CHANGE_MILESTONE', milestoneId, 'change_milestone', fence);
     const person = currentActor({ requirePlatformUserId: true });
 
     return this.prisma.transaction(async (tx) => {
@@ -264,6 +272,7 @@ export class MilestoneService {
     action: 'PLAN_MILESTONE' | 'CHANGE_MILESTONE',
     subjectId: string | null,
     command: MilestoneCommand,
+    fence: RefusalFence | undefined,
   ): Promise<void> {
     const base = {
       action,
@@ -281,6 +290,7 @@ export class MilestoneService {
             'EDITOR_NOT_EMPLOYER',
           ]),
         ),
+        fence,
       );
     }
     if (!this.access.mayPlanMilestones()) {
@@ -290,6 +300,7 @@ export class MilestoneService {
           command,
           RastaError.insufficientRole(this.access.milestoneRoles(), getContext().roles),
         ),
+        fence,
       );
     }
   }

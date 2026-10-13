@@ -68,7 +68,7 @@ export default async function DriversPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/drivers" />}
+      sidebar={<PortalSidebar session={session} currentHref="/drivers" current={currentUser} />}
     >
       <PageHeader
         title="راننده و تخصیص"

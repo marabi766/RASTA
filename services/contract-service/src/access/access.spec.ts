@@ -2,6 +2,7 @@ import { isRastaError, runWithContext, type RequestContext } from '@rasta/nest-c
 import { loadContractEnv, type ContractEnv } from '../config/env';
 import {
   ContractAccess,
+  PlatformAdministratorRefused,
   assertNotAuditor,
   assertNotServiceCaller,
   assertPartyOf,
@@ -148,6 +149,67 @@ describe('configuration decides who reads for the employer', () => {
       runWithContext(context({ authType: 'SERVICE' }), assertNotServiceCaller),
     ).toThrow();
     expect(() => runWithContext(context({}), assertNotServiceCaller)).not.toThrow();
+  });
+});
+
+describe('the platform administrator never commands for a party', () => {
+  const access = new ContractAccess(env());
+  const commands = [
+    ['assertCanCommand', () => access.assertCanCommand()],
+    ['assertCanCommandAmendments', () => access.assertCanCommandAmendments()],
+  ] as const;
+
+  it.each(commands)(
+    '%s refuses it acting for an organization with a 403 that names the organization, for the audit',
+    (_name, command) => {
+      for (const roles of [['SYSTEM_ADMIN'], ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN']]) {
+        let refused: unknown;
+        runWithContext(context({ roles }), () => {
+          try {
+            command();
+          } catch (error) {
+            refused = error;
+          }
+        });
+        expect(refused).toBeInstanceOf(PlatformAdministratorRefused);
+        expect(refused).toMatchObject({ code: 'FORBIDDEN', status: 403, organizationId: ORG });
+        expect(isRastaError(refused)).toBe(true);
+      }
+    },
+  );
+
+  it.each(commands)(
+    '%s refuses it with no organization selected as a plain 403: there is nothing to audit against',
+    (_name, command) => {
+      let refused: unknown;
+      runWithContext(context({ roles: ['SYSTEM_ADMIN'], organizationId: undefined }), () => {
+        try {
+          command();
+        } catch (error) {
+          refused = error;
+        }
+      });
+      expect(refused).not.toBeInstanceOf(PlatformAdministratorRefused);
+      expect(refused).toMatchObject({ code: 'FORBIDDEN' });
+    },
+  );
+
+  it.each(commands)('%s refuses the oversight role and a service as before', (_name, command) => {
+    for (const overrides of [
+      { roles: ['AUDITOR', 'SYSTEM_ADMIN'] },
+      { roles: ['SYSTEM_ADMIN'], authType: 'SERVICE' as const },
+    ]) {
+      let refused: unknown;
+      runWithContext(context(overrides), () => {
+        try {
+          command();
+        } catch (error) {
+          refused = error;
+        }
+      });
+      expect(refused).not.toBeInstanceOf(PlatformAdministratorRefused);
+      expect(refused).toMatchObject({ code: 'FORBIDDEN' });
+    }
   });
 });
 

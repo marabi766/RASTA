@@ -64,7 +64,7 @@ export default async function MaintenancePage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/maintenance" />}
+      sidebar={<PortalSidebar session={session} currentHref="/maintenance" current={currentUser} />}
     >
       <MaintenanceScreen
         result={result}

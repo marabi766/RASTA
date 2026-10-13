@@ -67,7 +67,7 @@ export default async function AssetsPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/assets" />}
+      sidebar={<PortalSidebar session={session} currentHref="/assets" current={currentUser} />}
     >
       <AssetsScreen
         result={result}

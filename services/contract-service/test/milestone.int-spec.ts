@@ -204,6 +204,18 @@ describe('milestones of a signed contract', () => {
         ]);
       });
 
+      it('a refused plan repeated under the same key and user is refused again and audited once; another body is its own request and its own event', async () => {
+        const c = await signed();
+        const key = idemKey('refused-plan');
+        const first = await plan(c.id, c.contractorToken, body(), key).expect(403);
+        const again = await plan(c.id, c.contractorToken, body(), key).expect(403);
+        expect(reasons(again.body)).toEqual(reasons(first.body));
+        expect(await refusedEvents(c.employer)).toHaveLength(1);
+        await plan(c.id, c.contractorToken, body({ title: 'Another' }), key).expect(403);
+        expect(await refusedEvents(c.employer)).toHaveLength(2);
+        expect(await milestoneRows(w, c.id)).toEqual([]);
+      });
+
       it('the platform administrator, the oversight role, a service token and a token without a user id plan nothing', async () => {
         const c = await signed();
         const audits = (await refusedEvents(c.employer)).length;
@@ -224,7 +236,11 @@ describe('milestones of a signed contract', () => {
         ).expect(403);
         await plan(c.id, undefined).expect(401);
         expect(await milestoneRows(w, c.id)).toEqual([]);
-        expect((await refusedEvents(c.employer)).length).toBe(audits);
+        // Only the platform administrator acting for the employer is a refusal the audit records.
+        const recorded = (await refusedEvents(c.employer)).slice(audits);
+        expect(recorded.map((e) => [e.payload.action, e.payload.side, e.payload.reason])).toEqual([
+          ['PLAN_MILESTONE', 'EMPLOYER', 'PLATFORM_ADMINISTRATOR'],
+        ]);
       });
     });
   });
@@ -345,11 +361,13 @@ describe('milestones of a signed contract', () => {
       }).expect(403);
       expect(reasons(asContractor.body)).toEqual(['milestone:EDITOR_NOT_EMPLOYER']);
       await change(c.id, made.id, person(c.employer, ['DRIVER']), { title: 'x' }).expect(403);
+      await change(c.id, made.id, systemAdminOf(c.employer), { title: 'x' }).expect(403);
       const refused = await refusedEvents(c.employer);
       expect(refused.map((e) => [e.payload.action, e.payload.reason, e.payload.subjectId])).toEqual(
         [
           ['CHANGE_MILESTONE', 'NOT_EMPLOYER', made.id],
           ['CHANGE_MILESTONE', 'ROLE_NOT_PERMITTED', made.id],
+          ['CHANGE_MILESTONE', 'PLATFORM_ADMINISTRATOR', made.id],
         ],
       );
       await change(c.id, theirs.id, c.employerToken, { title: 'x' }).expect(404);
