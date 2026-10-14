@@ -283,22 +283,32 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         }),
     },
     {
-      // D-052: the relay, the purge and the reconciliation sweep stop together in the destroy
-      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweep too (as #247 r3): stopped
-      // later, it kept writing outbox rows while the relay drained. The two consumers still stop
-      // in onApplicationShutdown: `EventConsumer.stop()` takes no deadline yet.
+      // D-052: the relay, the purge, the reconciliation sweep and the two consumers stop
+      // together in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweep too
+      // (as #247 r3): stopped later, it kept writing outbox rows while the relay drained. The
+      // consumers too (Codex r1 on #277): stopped later, one after the other in
+      // onApplicationShutdown and with no bound, their waits came on top of the relay's.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, PolicyReconciliationSweeper, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PolicyReconciliationSweeper,
+        TenderAwardedConsumer,
+        OrganizationMovedConsumer,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         reconciliation: PolicyReconciliationSweeper,
+        awarded: TenderAwardedConsumer,
+        moves: OrganizationMovedConsumer,
         env: ContractEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [reconciliation],
+          workers: [reconciliation, awarded, moves],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -396,10 +406,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.awarded.stop();
-    await this.moves.stop();
-    // The relay, the purge and the sweep already stopped in OutboxShutdown's onModuleDestroy,
-    // concurrently and by one deadline; this joins that stop and returns at once.
+    // The relay, the purge, the sweep and the two consumers already stopped in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }
 }

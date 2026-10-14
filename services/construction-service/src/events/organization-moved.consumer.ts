@@ -5,6 +5,7 @@ import {
   kafkaConnection,
   type EventHandler,
   type HandlerOutcome,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import { z } from 'zod';
@@ -110,8 +111,16 @@ export class OrganizationMovedConsumer {
     await this.consumer.start();
   }
 
-  async stop(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay, the purge and the sweeps, by the shutdown's one deadline; an event
+   * still in flight is abandoned uncommitted and delivered again, and coalesces
+   * into its policy's open task. Before, `AppModule` stopped it with no bound in
+   * `onApplicationShutdown`, after the relay had drained, so the waits added up
+   * past SHUTDOWN_TIMEOUT_MS (Codex r1 on #277).
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
   }
 
   /** One event. Public so a test can drive it without a broker. */

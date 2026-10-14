@@ -1464,21 +1464,31 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     در nest-common با Producer وفادار به kafkajs (`__tests__/fake-kafka.ts`)، و در fleet: `test/outbox-shutdown.int-spec.ts`
     (Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Send بی‌پایان DLQ که پس از بستن می‌رسد؛ Handler واقعی که پس از بستن
     Commit می‌کند و تحویل دوباره‌اش بی‌اثر است) و `test/insurance-parked.int-spec.ts` (جاروی منتظر asset-service در
-    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. سرویس‌های دیگر (contract، construction، economic،
-    marketplace، notification، identity، audit، supplier، inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
+    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. سرویس‌های دیگر (notification، identity، audit، supplier،
+    inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
   - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
     بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
     ۲۴ ثانیه را زیر مهلت ۲۵ ثانیه می‌پذیرفت در حالی که Coordinator تخلیه را در ۲۳ ثانیه قطع می‌کرد. حالا هر سرویسِ دارای
     رله باید Grace را در `outboxShutdownBudgetMs` جا دهد (رله‌ای که هنوز در `onApplicationShutdown` می‌ایستد هم به همان ذخیره
     برای بقیهٔ بستن نیاز دارد)، و `SHUTDOWN_TIMEOUT_MS` ≤ ۲۰۰۰ در چنین سرویسی با نام خودش رد می‌شود. پیش‌فرض‌ها (۲۰ در ۲۳)
     تغییری نمی‌کنند.
-  - **فاز ۲ب، کارگرها:** Sweepهایی که ردیف Outbox می‌نویسند به همین `workers` پیوستند و با همان مهلت می‌ایستند:
-    construction (آشتی سیاست‌ها، بستن مناقصه، بررسی صلاحیت پس از انتخاب)، contract (آشتی سیاست‌ها) و economic (آشتی
-    پرداخت). هر کدام Poll را بی‌درنگ قطع می‌کند و واحد تازه‌ای شروع نمی‌کند؛ واحد جاری تا مهلت صبر می‌کند و پس از آن رها
-    می‌شود (واحد با رویدادش در یک تراکنش Commit می‌شود، پس Rollback و Lease آن را به Sweep بعدی می‌دهد). marketplace
-    کارگری جز Worker تمپورال ندارد که از پیش در همان مرحلهٔ Destroy می‌ایستد. **مصرف‌کننده‌های Kafka این چهار سرویس هنوز
-    بیرون از این مهلت‌اند:** `EventConsumer.stop()` روی `main` مهلت نمی‌گیرد (#270، هنوز باز، آن را برای سرویس‌های فاز ۱ می‌آورد)، پس همان‌جا
-    که بودند (`onApplicationShutdown`) می‌ایستند.
+  - **فاز ۲ب، کارگرها و Consumerها:** Sweepهایی که ردیف Outbox می‌نویسند به همین `workers` پیوستند و با همان مهلت
+    می‌ایستند: construction (آشتی سیاست‌ها، بستن مناقصه، بررسی صلاحیت پس از انتخاب)، contract (آشتی سیاست‌ها) و economic
+    (آشتی پرداخت). هر کدام Poll را بی‌درنگ قطع می‌کند و واحد تازه‌ای شروع نمی‌کند؛ واحد جاری تا مهلت صبر می‌کند و پس از آن
+    رها می‌شود (واحد با رویدادش در یک تراکنش Commit می‌شود، پس Rollback و Lease آن را به Sweep بعدی می‌دهد).
+    Consumerهای Kafka همین سه سرویس هم (Codex r1 روی #277) حالا `workers`اند و با `stop({ deadlineAt })` ِ #270
+    می‌ایستند: construction (`OrganizationMovedConsumer`، `SupplierStandingConsumer`)، contract (`TenderAwardedConsumer`،
+    `OrganizationMovedConsumer`) و economic (`SettlementAuthorityConsumer`، `RewardTriggerConsumer`). پیش‌تر بی‌کران و پس
+    از تخلیهٔ رله در `onApplicationShutdown` می‌ایستادند (در construction و contract یکی پس از دیگری)، پس Handler کند بستن
+    را تا خروج اجباری نگه می‌داشت. حالا پیام در پرواز تا مهلت انتظار کشیده و پس از آن **بی‌Commit رها** می‌شود و Group
+    دوباره تحویلش می‌دهد (تکرار را `processed_event`، یک قرارداد به‌ازای هر مناقصه یا وظیفهٔ باز هر سیاست جذب می‌کند)؛
+    `onApplicationShutdown` فقط به همان توقف می‌پیوندد. آزمون: `test/outbox-shutdown.int-spec.ts` در هر سه سرویس
+    (AppModule واقعی، هر دو Consumer واقعی روی `EventConsumer` واقعی با kafkajs جعلی که فقط با بازگشت `eachMessage`
+    Commit می‌کند؛ Handler بی‌پایان هر دو کنار Publish و Batch بی‌پایان ⇐ خروج ۰ در مهلت ۷ ثانیه زیر ۹ ثانیه، هیچ Offset
+    Commit نشده؛ Handlerی که پس از بستن برمی‌گردد هم Commit نمی‌شود) و `src/app.module.shutdown.spec.ts`. marketplace
+    Consumer ندارد؛ Worker تمپورالش در مرحلهٔ Destroy می‌ایستد ولی بی‌مهلت (Codex r1 روی #277، یافتهٔ ۲)، و Bootstrap
+    صلاحیت در construction و حلقهٔ ممیزی موجودی در economic پس از بازگشت `stop` هنوز صفحهٔ تازه شروع می‌کنند (یافتهٔ ۳)؛
+    هر دو مستقل از این PR روی `main` هستند و به PR جداگانهٔ فاز ۳ خاموش‌شدن رفته‌اند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 

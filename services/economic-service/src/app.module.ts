@@ -98,13 +98,13 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
 const MAINTENANCE_TOPICS = ['rasta.maintenance.v1'];
 const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 
-// A note on the providers nothing below injects — the two consumers and
-// `LedgerBalanceAudit`. Nest instantiates every provider a module declares, so
-// their `onModuleInit` runs and they subscribe and start their timer without
-// anyone holding a reference. Injecting them into `AppModule` purely to keep
-// them alive would be a lie about the dependency. `PaymentReconciliationSweeper`
-// starts its own timer the same way; `OutboxShutdown` injects it because it
-// stops it.
+// A note on the providers that start themselves — the two consumers,
+// `LedgerBalanceAudit` and `PaymentReconciliationSweeper`. Nest instantiates
+// every provider a module declares, so their `onModuleInit` runs and they
+// subscribe and start their timer without anyone holding a reference.
+// Injecting them into `AppModule` purely to keep them alive would be a lie
+// about the dependency. `OutboxShutdown` injects the sweeper and the two
+// consumers because it stops them.
 
 @Module({
   controllers: [
@@ -326,23 +326,34 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         }),
     },
     {
-      // D-052: the relay, the purge and the payment reconciler stop together in
-      // the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The
-      // reconciler too (as #247 r3): stopped later, it kept writing outbox rows
-      // while the relay drained. The two consumers still stop in their own
-      // onApplicationShutdown: `EventConsumer.stop()` takes no deadline yet.
+      // D-052: the relay, the purge, the payment reconciler and the two
+      // consumers stop together in the destroy phase, by one deadline inside
+      // SHUTDOWN_TIMEOUT_MS. The reconciler too (as #247 r3): stopped later, it
+      // kept writing outbox rows while the relay drained. The consumers too
+      // (Codex r1 on #277): stopped later, in their own onApplicationShutdown
+      // and with no bound, their wait came on top of the relay's; those hooks
+      // now only join this stop.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, PaymentReconciliationSweeper, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PaymentReconciliationSweeper,
+        SettlementAuthorityConsumer,
+        RewardTriggerConsumer,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         reconciler: PaymentReconciliationSweeper,
+        settlements: SettlementAuthorityConsumer,
+        rewards: RewardTriggerConsumer,
         env: EconomicEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [reconciler],
+          workers: [reconciler, settlements, rewards],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -438,9 +449,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay, the purge and the payment reconciler already stopped in
-    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
-    // joins that stop and returns at once.
+    // The relay, the purge, the payment reconciler and the two consumers
+    // already stopped in OutboxShutdown's onModuleDestroy, concurrently and by
+    // one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }

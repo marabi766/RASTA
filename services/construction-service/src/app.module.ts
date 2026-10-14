@@ -411,11 +411,12 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         }),
     },
     {
-      // D-052: the relay, the purge and the three sweeps stop together in the
-      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweeps
-      // too (as #247 r3): stopped later, they kept writing outbox rows while
-      // the relay drained. The consumers and the standing bootstrap write no
-      // outbox row and still stop in onApplicationShutdown.
+      // D-052: the relay, the purge, the three sweeps and the two consumers
+      // stop together in the destroy phase, by one deadline inside
+      // SHUTDOWN_TIMEOUT_MS. The sweeps too (as #247 r3): stopped later, they
+      // kept writing outbox rows while the relay drained. The consumers too
+      // (Codex r1 on #277): stopped later, in onApplicationShutdown and with no
+      // bound, their wait came on top of the relay's.
       provide: OutboxShutdown,
       inject: [
         OutboxRelay,
@@ -423,6 +424,8 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         PolicyReconciliationSweeper,
         TenderCloseSweeper,
         AwardStandingCheckSweeper,
+        OrganizationMovedConsumer,
+        SupplierStandingConsumer,
         ENV,
       ],
       useFactory: (
@@ -431,12 +434,14 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
         reconciliation: PolicyReconciliationSweeper,
         tenderClose: TenderCloseSweeper,
         awardCheck: AwardStandingCheckSweeper,
+        moves: OrganizationMovedConsumer,
+        standing: SupplierStandingConsumer,
         env: ConstructionEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [reconciliation, tenderClose, awardCheck],
+          workers: [reconciliation, tenderClose, awardCheck, moves, standing],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -564,12 +569,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.moves.stop();
-    await this.standing.stop();
     await this.bootstrap.stop();
-    // The relay, the purge and the three sweeps already stopped in
-    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
-    // joins that stop and returns at once.
+    // The relay, the purge, the three sweeps and the two consumers already
+    // stopped in OutboxShutdown's onModuleDestroy, concurrently and by one
+    // deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
   }
 }
