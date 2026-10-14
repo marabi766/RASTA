@@ -1404,7 +1404,9 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هر Migration بازنویسی (D-048، گام ۲) همهٔ ردیف‌های منتشرشده را حساب می‌کند.
 - **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
   صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
-- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization.** زمان‌بند مشترک
+- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization. فاز ۲a انجام شد
+  (#276): notification، supplier، inventory** — همان الگو، همان تنظیم‌ها و همان پیش‌فرض‌ها. identity در فاز ۲a
+  سیم‌کشی نشد (پایین، «مانده»). زمان‌بند مشترک
   `OutboxPurgeScheduler` و دستور `purgePublishedSql` در `@rasta/nest-common`، env در `outboxPurgeEnvSchema`
   (`@rasta/config`):
   - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
@@ -1439,6 +1441,11 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     می‌کنند و واحد رهاشده Rollback و در گذر بعدی دوباره پیدا می‌شود. آزمون: `test/outbox-shutdown.int-spec.ts` در
     document (اسکن و Publish بی‌پایان ⇐ خروج ۰ زیر مهلت، هر دو سند به صف برگشته؛ اسکن کوتاه ⇐ حکم ثبت، از شروع بستن هیچ
     Claim تازه‌ای نیست).
+  - **فاز ۲a، کارگرهای هر سرویس:** notification دو کارگرش (Resolution و Mail، #267) را در همان `workers` نگه می‌دارد و
+    Purge کنارشان می‌آید. `ReservationSweeper` در inventory مانند جاروی انقضای asset کارگر `OutboxShutdown` شد: هر Batch
+    آن ردیف Outbox می‌نویسد. Consumerهای Kafka (`DispatcherConsumer` در notification، `PerformanceConsumer` در supplier)
+    هنوز بیرون از این مهلت می‌ایستند، چون `EventConsumer.stop()` تا ادغام #270 مهلت نمی‌پذیرد. پس از #270 همان سیم‌کشی
+    fleet/asset/maintenance را می‌گیرند.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 
@@ -1453,7 +1460,7 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هزارتایی ۱۱ ms، اجرای بی‌کار ۰٫۱ ms.
 
   `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
-  `test/outbox-purge.int-spec.ts` در هر پنج سرویس این را نشان می‌دهد.
+  `test/outbox-purge.int-spec.ts` در هر هشت سرویس این را نشان می‌دهد.
 
   **B2 پیش از Purge:** B2 (`outbox-b2-backfill.md`) شماره‌گذاری را از بیشینهٔ `stream_seq` باقی‌مانده در جدول می‌گیرد،
   نه از شمارنده. پس B2 هر سرویس را **پیش از روشن شدن Purge آن** اجرا کن. اگر Purge ردیف‌های شماره‌دار یک Stream را
@@ -1472,8 +1479,11 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   «B2 پیش از Purge» برای آن همچنان لازم است.
 
   **مانده (فازهای بعد، با مالک هر سرویس):**
-  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست؛
-  - economic، marketplace، supplier، construction، contract، notification.
+  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست. **در فاز ۲a متوقف شد و تصمیمش با مدیر
+    پروژه است:** `audit-gap-detected.md` گام ۵ برای فرمان اصلاح، ردیف منتشرشدهٔ `outbox_message` را با
+    `audit_correction_command` Join می‌کند و نبودن آن را **توضیح‌نداده** می‌داند و تشدید می‌کند. Purge این ردیف‌ها را
+    پس از Retention پاک می‌کند، پس آن گام را بی تصمیم می‌شکند.
+  - economic، marketplace، construction، contract.
 
 - **اولویت:** متوسط (پیش‌نیاز Production)
 - **ثبت‌شده:** 2026-10-13 (#242 r1)
