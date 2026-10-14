@@ -4,6 +4,7 @@ import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
 import { fetchCurrentUser, type CurrentUserResult } from './identity';
+import { requestRoles } from './realm-roles';
 import type { WebSession } from './session';
 
 /**
@@ -49,7 +50,10 @@ export async function loadPortalNav(
   current?: CurrentUserResult,
 ): Promise<readonly SidebarItem[]> {
   const result = current ?? (await fetchCurrentUser(session));
-  const roles = result.kind === 'USER' ? result.user.effectiveRoles : [];
+  // The realm claim is read only once identity answered: with no answer the gated
+  // links stay hidden, whatever the token says.
+  const roles =
+    result.kind === 'USER' ? requestRoles(result.user.effectiveRoles, session.accessToken) : [];
   return portalNavFor({
     canReadProjects: canReadProjects(roles, webServerEnv()),
     canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
