@@ -306,6 +306,7 @@ SDK پیش از ساختن Span صدا می‌زند، و تصمیم نمونه�
 Frameهای Stack پس از همین پاک‌سازی جدا می‌شوند، چون سطری از بدنهٔ نقل‌شده می‌تواند شکل `at …` داشته باشد؛ و Correlation Id
 همان است که قاعدهٔ `X-Correlation-Id` (§ ۶٫۳) پذیرفته — `access_token=…` پذیرفته نمی‌شود و ULID تازه جایش را می‌گیرد. تست‌ها
 با Instrumentationهای واقعی و Exporter درون‌حافظه:
+
 - `packages/observability/src/url-redaction.spec.ts`: Span، با و بی `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT=40`، از جمله
   `User-Agent` به شکل خطای Parser.
 - `exporter-selection.spec.ts`: مقایسه با کد پیشین در هر ترکیب محیط.
