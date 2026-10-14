@@ -260,8 +260,8 @@ describe('subscribing to an undeclared topic', () => {
   });
 
   it('fails even when only one of several topics is undeclared', () => {
-    expect(() => build(['rasta.asset.v1', 'rasta.inventory.v1'], async () => undefined)).toThrow(
-      /rasta\.inventory\.v1/,
+    expect(() => build(['rasta.asset.v1', 'rasta.procurement.v1'], async () => undefined)).toThrow(
+      /rasta\.procurement\.v1/,
     );
   });
 });

@@ -1943,6 +1943,99 @@ export const EXPECTED = {
       'ck_outbox_published_is_clean',
     ],
   },
+  /**
+   * inventory-service (COM-006 PR 1, ADR-056). One initial migration that folds the domain
+   * schema, the idempotency store and the outbox together, as contract's does, so its outbox
+   * objects are verified here rather than by the by-name outbox verifiers
+   * (`verify-outbox-claim-migration.mjs` lists it as folded).
+   *
+   * The domain objects listed are the ones carrying a claim a reader would otherwise take on
+   * trust: no balance is ever negative or over-reserved, a balance moves only with its movement
+   * and the ledger is a verified, append-only chain, a reservation ends once, and a key applies a
+   * command once per stock item. The generated `available_quantity` goes with its table.
+   */
+  inventory: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is
+    // created — and migrated — as the migrator, which owns rasta_inventory.
+    connectAs: 'migrator',
+    // geography, unqualified in its migration (`warehouse.location`): see `scratchDatabase`
+    // in verify-migration-reversible.mjs.
+    scratchDatabase: true,
+    tables: [
+      'warehouse',
+      'stock_item',
+      'stock_reservation',
+      'stock_movement',
+      'idempotency_key',
+      'outbox_message',
+      'outbox_stream_sequence',
+    ],
+    types: ['StockMovementType', 'StockReservationStatus'],
+    triggers: [
+      'tg_warehouse_guard',
+      'tg_warehouse_no_truncate',
+      'tg_stock_item_guard',
+      'tg_stock_item_no_truncate',
+      'tg_stock_item_ledger_check',
+      'tg_stock_movement_append_only',
+      'tg_stock_movement_no_truncate',
+      'tg_stock_movement_chain',
+      'tg_stock_reservation_guard',
+      'tg_stock_reservation_no_truncate',
+      'tg_stock_reservation_ledger_check',
+    ],
+    functions: [
+      'warehouse_guard',
+      'stock_item_guard',
+      'stock_item_ledger_check',
+      'stock_movement_append_only',
+      'stock_movement_chain',
+      'stock_reservation_guard',
+      'stock_reservation_ledger_check',
+    ],
+    indexes: [
+      'ux_warehouse_org_id',
+      'ux_stock_item_org_warehouse_id',
+      'ux_stock_item_org_warehouse_product',
+      'ux_stock_item_org_id',
+      'ux_stock_reservation_org_item_id',
+      'ux_stock_movement_command',
+      'ux_stock_reservation_command',
+      'ux_stock_movement_item_version',
+      'ux_stock_movement_reserve_once',
+      'ux_stock_movement_end_once',
+      'ix_stock_reservation_due',
+    ],
+    constraints: [
+      'fk_stock_item_warehouse',
+      'fk_stock_reservation_item',
+      'fk_stock_movement_item',
+      'fk_stock_movement_reservation',
+      'ck_warehouse_id',
+      'ck_warehouse_name',
+      'ck_warehouse_status',
+      'ck_stock_item_id',
+      'ck_stock_item_product_id',
+      'ck_stock_item_on_hand_nonneg',
+      'ck_stock_item_reserved_nonneg',
+      'ck_stock_item_reserved_within_on_hand',
+      'ck_stock_item_version_nonneg',
+      'ck_stock_reservation_quantity_positive',
+      'ck_stock_reservation_order_reference',
+      'ck_stock_reservation_end_coherent',
+      'ck_stock_reservation_expired_had_expiry',
+      'ck_stock_movement_type_deltas',
+      'ck_stock_movement_after_valid',
+      'ck_stock_movement_source_reference',
+      'ck_idempotency_state',
+      'ck_idempotency_completed_has_response',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
   /*
    * The five services whose initial migration had no down.sql until the
    * platform-safety pass (lane 6), so the whole-chain check could not reach

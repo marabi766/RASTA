@@ -10,10 +10,15 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { RastaError, Roles, zodPipe } from '@rasta/nest-common';
-import { IdempotencyStore, targeted } from '../shared/idempotency';
+import { Roles, zodPipe } from '@rasta/nest-common';
+import {
+  IdempotencyStore,
+  requireIdempotencyKey,
+  targeted,
+  type RecordResponse,
+} from '../shared/idempotency';
 import { OrderSagaClient } from '../temporal/saga.client';
-import { OrderService } from './order.service';
+import { OrderService, type OrderCommand } from './order.service';
 import {
   cancelOrderSchema,
   confirmReceiptSchema,
@@ -28,6 +33,7 @@ import {
   type CreateOrderDto,
   type FulfillOrderDto,
   type ListOrdersQuery,
+  type OrderView,
   type RaiseDisputeDto,
   type ResolveDisputeDto,
   type SubmitReviewDto,
@@ -48,7 +54,8 @@ import {
  * ## Two things every unsafe route here does
  *
  * **It requires an `Idempotency-Key`.** The gateway marks the whole `orders`
- * prefix `requiresIdempotencyKey`, and the service requires it again rather
+ * prefix `requiresIdempotencyKey`, and the service requires it again
+ * ({@link requireIdempotencyKey}) rather
  * than trusting that: a request that reaches this port directly — another
  * service, a port-forward, a future ingress — must not be able to place two
  * orders by retrying.
@@ -89,8 +96,13 @@ export class OrderController {
   ) {
     const key = requireIdempotencyKey(idempotencyKey);
 
-    const order = await this.idempotency.run('POST /v1/orders', key, dto, 201, () =>
-      this.orders.place(dto, key),
+    const order = await this.idempotency.run<OrderView>(
+      'POST /v1/orders',
+      key,
+      dto,
+      201,
+      (record) => this.orders.place(dto, key, record),
+      (stored) => this.orders.assertReplayVisible(stored.id, 'place'),
     );
 
     // After the order is committed. A saga started before the commit could
@@ -132,7 +144,8 @@ export class OrderController {
   })
   async confirm(@Param('id') id: string, @Headers('idempotency-key') idempotencyKey?: string) {
     return this.command('POST /v1/orders/:id/confirm', id, idempotencyKey, undefined, {
-      work: () => this.orders.confirm(id),
+      command: 'confirm',
+      work: (record) => this.orders.confirm(id, record),
       signal: ['orderConfirmed'],
     });
   }
@@ -152,7 +165,8 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/fulfill', id, idempotencyKey, dto, {
-      work: () => this.orders.fulfill(id, dto),
+      command: 'fulfill',
+      work: (record) => this.orders.fulfill(id, dto, record),
       signal: ['orderFulfilled'],
     });
   }
@@ -173,7 +187,8 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/confirm-receipt', id, idempotencyKey, dto, {
-      work: () => this.orders.confirmReceipt(id, dto),
+      command: 'confirmReceipt',
+      work: (record) => this.orders.confirmReceipt(id, dto, record),
       signal: ['receiptConfirmed'],
     });
   }
@@ -193,7 +208,8 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/disputes', id, idempotencyKey, dto, {
-      work: () => this.orders.raiseDispute(id, dto),
+      command: 'raiseDispute',
+      work: (record) => this.orders.raiseDispute(id, dto, record),
       signal: ['orderDisputed', dto.reason],
     });
   }
@@ -213,7 +229,8 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/disputes/resolve', id, idempotencyKey, dto, {
-      work: () => this.orders.resolveDispute(id, dto),
+      command: 'resolveDispute',
+      work: (record) => this.orders.resolveDispute(id, dto, record),
       signal: ['disputeResolved', dto.outcome],
     });
   }
@@ -233,7 +250,8 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.command('POST /v1/orders/:id/cancel', id, idempotencyKey, dto, {
-      work: () => this.orders.cancel(id, dto),
+      command: 'cancel',
+      work: (record) => this.orders.cancel(id, dto, record),
       signal: ['orderCancelled', dto.reason],
     });
   }
@@ -253,8 +271,13 @@ export class OrderController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const key = requireIdempotencyKey(idempotencyKey);
-    return this.idempotency.run('POST /v1/orders/:id/reviews', key, targeted(id, dto), 201, () =>
-      this.orders.submitReview(id, dto),
+    return this.idempotency.run(
+      'POST /v1/orders/:id/reviews',
+      key,
+      targeted(id, dto),
+      201,
+      (record) => this.orders.submitReview(id, dto, record),
+      () => this.orders.assertReplayVisible(id, 'review'),
     );
   }
 
@@ -284,13 +307,22 @@ export class OrderController {
    * the order on its timer (ADR-039), not a client retry's. The workflow does
    * not do that re-read yet; it is tracked with the saga's other failure
    * windows.
+   *
+   * **A replay is re-authorized** (#253): before the stored response is
+   * returned, the caller must still see the order and still be the party
+   * `step.command` requires, by the rules as they are now — otherwise the
+   * live command's 404 or 403, never the stored body.
    */
   private async command<T>(
     endpoint: string,
     id: string,
     idempotencyKey: string | undefined,
     body: unknown,
-    step: { work: () => Promise<T>; signal: [name: string, ...args: unknown[]] },
+    step: {
+      command: OrderCommand;
+      work: (record: RecordResponse<T>) => Promise<T>;
+      signal: [name: string, ...args: unknown[]];
+    },
   ): Promise<T> {
     const key = requireIdempotencyKey(idempotencyKey);
     const { result, executed } = await this.idempotency.execute(
@@ -299,31 +331,9 @@ export class OrderController {
       targeted(id, body),
       200,
       step.work,
+      () => this.orders.assertReplayVisible(id, step.command),
     );
     if (executed) await this.saga.signal(id, ...step.signal);
     return result;
   }
-}
-
-/**
- * Refuses an unsafe request that arrived without a key.
- *
- * `400 VALIDATION_FAILED` exactly as `docs/06` § 6.8's table specifies. The
- * gateway enforces this for the whole prefix too; both exist because the
- * gateway is not the only way to reach this port.
- */
-export function requireIdempotencyKey(value: string | undefined): string {
-  if (!value || value.trim().length < 8) {
-    throw RastaError.validation(
-      [
-        {
-          path: 'Idempotency-Key',
-          code: 'required',
-          message: 'This operation requires an Idempotency-Key header of at least 8 characters',
-        },
-      ],
-      'Idempotency-Key is required for this operation',
-    );
-  }
-  return value.trim();
 }

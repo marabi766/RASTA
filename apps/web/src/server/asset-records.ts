@@ -24,6 +24,7 @@ import { ASSET_DISPLAY_TEXT, firstIssuePerField, readFields } from './asset-comm
 import { readFromGateway, type ReadResult } from './assets';
 import { BIDI_CONTROL, localDateToIso } from './drivers';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
@@ -147,8 +148,8 @@ const policySchema = z.object({
   /** Minor units as a string — a rial amount does not survive a JSON number. */
   premiumMinor: z.string().nullable().default(null),
   insuredValueMinor: z.string().nullable().default(null),
-  validFrom: z.string(),
-  validTo: z.string(),
+  validFrom: renderableDate,
+  validTo: renderableDate,
   status: z.string(),
   daysUntilExpiry: z.number().int(),
 });
@@ -159,8 +160,8 @@ const inspectionSchema = z.object({
   id: z.string(),
   certificateNo: z.string(),
   centerName: z.string().nullable().default(null),
-  inspectedAt: z.string(),
-  validTo: z.string(),
+  inspectedAt: renderableDate,
+  validTo: renderableDate,
   result: z.string(),
   notes: z.string().nullable().default(null),
   daysUntilExpiry: z.number().int(),

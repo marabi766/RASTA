@@ -111,6 +111,13 @@ export interface E2eConfig {
    * scenario qualifies and suspends its contractors through the gateway.
    */
   supplierUrl: string;
+  /**
+   * contract-service directly — health gating only (CON-003). The contract scenario goes
+   * through the gateway, its signing policy included (`/v1/contract-approval-policies`).
+   */
+  contractUrl: string;
+  /** Topic contract-service publishes to. */
+  contractTopic: string;
   /** Keycloak admin, used once to reconcile the E2E users into an imported realm. */
   keycloakAdmin: { username: string; password: string };
   /**
@@ -163,6 +170,11 @@ export function e2eConfig(): E2eConfig {
       'E2E_SUPPLIER_URL',
       `http://localhost:${process.env.PORT_SUPPLIER?.trim() || '3108'}`,
     ).replace(/\/+$/, ''),
+    contractUrl: required(
+      'E2E_CONTRACT_URL',
+      `http://localhost:${process.env.PORT_CONTRACT?.trim() || '3111'}`,
+    ).replace(/\/+$/, ''),
+    contractTopic: 'rasta.contract.v1',
     identityAggregationWindowSeconds: windowSeconds(
       required('SECURITY_EVENT_AGGREGATION_WINDOW_SECONDS', '60'),
     ),

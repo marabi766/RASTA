@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { EVENT_HEADERS } from '@rasta/contracts';
 import { e2eConfig, type E2eConfig } from './env';
 import { OBSERVER_PRINCIPAL, observerKafkaSettings } from './kafka-observer';
+import { waitFor } from './poll';
 
 /**
  * Reads what economic-service actually published.
@@ -19,6 +20,7 @@ import { OBSERVER_PRINCIPAL, observerKafkaSettings } from './kafka-observer';
  */
 
 export { OBSERVER_PRINCIPAL } from './kafka-observer';
+export { waitFor } from './poll';
 
 /**
  * How the harness reaches the authenticated broker (RUN-006, ADR-061 § 3): as
@@ -49,6 +51,12 @@ export function observerClient(config: E2eConfig, clientId: string): KafkaConfig
  * they disagree.
  */
 export interface ObservedEvent {
+  /**
+   * From the envelope. The outbox delivers at least once: a row published
+   * again before it was marked published arrives with the same `eventId`, and
+   * is the same logical event.
+   */
+  eventId: string | undefined;
   eventName: string;
   /** From the Kafka header — what a consumer filters on without deserialising. */
   correlationId: string | undefined;
@@ -124,12 +132,14 @@ export class EconomicEventTap {
 
         const envelope = message.value
           ? (JSON.parse(message.value.toString('utf8')) as {
+              eventId?: string;
               correlationId?: string;
               payload?: Record<string, unknown>;
             })
           : {};
 
         tap.received.push({
+          eventId: envelope.eventId,
           eventName: read(EVENT_HEADERS.eventName) ?? '(unnamed)',
           correlationId: read(EVENT_HEADERS.correlationId),
           envelopeCorrelationId: envelope.correlationId,
@@ -147,6 +157,27 @@ export class EconomicEventTap {
   /** Every event seen so far that carries this correlation id. */
   correlated(correlationId: string): ObservedEvent[] {
     return this.received.filter((event) => event.correlationId === correlationId);
+  }
+
+  /**
+   * Every delivery seen so far of these events, by the envelope's `eventId` —
+   * whatever header it arrived with. A redelivery that lost its correlation
+   * header is invisible to `correlated` and found here.
+   */
+  withEventIds(eventIds: Iterable<string | undefined>): ObservedEvent[] {
+    const wanted = new Set([...eventIds].filter((id) => id !== undefined));
+    return this.received.filter(
+      (event) => event.eventId !== undefined && wanted.has(event.eventId),
+    );
+  }
+
+  /**
+   * Every event seen so far that `select` keeps, correlated or not: what a check over a whole
+   * stream reads — a draft the award created, a flag a sweeper raised — and not only the events
+   * a call of the scenario's own carried a correlation id into.
+   */
+  observed(select: (event: ObservedEvent) => boolean): ObservedEvent[] {
+    return this.received.filter(select);
   }
 
   /**
@@ -178,34 +209,4 @@ export class EconomicEventTap {
   async stop(): Promise<void> {
     await this.consumer.disconnect();
   }
-}
-
-/**
- * Polls `check` until it is true. No fixed sleeps anywhere in this suite —
- * docs/14 § 14.7 forbids them, and a sleep long enough to be reliable is
- * always long enough to be slow.
- */
-export async function waitFor(
-  description: string,
-  check: () => boolean | Promise<boolean>,
-  timeoutMs = 30_000,
-  detail?: () => string,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-
-  while (Date.now() < deadline) {
-    try {
-      if (await check()) return;
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-
-  throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for ${description}` +
-      (detail ? `; ${detail()}` : '') +
-      (lastError ? `; last error: ${String(lastError)}` : ''),
-  );
 }

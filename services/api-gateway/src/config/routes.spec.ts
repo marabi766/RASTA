@@ -193,6 +193,39 @@ describe('repair orders', () => {
   });
 });
 
+describe('the inventory prefixes (COM-006, ADR-056 plan step 6)', () => {
+  it('route warehouses and stock to inventory-service and require a key on their writes', () => {
+    // A reservation, an issue or an adjustment posted twice must move stock once (docs/06
+    // § 6.8). The requirement applies to unsafe methods only, so reading stock needs none.
+    for (const path of [
+      '/warehouses',
+      '/stock/receipts',
+      '/stock/adjustments',
+      '/stock/reservations',
+      '/stock/reservations/SRV_1/issue',
+    ]) {
+      const route = resolveRoute(path);
+      expect([path, route?.service, route?.requiresIdempotencyKey]).toEqual([
+        path,
+        'inventory',
+        true,
+      ]);
+    }
+  });
+
+  it('stay closed, with no role filter of their own: the service decides who acts (Q-103)', () => {
+    for (const prefix of ['warehouses', 'stock']) {
+      const route = resolveRoute(prefix);
+      expect(route?.publicReason).toBeUndefined();
+      expect(route?.roles).toBeUndefined();
+    }
+  });
+
+  it('leave shipments as they were until its routes exist (PR 2)', () => {
+    expect(resolveRoute('/shipments')).toEqual({ prefix: 'shipments', service: 'inventory' });
+  });
+});
+
 describe('resolveRoute', () => {
   it.each([
     ['/users/me', 'identity'],
@@ -230,10 +263,14 @@ describe('resolveRoute', () => {
     expect(resolveRoute('/orders/ORD_1/cancel')?.requiresIdempotencyKey).toBe(true);
   });
 
-  it('does not require one on catalogue reads', () => {
-    // A search is safe and repeatable; demanding a key would be ceremony that
-    // teaches clients to send meaningless ones.
-    expect(resolveRoute('/products')?.requiresIdempotencyKey).toBeUndefined();
+  it('requires an Idempotency-Key on every unsafe catalogue route', () => {
+    // docs/06 § 6.8 lists publishing an offer among the operations that must
+    // be idempotent: without a key a double submit published two offers.
+    // marketplace-service requires it again. The flag applies to unsafe
+    // methods only (`enforceIdempotencyKey`), so a search needs no key.
+    expect(resolveRoute('/products')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/offers')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/offers/OFR_1')?.requiresIdempotencyKey).toBe(true);
   });
 
   it('gives the oversight role no marketplace prefix at all', () => {

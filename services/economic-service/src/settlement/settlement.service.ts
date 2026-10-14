@@ -15,6 +15,8 @@ import { assertSufficient, balancesFrom } from '../wallet/balances';
 import { nextStatus } from '../transaction/state-machine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor } from '../shared/money';
+import { after, resolveCursor } from '../shared/cursor';
+import type { Prisma } from '../generated/prisma';
 import {
   financialTransactionDuration,
   settlementFailuresTotal,
@@ -410,7 +412,57 @@ export class SettlementService {
     }
     return wallet;
   }
+
+  /**
+   * One page of the settlements this organization paid, or — `incoming` — was
+   * paid, newest first.
+   *
+   * `settlement.organization_id` is the **payer**, so the tenant guard alone
+   * answers only "what did I pay". The payee view has to cross it — ANDing
+   * the guard's filter with a payee filter would ask for a settlement whose
+   * payer and payee are the same organization, which
+   * `ck_settlement_distinct_parties` makes impossible, so it would always
+   * return nothing. The crossing is narrowed to exactly the caller's own id on
+   * the payee column, so it can only ever return settlements the caller was
+   * party to.
+   *
+   * The cursor is resolved with that **same** scope before the page is read
+   * (`shared/cursor.ts`): a settlement of another organization, one that does
+   * not exist, and the caller's own settlement from the other view are all
+   * refused alike, rather than the first returning older rows and the second
+   * none.
+   */
+  async list(
+    organizationId: string,
+    params: { incoming: boolean; limit: number; cursor?: string },
+  ): Promise<SettlementRow[]> {
+    const scope: Prisma.SettlementWhereInput = params.incoming
+      ? { payeeOrganizationId: organizationId }
+      : { organizationId };
+
+    const read = async (): Promise<SettlementRow[]> => {
+      const boundary = await resolveCursor(params.cursor, (id) =>
+        this.prisma.client.settlement
+          .findFirst({ where: { AND: [scope, { id }] }, select: { id: true, settledAt: true } })
+          .then((row) => (row ? { at: row.settledAt, id: row.id } : null)),
+      );
+      return this.prisma.client.settlement.findMany({
+        where: boundary ? { AND: [scope, after('settledAt', boundary)] } : scope,
+        orderBy: [{ settledAt: 'desc' }, { id: 'desc' }],
+        take: params.limit,
+      });
+    };
+
+    return params.incoming
+      ? runUnscoped(
+          'a payee reads settlements where it is the counterparty, narrowed to its own id',
+          read,
+        )
+      : read();
+  }
 }
+
+export type SettlementRow = Prisma.SettlementGetPayload<Record<string, never>>;
 
 export interface SettlementResult {
   settlementId: string;

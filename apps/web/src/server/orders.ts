@@ -16,6 +16,7 @@ import {
 
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -73,7 +74,7 @@ const orderSchema = z.object({
   cancelledAt: z.string().nullable().default(null),
   cancellationReason: z.string().nullable().default(null),
   failureReason: z.string().nullable().default(null),
-  createdAt: z.string(),
+  createdAt: renderableDate,
   /**
    * The commands *this viewer* may issue now, computed by marketplace-service
    * (`order-actions.ts`). Anything the portal does not recognise is dropped

@@ -135,8 +135,17 @@ export const ROUTES: readonly RouteRule[] = [
   // ---- commerce ----------------------------------------------------------
   // Search is read-heavy and cheap to abuse, so it carries the tighter limit
   // docs/06 § 6.9 sets for search rather than the default per-user one.
-  { prefix: 'products', service: 'marketplace', rateLimit: { limit: 60, windowSeconds: 60 } },
-  { prefix: 'offers', service: 'marketplace' },
+  // Creating a product and publishing or editing an offer need an
+  // Idempotency-Key (docs/06 § 6.8 lists publishing an offer): a double submit
+  // created two. Unsafe methods only, so search and reads need none, and
+  // marketplace-service enforces it again, storing the response with the write.
+  {
+    prefix: 'products',
+    service: 'marketplace',
+    rateLimit: { limit: 60, windowSeconds: 60 },
+    requiresIdempotencyKey: true,
+  },
+  { prefix: 'offers', service: 'marketplace', requiresIdempotencyKey: true },
   // `cart` is deferred, not removed (ADR-037 § 3): the prefix stays so the
   // routing table still reflects docs/04, and reaches a service that has no
   // handler for it — which answers 404, exactly what "not built yet" means.
@@ -147,8 +156,12 @@ export const ROUTES: readonly RouteRule[] = [
   { prefix: 'rfqs', service: 'procurement' },
   { prefix: 'purchase-orders', service: 'procurement', requiresIdempotencyKey: true },
   { prefix: 'suppliers', service: 'supplier' },
-  { prefix: 'warehouses', service: 'inventory' },
-  { prefix: 'stock', service: 'inventory' },
+  // Every unsafe method of inventory-service creates a warehouse or moves stock — an
+  // irreversible effect a retried POST must not repeat (ADR-056 plan step 6). The key is
+  // required here (unsafe methods only) and again by the service, which also keeps a key's
+  // effect once per stock item for good. `shipments` gains the flag with its routes (PR 2).
+  { prefix: 'warehouses', service: 'inventory', requiresIdempotencyKey: true },
+  { prefix: 'stock', service: 'inventory', requiresIdempotencyKey: true },
   { prefix: 'shipments', service: 'inventory' },
 
   // ---- civil works -------------------------------------------------------

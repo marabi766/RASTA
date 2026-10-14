@@ -31,6 +31,7 @@ describe('TOPIC_PRODUCERS', () => {
       'rasta.notification.v1': ['notification-service'],
       'rasta.construction.v1': ['construction-service'],
       'rasta.contract.v1': ['contract-service'],
+      'rasta.inventory.v1': ['inventory-service'],
       [AUDIT_TRAIL_TOPIC]: ['identity-service'],
       [OPS_REPLAY_TOPIC]: ['ops-replay'],
     });

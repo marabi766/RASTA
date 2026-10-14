@@ -1,12 +1,12 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, Sidebar, TopBar } from '@/ui';
+import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchCurrentUser } from '@/server/identity';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
 import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { fetchOffers, fetchProduct, OFFER_SORTS } from '@/server/marketplace';
-import { portalNavFor } from '@/app/portal-nav';
+import { PortalSidebar } from '@/app/PortalSidebar';
 import { OffersScreen } from './OffersScreen';
 
 /**
@@ -65,7 +65,7 @@ export default async function ProductOffersPage({
           </form>
         </TopBar>
       }
-      sidebar={<Sidebar items={await portalNavFor(session)} currentHref="/marketplace" />}
+      sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
       <OffersScreen
         product={product}

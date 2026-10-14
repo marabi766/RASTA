@@ -6,7 +6,7 @@ import {
   OutboxRelay,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -95,11 +95,24 @@ export function bearer(claims: TestClaims): string {
   return `test.${Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')}`;
 }
 
-/** A user of one organization, with the roles given. */
-export function actor(organizationId: string, roles: string[]): string {
+/**
+ * A user of one organization, with the roles given.
+ *
+ * **One person per organization and role set**: two tokens minted for the same
+ * pair carry the same user id, as two tokens of one real user do. An
+ * idempotent replay is bound to the user who sent the original request
+ * (docs/06 § 6.8, #253), so a test that retries with a freshly minted token
+ * is retrying as the same person. Pass `userId` for one person under changed
+ * roles — a user who lost a role keeps their id.
+ */
+export function actor(organizationId: string, roles: string[], userId?: string): string {
+  const person = createHash('sha256')
+    .update(`${organizationId}|${[...roles].sort().join(',')}`)
+    .digest('hex')
+    .slice(0, 12);
   return bearer({
-    sub: `sub-${ulid()}`,
-    rastaUserId: `USR-APITEST-${ulid().slice(-8)}`,
+    sub: `sub-${userId ?? person}`,
+    rastaUserId: userId ?? `USR-APITEST-${person}`,
     organizationId,
     organizationIds: [organizationId],
     roles,

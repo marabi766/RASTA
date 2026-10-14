@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
 import { webServerEnv } from './env';
+import { renderableDate } from './instant';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import { IRR, MoneyInputError, parseMoneyInput } from '@/lib/format';
 import { TOP_UP_FIELDS, type TopUpFormField, type TopUpFormValues } from '@/lib/wallet-fields';
@@ -43,7 +44,7 @@ const holdSchema = z.object({
   status: z.string(),
   reference: z.string(),
   referenceType: z.string(),
-  placedAt: z.string(),
+  placedAt: renderableDate,
   resolvedAt: z.string().nullable().default(null),
   resolutionNote: z.string().nullable().default(null),
 });
@@ -62,7 +63,7 @@ const transactionSchema = z.object({
   status: z.string(),
   netAmountMinor: z.string(),
   currency: z.string(),
-  occurredAt: z.string(),
+  occurredAt: renderableDate,
   sourceType: z.string().nullable().default(null),
   sourceReference: z.string().nullable().default(null),
   disputeReason: z.string().nullable().default(null),

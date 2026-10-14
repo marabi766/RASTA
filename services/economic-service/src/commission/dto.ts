@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, organizationIdSchema } from '@rasta/contracts';
 import { TRANSACTION_TYPES } from '../transaction/dto';
+import { cursorQueryParameter } from '../shared/cursor';
 
 /**
  * Commission rule configuration (ADR-023).
@@ -87,7 +88,7 @@ export type ListCommissionRulesQuery = z.infer<typeof listCommissionRulesQuerySc
 
 export const listCommissionsQuerySchema = z
   .object({
-    cursor: z.string().optional(),
+    cursor: cursorQueryParameter,
     limit: z.coerce.number().int().min(1).max(100).default(25),
   })
   .strict();

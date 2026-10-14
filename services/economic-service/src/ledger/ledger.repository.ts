@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { AccountPurpose, Prisma } from '../generated/prisma';
+import { after, resolveCursor } from '../shared/cursor';
 
 /**
  * Ledger persistence.
@@ -217,17 +218,27 @@ export class LedgerRepository {
    * Reads `ledger_entry` rather than joining through `journal`, because the
    * index that exists for it — `(account_id, posted_at DESC)` — is the one
    * docs/05 § 5.5 justifies with this exact query.
+   *
+   * The cursor must be an entry of **this** account, read through the tenant
+   * guard like the page itself: an entry of another organization, of another
+   * of the caller's own accounts, or of nothing at all is refused alike
+   * (shared/cursor.ts).
    */
   async listEntries(params: {
     accountId: string;
     cursor?: string;
     limit: number;
   }): Promise<{ items: LedgerEntryRow[]; nextCursor: string | null; hasMore: boolean }> {
+    const scope = { accountId: params.accountId };
+    const boundary = await resolveCursor(params.cursor, (id) =>
+      this.client.ledgerEntry
+        .findFirst({ where: { ...scope, id }, select: { id: true, postedAt: true } })
+        .then((row) => (row ? { at: row.postedAt, id: row.id } : null)),
+    );
     const rows = await this.client.ledgerEntry.findMany({
-      where: { accountId: params.accountId },
+      where: boundary ? { ...scope, ...after('postedAt', boundary) } : scope,
       orderBy: [{ postedAt: 'desc' }, { id: 'desc' }],
       take: params.limit + 1,
-      ...(params.cursor ? { cursor: { id: params.cursor }, skip: 1 } : {}),
       include: {
         journal: { select: { journalType: true, description: true, transactionId: true } },
       },

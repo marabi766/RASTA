@@ -58,7 +58,8 @@ function requestFor(method: string, path: string) {
     method,
     path,
     originalUrl: path,
-    headers: {},
+    // Some routes here require one on writes (`products`); it changes no budget.
+    headers: { 'idempotency-key': 'rate-limit-scope-0001' },
     body: {},
     ip: '127.0.0.1',
     socket: { remoteAddress: '127.0.0.1' },
