@@ -15,7 +15,11 @@
 //      fails with P2024 after about a second, where the default waits on;
 //   4. every service opens its database on that URL and no other: each
 //      PrismaService is built from `env.DATABASE_URL`, and so is every other
-//      client in services/*/src (main.ts preflight, CLIs).
+//      client in services/*/src (main.ts preflight, CLIs); the migration
+//      runner never goes through it;
+//   5. DATABASE_STATEMENT_TIMEOUT_MS (Codex r1 on #268) is the session's
+//      `statement_timeout` — 15 s unset — so a longer statement is cancelled,
+//      and a transaction's own `SET LOCAL` still wins inside it.
 //
 // Reads only: it opens connections and sleeps on them, and creates nothing.
 // Needs organization-service's generated Prisma client (any service's would do).
@@ -174,4 +178,58 @@ test('4. every service opens its database on loadEnv’s DATABASE_URL, and no ot
     }
     assert.ok(built >= 1, `${service}: no PrismaService built from env.DATABASE_URL`);
   }
+
+  // The migrators keep their own timeouts (D-045, D-048): the runner never
+  // loads a service's environment, so none of these settings reach it.
+  for (const file of ['scripts/prisma.mjs', 'scripts/prisma-lib.mjs']) {
+    const source = readFileSync(join(ROOT, file), 'utf8');
+    assert.doesNotMatch(source, /\bloadEnv\b|@rasta\/config|DATABASE_(POOL|STATEMENT)_/, file);
+  }
+});
+
+/** How a raw statement on `client` ended: 'OK', or the PostgreSQL error code. */
+async function outcome(run) {
+  try {
+    await run();
+    return 'OK';
+  } catch (error) {
+    // $queryRaw wraps a database error as P2010 with the server's code in meta.
+    return error?.meta?.code ?? error?.code ?? error?.name ?? 'UNKNOWN';
+  }
+}
+
+test('5. DATABASE_STATEMENT_TIMEOUT_MS is the session’s statement_timeout; SET LOCAL still overrides it', async () => {
+  // Unset: the 15 s default, whatever the server's or the role's.
+  const fallback = await withClient(serviceUrl(), (client) =>
+    client.$queryRawUnsafe(`SELECT current_setting('statement_timeout') AS value`),
+  );
+  assert.equal(fallback[0].value, '15s');
+
+  await withClient(serviceUrl({ DATABASE_STATEMENT_TIMEOUT_MS: '1000' }), async (client) => {
+    const [row] = await client.$queryRawUnsafe(
+      `SELECT current_setting('statement_timeout') AS value`,
+    );
+    assert.equal(row.value, '1s');
+    // Longer than the limit: cancelled by the server (query_canceled).
+    const started = Date.now();
+    assert.equal(await outcome(() => client.$queryRawUnsafe(`SELECT pg_sleep(3)::text`)), '57014');
+    assert.ok(Date.now() - started < 2500, `cancelled only after ${Date.now() - started} ms`);
+    // The pooled connection is still usable afterwards, and a short statement runs.
+    assert.equal(await outcome(() => client.$queryRawUnsafe(`SELECT pg_sleep(0.2)::text`)), 'OK');
+    // A transaction that needs longer says so itself (the outbox purge does).
+    assert.equal(
+      await outcome(() =>
+        client.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = '5s'`);
+          await tx.$queryRawUnsafe(`SELECT pg_sleep(1.5)::text`);
+        }),
+      ),
+      'OK',
+    );
+  });
+
+  // The control: the same sleep under the default runs to the end.
+  await withClient(serviceUrl(), async (client) => {
+    assert.equal(await outcome(() => client.$queryRawUnsafe(`SELECT pg_sleep(3)::text`)), 'OK');
+  });
 });

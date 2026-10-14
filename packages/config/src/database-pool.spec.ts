@@ -1,4 +1,4 @@
-import { DatabasePoolConflictError, withDatabasePool } from './database-pool';
+import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
 
 describe('withDatabasePool', () => {
   it('returns the URL itself when nothing is configured — Prisma keeps its defaults', () => {
@@ -78,8 +78,8 @@ describe('withDatabasePool', () => {
     try {
       withDatabasePool(url, pool);
     } catch (error) {
-      expect(error).toBeInstanceOf(DatabasePoolConflictError);
-      expect((error as DatabasePoolConflictError).variable).toBe(variable);
+      expect(error).toBeInstanceOf(DatabaseUrlConflictError);
+      expect((error as DatabaseUrlConflictError).variable).toBe(variable);
       expect((error as Error).message).not.toContain('postgresql://');
     }
   });

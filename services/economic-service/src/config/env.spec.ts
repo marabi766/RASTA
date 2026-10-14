@@ -1,6 +1,14 @@
 import { EnvValidationError } from '@rasta/config';
 import { corsOrigins, loadEconomicEnv } from './env';
-import { withUtcSession } from '@rasta/config';
+import {
+  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+  withStatementTimeout,
+  withUtcSession,
+} from '@rasta/config';
+
+/** The runtime URL loadEnv hands the service: UTC sessions, the default statement timeout. */
+const runtimeSession = (url: string): string =>
+  withStatementTimeout(withUtcSession(url), DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS);
 
 /**
  * The configuration this service refuses to start without — and the values it
@@ -44,7 +52,7 @@ describe('loadEconomicEnv', () => {
       PORT_ECONOMIC: '4112',
     } as NodeJS.ProcessEnv);
 
-    expect(env.DATABASE_URL).toBe(withUtcSession('postgresql://u:p@localhost:5432/rasta_economic'));
+    expect(env.DATABASE_URL).toBe(runtimeSession('postgresql://u:p@localhost:5432/rasta_economic'));
     expect(env.PORT).toBe(4112);
   });
 

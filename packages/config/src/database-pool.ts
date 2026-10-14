@@ -43,23 +43,24 @@ export const DATABASE_POOL_PARAMETERS = [
 }>;
 
 /**
- * The URL already sets a pool parameter to a different value than its variable.
+ * The URL already sets a pool parameter (or, `withStatementTimeout`, the
+ * statement timeout) to a different value than its variable.
  *
  * Two places for one number, disagreeing, is refused rather than resolved: an
  * operator who changed one of them believes it is the one in effect. The
  * message names the parameter and the variable, never the URL — it carries the
  * runtime role's password (S-09).
  */
-export class DatabasePoolConflictError extends Error {
+export class DatabaseUrlConflictError extends Error {
   constructor(
     public readonly variable: string,
     public readonly parameter: string,
   ) {
     super(
       `DATABASE_URL already sets ${parameter} to a different value than ${variable}; ` +
-        'set the pool in one place',
+        'set it in one place',
     );
-    this.name = 'DatabasePoolConflictError';
+    this.name = 'DatabaseUrlConflictError';
   }
 }
 
@@ -68,7 +69,7 @@ export class DatabasePoolConflictError extends Error {
  *
  * A parameter the URL does not carry is appended; one it carries with the
  * same value is left as written; one it carries with another value throws
- * {@link DatabasePoolConflictError}. Everything else is kept byte for byte, as
+ * {@link DatabaseUrlConflictError}. Everything else is kept byte for byte, as
  * `withUtcSession` keeps it. With nothing configured the URL is returned
  * unchanged.
  */
@@ -94,7 +95,7 @@ export function withDatabasePool(url: string, pool: DatabasePool): string {
     if (present.length === 0) {
       added.push(`${parameter}=${value}`);
     } else if (present.some((written) => written !== String(value))) {
-      throw new DatabasePoolConflictError(variable, parameter);
+      throw new DatabaseUrlConflictError(variable, parameter);
     }
   }
 

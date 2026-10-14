@@ -20,6 +20,7 @@
  * Infrastructure, not business logic (A-03): it decides how a connection is
  * opened, never what is done on it.
  */
+import { DatabaseUrlConflictError } from './database-pool';
 
 /** The startup option every Rasta database session is opened with. */
 export const UTC_SESSION_OPTION = '-c TimeZone=UTC';
@@ -35,6 +36,55 @@ export const UTC_SESSION_OPTION = '-c TimeZone=UTC';
  * parser can read its space as a separator.
  */
 export function withUtcSession(url: string): string {
+  const { existing, withOptions } = startupOptions(url);
+  if (endsWithUtc(existing)) return url;
+  return withOptions(existing ? `${existing} ${UTC_SESSION_OPTION}` : UTC_SESSION_OPTION);
+}
+
+/**
+ * `url` with `-c statement_timeout=<timeoutMs>` in its `options` parameter: the
+ * runtime session's statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`), written
+ * by `loadEnv` the way the UTC option is, so every pooled connection starts
+ * with it and it overrides the server's, the database's and the role's
+ * default. A transaction that needs longer says so itself with `SET LOCAL`
+ * (the outbox purge does), which wins inside that transaction only.
+ *
+ * Placed before a trailing {@link UTC_SESSION_OPTION}, so the URL still ends
+ * with it and `withUtcSession` stays idempotent on the result. A URL whose
+ * options already set `statement_timeout` to the same value is returned
+ * unchanged; to another value, {@link DatabaseUrlConflictError} — one number
+ * in two places is refused, as the pool's are.
+ */
+export function withStatementTimeout(url: string, timeoutMs: number): string {
+  const { existing, withOptions } = startupOptions(url);
+  const written = settingsIn(existing).filter(([name]) => name === 'statement_timeout');
+  if (written.some(([, value]) => value !== String(timeoutMs))) {
+    throw new DatabaseUrlConflictError('DATABASE_STATEMENT_TIMEOUT_MS', 'statement_timeout');
+  }
+  if (written.length > 0) return url;
+
+  const option = `-c statement_timeout=${timeoutMs}`;
+  if (!existing) return withOptions(option);
+  if (!endsWithUtc(existing)) return withOptions(`${existing} ${option}`);
+  const before = existing.slice(0, existing.length - UTC_SESSION_OPTION.length).trim();
+  return withOptions([before, option, UTC_SESSION_OPTION].filter(Boolean).join(' '));
+}
+
+function endsWithUtc(options: string): boolean {
+  return options === UTC_SESSION_OPTION || options.endsWith(` ${UTC_SESSION_OPTION}`);
+}
+
+/**
+ * The `options` the URL carries (every `options` parameter, joined), and a
+ * function giving the URL with them replaced. Everything but the `options`
+ * parameter is kept byte for byte — the credentials, the host and every other
+ * parameter — and the new value is percent-encoded, so no parser can read its
+ * spaces as separators.
+ */
+function startupOptions(url: string): {
+  existing: string;
+  withOptions: (options: string) => string;
+} {
   const hashAt = url.indexOf('#');
   const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
   const hash = hashAt === -1 ? '' : url.slice(hashAt);
@@ -55,12 +105,34 @@ export function withUtcSession(url: string): string {
     .map((pair) => decodeComponent(pair.slice(pair.indexOf('=') + 1 || pair.length)))
     .join(' ')
     .trim();
-
-  if (existing === UTC_SESSION_OPTION || existing.endsWith(` ${UTC_SESSION_OPTION}`)) return url;
-
-  const options = existing ? `${existing} ${UTC_SESSION_OPTION}` : UTC_SESSION_OPTION;
   const kept = pairs.filter((pair) => !isOptions(pair));
-  return `${base}?${[...kept, `options=${encodeURIComponent(options)}`].join('&')}${hash}`;
+  return {
+    existing,
+    withOptions: (options) =>
+      `${base}?${[...kept, `options=${encodeURIComponent(options)}`].join('&')}${hash}`,
+  };
+}
+
+/**
+ * The `name=value` settings in a startup `options` string, as PostgreSQL reads
+ * them: `-c name=value`, `-cname=value` or `--name=value`, a name's dashes
+ * read as underscores and its case ignored.
+ */
+function settingsIn(options: string): Array<[name: string, value: string]> {
+  const words = options.split(/\s+/).filter(Boolean);
+  const settings: Array<[string, string]> = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i] ?? '';
+    let setting: string | undefined;
+    if (word === '-c') setting = words[++i];
+    else if (word.startsWith('-c')) setting = word.slice(2);
+    else if (word.startsWith('--')) setting = word.slice(2);
+    if (!setting) continue;
+    const at = setting.indexOf('=');
+    const name = (at === -1 ? setting : setting.slice(0, at)).replace(/-/g, '_').toLowerCase();
+    settings.push([name, at === -1 ? '' : setting.slice(at + 1)]);
+  }
+  return settings;
 }
 
 /** A query component as `application/x-www-form-urlencoded` reads it: `+` is a space. */

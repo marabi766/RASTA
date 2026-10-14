@@ -9,6 +9,9 @@ export {
   databaseEnvSchema,
   DATABASE_POOL_SIZE_MAX,
   DATABASE_POOL_TIMEOUT_SECONDS_MAX,
+  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+  DATABASE_STATEMENT_TIMEOUT_MS_MIN,
+  DATABASE_STATEMENT_TIMEOUT_MS_MAX,
   kafkaEnvSchema,
   outboxPurgeEnvSchema,
   OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
@@ -35,11 +38,11 @@ export {
 
 export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, OutboxPurgeEnv, EnvIssue } from './env';
 
-export { UTC_SESSION_OPTION, withUtcSession } from './database-session';
+export { UTC_SESSION_OPTION, withStatementTimeout, withUtcSession } from './database-session';
 
 export {
   DATABASE_POOL_PARAMETERS,
-  DatabasePoolConflictError,
+  DatabaseUrlConflictError,
   withDatabasePool,
 } from './database-pool';
 export type { DatabasePool } from './database-pool';

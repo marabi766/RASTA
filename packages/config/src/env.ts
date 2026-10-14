@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { DatabasePoolConflictError, withDatabasePool } from './database-pool';
-import { withUtcSession } from './database-session';
+import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
+import { withStatementTimeout, withUtcSession } from './database-session';
 
 /**
  * Environment loading for Rasta services.
@@ -219,6 +219,15 @@ export const DATABASE_POOL_SIZE_MAX = 100;
  */
 export const DATABASE_POOL_TIMEOUT_SECONDS_MAX = 60;
 
+/** The runtime session's `statement_timeout` when `DATABASE_STATEMENT_TIMEOUT_MS` is unset. */
+export const DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS = 15_000;
+
+/** Below a second, ordinary queries under load would be cancelled. */
+export const DATABASE_STATEMENT_TIMEOUT_MS_MIN = 1000;
+
+/** An hour: past that, a runtime statement is a stuck one. */
+export const DATABASE_STATEMENT_TIMEOUT_MS_MAX = 3_600_000;
+
 /**
  * A whole number read from an environment variable, refused unless it is
  * written as plain digits.
@@ -250,12 +259,21 @@ function wholeNumberEnv(min: number, max: number) {
  * * 2 + 1` connections, a 10-second wait) — what every service ran with before
  * they existed. `0` is refused for the wait: to Prisma it means waiting
  * forever, which is the unbounded queue a bounded pool exists to prevent.
+ *
+ * `DATABASE_STATEMENT_TIMEOUT_MS` goes into the same URL as the session's
+ * `statement_timeout` ({@link withStatementTimeout}), so no runtime statement —
+ * a lock wait included — holds a pooled connection longer. Always written,
+ * default 15 s; `0` (PostgreSQL's "no limit") is refused for the same reason
+ * as the pool's. The migrators never read it (D-045).
  */
 export const databaseEnvSchema = z.object({
   DATABASE_URL: postgresUrlSchema.transform(withUtcSession),
   DATABASE_POOL_SIZE: wholeNumberEnv(1, DATABASE_POOL_SIZE_MAX).optional(),
   DATABASE_POOL_TIMEOUT_SECONDS: wholeNumberEnv(1, DATABASE_POOL_TIMEOUT_SECONDS_MAX).optional(),
-  DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(15_000),
+  DATABASE_STATEMENT_TIMEOUT_MS: wholeNumberEnv(
+    DATABASE_STATEMENT_TIMEOUT_MS_MIN,
+    DATABASE_STATEMENT_TIMEOUT_MS_MAX,
+  ).default(String(DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS)),
 });
 
 /** The only SASL mechanism a broker credential is issued for (ADR-061 § 3). */
@@ -545,25 +563,27 @@ export function loadEnv<S extends z.ZodTypeAny>(
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxGraceWithinShutdown(result.data);
   assertOutboxShutdownWithinTimeout(result.data);
-  return withConfiguredDatabasePool(result.data);
+  return withConfiguredDatabase(result.data);
 }
 
 /**
- * `DATABASE_URL` with the configured pool written into it, for a service whose
- * schema has `databaseEnvSchema`. Done here rather than in that schema: the
- * URL and the two settings are siblings, and a transform over the object
- * would stop it being `.merge`d into each service's schema.
+ * `DATABASE_URL` with the configured pool and statement timeout written into
+ * it, for a service whose schema has `databaseEnvSchema`. Done here rather than
+ * in that schema: the URL and the settings are siblings, and a transform over
+ * the object would stop it being `.merge`d into each service's schema.
  */
-function withConfiguredDatabasePool<T>(parsed: T): T {
+function withConfiguredDatabase<T>(parsed: T): T {
   if (typeof parsed !== 'object' || parsed === null) return parsed;
   const {
     DATABASE_URL: url,
     DATABASE_POOL_SIZE: size,
     DATABASE_POOL_TIMEOUT_SECONDS: timeoutSeconds,
+    DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs,
   } = parsed as {
     DATABASE_URL?: unknown;
     DATABASE_POOL_SIZE?: unknown;
     DATABASE_POOL_TIMEOUT_SECONDS?: unknown;
+    DATABASE_STATEMENT_TIMEOUT_MS?: unknown;
   };
   if (typeof url !== 'string') return parsed;
   const pool = {
@@ -571,10 +591,12 @@ function withConfiguredDatabasePool<T>(parsed: T): T {
     timeoutSeconds: typeof timeoutSeconds === 'number' ? timeoutSeconds : undefined,
   };
   try {
-    const pooled = withDatabasePool(url, pool);
-    return pooled === url ? parsed : { ...parsed, DATABASE_URL: pooled };
+    const timed =
+      typeof statementTimeoutMs === 'number' ? withStatementTimeout(url, statementTimeoutMs) : url;
+    const configured = withDatabasePool(timed, pool);
+    return configured === url ? parsed : { ...parsed, DATABASE_URL: configured };
   } catch (error) {
-    if (!(error instanceof DatabasePoolConflictError)) throw error;
+    if (!(error instanceof DatabaseUrlConflictError)) throw error;
     throw new EnvValidationError([{ path: error.variable, message: error.message }]);
   }
 }

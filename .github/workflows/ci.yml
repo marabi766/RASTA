@@ -129,6 +129,13 @@ jobs:
         # root `pnpm dev` resolves them (turbo dry run). Codex r1 on #247.
         run: pnpm run test:outbox-purge-turbo-env
 
+      - name: Database settings reach the services through turbo
+        # Every task that starts a service with a database — `dev` and the
+        # integration suites — passes every databaseEnvSchema variable (pool,
+        # statement timeout, the service's own URL), and the root `pnpm dev`
+        # resolves them (turbo dry run). Codex r1 on #268.
+        run: pnpm run test:database-turbo-env
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.
@@ -1647,12 +1654,14 @@ jobs:
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
 
-      - name: The runtime pool comes from configuration
+      - name: The runtime pool and statement timeout come from configuration
         # DATABASE_POOL_SIZE and DATABASE_POOL_TIMEOUT_SECONDS reach Prisma
         # only through the URL every service builds (@rasta/config): unset,
         # a burst still opens Prisma's default pool; set, a client opened on
         # that URL keeps to the size and fails with P2024 after the wait. And
         # every service's clients are opened on that URL and no other.
+        # DATABASE_STATEMENT_TIMEOUT_MS is the session's statement_timeout
+        # (15 s unset): a longer statement is cancelled with 57014.
         run: pnpm run test:db-pool-config
         env:
           PGHOST: localhost

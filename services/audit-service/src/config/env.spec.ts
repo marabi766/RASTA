@@ -4,7 +4,15 @@ import {
   DEFAULT_MAX_QUERY_WINDOW_DAYS,
   DEFAULT_MAX_VERIFICATION_RECORDS,
 } from '../audit/audit.query.dto';
-import { withUtcSession } from '@rasta/config';
+import {
+  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+  withStatementTimeout,
+  withUtcSession,
+} from '@rasta/config';
+
+/** The runtime URL loadEnv hands the service: UTC sessions, the default statement timeout. */
+const runtimeSession = (url: string): string =>
+  withStatementTimeout(withUtcSession(url), DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS);
 
 const RUNTIME_URL = 'postgresql://rasta_audit:pw@localhost:5433/rasta_audit?schema=audit';
 const MIGRATOR_URL = 'postgresql://rasta_audit_migrator:pw@localhost:5433/rasta_audit?schema=audit';
@@ -52,7 +60,7 @@ describe('audit-service configuration', () => {
 
   describe('the runtime database url, which is the append-only design in one line', () => {
     it('resolves DATABASE_URL from DATABASE_URL_AUDIT', () => {
-      expect(loadAuditEnv(base()).DATABASE_URL).toBe(withUtcSession(RUNTIME_URL));
+      expect(loadAuditEnv(base()).DATABASE_URL).toBe(runtimeSession(RUNTIME_URL));
     });
 
     it('never falls back to the migrator url, even when it is the only one set', () => {
@@ -75,7 +83,7 @@ describe('audit-service configuration', () => {
     it('does not silently accept the migrator url alongside the runtime one', () => {
       const env = loadAuditEnv(base({ DATABASE_URL_AUDIT_MIGRATOR: MIGRATOR_URL }));
 
-      expect(env.DATABASE_URL).toBe(withUtcSession(RUNTIME_URL));
+      expect(env.DATABASE_URL).toBe(runtimeSession(RUNTIME_URL));
       expect(env.DATABASE_URL).not.toContain('rasta_audit_migrator');
     });
 
@@ -84,7 +92,7 @@ describe('audit-service configuration', () => {
       // migrator. An environment shared with a migrate job must not hand the
       // runtime that connection.
       const env = loadAuditEnv(base({ DATABASE_URL: MIGRATOR_URL }));
-      expect(env.DATABASE_URL).toBe(withUtcSession(RUNTIME_URL));
+      expect(env.DATABASE_URL).toBe(runtimeSession(RUNTIME_URL));
     });
 
     it('refuses DATABASE_URL alone, naming the variable it needs', () => {

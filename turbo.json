@@ -64,6 +64,8 @@
       "env": [
         "DATABASE_URL",
         "DATABASE_URL_*",
+        "DATABASE_POOL_*",
+        "DATABASE_STATEMENT_TIMEOUT_MS",
         "REDIS_URL",
         "KAFKA_BROKERS",
         "KAFKA_SASL_*",
@@ -94,10 +96,13 @@
       // shell exported them directly.
       //
       // OUTBOX_PURGE_* (D-052): the integration suites build the AppModule
-      // from process.env, purge scheduler included; see "dev" below.
+      // from process.env, purge scheduler included; see "dev" below. The
+      // DATABASE_* settings for the same reason (databaseEnvSchema, #268).
       "env": [
         "DATABASE_URL",
         "DATABASE_URL_*",
+        "DATABASE_POOL_*",
+        "DATABASE_STATEMENT_TIMEOUT_MS",
         "REDIS_URL",
         "KAFKA_BROKERS",
         "KAFKA_SASL_*",
@@ -118,6 +123,8 @@
       "env": [
         "DATABASE_URL",
         "DATABASE_URL_*",
+        "DATABASE_POOL_*",
+        "DATABASE_STATEMENT_TIMEOUT_MS",
         "REDIS_URL",
         "KAFKA_BROKERS",
         "KAFKA_SASL_*",
@@ -156,7 +163,25 @@
     // invalid value in the shell never reached the validation that refuses
     // it. scripts/outbox-purge-turbo-env.test.mjs holds every task that starts
     // a service wiring the purge to every variable of outboxPurgeEnvSchema.
-    "dev": { "cache": false, "persistent": true, "env": ["OUTBOX_PURGE_*"] },
+    //
+    // DATABASE_POOL_*, DATABASE_STATEMENT_TIMEOUT_MS and DATABASE_URL_* (Codex
+    // r1 on #268): the same trap for databaseEnvSchema, here and in the test
+    // tasks above — undeclared, `DATABASE_POOL_SIZE=2 pnpm dev` ran on Prisma's
+    // default pool and a malformed value never met the check that refuses it.
+    // Each service reads its own DATABASE_URL_<SVC>. A bare DATABASE_URL is
+    // deliberately not passed here: every service prefers it, so one exported
+    // in the shell would point all of them at a single database.
+    // scripts/database-turbo-env.test.mjs holds these tasks to the schema.
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "env": [
+        "OUTBOX_PURGE_*",
+        "DATABASE_URL_*",
+        "DATABASE_POOL_*",
+        "DATABASE_STATEMENT_TIMEOUT_MS"
+      ]
+    },
     "clean": { "cache": false }
   }
 }

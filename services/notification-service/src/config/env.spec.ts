@@ -8,7 +8,15 @@ import {
   NOTIFICATION_DLQ_TOPIC,
   SERVICE_NAME,
 } from './env';
-import { withUtcSession } from '@rasta/config';
+import {
+  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+  withStatementTimeout,
+  withUtcSession,
+} from '@rasta/config';
+
+/** The runtime URL loadEnv hands the service: UTC sessions, the default statement timeout. */
+const runtimeSession = (url: string): string =>
+  withStatementTimeout(withUtcSession(url), DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS);
 
 /** The minimum a running service needs; every test builds on it. */
 const REQUIRED = {
@@ -44,11 +52,11 @@ describe('notification-service configuration', () => {
     const { DATABASE_URL_NOTIFICATION: _omitted, ...withoutDatabase } = REQUIRED;
     expect(() => loadNotificationEnv(withoutDatabase)).toThrow(/DATABASE_URL/);
     expect(loadNotificationEnv(REQUIRED).DATABASE_URL).toBe(
-      withUtcSession(REQUIRED.DATABASE_URL_NOTIFICATION),
+      runtimeSession(REQUIRED.DATABASE_URL_NOTIFICATION),
     );
     expect(
       loadNotificationEnv({ ...REQUIRED, DATABASE_URL: 'postgresql://x:y@h:1/d' }).DATABASE_URL,
-    ).toBe(withUtcSession('postgresql://x:y@h:1/d'));
+    ).toBe(runtimeSession('postgresql://x:y@h:1/d'));
   });
 
   it('requires the broker list, the identity url and the internal token secret', () => {

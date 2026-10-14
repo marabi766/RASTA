@@ -70,6 +70,17 @@ URLی که همان پارامتر را با مقدار دیگری دارد، س
 PostgreSQL واقعی می‌سنجد: پیش‌فرض دست‌نخورده، سقف اتصال، `P2024` پس از انتظار، و اینکه هر سرویس Clientهایش را فقط روی
 همین URL باز می‌کند.
 
+**سقف زمان هر Statement.** `DATABASE_STATEMENT_TIMEOUT_MS` (همان `databaseEnvSchema`؛ ۱۰۰۰..۳۶۰۰۰۰۰ میلی‌ثانیه، تنظیم‌نشده
+**۱۵۰۰۰**) را `loadEnv` همیشه به‌صورت `-c statement_timeout=<ms>` در `options` همان `DATABASE_URL` می‌نویسد (پیش از
+گزینهٔ UTC؛ `withStatementTimeout`). پس هر Statement زمان اجرا — از جمله انتظار برای Lock ردیف، جدول یا Advisory Lock —
+پس از این مدت با `57014` لغو می‌شود و اتصال Pool را بیش از آن نگه نمی‌دارد. `0` (در PostgreSQL یعنی بی‌سقف) رد می‌شود؛
+مقدار غیرعددی یا خارج از بازه، و URLی که در `options` خودش `statement_timeout` دیگری دارد، سرویس را در Startup متوقف
+می‌کند (همان قاعدهٔ Pool). تراکنشی که بیشتر لازم دارد خودش `SET LOCAL statement_timeout` می‌گوید و فقط در همان تراکنش
+غلبه می‌کند (Purge صندوق خروجی، `OUTBOX_PURGE_STATEMENT_TIMEOUT_MS`). Migratorها (D-045) آن را نمی‌خوانند؛ Migrationها
+سقف خودشان را دارند (D-048). `pnpm test:db-pool-config` اثرش را روی PostgreSQL واقعی می‌سنجد. **پشت PgBouncer** همان
+حکم `TimeZone` در بند بعد برقرار است: `options` دور انداخته می‌شود، پس تضمین آنجا تنظیم سمت پایگاه داده برای Role زمان
+اجراست (`ALTER ROLE <runtime> IN DATABASE rasta_<svc> SET statement_timeout = '15s'`)، نه برای Migrator.
+
 **منطقهٔ زمانی نشست پشت Pooler (L7-37، [D-048](23-risks-and-tradeoffs.md)).** هر نشست پایگاه داده باید در UTC باشد،
 و **تضمین آن سمت پایگاه داده است، نه سمت Client**: برای پایگاه دادهٔ هر سرویس، Role زمان اجرا و Migrator آن،
 
