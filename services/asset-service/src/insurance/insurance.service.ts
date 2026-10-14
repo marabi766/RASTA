@@ -291,9 +291,12 @@ export class InsuranceService {
    * L3-04), so a policy is never expired without its INSURANCE_EXPIRED event,
    * and an event is never sent for a policy whose expiry rolled back.
    *
-   * `shouldStop` is asked between transactions (the shutdown, #247 r4): once
-   * it answers yes no further batch starts. Each batch commits whole, so the
-   * policies not reached are simply the next sweep's.
+   * `shouldStop` is asked before every transaction, the warnings' included
+   * (the shutdown, #247 r4 and its Codex follow-up): once it answers yes no
+   * further transaction starts. The warning queries are reads, so a shutdown
+   * that begins while they are pending must still stop the sweep before it
+   * writes. Each transaction commits whole, so what is not reached is simply
+   * the next sweep's.
    */
   async runExpirySweep(
     options: { shouldStop?: () => boolean } = {},
@@ -306,6 +309,8 @@ export class InsuranceService {
         this.repository.findInspectionsExpiringWithin(this.expiryWarningDays),
       ),
     ]);
+
+    if (options.shouldStop?.()) return { warned: 0, expired: 0, held: 0 };
 
     let warned = 0;
 
