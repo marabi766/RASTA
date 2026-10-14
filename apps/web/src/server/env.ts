@@ -43,8 +43,15 @@ const httpUrl = z
 /** The oversight role has aggregate access only; no setting here may grant it a screen. */
 const OVERSIGHT_ROLE = 'AUDITOR';
 
-/** A comma-separated role list, trimmed, empty elements dropped, never naming the oversight role. */
-function roleList(name: string, fallback: string) {
+/** The platform administrator, whom inventory-service refuses too (Q-103). */
+const PLATFORM_ROLE = 'SYSTEM_ADMIN';
+
+/**
+ * A comma-separated role list, trimmed, empty elements dropped, never naming the
+ * oversight role — nor any other role in `alsoRefused`.
+ */
+function roleList(name: string, fallback: string, alsoRefused: readonly string[] = []) {
+  const refused = [OVERSIGHT_ROLE, ...alsoRefused];
   return z
     .string()
     .default(fallback)
@@ -54,8 +61,8 @@ function roleList(name: string, fallback: string) {
         .map((item) => item.trim())
         .filter((item) => item.length > 0),
     )
-    .refine((roles) => !roles.includes(OVERSIGHT_ROLE), {
-      message: `${name} may not name ${OVERSIGHT_ROLE}`,
+    .refine((roles) => !roles.some((role) => refused.includes(role)), {
+      message: `${name} may not name ${refused.join(' or ')}`,
     });
 }
 
@@ -142,6 +149,21 @@ const schema = z.object({
    */
   WEB_PROJECT_ROLES: roleList('WEB_PROJECT_ROLES', 'ORGANIZATION_ADMIN'),
   WEB_PROJECT_READER_ROLES: roleList('WEB_PROJECT_READER_ROLES', ''),
+
+  /**
+   * Which roles are shown the Inventory link (`server/portal-nav.ts`).
+   *
+   * These **mirror** inventory-service's `INVENTORY_OPERATOR_ROLES` and
+   * `INVENTORY_READER_ROLES` (both default `ORGANIZATION_ADMIN`, Q-103) and
+   * must be changed together with them. They decide only whether a link is
+   * drawn; the service still decides who may read. The service refuses
+   * `AUDITOR` and `SYSTEM_ADMIN` whatever the configuration says and refuses to
+   * start naming either, so the portal does the same.
+   */
+  WEB_INVENTORY_ROLES: roleList('WEB_INVENTORY_ROLES', 'ORGANIZATION_ADMIN', [PLATFORM_ROLE]),
+  WEB_INVENTORY_READER_ROLES: roleList('WEB_INVENTORY_READER_ROLES', 'ORGANIZATION_ADMIN', [
+    PLATFORM_ROLE,
+  ]),
 
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
