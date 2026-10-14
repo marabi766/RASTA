@@ -222,14 +222,7 @@ export class ScheduleService {
 
       return toScheduleView(created as ScheduleRow, asset.name ?? null);
     } catch (error) {
-      if (isUniqueViolation(error)) {
-        // The title is client text: the log names the field, never its value (S-09).
-        throw RastaError.businessRule('This machine already has a live schedule with that title.', {
-          rule: 'DUPLICATE_SCHEDULE_TITLE',
-          assetId: dto.assetId,
-          field: 'title',
-        });
-      }
+      if (isUniqueViolation(error)) throw duplicateTitle(dto.assetId);
       throw error;
     }
   }
@@ -286,52 +279,57 @@ export class ScheduleService {
 
     const changedAt = new Date();
 
-    const updated = await this.repository.transaction(async (tx) => {
-      const row = await tx.maintenanceSchedule.update({
-        where: { id },
-        data: {
-          ...(dto.title !== undefined ? { title: dto.title } : {}),
-          ...(dto.intervalDays !== undefined ? { intervalDays: dto.intervalDays } : {}),
-          ...(dto.intervalHours !== undefined ? { intervalHours: dto.intervalHours } : {}),
-          ...(dto.intervalKilometres !== undefined
-            ? { intervalKilometres: dto.intervalKilometres }
-            : {}),
-          ...(dto.leadDays !== undefined ? { leadDays: dto.leadDays } : {}),
-          ...(dto.leadHours !== undefined ? { leadHours: dto.leadHours } : {}),
-          ...(dto.leadKilometres !== undefined ? { leadKilometres: dto.leadKilometres } : {}),
-          ...(dto.lastServicedAt !== undefined
-            ? { lastServicedAt: dto.lastServicedAt ? new Date(dto.lastServicedAt) : null }
-            : {}),
-          ...(dto.lastServicedHourMeter !== undefined
-            ? { lastServicedHourMeter: dto.lastServicedHourMeter }
-            : {}),
-          ...(dto.lastServicedOdometer !== undefined
-            ? { lastServicedOdometer: dto.lastServicedOdometer }
-            : {}),
-          ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
-          // The due point has moved, so the announcement made against the old
-          // one is stale. Cleared rather than left, or the schedule would go
-          // quiet until it was next served.
-          dueAnnouncedAt: null,
-          updatedBy: actor,
-        },
-      });
+    const updated = await this.repository
+      .transaction(async (tx) => {
+        const row = await tx.maintenanceSchedule.update({
+          where: { id },
+          data: {
+            ...(dto.title !== undefined ? { title: dto.title } : {}),
+            ...(dto.intervalDays !== undefined ? { intervalDays: dto.intervalDays } : {}),
+            ...(dto.intervalHours !== undefined ? { intervalHours: dto.intervalHours } : {}),
+            ...(dto.intervalKilometres !== undefined
+              ? { intervalKilometres: dto.intervalKilometres }
+              : {}),
+            ...(dto.leadDays !== undefined ? { leadDays: dto.leadDays } : {}),
+            ...(dto.leadHours !== undefined ? { leadHours: dto.leadHours } : {}),
+            ...(dto.leadKilometres !== undefined ? { leadKilometres: dto.leadKilometres } : {}),
+            ...(dto.lastServicedAt !== undefined
+              ? { lastServicedAt: dto.lastServicedAt ? new Date(dto.lastServicedAt) : null }
+              : {}),
+            ...(dto.lastServicedHourMeter !== undefined
+              ? { lastServicedHourMeter: dto.lastServicedHourMeter }
+              : {}),
+            ...(dto.lastServicedOdometer !== undefined
+              ? { lastServicedOdometer: dto.lastServicedOdometer }
+              : {}),
+            ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
+            // The due point has moved, so the announcement made against the old
+            // one is stale. Cleared rather than left, or the schedule would go
+            // quiet until it was next served.
+            dueAnnouncedAt: null,
+            updatedBy: actor,
+          },
+        });
 
-      await this.announceScheduleChange(tx, {
-        schedule: row as ScheduleRow,
-        change: 'UPDATED',
-        // An edit does not move the status, so both sides are the same value
-        // rather than one of them being null — the transition is real, it is
-        // just the identity one.
-        previousStatus: schedule.status,
-        reason: null,
-        changedFields,
-        changedAt,
-        actor,
-      });
+        await this.announceScheduleChange(tx, {
+          schedule: row as ScheduleRow,
+          change: 'UPDATED',
+          // An edit does not move the status, so both sides are the same value
+          // rather than one of them being null — the transition is real, it is
+          // just the identity one.
+          previousStatus: schedule.status,
+          reason: null,
+          changedFields,
+          changedAt,
+          actor,
+        });
 
-      return row;
-    });
+        return row;
+      })
+      .catch((error: unknown) => {
+        // A new title can meet another live schedule's on the same machine.
+        throw isUniqueViolation(error) ? duplicateTitle(schedule.assetId) : error;
+      });
 
     return toScheduleView(updated as ScheduleRow);
   }
@@ -580,4 +578,17 @@ function appendReason(notes: string | null, status: string, reason: string): str
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+/**
+ * The refusal for a title another live schedule on the machine already has
+ * (`ux_schedule_live_per_asset_title`), from a create or an edit alike. The
+ * title is client text: the error names the field, never its value (S-09).
+ */
+function duplicateTitle(assetId: string): RastaError {
+  return RastaError.businessRule('This machine already has a live schedule with that title.', {
+    rule: 'DUPLICATE_SCHEDULE_TITLE',
+    assetId,
+    field: 'title',
+  });
 }

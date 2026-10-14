@@ -238,4 +238,63 @@ describe('schedule changes reach the audit trail', () => {
     );
     expect(schedulesOnAsset).toBe(1);
   });
+
+  // The same constraint, reached by renaming a schedule rather than creating
+  // one: the refusal is the create path's, not a 500 out of the driver.
+  it('refuses an edit that takes another live schedule’s title, and writes nothing', async () => {
+    const { assetId, schedule: taken } = await ownSchedule('عنوان گرفته‌شده');
+    const renamed = await asActor({ organizationId: org.a, userId: actor }, () =>
+      schedules.create({
+        assetId,
+        title: 'عنوان دیگر',
+        maintenanceType: 'PREVENTIVE',
+        recurrence: 'RECURRING',
+        intervalDays: 90,
+      }),
+    );
+    const eventsBefore = await eventsFor(renamed.id);
+
+    const refusal = (await asActor({ organizationId: org.a, userId: actor }, () =>
+      schedules.update(renamed.id, { title: taken.title, intervalDays: 30 }),
+    ).catch((error: unknown) => error)) as RastaError;
+
+    expect(refusal).toBeInstanceOf(RastaError);
+    expect(refusal.code).toBe('BUSINESS_RULE_VIOLATION');
+    expect(refusal.status).toBe(422);
+    expect(refusal.message).toBe('This machine already has a live schedule with that title.');
+    expect(refusal.internalContext).toEqual({
+      rule: 'DUPLICATE_SCHEDULE_TITLE',
+      assetId,
+      field: 'title',
+    });
+    expect(JSON.stringify([refusal.message, refusal.internalContext])).not.toContain(taken.title);
+
+    // The edit and its announcement rolled back together.
+    expect(await eventsFor(renamed.id)).toHaveLength(eventsBefore.length);
+    const row = await asActor({ organizationId: org.a }, () =>
+      prisma.client.maintenanceSchedule.findUniqueOrThrow({ where: { id: renamed.id } }),
+    );
+    expect(row).toMatchObject({ title: 'عنوان دیگر', intervalDays: 90 });
+  });
+
+  it('still lets an archived schedule’s title be taken by an edit', async () => {
+    const { assetId, schedule: archived } = await ownSchedule('عنوان بایگانی‌شده');
+    await asActor({ organizationId: org.a, userId: actor }, () =>
+      schedules.changeStatus(archived.id, { status: 'ARCHIVED', reason: 'جایگزین شد' }),
+    );
+    const live = await asActor({ organizationId: org.a, userId: actor }, () =>
+      schedules.create({
+        assetId,
+        title: 'عنوان تازه',
+        maintenanceType: 'PREVENTIVE',
+        recurrence: 'RECURRING',
+        intervalDays: 90,
+      }),
+    );
+
+    const edited = await asActor({ organizationId: org.a, userId: actor }, () =>
+      schedules.update(live.id, { title: archived.title }),
+    );
+    expect(edited.title).toBe(archived.title);
+  });
 });
