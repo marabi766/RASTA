@@ -214,7 +214,8 @@ export class UnprocessableEventError extends Error {
 /**
  * Thrown out of kafkajs's `eachMessage` for a message a stopping consumer gives
  * up on: before its handler runs, instead of a further attempt or the pause
- * before one, or instead of its dead letter.
+ * before one, instead of its dead letter or its send, or once it has ended
+ * after the stop's deadline, however it ended.
  *
  * Throwing is what keeps the message: kafkajs commits only the offsets of
  * messages whose `eachMessage` returned, so this one stays uncommitted and the
@@ -281,6 +282,20 @@ export const DEFAULT_BACKOFF_MS = 500;
  */
 export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
 
+/**
+ * One run of the consumer, from a `start()` to its stop. A message keeps the
+ * run it was delivered in, so a stop's verdict on it outlives a later `start()`
+ * — a handler abandoned at the deadline may still be running then.
+ */
+interface ConsumerRun {
+  /** Set when a stop begins: from then on nothing new starts for a message. */
+  stopRequested: boolean;
+  /** The stop's deadline (epoch ms): once past, no message of this run returns (#270 r1). */
+  deadlineAt?: number;
+  /** Set when the stop gave up waiting at its deadline. */
+  abandoned: boolean;
+}
+
 export class EventConsumer {
   private readonly kafka: Kafka;
   private consumer?: Consumer;
@@ -288,8 +303,8 @@ export class EventConsumer {
   private dlqProducer?: Producer;
   private dlqConnecting?: Promise<void>;
   private running = false;
-  /** Set when a stop begins: from then on nothing new starts for a message. */
-  private stopRequested = false;
+  /** The current run; replaced by each `start()`. */
+  private run: ConsumerRun = { stopRequested: false, abandoned: false };
   /** The one stop in progress or done since the last `start()`; later calls join it. */
   private stopping?: Promise<void>;
   /** Wakes the pauses between attempts, so a stop does not wait one out. */
@@ -369,7 +384,8 @@ export class EventConsumer {
 
   async start(): Promise<void> {
     if (this.running) return;
-    this.stopRequested = false;
+    const run: ConsumerRun = { stopRequested: false, abandoned: false };
+    this.run = run;
     this.stopping = undefined;
 
     const consumer = this.kafka.consumer({
@@ -411,7 +427,14 @@ export class EventConsumer {
             message.offset,
             message.key,
             heartbeat,
+            run,
           );
+          // kafkajs resolves the offset as soon as this returns. A message
+          // the stop gave up on at its deadline must not return, however it
+          // ended — a handler or a dead letter that finished late included:
+          // its offset stays uncommitted and the group delivers it again
+          // (A-09 absorbs the late effect; Codex r1 on #270).
+          this.abandonIfPastDeadline(run, { topic, partition, offset: message.offset });
         },
       });
     } catch (error) {
@@ -455,6 +478,7 @@ export class EventConsumer {
     offset?: string,
     key?: Buffer | null,
     heartbeat?: () => Promise<void>,
+    run: ConsumerRun = this.run,
   ): Promise<void> {
     const beat = heartbeat === undefined ? undefined : () => this.beat(heartbeat);
     let envelope: EventEnvelope;
@@ -484,6 +508,7 @@ export class EventConsumer {
         DLQ_REASONS.VALIDATION_FAILED,
         `Unparseable message (${DLQ_REASONS.VALIDATION_FAILED}): ${reason}`,
         0,
+        run,
       );
       return;
     }
@@ -516,6 +541,7 @@ export class EventConsumer {
         refusal.reason,
         `Refused before any handler (${refusal.reason}): ${refusal.message}`,
         0,
+        run,
       );
       return;
     }
@@ -526,7 +552,7 @@ export class EventConsumer {
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       // Once stopping, no attempt starts — the first included — and the pause
       // before a further one ends at once (`pause`).
-      this.abandonIfStopping({ topic, partition, offset }, `before attempt ${attempt}`);
+      this.abandonIfStopping(run, { topic, partition, offset }, `before attempt ${attempt}`);
       try {
         // The handler runs inside a context carrying the event's own
         // correlationId and tenant, so its log lines join up with the request
@@ -568,6 +594,7 @@ export class EventConsumer {
             error.reason,
             `Handler refused (${error.reason}): ${message}`,
             attempt,
+            run,
           );
           return;
         }
@@ -582,6 +609,7 @@ export class EventConsumer {
             reason,
             `Handler failed ${maxRetries}x (${reason}): ${message}`,
             attempt,
+            run,
           );
           return;
         }
@@ -589,7 +617,7 @@ export class EventConsumer {
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
         // The member stays in its group across the pause (#240 r12).
         beat?.();
-        await this.pause(backoff * attempt);
+        await this.pause(run, backoff * attempt);
         beat?.();
       }
     }
@@ -599,14 +627,37 @@ export class EventConsumer {
    * Gives up on a message once a stop has begun ({@link ConsumerStoppingError}):
    * thrown out of `eachMessage`, it leaves the message's offset uncommitted, so
    * the group delivers it again. Called before anything new starts for a
-   * message — an attempt, a dead letter — never in the middle of one: what is
-   * already running is the stop's to wait for, by its deadline.
+   * message — an attempt, a dead letter, its send — never in the middle of one:
+   * what is already running is the stop's to wait for, by its deadline.
    */
   private abandonIfStopping(
+    run: ConsumerRun,
     at: { topic: string; partition: number; offset: string | undefined },
     when: string,
   ): void {
-    if (!this.stopRequested) return;
+    if (!run.stopRequested) return;
+    this.abandon(at, when);
+  }
+
+  /**
+   * Gives up on a message that ended after its stop's deadline, however it
+   * ended: the stop has already returned and warned that it is delivered again,
+   * so its `eachMessage` must not return and let kafkajs commit it. Also once the
+   * deadline has passed by the clock but the stop's timer has not yet fired.
+   */
+  private abandonIfPastDeadline(
+    run: ConsumerRun,
+    at: { topic: string; partition: number; offset: string | undefined },
+  ): void {
+    const past = run.abandoned || (run.deadlineAt !== undefined && Date.now() >= run.deadlineAt);
+    if (!past) return;
+    this.abandon(at, 'after the shutdown deadline');
+  }
+
+  private abandon(
+    at: { topic: string; partition: number; offset: string | undefined },
+    when: string,
+  ): never {
     const where = `${at.topic}[${at.partition}]${at.offset === undefined ? '' : `@${at.offset}`}`;
     this.logger.warn(
       `${this.options.groupId} is stopping: ${where} left uncommitted ${when}; it is delivered again`,
@@ -617,8 +668,8 @@ export class EventConsumer {
   }
 
   /** The backoff between attempts; a stop ends it at once, and none starts once stopping. */
-  private pause(ms: number): Promise<void> {
-    if (this.stopRequested) return Promise.resolve();
+  private pause(run: ConsumerRun, ms: number): Promise<void> {
+    if (run.stopRequested) return Promise.resolve();
     return new Promise((resolve) => {
       const wake = (): void => {
         clearTimeout(timer);
@@ -674,10 +725,11 @@ export class EventConsumer {
     reason: DlqReason,
     detail: string,
     attempts: number,
+    run: ConsumerRun = this.run,
   ): Promise<void> {
     // A stopping consumer starts no dead letter: the message is delivered
     // again, and its next consumer reaches the same verdict (Codex on #267).
-    this.abandonIfStopping(original, 'before its dead letter was written');
+    this.abandonIfStopping(run, original, 'before its dead letter was written');
     const originalTopic = original.topic;
     const target = this.options.deadLetterTopic;
     if (!target) {
@@ -688,7 +740,22 @@ export class EventConsumer {
     }
 
     const producer = await this.getDlqProducer();
+    // Checked again after the connection: a stop that began while it was being
+    // made has closed this producer, but kafkajs reopens it for sends once a
+    // pending connect completes (Codex r1 on #270). No send starts then; the
+    // producer is closed again, since the stop's own close may have come first.
+    if (run.stopRequested) {
+      void producer.disconnect().catch((error: unknown) => {
+        this.logger.warn(
+          `Closing the dead-letter producer of ${this.options.groupId} failed: ${describe(error)}`,
+        );
+      });
+      this.abandon(original, 'before its dead letter was sent');
+    }
 
+    // A send in flight when the deadline passes is not cancelled — kafkajs's
+    // disconnect waits for pending requests — but its message is: it may reach
+    // the broker, and `eachMessage` still throws (`abandonIfPastDeadline`).
     await producer.send({
       topic: target,
       acks: -1,
@@ -754,11 +821,16 @@ export class EventConsumer {
    * still running, with a warning:
    *
    *   - the message in flight is left uncommitted, so the group delivers it
-   *     again (A-09 absorbs a handler that did commit its effect);
-   *   - the dead-letter producer is closed at once, so a send that hangs fails
-   *     rather than land after the process has given the message up — it may
-   *     still have reached the broker, which makes a second dead letter on
-   *     redelivery possible, as after any crash between a send and its commit;
+   *     again (A-09 absorbs a handler that did commit its effect). That holds
+   *     however it ends: a handler or a dead letter that finishes after the
+   *     deadline still throws out of `eachMessage`, so kafkajs never commits
+   *     it (Codex r1 on #270) — the deadline bounds the message, not only the
+   *     wait for it;
+   *   - the dead-letter producer is closed, and no send starts once stopping,
+   *     even on a connection that completes late. kafkajs's close waits for a
+   *     send already in flight rather than cancel it, so that one may still
+   *     reach the broker: a second dead letter on redelivery is possible, as
+   *     after any crash between a send and its commit;
    *   - kafkajs's disconnect carries on in the background while the close
    *     goes on, and the partition passes to another member when it ends or,
    *     at the latest, when the session times out.
@@ -774,8 +846,10 @@ export class EventConsumer {
   }
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
+    const run = this.run;
     this.running = false;
-    this.stopRequested = true;
+    run.stopRequested = true;
+    run.deadlineAt = deadlineAt;
     for (const wake of [...this.pauses]) wake();
 
     const consumer = this.consumer;
@@ -800,6 +874,8 @@ export class EventConsumer {
       return disconnecting;
     }
 
+    // From here the message in flight cannot be committed, however it ends.
+    run.abandoned = true;
     this.logger.warn(
       `${this.options.groupId} did not stop by the shutdown deadline: the message in flight is ` +
         'abandoned uncommitted and is delivered again; the group reassigns its partition when ' +

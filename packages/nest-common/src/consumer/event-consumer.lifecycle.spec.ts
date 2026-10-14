@@ -168,24 +168,51 @@ describe('a Kafka consumer in the shutdown deadline, through a real Nest close',
     expect(fakes.consumer.committed).toEqual([]);
   });
 
-  it('a slow dead-letter send: exit 0 under the timeout, the producer closed, nothing committed', async () => {
+  it('a slow dead-letter send: exit 0 under the timeout, the producer closed, nothing committed even when it lands late', async () => {
     const fakes = { consumer: new FakeKafkaConsumer(), producer: new FakeDlqProducer('send') };
     const app = await boot(async () => {
       throw new UnprocessableEventError(DLQ_REASONS.SOURCE_UNCONFIRMED, 'amount_mismatch');
     }, fakes);
     const delivered = fakes.consumer.deliver(message('2'));
-    await until(() => fakes.producer.connects === 1);
+    await until(() => fakes.producer.sendsStarted === 1);
 
     const { exits, errors, tookMs } = await closeUnderDeadline(app);
-    await delivered;
 
     expect(exits).toEqual([0]);
     expect(errors).toEqual([]);
     expect(tookMs).toBeLessThan(TIMEOUT_MS);
     expect(fakes.producer.disconnects).toBe(1);
-    expect(fakes.producer.sent).toEqual([]);
+
+    // kafkajs's close waits for the send; the broker accepts it after the close.
+    fakes.producer.release();
+    await delivered;
+    expect(fakes.producer.sent).toHaveLength(1);
     expect(fakes.consumer.committed).toEqual([]);
-    expect(fakes.consumer.uncommitted).toHaveLength(1);
+    expect(fakes.consumer.uncommitted).toEqual([
+      { offset: '2', error: expect.any(ConsumerStoppingError) },
+    ]);
+  });
+
+  it('a handler that finishes after the close: its message is not committed', async () => {
+    const fakes = { consumer: new FakeKafkaConsumer(), producer: new FakeDlqProducer() };
+    let release!: () => void;
+    let calls = 0;
+    const app = await boot(() => {
+      calls += 1;
+      return new Promise<void>((resolve) => (release = resolve));
+    }, fakes);
+    const delivered = fakes.consumer.deliver(message('4'));
+    await until(() => calls === 1);
+
+    const { exits } = await closeUnderDeadline(app);
+    expect(exits).toEqual([0]);
+
+    release();
+    await delivered;
+    expect(fakes.consumer.committed).toEqual([]);
+    expect(fakes.consumer.uncommitted).toEqual([
+      { offset: '4', error: expect.any(ConsumerStoppingError) },
+    ]);
   });
 
   it('a retry pause: exit 0 at once, no second attempt, the message uncommitted', async () => {

@@ -11,8 +11,17 @@ import type { EventConsumer } from '../event-consumer';
  *   - `disconnect()` stops the runner at once, then waits for the message in
  *     flight before it resolves (`waitForConsumer`).
  *
- * The producer's `connect` and `send` can be made to hang; a hanging one fails
- * once the producer is disconnected, as a request on a closed connection does.
+ * The producer copies kafkajs 2.2.4 where a stop meets it (`producer/index.js`,
+ * `producer/messageProducer.js`, `network/connection.js`), not what one would
+ * wish it did (Codex r1 on #270):
+ *   - `disconnect()` cancels nothing: it waits for the requests in flight
+ *     (`waitForPendingRequests`), so a send that hangs keeps it waiting, and
+ *     lands if the broker answers;
+ *   - a `connect()` that completes after a `disconnect()` marks the producer
+ *     connected again, and it accepts sends;
+ *   - a send while disconnecting or disconnected is refused.
+ * `connect` or `send` can be made to hang until `release()`, a slow broker
+ * finally answering.
  */
 export interface FakeMessage {
   topic: string;
@@ -78,32 +87,52 @@ export class FakeKafkaConsumer {
 }
 
 export class FakeDlqProducer {
-  readonly sent: { topic: string }[] = [];
+  /** Records the broker accepted. */
+  readonly sent: { topic: string; messages?: { headers?: Record<string, unknown> }[] }[] = [];
   connects = 0;
   disconnects = 0;
-  private closed?: () => void;
-  private readonly closedSignal = new Promise<void>((resolve) => (this.closed = resolve));
+  /** Sends begun on a connected producer, whether or not they ever landed. */
+  sendsStarted = 0;
+  status: 'disconnected' | 'connected' | 'disconnecting' = 'disconnected';
+  private readonly pending = new Set<Promise<void>>();
+  private answer!: () => void;
+  private readonly answered = new Promise<void>((resolve) => (this.answer = resolve));
 
   constructor(private readonly hang: 'none' | 'connect' | 'send' = 'none') {}
 
+  /** The slow broker answers: a hanging connect or send completes. */
+  release(): void {
+    this.answer();
+  }
+
   async connect(): Promise<void> {
     this.connects += 1;
-    if (this.hang === 'connect') await this.untilClosed('connect');
+    if (this.hang === 'connect') await this.answered;
+    this.status = 'connected';
   }
 
   async send(record: { topic: string }): Promise<void> {
-    if (this.hang === 'send') await this.untilClosed('send');
-    this.sent.push(record);
+    if (this.status === 'disconnecting') {
+      throw new Error("The producer is disconnecting; therefore, it can't safely accept messages");
+    }
+    if (this.status === 'disconnected') throw new Error('The producer is disconnected');
+    this.sendsStarted += 1;
+    const request = (this.hang === 'send' ? this.answered : Promise.resolve()).then(() => {
+      this.sent.push(record);
+    });
+    this.pending.add(request);
+    try {
+      await request;
+    } finally {
+      this.pending.delete(request);
+    }
   }
 
   async disconnect(): Promise<void> {
     this.disconnects += 1;
-    this.closed?.();
-  }
-
-  private async untilClosed(what: string): Promise<never> {
-    await this.closedSignal;
-    throw new Error(`Closed connection: the ${what} did not complete`);
+    this.status = 'disconnecting';
+    await Promise.all([...this.pending]);
+    this.status = 'disconnected';
   }
 }
 

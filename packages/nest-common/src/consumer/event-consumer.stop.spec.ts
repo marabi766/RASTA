@@ -223,35 +223,174 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
     });
   });
 
-  describe('a slow dead letter', () => {
+  describe('a handler that finishes after the deadline (Codex r1 on #270)', () => {
+    it('is not committed however it ends, is delivered again, and is applied once', async () => {
+      // An idempotent handler, as A-09 has every handler be: the effect and its
+      // marker in one step, a redelivery finding the marker.
+      const processed = new Set<string>();
+      let applied = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let calls = 0;
+      const h = await started(async (envelope) => {
+        calls += 1;
+        if (calls === 1) await gate;
+        if (processed.has(envelope.eventId)) return 'SKIPPED';
+        processed.add(envelope.eventId);
+        applied += 1;
+      });
+      const first = h.kafka.deliver(message('60'));
+      await until(() => calls === 1);
+
+      const tookMs = await timedStop(h.consumer, 300);
+      expect(tookMs).toBeLessThan(800);
+      // The consumer is started again before the abandoned handler ends: the
+      // verdict belongs to the run the message was delivered in.
+      await h.consumer.start();
+
+      release();
+      await first;
+      expect(applied).toBe(1);
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted).toEqual([
+        { offset: '60', error: expect.any(ConsumerStoppingError) },
+      ]);
+      expect(h.lines).toContainEqual(
+        expect.stringContaining(`${TOPIC}[0]@60 left uncommitted after the shutdown deadline`),
+      );
+
+      // Delivered again: the marker absorbs it, and this time it is committed.
+      await h.kafka.deliver(message('60'));
+      expect(calls).toBe(2);
+      expect(applied).toBe(1);
+      expect(h.kafka.committed).toEqual(['60']);
+      await h.consumer.stop({ deadlineAt: Date.now() + 1000 });
+    });
+
+    it('a failure after the deadline goes to no attempt and no dead letter', async () => {
+      let fail!: (error: Error) => void;
+      let calls = 0;
+      const h = await started(() => {
+        calls += 1;
+        return new Promise<void>((_resolve, reject) => (fail = reject));
+      });
+      const delivered = h.kafka.deliver(message('61'));
+      await until(() => calls === 1);
+
+      await timedStop(h.consumer, 200);
+      fail(new UnprocessableEventError(DLQ_REASONS.SOURCE_UNCONFIRMED, 'amount_mismatch'));
+      await delivered;
+
+      expect(calls).toBe(1);
+      expect(h.producer.connects).toBe(0);
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+    });
+
+    it('past the deadline by the clock, before the stop’s timer fires: not committed', async () => {
+      let release!: () => void;
+      const h = await started(() => new Promise<void>((resolve) => (release = resolve)));
+      const delivered = h.kafka.deliver(message('62'));
+      await until(() => release !== undefined);
+
+      // A deadline already behind: the handler's success lands with the stop
+      // under way, and must not return.
+      const stopping = h.consumer.stop({ deadlineAt: Date.now() - 1 });
+      release();
+      await stopping;
+      await delivered;
+
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+    });
+  });
+
+  describe('a slow dead letter (kafkajs-faithful producer, Codex r1 on #270)', () => {
     const refusing: EventHandler = async () => {
       throw new UnprocessableEventError(DLQ_REASONS.SOURCE_UNCONFIRMED, 'amount_mismatch');
     };
 
-    it.each(['send', 'connect'] as const)(
-      'returns by the deadline when the producer’s %s does not return, and closes it',
-      async (hang) => {
-        const h = await started(refusing, {}, new FakeDlqProducer(hang));
-        const delivered = h.kafka.deliver(message('20'));
-        await until(() => h.producer.connects === 1);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+    const counted = async () =>
+      (await dlqMessagesTotal.get()).values.filter((s) => s.value > 0).length;
 
-        const tookMs = await timedStop(h.consumer, 300);
-        await delivered;
+    it('a connection that completes after the stop began starts no send', async () => {
+      const h = await started(refusing, {}, new FakeDlqProducer('connect'));
+      const delivered = h.kafka.deliver(message('20'));
+      await until(() => h.producer.connects === 1);
 
-        expect(tookMs).toBeGreaterThanOrEqual(290);
-        expect(tookMs).toBeLessThan(800);
-        // Closed at the deadline, so the hung request failed rather than land later.
-        expect(h.producer.disconnects).toBe(1);
-        expect(h.producer.sent).toEqual([]);
-        // Not committed and not counted: the group delivers it again.
-        expect(h.kafka.committed).toEqual([]);
-        expect(h.kafka.uncommitted).toHaveLength(1);
-        expect((await dlqMessagesTotal.get()).values.filter((s) => s.value > 0)).toEqual([]);
-        // And the consumer's disconnect, which waited for that message, then ended.
-        await until(() => h.kafka.disconnected);
-      },
-    );
+      // Stopping with time to spare; the connection completes meanwhile, which
+      // in kafkajs marks a closed producer connected again.
+      const stopping = h.consumer.stop({ deadlineAt: Date.now() + 2000 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      h.producer.release();
+      await stopping;
+      await delivered;
+
+      expect(h.producer.sendsStarted).toBe(0);
+      expect(h.producer.sent).toEqual([]);
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+      expect(h.lines).toContainEqual(
+        expect.stringContaining(`${TOPIC}[0]@20 left uncommitted before its dead letter was sent`),
+      );
+      // Closed again after its late connection, not left open.
+      await until(() => h.producer.status === 'disconnected');
+      expect(await counted()).toBe(0);
+    });
+
+    it('a connection that completes after the deadline starts no send', async () => {
+      const h = await started(refusing, {}, new FakeDlqProducer('connect'));
+      const delivered = h.kafka.deliver(message('22'));
+      await until(() => h.producer.connects === 1);
+
+      const tookMs = await timedStop(h.consumer, 300);
+      expect(tookMs).toBeGreaterThanOrEqual(290);
+      expect(tookMs).toBeLessThan(800);
+      expect(h.producer.disconnects).toBe(1);
+
+      h.producer.release();
+      await delivered;
+
+      expect(h.producer.sendsStarted).toBe(0);
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+      await until(() => h.producer.status === 'disconnected');
+      await until(() => h.kafka.disconnected);
+    });
+
+    it('a send in flight at the deadline: the stop returns; if it lands, the message is still not committed, and is dead-lettered again on redelivery', async () => {
+      const h = await started(refusing, {}, new FakeDlqProducer('send'));
+      const delivered = h.kafka.deliver(message('23'));
+      await until(() => h.producer.sendsStarted === 1);
+
+      // kafkajs's close waits for the send rather than cancel it; the stop does not.
+      const tookMs = await timedStop(h.consumer, 300);
+      expect(tookMs).toBeGreaterThanOrEqual(290);
+      expect(tookMs).toBeLessThan(800);
+      expect(h.producer.disconnects).toBe(1);
+      expect(h.producer.status).toBe('disconnecting');
+
+      // The broker accepts it after the deadline.
+      h.producer.release();
+      await delivered;
+      expect(h.producer.sent).toHaveLength(1);
+      expect(h.kafka.committed).toEqual([]);
+      expect(h.kafka.uncommitted[0]?.error).toBeInstanceOf(ConsumerStoppingError);
+      await until(() => h.kafka.disconnected);
+
+      // Delivered again after a restart: dead-lettered a second time — nothing
+      // deduplicates dead letters (the record key is the aggregate's partition
+      // key) — then committed. Both name the same original offset.
+      await h.consumer.start();
+      await h.kafka.deliver(message('23'));
+      expect(h.producer.sent).toHaveLength(2);
+      expect(h.kafka.committed).toEqual(['23']);
+      const offsets = h.producer.sent.map(
+        (record) => record.messages?.[0]?.headers?.['x-dlq-original-offset'],
+      );
+      expect(offsets).toEqual(['23', '23']);
+      await h.consumer.stop({ deadlineAt: Date.now() + 1000 });
+    });
 
     it('a dead letter that completes in time is committed as before', async () => {
       const h = await started(refusing);

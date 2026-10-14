@@ -1,5 +1,11 @@
 import type { EventEnvelope } from '@rasta/contracts';
-import { OutboxRelay, RastaError, runUnscoped, type OutboxRow } from '@rasta/nest-common';
+import {
+  OutboxRelay,
+  RastaError,
+  runUnscoped,
+  type EventConsumer,
+  type OutboxRow,
+} from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
@@ -413,6 +419,65 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
     expect(await marked(envelope.eventId)).toBe(false);
     expect(await deadLetterRows(envelope.eventId)).toHaveLength(1);
     expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+  }, 30_000);
+
+  it('#270 r1: a sweep waiting on asset-service at shutdown is stopped by the deadline and writes nothing after; the row stays due for the next run', async () => {
+    const assetId = await machineOfA();
+    const { policyId, envelope } = newOwnersPolicy(assetId);
+    await consumer.handle(envelope);
+    await transferToB(assetId);
+    await activateForB(assetId);
+    const before = await parked(envelope.eventId);
+    expect(before).toMatchObject({ attempts: 0, nextAttemptAt: expect.any(Date) });
+
+    // asset-service answers only after the shutdown deadline.
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    let asked = 0;
+    const late = {
+      verify: async (organizationId: string, asset: string, policy: string) => {
+        asked += 1;
+        await answered;
+        return policies.verify(organizationId, asset, policy);
+      },
+    };
+    // Started as the service starts it: the timer runs the sweep.
+    const started = new AssetSyncConsumer(
+      () =>
+        ({ start: async () => undefined, stop: async () => undefined }) as unknown as EventConsumer,
+      repository,
+      undefined,
+      undefined,
+      undefined,
+      late,
+      { ...PARKING, sweepIntervalMs: 20 },
+    );
+    await started.onModuleInit();
+    const deadline = Date.now() + 10_000;
+    while (asked === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(asked).toBe(1);
+
+    const stoppedAt = Date.now();
+    await started.stop({ deadlineAt: Date.now() + 300 });
+    expect(Date.now() - stoppedAt).toBeLessThan(1_500);
+
+    answer();
+    const sweepRun = () => (started as unknown as { sweepRun?: Promise<void> }).sweepRun;
+    await sweepRun();
+    expect(asked).toBe(1);
+
+    // Nothing written after the answer: the row as it was, the replica unchanged.
+    expect(await parked(envelope.eventId)).toEqual(before);
+    expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toEqual({});
+
+    // The next run, anywhere, decides it.
+    expect((await consumer.sweepParked()).APPLIED).toBeGreaterThanOrEqual(1);
+    expect(await parked(envelope.eventId)).toBeNull();
+    expect((await repository.findAssetRefUnscoped(assetId))!.insuranceCover).toMatchObject({
+      COMPREHENSIVE: [{ policyId, generation: 1 }],
+    });
   }, 30_000);
 
   it('r10: the transfer returns at once however many events are parked; the sweep applies them', async () => {
