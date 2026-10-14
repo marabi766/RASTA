@@ -426,6 +426,10 @@ function notifyObserver<T extends object>(observe: (value: T) => void, value: T)
  * A header that names another organization is never answered by falling back
  * to the active one: silently ignoring it would let a caller believe they
  * were acting for B while the server acted for A.
+ *
+ * A refused header is client text that matched nothing, so the refusal logs
+ * only its length (S-09). A refused active organization is the signed
+ * token's own claim, and is logged as such.
  */
 export function resolveOrganization(
   requested: string | undefined,
@@ -436,6 +440,7 @@ export function resolveOrganization(
   if (!target) return undefined;
   if (memberships.includes(target)) return target;
 
+  if (requested) throw RastaError.tenantHeaderMismatch(requested.length, [...memberships]);
   throw RastaError.tenantMismatch(target, [...memberships]);
 }
 

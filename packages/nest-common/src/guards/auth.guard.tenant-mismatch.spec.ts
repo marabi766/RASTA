@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { ExecutionContext } from '@nestjs/common';
+import type { ArgumentsHost, ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
+import type { Logger } from '@rasta/logging';
 import { AuthGuard, type AuthGuardOptions, type UserTenantMismatch } from './auth.guard';
+import { AllExceptionsFilter } from '../filters/exception.filter';
 import { InternalTokenService, type TokenVerifier, type UserClaims } from '../auth/token-verifier';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { runWithContext } from '../context/request-context';
@@ -186,8 +188,10 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
       expect(serialised).not.toContain(SUBJECT);
       // `internalContext` is reachable only through the error, which the
       // observer needs by identity; the attribution itself carries none of it.
+      // Nor does the context carry the header: only that it matched nothing.
       expect(refusal.error.internalContext).toEqual({
-        requested: ORG_FOREIGN,
+        unmatchedHeader: 'X-Organization-Id',
+        headerLength: ORG_FOREIGN.length,
         allowed: [ORG_A, ORG_B],
       });
     });
@@ -429,6 +433,49 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
       expect(allowed).toBeUndefined();
       expect((error as RastaError).status).toBe(403);
     });
+  });
+
+  it('never writes the refused header to the response or the log (S-09)', async () => {
+    // A valid bearer with a header that is not an organization at all.
+    const { error } = await attempt(
+      { ...bearer, 'x-organization-id': 'access_token=secret123' },
+      { observe: null },
+    );
+
+    const lines: { level: string; payload: unknown; message: string }[] = [];
+    const at = (level: string) => (payload: unknown, message: string) => {
+      lines.push({ level, payload, message });
+    };
+    const logger = {
+      debug: at('debug'),
+      warn: at('warn'),
+      error: at('error'),
+    } as unknown as Logger;
+    const sent: { status?: number; body?: unknown } = {};
+    const response = {
+      status: (code: number) => {
+        sent.status = code;
+        return response;
+      },
+      json: (body: unknown) => {
+        sent.body = body;
+      },
+      setHeader: () => undefined,
+    };
+    new AllExceptionsFilter(logger).catch(error, {
+      switchToHttp: () => ({
+        getResponse: () => response,
+        getRequest: () => ({ method: 'GET', originalUrl: '/v1/x' }),
+      }),
+    } as unknown as ArgumentsHost);
+
+    expect(sent.status).toBe(403);
+    expect(sent.body).toMatchObject({ code: 'TENANT_MISMATCH' });
+    expect(lines.map((line) => line.level)).toEqual(['warn']);
+    expect(lines[0]!.payload).toMatchObject({
+      internalContext: { unmatchedHeader: 'X-Organization-Id', headerLength: 22 },
+    });
+    expect(JSON.stringify([sent.body, lines])).not.toContain('secret123');
   });
 
   it('keeps the shared package free of any service-specific dependency (A-03)', () => {
