@@ -1,32 +1,50 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope } from '@rasta/contracts';
 import {
+  HANDLER_MESSAGE_MAX,
   UnprocessableEventError,
   createSystemContext,
+  deadLetterHeaders,
+  envelopeHeaders,
   invalidPayloadError,
   isRetryDelivery,
   replicaOwnerMismatchError,
   requireEnvelopeTenant,
   runWithContext,
+  safeLogText,
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
 } from '@rasta/nest-common';
+import { dlqMessagesTotal } from '@rasta/observability';
 import {
   UNCONFIGURED_TRANSFER_RECORD_SOURCE,
   type TransferRecordSource,
 } from '../fleet/transfer-record';
 import {
   UNCONFIGURED_ASSET_SNAPSHOT_SOURCE,
+  UNCONFIGURED_INSURANCE_POLICY_SOURCE,
   UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
   type AssetSnapshotSource,
+  type InsurancePolicySource,
   type MaintenanceStateSource,
+  type PolicyVerdict,
 } from './replica-sources';
-import { FLEET_TOPIC, SERVICE_NAME } from '../config/env';
-import { FleetRepository } from '../fleet/fleet.repository';
+import {
+  ASSET_SYNC_DEAD_LETTER_TOPIC,
+  ASSET_SYNC_TOPICS,
+  FLEET_TOPIC,
+  SERVICE_NAME,
+} from '../config/env';
+import {
+  FleetRepository,
+  type DeadLetterOutboxInput,
+  type ParkedInsurance,
+} from '../fleet/fleet.repository';
 import {
   INSPECTION_BLOCK_REASON,
   UNKNOWN_COVERAGE,
+  afterTransfer,
   parseCover,
   unresolvedLapses,
   withRecordedPolicy,
@@ -88,16 +106,24 @@ interface Projection {
     current: CurrentAssetRef | null,
     now: Date,
     occurredAt: Date,
+    eventOrganization: string | undefined,
   ) => AssetRefPatch;
 }
 
 /** The fields of the current row a projection may build on. */
 interface CurrentAssetRef {
+  organizationId: string;
   inspectionBlockedAt: Date | null;
   inspectionResolvedAt: Date | null;
   insuranceLapsedCoverages: string[];
   insuranceLapsedAt: Date | null;
   insuranceCover: unknown;
+  ownershipGeneration: number | null;
+  retainedCoverages: string[];
+  /** Moved by every change to the insurance state, owner or generation (trigger, #240 r10). */
+  insuranceRevision: bigint;
+  /** Moved by every `insurance:clear-transferred` run that targets the row (#240 r11). */
+  insuranceEpoch: bigint;
 }
 
 interface AssetRefPatch {
@@ -113,11 +139,15 @@ interface AssetRefPatch {
   insuranceLapsedCoverages?: string[];
   insuranceLapsedAt?: Date | null;
   insuranceCover?: InsuranceCover;
+  ownershipGeneration?: number | null;
+  retainedCoverages?: string[];
 }
 
 const PROJECTIONS: Record<ConsumedEventName, Projection> = {
   // ---- asset-service: the replica -----------------------------------------
   [CONSUMED_EVENTS.ASSET_CREATED]: {
+    // Applied to an absent row only: on an existing one `handle` reconciles from
+    // asset-service instead (#240 r13), so this owner never replaces another.
     patch: (payload) => ({
       organizationId: str(payload.organizationId),
       name: str(payload.name) ?? null,
@@ -140,19 +170,43 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
     patch: (payload) => ({ status: str(payload.newStatus) ?? undefined }),
   },
   [CONSUMED_EVENTS.ASSET_TRANSFERRED]: {
-    patch: (payload) => ({
-      // The machine moved to another organization. Following it matters: a
-      // replica that kept the old owner would keep offering the machine in
-      // the wrong organization's availability listing.
-      organizationId: str(payload.toOrganizationId),
-      // Its new owner must re-commission it, exactly as asset-service records.
-      // Any assignment still open on it is ended by the handler, below.
-      status: 'REGISTERED',
-      // The insurance state is deliberately left as it is. The policy follows
-      // the vehicle: the previous owner's policy counts for the new owner
-      // until its own validTo, lapses included (docs/24 Q-66, project owner's
-      // decision 2026-09-25).
-    }),
+    patch: (payload, current) => {
+      const retained = strList(payload.retainedCoverages);
+      const generation = int(payload.ownershipGeneration);
+      return {
+        // The machine moved to another organization. Following it matters: a
+        // replica that kept the old owner would keep offering the machine in
+        // the wrong organization's availability listing.
+        organizationId: str(payload.toOrganizationId),
+        // Its new owner must re-commission it, exactly as asset-service records.
+        // Any assignment still open on it is ended by the handler, below.
+        status: 'REGISTERED',
+        // The policy follows the vehicle only for the coverages asset-service
+        // lets follow it (docs/24 Q-66, INSURANCE_COVERAGES_FOLLOWING_VEHICLE),
+        // which the event states. The others' windows are dropped: with a
+        // required-coverage dispatch rule a stale window would authorize the
+        // new owner. No `retainedCoverages` (an older event) drops them all —
+        // fail closed; the re-projection command restores the valid ones.
+        // Lapses are left as they are: they only ever withhold. From an unknown
+        // generation a retained window must also carry one (#240 r15).
+        insuranceCover: afterTransfer(
+          parseCover(current?.insuranceCover),
+          retained,
+          generation,
+          (current?.ownershipGeneration ?? null) !== null,
+        ),
+        retainedCoverages: retained ?? [],
+        // Monotonic (#240 r12): a transfer at or below the replica's generation
+        // never reaches this patch (`handle` acknowledges it unapplied). An event
+        // that states none (an older one) leaves an unknown generation UNKNOWN
+        // (NULL), so the owner check applies, and a known one as it is: never
+        // lowered.
+        ownershipGeneration:
+          generation === undefined
+            ? (current?.ownershipGeneration ?? null)
+            : Math.max(generation, current?.ownershipGeneration ?? generation),
+      };
+    },
   },
   [CONSUMED_EVENTS.ASSET_DECOMMISSIONED]: {
     patch: () => ({ status: 'DECOMMISSIONED' }),
@@ -213,10 +267,17 @@ const PROJECTIONS: Record<ConsumedEventName, Projection> = {
       // this guard only narrows the types and never guesses a validity.
       if (!coverage || !policyId || !validFrom || !validTo) return {};
 
+      // Whether the policy is the current owner's and counts is not decided
+      // here: `verifiedInsurancePatch` asks asset-service and passes this patch
+      // the source's own coverage, window and generation (#240 r7).
+      const generation = int(payload.ownershipGeneration);
+
       const cover = withRecordedPolicy(
         parseCover(current?.insuranceCover),
         coverage,
-        { policyId, validFrom, validTo },
+        generation === undefined
+          ? { policyId, validFrom, validTo }
+          : { policyId, validFrom, validTo, generation },
         now,
       );
       // Resolved lapses are dropped from the set so it does not grow for
@@ -282,6 +343,9 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
  * The ordinary state events, which change a row the event's tenant must own
  * (review #205 r2): every state event but the two that set the owner —
  * `ASSET_CREATED` and `ASSET_TRANSFERRED`, both held to the envelope tenant.
+ * Neither is owner-checked; each is fenced its own way instead: a transfer by
+ * the ownership generation (#240 r12), a creation by applying its payload only
+ * to an absent row and reconciling an existing one from asset-service (r13).
  * The safety events are not here: an insurance event from the previous owner
  * after a transfer applies to the vehicle (docs/24 Q-66), and a failed
  * inspection only ever withdraws the machine.
@@ -315,11 +379,28 @@ function withoutStateFields(patch: AssetRefPatch): AssetRefPatch {
 }
 
 /**
- * A refresh holds the asset's lock across up to four short exchanges with the
- * owners (each bounded by its own deadline), so its transaction is given room.
- * Replays are rare operator actions; original deliveries for that asset wait.
+ * The default for the one transaction that still holds an asset's lock across
+ * exchanges with the owners — a replayed state event's refresh, which makes up
+ * to three, each bounded by its own deadline — and for the insurance decisions
+ * that may wait on that lock behind it (#240 r10: they ask nobody themselves).
+ * `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS`, checked at startup against the
+ * upstream timeout and the consumer's session timeout (`assetSyncBudgetProblem`,
+ * #240 r11). Replays are rare operator actions; but what waits on the lock
+ * behind one may FAIL rather than wait — an ordinary delivery or an HTTP
+ * request's transaction has Prisma's 5 s (known limitation,
+ * docs/runbooks/replay-dlq.md). 14.2 s since #240 r12, so that the start waits
+ * and the reads before a transaction fit the session too.
  */
-const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
+export const DEFAULT_TRANSACTION_TIMEOUT_MS = 14_200;
+
+/**
+ * How long every asset-sync transaction may wait to start — for a pool
+ * connection — and how long the reads an `INSURANCE_RECORDED` makes before its
+ * transaction may take together (#240 r12). Prisma's own `maxWait` (2 s) was
+ * outside the delivery budget; this one is in it.
+ * `FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS`.
+ */
+export const DEFAULT_TRANSACTION_MAX_WAIT_MS = 500;
 
 const CONSUMER_NAME = 'fleet-service.asset-sync';
 
@@ -343,10 +424,96 @@ const TRANSFER_END_NOTES = 'پایان خودکار: ماشین به سازما�
  */
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
+/**
+ * The parked-insurance sweep's bounds (#240 r8; `FLEET_INSURANCE_PARKED_*`).
+ * Exhausted events are dead-lettered through the outbox to
+ * `rasta.fleet.v1.dlq` (#240 r9).
+ */
+export interface ParkingOptions {
+  readonly minAgeSeconds: number;
+  readonly maxAttempts: number;
+  readonly sweepIntervalMs: number;
+  readonly batchSize: number;
+  /**
+   * The `service` label those dead letters are counted under in
+   * `rasta_dlq_messages_total`: the consumer's Kafka client id, the label of its
+   * own dead letters, so one alert covers both. `fleet-service` when not given.
+   */
+  readonly dlqMetricService?: string;
+}
+
+export const DEFAULT_PARKING: ParkingOptions = {
+  minAgeSeconds: 300,
+  maxAttempts: 12,
+  sweepIntervalMs: 60_000,
+  batchSize: 50,
+};
+
+/**
+ * What asset-service's answer about an `INSURANCE_RECORDED` means for the
+ * replica, decided under the asset's lock: store the source's window, drop the
+ * event (the policy does not count, or the answer is older than the replica),
+ * or park it (the source is about a later owner than the replica has seen).
+ */
+type InsuranceOutcome =
+  | { readonly kind: 'APPLY'; readonly patch: AssetRefPatch }
+  | { readonly kind: 'DROP'; readonly reason: string }
+  | { readonly kind: 'PARK'; readonly reason: ParkReason };
+
+/** Why an event is (still) parked: the source ahead, or no answer from it. */
+type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
+
+/** What one re-verification of a parked event did. */
+export type ParkedOutcome = 'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED';
+
+/** Where INSURANCE_RECORDED is published (ASSET_SYNC_TOPICS); a parked event without a delivery is dead-lettered as from here. */
+const INSURANCE_TOPIC = 'rasta.insurance.v1';
+
+/**
+ * Where asset-service's answer stands against the replica it is applied to, by
+ * ownership generation. With the replica's generation unknown only the owner
+ * can be compared; any disagreement then, or at an equal generation, is treated
+ * as the source being ahead (the transfer has not been consumed): retried, never
+ * guessed.
+ */
+function sourceOrder(
+  verdict: { organizationId: string; ownershipGeneration: number },
+  replica: { organizationId: string; ownershipGeneration?: number | null },
+): 'SAME' | 'AHEAD' | 'BEHIND' {
+  const known = replica.ownershipGeneration;
+  if (known !== null && known !== undefined) {
+    if (verdict.ownershipGeneration > known) return 'AHEAD';
+    if (verdict.ownershipGeneration < known) return 'BEHIND';
+  }
+  return verdict.organizationId === replica.organizationId ? 'SAME' : 'AHEAD';
+}
+
+/**
+ * The fields that initialise a replica row whose ownership generation is unknown
+ * at the `generation` asset-service states for its owner (#240 r15): the
+ * generation, and the windows of an uncertain tenure (r13) — above 0 only those
+ * verified under it or later, none retained.
+ */
+function initialisedTenure(
+  current: Pick<CurrentAssetRef, 'insuranceCover'>,
+  generation: number,
+): Pick<AssetRefPatch, 'ownershipGeneration' | 'insuranceCover' | 'retainedCoverages'> {
+  if (generation === 0) return { ownershipGeneration: 0 };
+  return {
+    ownershipGeneration: generation,
+    insuranceCover: afterTransfer(parseCover(current.insuranceCover), undefined, generation),
+    retainedCoverages: [],
+  };
+}
+
 @Injectable()
 export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AssetSyncConsumer.name);
   private consumer?: EventConsumer;
+  private sweepTimer?: NodeJS.Timeout;
+  private sweeping = false;
+  /** A run was asked for while one was running (a transfer made rows due): run again after it. */
+  private sweepAgain = false;
 
   constructor(
     private readonly consumerFactory: EventConsumerFactory | null,
@@ -356,7 +523,34 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly maintenanceSource: MaintenanceStateSource = UNCONFIGURED_MAINTENANCE_STATE_SOURCE,
     /** Whether a stale fence's transfer was recorded (ADR-062 § 3b); read under the lock. */
     private readonly transferRecords: TransferRecordSource = UNCONFIGURED_TRANSFER_RECORD_SOURCE,
-  ) {}
+    /** Asked about every `INSURANCE_RECORDED` before it is applied (ADR-061 § 4); without it none is applied. */
+    private readonly insurancePolicies: InsurancePolicySource = UNCONFIGURED_INSURANCE_POLICY_SOURCE,
+    /** The parked-insurance sweep (#240 r8). */
+    private readonly parking: ParkingOptions = DEFAULT_PARKING,
+    /** `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS` (#240 r9). */
+    private readonly transactionTimeoutMs: number = DEFAULT_TRANSACTION_TIMEOUT_MS,
+    /** `FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS` (#240 r12). */
+    private readonly transactionMaxWaitMs: number = DEFAULT_TRANSACTION_MAX_WAIT_MS,
+  ) {
+    // RastaDeadLetterMessagePublished alerts on an increase, which a series born
+    // at one never shows: each topic a parked event can come from starts at zero.
+    for (const topic of ASSET_SYNC_TOPICS) {
+      for (const source of [topic, `${topic}${RETRY_TOPIC_SUFFIX}`]) {
+        dlqMessagesTotal.inc(
+          {
+            service: this.dlqMetricService,
+            topic: source,
+            reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+          },
+          0,
+        );
+      }
+    }
+  }
+
+  private get dlqMetricService(): string {
+    return this.parking.dlqMetricService ?? SERVICE_NAME;
+  }
 
   async onModuleInit(): Promise<void> {
     // Null in tests and in any run without a broker. The service stays useful
@@ -367,9 +561,15 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     }
     this.consumer = this.consumerFactory((envelope, delivery) => this.handle(envelope, delivery));
     await this.consumer.start();
+    // Only with a consumer: without one nothing is parked. Every instance
+    // sweeps; rows are decided under their machine's lock and re-checked there,
+    // so two never decide one.
+    this.sweepTimer = setInterval(() => void this.runSweep(), this.parking.sweepIntervalMs);
+    this.sweepTimer.unref?.();
   }
 
   async onModuleDestroy(): Promise<void> {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
     await this.consumer?.stop();
   }
 
@@ -434,12 +634,29 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     const replayed =
       delivery !== undefined && isRetryDelivery(delivery) && STATE_EVENTS.has(envelope.eventName);
 
+    // An INSURANCE_RECORDED is verified at asset-service BEFORE the transaction,
+    // with no lock held (#240 r10): the replica is read, the source asked, and the
+    // answer decided under the lock only if the replica's insurance revision and
+    // epoch (r11) have not moved meanwhile. Writers that take the lock never wait
+    // on the network.
+    const verified =
+      envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED
+        ? await this.askAboutRecordedPolicy(
+            envelope.eventId,
+            payload,
+            assetId,
+            organizationId,
+            delivery,
+          )
+        : undefined;
+
     const now = new Date();
-    // The producer's clock, for ordering. An unreadable timestamp falls back to
-    // now, which dates the event as late as possible: a failure then blocks,
-    // and a repair clears only failures that are genuinely older.
-    const stated = new Date(envelope.occurredAt);
-    const occurredAt = Number.isNaN(stated.getTime()) ? now : stated;
+    const occurredAt = producerInstant(envelope, now);
+
+    // Whether this delivery moved the machine to another owner: a transfer, or a
+    // replay whose refreshed snapshot shows one. The machine's parked insurance
+    // events are made due in its transaction, and the sweep decides them (#240 r10).
+    let parkedMadeDue = 0;
 
     await this.repository.transaction(
       async (tx: ExtendedPrismaClient) => {
@@ -456,7 +673,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         // to what the row already holds, and two events for one machine handled
         // at once must not each build on a copy that lacks the other's change.
         await this.repository.lockAssetRef(tx, assetId);
-        const current = await this.repository.findAssetRef(assetId, tx);
+        const current = await this.repository.findAssetRefUnscoped(assetId, tx);
 
         // An ordinary state event changes a row its tenant must own. One whose
         // (envelope and payload) tenant is not the replica's owner is refused
@@ -473,23 +690,146 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           throw replicaOwnerMismatchError(envelope);
         }
 
+        // The replica's ownership generation only rises (#240 r12). A transfer at
+        // or below it — the original of one a replay's refresh already moved past,
+        // or a replay of it — is history: applied, it would hand the machine back
+        // to an earlier owner and keep the later owner's windows (which its
+        // generation leaves standing) for it. Acknowledged, nothing changed.
+        if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+          const stated = int(payload.ownershipGeneration);
+          const known = current?.ownershipGeneration ?? null;
+          if (stated !== undefined && known !== null && stated <= known) {
+            this.logger.log(
+              `ASSET_TRANSFERRED ${envelope.eventId} of ${assetId} ignored: its ownership generation ` +
+                `${stated} is not after the replica's ${known}; owner and insurance left as they are`,
+            );
+            return;
+          }
+        }
+
         // An insurance event from the previous owner's tenant, consumed after the
         // transfer, is applied to the row as it now stands, under its current
         // owner: the policy is the vehicle's, not the organization's (docs/24
         // Q-66). The tenant below comes from the row, never from such an event.
-        let patch = projection.patch(payload, current, now, occurredAt);
-        const refresh = replayed
-          ? await this.readAuthoritativeState(envelope, assetId, organizationId)
-          : undefined;
+        let patch: AssetRefPatch;
+        if (verified) {
+          if (verified === 'ALREADY_HANDLED') {
+            // Marked when it was read, unmarked since (its parked row was
+            // dead-lettered): nothing was asked, so nothing is decided here.
+            throw new Error(
+              `INSURANCE_RECORDED ${envelope.eventId}: no longer marked handled; verified again`,
+            );
+          }
+          if (!sameInsuranceState(current, verified.read)) {
+            // The answer is about a replica that no longer stands — the windows
+            // were cleared, a transfer or another policy committed meanwhile. It
+            // is discarded; the throw rolls the marker back and the event is
+            // verified again from the start (#240 r10).
+            throw new Error(
+              `INSURANCE_RECORDED ${envelope.eventId}: the insurance state of ${assetId} changed ` +
+                'while asset-service was asked; verified again',
+            );
+          }
+          const outcome = this.decideRecordedPolicy(
+            verified,
+            envelope.eventId,
+            payload,
+            current,
+            now,
+            occurredAt,
+            organizationId,
+          );
+          if (outcome.kind === 'PARK') {
+            // The source is about an owner the replica has not seen: parked with
+            // the marker, applied by nothing until the source is asked again
+            // (#240 r8). The replica row is left as it is.
+            await this.park(tx, envelope, delivery, assetId, organizationId, outcome.reason);
+            return;
+          }
+          patch = outcome.kind === 'APPLY' ? outcome.patch : {};
+        } else {
+          patch = projection.patch(payload, current, now, occurredAt, organizationId);
+        }
+        // An ASSET_CREATED only initialises an ABSENT replica (#240 r13). One that
+        // finds the row — a late original after replays or transfers moved the
+        // machine on, or a row a safety event created first — names the owner at
+        // registration, which may no longer be the owner: applied, it would move
+        // the machine back with the later owner's generation and windows. It is
+        // reconciled from asset-service instead, exactly as a replayed state event
+        // is (D-039, below); no answer throws, so nothing is written.
+        const reconciled =
+          !replayed && current !== null && envelope.eventName === CONSUMED_EVENTS.ASSET_CREATED;
+        if (reconciled) {
+          this.logger.log(
+            `ASSET_CREATED ${envelope.eventId} of ${assetId}: the replica already holds the machine; ` +
+              'reconciled from asset-service, not from the payload',
+          );
+        }
+        const refresh =
+          replayed || reconciled
+            ? await this.readAuthoritativeState(envelope, assetId, organizationId, delivery)
+            : undefined;
         if (refresh) {
+          const known = current?.ownershipGeneration ?? null;
+          if (
+            known !== null &&
+            (refresh.transferGeneration < known ||
+              (refresh.transferGeneration === known &&
+                current?.organizationId !== refresh.organizationId))
+          ) {
+            // asset-service's answer is about an earlier tenure than the replica
+            // has seen, or names another owner at the same one: written, it would
+            // lower the generation or move the owner without one (#240 r12). Not
+            // written; retried, then dead-lettered.
+            throw new Error(
+              `${envelope.eventName} ${envelope.eventId}: asset-service's ownership generation ` +
+                `${refresh.transferGeneration} of ${assetId} does not follow the replica's ${known}`,
+            );
+          }
           // The replica fields come from the owners. What stays of the payload's
           // patch is the safety part, which has its own order-insensitive rules
           // (a repair completion still resolves an older inspection failure) —
           // but only for a tenant that still owns the machine: an event from a
-          // previous owner is good for the owner change alone.
-          patch = refresh.viaTransfer
-            ? refresh.patch
-            : { ...withoutStateFields(patch), ...refresh.patch };
+          // previous owner is good for the owner change alone. The generation is
+          // the source's too (#240 r12): a transfer at or below it, consumed
+          // later, is then recognised as history.
+          patch = {
+            ...(refresh.viaTransfer
+              ? refresh.patch
+              : { ...withoutStateFields(patch), ...refresh.patch }),
+            ownershipGeneration: refresh.transferGeneration,
+          };
+          // The snapshot shows a tenure this replica missed the transfer to — a
+          // new owner, or a later generation of the same one (A→B→A). It does not
+          // state the coverages that follow the vehicle, so none is retained:
+          // only windows recorded under the snapshot's generation or a later one
+          // (the current tenure's own) stay. Fail closed, as for an older
+          // transfer; the re-projection command restores the valid windows.
+          //
+          // An UNKNOWN generation (a row migrated without one, #240 r13) is an
+          // uncertain tenure: the replica may have missed A→B→A before the column
+          // existed, and kept A's first-tenure windows. So the same rule applies:
+          // a window stays only if it was verified under the snapshot's generation
+          // or later; one with no generation cannot be placed and does not count.
+          // Generation 0 is the exception: a machine never transferred has had one
+          // tenure, so every window on it is that tenure's.
+          const uncertainTenure = known === null && refresh.transferGeneration > 0;
+          if (
+            current &&
+            (current.organizationId !== refresh.organizationId ||
+              uncertainTenure ||
+              (known !== null && refresh.transferGeneration > known))
+          ) {
+            patch = {
+              ...patch,
+              insuranceCover: afterTransfer(
+                parseCover(current.insuranceCover),
+                undefined,
+                refresh.transferGeneration,
+              ),
+              retainedCoverages: [],
+            };
+          }
         }
 
         // The row's organization: the one an ASSET_CREATED or a transfer
@@ -520,9 +860,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           if (previousOwner && previousOwner !== refresh.organizationId) {
             await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
             await this.revokeWindowsOnTransfer(tx, envelope, assetId, previousOwner, now);
+            parkedMadeDue = await this.repository.markParkedInsuranceDue(tx, assetId);
           }
-          await this.settleStaleFence(tx, assetId, refresh.organizationId);
+          await this.settleStaleFence(tx, assetId, refresh.organizationId, delivery);
         } else if (envelope.eventName === CONSUMED_EVENTS.ASSET_TRANSFERRED) {
+          // The machine's parked insurance events may be about this owner: made
+          // due, never decided here. Deciding them asks asset-service once each,
+          // which a Kafka handler must not wait on (#240 r10).
+          parkedMadeDue = await this.repository.markParkedInsuranceDue(tx, assetId);
           await this.endAssignmentsOnTransfer(tx, envelope, assetId, now, occurredAt);
           await this.revokeWindowsOnTransfer(
             tx,
@@ -541,8 +886,501 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
           }
         }
       },
-      replayed ? { timeoutMs: REFRESH_TRANSACTION_TIMEOUT_MS } : undefined,
+      // Every one waits at most the configured time to start (#240 r12); the
+      // ordinary ones keep Prisma's 5 s timeout. An ASSET_CREATED may be
+      // reconciled under the lock like a replay (r13), so it gets a replay's.
+      replayed ||
+        envelope.eventName === CONSUMED_EVENTS.INSURANCE_RECORDED ||
+        envelope.eventName === CONSUMED_EVENTS.ASSET_CREATED
+        ? { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs }
+        : { maxWaitMs: this.transactionMaxWaitMs },
     );
+
+    // Committed: the sweep, outside this handler, decides what the transfer made
+    // due — now rather than at its next tick. Not awaited.
+    if (parkedMadeDue > 0) this.requestSweep();
+  }
+
+  /**
+   * One run of the parked-insurance sweep (#240 r8, r10): a bounded batch of
+   * events a transfer made due, then of those parked, and last tried, at least
+   * the configured age ago, oldest first. Each is re-verified at the source; one
+   * still unverified after the maximum attempts is dead-lettered as
+   * `PARKED_VERIFICATION_EXHAUSTED`. Exposed so a test can run it without the
+   * timer.
+   */
+  async sweepParked(): Promise<Record<ParkedOutcome, number>> {
+    const counts: Record<ParkedOutcome, number> = {
+      GONE: 0,
+      NOT_DUE: 0,
+      APPLIED: 0,
+      DROPPED: 0,
+      KEPT: 0,
+      DEAD_LETTERED: 0,
+    };
+    const due = await this.repository.listDueParkedInsurance(
+      this.parking.minAgeSeconds,
+      this.parking.batchSize,
+    );
+    for (const row of due) {
+      try {
+        counts[await this.reverifyParked(row.eventId, row.assetId)] += 1;
+      } catch (error) {
+        this.logger.warn(
+          `Parked INSURANCE_RECORDED ${row.eventId} of ${row.assetId} not decided by the sweep; ` +
+            `tried again on a later run (${describe(error)})`,
+        );
+      }
+    }
+    return counts;
+  }
+
+  /**
+   * A sweep run now, not awaited: a transfer made parked events due. Only where
+   * the timer runs (a started consumer); elsewhere — a test driving `handle` —
+   * the caller runs {@link sweepParked} itself.
+   */
+  private requestSweep(): void {
+    if (!this.sweepTimer) return;
+    void this.runSweep();
+  }
+
+  /**
+   * The timer's run, and a requested one: never two at once on one instance —
+   * one asked for meanwhile runs right after — and never a thrown error.
+   */
+  private async runSweep(): Promise<void> {
+    if (this.sweeping) {
+      this.sweepAgain = true;
+      return;
+    }
+    this.sweeping = true;
+    try {
+      do {
+        this.sweepAgain = false;
+        const counts = await this.sweepParked();
+        if (counts.APPLIED + counts.DROPPED + counts.DEAD_LETTERED > 0) {
+          this.logger.log(
+            `Parked insurance sweep: ${counts.APPLIED} applied, ${counts.DROPPED} dropped, ` +
+              `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered`,
+          );
+        }
+      } while (this.sweepAgain);
+    } catch (error) {
+      this.logger.warn(
+        `Parked insurance sweep failed; tried again on its next run (${describe(error)})`,
+      );
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
+  /**
+   * Parks an `INSURANCE_RECORDED` in the delivery's transaction, after its
+   * marker (#240 r8). Stored under the envelope's tenant, with where it came
+   * from so a dead letter of it is one the replay tool accepts.
+   */
+  private async park(
+    tx: ExtendedPrismaClient,
+    envelope: EventEnvelope,
+    delivery: EventDelivery | undefined,
+    assetId: string,
+    organizationId: string,
+    reason: ParkReason,
+  ): Promise<void> {
+    await this.repository.parkInsuranceEvent(tx, {
+      eventId: envelope.eventId,
+      assetId,
+      organizationId,
+      correlationId: envelope.correlationId,
+      envelope,
+      messageKey: delivery?.key ?? null,
+      sourceTopic: delivery?.topic ?? INSURANCE_TOPIC,
+      sourcePartition: delivery?.partition ?? null,
+      sourceOffset: delivery?.offset ?? null,
+      reason,
+    });
+    this.logger.log(
+      `INSURANCE_RECORDED ${envelope.eventId} parked (${reason}): asset-service answers for a later ` +
+        `owner of ${assetId} than the replica has seen; made due when the transfer is consumed`,
+    );
+  }
+
+  /**
+   * Decides one parked event (#240 r8–r10). The same verification and the same
+   * generation fence as a live delivery ({@link decideInsurance}): applied with
+   * the source's window, or removed when the source says the policy does not
+   * count or its answer is older than the replica, or kept with one more attempt
+   * counted. Nothing is ever applied unverified.
+   *
+   * Three steps, and asset-service is asked in none of the transactions (r9): a
+   * transaction that waited on the source could expire before it recorded the
+   * attempt, and the attempts would then never advance. So the row and the
+   * replica — its insurance revision included — are read under the machine's
+   * lock; the source is asked with no transaction open (a source with no answer
+   * counts as an attempt); and the decision is taken in a second short
+   * transaction that re-checks, under the lock, that nobody tried the row
+   * meanwhile and that the replica's insurance revision, epoch (r11), owner and
+   * generation are still those the source was asked about (r10).
+   *
+   * A row whose attempts reached the maximum is dead-lettered in that decision's
+   * transaction: the dead letter is enqueued in the outbox, and the row and the
+   * event's marker are deleted (r9, ADR-021). The relay publishes it once that
+   * commits — so a replay of it is applied — and never if it rolls back, when the
+   * row and the marker stay.
+   */
+  private async reverifyParked(eventId: string, assetId: string): Promise<ParkedOutcome> {
+    const read = await this.repository.transaction(
+      async (tx: ExtendedPrismaClient): Promise<ParkedRead | ParkedOutcome> => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row) return 'GONE';
+        if (!row.due) return 'NOT_DUE';
+        const parsed = CONSUMED_PAYLOADS[CONSUMED_EVENTS.INSURANCE_RECORDED].schema.safeParse(
+          (row.envelope as EventEnvelope).payload,
+        );
+        if (!parsed.success) {
+          // Validated before it was parked; a row that no longer parses names
+          // nothing the source can be asked about.
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          this.logger.warn(
+            `Parked INSURANCE_RECORDED ${eventId} removed: its payload no longer parses`,
+          );
+          return 'DROPPED';
+        }
+        const current = await this.repository.findAssetRefUnscoped(assetId, tx);
+        return { row, payload: parsed.data as Record<string, unknown>, current };
+      },
+      { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
+    );
+    if (typeof read === 'string') return read;
+
+    // No transaction is open while the source is asked.
+    const question = insuranceQuestion(read.payload, read.current, read.row.organizationId);
+    let answer: PolicyVerdict | 'NO_ANSWER' | undefined;
+    if (question.kind === 'ASK') {
+      try {
+        answer = await this.insurancePolicies.verify(
+          question.organizationId,
+          question.assetId,
+          question.policyId,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Parked INSURANCE_RECORDED ${eventId}: no answer from asset-service (${describe(error)})`,
+        );
+        answer = 'NO_ANSWER';
+      }
+    }
+
+    let lettered: { sourceTopic: string; attempts: number; last: ParkReason } | undefined;
+    const outcome = await this.repository.transaction(
+      async (tx: ExtendedPrismaClient): Promise<ParkedOutcome> => {
+        await this.repository.lockAssetRef(tx, assetId);
+        const row = await this.repository.findParkedInsurance(
+          tx,
+          eventId,
+          this.parking.minAgeSeconds,
+        );
+        if (!row) return 'GONE';
+        // Another run (a sweep on another instance) tried it while the source
+        // was asked: its decision stands, this answer is not counted.
+        if (row.attempts !== read.row.attempts) return 'NOT_DUE';
+        const current = await this.repository.findAssetRefUnscoped(assetId, tx);
+        if (!sameInsuranceState(current, read.current)) {
+          // The replica's insurance state changed meanwhile — a transfer, a
+          // refresh, `insurance:clear-transferred`, another policy — so the answer
+          // is about a replica that no longer stands (r10). Discarded, no attempt
+          // counted: the row stays parked and due, and the next run asks again.
+          this.logger.log(
+            `Parked INSURANCE_RECORDED ${eventId}: the insurance state of ${assetId} changed while ` +
+              'the source was asked; decided again later',
+          );
+          return 'KEPT';
+        }
+
+        const now = new Date();
+        const decided: InsuranceOutcome =
+          question.kind === 'DROP'
+            ? { kind: 'DROP', reason: question.reason }
+            : answer === 'NO_ANSWER' || answer === undefined
+              ? { kind: 'PARK', reason: 'NO_ANSWER' }
+              : this.decideInsurance(
+                  PROJECTIONS[CONSUMED_EVENTS.INSURANCE_RECORDED],
+                  eventId,
+                  read.payload,
+                  answer,
+                  current,
+                  now,
+                  producerInstant(row.envelope as EventEnvelope, now),
+                  row.organizationId,
+                );
+
+        if (decided.kind === 'APPLY') {
+          await this.repository.upsertAssetRef(tx, {
+            ...decided.patch,
+            id: assetId,
+            organizationId: current?.organizationId ?? row.organizationId,
+            sourceEvent: CONSUMED_EVENTS.INSURANCE_RECORDED,
+          });
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          this.logger.log(
+            `Parked INSURANCE_RECORDED ${eventId} verified and applied to ${assetId}`,
+          );
+          return 'APPLIED';
+        }
+        if (decided.kind === 'DROP') {
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          this.logger.log(
+            `Parked INSURANCE_RECORDED ${eventId} removed, nothing applied (${decided.reason})`,
+          );
+          return 'DROPPED';
+        }
+
+        const attempts = await this.repository.recordParkedAttempt(tx, eventId, decided.reason);
+        if (attempts >= this.parking.maxAttempts) {
+          // One transaction: the dead letter is published exactly when the row
+          // and the marker are gone (r9).
+          await this.repository.enqueueDeadLetter(
+            tx,
+            this.parkedDeadLetter(row, attempts, decided.reason),
+          );
+          await this.repository.deleteParkedInsurance(tx, eventId);
+          await this.repository.unmarkEventProcessed(tx, eventId, CONSUMER_NAME);
+          lettered = { sourceTopic: row.sourceTopic, attempts, last: decided.reason };
+          return 'DEAD_LETTERED';
+        }
+        return 'KEPT';
+      },
+      { timeoutMs: this.transactionTimeoutMs, maxWaitMs: this.transactionMaxWaitMs },
+    );
+
+    if (lettered) {
+      // Counted once committed: the relay publishes what the outbox holds.
+      dlqMessagesTotal.inc({
+        service: this.dlqMetricService,
+        topic: lettered.sourceTopic,
+        reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+      });
+      this.logger.error(
+        `Parked INSURANCE_RECORDED ${eventId} of ${assetId} dead-lettered ` +
+          `(${DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED}) after ${lettered.attempts} attempts; ` +
+          `last: ${lettered.last}`,
+      );
+    }
+    return outcome;
+  }
+
+  /**
+   * A parked event's dead letter, as the producer published it: the original
+   * envelope under the key the record carried, with the platform headers and
+   * why, from where and after how many attempts (the consumer's own DLQ
+   * headers, {@link deadLetterHeaders}).
+   */
+  private parkedDeadLetter(
+    row: ParkedInsurance,
+    attempts: number,
+    lastReason: ParkReason,
+  ): DeadLetterOutboxInput {
+    const envelope = row.envelope as EventEnvelope;
+    const headers = deadLetterHeaders(envelopeHeaders(envelope), {
+      reason: DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED,
+      originalTopic: row.sourceTopic,
+      ...(row.sourcePartition === null ? {} : { originalPartition: row.sourcePartition }),
+      ...(row.sourceOffset === null ? {} : { originalOffset: row.sourceOffset }),
+      attempts,
+      // Fixed text and identifiers; the event and machine ids are the sender's,
+      // so the whole is made safe for a header (S-09).
+      detail: safeLogText(
+        `Parked verification exhausted (${DLQ_REASONS.PARKED_VERIFICATION_EXHAUSTED}): ` +
+          `INSURANCE_RECORDED ${row.eventId} for ${row.assetId} still unverified after ` +
+          `${attempts} attempts (last: ${lastReason})`,
+        HANDLER_MESSAGE_MAX,
+      ),
+      producer: this.dlqMetricService,
+      failedAt: new Date(),
+    });
+    return {
+      topic: ASSET_SYNC_DEAD_LETTER_TOPIC,
+      // The publisher's partition key (D-040), which the replay goes out under.
+      key: row.messageKey ?? envelope.streamKey ?? envelope.aggregateId,
+      envelope,
+      headers: Object.fromEntries(
+        Object.entries(headers).map(([name, value]) => [name, String(value)]),
+      ),
+      organizationId: row.organizationId,
+    };
+  }
+
+  /**
+   * What an `INSURANCE_RECORDED` does — from what asset-service confirms, never
+   * from the event alone (ADR-061 § 4, #240 r6–r8).
+   *
+   * Whatever route delivered the event (live, `.retry`, a dead-letter replay, a
+   * re-projection), it is a statement about the past: after the following list
+   * is narrowed, or from a previous tenure (A→B→A), it can name a policy that
+   * no longer counts. So the policy is asked about, and only a policy that
+   * counts for the CURRENT owner under asset-service's CURRENT rule is stored —
+   * with the window and generation the source states.
+   *
+   * **No permanent decision is made without the source.** Every event is
+   * verified, however old its generation or foreign its tenant looks from the
+   * replica: a policy the current rule counts must never be lost to a guess made
+   * from a retained list (a legacy transfer retains none). A source that says
+   * the policy does not count, or does not know it, ends the event (DROP:
+   * acknowledged, reason logged). No answer throws: on a live delivery the marker
+   * rolls back, the event is retried, and nothing is applied unverified.
+   *
+   * The source is asked as the owner the replica shows, and answers the current
+   * owner only. `NOT_CURRENT_OWNER` means the asset has moved on and this replica
+   * has not consumed the transfer yet: not a verdict on the policy. The topics
+   * carry no order between them, so retrying for a second and dead-lettering
+   * lost a valid policy (#240 r8): the event is PARKED, made due when the
+   * transfer is consumed, and verified again by the sweep.
+   *
+   * No lock is held while the source is asked, live or parked (#240 r9, r10):
+   * the replica is read first, its insurance revision with it; the source is
+   * asked with no transaction open; and the answer is decided under the lock
+   * only if that revision — moved by every change to the windows, the retained
+   * list, the lapses, the owner or the generation — and the invalidation epoch
+   * — moved by every `insurance:clear-transferred` that targets the machine, even
+   * one with nothing to empty (r11) — still stand. Otherwise the
+   * answer is discarded and the event verified again: a live delivery fails and
+   * is retried with its marker rolled back, a parked one stays parked. A live
+   * delivery's marker and effect still commit together, in its transaction.
+   *
+   * This method is the live delivery's first two steps: the replica as it
+   * stands, then the source's answer — or, for a redelivery of a handled event,
+   * nothing asked at all. No answer throws: the event is retried, nothing written.
+   * The two reads together take at most the transaction's start wait (#240 r12),
+   * so the delivery budget bounds them; slower, the attempt fails and is retried.
+   */
+  private async askAboutRecordedPolicy(
+    eventId: string,
+    payload: Record<string, unknown>,
+    assetId: string,
+    eventOrganization: string | undefined,
+    delivery: EventDelivery | undefined,
+  ): Promise<LiveAnswer> {
+    const before = await withinDeadline(
+      this.transactionMaxWaitMs,
+      `INSURANCE_RECORDED ${eventId}: reading the replica of ${assetId}`,
+      async () =>
+        (await this.repository.isEventProcessed(eventId, CONSUMER_NAME))
+          ? ('ALREADY_HANDLED' as const)
+          : { read: await this.repository.findAssetRefUnscoped(assetId) },
+    );
+    if (before === 'ALREADY_HANDLED') return before;
+    const { read } = before;
+    const question = insuranceQuestion(payload, read, eventOrganization);
+    if (question.kind === 'DROP') return { read, outcome: question };
+    const verdict = await asking(delivery, () =>
+      this.insurancePolicies.verify(question.organizationId, question.assetId, question.policyId),
+    );
+    return { read, verdict };
+  }
+
+  /**
+   * The live delivery's decision, in its transaction under the lock, on the
+   * replica as it stands there — which {@link handle} has already found to be
+   * at the insurance revision the source was asked about.
+   */
+  private decideRecordedPolicy(
+    answer: Exclude<LiveAnswer, 'ALREADY_HANDLED'>,
+    eventId: string,
+    payload: Record<string, unknown>,
+    current: CurrentAssetRef | null,
+    now: Date,
+    occurredAt: Date,
+    eventOrganization: string | undefined,
+  ): InsuranceOutcome {
+    if ('outcome' in answer) return answer.outcome;
+    return this.decideInsurance(
+      PROJECTIONS[CONSUMED_EVENTS.INSURANCE_RECORDED],
+      eventId,
+      payload,
+      answer.verdict,
+      current,
+      now,
+      occurredAt,
+      eventOrganization,
+    );
+  }
+
+  /**
+   * What asset-service's answer means for the replica as it stands, read under
+   * the machine's lock. The answer is a snapshot: a transfer can commit at the
+   * source before this transaction does. So the source's ownership generation
+   * and owner are compared with the replica's — equal, apply; the source ahead,
+   * park (the transfer event will arrive, and the policy is then verified
+   * again); the source behind, the answer is stale and the event dropped.
+   */
+  private decideInsurance(
+    projection: Projection,
+    eventId: string,
+    payload: Record<string, unknown>,
+    verdict: PolicyVerdict,
+    current: CurrentAssetRef | null,
+    now: Date,
+    occurredAt: Date,
+    eventOrganization: string | undefined,
+  ): InsuranceOutcome {
+    const policyId = str(payload.policyId);
+    if (!verdict.counts) {
+      if (verdict.reason === 'NOT_CURRENT_OWNER')
+        return { kind: 'PARK', reason: 'NOT_CURRENT_OWNER' };
+      this.logger.log(
+        `INSURANCE_RECORDED ${eventId} ignored: asset-service says policy ${policyId} ` +
+          `does not count (${verdict.reason})`,
+      );
+      return { kind: 'DROP', reason: verdict.reason };
+    }
+
+    if (current) {
+      const order = sourceOrder(verdict, current);
+      if (order === 'AHEAD') return { kind: 'PARK', reason: 'SOURCE_AHEAD' };
+      if (order === 'BEHIND') {
+        this.logger.log(
+          `INSURANCE_RECORDED ${eventId} ignored: the answer for policy ${policyId} is older ` +
+            `than the replica (ownership generation ${verdict.ownershipGeneration})`,
+        );
+        return { kind: 'DROP', reason: 'SOURCE_BEHIND' };
+      }
+    }
+
+    // An UNKNOWN generation (a row the generation migration left NULL) counts no
+    // window at dispatch (#240 r15). asset-service's answer is about this owner
+    // (compared above) and names the generation it is in, so it initialises the
+    // row — with the cleanup a refresh from an unknown generation makes (r13):
+    // only windows verified under that generation or a later one stay, nothing
+    // is retained; generation 0, a machine never transferred, keeps them all.
+    const initialised =
+      current && current.ownershipGeneration === null
+        ? initialisedTenure(current, verdict.ownershipGeneration)
+        : undefined;
+    const base = current && initialised ? { ...current, ...initialised } : current;
+
+    // The event's own coverage, window and generation are replaced by the
+    // source's. A known owner and generation stay the transfer events' to set:
+    // this only ever adds a window the source stands behind.
+    const patch = projection.patch(
+      {
+        ...payload,
+        coverage: verdict.coverage,
+        validFrom: verdict.validFrom,
+        validTo: verdict.validUntil,
+        ownershipGeneration: verdict.ownershipGeneration,
+      },
+      base,
+      now,
+      occurredAt,
+      eventOrganization,
+    );
+    return { kind: 'APPLY', patch: initialised ? { ...initialised, ...patch } : patch };
   }
 
   /**
@@ -556,10 +1394,13 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     tx: ExtendedPrismaClient,
     assetId: string,
     currentOwner: string,
+    delivery: EventDelivery | undefined,
   ): Promise<void> {
     const fence = await this.repository.findTransferFence(assetId, tx);
     if (!fence || fence.organizationId === currentOwner) return;
-    const answer = await this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId);
+    const answer = await asking(delivery, () =>
+      this.transferRecords.resolve(fence.organizationId, assetId, fence.fenceId),
+    );
     if (answer === 'RECORDED') {
       await this.repository.deleteTransferFence(tx, assetId, fence.fenceId);
     }
@@ -574,19 +1415,28 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    * not knowing the machine for the organization the event names is a
    * refusal, not a retry: the answer will not change (SOURCE_UNCONFIRMED).
    * No answer from either throws, so the event is retried and dead-lettered.
+   * The snapshot's ownership generation comes back with it (#240 r12).
    */
   private async readAuthoritativeState(
     envelope: EventEnvelope,
     assetId: string,
     organizationId: string | undefined,
-  ): Promise<{ organizationId: string; viaTransfer: boolean; patch: AssetRefPatch }> {
+    delivery: EventDelivery | undefined,
+  ): Promise<{
+    organizationId: string;
+    viaTransfer: boolean;
+    transferGeneration: number;
+    patch: AssetRefPatch;
+  }> {
     if (!organizationId) {
       throw new UnprocessableEventError(
         DLQ_REASONS.SOURCE_UNCONFIRMED,
         `${envelope.eventName} ${envelope.eventId} names no organization to ask asset-service for`,
       );
     }
-    const snapshot = await this.assetSource.snapshot(organizationId, assetId);
+    const snapshot = await asking(delivery, () =>
+      this.assetSource.snapshot(organizationId, assetId),
+    );
     if (!snapshot) {
       throw new UnprocessableEventError(
         DLQ_REASONS.SOURCE_UNCONFIRMED,
@@ -597,11 +1447,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // no longer owns the machine, which is good for the owner change alone.
     const inMaintenance =
       MAINTENANCE_EVENTS.has(envelope.eventName) && !snapshot.viaTransfer
-        ? await this.maintenanceSource.inMaintenance(snapshot.organizationId, assetId)
+        ? await asking(delivery, () =>
+            this.maintenanceSource.inMaintenance(snapshot.organizationId, assetId),
+          )
         : undefined;
     return {
       organizationId: snapshot.organizationId,
       viaTransfer: snapshot.viaTransfer,
+      transferGeneration: snapshot.transferGeneration,
       patch: {
         organizationId: snapshot.organizationId,
         name: snapshot.name,
@@ -758,6 +1611,114 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
   }
 }
 
+/** What the first step of a parked event's re-verification read under the lock (#240 r9). */
+interface ParkedRead {
+  readonly row: ParkedInsurance;
+  readonly payload: Record<string, unknown>;
+  readonly current: CurrentAssetRef | null;
+}
+
+/** Whom to ask about an `INSURANCE_RECORDED`'s policy, or why it names nothing to ask about. */
+type InsuranceQuestion =
+  | {
+      readonly kind: 'ASK';
+      readonly organizationId: string;
+      readonly assetId: string;
+      readonly policyId: string;
+    }
+  | { readonly kind: 'DROP'; readonly reason: string };
+
+/** The source is asked as the owner the replica shows, else as the event's tenant. */
+function insuranceQuestion(
+  payload: Record<string, unknown>,
+  current: CurrentAssetRef | null,
+  eventOrganization: string | undefined,
+): InsuranceQuestion {
+  const coverage = str(payload.coverage);
+  const policyId = str(payload.policyId);
+  const assetId = str(payload.assetId);
+  if (!coverage || !policyId || !assetId) return { kind: 'DROP', reason: 'INCOMPLETE' };
+  const asked = current?.organizationId ?? eventOrganization;
+  if (!asked) return { kind: 'DROP', reason: 'NO_OWNER' };
+  return { kind: 'ASK', organizationId: asked, assetId, policyId };
+}
+
+/**
+ * A live `INSURANCE_RECORDED`'s first two steps (#240 r10): the replica as read
+ * before the source was asked, with the source's verdict or the outcome decided
+ * without asking; or, for an event already handled when it was read, nothing.
+ */
+type LiveAnswer =
+  | 'ALREADY_HANDLED'
+  | { readonly read: CurrentAssetRef | null; readonly verdict: PolicyVerdict }
+  | { readonly read: CurrentAssetRef | null; readonly outcome: InsuranceOutcome };
+
+/**
+ * Whether two reads of the replica show the same insurance state: the same
+ * insurance revision (#240 r10), invalidation epoch (r11), owner and ownership
+ * generation. The revision moves with any change to the state; the epoch with
+ * every `insurance:clear-transferred` that targets the row, including one that
+ * found nothing to empty and so changed no value the revision counts. The owner
+ * and generation are compared too, so the check does not rest on the trigger
+ * alone.
+ */
+function sameInsuranceState(a: CurrentAssetRef | null, b: CurrentAssetRef | null): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.insuranceRevision === b.insuranceRevision &&
+    a.insuranceEpoch === b.insuranceEpoch &&
+    a.organizationId === b.organizationId &&
+    (a.ownershipGeneration ?? null) === (b.ownershipGeneration ?? null)
+  );
+}
+
+/**
+ * The producer's clock, for ordering. An unreadable timestamp falls back to now,
+ * which dates the event as late as possible: a failure then blocks, and a repair
+ * clears only failures that are genuinely older.
+ */
+function producerInstant(envelope: EventEnvelope, now: Date): Date {
+  const stated = new Date(envelope.occurredAt);
+  return Number.isNaN(stated.getTime()) ? now : stated;
+}
+
+/**
+ * One question to another service during a delivery, with the consumer's
+ * heartbeat before and after it (#240 r12): kafkajs does not heartbeat while a
+ * handler runs, so a delivery that asks several times keeps its member in the
+ * group by itself rather than by the startup arithmetic alone. The heartbeat
+ * neither waits nor throws. A sweep has no delivery and no heartbeat.
+ */
+async function asking<T>(delivery: EventDelivery | undefined, call: () => Promise<T>): Promise<T> {
+  delivery?.heartbeat?.();
+  try {
+    return await call();
+  } finally {
+    delivery?.heartbeat?.();
+  }
+}
+
+/**
+ * `work`, or a failure once `ms` have passed (#240 r12). Bounds reads that have
+ * no deadline of their own — a pool connection can be waited for far longer —
+ * so they fit the delivery budget; what is abandoned only reads.
+ */
+async function withinDeadline<T>(ms: number, what: string, work: () => Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms} ms`)), ms);
+  });
+  try {
+    return await Promise.race([work(), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
 /** The later of two instants, either of which may be missing. */
 function later(a: Date | null | undefined, b: Date): Date {
   return a && a > b ? a : b;
@@ -787,6 +1748,17 @@ function assertTransferEnvelope(envelope: EventEnvelope): void {
         'disagrees with the transferred asset or its new owner',
     );
   }
+}
+
+/** A non-negative integer field, or undefined. */
+function int(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** A list of non-empty strings, or undefined when the field is absent or not one. */
+function strList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((v): v is string => typeof v === 'string' && v.length > 0);
 }
 
 /** Reads a string field, tolerating the absence the loose schema allows. */
