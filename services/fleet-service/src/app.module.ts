@@ -14,7 +14,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -22,6 +25,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -60,12 +64,25 @@ import {
 } from './fleet/transfer-record';
 import { UsageFactService } from './fleet/source-fact';
 import { AssetSyncConsumer } from './consumers/asset-sync.consumer';
-import { AssetSnapshotClient, MaintenanceStateClient } from './consumers/replica-sources';
+import {
+  AssetSnapshotClient,
+  InsurancePolicyClient,
+  MaintenanceStateClient,
+} from './consumers/replica-sources';
 import { AssetWorkStateService } from './fleet/asset-work-state';
 import { assignmentsActiveTotal } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER } from './tokens';
-import { loadFleetEnv, SERVICE_NAME, type FleetEnv } from './config/env';
+import {
+  ASSET_SYNC_DEAD_LETTER_TOPIC,
+  ASSET_SYNC_GROUP,
+  ASSET_SYNC_TOPICS,
+  dispatchPolicyFromEnv,
+  loadFleetEnv,
+  parkingFromEnv,
+  SERVICE_NAME,
+  type FleetEnv,
+} from './config/env';
 
 /**
  * Topics the asset replica is built from.
@@ -86,7 +103,7 @@ const internalTokens = (env: FleetEnv): InternalTokenService =>
     env.INTERNAL_TOKEN_TTL_SECONDS,
   );
 
-const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintenance.v1'];
+const CONSUMED_TOPICS = [...ASSET_SYNC_TOPICS];
 
 @Module({
   controllers: [
@@ -135,9 +152,7 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     {
       provide: DISPATCH_POLICY,
       inject: [ENV],
-      useFactory: (env: FleetEnv): DispatchPolicy => ({
-        blockingCoverages: env.FLEET_DISPATCH_BLOCKING_COVERAGES,
-      }),
+      useFactory: (env: FleetEnv): DispatchPolicy => dispatchPolicyFromEnv(env),
     },
 
     PrismaOutboxStore,
@@ -193,9 +208,9 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
                 // One group per (service, purpose), never shared: a second
                 // consumer on the same group would steal partitions and each
                 // would see half the stream (docs/07 § 7.10).
-                groupId: 'fleet-service.asset-sync',
+                groupId: ASSET_SYNC_GROUP,
                 topics: CONSUMED_TOPICS,
-                deadLetterTopic: 'rasta.fleet.v1.dlq',
+                deadLetterTopic: ASSET_SYNC_DEAD_LETTER_TOPIC,
                 // The replica reads from the start. A fleet that only knows
                 // about machines registered after this service was first
                 // deployed is not a fleet.
@@ -224,6 +239,26 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
             tokens: internalTokens(env),
           }),
           transferRecords,
+          // ADR-061 § 4: every INSURANCE_RECORDED is verified at its source.
+          new InsurancePolicyClient({
+            from: SERVICE_NAME,
+            baseUrl: env.ASSET_SERVICE_URL,
+            timeoutMs: env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS,
+            tokens: internalTokens(env),
+          }),
+          // #240 r8: an INSURANCE_RECORDED the source answers for a later owner
+          // is parked, made due by the transfer (r10), re-verified by this sweep, and
+          // dead-lettered to rasta.fleet.v1.dlq when its attempts run out —
+          // through the outbox (r9), counted under the consumer's own label.
+          {
+            ...parkingFromEnv(env),
+            dlqMetricService: `${env.KAFKA_CLIENT_ID}-asset-sync`,
+          },
+          // Checked against ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS at startup (r9):
+          // a replay's refresh still asks under the lock (r10).
+          env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
+          // r12: every asset-sync transaction's start wait, in the same budget.
+          env.FLEET_ASSET_SYNC_TRANSACTION_MAX_WAIT_MS,
         ),
     },
 
@@ -258,6 +293,27 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: FleetEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay and the purge drain together in the destroy phase,
+      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
+      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: FleetEnv) =>
+        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV],
       useFactory: (env: FleetEnv): AuthGuardOptions => ({
@@ -288,6 +344,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly repository: FleetRepository,
     private readonly idempotency: IdempotencyStore,
@@ -308,6 +366,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -336,8 +395,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart.
-    await this.relay.stop();
+    // The relay and the purge already drained in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop
+    // and returns at once.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 }

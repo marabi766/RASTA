@@ -189,6 +189,45 @@ describe('idempotent stock commands', () => {
     });
   });
 
+  /**
+   * Every connection of `prisma`'s pool, held by an open transaction until released. Returns only
+   * once each holder is **inside** its transaction — its connection checked out and `BEGIN` run —
+   * so whatever asks for a connection afterwards finds the pool exhausted, however long the pool
+   * took to connect. A fixed sleep cannot promise that: a fresh client's first transaction took
+   * 117–207 ms to begin on an idle machine and 189–563 ms on a busy one, and a claim that got the
+   * connection first ran its work.
+   */
+  async function occupyPool(
+    prisma: PrismaService,
+    connections: number,
+  ): Promise<() => Promise<void>> {
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let started = 0;
+    let allStarted: () => void = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      allStarted = resolve;
+    });
+    const holders = Array.from({ length: connections }, () =>
+      prisma.transaction(
+        async () => {
+          started += 1;
+          if (started === connections) allStarted();
+          await gate;
+        },
+        { timeoutMs: 30_000, maxWaitMs: 10_000 },
+      ),
+    );
+    // A holder that cannot start fails the test here rather than leaving it waiting.
+    await Promise.race([ready, Promise.all(holders)]);
+    return async () => {
+      open();
+      await Promise.all(holders);
+    };
+  }
+
   it('answers a claim that cannot get a connection (the pool exhausted) 409 CONFLICT with Retry-After, never a 500', async () => {
     const a = org();
     // One connection, held by another transaction for longer than the claim's whole budget.
@@ -200,13 +239,8 @@ describe('idempotent stock commands', () => {
       { INVENTORY_IDEMPOTENCY_TTL_HOURS: 24, INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: 120 },
       () => undefined,
     );
-    let release: () => void = () => undefined;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const holder = narrow.transaction(() => held, { timeoutMs: 30_000 });
+    const release = await occupyPool(narrow, 1);
     try {
-      await new Promise((resolve) => setTimeout(resolve, 200));
       const work = jest.fn();
       const context = createSystemContext({
         correlationId: key(),
@@ -220,8 +254,7 @@ describe('idempotent stock commands', () => {
       expect(outcome).toMatchObject({ code: 'CONFLICT', retryAfterSeconds: 1 });
       expect(work).not.toHaveBeenCalled();
     } finally {
-      release();
-      await holder;
+      await release();
       await narrow.onModuleDestroy();
     }
     expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(0);
@@ -243,34 +276,6 @@ describe('idempotent stock commands', () => {
       await quick.close();
     });
 
-    /** Every connection of the app's pool, held by an open transaction until released. */
-    async function occupyPool(prisma: PrismaService): Promise<() => Promise<void>> {
-      let open: () => void = () => undefined;
-      const gate = new Promise<void>((resolve) => {
-        open = resolve;
-      });
-      let started = 0;
-      let allStarted: () => void = () => undefined;
-      const ready = new Promise<void>((resolve) => {
-        allStarted = resolve;
-      });
-      const holders = Array.from({ length: TEST_POOL_CONNECTIONS }, () =>
-        prisma.transaction(
-          async () => {
-            started += 1;
-            if (started === TEST_POOL_CONNECTIONS) allStarted();
-            await gate;
-          },
-          { timeoutMs: 30_000, maxWaitMs: 10_000 },
-        ),
-      );
-      await ready;
-      return async () => {
-        open();
-        await Promise.all(holders);
-      };
-    }
-
     it('is answered 409 CONFLICT with Retry-After: no warehouse, no event, and the key free for the retry', async () => {
       const a = org();
       const owner = client(quick, orgAdmin(a));
@@ -282,7 +287,7 @@ describe('idempotent stock commands', () => {
         claimedBefore = await raw.idempotencyKey.count({
           where: { organizationId: a, state: 'IN_PROGRESS' },
         });
-        const release = await occupyPool(quick.prisma);
+        const release = await occupyPool(quick.prisma, TEST_POOL_CONNECTIONS);
         try {
           return await create(dto, fence);
         } finally {

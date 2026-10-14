@@ -399,4 +399,69 @@ describe('ResolutionWorker', () => {
       jest.useRealTimers();
     }
   });
+
+  describe('stopping on shutdown (OutboxShutdown)', () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('stops polling at once and abandons a batch that outlives the deadline, with a warning', async () => {
+      jest.useFakeTimers();
+      const repo = fakeRepository([]);
+      (repo.repository.claimPending as jest.Mock).mockImplementation(
+        () => new Promise(() => undefined),
+      );
+      const logger = silent();
+      const worker = new ResolutionWorker(
+        repo.repository,
+        port(async () => ({ recipients: [], truncated: false })),
+        { ...options, pollIntervalMs: 100 },
+        logger,
+      );
+      worker.start();
+      await jest.advanceTimersByTimeAsync(100);
+      expect(repo.repository.claimPending).toHaveBeenCalledTimes(1);
+
+      let returned = false;
+      const stopping = worker.stop({ deadlineAt: Date.now() + 5_000 }).then(() => {
+        returned = true;
+      });
+      await jest.advanceTimersByTimeAsync(4_999);
+      expect(returned).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await stopping;
+
+      expect(logger.lines.join('\n')).toContain('abandoned');
+      // The later hook joins the stop rather than waiting again, unbounded.
+      await expect(worker.onApplicationShutdown()).resolves.toBeUndefined();
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(repo.repository.claimPending).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for a batch that ends in time, and every caller joins the one stop', async () => {
+      jest.useFakeTimers();
+      const repo = fakeRepository([]);
+      let finish!: (rows: NotificationIntent[]) => void;
+      (repo.repository.claimPending as jest.Mock).mockImplementation(
+        () => new Promise<NotificationIntent[]>((resolve) => (finish = resolve)),
+      );
+      const logger = silent();
+      const worker = new ResolutionWorker(
+        repo.repository,
+        port(async () => ({ recipients: [], truncated: false })),
+        { ...options, pollIntervalMs: 100 },
+        logger,
+      );
+      worker.start();
+      await jest.advanceTimersByTimeAsync(100);
+
+      const first = worker.stop({ deadlineAt: Date.now() + 5_000 });
+      expect(worker.stop()).toBe(first);
+      await jest.advanceTimersByTimeAsync(1_000);
+      finish([]);
+      await first;
+
+      expect(logger.lines.join('\n')).not.toContain('abandoned');
+    });
+  });
 });

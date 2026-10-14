@@ -1,4 +1,5 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { SealingError } from './errors';
 import {
   EnvKekProvider,
   isKekId,
@@ -12,6 +13,7 @@ import {
   genesisReceipt,
   nextReceipt,
   openBid,
+  verifyReceipts,
   privateKeyFromDer,
   sealBid,
 } from './sealing';
@@ -82,7 +84,10 @@ describe('EnvKekProvider', () => {
         privateKey: privateKeyFromDer(recovered),
         binding,
         sealed,
-        receipts: { links: [{ ...link, receipt }], head: receipt },
+        receipts: verifyReceipts(binding.tenderId, {
+          links: [{ ...link, receipt }],
+          head: receipt,
+        }),
       }),
     ).toEqual({ priceMinor: '1' });
   });
@@ -193,6 +198,90 @@ describe('the KEK configuration', () => {
         expect(`${String(error)} ${JSON.stringify(error)}`).not.toContain(K1);
       }
     }
+  });
+
+  describe('the keyed request digest (a bid submission’s Idempotency-Key, construction audit F4)', () => {
+    const data = '{"body":{"content":{"priceMinor":"1250000000"}},"id":"TND_A"}';
+    const alice = { organizationId: 'ORG_A', userId: 'USR_A' };
+
+    it('is a keyed, salted digest naming its KEK, recognised for the same requester and data only', () => {
+      const provider = new EnvKekProvider(`v1:${K1}`, 'v1');
+      const digest = provider.requestDigest(alice, data);
+      expect(digest).toMatch(/^hmac-v1:v1:[0-9a-f]{64}:[0-9a-f]{64}$/);
+      // Not the unkeyed SHA-256 a reader of the database could recompute for a guessed price.
+      expect(digest).not.toContain(createHash('sha256').update(data).digest('hex'));
+      expect(provider.matchesRequestDigest(digest, alice, data)).toBe(true);
+      expect(provider.matchesRequestDigest(digest, alice, `${data} `)).toBe(false);
+      expect(provider.matchesRequestDigest(digest, alice, data.replace('125', '126'))).toBe(false);
+    });
+
+    it('never compares across claims: a fresh salt each time, and the organization and user inside the MAC (Codex r1 on #250, R1)', () => {
+      const provider = new EnvKekProvider(`v1:${K1}`, 'v1');
+      const sameOrganization = { organizationId: 'ORG_A', userId: 'USR_B' };
+      const otherOrganization = { organizationId: 'ORG_B', userId: 'USR_A' };
+      const digests = [
+        provider.requestDigest(alice, data),
+        provider.requestDigest(alice, data),
+        provider.requestDigest(sameOrganization, data),
+        provider.requestDigest(otherOrganization, data),
+      ];
+      // Neither the whole digest nor its MAC repeats, the same requester's included.
+      expect(new Set(digests).size).toBe(digests.length);
+      expect(new Set(digests.map((d) => d.split(':')[3])).size).toBe(digests.length);
+      // Each is recognised for its own requester and no other.
+      expect(provider.matchesRequestDigest(digests[0]!, alice, data)).toBe(true);
+      expect(provider.matchesRequestDigest(digests[2]!, sameOrganization, data)).toBe(true);
+      expect(provider.matchesRequestDigest(digests[0]!, sameOrganization, data)).toBe(false);
+      expect(provider.matchesRequestDigest(digests[0]!, otherOrganization, data)).toBe(false);
+      expect(provider.matchesRequestDigest(digests[3]!, alice, data)).toBe(false);
+      // The fields are length-prefixed: moving characters between them is another requester.
+      const shifted = provider.requestDigest({ organizationId: 'ORG_AU', userId: 'SR_A' }, data);
+      expect(provider.matchesRequestDigest(shifted, alice, data)).toBe(false);
+      // The salt is part of the MAC: another digest's salt does not carry this one's MAC.
+      const [version, kekId, , mac] = digests[0]!.split(':');
+      const otherSalt = digests[1]!.split(':')[2];
+      expect(
+        provider.matchesRequestDigest([version, kekId, otherSalt, mac].join(':'), alice, data),
+      ).toBe(false);
+    });
+
+    it('depends on the KEK, and is still recognised after a rotation while the old KEK is kept', () => {
+      const before = new EnvKekProvider(`v1:${K1}`, 'v1').requestDigest(alice, data);
+      expect(new EnvKekProvider(`v1:${K2}`, 'v1').matchesRequestDigest(before, alice, data)).toBe(
+        false,
+      );
+      const rotated = new EnvKekProvider(`v1:${K1},v2:${K2}`, 'v2');
+      expect(rotated.requestDigest(alice, data)).toMatch(/^hmac-v1:v2:/);
+      expect(rotated.matchesRequestDigest(before, alice, data)).toBe(true);
+      // The old KEK removed: nothing it made is recognised any more.
+      expect(new EnvKekProvider(`v2:${K2}`, 'v2').matchesRequestDigest(before, alice, data)).toBe(
+        false,
+      );
+    });
+
+    it('recognises nothing malformed, and makes nothing without a KEK', () => {
+      const provider = new EnvKekProvider(`v1:${K1}`, 'v1');
+      const digest = provider.requestDigest(alice, data);
+      const [version, kekId, salt, mac] = digest.split(':');
+      for (const stored of [
+        '',
+        createHash('sha256').update(data).digest('hex'),
+        digest.replace('hmac-v1', 'hmac-v2'),
+        `${digest}:extra`,
+        // The unsalted form of the first round of this PR.
+        [version, kekId, mac].join(':'),
+        [version, kekId, '', mac].join(':'),
+        [version, kekId, salt!.slice(0, -2), mac].join(':'),
+        [version, kekId, salt!.toUpperCase(), mac].join(':'),
+        digest.slice(0, -2),
+        digest.replace(/.$/, (last) => (last === '0' ? '1' : '0')),
+      ]) {
+        expect(provider.matchesRequestDigest(stored, alice, data)).toBe(false);
+      }
+      const unset = new EnvKekProvider(undefined, undefined);
+      expect(() => unset.requestDigest(alice, data)).toThrow(SealingError);
+      expect(unset.matchesRequestDigest(digest, alice, data)).toBe(false);
+    });
   });
 
   it('recognises well-formed ids only', () => {

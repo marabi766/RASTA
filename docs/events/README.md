@@ -100,35 +100,58 @@ Projection به Keycloak روی آن عمل نمی‌کند — تغییر سا�
 
 ## Asset — `rasta.asset.v1`
 
-| رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                     |
-| ------------------------- | ---------------------------------- | ----------------------------------------------------------------- |
-| `ASSET_CREATED`           | fleet · analytics · audit · search | `assetId`, `organizationId`, `name`, `type`, `assetTag`, `status` |
-| `ASSET_ACTIVATED`         | fleet · analytics                  | `assetId`, `organizationId`, `commissionedAt`                     |
-| `ASSET_UPDATED`           | fleet · search · analytics         | `assetId`, `organizationId`, `changedFields`                      |
-| `ASSET_TRANSFERRED`       | fleet · analytics · audit          | `assetId`, `fromOrganizationId`, `toOrganizationId`, `reason`     |
-| `ASSET_STATUS_CHANGED`    | fleet · construction · analytics   | `assetId`, `previousStatus`, `newStatus`, `reason`                |
-| `ASSET_DECOMMISSIONED`    | fleet · maintenance · analytics    | `assetId`, `reason`, `decommissionedAt`                           |
-| `ASSET_LOCATION_RECORDED` | fleet · construction · analytics   | `assetId`, `locationId`, `hasCoordinate`, `source`                |
-| `ASSET_DOCUMENT_ATTACHED` | document · analytics               | `assetId`, `documentId`, `kind`, `expiresAt`                      |
+| رویداد                    | مصرف‌کنندگان                       | Payload کلیدی                                                                                             |
+| ------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `ASSET_CREATED`           | fleet · analytics · audit · search | `assetId`, `organizationId`, `name`, `type`, `assetTag`, `status`                                         |
+| `ASSET_ACTIVATED`         | fleet · analytics                  | `assetId`, `organizationId`, `commissionedAt`                                                             |
+| `ASSET_UPDATED`           | fleet · search · analytics         | `assetId`, `organizationId`, `changedFields`                                                              |
+| `ASSET_TRANSFERRED`       | fleet · analytics · audit          | `assetId`, `fromOrganizationId`, `toOrganizationId`, `reason`, `ownershipGeneration`, `retainedCoverages` |
+| `ASSET_STATUS_CHANGED`    | fleet · construction · analytics   | `assetId`, `previousStatus`, `newStatus`, `reason`                                                        |
+| `ASSET_DECOMMISSIONED`    | fleet · maintenance · analytics    | `assetId`, `reason`, `decommissionedAt`                                                                   |
+| `ASSET_LOCATION_RECORDED` | fleet · construction · analytics   | `assetId`, `locationId`, `hasCoordinate`, `source`                                                        |
+| `ASSET_DOCUMENT_ATTACHED` | document · analytics               | `assetId`, `documentId`, `kind`, `expiresAt`                                                              |
 
 `ASSET_UPDATED` حمل نام فیلدهای تغییریافته است، نه مقدار پیشین آن‌ها: یک تغییر نام
 نباید مقدار قدیمی را روی Topic‌ای بگذارد که همه سرویس‌ها می‌خوانند و نگه می‌دارند.
 
 ## Insurance — `rasta.insurance.v1`
 
-| رویداد                | مصرف‌کنندگان                         | Payload کلیدی                                                            |
-| --------------------- | ------------------------------------ | ------------------------------------------------------------------------ |
-| `INSURANCE_RECORDED`  | **fleet** · notification · analytics | `assetId`, `policyId`, `insurerName`, `coverage`, `validFrom`, `validTo` |
-| `INSURANCE_EXPIRING`  | **notification** · analytics         | `assetId`, `policyId`, `insurerName`, `daysRemaining`                    |
-| `INSURANCE_EXPIRED`   | fleet · notification · analytics     | `assetId`, `policyId`, `coverage`, `validTo`                             |
-| `INSPECTION_RECORDED` | analytics                            | `assetId`, `inspectionId`, `certificateNo`, `result`                     |
-| `INSPECTION_EXPIRING` | notification                         | `assetId`, `inspectionId`, `daysRemaining`                               |
-| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics  | `assetId`, `inspectionId`, `notes`                                       |
+| رویداد                | مصرف‌کنندگان                         | Payload کلیدی                                                                                   |
+| --------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `INSURANCE_RECORDED`  | **fleet** · notification · analytics | `assetId`, `policyId`, `insurerName`, `coverage`, `validFrom`, `validTo`, `ownershipGeneration` |
+| `INSURANCE_EXPIRING`  | **notification** · analytics         | `assetId`, `policyId`, `insurerName`, `daysRemaining`                                           |
+| `INSURANCE_EXPIRED`   | fleet · notification · analytics     | `assetId`, `policyId`, `coverage`, `validTo`                                                    |
+| `INSPECTION_RECORDED` | analytics                            | `assetId`, `inspectionId`, `certificateNo`, `result`                                            |
+| `INSPECTION_EXPIRING` | notification                         | `assetId`, `inspectionId`, `daysRemaining`                                                      |
+| `INSPECTION_FAILED`   | **fleet** · maintenance · analytics  | `assetId`, `inspectionId`, `notes`                                                              |
 
 `INSPECTION_FAILED` رویدادی ایمنی است، نه اداری: `fleet` باید بلافاصله دستگاه را از
 فهرست قابل اعزام بردارد، و نباید مجبور باشد برای فهمیدن این موضوع فیلد `result` یک
 رویداد عمومی «ثبت شد» را بازرسی کند. `daysRemaining` در رویدادهای انقضا حمل می‌شود تا
 `notification` بتواند بدون محاسبه دوباره تاریخ، یادآور ۳۰ روزه را از ۳ روزه تشخیص دهد.
+
+**فیلدهای افزایشیِ مالکیت (#240 دور ۲، Q-66 و Q-101).** `ASSET_TRANSFERRED.ownershipGeneration`
+نسلِ مالکیتِ دارایی پس از انتقال است و `ASSET_TRANSFERRED.retainedCoverages` پوشش‌هایی که طبق
+پیکربندیِ `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` در لحظهٔ انتقال همراه خودرو می‌روند
+(asset-service آن‌ها را محاسبه می‌کند). `INSURANCE_RECORDED.ownershipGeneration` نسلِ دارایی در لحظهٔ
+انتشار است. هر سه **فیلد اختیاریِ افزوده** هستند، پس طبق `docs/07` § ۷٫۸ همان `eventVersion` ۱ می‌ماند
+(تغییر شکننده نیست؛ Consumer قدیمی آن‌ها را نادیده می‌گیرد). `fleet` در Projectionِ انتقال فقط پنجره‌های
+پوشش‌های `retainedCoverages` را نگه می‌دارد و بقیه را حذف می‌کند؛ نبودِ فیلد (رویداد قدیمی) یعنی **همهٔ**
+پنجره‌ها حذف شوند (بسته‌ماندن در خطا؛ فرمان `insurance:reproject` پنجره‌های معتبر را برمی‌گرداند).
+`INSURANCE_RECORDED`ای که نسلش از نسلِ ثبت‌شدهٔ Replica کمتر است (یا نسل ندارد) نادیده گرفته می‌شود، مگر
+پوشش آن در `retainedCoverages`ِ آخرین انتقال باشد. **وقتی نسلِ Replica نامعلوم است** (انتقالِ بدون `ownershipGeneration`، یا ردیفی که
+Migration ستون را تازه ساخته یا پس از بازگشتِ Migration دوباره ساخته) چیزی برای مقایسهٔ نسل نیست؛ پس سازمانِ پوششِ رویداد با **مالک جاریِ**
+Replica مقایسه می‌شود: `INSURANCE_RECORDED` از سازمانی جز مالک جاری نادیده گرفته می‌شود (بسته‌ماندن در خطا) و رویداد مالک جاری — از جمله
+بازتابِ `insurance:reproject` — اعمال می‌شود و پوشش را برمی‌گرداند. پوششی که همراه خودرو می‌رود از این بررسی معاف است.
+
+**ترتیبِ دو Topic (#240 دور ۸).** `rasta.insurance.v1` و `rasta.asset.v1` هیچ ترتیبی با هم ندارند، پس `INSURANCE_RECORDED`ِ مالک
+جدید می‌تواند پیش از `ASSET_TRANSFERRED` به fleet برسد؛ asset-service (که فقط به مالک فعلی پاسخ می‌دهد) آن‌گاه `NOT_CURRENT_OWNER` یا نسلی
+جلوتر از Replica می‌گوید. چنین رویدادی دیگر تلاش دوباره و DLQ نمی‌شود: در `insurance_pending_verification` **پارک** و تحویلش پردازش‌شده علامت
+می‌خورد؛ انتقال در تراکنش خودش آن را «سررسیده» علامت می‌زند (دور ۱۰) و جاروی دوره‌ای — بیرون از Handler کافکا — دوباره از منبع می‌پرسد و
+اعمال یا حذف می‌کند، و پس از آخرین تلاش با
+`PARKED_VERIFICATION_EXHAUSTED` به `rasta.fleet.v1.dlq` می‌فرستد — از راه Outbox خودِ fleet، در همان تراکنشی که ردیف پارک و علامت
+پردازش را حذف می‌کند (دور ۹). هیچ‌گاه بی‌تأیید اعمال نمی‌شود
+([insurance-reprojection](../runbooks/insurance-reprojection.md)).
 
 **`fleet` اکنون `INSURANCE_RECORDED` را هم مصرف می‌کند (L3-02).** ممنوعیت اعزام
 Causeهای مستقل دارد و هیچ‌کدام دیگری را پاک یا بازنویسی نمی‌کند. `INSPECTION_FAILED`
@@ -510,20 +533,20 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 > `construction-service.supplier-standing`، صف مرده `rasta.construction.v1.dlq`) و از `rasta.organization.v1` فقط
 > `ORGANIZATION_MOVED` را. پیاده‌سازی مدل خواندنی: جابه‌جاپذیر و تکرارپذیر؛ سازمانِ ناشناخته واجد شرایط نیست.
 
-| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                                                                            |
-| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt`                                                                                 |
-| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `authorityOrganizationId`, `authorityRole`, `policyId`, `policyVersion`, `requestedAt` |
-| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`, `hasConditions`                                              |
-| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`                                                               |
-| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                                                                                                             |
-| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                                                                                                               |
-| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                                                                                                       |
-| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                                                                                                          |
-| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                                                                                                        |
-| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `organizationId`, `contractId` (تا CON-003 همیشه `null`), `startedBy`, `startedAt`                                                                          |
-| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `submittedBy`, `submittedAt` — **بدون `assetsUsed`** (پایین‌تر)                             |
-| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                              |
+| رویداد                     | مصرف‌کنندگان                                            | Payload کلیدی                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PROJECT_CREATED`          | analytics · audit                                       | `projectId`, `organizationId`, `estimatedCostMinor`, `hasArea`, `createdBy`, `createdAt`                                                                                                                                                               |
+| `APPROVAL_REQUESTED`       | **notification (مرجع تأیید)** · audit                   | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `authorityOrganizationId`, `authorityRole`, `policyId`, `policyVersion`, `requestedAt`                                                                               |
+| `APPROVAL_GRANTED`         | notification · audit · analytics                        | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`, `hasConditions`                                                                                                                            |
+| `APPROVAL_REJECTED`        | notification · audit                                    | `approvalId`, `projectId`, `organizationId`, `workflowKey`, `round`, `stepOrder`, `decidedBy`, `decidedAt`                                                                                                                                             |
+| `TENDER_CREATED`           | audit                                                   | `tenderId`, `projectId`, `procurementNature`                                                                                                                                                                                                           |
+| `TENDER_PUBLISHED`         | **notification (پیمانکاران)** · search · analytics      | `tenderId`, `bidOpeningAt`, `bidClosingAt`                                                                                                                                                                                                             |
+| `BID_SUBMITTED`            | notification · **audit (مهر زمانی)**                    | `bidId`, `tenderId`, `contractorId`, `submittedAt`                                                                                                                                                                                                     |
+| `BIDS_EVALUATED`           | audit · analytics                                       | `tenderId`, `matrix`, `ranking`                                                                                                                                                                                                                        |
+| `TENDER_AWARDED`           | **contract (ایجاد پیش‌نویس)** · notification · supplier | `tenderId`, `winnerId`, `amount`, `justification`                                                                                                                                                                                                      |
+| `PROJECT_STARTED`          | fleet · analytics                                       | `projectId`, `organizationId`, `contractId` (تا CON-003 همیشه `null`), `startedBy`, `startedAt`                                                                                                                                                        |
+| `PROJECT_PROGRESS_UPDATED` | contract · notification · analytics                     | `projectId`, `reportId`, `organizationId`, `progressBasisPoints` (۰..۱۰۰۰۰), `submittedBy`, `submittedAt`, `supersededCompletionRound` (دور موافقت تکمیلی که این گزارش باطلش کرد یا `null`؛ ممیزی construction، F7) — **بدون `assetsUsed`** (پایین‌تر) |
+| `PROJECT_COMPLETED`        | contract · supplier (امتیاز) · analytics                | `projectId`, `organizationId`, `completedBy`, `completedAt`                                                                                                                                                                                            |
 
 **رویدادهای مناقصه — CON-002 (طرح، 2026-09-30؛ هنوز تولید نمی‌شوند).** ردیف‌های `TENDER_*`/`BID_*`/`BIDS_EVALUATED` جدول
 بالا **طرح**‌اند و با این جدول (ADR-065/066/067) جایگزین می‌شوند: `aggregateType = Tender`، **کلید پارتیشن `tenderId`**
@@ -588,9 +611,11 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
   حداکثر ۱۰۰ و `organizationCount`). بازگشایی پس گرفته نمی‌شود.
 - `BID_OPENING_PROPOSAL_WITHDRAWN` — **افزودهٔ CON-002 برای S-06؛ در انتظار پذیرش.** پیشنهادِ بازگشایی را پیشنهاددهنده پس گرفت یا تأییدی که او را
   عضو پیشنهاددهنده یافت پاکش کرد: `tenderId`، `organizationId`، `proposedBy`، `withdrawnBy`، `reason`
-  (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED | PROPOSER_IDENTITY_UNKNOWN`)، `withdrawnAt`. `PROPOSER_IDENTITY_UNKNOWN` (#188):
+  (`WITHDRAWN_BY_PROPOSER | PROPOSER_CONFLICTED | PROPOSER_NOT_AUTHORIZED | PROPOSER_IDENTITY_UNKNOWN`)، `withdrawnAt`. `PROPOSER_IDENTITY_UNKNOWN` (#188):
   تأییدِ شخص دوم پیشنهادی را یافت که هویت پایدار پیشنهاددهنده‌اش ثبت نشده (یا با صادرکنندهٔ دیگری)، پس آن را پاک کرد و خودش با
-  `422 ACTOR_IDENTITY_UNKNOWN` رد شد — مقدار افزوده به Enum؛ شکل Payload همان است.
+  `422 ACTOR_IDENTITY_UNKNOWN` رد شد — مقدار افزوده به Enum؛ شکل Payload همان است. `PROPOSER_NOT_AUTHORIZED` (ممیزی construction، F6):
+  تأیید، پیشنهاددهنده را با identity-service **اکنون** همان‌طور سنجید که تأییدکننده را — عضویت زنده در سازمان مالک، نقشی که پیشنهادها را باز
+  می‌کند و هیچ نقش ممنوعی (`SYSTEM_ADMIN`، `AUDITOR`، `CONTRACTOR`) — و نیافت، پس پیشنهاد را پاک کرد و خودش با `403` رد شد؛ مقدار افزوده به Enum.
 
 **پیاده‌شده در CON-002 PR 9 (ارزیابی؛ ADR-067).** پنج رویداد (`aggregateType = Tender`، کلید `tenderId`؛ فقط شناسه، کد بسته، شمار و Digest، `.strict()`؛ بی `projectId` جز `BIDS_EVALUATED`):
 

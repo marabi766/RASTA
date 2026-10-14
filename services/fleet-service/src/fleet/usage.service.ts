@@ -94,8 +94,8 @@ export class UsageService {
       }
     }
 
-    const asset = await this.repository.findAssetRef(dto.assetId);
-    if (!asset || asset.organizationId !== organizationId) {
+    const asset = await this.repository.findAssetRef(organizationId, dto.assetId);
+    if (!asset) {
       // Absent, not forbidden — the same non-disclosure rule the rest of the
       // platform follows for a resource in another tenant.
       throw RastaError.notFound('Asset', dto.assetId);
@@ -128,8 +128,8 @@ export class UsageService {
         // Ownership again, now under the lock. The check above ran before it,
         // and a transfer consumed in between would otherwise let this
         // organization record usage against a machine it no longer holds.
-        const locked = await this.repository.findAssetRef(dto.assetId, tx);
-        if (!locked || locked.organizationId !== organizationId) {
+        const locked = await this.repository.findAssetRef(organizationId, dto.assetId, tx);
+        if (!locked) {
           throw RastaError.notFound('Asset', dto.assetId);
         }
 

@@ -1,0 +1,4 @@
+# False positive in #245 (PM-verified): sessionStorage key name in a test, not a secret.
+41d8ae23979eba6f82104ed45d323d07c58fd5d0:apps/web/src/app/marketplace/[productId]/place-order-recovery.spec.tsx:generic-api-key:62
+# #241: fake canary password in a tests/e2e URL-userinfo test, not a secret (PM-verified). The final tree no longer flags.
+487919cecfe0ebaaaa058592632d5bec69011756:tests/e2e/src/target-guard.test.ts:generic-api-key:158

@@ -1404,6 +1404,77 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هر Migration بازنویسی (D-048، گام ۲) همهٔ ردیف‌های منتشرشده را حساب می‌کند.
 - **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
   صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
+- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization.** زمان‌بند مشترک
+  `OutboxPurgeScheduler` و دستور `purgePublishedSql` در `@rasta/nest-common`، env در `outboxPurgeEnvSchema`
+  (`@rasta/config`):
+  - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
+  - `OUTBOX_PURGE_RETENTION_HOURS` پیش‌فرض ۱۶۸ است: همان هفت روز ADR-050، و برابر نگه‌داری هفت‌روزهٔ Topicهای دامنه در Kafka.
+  - تنظیم‌های دیگر: `_INTERVAL_SECONDS`، `_BATCH_SIZE`، `_MAX_BATCHES_PER_RUN`، `_STATEMENT_TIMEOUT_MS`،
+    `_MAX_WAIT_MS`.
+  - هر مقدار کران دارد و مقدار نامعتبر سرویس را در شروع متوقف می‌کند. `turbo.json` همهٔ `OUTBOX_PURGE_*` را به `dev`،
+    `test` و `test:integration` می‌دهد؛ وگرنه `OUTBOX_PURGE_ENABLED=false pnpm dev` بی‌صدا نادیده گرفته می‌شد
+    (`scripts/outbox-purge-turbo-env.test.mjs`).
+  - **کران خاموش‌شدن:** هر Batch دو کران جدا دارد: انتظار برای Connection (`_MAX_WAIT_MS`، همان `maxWait` پریزما) و
+    تراکنش (`statement_timeout` به‌اضافهٔ ۵ ثانیه حاشیه). `stop()` Batch تازه‌ای شروع نمی‌کند و برای Batch جاری حداکثر
+    همین مجموع صبر می‌کند؛ پس از آن Batch را با هشدار رها می‌کند.
+  - **یک مهلت برای کل مسیر خاموش‌شدن (Codex r2 روی #247):** پیش‌تر Purge در `onModuleDestroy` تخلیه می‌شد و Grace
+    رله (`OUTBOX_SHUTDOWN_GRACE_SECONDS`) تازه در `onApplicationShutdown` شروع می‌شد؛ دو کرانی که هر کدام جدا زیر
+    `SHUTDOWN_TIMEOUT_MS` بودند پشت سر هم از آن می‌گذشتند (مثلاً ۱۰ + ۲۰ > ۲۵ ثانیه). حالا `OutboxShutdown`
+    (`@rasta/nest-common`) در `onModuleDestroy` هر دو را **هم‌زمان** تخلیه می‌کند، با **یک** مهلت مشترک:
+    `outboxShutdownBudgetMs` = `SHUTDOWN_TIMEOUT_MS` منهای `OUTBOX_SHUTDOWN_RESERVE_MS` (۲ ثانیه برای بقیهٔ بستن: بستن
+    HTTP و `onApplicationShutdown`). هر کدام تا زودترینِ کران خودش و این مهلت صبر می‌کند؛ Release رله هم. `loadEnv`
+    سرویسی را که بزرگ‌ترِ این دو کران — نه هر کدام جدا در برابر کل زمان — از این بودجه بیشتر باشد راه نمی‌اندازد.
+    پیش‌فرض‌ها: max(۲۰، ۱۲) ≤ ۲۳ ثانیه. فراخوانی دوباره `stop()` به همان یک Promise می‌پیوندد و پس از رها شدن Batch بی‌درنگ
+    برمی‌گردد (پیش‌تر یک کران کامل دیگر روی همان Batch صبر می‌کرد). آزمون: `test/outbox-shutdown.int-spec.ts` در
+    fleet، AppModule واقعی با Publish و Batch بی‌پایان، زیر مهلت واقعی فرایند.
+  - **کارگرهای پس‌زمینهٔ دیگر در همان مهلت (Codex r3 روی #247):** Scan Worker در document-service تا
+    `onApplicationShutdown` Poll می‌کرد و `stop()`ش بی‌کران منتظر اسکن جاری می‌ماند (`DOCUMENT_SCAN_TIMEOUT_MS`، پیش‌فرض ۶۰
+    ثانیه)، یعنی پس از تخلیهٔ رله و بیرون از مهلت ⇐ خروج اجباری وسط اسکن. حالا `OutboxShutdown` گزینهٔ `workers` دارد و در
+    همان `onModuleDestroy` و با همان مهلت آن‌ها را هم متوقف می‌کند: Scan Worker (document)، `DueScanner` (maintenance) و
+    زمان‌بند جاروی انقضای بیمه (asset؛ هر دو ردیف Outbox می‌نوشتند و تا پس از تخلیه Poll می‌کردند). هر کدام Poll را بی‌درنگ قطع
+    می‌کند، واحد تازه‌ای شروع نمی‌کند و برای واحد جاری تا مهلت صبر می‌کند. Scan Worker در مهلت (منهای یک ثانیه برای
+    Release) اسکن را رها می‌کند و **همهٔ** Claimهای خودش — سند در حال اسکن هم — را به صف برمی‌گرداند (`releaseAllHeld`):
+    `PENDING` و بی Lease، تلاشی شمرده نمی‌شود، Write-back دیرِ همین فرایند به چیزی نمی‌خورد؛ اگر Release نرسد، Lease
+    (`DOCUMENT_SCAN_LEASE_SECONDS`) منقضی و سند دوباره Claim‌پذیر می‌شود. دو کارگر دیگر واحدشان را در یک تراکنش Commit
+    می‌کنند و واحد رهاشده Rollback و در گذر بعدی دوباره پیدا می‌شود. آزمون: `test/outbox-shutdown.int-spec.ts` در
+    document (اسکن و Publish بی‌پایان ⇐ خروج ۰ زیر مهلت، هر دو سند به صف برگشته؛ اسکن کوتاه ⇐ حکم ثبت، از شروع بستن هیچ
+    Claim تازه‌ای نیست).
+  - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
+    شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
+
+  هر Batch یک تراکنش کوتاه است:
+  - `SET LOCAL statement_timeout`؛
+  - قفل Advisory در سطح تراکنش به‌ازای Schema، تا Replica دوم `busy` بگیرد و اجرایش را تمام کند؛
+  - `FOR UPDATE SKIP LOCKED` و `LIMIT`.
+
+  فقط ردیف منتشرشده‌ای حذف می‌شود که از Retention گذشته باشد، به ساعت پایگاه داده، با `claim_token IS NULL`. ردیفی که
+  `outbox-stuck.md` (علت C) دستی `MANUALLY SKIPPED` کرده **نگه داشته می‌شود**، چون هرگز تحویل نشده است.
+  `created_at < cutoff` راه دسترسی از ایندکس `created_at` است و Migration لازم نشد. اندازه‌گیری روی ۴۰۰٬۰۰۰ ردیف: Batch
+  هزارتایی ۱۱ ms، اجرای بی‌کار ۰٫۱ ms.
+
+  `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
+  `test/outbox-purge.int-spec.ts` در هر پنج سرویس این را نشان می‌دهد.
+
+  **B2 پیش از Purge:** B2 (`outbox-b2-backfill.md`) شماره‌گذاری را از بیشینهٔ `stream_seq` باقی‌مانده در جدول می‌گیرد،
+  نه از شمارنده. پس B2 هر سرویس را **پیش از روشن شدن Purge آن** اجرا کن. اگر Purge ردیف‌های شماره‌دار یک Stream را
+  پاک کرده باشد، `next_seq` آن Stream از بالاترین ردیف باقی‌مانده جلوتر است. B2 آن سرویس را **رد می‌کند**: کد خروج ۱،
+  پیش از هر نوشتن، Dry-Run هم. اگر Purge حین اجرا برسد، Guard هر Batch همین را می‌گیرد. B2 از شمارنده هم شماره را
+  ادامه نمی‌دهد: ردیف لنگر و `(created_at, id)` آن با Purge رفته‌اند، و Guard ترتیب دیگر چیزی برای سنجیدن ندارد.
+  همچنین Apply نهایی‌شده با `*_mismatch` غیرصفر دیگر موفق شمرده نمی‌شود (Codex r1 روی #247).
+
+  **Watermark هر Batch (Codex r2 روی #247):** این رد کردن به شمارنده تکیه دارد، و B2 شمارنده را فقط پس از آخرین Batch
+  می‌ساخت. اجرای بریده (`--batch-size 1 --max-batches 1`) شماره‌ها را بی‌شمارنده Commit می‌کرد؛ پس از انتشار و Purge آن
+  ردیف‌ها چیزی نمی‌ماند که بگوید آن شماره‌ها داده شده‌اند، و اجرای از سرگرفته همان شماره‌ها را دوباره می‌داد و Verify هم
+  پاک می‌گذشت. حالا هر Batch `next_seq` جریان‌هایش را **در همان دستور** (پس همان تراکنش) که شماره می‌دهد جلو می‌برد.
+  ردیف شمارنده همان Watermark ماندگار است: Purge فقط ردیف Outbox پاک می‌کند، نه شمارنده. همان `next_seq` است که B3 از آن
+  ادامه می‌دهد؛ پس پس از اجرای بریده B3 هم دیگر شماره‌ای را که روی ردیفی هست دوباره نمی‌دهد. **محدودیت:** اجرای بریده‌ای
+  که **پیش از** این تغییر رخ داده و ردیف‌هایش پیش از اجرای بعدی Purge شده‌اند ردی نگذاشته و تشخیص‌پذیر نیست؛ قاعدهٔ
+  «B2 پیش از Purge» برای آن همچنان لازم است.
+
+  **مانده (فازهای بعد، با مالک هر سرویس):**
+  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست؛
+  - economic، marketplace، supplier، construction، contract، notification.
+
 - **اولویت:** متوسط (پیش‌نیاز Production)
 - **ثبت‌شده:** 2026-10-13 (#242 r1)
 

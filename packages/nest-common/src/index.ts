@@ -28,6 +28,7 @@ export {
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
 } from './errors/rasta-error';
+export { safeLogText } from './errors/safe-log-text';
 
 // Decorators -----------------------------------------------------------------
 export {
@@ -133,8 +134,17 @@ export {
 export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
 
 // Event consumption ----------------------------------------------------------
-export { EventConsumer, UnprocessableEventError } from './consumer/event-consumer';
+export {
+  EventConsumer,
+  UnprocessableEventError,
+  deadLetterHeaders,
+  HANDLER_MESSAGE_MAX,
+  CONSUMER_SESSION_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BACKOFF_MS,
+} from './consumer/event-consumer';
 export type {
+  DeadLetterDescription,
   EventConsumerOptions,
   EventDelivery,
   EventHandler,
@@ -153,12 +163,14 @@ export {
 // Outbox ---------------------------------------------------------------------
 export {
   buildOutboxRow,
+  buildHeaders as envelopeHeaders,
   orderForPublish,
   OutboxRelay,
   renewalIntervalMs,
   renewalDeadlineMs,
   RENEWAL_INTERVAL_DIVISOR,
   RENEWAL_DEADLINE_CEILING_MS,
+  withinDeadline,
 } from './outbox/outbox';
 export type {
   OutboxMessageInput,
@@ -166,6 +178,7 @@ export type {
   OutboxStore,
   EventPublisher,
   OutboxRelayOptions,
+  OutboxStopOptions,
   BuildOutboxOptions,
   OutboxClaim,
   ClaimRequest,
@@ -182,6 +195,8 @@ export {
   toOutboxRow,
   allocateStreamSeqSql,
   STREAM_SEQUENCE_TABLE,
+  purgePublishedSql,
+  MANUALLY_SKIPPED_PREFIX,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,
@@ -189,7 +204,21 @@ export type {
   OutboxClaimResult,
   ClaimOptions,
   OutboxTxRunner,
+  OutboxPurgeTxRunner,
+  PurgePublishedOptions,
+  PurgePublishedBatch,
 } from './outbox/outbox-sql';
+export { OutboxPurgeScheduler, outboxPurgeSettings } from './outbox/outbox-purge';
+export type {
+  OutboxPurgeStore,
+  OutboxPurgeSettings,
+  OutboxPurgeLogger,
+  OutboxPurgeSchedulerOptions,
+  OutboxPurgeOutcome,
+  OutboxPurgeRun,
+} from './outbox/outbox-purge';
+export { OutboxShutdown } from './outbox/outbox-shutdown';
+export type { OutboxShutdownOptions, OutboxStoppable } from './outbox/outbox-shutdown';
 
 // Lifecycle ------------------------------------------------------------------
 export {

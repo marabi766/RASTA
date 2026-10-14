@@ -1,5 +1,10 @@
 import { Injectable, type OnApplicationShutdown } from '@nestjs/common';
-import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import {
+  createSystemContext,
+  runWithContext,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import type { NotificationIntent } from '../generated/prisma';
 // Type-only: built by an explicit `useFactory` in `app.module.ts`.
 import type { NotificationRepository } from '../notification/notification.repository';
@@ -68,6 +73,8 @@ export class ResolutionWorker implements OnApplicationShutdown {
   private gaugeTimer?: NodeJS.Timeout;
   private inFlight?: Promise<void>;
   private stopped = false;
+  /** The one stop in progress or done since the last `start()`; later calls join it. */
+  private stopping?: Promise<void>;
 
   constructor(
     private readonly repository: NotificationRepository,
@@ -79,6 +86,7 @@ export class ResolutionWorker implements OnApplicationShutdown {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
+    this.stopping = undefined;
     this.timer = setInterval(() => void this.tickGuarded(), this.options.pollIntervalMs);
     this.timer.unref?.();
 
@@ -92,7 +100,17 @@ export class ResolutionWorker implements OnApplicationShutdown {
     await this.stop();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stops polling at once and waits for the batch in flight — until
+   * `deadlineAt` when the shutdown passes one (`OutboxShutdown`), else
+   * for as long as it takes. One stop per `start()`: a later call joins it.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
@@ -100,7 +118,20 @@ export class ResolutionWorker implements OnApplicationShutdown {
     this.gaugeTimer = undefined;
     // A batch that is mid-flight finishes; a lease abandoned half-written
     // would only be picked up again after it expired.
-    await this.inFlight;
+    const current = this.inFlight;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
+    }
+    // Past the shutdown's deadline it is abandoned all the same — the forced
+    // exit would cut it off a moment later — and says so.
+    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'Resolution batch still running at the shutdown deadline; abandoned. Its intents ' +
+          `return to the queue when their lease (${this.options.leaseSeconds} s) expires`,
+      );
+    }
   }
 
   isRunning(): boolean {

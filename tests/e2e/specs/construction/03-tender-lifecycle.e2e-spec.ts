@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import type { APIRequestContext } from '@playwright/test';
-import { test, expect, errorCode, idempotencyKey, Actor, type ApiResponse } from '../../src/api';
+import {
+  test,
+  expect,
+  errorCode,
+  idempotencyKey,
+  Actor,
+  SessionToken,
+  until,
+  type ApiResponse,
+} from '../../src/api';
 import { ORG, e2eConfig } from '../../src/env';
 import { EconomicEventTap, type ObservedEvent } from '../../src/events';
 import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-accounts';
@@ -74,9 +82,6 @@ const BIDDING_WINDOW_MS = 60_000;
  * `BID_WINDOW_CLOSED` or an opening that is suddenly allowed.
  */
 const WINDOW_MARGIN_MS = 15_000;
-
-/** One poll per second: the gateway allows 300 calls a minute per user. */
-const POLL_INTERVAL_MS = 1_000;
 
 const OWNER_ROLE = 'ORGANIZATION_ADMIN';
 
@@ -184,28 +189,6 @@ function send(
     idempotencyKey: idempotencyKey(`tender-${RUN}`),
     ...(correlationId ? { correlationId } : {}),
   });
-}
-
-/** Polls at a rate the gateway's per-user limit tolerates; never a fixed sleep. */
-async function until<T>(
-  description: string,
-  check: () => Promise<T | undefined>,
-  timeoutMs: number,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last = '';
-  while (Date.now() < deadline) {
-    try {
-      const value = await check();
-      if (value !== undefined) return value;
-    } catch (error) {
-      last = String(error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-  }
-  throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for ${description}${last ? `; ${last}` : ''}`,
-  );
 }
 
 /**
@@ -356,7 +339,6 @@ async function assertInvisibleToStranger(
 // ---------------------------------------------------------------------------
 
 test.describe.serial('a tender, end to end (CON-002)', () => {
-  let context: APIRequestContext;
   let tap: EconomicEventTap;
 
   const org = { owner: '', c1: '', c2: '', c3: '' };
@@ -406,14 +388,12 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
   /** Correlation ids of the calls whose audit evidence is asserted at the end. */
   const evidence: { label: string; correlationId: string; events: string[] }[] = [];
 
-  test.beforeAll(async ({ playwright }) => {
-    context = await playwright.request.newContext();
+  test.beforeAll(async () => {
     tap = await EconomicEventTap.start(config, config.constructionTopic);
   });
 
   test.afterAll(async () => {
     await tap?.stop();
-    await context?.dispose();
   });
 
   test('the cast: an owner under the union, three contractors, and the people who act', async ({
@@ -510,7 +490,11 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         },
         30_000,
       );
-      signedIn[key] = new Actor(account.username, context, token, config);
+      signedIn[key] = new Actor(
+        account.username,
+        new SessionToken(token, () => freshToken(account.username)),
+        config,
+      );
     }
     people = signedIn;
   });
@@ -1194,8 +1178,8 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         `/v1/tenders/${tenderId}/bids/${bid[key]}/scores`,
         {
           scores: [
-            { criterionCode: 'technical', scoreScaled: scores[key][0] },
-            { criterionCode: 'compliance', scoreScaled: scores[key][1] },
+            { criterionCode: 'technical', scoreScaled: scores[key][0], expectedRevision: 0 },
+            { criterionCode: 'compliance', scoreScaled: scores[key][1], expectedRevision: 0 },
           ],
         },
       );

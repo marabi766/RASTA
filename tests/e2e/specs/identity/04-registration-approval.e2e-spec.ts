@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { test, expect } from '../../src/api';
+import { test, expect, Actor, SessionToken } from '../../src/api';
 import { ORG } from '../../src/env';
 import {
   enableSignIn,
@@ -79,10 +79,7 @@ test.describe.serial('Self-registration approved through the gateway (#219)', ()
     expect(account.attributes?.rasta_user_id).toEqual([userId]);
   });
 
-  test('the approved person signs in, and the gateway answers as them', async ({
-    request,
-    config,
-  }) => {
+  test('the approved person signs in, and the gateway answers as them', async ({ config }) => {
     await enableSignIn(username);
     const token = await freshToken(username);
     expect(membershipClaims(token)).toEqual({
@@ -92,12 +89,11 @@ test.describe.serial('Self-registration approved through the gateway (#219)', ()
       org_roles: [`${ORG.a}:FLEET_MANAGER`],
     });
 
-    const me = await request.fetch(`${config.gatewayUrl}/v1/users/me`, {
-      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-      failOnStatusCode: false,
-    });
-    expect(me.status()).toBe(200);
-    const body = (await me.json()) as {
+    // As an `Actor`, so the bearer token never passes through Playwright's request context.
+    const person = new Actor(username, new SessionToken(token, () => freshToken(username)), config);
+    const me = await person.get('/v1/users/me');
+    expect(me.status).toBe(200);
+    const body = me.body as {
       id: string;
       memberships: { organizationId: string; roles: string[] }[];
     };

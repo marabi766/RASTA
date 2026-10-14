@@ -15,6 +15,7 @@ import { ProjectRepository, type LockedProject } from '../project/project.reposi
 import { assertProjectTransition, type ProjectStateName } from '../project/project.state-machine';
 import { ProjectService } from '../project/project.service';
 import type { ProjectView } from '../project/dto';
+import { FULL_PROGRESS_BASIS_POINTS } from '../progress/progress.state-machine';
 import { ApprovalRepository } from './approval.repository';
 import { PolicySuspensionService } from './policy-suspension.service';
 import {
@@ -501,6 +502,24 @@ export class ApprovalService {
         occurredAt: at,
       });
     } else {
+      // The last grant completes the project only on a report that still says 100%, read under
+      // the project lock this decision holds (construction audit F7). A new report supersedes an
+      // open round (`ProgressService.submit`); this is the backstop for one that did not — a round
+      // opened before that rule — and it grants nothing: the authority may reject instead.
+      const latest = await this.approvals.latestSubmittedProgress(tx, {
+        organizationId: approval.organizationId,
+        projectId: approval.projectId,
+      });
+      if (latest === null || latest < FULL_PROGRESS_BASIS_POINTS) {
+        throw RastaError.businessRule(
+          'The project no longer reports 100% progress; its completion cannot be granted',
+          {
+            approvalId: approval.id,
+            projectId: approval.projectId,
+            latestProgressBasisPoints: latest,
+          },
+        );
+      }
       await this.moveProject(tx, { approval, locked, to: 'COMPLETED', reason: null, actor, at });
       await this.events.enqueue(tx, {
         eventName: 'PROJECT_COMPLETED',

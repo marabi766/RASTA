@@ -57,6 +57,7 @@ test.describe.serial('the marketplace critical path', () => {
     const sku = `E2E-SKU-${Date.now()}`;
 
     const product = await tenantB.post('/v1/products', {
+      idempotencyKey: idempotencyKey('e2e-catalogue'),
       body: {
         sku,
         name: 'فیلتر روغن بیل مکانیکی',
@@ -69,6 +70,7 @@ test.describe.serial('the marketplace critical path', () => {
     productId = (product.body as { id: string }).id;
 
     const offer = await tenantB.post('/v1/offers', {
+      idempotencyKey: idempotencyKey('e2e-catalogue'),
       body: {
         productId,
         unitPriceMinor: '450000',
