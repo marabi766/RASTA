@@ -98,6 +98,140 @@ describe('EventConsumer delivery metadata', () => {
     expect(seen[0]).toEqual({ topic: 'rasta.asset.v1', partition: 2 });
   });
 
+  it('adds the record key and offset when the broker reports them (#240 r8)', async () => {
+    const seen: EventDelivery[] = [];
+    const consumer = new EventConsumer(
+      options,
+      async (_envelope, delivery) => {
+        seen.push(delivery);
+      },
+      silentLogger,
+    );
+    const handle = consumer as unknown as {
+      handleMessage(
+        topic: string,
+        partition: number,
+        value: Buffer | null,
+        headers: undefined,
+        offset?: string,
+        key?: Buffer | null,
+      ): Promise<void>;
+    };
+
+    await handle.handleMessage(
+      'rasta.asset.v1',
+      1,
+      envelopeBytes(),
+      undefined,
+      '17',
+      Buffer.from('AST_SPEC_1'),
+    );
+    await handle.handleMessage('rasta.asset.v1', 1, envelopeBytes(), undefined, '18', null);
+
+    expect(seen).toEqual([
+      { topic: 'rasta.asset.v1', partition: 1, key: 'AST_SPEC_1', offset: '17' },
+      { topic: 'rasta.asset.v1', partition: 1, key: null, offset: '18' },
+    ]);
+  });
+
+  describe('the heartbeat (#240 r12)', () => {
+    type WithHeartbeat = {
+      handleMessage(
+        topic: string,
+        partition: number,
+        value: Buffer | null,
+        headers: undefined,
+        offset?: string,
+        key?: Buffer | null,
+        heartbeat?: () => Promise<void>,
+      ): Promise<void>;
+    };
+
+    it('hands the handler a heartbeat that starts kafkajs’s and returns at once', async () => {
+      let release!: () => void;
+      const kafkajs = jest.fn(() => new Promise<void>((resolve) => (release = resolve)));
+      const consumer = new EventConsumer(
+        { ...options, maxRetries: 1 },
+        async (_envelope, delivery) => {
+          // Not awaited by the handler: it returns while kafkajs's is in flight.
+          delivery.heartbeat?.();
+          delivery.heartbeat?.();
+        },
+        silentLogger,
+      );
+
+      await (consumer as unknown as WithHeartbeat).handleMessage(
+        'rasta.asset.v1',
+        0,
+        envelopeBytes(),
+        undefined,
+        '1',
+        null,
+        kafkajs,
+      );
+
+      expect(kafkajs).toHaveBeenCalledTimes(2);
+      release();
+    });
+
+    it('beats before and after each pause between attempts', async () => {
+      const calls: string[] = [];
+      const consumer = new EventConsumer(
+        { ...options, maxRetries: 3, retryBackoffMs: 1 },
+        async () => {
+          calls.push('attempt');
+          throw new Error('database blip');
+        },
+        silentLogger,
+      );
+
+      await (consumer as unknown as WithHeartbeat).handleMessage(
+        'rasta.asset.v1',
+        0,
+        envelopeBytes(),
+        undefined,
+        '1',
+        null,
+        async () => {
+          calls.push('beat');
+        },
+      );
+
+      expect(calls).toEqual(['attempt', 'beat', 'beat', 'attempt', 'beat', 'beat', 'attempt']);
+    });
+
+    it('a failing heartbeat is logged, never thrown into the handler', async () => {
+      const warnings: string[] = [];
+      const handled = jest.fn();
+      const consumer = new EventConsumer(
+        options,
+        async (_envelope, delivery) => {
+          delivery.heartbeat?.();
+          handled();
+        },
+        { ...silentLogger, warn: (message) => warnings.push(message) },
+      );
+
+      await (consumer as unknown as WithHeartbeat).handleMessage(
+        'rasta.asset.v1',
+        0,
+        envelopeBytes(),
+        undefined,
+        '1',
+        null,
+        async () => {
+          throw new Error('The group is rebalancing');
+        },
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(handled).toHaveBeenCalledTimes(1);
+      expect(warnings).toEqual([
+        'Heartbeat of nest-common-spec.group failed: Error: The group is rebalancing',
+      ]);
+    });
+  });
+
   it('reports the real topic even when the producer publishes elsewhere', async () => {
     // The reason this metadata exists at all. `producer` is `asset-service` on
     // both messages below; the topic is what tells a retry delivery apart from

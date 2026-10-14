@@ -74,7 +74,7 @@ function harness(overrides: Record<string, unknown> = {}): Harness {
     findInspectionsExpiringWithin: jest.fn(async () => []),
     claimLapsedPolicies: jest.fn(async () => []),
     findLapsedPoliciesWithInvalidAmount: jest.fn(async () => ({ total: 0, sample: [] })),
-    lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
+    lockAsset: jest.fn(async () => ({ status: 'ACTIVE', ownershipGeneration: 2 })),
     ...overrides,
   } as unknown as AssetRepository;
 
@@ -130,7 +130,7 @@ describe('InsuranceService', () => {
       const h = harness({
         lockAsset: jest.fn(async () => {
           order.push('lock');
-          return { status: 'ACTIVE' };
+          return { status: 'ACTIVE', ownershipGeneration: 2 };
         }),
       });
       const original = h.enqueued.push.bind(h.enqueued);
@@ -165,6 +165,14 @@ describe('InsuranceService', () => {
       expect(policy.status).toBe('ACTIVE');
       expect(h.enqueued.map((e) => e.eventName)).toEqual([INSURANCE_EVENTS.INSURANCE_RECORDED]);
       expect(h.appended[0]).toMatchObject({ category: 'INSURANCE' });
+    });
+
+    it('stamps the event with the ownership generation read under the lock', async () => {
+      // #240 round 2: additive on INSURANCE_RECORDED (docs/07 § 7.8).
+      const h = harness();
+      await run(() => h.service.recordPolicy(ASSET_ID, POLICY));
+
+      expect(h.enqueued[0]?.payload).toMatchObject({ ownershipGeneration: 2 });
     });
 
     it('refuses a policy that has already expired', async () => {
@@ -362,6 +370,39 @@ describe('InsuranceService', () => {
 
       expect(claim).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({ expired: 200 });
+    });
+
+    it('starts no warning transaction when the stop came while the warning queries ran (Codex #247 r4)', async () => {
+      // The shutdown begins while both reads are pending. Asked only between
+      // expiry batches, the sweep still opened the warning transaction and
+      // enqueued its events after the relay had stopped.
+      let stopping = false;
+      const h = harness({
+        findPoliciesExpiringWithin: jest.fn(async () => {
+          stopping = true;
+          return [
+            {
+              id: 'INS_W1',
+              assetId: ASSET_ID,
+              organizationId: DEH1,
+              insurerName: 'بیمه نمونه',
+              validTo: new Date(Date.now() + 20 * day),
+            },
+          ];
+        }),
+        findInspectionsExpiringWithin: jest.fn(async () => [
+          { id: 'INP_W1', assetId: ASSET_ID, organizationId: DEH1, validTo: new Date() },
+        ]),
+        claimLapsedPolicies: jest.fn(async () => [lapsedPolicy('INS_W2')]),
+      });
+      const repository = h.service['repository'] as unknown as Record<string, jest.Mock>;
+
+      const result = await h.service.runExpirySweep({ shouldStop: () => stopping });
+
+      expect(result).toEqual({ warned: 0, expired: 0, held: 0 });
+      expect(repository.transaction).not.toHaveBeenCalled();
+      expect(repository.claimLapsedPolicies).not.toHaveBeenCalled();
+      expect(h.enqueued).toEqual([]);
     });
 
     it('works through a backlog in batches until one comes back short', async () => {

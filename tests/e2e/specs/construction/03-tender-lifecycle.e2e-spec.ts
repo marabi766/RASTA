@@ -1178,8 +1178,8 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
         `/v1/tenders/${tenderId}/bids/${bid[key]}/scores`,
         {
           scores: [
-            { criterionCode: 'technical', scoreScaled: scores[key][0] },
-            { criterionCode: 'compliance', scoreScaled: scores[key][1] },
+            { criterionCode: 'technical', scoreScaled: scores[key][0], expectedRevision: 0 },
+            { criterionCode: 'compliance', scoreScaled: scores[key][1], expectedRevision: 0 },
           ],
         },
       );

@@ -75,7 +75,25 @@ describe('standing down', () => {
 });
 
 describe('scoring a bid', () => {
-  const one = (scoreScaled: unknown) => ({ scores: [{ criterionCode: 'PRICE', scoreScaled }] });
+  const one = (scoreScaled: unknown) => ({
+    scores: [{ criterionCode: 'PRICE', scoreScaled, expectedRevision: 0 }],
+  });
+
+  it('needs the revision of the cell its sender last saw, a whole number from 0 (construction audit F5)', () => {
+    expect(scoreBidSchema.safeParse(one(1)).success).toBe(true);
+    for (const expectedRevision of [undefined, -1, 1.5, '1', null]) {
+      expect(
+        scoreBidSchema.safeParse({
+          scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      scoreBidSchema.safeParse({
+        scores: [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 7 }],
+      }).success,
+    ).toBe(true);
+  });
 
   it('takes integers, the points × 100', () => {
     expect(scoreBidSchema.safeParse(one(0)).success).toBe(true);

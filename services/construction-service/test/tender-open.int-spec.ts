@@ -39,6 +39,7 @@ import {
   type Wiring,
   liftApprovalGuard,
   restoreApprovalGuard,
+  bidKey,
 } from './helpers';
 
 /**
@@ -109,7 +110,9 @@ describe('opening the bids of a tender', () => {
     }
     const { tenderId, keyId } = await publishedForBids(w, owner);
     for (const [i, bidder] of bidders.entries()) {
-      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent(prices[i]) }));
+      await asBidder(bidder, () =>
+        w.bids.submit(tenderId, { content: bidContent(prices[i]) }, bidKey()),
+      );
     }
     await makeOverdue(tenderId);
     await w.tenderClose.close({ organizationId: owner, tenderId });
@@ -371,9 +374,11 @@ describe('opening the bids of a tender', () => {
       await qualify(w, keeps);
       await qualify(w, leaves);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(keeps, () => w.bids.submit(tenderId, { content: bidContent(PRICES[0]!) }));
+      await asBidder(keeps, () =>
+        w.bids.submit(tenderId, { content: bidContent(PRICES[0]!) }, bidKey()),
+      );
       const second = await asBidder(leaves, () =>
-        w.bids.submit(tenderId, { content: bidContent(PRICES[1]!) }),
+        w.bids.submit(tenderId, { content: bidContent(PRICES[1]!) }, bidKey()),
       );
       await asBidder(leaves, () =>
         w.bids.withdraw(tenderId, second.bidId, { expectedRevision: 1 }),
@@ -397,7 +402,7 @@ describe('opening the bids of a tender', () => {
       const bidder = org();
       await qualify(w, bidder);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
       await makeOverdue(tenderId);
 
       expect(await refusalOf(open(owner, tenderId))).toContain('NOT_CLOSED');
@@ -507,7 +512,7 @@ describe('opening the bids of a tender', () => {
       const bidder = org();
       await qualify(w, bidder);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
       await makeOverdue(tenderId);
       const claimed = (await w.tenderCloses.claimDue(500, 600, 'fence-a')).find(
         (c) => c.id === tenderId,
@@ -559,7 +564,7 @@ describe('opening the bids of a tender', () => {
         const bidder = org();
         await qualify(w, bidder);
         const { tenderId } = await publishedForBids(w, owner);
-        await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+        await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
         await makeOverdue(tenderId);
         made.push({ owner, tenderId });
       }
@@ -1034,9 +1039,11 @@ describe('opening the bids of a tender', () => {
       await qualify(w, keeps);
       await qualify(w, leaves);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(keeps, () => w.bids.submit(tenderId, { content: bidContent(PRICES[0]!) }));
+      await asBidder(keeps, () =>
+        w.bids.submit(tenderId, { content: bidContent(PRICES[0]!) }, bidKey()),
+      );
       const second = await asBidder(leaves, () =>
-        w.bids.submit(tenderId, { content: bidContent(PRICES[1]!) }),
+        w.bids.submit(tenderId, { content: bidContent(PRICES[1]!) }, bidKey()),
       );
       await asBidder(leaves, () =>
         w.bids.withdraw(tenderId, second.bidId, { expectedRevision: 1 }),
@@ -1101,6 +1108,63 @@ describe('opening the bids of a tender', () => {
         insert.mockRestore();
       }
       expect((await logOf(tenderId)).length).toBe(before);
+    });
+
+    it('names no bidder in the access log before the opening, on any page; the record keeps it all (construction audit F1)', async () => {
+      const { owner, bidders, tenderId } = await closedTender();
+      // Before the opening: each bidder reads its own receipt, a stranger tries an owner route,
+      // and the owner counts the bids.
+      for (const bidder of bidders) await asBidder(bidder, () => w.bids.getMine(tenderId));
+      const stranger = org();
+      await codeOf(asAdmin(stranger, () => w.tenderOpen.listBids(tenderId)));
+      await asAdmin(owner, () => w.tenderOpen.listBids(tenderId));
+
+      // Every page of the owner's log, one row at a time.
+      const everyPage = async () => {
+        const items: Awaited<ReturnType<typeof w.tenderOpen.listAccessLog>>['items'] = [];
+        let cursor: string | undefined;
+        for (;;) {
+          const page = await asAdmin(owner, () =>
+            w.tenderOpen.listAccessLog(tenderId, { limit: 1, ...(cursor ? { cursor } : {}) }),
+          );
+          items.push(...page.items);
+          if (!page.hasMore) return items;
+          cursor = page.nextCursor!;
+        }
+      };
+
+      const before = await everyPage();
+      expect(before.map((item) => item.purpose)).toContain('COUNT_BIDS');
+      for (const item of before) {
+        expect(item.accessorOrganizationId).toBe(owner);
+        expect(item.bidId).toBeNull();
+      }
+      const shown = JSON.stringify(before);
+      for (const outsider of [...bidders, stranger]) expect(shown).not.toContain(outsider);
+      const bidIds = (await bidRows(tenderId)).map((bid) => bid.id);
+      for (const bidId of bidIds) expect(shown).not.toContain(bidId);
+
+      // Held back, not lost: the record has every read, and BID_ACCESSED went out for each.
+      const recorded = await logOf(tenderId);
+      expect(
+        recorded.filter((row) => row.purpose === 'OWN_BID_RECEIPT').map((row) => row.bidId),
+      ).toEqual(expect.arrayContaining(bidIds));
+      expect(recorded.some((row) => row.accessorOrganizationId === stranger)).toBe(true);
+      expect(
+        (await eventsOf(owner, 'BID_ACCESSED', tenderId)).filter(
+          (row) => (payloadOf(row) as { purpose: string }).purpose === 'OWN_BID_RECEIPT',
+        ),
+      ).toHaveLength(bidders.length);
+
+      // Once the bids are opened, the whole log is the owner's to read.
+      await open(owner, tenderId);
+      const after = await everyPage();
+      expect(after.map((item) => item.id).sort()).toEqual(
+        (await logOf(tenderId)).map((row) => row.id).sort(),
+      );
+      expect(
+        after.filter((item) => item.purpose === 'OWN_BID_RECEIPT').map((item) => item.bidId),
+      ).toEqual(expect.arrayContaining(bidIds));
     });
 
     it('lists the access log newest first, a page at a time, without logging the reading of the log', async () => {
@@ -1352,7 +1416,7 @@ describe('opening the bids of a tender', () => {
       const bidder = org();
       await qualify(w, bidder);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
       await makeOverdue(tenderId);
 
       expect(await refusalOf(propose(owner, tenderId, alice))).toContain('NOT_CLOSED');
@@ -1420,6 +1484,53 @@ describe('opening the bids of a tender', () => {
           alreadyProposed: false,
         });
         expect((await approve(owner, tenderId, carol)).status).toBe('EVALUATING');
+      });
+
+      it.each([
+        ['whose membership of the owner was revoked', () => w4.memberships.revoked.add(alice)],
+        [
+          'who no longer holds a role that opens bids',
+          () => w4.memberships.rolesOf.set(alice, ['UNION_ADMIN']),
+        ],
+        [
+          'who has since gained an excluded role',
+          () => w4.memberships.rolesOf.set(alice, ['ORGANIZATION_ADMIN', 'AUDITOR']),
+        ],
+      ])(
+        'refuses a proposer %s, and CLEARS the proposal with an audited event (construction audit F6)',
+        async (_case, change) => {
+          const { owner, tenderId } = await closedTender();
+          await propose(owner, tenderId, alice);
+          change();
+
+          expect(await codeOf(approve(owner, tenderId, bob))).toMatchObject({ code: 'FORBIDDEN' });
+
+          await expectNothingOpened(owner, tenderId);
+          expect(await rowOf(tenderId)).toMatchObject({
+            openingProposedBy: null,
+            openingProposedAt: null,
+          });
+          const [event] = await eventsOf(owner, 'BID_OPENING_PROPOSAL_WITHDRAWN', tenderId);
+          expect(payloadOf(event!)).toMatchObject({
+            proposedBy: alice,
+            withdrawnBy: bob,
+            reason: 'PROPOSER_NOT_AUTHORIZED',
+          });
+          expect(
+            (await logOf(tenderId)).filter((row) => row.purpose === 'WITHDRAW_PROPOSAL'),
+          ).toEqual([expect.objectContaining({ accessorUserId: bob, outcome: 'GRANTED' })]);
+          // Afresh: bob proposes, carol approves.
+          const carol = newUserId();
+          await propose(owner, tenderId, bob);
+          expect((await approve(owner, tenderId, carol)).status).toBe('EVALUATING');
+        },
+      );
+
+      it('opens on a proposal whose proposer still may open the bids, as identity-service says now', async () => {
+        const { owner, tenderId } = await closedTender();
+        await propose(owner, tenderId, alice);
+        expect((await approve(owner, tenderId, bob)).status).toBe('EVALUATING');
+        expect(w4.memberships.asked).toEqual(expect.arrayContaining([alice, bob]));
       });
 
       it('leaves a proposal standing when only the approver is conflicted', async () => {
@@ -1719,7 +1830,7 @@ describe('opening the bids of a tender', () => {
       const bidder = org();
       await qualify(w, bidder);
       const { tenderId } = await publishedForBids(w, owner);
-      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+      await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey()));
       const asMember = <T>(fn: () => T) =>
         runWithContext(
           context({

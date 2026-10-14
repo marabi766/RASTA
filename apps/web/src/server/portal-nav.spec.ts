@@ -4,7 +4,14 @@
 import { portalNavFor } from '@/app/nav';
 
 import type { CurrentUserResult } from './identity';
-import { canReadInventory, canReadProjects, loadPortalNav } from './portal-nav';
+import {
+  canReadInventory,
+  canReadProjects,
+  canReadTenders,
+  loadPortalNav,
+  tenderDoorsFor,
+  tenderSidesFor,
+} from './portal-nav';
 import type { WebSession } from './session';
 
 /**
@@ -49,6 +56,67 @@ describe('canReadProjects', () => {
   });
 });
 
+describe('tenderSidesFor / canReadTenders', () => {
+  it('offers the owner’s side to whoever may read projects, as the service gates both alike', () => {
+    expect(tenderSidesFor(['ORGANIZATION_ADMIN'], DEFAULTS)).toEqual({
+      owner: true,
+      bidder: false,
+    });
+    expect(tenderSidesFor(['SYSTEM_ADMIN'], DEFAULTS)).toEqual({ owner: true, bidder: false });
+    const settings = { ...DEFAULTS, WEB_PROJECT_READER_ROLES: ['FLEET_MANAGER'] };
+    expect(tenderSidesFor(['FLEET_MANAGER'], settings).owner).toBe(true);
+    expect(tenderSidesFor(['FLEET_MANAGER'], DEFAULTS).owner).toBe(false);
+  });
+
+  it('offers the bidder’s side to CONTRACTOR only', () => {
+    expect(tenderSidesFor(['CONTRACTOR'], DEFAULTS)).toEqual({ owner: false, bidder: true });
+    for (const role of ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'SUPPLIER', 'DRIVER']) {
+      expect(tenderSidesFor([role], DEFAULTS).bidder).toBe(false);
+    }
+  });
+
+  it('refuses the bidder’s side to SYSTEM_ADMIN and AUDITOR whenever present, as the service does', () => {
+    expect(tenderSidesFor(['CONTRACTOR', 'SYSTEM_ADMIN'], DEFAULTS).bidder).toBe(false);
+    expect(tenderSidesFor(['CONTRACTOR', 'AUDITOR'], DEFAULTS).bidder).toBe(false);
+  });
+
+  it('offers neither side to AUDITOR, whatever else the person holds or the settings say', () => {
+    for (const roles of [
+      ['AUDITOR'],
+      ['AUDITOR', 'ORGANIZATION_ADMIN'],
+      ['AUDITOR', 'CONTRACTOR'],
+    ]) {
+      expect(tenderSidesFor(roles, DEFAULTS)).toEqual({ owner: false, bidder: false });
+      expect(canReadTenders(roles, DEFAULTS)).toBe(false);
+    }
+  });
+
+  it('draws the link for an owner, a bidder or both, and for nobody else', () => {
+    expect(canReadTenders(['ORGANIZATION_ADMIN'], DEFAULTS)).toBe(true);
+    expect(canReadTenders(['CONTRACTOR'], DEFAULTS)).toBe(true);
+    expect(canReadTenders(['ORGANIZATION_ADMIN', 'CONTRACTOR'], DEFAULTS)).toBe(true);
+    expect(canReadTenders(['DRIVER'], DEFAULTS)).toBe(false);
+    expect(canReadTenders([], DEFAULTS)).toBe(false);
+  });
+});
+
+describe('tenderDoorsFor', () => {
+  it('asks the door that matches the roles, both for somebody who is both', () => {
+    expect(tenderDoorsFor(['ORGANIZATION_ADMIN'], DEFAULTS)).toEqual({ own: true, open: false });
+    expect(tenderDoorsFor(['CONTRACTOR'], DEFAULTS)).toEqual({ own: false, open: true });
+    expect(tenderDoorsFor(['ORGANIZATION_ADMIN', 'CONTRACTOR'], DEFAULTS)).toEqual({
+      own: true,
+      open: true,
+    });
+  });
+
+  it('still asks the owner’s door for anyone else, so the service gives its own refusal', () => {
+    expect(tenderDoorsFor(['DRIVER'], DEFAULTS)).toEqual({ own: true, open: false });
+    expect(tenderDoorsFor(['AUDITOR'], DEFAULTS)).toEqual({ own: true, open: false });
+    expect(tenderDoorsFor([], DEFAULTS)).toEqual({ own: true, open: false });
+  });
+});
+
 const INVENTORY_DEFAULTS = {
   WEB_INVENTORY_ROLES: ['ORGANIZATION_ADMIN'],
   WEB_INVENTORY_READER_ROLES: ['ORGANIZATION_ADMIN'],
@@ -82,19 +150,34 @@ describe('canReadInventory', () => {
   });
 });
 
-describe('the Inventory link in the navigation', () => {
-  it('sits after Projects and before the wallet, and only when allowed', () => {
+describe('portalNavFor', () => {
+  it('puts Inventory right after Projects (and Tenders), and only when allowed', () => {
     const shown = hrefs(portalNavFor({ canReadProjects: true, canReadInventory: true }));
     const hidden = hrefs(portalNavFor({ canReadProjects: true, canReadInventory: false }));
+    const withTenders = hrefs(
+      portalNavFor({ canReadProjects: true, canReadTenders: true, canReadInventory: true }),
+    );
 
     expect(shown.indexOf('/inventory')).toBe(shown.indexOf('/projects') + 1);
     expect(shown.indexOf('/wallet')).toBe(shown.indexOf('/inventory') + 1);
+    expect(withTenders.indexOf('/inventory')).toBe(withTenders.indexOf('/tenders') + 1);
     expect(hidden).not.toContain('/inventory');
     expect(hrefs(portalNavFor({ canReadProjects: false }))).not.toContain('/inventory');
   });
-});
 
-describe('portalNavFor', () => {
+  it('puts Tenders right after Projects, and only when allowed', () => {
+    const shown = hrefs(portalNavFor({ canReadProjects: true, canReadTenders: true }));
+    const hidden = hrefs(portalNavFor({ canReadProjects: true, canReadTenders: false }));
+    const contractor = hrefs(portalNavFor({ canReadProjects: false, canReadTenders: true }));
+
+    expect(shown.indexOf('/tenders')).toBe(shown.indexOf('/projects') + 1);
+    expect(shown.indexOf('/wallet')).toBe(shown.indexOf('/tenders') + 1);
+    expect(hidden).not.toContain('/tenders');
+    expect(contractor).toContain('/tenders');
+    expect(contractor).not.toContain('/projects');
+    expect(contractor.indexOf('/tenders')).toBe(contractor.indexOf('/marketplace') + 1);
+  });
+
   it('puts Projects between the marketplace and the wallet, and only when allowed', () => {
     const shown = hrefs(portalNavFor({ canReadProjects: true }));
     const hidden = hrefs(portalNavFor({ canReadProjects: false }));
@@ -108,7 +191,11 @@ describe('portalNavFor', () => {
 });
 
 describe('loadPortalNav', () => {
-  const SESSION = { accessToken: 'opaque' } as WebSession;
+  const tokenWith = (realmRoles: string[]): string =>
+    `h.${Buffer.from(JSON.stringify({ realm_access: { roles: realmRoles } })).toString('base64url')}.s`;
+  const sessionWith = (realmRoles: string[]): WebSession =>
+    ({ accessToken: tokenWith(realmRoles) }) as WebSession;
+  const SESSION = sessionWith([]);
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -145,6 +232,48 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/projects');
   });
 
+  it('offers the Tenders link to an owner and to a contractor, not to the oversight role', async () => {
+    expect(hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])))).toContain('/tenders');
+    expect(hrefs(await loadPortalNav(SESSION, user(['CONTRACTOR'])))).toContain('/tenders');
+    expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/tenders');
+    expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/tenders');
+  });
+
+  // The service acts on membership roles plus the global realm roles, so a realm
+  // SYSTEM_ADMIN is an owner and never a bidder, whatever the membership holds.
+  it.each([
+    {
+      name: 'SYSTEM_ADMIN realm + CONTRACTOR membership',
+      realm: ['SYSTEM_ADMIN'],
+      member: ['CONTRACTOR'],
+      links: ['/tenders', '/projects'],
+    },
+    {
+      name: 'SYSTEM_ADMIN realm + no membership roles',
+      realm: ['SYSTEM_ADMIN'],
+      member: [],
+      links: ['/tenders', '/projects'],
+    },
+    { name: 'CONTRACTOR membership alone', realm: [], member: ['CONTRACTOR'], links: ['/tenders'] },
+    {
+      name: 'a non-global realm role is ignored',
+      realm: ['UNION_ADMIN'],
+      member: ['CONTRACTOR'],
+      links: ['/tenders'],
+    },
+    {
+      name: 'AUDITOR membership beats a realm SYSTEM_ADMIN',
+      realm: ['SYSTEM_ADMIN'],
+      member: ['AUDITOR'],
+      links: [],
+    },
+  ])('draws the right links for $name', async ({ realm, member, links }) => {
+    const items = hrefs(await loadPortalNav(sessionWith(realm), user(member)));
+    for (const link of ['/tenders', '/projects']) {
+      expect(items.includes(link)).toBe(links.includes(link));
+    }
+  });
+
   it('keeps the settlements link for the roles that read settlements, next to Projects', async () => {
     const admin = hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])));
     expect(admin).toContain('/settlements');
@@ -153,23 +282,8 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/settlements');
   });
 
-  it('offers Inventory to the roles inventory-service reads for, never to AUDITOR or SYSTEM_ADMIN', async () => {
-    delete process.env.WEB_INVENTORY_ROLES;
-    delete process.env.WEB_INVENTORY_READER_ROLES;
-    expect(hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])))).toContain(
-      '/inventory',
-    );
-    expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/inventory');
-    expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/inventory');
-    expect(hrefs(await loadPortalNav(SESSION, user(['SYSTEM_ADMIN'])))).not.toContain('/inventory');
-  });
-
-  describe('Inventory against the realm roles in the access token', () => {
-    const sessionWith = (claims: unknown): WebSession =>
-      ({
-        accessToken: `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`,
-      }) as WebSession;
-    const REALM_ADMIN = { realm_access: { roles: ['SYSTEM_ADMIN'] } };
+  describe('Inventory', () => {
+    const REALM_ADMIN = ['SYSTEM_ADMIN'];
 
     beforeEach(() => {
       delete process.env.WEB_INVENTORY_ROLES;
@@ -178,49 +292,29 @@ describe('loadPortalNav', () => {
 
     it.each([
       {
-        name: 'ORGANIZATION_ADMIN membership + realm SYSTEM_ADMIN is refused by the service',
+        name: 'ORGANIZATION_ADMIN membership',
+        realm: [],
         roles: ['ORGANIZATION_ADMIN'],
-        claims: REALM_ADMIN,
-        shown: false,
-      },
-      {
-        name: 'ORGANIZATION_ADMIN membership, no realm role',
-        roles: ['ORGANIZATION_ADMIN'],
-        claims: {},
         shown: true,
+      },
+      { name: 'DRIVER membership', realm: [], roles: ['DRIVER'], shown: false },
+      { name: 'AUDITOR membership', realm: [], roles: ['AUDITOR'], shown: false },
+      { name: 'SYSTEM_ADMIN membership', realm: [], roles: ['SYSTEM_ADMIN'], shown: false },
+      {
+        name: 'ORGANIZATION_ADMIN membership + realm SYSTEM_ADMIN, which the service refuses',
+        realm: REALM_ADMIN,
+        roles: ['ORGANIZATION_ADMIN'],
+        shown: false,
       },
       {
         name: 'ORGANIZATION_ADMIN membership + a non-global realm role',
+        realm: ['UNION_ADMIN'],
         roles: ['ORGANIZATION_ADMIN'],
-        claims: { realm_access: { roles: ['UNION_ADMIN'] } },
         shown: true,
       },
-      {
-        name: 'ORGANIZATION_ADMIN membership + unreadable claim adds nothing',
-        roles: ['ORGANIZATION_ADMIN'],
-        claims: 'SYSTEM_ADMIN',
-        shown: true,
-      },
-      {
-        name: 'realm SYSTEM_ADMIN alone',
-        roles: [],
-        claims: REALM_ADMIN,
-        shown: false,
-      },
-      {
-        name: 'AUDITOR + ORGANIZATION_ADMIN memberships',
-        roles: ['AUDITOR', 'ORGANIZATION_ADMIN'],
-        claims: {},
-        shown: false,
-      },
-      {
-        name: 'narrow membership + realm SYSTEM_ADMIN',
-        roles: ['DRIVER'],
-        claims: REALM_ADMIN,
-        shown: false,
-      },
-    ])('$name', async ({ roles, claims, shown }) => {
-      const items = hrefs(await loadPortalNav(sessionWith(claims), user(roles)));
+      { name: 'realm SYSTEM_ADMIN alone', realm: REALM_ADMIN, roles: [], shown: false },
+    ])('$name', async ({ realm, roles, shown }) => {
+      const items = hrefs(await loadPortalNav(sessionWith(realm), user(roles)));
       expect(items.includes('/inventory')).toBe(shown);
     });
 
@@ -236,6 +330,74 @@ describe('loadPortalNav', () => {
     });
   });
 
+  describe('a realm SYSTEM_ADMIN in the access token', () => {
+    const sessionWithClaims = (claims: unknown): WebSession =>
+      ({
+        accessToken: `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`,
+      }) as WebSession;
+    const REALM_ADMIN = { realm_access: { roles: ['SYSTEM_ADMIN'] } };
+
+    it.each([
+      {
+        name: 'narrow membership + realm admin',
+        roles: ['CONTRACTOR'],
+        claims: REALM_ADMIN,
+        projects: true,
+        settlements: true,
+      },
+      {
+        name: 'no membership roles + realm admin',
+        roles: [],
+        claims: REALM_ADMIN,
+        projects: true,
+        settlements: true,
+      },
+      {
+        name: 'narrow membership, no realm role',
+        roles: ['CONTRACTOR'],
+        claims: {},
+        projects: false,
+        settlements: false,
+      },
+      {
+        name: 'non-global realm role is ignored',
+        roles: ['CONTRACTOR'],
+        claims: { realm_access: { roles: ['UNION_ADMIN'] } },
+        projects: false,
+        settlements: false,
+      },
+      {
+        name: 'AUDITOR membership + realm admin is still excluded',
+        roles: ['AUDITOR'],
+        claims: REALM_ADMIN,
+        projects: false,
+        settlements: false,
+      },
+      {
+        name: 'unreadable token adds nothing',
+        roles: ['CONTRACTOR'],
+        claims: 'SYSTEM_ADMIN',
+        projects: false,
+        settlements: false,
+      },
+    ])('$name', async ({ roles, claims, projects, settlements }) => {
+      const items = hrefs(await loadPortalNav(sessionWithClaims(claims), user(roles)));
+      expect(items.includes('/projects')).toBe(projects);
+      expect(items.includes('/settlements')).toBe(settlements);
+    });
+
+    it('is not read when identity did not answer', async () => {
+      for (const result of [
+        { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+        { kind: 'MALFORMED', correlationId: 'c' },
+      ] as const) {
+        const items = hrefs(await loadPortalNav(sessionWithClaims(REALM_ADMIN), result));
+        expect(items).not.toContain('/projects');
+        expect(items).not.toContain('/settlements');
+      }
+    });
+  });
+
   it.each([
     { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
     { kind: 'MALFORMED', correlationId: 'c' },
@@ -244,6 +406,7 @@ describe('loadPortalNav', () => {
     async (result) => {
       const items = hrefs(await loadPortalNav(SESSION, result));
       expect(items).not.toContain('/projects');
+      expect(items).not.toContain('/tenders');
       expect(items).not.toContain('/settlements');
       expect(items).not.toContain('/inventory');
       expect(items).toContain('/assets');

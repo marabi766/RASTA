@@ -473,8 +473,9 @@ describe('every Kafka consumer in the repository is a declared EventConsumer', (
       const text = read(FLEET_MODULE)
         .replace(/\bEventConsumer,/, 'EventConsumer as Consumer,')
         .replace('new EventConsumer(', 'new Consumer(')
-        .replace("groupId: 'fleet-service.asset-sync'", "groupId: 'economic-service.stolen'");
+        .replace('groupId: ASSET_SYNC_GROUP', "groupId: 'economic-service.stolen'");
       expect(text).toContain('new Consumer(');
+      expect(text).toContain("groupId: 'economic-service.stolen'");
       const result = mutate('fleet-service', { [FLEET_MODULE]: text });
       expect(result.consumers).toHaveLength(1);
       expect(problemsOf(result.consumers).join('\n')).toMatch(/outside fleet-service's namespace/);

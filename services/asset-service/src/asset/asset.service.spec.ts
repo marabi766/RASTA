@@ -68,6 +68,7 @@ function assetRow(overrides: Record<string, unknown> = {}) {
     createdBy: 'SEED',
     updatedBy: 'SEED',
     version: 1,
+    ownershipGeneration: 0,
     deletedAt: null,
     ...overrides,
   };
@@ -254,9 +255,17 @@ function harness(
   const lookup = repository.findById;
   repository.findById = jest.fn(async (...args: Parameters<AssetRepository['findById']>) => {
     const row = await lookup(...args);
-    return row && args[1] !== undefined && updates.length > 0
-      ? { ...row, ...(updates.at(-1) as object) }
-      : row;
+    if (!row || args[1] === undefined || updates.length === 0) return row;
+    // `{ increment: n }` is Prisma's atomic add: the database returns the sum.
+    const applied = Object.fromEntries(
+      Object.entries(updates.at(-1) as Record<string, unknown>).map(([key, value]) => [
+        key,
+        value && typeof value === 'object' && 'increment' in value
+          ? Number((row as Record<string, unknown>)[key]) + Number(value.increment)
+          : value,
+      ]),
+    );
+    return { ...row, ...applied };
   }) as never;
 
   const documents = fakeDocuments();
@@ -1563,6 +1572,18 @@ describe('AssetService', () => {
       expect(h.enqueued.at(-1)?.payload).toMatchObject({
         fromOrganizationId: DEH1,
         toOrganizationId: DEH2,
+      });
+    });
+
+    it('states the new ownership generation and the coverages that follow the vehicle', async () => {
+      // #240 round 2: both fields are additive on ASSET_TRANSFERRED (docs/07 § 7.8).
+      // The row was at generation 3; the compare-and-set increments it to 4.
+      const h = harness({ findById: jest.fn(async () => assetRow({ ownershipGeneration: 3 })) });
+      await run(() => h.service.transfer(ASSET_ID, dto));
+
+      expect(h.enqueued.at(-1)?.payload).toMatchObject({
+        ownershipGeneration: 4,
+        retainedCoverages: ['THIRD_PARTY', 'COMPREHENSIVE', 'PASSENGER_ACCIDENT', 'LIABILITY'],
       });
     });
 

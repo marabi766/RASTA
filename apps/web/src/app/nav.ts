@@ -32,6 +32,9 @@ const NAV_BEFORE_PROJECTS: readonly SidebarItem[] = [
 /** Shown only to a role that may read projects (`server/portal-nav.ts`). */
 const PROJECTS_ITEM: SidebarItem = { href: '/projects', label: 'پروژه‌های عمرانی' };
 
+/** Shown only to a role that may read tenders, on either side (`server/portal-nav.ts`). */
+const TENDERS_ITEM: SidebarItem = { href: '/tenders', label: 'مناقصه‌ها' };
+
 const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },
   { href: '/organizations', label: 'سازمان و اعضا' },
@@ -52,12 +55,14 @@ export const INVENTORY_NAV_ITEM: SidebarItem = { href: '/inventory', label: 'ا�
 /** The navigation for a caller, with role-gated entries only when they apply. */
 export function portalNavFor(options: {
   readonly canReadProjects: boolean;
+  readonly canReadTenders?: boolean;
   readonly canReadSettlements?: boolean;
   readonly canReadInventory?: boolean;
 }): readonly SidebarItem[] {
   const items = [
     ...NAV_BEFORE_PROJECTS,
     ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
+    ...(options.canReadTenders ? [TENDERS_ITEM] : []),
     ...(options.canReadInventory ? [INVENTORY_NAV_ITEM] : []),
     ...NAV_AFTER_PROJECTS,
   ];

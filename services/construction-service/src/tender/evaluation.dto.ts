@@ -30,6 +30,8 @@ export type RecusalReason = (typeof RECUSAL_REASONS)[number];
 export const SCORE_SCALE = 100;
 /** `criterion.max_score` is at most 1 000 000 (criteria.dto), so a score is at most 100 000 000. */
 const MAX_SCORE_SCALED = 1_000_000 * SCORE_SCALE;
+/** A cell's revision is an INTEGER (`bid_evaluation_score.revision`). */
+const MAX_CELL_REVISION = 2_147_483_647;
 
 const identifier = z.string().min(1).max(64);
 
@@ -80,6 +82,14 @@ export const scoreBidSchema = z
               .max(MAX_SCORE_SCALED)
               .describe(
                 'The score × 100, an integer: 0..maxScore × 100 (a PASS_FAIL criterion: 0 or maxScore × 100).',
+              ),
+            expectedRevision: z
+              .number()
+              .int()
+              .min(0)
+              .max(MAX_CELL_REVISION)
+              .describe(
+                'The revision of this cell the caller last saw of their own scores — 0 for a cell they have not scored. Compare-and-set: any other is 409 OPTIMISTIC_LOCK_FAILED and nothing of the request is recorded, so a delayed retry of an older score cannot overwrite a newer one.',
               ),
           })
           .strict(),

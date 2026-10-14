@@ -3,7 +3,16 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
-import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
+import { FakePolicySource, echoing } from './policy-source.fake';
+import {
+  asActor,
+  cleanup,
+  id,
+  newPrisma,
+  tenants,
+  producerShaped,
+  LAPSE_RULES_ONLY,
+} from './helpers';
 
 /**
  * ASSET_TRANSFERRED ends the assignments still open on the machine (the
@@ -24,14 +33,21 @@ describe('a transfer ends the assignments still open on the machine', () => {
   let prisma: PrismaService;
   let repository: FleetRepository;
   let consumer: AssetSyncConsumer;
+  let policies: FakePolicySource;
   let assignments: AssignmentService;
 
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    consumer = new AssetSyncConsumer(null, repository);
-    assignments = new AssignmentService(repository);
+    // asset-service confirms each policy as its event states it, unless a test says otherwise.
+    policies = new FakePolicySource();
+    policies.replica = (assetId) => repository.findAssetRefUnscoped(assetId);
+    consumer = echoing(
+      new AssetSyncConsumer(null, repository, undefined, undefined, undefined, policies),
+      policies,
+    );
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     await cleanup(prisma, [org.a, org.b]);
   });
 
@@ -60,7 +76,12 @@ describe('a transfer ends the assignments still open on the machine', () => {
 
   // Tenant = the new owner, as asset-service stamps it; the consumer now
   // dead-letters anything else (review #127 #5).
-  const transfer = (assetId: string, from = org.a, to = org.b) =>
+  const transfer = (
+    assetId: string,
+    from = org.a,
+    to = org.b,
+    extra: Record<string, unknown> = {},
+  ) =>
     event('ASSET_TRANSFERRED', to, {
       assetId,
       fromOrganizationId: from,
@@ -68,6 +89,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
       reason: 'واگذاری',
       referenceNo: null,
       transferredAt: new Date().toISOString(),
+      ...extra,
     });
 
   async function machine(organizationId: string): Promise<string> {
@@ -236,9 +258,11 @@ describe('a transfer ends the assignments still open on the machine', () => {
       event(eventName, owner, { assetId, organizationId: owner, ...fields });
     const year = 365 * 86_400_000;
 
-    it("blocks and then clears the new owner's dispatch", async () => {
+    it("blocks and then clears the new owner's dispatch, for a coverage that follows the vehicle", async () => {
       const assetId = await machine(org.a);
-      await consumer.handle(transfer(assetId));
+      await consumer.handle(
+        transfer(assetId, org.a, org.b, { retainedCoverages: ['THIRD_PARTY'] }),
+      );
       await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
       const driverB = await driver(org.b);
 
@@ -246,7 +270,7 @@ describe('a transfer ends the assignments still open on the machine', () => {
       await consumer.handle(
         insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
       );
-      expect(await repository.findAssetRef(assetId)).toMatchObject({
+      expect(await repository.findAssetRefUnscoped(assetId)).toMatchObject({
         organizationId: org.b,
         insuranceLapsedCoverages: ['THIRD_PARTY'],
       });
@@ -268,6 +292,34 @@ describe('a transfer ends the assignments still open on the machine', () => {
       await expect(assign(org.b, assetId, driverB)).resolves.toMatchObject({
         assetId,
         organizationId: org.b,
+      });
+    });
+
+    it('ignores the previous owner’s renewal of a coverage that does not follow the vehicle, and keeps the lapse', async () => {
+      const assetId = await machine(org.a);
+      // A transfer that states no generation and retains nothing.
+      await consumer.handle(transfer(assetId));
+      await consumer.handle(event('ASSET_ACTIVATED', org.b, { assetId }));
+      const driverB = await driver(org.b);
+      await consumer.handle(
+        insurance('INSURANCE_EXPIRED', assetId, org.a, { coverage: 'THIRD_PARTY' }),
+      );
+
+      // asset-service denies it under the current rule (r7: not decided from the replica).
+      const staleId = id('INS');
+      policies.deny(staleId, 'NOT_FOLLOWING_VEHICLE');
+      await consumer.handle(
+        insurance('INSURANCE_RECORDED', assetId, org.a, {
+          policyId: staleId,
+          coverage: 'THIRD_PARTY',
+          validFrom: new Date(Date.now() - 1000).toISOString(),
+          validTo: new Date(Date.now() + year).toISOString(),
+        }),
+      );
+
+      await expect(assign(org.b, assetId, driverB)).rejects.toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        message: expect.stringContaining('withdrawn from dispatch'),
       });
     });
 

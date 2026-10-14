@@ -180,10 +180,22 @@ export class ProjectAccess {
     return { actor: context.userId };
   }
 
-  /** The organization whose policies (governed or authored) a listing shows. */
-  assertCanListPolicies(): { organizationId: string } {
+  /**
+   * The organization whose policies a listing shows, and which of them: the same rule as
+   * `canSeePolicy`, applied inside the list query so a page never holds a policy the caller could
+   * not read on its own (construction audit F3). The platform administrator sees both sides; a
+   * union administrator the policies its organization **wrote**; a project reader the ones that
+   * **govern** its organization. A caller with neither sees nothing.
+   */
+  assertCanListPolicies(): { organizationId: string; governed: boolean; authored: boolean } {
     const { organizationId } = this.assert(this.policyReaders, 'read approval policies');
-    return { organizationId };
+    const { roles } = getContext();
+    if (roles.includes(SUPER_ROLE)) return { organizationId, governed: true, authored: true };
+    return {
+      organizationId,
+      governed: this.canReadProjectsOf(organizationId),
+      authored: roles.includes(UNION_ROLE),
+    };
   }
 
   /**
@@ -397,6 +409,17 @@ export class ProjectAccess {
    */
   assertLiveRolesMayOpenBids(liveRoles: readonly string[]): void {
     this.assertLiveBidSide(this.bidOpeners, liveRoles, 'opens or reads bids');
+  }
+
+  /**
+   * `assertLiveRolesMayOpenBids` as a question, for someone other than the caller: the proposer of
+   * an opening, judged at the approval on the same rule as the approver (construction audit F6).
+   */
+  liveRolesMayOpenBids(liveRoles: readonly string[]): boolean {
+    return (
+      !BID_EXCLUDED_ROLES.some((role) => liveRoles.includes(role)) &&
+      this.bidOpeners.some((role) => liveRoles.includes(role))
+    );
   }
 
   /**
