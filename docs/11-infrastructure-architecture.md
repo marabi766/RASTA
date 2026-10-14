@@ -76,7 +76,13 @@ PostgreSQL واقعی می‌سنجد: پیش‌فرض دست‌نخورده، �
 پس از این مدت با `57014` لغو می‌شود و اتصال Pool را بیش از آن نگه نمی‌دارد. `0` (در PostgreSQL یعنی بی‌سقف) رد می‌شود؛
 مقدار غیرعددی یا خارج از بازه، و URLی که در `options` خودش `statement_timeout` دیگری دارد، سرویس را در Startup متوقف
 می‌کند (همان قاعدهٔ Pool). تراکنشی که بیشتر لازم دارد خودش `SET LOCAL statement_timeout` می‌گوید و فقط در همان تراکنش
-غلبه می‌کند (Purge صندوق خروجی، `OUTBOX_PURGE_STATEMENT_TIMEOUT_MS`). Migratorها (D-045) آن را نمی‌خوانند؛ Migrationها
+غلبه می‌کند (Purge صندوق خروجی، `OUTBOX_PURGE_STATEMENT_TIMEOUT_MS`؛ و در identity تراکنش Projection به Keycloak،
+ترمیم حساب یتیم و تأیید ثبت‌نام، که Lock را در طول فراخوان‌های Keycloak نگه می‌دارند: `SET LOCAL statement_timeout` برابر
+Timeout همان تراکنش، ۶۵ ثانیه). هر تنظیمی که بگذارد یک Statement دست‌کم به اندازهٔ این سقف منتظر Lock بماند، سرویسش را
+در Startup متوقف می‌کند (`assertStatementWaitsWithinTimeout` در Loader همان سرویس؛ fail closed): inventory
+`INVENTORY_LOCK_TIMEOUT_MS`، contract `CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS` + ۱۰ ثانیه، fleet
+`FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS`، maintenance دو برابر `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` + ۵ ثانیه، asset
+`ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS` + ۵ ثانیه. با پیش‌فرض‌ها همه زیر ۱۵ ثانیه‌اند. Migratorها (D-045) آن را نمی‌خوانند؛ Migrationها
 سقف خودشان را دارند (D-048). `pnpm test:db-pool-config` اثرش را روی PostgreSQL واقعی می‌سنجد. **پشت PgBouncer** همان
 حکم `TimeZone` در بند بعد برقرار است: `options` دور انداخته می‌شود، پس تضمین آنجا تنظیم سمت پایگاه داده برای Role زمان
 اجراست (`ALTER ROLE <runtime> IN DATABASE rasta_<svc> SET statement_timeout = '15s'`)، نه برای Migrator.

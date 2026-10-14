@@ -25,6 +25,19 @@ import {
  */
 const PROJECTION_TRANSACTION_TIMEOUT_MS = 65_000;
 
+/**
+ * A second projection or repair of the same user waits on the first one's
+ * lock for as long as that one may hold it, so its statements may run as long
+ * as the transaction: the connection's `DATABASE_STATEMENT_TIMEOUT_MS`
+ * (15 s by default) would cancel the wait while Keycloak is merely slow
+ * (#268). Set with `SET LOCAL`, for these transactions only.
+ */
+export const PROJECTION_TRANSACTION_OPTIONS = {
+  maxWait: 10_000,
+  timeout: PROJECTION_TRANSACTION_TIMEOUT_MS,
+  statementTimeoutMs: PROJECTION_TRANSACTION_TIMEOUT_MS,
+} as const;
+
 export interface ReconcileFinding {
   userId: string;
   divergent: PlatformAttributeName[];
@@ -175,27 +188,24 @@ export class KeycloakProjector {
    * then enables the account. Throws when Keycloak cannot be reached.
    */
   async repairOrphan(userId: string, username: string): Promise<OrphanRepairOutcome> {
-    return this.repository.transaction(
-      async (tx) => {
-        const statuses = await this.repository.lockRegistrationRequestsOfUser(tx, userId);
-        const user = await this.repository.findUserById(userId, tx);
-        if (!user || user.keycloakId || statuses.includes('APPROVED')) return 'owned';
+    return this.repository.transaction(async (tx) => {
+      const statuses = await this.repository.lockRegistrationRequestsOfUser(tx, userId);
+      const user = await this.repository.findUserById(userId, tx);
+      if (!user || user.keycloakId || statuses.includes('APPROVED')) return 'owned';
 
-        const account = await this.keycloak.findAccountByUsername(username);
-        const provenance = account?.attributes.rasta_user_id ?? [];
-        if (!account || provenance.length !== 1 || provenance[0] !== userId) return 'not_ours';
-        if (!account.enabled && !grantsAnything(account.attributes)) return 'harmless';
+      const account = await this.keycloak.findAccountByUsername(username);
+      const provenance = account?.attributes.rasta_user_id ?? [];
+      if (!account || provenance.length !== 1 || provenance[0] !== userId) return 'not_ours';
+      if (!account.enabled && !grantsAnything(account.attributes)) return 'harmless';
 
-        await this.keycloak.setEnabled(account.id, false);
-        await this.keycloak.replacePlatformAttributes(account.id, provenanceOnly(userId));
-        this.logger.warn(
-          { userId, keycloakId: account.id },
-          'Orphan Keycloak account disabled and its grants cleared',
-        );
-        return 'repaired';
-      },
-      { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
-    );
+      await this.keycloak.setEnabled(account.id, false);
+      await this.keycloak.replacePlatformAttributes(account.id, provenanceOnly(userId));
+      this.logger.warn(
+        { userId, keycloakId: account.id },
+        'Orphan Keycloak account disabled and its grants cleared',
+      );
+      return 'repaired';
+    }, PROJECTION_TRANSACTION_OPTIONS);
   }
 
   /**
@@ -218,35 +228,32 @@ export class KeycloakProjector {
    */
   private async write(userId: string): Promise<KeycloakProjectionOutcome> {
     if (!this.keycloak.enabled) return KEYCLOAK_PROJECTION_OUTCOMES.DISABLED;
-    return this.repository.transaction(
-      async (tx) => {
-        await this.repository.lockUserProjection(tx, userId);
-        let user = await this.repository.findUserById(userId, tx);
-        if (!user) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
-        // A registration not yet approved has no account: nothing to project into.
-        if (!user.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
-        const keycloakId = user.keycloakId;
-        if (user.accountActivationPending) {
-          // A first activation is decided on memberships no revocation can
-          // end while it runs: the user row lock is the serialisation point
-          // every membership change takes first (`lockUserMemberships`), so a
-          // revocation either committed before this read — and there is no
-          // live membership to enable for — or waits until this commits, and
-          // its own projection then clears the grants (#219 r3).
-          await this.repository.lockUserMemberships(tx, userId);
-          user = (await this.repository.findUserById(userId, tx)) ?? user;
-        }
-        const memberships = await this.repository.listMembershipsForUser(userId, tx);
-        const attributes = platformAttributesFor(user, memberships, new Date());
-        await this.keycloak.replacePlatformAttributes(keycloakId, attributes);
-        if (user.accountActivationPending) {
-          await this.activateOnce(tx, user, keycloakId, attributes);
-        }
-        if (user.status !== 'ACTIVE') await this.disableIfEnabled(user.id, keycloakId);
-        return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
-      },
-      { maxWait: 10_000, timeout: PROJECTION_TRANSACTION_TIMEOUT_MS },
-    );
+    return this.repository.transaction(async (tx) => {
+      await this.repository.lockUserProjection(tx, userId);
+      let user = await this.repository.findUserById(userId, tx);
+      if (!user) return KEYCLOAK_PROJECTION_OUTCOMES.NO_USER;
+      // A registration not yet approved has no account: nothing to project into.
+      if (!user.keycloakId) return KEYCLOAK_PROJECTION_OUTCOMES.NO_ACCOUNT;
+      const keycloakId = user.keycloakId;
+      if (user.accountActivationPending) {
+        // A first activation is decided on memberships no revocation can
+        // end while it runs: the user row lock is the serialisation point
+        // every membership change takes first (`lockUserMemberships`), so a
+        // revocation either committed before this read — and there is no
+        // live membership to enable for — or waits until this commits, and
+        // its own projection then clears the grants (#219 r3).
+        await this.repository.lockUserMemberships(tx, userId);
+        user = (await this.repository.findUserById(userId, tx)) ?? user;
+      }
+      const memberships = await this.repository.listMembershipsForUser(userId, tx);
+      const attributes = platformAttributesFor(user, memberships, new Date());
+      await this.keycloak.replacePlatformAttributes(keycloakId, attributes);
+      if (user.accountActivationPending) {
+        await this.activateOnce(tx, user, keycloakId, attributes);
+      }
+      if (user.status !== 'ACTIVE') await this.disableIfEnabled(user.id, keycloakId);
+      return KEYCLOAK_PROJECTION_OUTCOMES.PROJECTED;
+    }, PROJECTION_TRANSACTION_OPTIONS);
   }
 
   /**

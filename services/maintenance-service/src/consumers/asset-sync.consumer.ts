@@ -100,8 +100,10 @@ const PROJECTIONS: Record<ConsumedEventName, Projection | null> = {
 };
 
 /**
- * A refresh holds the asset's locks across up to three short exchanges with
- * asset-service (each bounded by its own deadline), so its transaction is given
+ * A refresh holds the asset's locks across up to two short exchanges with
+ * asset-service (`REFRESH_UPSTREAM_CALLS_UNDER_LOCK`, each bounded by its own
+ * deadline; `loadMaintenanceEnv` keeps their wait under the statement
+ * timeout), so its transaction is given
  * room. Replays are rare operator actions; other deliveries for that asset wait.
  */
 const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;

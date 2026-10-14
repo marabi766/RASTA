@@ -1,5 +1,6 @@
 import {
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  assertStatementWaitsWithinTimeout,
   baseEnvSchema,
   databaseEnvSchema,
   kafkaEnvSchema,
@@ -254,6 +255,44 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
     } as NodeJS.ProcessEnv);
     expect(env).not.toHaveProperty('DATABASE_URL');
     expect(env).not.toHaveProperty('DATABASE_POOL_SIZE');
+  });
+});
+
+describe('a wait the settings allow, against the statement timeout (#268 r3)', () => {
+  const env = { DATABASE_STATEMENT_TIMEOUT_MS: 15_000 };
+  const wait = (variable: string, worstCaseMs: number) => ({
+    variable,
+    worstCaseMs,
+    derivation: 'a test wait',
+  });
+
+  it('accepts every wait shorter than the statement timeout, and no waits at all', () => {
+    expect(() => assertStatementWaitsWithinTimeout(env, [wait('A_MS', 14_999)])).not.toThrow();
+    expect(() => assertStatementWaitsWithinTimeout(env, [])).not.toThrow();
+  });
+
+  it('refuses a wait as long as the statement timeout: the statement would be cancelled first', () => {
+    expect(() => assertStatementWaitsWithinTimeout(env, [wait('A_MS', 15_000)])).toThrow(
+      EnvValidationError,
+    );
+  });
+
+  it('names every setting that does not fit, with its worst case and how it is made up', () => {
+    let thrown: unknown;
+    try {
+      assertStatementWaitsWithinTimeout(env, [
+        wait('A_MS', 15_000),
+        wait('B_MS', 1_000),
+        wait('C_MS', 60_000),
+      ]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(EnvValidationError);
+    const issues = (thrown as EnvValidationError).issues;
+    expect(issues.map((issue) => issue.path)).toEqual(['A_MS', 'C_MS']);
+    expect(issues[1]!.message).toContain('up to 60000 ms (a test wait)');
+    expect(issues[1]!.message).toContain('DATABASE_STATEMENT_TIMEOUT_MS (15000 ms)');
   });
 });
 

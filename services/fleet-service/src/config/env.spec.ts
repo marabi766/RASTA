@@ -88,6 +88,25 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     expect(at(3 * 3_125 + 5_000, 3_125)).toMatch(/must exceed/);
   });
 
+  it('#268 r3: refuses a statement timeout that a replay’s lock hold can outlast; the bound is exact', () => {
+    // Others wait on the refresh's lock for as long as its transaction may run.
+    const at = (statementTimeoutMs: number) => () =>
+      loadFleetEnv({ ...MINIMAL, DATABASE_STATEMENT_TIMEOUT_MS: String(statementTimeoutMs) });
+    expect(at(14_200)).toThrow(
+      /FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: lets one statement wait up to 14200 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(14200 ms\)/,
+    );
+    expect(at(14_201)).not.toThrow();
+    expect(() =>
+      loadFleetEnv({
+        ...MINIMAL,
+        DATABASE_STATEMENT_TIMEOUT_MS: '12000',
+        FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '11999',
+        // Still above 3 × the upstream timeout + 5 s, as the budget above asks.
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '2000',
+      }),
+    ).not.toThrow();
+  });
+
   it('refuses a transaction timeout longer than the session timeout, and a start wait out of range, in the schema', () => {
     expect(() =>
       loadFleetEnv({ ...MINIMAL, FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS: '60001' }),

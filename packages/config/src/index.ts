@@ -30,13 +30,23 @@ export {
   isTest,
   allowsDeveloperTooling,
   EnvValidationError,
+  STATEMENT_WAIT_MARGIN_MS,
+  assertStatementWaitsWithinTimeout,
   urlWithProtocol,
   httpUrlSchema,
   postgresUrlSchema,
   redisUrlSchema,
 } from './env';
 
-export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, OutboxPurgeEnv, EnvIssue } from './env';
+export type {
+  NodeEnv,
+  LogLevel,
+  BaseEnv,
+  KafkaEnv,
+  OutboxPurgeEnv,
+  EnvIssue,
+  StatementWait,
+} from './env';
 
 export { UTC_SESSION_OPTION, withStatementTimeout, withUtcSession } from './database-session';
 

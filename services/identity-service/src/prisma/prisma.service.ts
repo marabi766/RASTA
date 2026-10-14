@@ -117,11 +117,46 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * Exposed deliberately: the outbox pattern requires the state change and the
    * outbox insert to share one transaction, and that is the whole reason the
    * platform does not lose or invent events (ADR-021).
+   *
+   * `statementTimeoutMs` is for a transaction whose statements may wait longer
+   * than the connection's `DATABASE_STATEMENT_TIMEOUT_MS` (#268): it is set
+   * with `SET LOCAL` as the transaction's first statement, so it ends with the
+   * transaction and the connection goes back to the pool unchanged.
    */
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { maxWait?: number; timeout?: number },
+    options?: TransactionOptions,
   ): Promise<T> {
-    return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+    if (options?.statementTimeoutMs === undefined) {
+      return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+    }
+    const bound = localStatementTimeoutOf(options.statementTimeoutMs);
+    const { maxWait, timeout } = options;
+    return this.client.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
+        return fn(tx as ExtendedPrismaClient);
+      },
+      { maxWait, timeout },
+    );
   }
+}
+
+export interface TransactionOptions {
+  maxWait?: number;
+  timeout?: number;
+  /** `SET LOCAL statement_timeout` for this transaction only, in milliseconds. */
+  statementTimeoutMs?: number;
+}
+
+/**
+ * A positive whole number of milliseconds for `SET LOCAL statement_timeout`,
+ * which takes no bind parameter. Only ever a constant of this service, and
+ * checked so nothing but digits reaches the statement (S-05).
+ */
+function localStatementTimeoutOf(ms: number): number {
+  if (!Number.isSafeInteger(ms) || ms < 1) {
+    throw new Error('refusing a statement timeout that is not a positive whole number');
+  }
+  return ms;
 }

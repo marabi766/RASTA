@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
+  assertStatementWaitsWithinTimeout,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
@@ -294,7 +295,7 @@ export type ContractEnv = z.infer<typeof contractEnvSchema>;
  *                 database would violate A-01 quietly.
  */
 export function loadContractEnv(source: NodeJS.ProcessEnv = process.env): ContractEnv {
-  return loadEnv(contractEnvSchema, {
+  const env = loadEnv(contractEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
     PORT: source.PORT ?? source.PORT_CONTRACT ?? DEFAULT_PORT,
@@ -303,6 +304,31 @@ export function loadContractEnv(source: NodeJS.ProcessEnv = process.env): Contra
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  assertStatementWaitsWithinTimeout(env, [
+    {
+      variable: 'CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS',
+      worstCaseMs: signingTransactionTimeoutMs(env),
+      derivation:
+        'a signature, policy change or suspension waits on the policy-slot lock a signing ' +
+        'transaction holds across the organization-service call: its transaction timeout, ' +
+        `this setting + ${SIGNING_TRANSACTION_MARGIN_MS} ms`,
+    },
+  ]);
+  return env;
+}
+
+/** The room a signing transaction has besides the hierarchy question's deadline. */
+export const SIGNING_TRANSACTION_MARGIN_MS = 10_000;
+
+/**
+ * How long a signing transaction may run, holding the contract row and the
+ * policy-slot lock: the hierarchy question's deadline and some room. So also
+ * the longest a statement waiting on those locks waits (#268).
+ */
+export function signingTransactionTimeoutMs(
+  env: Pick<ContractEnv, 'CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS'>,
+): number {
+  return env.CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS + SIGNING_TRANSACTION_MARGIN_MS;
 }
 
 export function corsOrigins(env: ContractEnv): string[] {

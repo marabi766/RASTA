@@ -1,11 +1,13 @@
 import { z } from 'zod';
 import {
+  assertStatementWaitsWithinTimeout,
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  STATEMENT_WAIT_MARGIN_MS,
 } from '@rasta/config';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
 
@@ -140,7 +142,7 @@ export const assetEnvSchema = baseEnvSchema
 export type AssetEnv = z.infer<typeof assetEnvSchema>;
 
 export function loadAssetEnv(source: NodeJS.ProcessEnv = process.env): AssetEnv {
-  return loadEnv(assetEnvSchema, {
+  const env = loadEnv(assetEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? 'asset-service',
     PORT: source.PORT ?? source.PORT_ASSET ?? '3103',
@@ -149,6 +151,19 @@ export function loadAssetEnv(source: NodeJS.ProcessEnv = process.env): AssetEnv 
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'asset-service.main',
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  // A replayed timeline event's refresh asks fleet and maintenance about the
+  // machine's work at once (one exchange's time) under the asset row's lock.
+  assertStatementWaitsWithinTimeout(env, [
+    {
+      variable: 'ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS',
+      worstCaseMs: env.ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS + STATEMENT_WAIT_MARGIN_MS,
+      derivation:
+        "a delivery or write for the asset waits on the asset row a replay's refresh holds " +
+        `across one work-state exchange of this setting, + ${STATEMENT_WAIT_MARGIN_MS} ms for ` +
+        'its own statements',
+    },
+  ]);
+  return env;
 }
 
 export function corsOrigins(env: AssetEnv): string[] {

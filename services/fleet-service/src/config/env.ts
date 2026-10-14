@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  assertStatementWaitsWithinTimeout,
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
@@ -332,6 +333,16 @@ export function loadFleetEnv(source: NodeJS.ProcessEnv = process.env): FleetEnv 
   // a state event at run time instead (#240 r9, r10).
   const problem = assetSyncBudgetProblem(env);
   if (problem) throw new Error(`Invalid fleet-service configuration: ${problem}`);
+  // The transaction timeout bounds the calls too (above), so it is the wait.
+  assertStatementWaitsWithinTimeout(env, [
+    {
+      variable: 'FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS',
+      worstCaseMs: env.FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS,
+      derivation:
+        "a delivery, assignment or usage write waits on the machine's lock a replay's " +
+        'refresh holds across its upstream calls: that transaction timeout',
+    },
+  ]);
   return env;
 }
 

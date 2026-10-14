@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import {
+  assertStatementWaitsWithinTimeout,
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
@@ -152,7 +153,7 @@ export type InventoryEnv = z.infer<typeof inventoryEnvSchema>;
  *                 database would violate A-01 quietly.
  */
 export function loadInventoryEnv(source: NodeJS.ProcessEnv = process.env): InventoryEnv {
-  return loadEnv(inventoryEnvSchema, {
+  const env = loadEnv(inventoryEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? SERVICE_NAME,
     PORT: source.PORT ?? source.PORT_INVENTORY ?? DEFAULT_PORT,
@@ -161,6 +162,16 @@ export function loadInventoryEnv(source: NodeJS.ProcessEnv = process.env): Inven
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  // A command's wait for a stock row ends in lock_timeout (55P03, a retryable
+  // 409) only while that is shorter than the session's statement_timeout.
+  assertStatementWaitsWithinTimeout(env, [
+    {
+      variable: 'INVENTORY_LOCK_TIMEOUT_MS',
+      worstCaseMs: env.INVENTORY_LOCK_TIMEOUT_MS,
+      derivation: "a stock command's lock_timeout on each row it waits for",
+    },
+  ]);
+  return env;
 }
 
 export function corsOrigins(env: InventoryEnv): string[] {

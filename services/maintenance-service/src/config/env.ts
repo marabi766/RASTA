@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  assertStatementWaitsWithinTimeout,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
@@ -8,6 +9,7 @@ import {
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  STATEMENT_WAIT_MARGIN_MS,
 } from '@rasta/config';
 
 /**
@@ -106,8 +108,16 @@ export const maintenanceEnvSchema = baseEnvSchema
 
 export type MaintenanceEnv = z.infer<typeof maintenanceEnvSchema>;
 
+/**
+ * The upstream calls a replayed asset event's refresh makes, one after
+ * another, while it holds the asset's locks: the snapshot, and whether a stale
+ * fence's transfer was recorded. Each is bounded by
+ * `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS`.
+ */
+export const REFRESH_UPSTREAM_CALLS_UNDER_LOCK = 2;
+
 export function loadMaintenanceEnv(source: NodeJS.ProcessEnv = process.env): MaintenanceEnv {
-  return loadEnv(maintenanceEnvSchema, {
+  const env = loadEnv(maintenanceEnvSchema, {
     ...source,
     SERVICE_NAME: source.SERVICE_NAME ?? 'maintenance-service',
     PORT: source.PORT ?? source.PORT_MAINTENANCE ?? '3105',
@@ -116,6 +126,19 @@ export function loadMaintenanceEnv(source: NodeJS.ProcessEnv = process.env): Mai
     KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'maintenance-service.main',
     CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
   });
+  assertStatementWaitsWithinTimeout(env, [
+    {
+      variable: 'ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS',
+      worstCaseMs:
+        REFRESH_UPSTREAM_CALLS_UNDER_LOCK * env.ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS +
+        STATEMENT_WAIT_MARGIN_MS,
+      derivation:
+        "a new request, repair order or delivery waits on the asset's locks a replay's refresh " +
+        `holds across ${REFRESH_UPSTREAM_CALLS_UNDER_LOCK} calls of this setting each, ` +
+        `+ ${STATEMENT_WAIT_MARGIN_MS} ms for its own statements`,
+    },
+  ]);
+  return env;
 }
 
 export function corsOrigins(env: MaintenanceEnv): string[] {

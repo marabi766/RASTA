@@ -1,4 +1,39 @@
-import { assetEnvSchema } from './env';
+import { assetEnvSchema, loadAssetEnv } from './env';
+
+/**
+ * #268 r3: a replayed timeline event's refresh holds the asset row across one
+ * work-state exchange (fleet and maintenance asked at once), and every other
+ * delivery or write for that asset waits on it. That wait must end before the
+ * session's statement timeout would cut it.
+ */
+describe('ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS against the statement timeout', () => {
+  const BASE: NodeJS.ProcessEnv = {
+    DATABASE_URL: 'postgresql://u:p@localhost:5433/rasta_asset?schema=public',
+    KAFKA_BROKERS: 'localhost:9092',
+    OIDC_ISSUER_URL: 'http://localhost:8080/realms/rasta',
+    OIDC_JWKS_URI: 'http://localhost:8080/realms/rasta/protocol/openid-connect/certs',
+    OIDC_AUDIENCE: 'rasta-api',
+    INTERNAL_TOKEN_SECRET: 'a-throwaway-value-used-only-by-this-spec-32',
+    FLEET_SERVICE_URL: 'http://localhost:3104',
+    MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
+    DOCUMENT_SERVICE_URL: 'http://localhost:3107',
+  };
+  const load = (overrides: NodeJS.ProcessEnv) => () => loadAssetEnv({ ...BASE, ...overrides });
+
+  it('holds the timeout + 5 s under it; the bound is exact', () => {
+    expect(load({})).not.toThrow();
+    expect(load({ ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: '9999' })).not.toThrow();
+    expect(load({ ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: '10000' })).toThrow(
+      /ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
+    );
+    expect(
+      load({
+        ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: '30000',
+        DATABASE_STATEMENT_TIMEOUT_MS: '35001',
+      }),
+    ).not.toThrow();
+  });
+});
 
 /**
  * The two claim-authority settings (docs/24 Q-59), parsed as a deployment

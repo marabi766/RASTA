@@ -1,4 +1,4 @@
-import { corsOrigins, loadContractEnv } from './env';
+import { corsOrigins, loadContractEnv, signingTransactionTimeoutMs } from './env';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -181,5 +181,26 @@ describe('corsOrigins', () => {
     expect(corsOrigins(load({ GATEWAY_CORS_ORIGINS: 'https://gw.test' }))).toEqual([
       'https://gw.test',
     ]);
+  });
+});
+
+describe('the signing lock hold against the statement timeout (#268 r3)', () => {
+  it('waits up to the signing transaction timeout: the organization timeout + 10 s', () => {
+    const env = load();
+    expect(signingTransactionTimeoutMs(env)).toBe(13_000);
+  });
+
+  it('refuses an organization timeout whose lock hold the statement timeout would cut; the bound is exact', () => {
+    expect(() => load({ CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '5000' })).toThrow(
+      /CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
+    );
+    expect(() => load({ CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '4999' })).not.toThrow();
+    // A longer one is accepted with a statement timeout above its hold.
+    expect(() =>
+      load({
+        CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '60000',
+        DATABASE_STATEMENT_TIMEOUT_MS: '70001',
+      }),
+    ).not.toThrow();
   });
 });

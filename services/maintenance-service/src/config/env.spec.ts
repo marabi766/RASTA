@@ -93,3 +93,27 @@ describe('MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS', () => {
     },
   );
 });
+
+/**
+ * #268 r3: a replayed asset event's refresh holds the asset's locks across two
+ * calls of `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS`, and new work waits on them.
+ * That wait must end before the session's statement timeout would cut it.
+ */
+describe('ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS against the statement timeout', () => {
+  const load = (overrides: NodeJS.ProcessEnv) => () =>
+    loadMaintenanceEnv({ ...BASE, ...overrides });
+
+  it('holds 2 × the timeout + 5 s under it; the bound is exact', () => {
+    expect(load({})).not.toThrow();
+    expect(load({ ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '4999' })).not.toThrow();
+    expect(load({ ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '5000' })).toThrow(
+      /ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
+    );
+    expect(
+      load({
+        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000',
+        DATABASE_STATEMENT_TIMEOUT_MS: '65001',
+      }),
+    ).not.toThrow();
+  });
+});

@@ -541,6 +541,50 @@ export class EnvValidationError extends Error {
 }
 
 /**
+ * Room for the database work a lock holder does around its upstream calls,
+ * where its transaction's own timeout is a fixed allowance rather than one
+ * derived from its settings: the 5 s fleet's asset-sync budget already allows.
+ */
+export const STATEMENT_WAIT_MARGIN_MS = 5_000;
+
+/** How long a service's settings let one statement wait, at worst (#268). */
+export interface StatementWait {
+  /** The setting that sizes the wait; the refusal's path. */
+  readonly variable: string;
+  /** The worst case at the configured values, in milliseconds. */
+  readonly worstCaseMs: number;
+  /** What waits on what, and how the worst case is made up. */
+  readonly derivation: string;
+}
+
+/**
+ * Refuses a configuration in which a setting lets one statement wait at
+ * least as long as `DATABASE_STATEMENT_TIMEOUT_MS` (#268). That statement is
+ * a lock wait on a transaction that holds the lock across upstream calls, or
+ * one bounded by its own `lock_timeout`; the session's `statement_timeout`
+ * would cancel it first (`57014`), so an operation that is merely slow would
+ * fail, and one that answers a lock timeout with 409 would answer 500. A
+ * transaction that sets its own `statement_timeout` with `SET LOCAL` is not
+ * listed: the session's value does not apply to it.
+ */
+export function assertStatementWaitsWithinTimeout(
+  env: { DATABASE_STATEMENT_TIMEOUT_MS: number },
+  waits: readonly StatementWait[],
+): void {
+  const limitMs = env.DATABASE_STATEMENT_TIMEOUT_MS;
+  const issues = waits
+    .filter((wait) => wait.worstCaseMs >= limitMs)
+    .map((wait) => ({
+      path: wait.variable,
+      message:
+        `lets one statement wait up to ${wait.worstCaseMs} ms (${wait.derivation}), not less ` +
+        `than DATABASE_STATEMENT_TIMEOUT_MS (${limitMs} ms), which would cancel it first. ` +
+        `Lower ${wait.variable} or raise DATABASE_STATEMENT_TIMEOUT_MS`,
+    }));
+  if (issues.length > 0) throw new EnvValidationError(issues);
+}
+
+/**
  * Validates `source` against `schema` and returns the parsed, typed result.
  * Throws {@link EnvValidationError} listing *every* problem at once — fixing
  * one missing variable per restart is a miserable way to configure 17 services.

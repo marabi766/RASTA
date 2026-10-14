@@ -124,3 +124,18 @@ describe('corsOrigins', () => {
     ]);
   });
 });
+
+describe('INVENTORY_LOCK_TIMEOUT_MS against the statement timeout (#268 r3)', () => {
+  it('refuses a lock timeout the statement timeout would cut first (500, not 409); the bound is exact', () => {
+    expect(() => load({ INVENTORY_LOCK_TIMEOUT_MS: '15000' })).toThrow(
+      /INVENTORY_LOCK_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
+    );
+    expect(() => load({ INVENTORY_LOCK_TIMEOUT_MS: '14999' })).not.toThrow();
+    expect(() =>
+      load({ INVENTORY_LOCK_TIMEOUT_MS: '5000', DATABASE_STATEMENT_TIMEOUT_MS: '5000' }),
+    ).toThrow(/INVENTORY_LOCK_TIMEOUT_MS/);
+    expect(() =>
+      load({ INVENTORY_LOCK_TIMEOUT_MS: '60000', DATABASE_STATEMENT_TIMEOUT_MS: '60001' }),
+    ).not.toThrow();
+  });
+});
