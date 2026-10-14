@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
-import type { ReactNode } from 'react';
+import { Suspense, type ReactNode } from 'react';
 
+import { AccountGuard } from './AccountGuard';
 import { vazirmatn } from './fonts';
 import './globals.css';
 
@@ -33,7 +34,12 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="fa" dir="rtl" className={vazirmatn.variable}>
-      <body>{children}</body>
+      <body>
+        {children}
+        <Suspense fallback={null}>
+          <AccountGuard />
+        </Suspense>
+      </body>
     </html>
   );
 }

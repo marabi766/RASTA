@@ -28,6 +28,7 @@ export {
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
 } from './errors/rasta-error';
+export { safeLogText } from './errors/safe-log-text';
 
 // Decorators -----------------------------------------------------------------
 export {
@@ -136,8 +137,17 @@ export {
 export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
 
 // Event consumption ----------------------------------------------------------
-export { EventConsumer, UnprocessableEventError } from './consumer/event-consumer';
+export {
+  EventConsumer,
+  UnprocessableEventError,
+  deadLetterHeaders,
+  HANDLER_MESSAGE_MAX,
+  CONSUMER_SESSION_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BACKOFF_MS,
+} from './consumer/event-consumer';
 export type {
+  DeadLetterDescription,
   EventConsumerOptions,
   EventDelivery,
   EventHandler,
@@ -156,6 +166,7 @@ export {
 // Outbox ---------------------------------------------------------------------
 export {
   buildOutboxRow,
+  buildHeaders as envelopeHeaders,
   orderForPublish,
   OutboxRelay,
   renewalIntervalMs,

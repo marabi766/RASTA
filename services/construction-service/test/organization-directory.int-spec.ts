@@ -14,7 +14,12 @@ import { testEnv } from './helpers';
  *   X-Internal-Token from construction-service, for organization-service,
  *   signed for the scope organization; GET /v1/organizations/{id}
  *     id is the scope, or beneath it → 200 { id }
- *     otherwise                      → 404
+ *     otherwise                      → 404 { code: 'NOT_FOUND', message: 'Organization not found' }
+ *
+ * Only that 404 is "not within". A 404 without that body — a proxy's HTML page, an empty body, a
+ * route that is not mounted — proves nothing about the hierarchy and is refused as unavailable:
+ * read as "outside", it would make the sweeper suspend a valid policy (construction audit, as
+ * contract-service #248).
  *
  * The server verifies the token with the real verifier, so a client that sent
  * the wrong audience, caller, purpose or organization would fail here. Then
@@ -37,7 +42,26 @@ function within(scope: string, id: string): boolean {
   return false;
 }
 
-type Behaviour = 'contract' | 'error' | 'wrong-body' | 'slow' | 'stalled-body' | 'oversized';
+type Behaviour =
+  | 'contract'
+  | 'error'
+  | 'wrong-body'
+  | 'slow'
+  | 'stalled-body'
+  | 'oversized'
+  | 'html-404'
+  | 'empty-404'
+  | 'route-404'
+  | 'oversized-404';
+
+/** What organization-service's exception filter renders for `RastaError.notFound('Organization', id)`. */
+const organizationNotFound = (path: string) => ({
+  code: 'NOT_FOUND',
+  message: 'Organization not found',
+  correlationId: 'corr-directory',
+  timestamp: new Date().toISOString(),
+  path,
+});
 
 describe('OrganizationDirectory against the organization-service contract', () => {
   let server: Server;
@@ -70,6 +94,34 @@ describe('OrganizationDirectory against the organization-service contract', () =
           res.writeHead(500).end();
           return;
         }
+        // 404s that are not organization-service's answer about an organization.
+        if (behaviour === 'html-404') {
+          res.writeHead(404, { 'content-type': 'text/html' });
+          res.end('<html><body><h1>404 Not Found</h1>nginx</body></html>');
+          return;
+        }
+        if (behaviour === 'empty-404') {
+          res.writeHead(404).end();
+          return;
+        }
+        if (behaviour === 'route-404') {
+          // Nest's own 404 for a route that is not mounted: the same filter and code, another message.
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              ...organizationNotFound(req.url ?? ''),
+              message: `Cannot GET ${req.url ?? ''}`,
+            }),
+          );
+          return;
+        }
+        if (behaviour === 'oversized-404') {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({ ...organizationNotFound(req.url ?? ''), padding: 'x'.repeat(4096) }),
+          );
+          return;
+        }
         const id = decodeURIComponent((req.url ?? '').replace('/v1/organizations/', ''));
         if (behaviour === 'wrong-body') {
           res.writeHead(200, { 'content-type': 'application/json' });
@@ -82,7 +134,8 @@ describe('OrganizationDirectory against the organization-service contract', () =
           return;
         }
         if (!within(claims.organizationId, id)) {
-          res.writeHead(404).end();
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(organizationNotFound(req.url ?? '')));
           return;
         }
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -187,6 +240,19 @@ describe('OrganizationDirectory against the organization-service contract', () =
       asked(() => directory().isWithin('ORG-UNION', 'ORG-DEHYARI')),
     ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
   });
+
+  it.each(['html-404', 'empty-404', 'route-404', 'oversized-404'] as const)(
+    'a 404 that is not organization-service’s own (%s) is unavailable, never "outside" (503)',
+    async (kind) => {
+      behaviour = kind;
+      await expect(
+        asked(() => directory().isWithin('ORG-UNION', 'ORG-DEHYARI')),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      await expect(asked(() => directory().exists('ORG-DEHYARI'))).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+    },
+  );
 
   it('fails closed when organization-service cannot be reached (503)', async () => {
     await expect(

@@ -1,4 +1,18 @@
-import { brokersOf, corsOrigins, DEFAULT_PORT, loadConstructionEnv, SERVICE_NAME } from './env';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
+import {
+  brokersOf,
+  corsOrigins,
+  DEFAULT_PORT,
+  loadConstructionEnv,
+  SERVICE_NAME,
+  TENDER_MAX_STANDING_BIDS_CEILING,
+  TENDER_MAX_STANDING_BIDS_DEFAULT,
+  TENDER_OPEN_TIMEOUT_DEFAULT_MS,
+  TENDER_OPEN_TIMEOUT_MAX_MS,
+  TENDER_OPEN_TIMEOUT_MIN_MS,
+} from './env';
 
 /**
  * Configuration parsing, the fallbacks a deployment relies on, and the four
@@ -202,6 +216,94 @@ describe('project roles (Q-69)', () => {
       ['CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS', 'soon'],
     ])('refuses %s=%s', (name, value) => {
       expect(() => load({ [name]: value })).toThrow();
+    });
+  });
+
+  describe('how long a tender’s receipt chain may grow (construction audit F2)', () => {
+    it('defaults to what audit-service returns, and 50 revisions a bid (provisional, D1)', () => {
+      const env = load();
+      expect(env.CONSTRUCTION_TENDER_MAX_RECEIPTS).toBe(EVIDENCE_MAX_CHAIN_LINKS);
+      expect(env.CONSTRUCTION_BID_MAX_REVISIONS).toBe(50);
+    });
+
+    it('never allows more receipts than audit-service returns: such a tender could not be opened', () => {
+      expect(() =>
+        load({ CONSTRUCTION_TENDER_MAX_RECEIPTS: String(EVIDENCE_MAX_CHAIN_LINKS + 1) }),
+      ).toThrow(/CONSTRUCTION_TENDER_MAX_RECEIPTS/);
+      expect(
+        load({ CONSTRUCTION_TENDER_MAX_RECEIPTS: '100' }).CONSTRUCTION_TENDER_MAX_RECEIPTS,
+      ).toBe(100);
+    });
+
+    it.each(['0', '1.5', 'many'])('refuses %s', (value) => {
+      expect(() => load({ CONSTRUCTION_TENDER_MAX_RECEIPTS: value })).toThrow();
+      expect(() => load({ CONSTRUCTION_BID_MAX_REVISIONS: value })).toThrow();
+    });
+
+    it('holds the same limit audit-service holds (its MAX_CHAIN_LINKS), read from its source', () => {
+      // No cross-service import: the declaration is read as text, so the two cannot drift apart.
+      const source = readFileSync(
+        join(__dirname, '../../../audit-service/src/audit/tender-evidence.repository.ts'),
+        'utf8',
+      );
+      const declared = /export const MAX_CHAIN_LINKS = ([\d_]+);/.exec(source)?.[1];
+      expect(Number(declared?.replaceAll('_', ''))).toBe(EVIDENCE_MAX_CHAIN_LINKS);
+    });
+  });
+
+  describe('how many bids may stand on one tender (Codex r2 on #250, Q-117)', () => {
+    it('defaults to the provisional 200 and takes a value up to the measured ceiling', () => {
+      expect(load().CONSTRUCTION_TENDER_MAX_STANDING_BIDS).toBe(TENDER_MAX_STANDING_BIDS_DEFAULT);
+      expect(TENDER_MAX_STANDING_BIDS_DEFAULT).toBe(200);
+      expect(
+        load({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: String(TENDER_MAX_STANDING_BIDS_CEILING) })
+          .CONSTRUCTION_TENDER_MAX_STANDING_BIDS,
+      ).toBe(TENDER_MAX_STANDING_BIDS_CEILING);
+    });
+
+    it('at the default caps, every standing bid can use every revision within the receipt cap', () => {
+      const env = load();
+      expect(
+        env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS * env.CONSTRUCTION_BID_MAX_REVISIONS,
+      ).toBeLessThanOrEqual(env.CONSTRUCTION_TENDER_MAX_RECEIPTS);
+    });
+
+    it.each([
+      String(TENDER_MAX_STANDING_BIDS_CEILING + 1),
+      '10000',
+      '0',
+      '-1',
+      '200.5',
+      'unlimited',
+      '',
+    ])('refuses %j at startup rather than falling back', (value) => {
+      expect(() => load({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: value })).toThrow(
+        /CONSTRUCTION_TENDER_MAX_STANDING_BIDS/,
+      );
+    });
+  });
+
+  describe('how long opening a tender’s bids may take (Codex r1 on #250, R2)', () => {
+    it('has an explicit default, not Prisma’s 5 s, and takes a value in range', () => {
+      expect(load().CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS).toBe(TENDER_OPEN_TIMEOUT_DEFAULT_MS);
+      expect(TENDER_OPEN_TIMEOUT_DEFAULT_MS).toBeGreaterThan(5_000);
+      expect(
+        load({ CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: '60000' }).CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS,
+      ).toBe(60_000);
+    });
+
+    it.each([
+      String(TENDER_OPEN_TIMEOUT_MIN_MS - 1),
+      String(TENDER_OPEN_TIMEOUT_MAX_MS + 1),
+      '0',
+      '-1',
+      '7500.5',
+      'forever',
+      '',
+    ])('refuses %j at startup rather than falling back', (value) => {
+      expect(() => load({ CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS: value })).toThrow(
+        /CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS/,
+      );
     });
   });
 

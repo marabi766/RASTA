@@ -1,14 +1,19 @@
 import { Injectable } from '@nestjs/common';
+import { ulid } from 'ulid';
+import type { EventEnvelope } from '@rasta/contracts';
 import {
   allocateStreamSeqSql,
   buildOutboxRow,
+  createSystemContext,
   runUnscoped,
+  runWithContext,
   type OutboxMessageInput,
 } from '@rasta/nest-common';
 import { resolvePartitionKey } from './routing';
 import type { FleetEventName } from './events';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import { Prisma } from '../generated/prisma';
 import type { InsuranceCover } from './dispatch-blocks';
 import type {
   AvailabilityQuery,
@@ -42,7 +47,7 @@ export class FleetRepository {
 
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; maxWaitMs?: number },
   ): Promise<T> {
     return this.prisma.transaction(fn, options);
   }
@@ -84,6 +89,37 @@ export class FleetRepository {
     });
 
     return row.id;
+  }
+
+  /**
+   * Enqueues a dead letter in the caller's transaction (#240 r9, ADR-021): the
+   * outbox relay publishes it to its topic once that transaction commits, and
+   * never if it rolls back. The row carries the original envelope, key and
+   * headers as they are to be published; its id is fresh, never the event's —
+   * a replayed event can be dead-lettered again. No stream sequence: a dead
+   * letter is in no fleet stream.
+   */
+  async enqueueDeadLetter(
+    tx: ExtendedPrismaClient,
+    letter: DeadLetterOutboxInput,
+  ): Promise<string> {
+    const id = ulid();
+    await tx.outboxMessage.create({
+      data: {
+        id,
+        aggregateType: letter.envelope.aggregateType,
+        aggregateId: letter.envelope.aggregateId,
+        eventName: letter.envelope.eventName,
+        eventVersion: letter.envelope.eventVersion,
+        topic: letter.topic,
+        partitionKey: letter.key,
+        payload: letter.envelope as unknown as Prisma.InputJsonValue,
+        headers: letter.headers,
+        organizationId: letter.organizationId,
+        correlationId: letter.envelope.correlationId,
+      },
+    });
+    return id;
   }
 
   // -------------------------------------------------------------------------
@@ -361,6 +397,29 @@ export class FleetRepository {
     const rows = await tx.$queryRaw<{ fence_id: string }[]>`
       SELECT fence_id FROM asset_transfer_fence WHERE asset_id = ${assetId}`;
     return rows.length > 0;
+  }
+
+  /**
+   * Which of these machines have a transfer fence standing, live or expired —
+   * the same test assignment applies (ADR-062 § 3b), for a listing.
+   */
+  async findFencedAssetIds(assetIds: readonly string[]): Promise<Set<string>> {
+    if (assetIds.length === 0) return new Set();
+    const rows = await this.client.$queryRaw<{ asset_id: string }[]>`
+      SELECT asset_id FROM asset_transfer_fence WHERE asset_id = ANY(${[...assetIds]}::text[])`;
+    return new Set(rows.map((row) => row.asset_id));
+  }
+
+  /**
+   * The database's clock *now*. `clock_timestamp()`, not `now()`: `now()` is
+   * the transaction's start, so an assignment whose transaction began before a
+   * policy ended but got the asset's lock after it would still pass. Read after
+   * {@link lockAssetRef}, as the last check before the insert. Application
+   * hosts with skewed clocks do not decide who is insured either.
+   */
+  async databaseNow(tx: ExtendedPrismaClient): Promise<Date> {
+    const [row] = await tx.$queryRaw<[{ now: Date }]>`SELECT clock_timestamp() AS now`;
+    return row.now;
   }
 
   /** The machine's fence, if any, and whether it has expired by the database's clock. */
@@ -722,9 +781,30 @@ export class FleetRepository {
   // Asset reference replica
   // -------------------------------------------------------------------------
 
-  async findAssetRef(id: string, tx?: ExtendedPrismaClient) {
-    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
-      (tx ?? this.client).assetRef.findFirst({ where: { id } }),
+  /**
+   * The replica row of a machine **of that organization**; absent and another
+   * tenant's are the same `null`. The read every request path uses (AGENTS.md
+   * A-04): the organization is part of the query, so a row of another tenant
+   * is never loaded into this one's request, whatever the caller then does
+   * with it.
+   */
+  async findAssetRef(organizationId: string, id: string, tx?: ExtendedPrismaClient) {
+    return runUnscoped(
+      'asset reference replica is platform-wide; the tenant filter is applied explicitly below',
+      () => (tx ?? this.client).assetRef.findFirst({ where: { id, organizationId } }),
+    );
+  }
+
+  /**
+   * The replica row of a machine whoever owns it. Not for a request that acts
+   * for a tenant: only the event consumer, which writes the replica for every
+   * tenant and must see a row it may not own, and the transfer clearance,
+   * which has to tell a machine that is elsewhere from one never seen.
+   */
+  async findAssetRefUnscoped(id: string, tx?: ExtendedPrismaClient) {
+    return runUnscoped(
+      'asset reference replica is platform-wide; the caller decides about ownership itself',
+      () => (tx ?? this.client).assetRef.findFirst({ where: { id } }),
     );
   }
 
@@ -736,11 +816,76 @@ export class FleetRepository {
    * a report with names — the textbook N+1, and the one query on this service
    * that grows with the size of the fleet rather than with the page.
    */
-  async findAssetRefs(ids: readonly string[]) {
+  async findAssetRefs(organizationId: string, ids: readonly string[]) {
     if (ids.length === 0) return [];
-    return runUnscoped('asset reference replica is platform-wide, not tenant data', () =>
-      this.client.assetRef.findMany({ where: { id: { in: [...ids] } } }),
+    return runUnscoped(
+      'asset reference replica is platform-wide; the tenant filter is applied explicitly below',
+      () => this.client.assetRef.findMany({ where: { organizationId, id: { in: [...ids] } } }),
     );
+  }
+
+  /**
+   * One keyset page of the transferred replica rows `insurance:clear-transferred`
+   * targets, by id after `after` — those with nothing left to empty included
+   * (#240 r11): each has its invalidation epoch moved. Candidates only:
+   * {@link clearInsuranceCover} decides each under the asset's lock.
+   */
+  async listClearableInsuranceRefs(
+    options: ClearableInsuranceOptions & { after: string; limit: number },
+  ): Promise<ClearableInsuranceRef[]> {
+    return runUnscoped(
+      'operator command over the platform-wide replica; the organization filter is applied in the predicate',
+      () =>
+        this.client.$queryRaw<ClearableInsuranceRef[]>`
+          SELECT r.id, r.organization_id AS "organizationId", ${holdsInsurance} AS "holdsInsurance"
+            FROM asset_ref r
+           WHERE r.id > ${options.after} AND ${transferredPredicate(options)}
+           ORDER BY r.id
+           LIMIT ${options.limit}`,
+    );
+  }
+
+  /**
+   * Empties one transferred replica row's insurance windows and increments its
+   * invalidation epoch, if it is still targeted. Under {@link lockAssetRef} in
+   * the caller's transaction, so a transfer or an event committed since the page
+   * was read is seen. The retained-coverage list is emptied in the same update:
+   * a delayed old-owner event for a coverage that followed at transfer time
+   * would otherwise still be exempted from the owner check and restore a window
+   * for the new owner. Lapses and the generation are left as they are.
+   *
+   * The epoch moves on EVERY row, also one whose windows and retained list were
+   * already empty (#240 r11): there the update changes no value the
+   * `insurance_revision` trigger counts, and an answer asset-service gave under
+   * the previous rule would otherwise still match the row. With the epoch moved,
+   * a verification that read the row before this commit cannot apply after it.
+   *
+   * Returns the row's owner and whether it held anything to empty, or null when
+   * it no longer qualifies.
+   */
+  async clearInsuranceCover(
+    tx: ExtendedPrismaClient,
+    assetId: string,
+    options: ClearableInsuranceOptions,
+  ): Promise<{ organizationId: string; holdsInsurance: boolean } | null> {
+    // `before` is read in the statement's snapshot, so it shows the row as it
+    // was before this update; the caller holds the asset's lock.
+    const rows = await runUnscoped(
+      'operator command over the platform-wide replica; the organization filter is applied in the predicate',
+      () =>
+        tx.$queryRaw<{ organizationId: string; holdsInsurance: boolean }[]>`
+          WITH before AS (
+            SELECT r.id, ${holdsInsurance} AS holds FROM asset_ref r
+             WHERE r.id = ${assetId} AND ${transferredPredicate(options)}
+          )
+          UPDATE asset_ref a
+             SET insurance_cover = '{}'::jsonb, retained_coverages = '{}',
+                 insurance_epoch = a.insurance_epoch + 1, synced_at = now()
+            FROM before
+           WHERE a.id = before.id
+          RETURNING a.organization_id AS "organizationId", before.holds AS "holdsInsurance"`,
+    );
+    return rows[0] ?? null;
   }
 
   async upsertAssetRef(
@@ -759,6 +904,8 @@ export class FleetRepository {
       insuranceLapsedCoverages?: string[];
       insuranceLapsedAt?: Date | null;
       insuranceCover?: InsuranceCover;
+      ownershipGeneration?: number | null;
+      retainedCoverages?: string[];
       sourceEvent: string;
     },
   ) {
@@ -784,8 +931,185 @@ export class FleetRepository {
   }
 
   // -------------------------------------------------------------------------
+  // Parked insurance events (#240 r8)
+  //
+  // Written under the envelope's tenant; read and removed by machine or by age,
+  // whichever tenant parked them, under `runUnscoped`. Every mutation of a row
+  // happens under `lockAssetRef` for its machine, so the transfer's handler and
+  // the sweep (on any instance) never change the same row at once.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Parks an event, in the caller's transaction and under the envelope's tenant
+   * (the tenant guard writes `organization_id` from that context). Called after
+   * the event's `processed_event` marker in the same transaction, so a
+   * redelivery stops at the marker and never parks it twice.
+   */
+  async parkInsuranceEvent(tx: ExtendedPrismaClient, row: ParkedInsuranceInput): Promise<void> {
+    const context = createSystemContext({
+      correlationId: row.correlationId,
+      organizationId: row.organizationId,
+      callerService: SERVICE_NAME,
+    });
+    // Awaited inside the context: a Prisma query is lazy and would otherwise run
+    // after the context closed (test/helpers.ts `asActor`).
+    await runWithContext(context, async () => {
+      await tx.insurancePendingVerification.create({
+        data: {
+          eventId: row.eventId,
+          assetId: row.assetId,
+          // Stated, and held by the guard to the context's tenant: the same one.
+          organizationId: row.organizationId,
+          envelope: row.envelope as Prisma.InputJsonValue,
+          messageKey: row.messageKey,
+          sourceTopic: row.sourceTopic,
+          sourcePartition: row.sourcePartition,
+          sourceOffset: row.sourceOffset,
+          reason: row.reason,
+        },
+      });
+    });
+  }
+
+  /**
+   * One parked event, read under {@link lockAssetRef}. `due` says whether the
+   * sweep may try it now: made due by its machine's transfer, or parked and last
+   * tried at least `minAgeSeconds` ago, by the database's clock — so a second
+   * instance's sweep that listed it before this one tried it leaves it alone.
+   */
+  async findParkedInsurance(
+    tx: ExtendedPrismaClient,
+    eventId: string,
+    minAgeSeconds: number,
+  ): Promise<ParkedInsurance | null> {
+    const rows = await runUnscoped(
+      'a parked insurance event is decided by machine, whichever tenant parked it',
+      () =>
+        tx.$queryRaw<RawParkedInsurance[]>`
+          SELECT event_id, asset_id, organization_id, envelope, message_key, source_topic,
+                 source_partition, source_offset, reason, attempts,
+                 (COALESCE(next_attempt_at <= now(), false)
+                  OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
+                      AND (last_attempt_at IS NULL
+                           OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int)))) AS due
+            FROM insurance_pending_verification
+           WHERE event_id = ${eventId}`,
+    );
+    const row = rows[0];
+    return row
+      ? {
+          eventId: row.event_id,
+          assetId: row.asset_id,
+          organizationId: row.organization_id,
+          envelope: row.envelope,
+          messageKey: row.message_key,
+          sourceTopic: row.source_topic,
+          sourcePartition: row.source_partition,
+          sourceOffset: row.source_offset,
+          reason: row.reason,
+          attempts: row.attempts,
+          due: row.due,
+        }
+      : null;
+  }
+
+  /**
+   * Makes every parked event of one machine due now, whichever tenant parked it
+   * (#240 r10): its transfer committed, so the sweep decides them on its next
+   * run. In the transfer's transaction, under {@link lockAssetRef}; one
+   * statement, asking nobody. Returns how many.
+   */
+  async markParkedInsuranceDue(tx: ExtendedPrismaClient, assetId: string): Promise<number> {
+    return runUnscoped(
+      'a transfer makes every parked insurance event of the machine due, whichever tenant parked it',
+      () =>
+        tx.$executeRaw`
+          UPDATE insurance_pending_verification SET next_attempt_at = now()
+           WHERE asset_id = ${assetId}`,
+    );
+  }
+
+  /**
+   * The sweep's batch: made due by a transfer, or parked and last tried at least
+   * `minAgeSeconds` ago, by the database's clock. Those a transfer made due
+   * first, then the oldest.
+   */
+  async listDueParkedInsurance(
+    minAgeSeconds: number,
+    limit: number,
+  ): Promise<{ eventId: string; assetId: string }[]> {
+    const rows = await runUnscoped(
+      'the parked-insurance sweep spans every tenant; each row is decided under its machine’s lock',
+      () =>
+        this.client.$queryRaw<{ event_id: string; asset_id: string }[]>`
+          SELECT event_id, asset_id FROM insurance_pending_verification
+           WHERE next_attempt_at <= now()
+              OR (first_seen_at <= now() - make_interval(secs => ${minAgeSeconds}::int)
+                  AND (last_attempt_at IS NULL
+                       OR last_attempt_at <= now() - make_interval(secs => ${minAgeSeconds}::int)))
+           ORDER BY next_attempt_at IS NULL, first_seen_at, event_id
+           LIMIT ${limit}`,
+    );
+    return rows.map((row) => ({ eventId: row.event_id, assetId: row.asset_id }));
+  }
+
+  /**
+   * Counts one more attempt that left the event parked, and why; a mark made by
+   * a transfer is spent, and the age rule applies again. Returns the attempts so far.
+   */
+  async recordParkedAttempt(
+    tx: ExtendedPrismaClient,
+    eventId: string,
+    reason: string,
+  ): Promise<number> {
+    const rows = await runUnscoped(
+      'a parked insurance event is decided by machine, whichever tenant parked it',
+      () =>
+        tx.$queryRaw<{ attempts: number }[]>`
+          UPDATE insurance_pending_verification
+             SET attempts = attempts + 1, last_attempt_at = now(), next_attempt_at = NULL,
+                 reason = ${reason}
+           WHERE event_id = ${eventId}
+          RETURNING attempts`,
+    );
+    return rows[0]?.attempts ?? 0;
+  }
+
+  /** Removes a parked event: applied, definitively rejected, or dead-lettered. */
+  async deleteParkedInsurance(tx: ExtendedPrismaClient, eventId: string): Promise<boolean> {
+    const result = await runUnscoped(
+      'a parked insurance event is decided by machine, whichever tenant parked it',
+      () => tx.insurancePendingVerification.deleteMany({ where: { eventId } }),
+    );
+    return result.count === 1;
+  }
+
+  // -------------------------------------------------------------------------
   // Consumer idempotency
   // -------------------------------------------------------------------------
+
+  /**
+   * Forgets that an event was handled, so a replay of it is applied. Only for
+   * an event this consumer acknowledged without applying and has now
+   * dead-lettered (a parked insurance event whose attempts ran out).
+   */
+  async unmarkEventProcessed(
+    tx: ExtendedPrismaClient,
+    eventId: string,
+    consumerName: string,
+  ): Promise<void> {
+    await tx.processedEvent.deleteMany({ where: { eventId, consumerName } });
+  }
+
+  /**
+   * Whether an event is already marked handled, read outside any transaction.
+   * Only to skip work that would be wasted (asking asset-service about a
+   * redelivered event); the marker itself is still written, and decides, in the
+   * handler's transaction.
+   */
+  async isEventProcessed(eventId: string, consumerName: string): Promise<boolean> {
+    return (await this.client.processedEvent.count({ where: { eventId, consumerName } })) > 0;
+  }
 
   /**
    * Records that an event has been handled.
@@ -808,6 +1132,98 @@ export class FleetRepository {
       throw error;
     }
   }
+}
+
+/** A dead letter for the outbox (#240 r9): published as `key`, `envelope` and `headers` to `topic`. */
+export interface DeadLetterOutboxInput {
+  topic: string;
+  key: string;
+  envelope: EventEnvelope;
+  headers: Record<string, string>;
+  /** The original envelope's tenant. */
+  organizationId: string;
+}
+
+/** What parking an `INSURANCE_RECORDED` stores (#240 r8). */
+export interface ParkedInsuranceInput {
+  eventId: string;
+  assetId: string;
+  /** The envelope's tenant. */
+  organizationId: string;
+  correlationId: string;
+  envelope: unknown;
+  messageKey: string | null;
+  sourceTopic: string;
+  sourcePartition: number | null;
+  sourceOffset: string | null;
+  reason: string;
+}
+
+export interface ParkedInsurance {
+  eventId: string;
+  assetId: string;
+  organizationId: string;
+  envelope: unknown;
+  messageKey: string | null;
+  sourceTopic: string;
+  sourcePartition: number | null;
+  sourceOffset: string | null;
+  reason: string;
+  attempts: number;
+  /** Whether the sweep may try it now (see `findParkedInsurance`). */
+  due: boolean;
+}
+
+interface RawParkedInsurance {
+  event_id: string;
+  asset_id: string;
+  organization_id: string;
+  envelope: unknown;
+  message_key: string | null;
+  source_topic: string;
+  source_partition: number | null;
+  source_offset: string | null;
+  reason: string;
+  attempts: number;
+  due: boolean;
+}
+
+export interface ClearableInsuranceOptions {
+  /** Also the rows whose ownership generation is NULL (after a rollback of the generation migration). */
+  includeUnknownGeneration: boolean;
+  /** Only machines this organization owns **now**. */
+  organizationId?: string;
+}
+
+/** A replica row `insurance:clear-transferred` targets, as a page names it. */
+export interface ClearableInsuranceRef {
+  id: string;
+  organizationId: string;
+  /** Whether it holds a window or a retained coverage to empty. */
+  holdsInsurance: boolean;
+}
+
+/** Whether replica row `r` holds a window or a retained coverage. */
+const holdsInsurance = Prisma.sql`(r.insurance_cover <> '{}'::jsonb OR cardinality(r.retained_coverages) > 0)`;
+
+/**
+ * Which replica rows `insurance:clear-transferred` targets: those that have
+ * ever been transferred, whether or not they still hold a window (#240 r11:
+ * every one has its invalidation epoch moved). A stated ownership generation
+ * above zero, a latest event that was a transfer, or a window revoked by one
+ * (all a transfer without a generation leaves), and optionally every row whose
+ * generation is unknown.
+ */
+function transferredPredicate(options: ClearableInsuranceOptions): Prisma.Sql {
+  return Prisma.sql`
+    (${options.organizationId ?? null}::text IS NULL OR r.organization_id = ${options.organizationId ?? null})
+    AND (
+      r.ownership_generation > 0
+      OR r.source_event = 'ASSET_TRANSFERRED'
+      OR EXISTS (SELECT 1 FROM availability_window w
+                  WHERE w.asset_id = r.id AND w.revoke_reason = 'ASSET_TRANSFERRED')
+      OR (${options.includeUnknownGeneration}::boolean AND r.ownership_generation IS NULL)
+    )`;
 }
 
 export function isUniqueViolation(error: unknown): boolean {

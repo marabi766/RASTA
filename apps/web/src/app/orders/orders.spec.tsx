@@ -299,6 +299,22 @@ describe('the list', () => {
   });
 });
 
+describe('an order that was just placed', () => {
+  it('says it was placed and that it is not settled, claiming no payment and no acceptance', () => {
+    const { container } = render(
+      <OrderDetailScreen result={ok(ORDER)} csrfToken={CSRF} mintSubmissionId={mint} placed />,
+    );
+    expect(screen.getByText(/سفارش ثبت شد/)).toBeInTheDocument();
+    expect(container.textContent).toMatch(/هنوز قطعی نیست/);
+    expect(container.textContent).not.toMatch(/پرداخت شد|پذیرفته شد/);
+  });
+
+  it('says nothing of the kind on an ordinary visit', () => {
+    renderDetail(ORDER);
+    expect(screen.queryByText(/سفارش ثبت شد/)).toBeNull();
+  });
+});
+
 describe('accessibility', () => {
   it('has no violations on the detail screen with every form a buyer can see', async () => {
     const { container } = renderDetail({

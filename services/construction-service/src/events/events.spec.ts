@@ -88,6 +88,7 @@ Object.assign(VALID, {
     progressBasisPoints: 2500,
     submittedBy: 'USR_1',
     submittedAt: AT,
+    supersededCompletionRound: null,
   },
   PROJECT_COMPLETED: { ...BASE, completedBy: 'USR_1', completedAt: AT },
   APPROVAL_POLICY_CREATED: {

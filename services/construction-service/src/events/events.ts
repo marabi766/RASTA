@@ -310,6 +310,13 @@ export const projectProgressUpdatedPayload = z
     progressBasisPoints: z.number().int().min(0).max(10_000),
     submittedBy: identifier,
     submittedAt: isoTimestamp,
+    /**
+     * The completion approval round this report ended, or null (construction audit F7): a round
+     * asks its authorities about the report that stood when completion was requested, so a new
+     * report supersedes its undecided steps in the same transaction, and completion is requested
+     * again. The steps' state says it too (`SUPERSEDED`).
+     */
+    supersededCompletionRound: z.number().int().positive().nullable(),
   })
   .strict();
 
@@ -683,12 +690,19 @@ export const bidOpeningProposalWithdrawnPayload = z
     organizationId: identifier,
     proposedBy: identifier,
     /**
-     * Who took it back (the proposer), or whose approval found the proposer conflicted or with
-     * no stable identity on record (#188: a proposal older than the record cannot be told apart
-     * from the approver, so it neither stands nor blocks).
+     * Who took it back (the proposer), or whose approval found the proposer conflicted, no longer
+     * authorised to open the bids (no live membership of the owner, no opening role, or an
+     * excluded role — construction audit F6), or with no stable identity on record (#188: a
+     * proposal older than the record cannot be told apart from the approver, so it neither
+     * stands nor blocks).
      */
     withdrawnBy: identifier,
-    reason: z.enum(['WITHDRAWN_BY_PROPOSER', 'PROPOSER_CONFLICTED', 'PROPOSER_IDENTITY_UNKNOWN']),
+    reason: z.enum([
+      'WITHDRAWN_BY_PROPOSER',
+      'PROPOSER_CONFLICTED',
+      'PROPOSER_NOT_AUTHORIZED',
+      'PROPOSER_IDENTITY_UNKNOWN',
+    ]),
     withdrawnAt: isoTimestamp,
   })
   .strict();

@@ -24,6 +24,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  bidKey,
 } from './helpers';
 import { REFUSAL_REASONS, buildConstructionOpenApiDocument } from '../src/openapi/document';
 import { responseSchemaOf, validate, violationsOf } from './refusal-contract';
@@ -61,7 +62,9 @@ describe('the refusal contract: real refusals against the generated OpenAPI docu
     const bidder = org(`${label}-bidder`);
     await qualify(w, bidder);
     const { tenderId } = await publishedForBids(w, owner);
-    const bid = await asBidder(bidder, () => w.bids.submit(tenderId, { content: bidContent() }));
+    const bid = await asBidder(bidder, () =>
+      w.bids.submit(tenderId, { content: bidContent() }, bidKey()),
+    );
     await runUnscoped('the suite lets the deadline pass', () =>
       w.prisma.client.$executeRawUnsafe(
         `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',

@@ -354,6 +354,18 @@ export class BidRepository {
     return { seq: (last?.seq ?? 0) + 1, previousReceipt: last?.receipt ?? null };
   }
 
+  /**
+   * The bids standing on a tender — submitted, not withdrawn — the caller's own uncommitted one
+   * included. Read under the chain's advisory lock (`nextReceiptSlot`), which every submission
+   * holds until it commits, so no two submissions count past each other.
+   */
+  countStandingBids(tx: ExtendedPrismaClient, tenderId: string): Promise<number> {
+    return runUnscoped(
+      'a submission counts the bids standing on the tender it bids on, by id',
+      () => tx.bid.count({ where: { tenderId, status: 'SUBMITTED' } }),
+    );
+  }
+
   /** The receipt issued for one revision of a bid, or null. */
   async receiptOf(
     tx: ExtendedPrismaClient,

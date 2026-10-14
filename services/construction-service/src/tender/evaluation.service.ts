@@ -18,6 +18,7 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { evaluationRefusalsTotal, tenderTransitionsTotal } from '../observability/metrics';
 import { versionConflictsTotal } from '../observability/metrics';
 import { transactionNow } from '../shared/clock';
+import { IdempotencyStore, targeted, type RecordCompletion } from '../shared/idempotency';
 import { storedActor, storedIdentityOf } from '../shared/stable-actor';
 import { ENV } from '../tokens';
 import { BidAccessAudit, refusalCodeOf } from './bid-access-audit';
@@ -70,6 +71,9 @@ export const EVALUATION_REFUSALS = [
   'EVALUATION_INCOMPLETE',
 ] as const;
 export type EvaluationRefusal = (typeof EVALUATION_REFUSALS)[number];
+
+/** The endpoint template a score's `Idempotency-Key` is stored under (docs/06 § 6.8). */
+export const SCORE_BID_ENDPOINT = 'POST /v1/tenders/:id/bids/:bidId/scores';
 
 /** What the transaction of an evaluation command works with, once the tender is locked and judged. */
 interface Locked {
@@ -147,6 +151,7 @@ export class EvaluationService {
     private readonly standing: StandingAuthority,
     private readonly clock: TenderClock,
     @Inject(ENV) private readonly env: ConstructionEnv,
+    private readonly idempotency: IdempotencyStore,
   ) {}
 
   // -- decide on a bid -------------------------------------------------------------------
@@ -316,137 +321,177 @@ export class EvaluationService {
 
   // -- score a bid -----------------------------------------------------------------------
 
-  async score(tenderId: string, bidId: string, dto: ScoreBidDto): Promise<ScoreRecordedView> {
+  /**
+   * Records the caller's scores for one qualified bid. Each score names the revision of its cell
+   * the caller last saw (`expectedRevision`, 0 for a new cell) and is compared-and-set under the
+   * tender lock: one that does not match refuses the whole request (409, nothing recorded), so a
+   * delayed retry of an older score cannot be appended as a newer revision and move the ranking
+   * (construction audit F5). An `Idempotency-Key` (optional, as on the other construction
+   * commands; the gateway sends one) answers a retry with the first answer; it is claimed only
+   * after the caller is authorised, judged live and found not conflicted, so a replay never skips
+   * them, and it is the evaluator's own: the evaluator is part of the request.
+   */
+  async score(
+    tenderId: string,
+    bidId: string,
+    dto: ScoreBidDto,
+    idempotencyKey?: string,
+  ): Promise<ScoreRecordedView> {
     const caller = await this.authorize(tenderId, 'SCORE_BID');
     return this.guarded(caller, tenderId, 'SCORE_BID', async () => {
       const principal = await this.identity.live(caller, 'EVALUATE_BIDS');
       await this.assertNotConflicted(principal, tenderId);
-      return withFinancialSpan(
-        'construction.bid.score',
-        () =>
-          this.prisma.transaction(async (tx) => {
-            const locked = await this.enter(tx, principal, tenderId);
-            const bid = this.bidOf(locked, bidId);
-            await this.assertOnePerson(tx, tenderId, bidId, 'SCORE');
-            if (bid.status !== 'QUALIFIED') throw this.rule('BID_NOT_QUALIFIED');
-
-            const criteria = await this.repo.listCriteria(tx, tenderId);
-            const byCode = new Map(criteria.map((criterion) => [criterion.code, criterion]));
-            for (const { criterionCode, scoreScaled } of dto.scores) {
-              const criterion = byCode.get(criterionCode);
-              if (!criterion) throw this.rule('UNKNOWN_CRITERION');
-              const top = criterion.maxScore * 100;
-              if (
-                scoreScaled < 0 ||
-                scoreScaled > top ||
-                (criterion.scoringMethod === 'PASS_FAIL' &&
-                  scoreScaled !== 0 &&
-                  scoreScaled !== top)
-              ) {
-                throw this.rule('SCORE_OUT_OF_RANGE');
-              }
-            }
-
-            const { at } = locked;
-            let evaluation = await this.repo.findEvaluation(tx, tenderId, bidId, principal.actor);
-            if (!evaluation) {
-              const active = await this.repo.countActiveEvaluators(tx, tenderId, bidId);
-              if (active >= this.env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS) {
-                throw this.rule('EVALUATOR_LIMIT');
-              }
-              const id = newId(ID_PREFIX.evaluation);
-              const identity = storedIdentityOf(currentActor());
-              await this.repo.insertEvaluation(tx, {
-                id,
-                organizationId: principal.organizationId,
-                tenderId,
-                bidId,
-                evaluatorId: principal.actor,
-                identity,
-                at,
-              });
-              evaluation = {
-                id,
-                organizationId: principal.organizationId,
-                tenderId,
-                bidId,
-                evaluatorId: principal.actor,
-                evaluatorIssuer: identity.issuer,
-                evaluatorSubject: identity.subject,
-                createdAt: at,
-              };
-            }
-
-            const latest = new Map<string, { revision: number; scoreScaled: number }>();
-            for (const row of await this.repo.listScoresOf(tx, evaluation.id)) {
-              const current = latest.get(row.criterionCode);
-              if (!current || current.revision < row.revision) {
-                latest.set(row.criterionCode, {
-                  revision: row.revision,
-                  scoreScaled: row.scoreScaled,
-                });
-              }
-            }
-            const recorded: { criterionCode: string; revision: number; scoreScaled: number }[] = [];
-            const unchanged: string[] = [];
-            for (const { criterionCode, scoreScaled } of dto.scores) {
-              const current = latest.get(criterionCode);
-              // A revision is a change: the score already standing is not appended again.
-              if (current && current.scoreScaled === scoreScaled) {
-                unchanged.push(criterionCode);
-                continue;
-              }
-              const revision = (current?.revision ?? 0) + 1;
-              await this.repo.insertScore(tx, {
-                id: newId(ID_PREFIX.score),
-                organizationId: principal.organizationId,
-                tenderId,
-                bidId,
-                evaluationId: evaluation.id,
-                evaluatorId: principal.actor,
-                criterionCode,
-                revision,
-                scoreScaled,
-                at,
-              });
-              latest.set(criterionCode, { revision, scoreScaled });
-              recorded.push({ criterionCode, revision, scoreScaled });
-            }
-
-            if (recorded.length > 0) {
-              await this.events.enqueue(tx, {
-                eventName: 'BID_SCORED',
-                aggregateId: tenderId,
-                organizationId: principal.organizationId,
-                payload: {
-                  bidId,
-                  tenderId,
-                  organizationId: principal.organizationId,
-                  evaluationId: evaluation.id,
-                  evaluatorId: principal.actor,
-                  recordedCount: recorded.length,
-                  scoresDigest: sha256(
-                    recorded.map((r) => `${r.criterionCode}|${r.revision}|${r.scoreScaled}`),
-                  ),
-                  scoredAt: at.toISOString(),
-                },
-                occurredAt: at,
-              });
-              await this.record(tx, principal, tenderId, bidId, 'SCORE_BID', at);
-            }
-            return {
-              bidId,
-              tenderId,
-              evaluationId: evaluation.id,
-              evaluatorId: principal.actor,
-              recorded,
-              unchanged,
-              complete: criteria.every((criterion) => latest.has(criterion.code)),
-            };
-          }),
-        { 'rasta.tender.command': 'score-bid' },
+      return this.idempotency.run(
+        SCORE_BID_ENDPOINT,
+        idempotencyKey,
+        targeted(`${tenderId}/${bidId}`, { evaluator: principal.actor, scores: dto.scores }),
+        200,
+        (record) => this.scoreOnce(principal, tenderId, bidId, dto, record),
       );
     });
+  }
+
+  private scoreOnce(
+    principal: LivePrincipal,
+    tenderId: string,
+    bidId: string,
+    dto: ScoreBidDto,
+    record: RecordCompletion<ScoreRecordedView>,
+  ): Promise<ScoreRecordedView> {
+    return withFinancialSpan(
+      'construction.bid.score',
+      () =>
+        this.prisma.transaction(async (tx) => {
+          const locked = await this.enter(tx, principal, tenderId);
+          const bid = this.bidOf(locked, bidId);
+          await this.assertOnePerson(tx, tenderId, bidId, 'SCORE');
+          if (bid.status !== 'QUALIFIED') throw this.rule('BID_NOT_QUALIFIED');
+
+          const criteria = await this.repo.listCriteria(tx, tenderId);
+          const byCode = new Map(criteria.map((criterion) => [criterion.code, criterion]));
+          for (const { criterionCode, scoreScaled } of dto.scores) {
+            const criterion = byCode.get(criterionCode);
+            if (!criterion) throw this.rule('UNKNOWN_CRITERION');
+            const top = criterion.maxScore * 100;
+            if (
+              scoreScaled < 0 ||
+              scoreScaled > top ||
+              (criterion.scoringMethod === 'PASS_FAIL' && scoreScaled !== 0 && scoreScaled !== top)
+            ) {
+              throw this.rule('SCORE_OUT_OF_RANGE');
+            }
+          }
+
+          const { at } = locked;
+          let evaluation = await this.repo.findEvaluation(tx, tenderId, bidId, principal.actor);
+          if (!evaluation) {
+            const active = await this.repo.countActiveEvaluators(tx, tenderId, bidId);
+            if (active >= this.env.CONSTRUCTION_EVALUATION_MAX_EVALUATORS) {
+              throw this.rule('EVALUATOR_LIMIT');
+            }
+            const id = newId(ID_PREFIX.evaluation);
+            const identity = storedIdentityOf(currentActor());
+            await this.repo.insertEvaluation(tx, {
+              id,
+              organizationId: principal.organizationId,
+              tenderId,
+              bidId,
+              evaluatorId: principal.actor,
+              identity,
+              at,
+            });
+            evaluation = {
+              id,
+              organizationId: principal.organizationId,
+              tenderId,
+              bidId,
+              evaluatorId: principal.actor,
+              evaluatorIssuer: identity.issuer,
+              evaluatorSubject: identity.subject,
+              createdAt: at,
+            };
+          }
+
+          const latest = new Map<string, { revision: number; scoreScaled: number }>();
+          for (const row of await this.repo.listScoresOf(tx, evaluation.id)) {
+            const current = latest.get(row.criterionCode);
+            if (!current || current.revision < row.revision) {
+              latest.set(row.criterionCode, {
+                revision: row.revision,
+                scoreScaled: row.scoreScaled,
+              });
+            }
+          }
+          // Compare-and-set, every cell before any is written: a score is about the revision its
+          // sender last saw, and one sent about an older revision (a delayed retry) changes nothing.
+          for (const { criterionCode, expectedRevision } of dto.scores) {
+            if ((latest.get(criterionCode)?.revision ?? 0) !== expectedRevision) {
+              versionConflictsTotal.inc({ service: SERVICE_NAME, aggregate: 'BidScore' });
+              throw RastaError.optimisticLockFailed('BidScore', `${bidId}/${criterionCode}`);
+            }
+          }
+          const recorded: { criterionCode: string; revision: number; scoreScaled: number }[] = [];
+          const unchanged: string[] = [];
+          for (const { criterionCode, scoreScaled } of dto.scores) {
+            const current = latest.get(criterionCode);
+            // A revision is a change: the score already standing is not appended again.
+            if (current && current.scoreScaled === scoreScaled) {
+              unchanged.push(criterionCode);
+              continue;
+            }
+            const revision = (current?.revision ?? 0) + 1;
+            await this.repo.insertScore(tx, {
+              id: newId(ID_PREFIX.score),
+              organizationId: principal.organizationId,
+              tenderId,
+              bidId,
+              evaluationId: evaluation.id,
+              evaluatorId: principal.actor,
+              criterionCode,
+              revision,
+              scoreScaled,
+              at,
+            });
+            latest.set(criterionCode, { revision, scoreScaled });
+            recorded.push({ criterionCode, revision, scoreScaled });
+          }
+
+          if (recorded.length > 0) {
+            await this.events.enqueue(tx, {
+              eventName: 'BID_SCORED',
+              aggregateId: tenderId,
+              organizationId: principal.organizationId,
+              payload: {
+                bidId,
+                tenderId,
+                organizationId: principal.organizationId,
+                evaluationId: evaluation.id,
+                evaluatorId: principal.actor,
+                recordedCount: recorded.length,
+                scoresDigest: sha256(
+                  recorded.map((r) => `${r.criterionCode}|${r.revision}|${r.scoreScaled}`),
+                ),
+                scoredAt: at.toISOString(),
+              },
+              occurredAt: at,
+            });
+            await this.record(tx, principal, tenderId, bidId, 'SCORE_BID', at);
+          }
+          const view: ScoreRecordedView = {
+            bidId,
+            tenderId,
+            evaluationId: evaluation.id,
+            evaluatorId: principal.actor,
+            recorded,
+            unchanged,
+            complete: criteria.every((criterion) => latest.has(criterion.code)),
+          };
+          // The answer and the key's completion commit with the scores, or none of them does.
+          await record(tx, evaluation.id, view);
+          return view;
+        }),
+      { 'rasta.tender.command': 'score-bid' },
+    );
   }
 
   // -- complete the evaluation -----------------------------------------------------------
