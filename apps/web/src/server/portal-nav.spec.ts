@@ -108,7 +108,7 @@ describe('portalNavFor', () => {
 });
 
 describe('loadPortalNav', () => {
-  const SESSION = {} as WebSession;
+  const SESSION = { accessToken: 'opaque' } as WebSession;
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -162,6 +162,78 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/inventory');
     expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/inventory');
     expect(hrefs(await loadPortalNav(SESSION, user(['SYSTEM_ADMIN'])))).not.toContain('/inventory');
+  });
+
+  describe('Inventory against the realm roles in the access token', () => {
+    const sessionWith = (claims: unknown): WebSession =>
+      ({
+        accessToken: `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`,
+      }) as WebSession;
+    const REALM_ADMIN = { realm_access: { roles: ['SYSTEM_ADMIN'] } };
+
+    beforeEach(() => {
+      delete process.env.WEB_INVENTORY_ROLES;
+      delete process.env.WEB_INVENTORY_READER_ROLES;
+    });
+
+    it.each([
+      {
+        name: 'ORGANIZATION_ADMIN membership + realm SYSTEM_ADMIN is refused by the service',
+        roles: ['ORGANIZATION_ADMIN'],
+        claims: REALM_ADMIN,
+        shown: false,
+      },
+      {
+        name: 'ORGANIZATION_ADMIN membership, no realm role',
+        roles: ['ORGANIZATION_ADMIN'],
+        claims: {},
+        shown: true,
+      },
+      {
+        name: 'ORGANIZATION_ADMIN membership + a non-global realm role',
+        roles: ['ORGANIZATION_ADMIN'],
+        claims: { realm_access: { roles: ['UNION_ADMIN'] } },
+        shown: true,
+      },
+      {
+        name: 'ORGANIZATION_ADMIN membership + unreadable claim adds nothing',
+        roles: ['ORGANIZATION_ADMIN'],
+        claims: 'SYSTEM_ADMIN',
+        shown: true,
+      },
+      {
+        name: 'realm SYSTEM_ADMIN alone',
+        roles: [],
+        claims: REALM_ADMIN,
+        shown: false,
+      },
+      {
+        name: 'AUDITOR + ORGANIZATION_ADMIN memberships',
+        roles: ['AUDITOR', 'ORGANIZATION_ADMIN'],
+        claims: {},
+        shown: false,
+      },
+      {
+        name: 'narrow membership + realm SYSTEM_ADMIN',
+        roles: ['DRIVER'],
+        claims: REALM_ADMIN,
+        shown: false,
+      },
+    ])('$name', async ({ roles, claims, shown }) => {
+      const items = hrefs(await loadPortalNav(sessionWith(claims), user(roles)));
+      expect(items.includes('/inventory')).toBe(shown);
+    });
+
+    it('is not read when identity did not answer', async () => {
+      for (const result of [
+        { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+        { kind: 'MALFORMED', correlationId: 'c' },
+      ] as const) {
+        expect(hrefs(await loadPortalNav(sessionWith(REALM_ADMIN), result))).not.toContain(
+          '/inventory',
+        );
+      }
+    });
   });
 
   it.each([

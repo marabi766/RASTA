@@ -4,6 +4,7 @@ import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
 import { fetchCurrentUser, type CurrentUserResult } from './identity';
+import { requestRoles } from './realm-roles';
 import type { WebSession } from './session';
 
 /**
@@ -68,9 +69,14 @@ export async function loadPortalNav(
 ): Promise<readonly SidebarItem[]> {
   const result = current ?? (await fetchCurrentUser(session));
   const roles = result.kind === 'USER' ? result.user.effectiveRoles : [];
+  // inventory-service judges the membership roles plus the global realm roles, so a realm
+  // SYSTEM_ADMIN with an ORGANIZATION_ADMIN membership is refused there. The claim is read only
+  // once identity answered: with no answer the link stays hidden, whatever the token says.
+  const inventoryRoles =
+    result.kind === 'USER' ? requestRoles(result.user.effectiveRoles, session.accessToken) : [];
   return portalNavFor({
     canReadProjects: canReadProjects(roles, webServerEnv()),
     canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
-    canReadInventory: canReadInventory(roles, webServerEnv()),
+    canReadInventory: canReadInventory(inventoryRoles, webServerEnv()),
   });
 }
