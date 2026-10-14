@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
-import { PrismaClient } from '../src/generated/prisma';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
 import {
   SUPPLIER,
@@ -17,7 +16,7 @@ import {
   bidContent,
   newOrganizationId,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   publishedForBids,
   qualify as makeEligible,
   testEnv,
@@ -1214,7 +1213,7 @@ describe('evaluating the opened bids of a tender', () => {
           `UPDATE "bid_qualification" SET "decided_by" = 'USR_X' WHERE "tender_id" = '${tenderId}'`,
         ),
       ).rejects.toThrow(/ck_bid_append_only/);
-      const ownerClient = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const ownerConnection = ownerClient();
       const rollback = new Error('the suite rolls the attempt back');
       try {
         for (const table of [
@@ -1224,14 +1223,14 @@ describe('evaluating the opened bids of a tender', () => {
           'bid_evaluation_score',
         ]) {
           await expect(
-            ownerClient.$transaction(async (tx) => {
+            ownerConnection.$transaction(async (tx) => {
               await tx.$executeRawUnsafe(`TRUNCATE "${table}"`);
               throw rollback;
             }),
           ).rejects.toThrow(/ck_bid_append_only|cannot truncate a table referenced/);
         }
       } finally {
-        await ownerClient.$disconnect();
+        await ownerConnection.$disconnect();
       }
       expect((await counts(tenderId)).scores).toBe(2);
     });

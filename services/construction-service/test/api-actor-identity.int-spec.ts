@@ -12,7 +12,7 @@ import {
   context,
   loadStanding,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   qualify,
   testEnv,
   wire,
@@ -169,7 +169,7 @@ describe('stable actor identity (#188) through the API', () => {
     api = await startApi();
     w = wire(testEnv({ CONSTRUCTION_TENDER_OPEN_FOUR_EYES: 'false' }));
     await loadStanding(w);
-    owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    owner = ownerClient();
   });
 
   afterEach(() => {

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
-import { PrismaClient } from '../src/generated/prisma';
+import type { PrismaClient } from '../src/generated/prisma';
 import {
   bidOpeningConflictChecksTotal,
   bidOpeningRefusalsTotal,
@@ -30,7 +30,7 @@ import {
   newOrganizationId,
   newUserId,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   publishedForBids,
   qualify,
   testEnv,
@@ -153,7 +153,7 @@ describe('opening the bids of a tender', () => {
 
   /** Changes what the database owner can change and the application role cannot: the triggers lifted. */
   const asDatabaseOwner = async (work: (tx: PrismaClient) => Promise<void>) => {
-    const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    const owner = ownerClient();
     try {
       await owner.$transaction(async (tx) => {
         for (const [table, trigger] of [

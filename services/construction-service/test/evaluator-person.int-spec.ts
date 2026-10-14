@@ -7,7 +7,7 @@ import {
   context,
   evaluatingTender,
   loadStanding,
-  ownerDatabaseUrl,
+  ownerClient,
   testEnv,
   wire,
   type Wiring,
@@ -83,7 +83,7 @@ describe('one person, one evaluator (#188 E1, E2)', () => {
       }),
     );
     await loadStanding(w);
-    owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+    owner = ownerClient();
   });
 
   afterAll(async () => {

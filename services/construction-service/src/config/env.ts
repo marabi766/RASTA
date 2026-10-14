@@ -495,6 +495,26 @@ export const constructionEnvSchema = baseEnvSchema
 
     /** docs/06 § 6.8: 24 hours unless configured. */
     CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+
+    /**
+     * How long one interactive transaction may stay open, BEGIN to COMMIT, before
+     * the database client rolls it back (`PrismaService`). Every transaction of
+     * this service runs on it unless its caller names its own bound (the
+     * idempotency wait does).
+     *
+     * Before it, every transaction ran on Prisma's unwritten 5 000 ms. A command
+     * of a few milliseconds that the process could not run for six seconds — a
+     * starved CI runner (main 2883320, run 38531029337), a CPU-throttled
+     * container — expired and failed, though it did nothing wrong. Never below
+     * that 5 000 ms, which would fail commands that pass today; at most a minute,
+     * which is already longer than any command here should hold its locks.
+     */
+    CONSTRUCTION_TRANSACTION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(60_000)
+      .default(15_000),
   })
   // The two key settings are one setting (Codex review of #163): keys with a
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass

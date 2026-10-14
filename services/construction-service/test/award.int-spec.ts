@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
-import { PrismaClient } from '../src/generated/prisma';
 import { Logger } from '@nestjs/common';
 import { awardStandingChecksTotal } from '../src/observability/metrics';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
@@ -19,7 +18,7 @@ import {
   loadStanding,
   newUserId,
   outboxFor,
-  ownerDatabaseUrl,
+  ownerClient,
   ownerSql,
   TEST_ISSUER,
   testEnv,
@@ -2019,17 +2018,17 @@ describe('awarding an evaluated tender', () => {
           }),
         ),
       ).rejects.toThrow(/ck_award_evaluated/);
-      const ownerClient = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+      const ownerConnection = ownerClient();
       const rollback = new Error('the suite rolls the attempt back');
       try {
         await expect(
-          ownerClient.$transaction(async (tx) => {
+          ownerConnection.$transaction(async (tx) => {
             await tx.$executeRawUnsafe(`TRUNCATE "tender_award"`);
             throw rollback;
           }),
         ).rejects.toThrow(/ck_bid_append_only|cannot truncate a table referenced/);
       } finally {
-        await ownerClient.$disconnect();
+        await ownerConnection.$disconnect();
       }
       expect(await awardRows(tenderId)).toHaveLength(1);
     });

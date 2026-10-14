@@ -67,6 +67,28 @@ describe('service identity and wiring', () => {
   });
 });
 
+describe('the transaction timeout', () => {
+  it('defaults to 15 s, above the 5 s Prisma would apply unwritten', () => {
+    expect(load().CONSTRUCTION_TRANSACTION_TIMEOUT_MS).toBe(15_000);
+  });
+
+  it('accepts a value from 5 s to a minute', () => {
+    for (const value of ['5000', '30000', '60000']) {
+      expect(
+        load({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: value }).CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+      ).toBe(Number(value));
+    }
+  });
+
+  it('refuses to start on anything else rather than fall back to a value', () => {
+    for (const value of ['4999', '60001', '0', '-1', '7500.5', 'fast', '']) {
+      expect(() => load({ CONSTRUCTION_TRANSACTION_TIMEOUT_MS: value })).toThrow(
+        /CONSTRUCTION_TRANSACTION_TIMEOUT_MS/,
+      );
+    }
+  });
+});
+
 describe('project roles (Q-69)', () => {
   it('defaults the writers to ORGANIZATION_ADMIN and the extra readers to nobody', () => {
     const env = load();
