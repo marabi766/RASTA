@@ -26,6 +26,10 @@ export const TENANT_SCOPED_MODELS = [
   'UsageRecord',
   'AvailabilityWindow',
   'IdempotencyKey',
+  // An INSURANCE_RECORDED parked for re-verification (#240 r8), under its
+  // envelope's tenant. The consumer and the sweep cross tenants by machine
+  // through `runUnscoped`; nothing reads it for a request.
+  'InsurancePendingVerification',
 ] as const;
 
 /**
@@ -128,14 +132,22 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * Exposed deliberately: the outbox pattern requires the state change and the
    * outbox insert to share one transaction, and that is the whole reason the
    * platform does not lose or invent events (ADR-021).
+   *
+   * `timeoutMs` bounds the transaction once started, `maxWaitMs` how long it
+   * may wait to start (a pool connection); Prisma's defaults (5 s, 2 s) where
+   * not given.
    */
   transaction<T>(
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; maxWaitMs?: number },
   ): Promise<T> {
+    const settings = {
+      ...(options?.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+      ...(options?.maxWaitMs === undefined ? {} : { maxWait: options.maxWaitMs }),
+    };
     return this.client.$transaction(
       (tx) => fn(tx as ExtendedPrismaClient),
-      options?.timeoutMs === undefined ? undefined : { timeout: options.timeoutMs },
+      Object.keys(settings).length === 0 ? undefined : settings,
     );
   }
 }

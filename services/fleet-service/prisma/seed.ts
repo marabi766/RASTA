@@ -253,11 +253,27 @@ async function main(): Promise<void> {
 
   console.warn('Seeding fleet-service…');
 
+  // The demo machines are insured: one policy per coverage, in force for a
+  // year, because dispatch requires a window in force (docs/24 Q-101) and an
+  // asset_ref seeded without one would be refused for every assignment.
+  const now = Date.now();
+  const insuranceCover = Object.fromEntries(
+    ['THIRD_PARTY', 'COMPREHENSIVE', 'PASSENGER_ACCIDENT', 'LIABILITY'].map((coverage) => [
+      coverage,
+      [
+        {
+          policyId: `SEED-${coverage}`,
+          validFrom: new Date(now - 86_400_000).toISOString(),
+          validTo: new Date(now + 365 * 86_400_000).toISOString(),
+        },
+      ],
+    ]),
+  );
   for (const ref of ASSET_REFS) {
     await prisma.assetRef.upsert({
       where: { id: ref.id },
-      create: { ...ref, syncedAt: new Date(), sourceEvent: 'SEED' },
-      update: { ...ref, syncedAt: new Date(), sourceEvent: 'SEED' },
+      create: { ...ref, insuranceCover, syncedAt: new Date(), sourceEvent: 'SEED' },
+      update: { ...ref, insuranceCover, syncedAt: new Date(), sourceEvent: 'SEED' },
     });
   }
   console.warn(`  asset references: ${ASSET_REFS.length}`);

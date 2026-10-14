@@ -11,7 +11,15 @@ import {
   TransferClearanceService,
 } from '../src/fleet/transfer-clearance';
 import type { TransferRecordSource } from '../src/fleet/transfer-record';
-import { asActor, cleanup, id, newPrisma, tenants, producerShaped } from './helpers';
+import {
+  asActor,
+  cleanup,
+  id,
+  newPrisma,
+  tenants,
+  producerShaped,
+  LAPSE_RULES_ONLY,
+} from './helpers';
 
 /**
  * The transfer clearance and its fence (ADR-062, docs/23 D-033), against
@@ -38,7 +46,7 @@ describe('transfer clearance', () => {
     repository = new FleetRepository(prisma);
     clearance = new TransferClearanceService(repository);
     consumer = new AssetSyncConsumer(null, repository);
-    assignments = new AssignmentService(repository);
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     await cleanup(prisma, [org.a, org.b]);
   });
 
@@ -221,7 +229,7 @@ describe('transfer clearance', () => {
     const assignWith = async (records: TransferRecordSource, assetId: string) => {
       const driverId = await driver(org.a);
       return asActor({ organizationId: org.a }, () =>
-        new AssignmentService(repository, undefined, records).create({ driverId, assetId }),
+        new AssignmentService(repository, LAPSE_RULES_ONLY, records).create({ driverId, assetId }),
       ).then(
         () => 'OK',
         (error: { code?: string; internalContext?: { rule?: string } }) =>
@@ -531,7 +539,10 @@ describe('transfer clearance', () => {
 
           const outcome = await refusal(
             asActor({ organizationId: org.b }, () =>
-              new AssignmentService(repository, undefined, records).create({ driverId, assetId }),
+              new AssignmentService(repository, LAPSE_RULES_ONLY, records).create({
+                driverId,
+                assetId,
+              }),
             ),
           );
 

@@ -1,4 +1,8 @@
-import { AssetSnapshotClient, MaintenanceStateClient } from './replica-sources';
+import {
+  AssetSnapshotClient,
+  InsurancePolicyClient,
+  MaintenanceStateClient,
+} from './replica-sources';
 
 const tokens = { issue: jest.fn(async () => 'signed') };
 const json = (status: number, body: unknown) =>
@@ -122,6 +126,118 @@ describe('MaintenanceStateClient', () => {
       await expect(client(bad).inMaintenance('ORG_A', 'AST_1')).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
+    }
+  });
+});
+
+/**
+ * The wire shape asset-service's `InsurancePolicyStandingService` answers with
+ * (its integration spec asserts these exact bodies): a change to either side
+ * breaks one of the two specs.
+ */
+describe('InsurancePolicyClient', () => {
+  const counting = (organizationId: string, extra: object = {}) => ({
+    transferred: false,
+    assetId: 'AST_1',
+    policyId: 'INS_1',
+    organizationId,
+    counts: true,
+    coverage: 'COMPREHENSIVE',
+    validFrom: '2026-02-01T00:00:00.000Z',
+    validUntil: '2027-02-01T00:00:00.000Z',
+    ownershipGeneration: 3,
+    ...extra,
+  });
+  const moved = { transferred: true, assetId: 'AST_1', organizationId: 'ORG_B' };
+
+  function policyClient(responses: Response[]) {
+    const fetchImpl = jest.fn(async () => responses.shift() ?? json(500, {}));
+    const client = new InsurancePolicyClient({
+      from: 'fleet-service',
+      baseUrl: 'http://asset.internal',
+      timeoutMs: 500,
+      tokens,
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    return { client, fetchImpl };
+  }
+
+  beforeEach(() => tokens.issue.mockClear());
+
+  it('returns the window and generation the source states, asked under the given organization', async () => {
+    const { client, fetchImpl } = policyClient([json(200, counting('ORG_A'))]);
+
+    await expect(client.verify('ORG_A', 'AST_1', 'INS_1')).resolves.toEqual({
+      counts: true,
+      organizationId: 'ORG_A',
+      coverage: 'COMPREHENSIVE',
+      validFrom: '2026-02-01T00:00:00.000Z',
+      validUntil: '2027-02-01T00:00:00.000Z',
+      ownershipGeneration: 3,
+    });
+    expect(tokens.issue).toHaveBeenCalledWith('fleet-service', 'asset-service', 'SERVICE', 'ORG_A');
+    expect((fetchImpl.mock.calls[0] as unknown as [string])[0]).toBe(
+      'http://asset.internal/v1/internal/assets/AST_1/insurance-policies/INS_1',
+    );
+  });
+
+  it('returns the reason a policy does not count', async () => {
+    const { client } = policyClient([
+      json(200, {
+        transferred: false,
+        assetId: 'AST_1',
+        policyId: 'INS_1',
+        organizationId: 'ORG_A',
+        counts: false,
+        reason: 'NOT_FOLLOWING_VEHICLE',
+      }),
+    ]);
+    await expect(client.verify('ORG_A', 'AST_1', 'INS_1')).resolves.toEqual({
+      counts: false,
+      reason: 'NOT_FOLLOWING_VEHICLE',
+    });
+  });
+
+  it('reads an unknown policy as one that does not count', async () => {
+    const { client } = policyClient([json(404, { code: 'NOT_FOUND', message: 'x' })]);
+    await expect(client.verify('ORG_A', 'AST_1', 'INS_1')).resolves.toEqual({
+      counts: false,
+      reason: 'UNKNOWN_POLICY',
+    });
+  });
+
+  it('reads NOT_CURRENT_OWNER as a verdict, asks once and never follows an owner', async () => {
+    const { client, fetchImpl } = policyClient([
+      json(200, {
+        transferred: false,
+        assetId: 'AST_1',
+        policyId: 'INS_1',
+        counts: false,
+        reason: 'NOT_CURRENT_OWNER',
+      }),
+    ]);
+
+    await expect(client.verify('ORG_A', 'AST_1', 'INS_1')).resolves.toEqual({
+      counts: false,
+      reason: 'NOT_CURRENT_OWNER',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats the retired transfer answer, and anything malformed or about another policy, as no answer', async () => {
+    for (const responses of [
+      [json(200, moved), json(200, moved)],
+      [json(500, {})],
+      [json(403, { code: 'FORBIDDEN' })],
+      [json(404, { code: 'ROUTE_NOT_FOUND' })],
+      [json(200, counting('ORG_A', { policyId: 'INS_OTHER' }))],
+      [json(200, counting('ORG_A', { validUntil: 'not a date' }))],
+      [json(200, counting('ORG_A', { ownershipGeneration: -1 }))],
+      [json(200, { transferred: false, assetId: 'AST_1', counts: true })],
+    ]) {
+      await expect(
+        policyClient(responses).client.verify('ORG_A', 'AST_1', 'INS_1'),
+      ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
     }
   });
 });

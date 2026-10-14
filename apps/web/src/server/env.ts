@@ -128,7 +128,10 @@ const schema = z.object({
     .optional(),
 
   /**
-   * Which roles are shown the Projects link (`server/portal-nav.ts`).
+   * Which roles are shown the Projects link, and the owner side of the Tenders
+   * link (`server/portal-nav.ts`) — construction-service gates both by the
+   * same configured roles. The bidder side of Tenders needs `CONTRACTOR`, fixed
+   * in the service, so it has no setting.
    *
    * These **mirror** construction-service's `CONSTRUCTION_PROJECT_ROLES`
    * (default `ORGANIZATION_ADMIN`) and `CONSTRUCTION_PROJECT_READER_ROLES`

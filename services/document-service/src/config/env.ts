@@ -6,6 +6,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import type { ClamdAddress } from '../scanning/clamav/clamd.client';
 
@@ -30,6 +31,7 @@ export const DOCUMENT_TOPIC = 'rasta.document.v1';
 export const documentEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

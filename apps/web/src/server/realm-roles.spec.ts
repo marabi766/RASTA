@@ -2,9 +2,12 @@
  * @jest-environment node
  */
 import { globalRealmRoles, requestRoles } from './realm-roles';
+import { tenderDoorsFor, tenderSidesFor } from './portal-nav';
 
 const token = (claims: unknown): string =>
   `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+
+const DEFAULTS = { WEB_PROJECT_ROLES: ['ORGANIZATION_ADMIN'], WEB_PROJECT_READER_ROLES: [] };
 
 describe('globalRealmRoles', () => {
   it.each([
@@ -43,5 +46,14 @@ describe('requestRoles', () => {
     expect(requestRoles(['CONTRACTOR'], jwt)).toEqual(['CONTRACTOR', 'SYSTEM_ADMIN']);
     expect(requestRoles(['SYSTEM_ADMIN'], jwt)).toEqual(['SYSTEM_ADMIN']);
     expect(requestRoles(['CONTRACTOR'], 'opaque')).toEqual(['CONTRACTOR']);
+  });
+
+  it('gives a realm SYSTEM_ADMIN with a CONTRACTOR membership the owner’s door only', () => {
+    const roles = requestRoles(
+      ['CONTRACTOR'],
+      token({ realm_access: { roles: ['SYSTEM_ADMIN'] } }),
+    );
+    expect(tenderSidesFor(roles, DEFAULTS)).toEqual({ owner: true, bidder: false });
+    expect(tenderDoorsFor(roles, DEFAULTS)).toEqual({ own: true, open: false });
   });
 });

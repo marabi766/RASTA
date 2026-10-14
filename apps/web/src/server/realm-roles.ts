@@ -4,15 +4,14 @@
  * identity-service's `/v1/users/me` reports membership roles only, but every
  * backend service builds a request's roles as the membership's roles *plus*
  * the global realm roles (`rolesForRequest`, ADR-060 § 4 rule 3: today only
- * `SYSTEM_ADMIN`). So a person with the realm role and a narrow membership is
- * a `SYSTEM_ADMIN` to economic-service and construction-service. The portal
- * reads the same claim (`realm_access.roles`) so that the links it draws agree
- * with what the services allow.
+ * `SYSTEM_ADMIN`). So a person with the realm role and a membership holding
+ * only `CONTRACTOR` is a `SYSTEM_ADMIN` to construction-service. The portal
+ * reads the same claim (`realm_access.roles`) so that what it draws and which
+ * door it knocks on agree with the service.
  *
  * The token is **not verified here**: it came from the token endpoint over TLS
- * into the sealed session, and the result only chooses which links to *draw*.
- * The gateway and the services verify the token on every request and decide
- * access. Callers read it only after `/v1/users/me` succeeded.
+ * into the sealed session, and the result only chooses what to *draw*. The
+ * gateway and the service verify the token on every request and decide access.
  */
 
 /** Mirrors `GLOBAL_ROLES` in `packages/nest-common` (`auth/tenant-roles.ts`). */
@@ -38,7 +37,7 @@ export function globalRealmRoles(accessToken: string): string[] {
   }
 }
 
-/** The services' view of a request: the membership's roles plus the global realm roles. */
+/** The service's view of a request: the membership's roles plus the global realm roles. */
 export function requestRoles(
   membershipRoles: readonly string[],
   accessToken: string,
