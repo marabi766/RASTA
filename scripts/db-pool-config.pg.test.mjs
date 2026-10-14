@@ -177,8 +177,10 @@ test('4. every service opens its database on loadEnv’s DATABASE_URL, and no ot
         [...source.matchAll(/new PrismaClient\(\{[\s\S]*?\burl: /g)].length,
         `${where}: a PrismaClient without an explicit url`,
       );
-      for (const [, url] of source.matchAll(/new PrismaService\(([^)]*)\)/g)) {
-        assert.equal(url, 'env.DATABASE_URL', `${where}: PrismaService url`);
+      // The URL is the first argument; construction's second is its own
+      // transaction timeout (#271).
+      for (const [, url] of source.matchAll(/new PrismaService\(([^,)]*)[,)]/g)) {
+        assert.equal(url.trim(), 'env.DATABASE_URL', `${where}: PrismaService url`);
         built += 1;
       }
     }

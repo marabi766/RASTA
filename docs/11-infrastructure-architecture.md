@@ -91,7 +91,7 @@ Lockهایشان منتظر می‌مانند. ثابت‌ها همان‌جا �
 | identity                                      | ۶۵۰۰۰                | Projection به Keycloak، ترمیم یتیم، تأیید ثبت‌نام                  |
 | asset، maintenance                            | ۳۰۰۰۰                | تراکنش Refresh در Replay                                           |
 | inventory                                     | ۳۰۰۰۰                | تراکنش فرمان: ۴ × `INVENTORY_LOCK_TIMEOUT_MS` + ۱۰ ثانیه           |
-| construction                                  | ۳۰۰۰۰                | `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS`                              |
+| construction                                  | ۳۰۰۰۰                | باز کردن مناقصه؛ تا ۶۰۰۰۰: `CONSTRUCTION_TRANSACTION_TIMEOUT_MS`   |
 | notification، audit                           | ۳۰۰۰۰                | تراکنش Ingest (و در notification، Dispatch)                        |
 | fleet                                         | ۱۴۲۰۰                | `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS`                          |
 | contract                                      | ۱۳۰۰۰                | تراکنش امضا: `CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS` + ۱۰ ثانیه |

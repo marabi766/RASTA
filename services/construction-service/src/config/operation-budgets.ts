@@ -8,11 +8,7 @@
  * the list cannot fall behind it. A leaf module: nothing here imports the code
  * that uses it.
  */
-import {
-  PRISMA_DEFAULT_TRANSACTION_BUDGET,
-  idempotencyClaimOperationBudget,
-  type OperationBudget,
-} from '@rasta/config';
+import { idempotencyClaimOperationBudget, type OperationBudget } from '@rasta/config';
 import { outboxRenewalOperationBudget } from '@rasta/nest-common';
 import type { ConstructionEnv } from './env';
 
@@ -27,8 +23,15 @@ export const WAIT_TRANSACTION_SLACK_MS = 2_000;
 
 export function constructionOperationBudgets(env: ConstructionEnv): readonly OperationBudget[] {
   return [
-    // Every other domain transaction and the three sweepers' per-item work.
-    PRISMA_DEFAULT_TRANSACTION_BUDGET,
+    // Every other domain transaction and the three sweepers' per-item work: the
+    // client's own timeout (#271), not Prisma's 5 000 ms.
+    {
+      name: 'CONSTRUCTION_TRANSACTION_TIMEOUT_MS',
+      budgetMs: env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS,
+      derivation:
+        'every interactive transaction that names no bound of its own runs on the client ' +
+        'timeout, and a statement in one, an award queued on the tender lock, may wait that long',
+    },
     idempotencyClaimOperationBudget('CLAIM_WAIT_MS', CLAIM_WAIT_MS, WAIT_TRANSACTION_SLACK_MS),
     {
       name: 'CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS',
