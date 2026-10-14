@@ -15,6 +15,7 @@ import {
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
+  OutboxShutdown,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -22,6 +23,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { HealthController } from './health/health.controller';
 import { NotificationController } from './api/notification.controller';
@@ -48,7 +50,6 @@ import { SmtpMailChannel } from './channels/smtp.mail.channel';
 import { MailWorker } from './channels/mail.worker';
 import { templateReader } from './channels/template.reader';
 import { seedEmailTemplates } from './channels/template.seeder';
-import { NotificationShutdown, notificationShutdownBudgetMs } from './lifecycle/shutdown';
 import {
   DISPATCHER_CONSUMER_GROUP,
   loadNotificationEnv,
@@ -349,21 +350,21 @@ import {
       // The relay and both workers stop together in the destroy phase, by one
       // deadline inside SHUTDOWN_TIMEOUT_MS. Nothing stopped the relay before:
       // it kept claiming rows through the close that the closed publisher
-      // could not send, and they waited out their leases.
-      provide: NotificationShutdown,
-      inject: [OutboxRelay, ResolutionWorker, MailWorker, ENV, SCRUBBED_LOGGER],
+      // could not send, and they waited out their leases. #247's coordinator
+      // (D-052): the relay bounds its own grace and release by the deadline,
+      // and the workers abandon a batch still running at it.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, ResolutionWorker, MailWorker, ENV],
       useFactory: (
         relay: OutboxRelay,
         resolution: ResolutionWorker,
         mail: MailWorker,
         env: NotificationEnv,
-        logger: ScrubbedLogger,
-      ): NotificationShutdown =>
-        new NotificationShutdown({
+      ): OutboxShutdown =>
+        new OutboxShutdown({
           relay,
           workers: [resolution, mail],
-          budgetMs: notificationShutdownBudgetMs(env),
-          logger,
+          budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
 

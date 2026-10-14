@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Injectable, type OnApplicationShutdown } from '@nestjs/common';
-import { createSystemContext, runWithContext } from '@rasta/nest-common';
+import {
+  createSystemContext,
+  runWithContext,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import type {
   NotificationRepository,
   SendableDelivery,
@@ -12,7 +17,6 @@ import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { ScrubbedLogger } from '../logging/scrub';
 import { SERVICE_NAME } from '../config/env';
 import { jitteredDelaySeconds } from '../resolution/backoff';
-import { withinDeadline, type ShutdownStopOptions } from '../lifecycle/shutdown';
 import {
   notificationDeliveriesTotal,
   notificationMailAttemptsTotal,
@@ -105,10 +109,10 @@ export class MailWorker implements OnApplicationShutdown {
 
   /**
    * Stops polling at once and waits for the batch in flight — until
-   * `deadlineAt` when the shutdown passes one (`NotificationShutdown`), else
+   * `deadlineAt` when the shutdown passes one (`OutboxShutdown`), else
    * for as long as it takes. One stop per `start()`: a later call joins it.
    */
-  stop(options: ShutdownStopOptions = {}): Promise<void> {
+  stop(options: OutboxStopOptions = {}): Promise<void> {
     this.stopping ??= this.halt(options.deadlineAt);
     return this.stopping;
   }

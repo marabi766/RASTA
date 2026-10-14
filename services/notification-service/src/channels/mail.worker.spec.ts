@@ -327,7 +327,7 @@ describe('a lease taken over mid-send', () => {
   });
 });
 
-describe('stopping on shutdown (NotificationShutdown)', () => {
+describe('stopping on shutdown (OutboxShutdown)', () => {
   afterEach(() => {
     jest.useRealTimers();
   });

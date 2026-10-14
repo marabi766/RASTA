@@ -5,6 +5,7 @@ import {
   AUTH_OPTIONS,
   installGracefulShutdown,
   OutboxRelay,
+  OutboxShutdown,
   type AuthGuardOptions,
   type InternalTokenService,
   type OutboxClaim,
@@ -19,7 +20,6 @@ import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { ResolutionWorker } from '../src/resolution/resolution.worker';
 import { MailWorker } from '../src/channels/mail.worker';
-import { NotificationShutdown } from '../src/lifecycle/shutdown';
 import { databaseUrl } from './helpers';
 
 /**
@@ -32,7 +32,7 @@ import { databaseUrl } from './helpers';
  * batch with no limit, so a slow one ran the close into the forced exit.
  *
  * Here the real `installGracefulShutdown` closes the real module — its
- * providers, `NotificationShutdown`, Prisma — under the real process deadline:
+ * providers, `OutboxShutdown`, Prisma — under the real process deadline:
  * timeout 9 s, relay grace 6 s, shared budget 7 s (9 s less the 2 s reserve).
  *
  * Only the outbox store, the broker and the consumer are stand-ins, and the
@@ -218,7 +218,7 @@ describe('notification-service shutdown: relay and workers by one deadline', () 
     const booted = await boot({ endlessRows: false, publishHangs: true, mailHangs: false });
     app = booted.app;
     expect(app.get(OutboxRelay)).toBeInstanceOf(OutboxRelay);
-    expect(app.get(NotificationShutdown)).toBeInstanceOf(NotificationShutdown);
+    expect(app.get(OutboxShutdown)).toBeInstanceOf(OutboxShutdown);
     await waitFor(() => booted.probe.publishes === 1, 'the relay to publish');
 
     const closed = await closeLikeMain(app, booted.env);

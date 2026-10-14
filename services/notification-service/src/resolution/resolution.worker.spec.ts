@@ -400,7 +400,7 @@ describe('ResolutionWorker', () => {
     }
   });
 
-  describe('stopping on shutdown (NotificationShutdown)', () => {
+  describe('stopping on shutdown (OutboxShutdown)', () => {
     afterEach(() => {
       jest.useRealTimers();
     });
