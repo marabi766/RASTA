@@ -14,6 +14,7 @@ import {
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
+  OutboxShutdown,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -21,6 +22,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -308,6 +310,19 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     },
 
     {
+      // D-052: the relay and the balance audit stop together in the destroy
+      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, LedgerBalanceAudit, ENV],
+      useFactory: (relay: OutboxRelay, audit: LedgerBalanceAudit, env: EconomicEnv) =>
+        new OutboxShutdown({
+          relay,
+          workers: [audit],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV],
       useFactory: (env: EconomicEnv): AuthGuardOptions => ({
@@ -339,6 +354,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly ledger: LedgerService,
     private readonly wallets: WalletService,
@@ -395,8 +411,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart.
-    await this.relay.stop();
+    // The relay and the balance audit already stopped in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 }

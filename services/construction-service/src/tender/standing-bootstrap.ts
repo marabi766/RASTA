@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import { PrismaService } from '../prisma/prisma.service';
 import { ENV, LOGGER, STANDING_SNAPSHOT_SOURCE } from '../tokens';
@@ -6,7 +7,7 @@ import type { ConstructionEnv } from '../config/env';
 import { ContractorStandingRepository } from './contractor-standing.repository';
 import { SNAPSHOT_PAGE_SIZE, type StandingSnapshotSource } from './supplier-snapshot.client';
 
-export type BootstrapOutcome = 'ALREADY_LOADED' | 'LOADED';
+export type BootstrapOutcome = 'ALREADY_LOADED' | 'LOADED' | 'STOPPED';
 
 /**
  * Loads the contractor-standing read model from supplier-service's snapshot before
@@ -48,6 +49,9 @@ export type BootstrapOutcome = 'ALREADY_LOADED' | 'LOADED';
 export class StandingBootstrap {
   private stopped = false;
   private timer: NodeJS.Timeout | undefined;
+  private wake: (() => void) | undefined;
+  private running: Promise<void> | undefined;
+  private stopping: Promise<void> | undefined;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -61,23 +65,57 @@ export class StandingBootstrap {
   /** Starts loading in the background and keeps retrying until it has. Never throws. */
   start(): void {
     this.stopped = false;
-    void this.loop();
+    this.stopping = undefined;
+    this.running = this.loop();
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Starts no further page, wakes the retry sleep, and waits for the page being
+   * applied — at most until `deadlineAt`, the shutdown's shared deadline
+   * (`OutboxShutdown`, D-052). Past it the run is abandoned with a warning. That
+   * is safe: a page and its marker advance commit together, so an exit rolls back
+   * the one in flight and the next start resumes at the recorded cursor. Without
+   * a deadline it waits. One stop per `start()`.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    this.wake?.();
+
+    const current = this.running;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
+    }
+    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'The contractor standing load was still running at the shutdown deadline; abandoned. ' +
+          'The page in flight rolls back and the next start resumes at the recorded cursor',
+      );
+    }
   }
 
   /** One attempt, from wherever the marker says. Throws when the snapshot cannot be read or applied. */
   async runOnce(): Promise<BootstrapOutcome> {
+    if (this.stopped) return 'STOPPED';
     const state = await this.standing.bootstrapState();
     if (state?.completedAt) return 'ALREADY_LOADED';
+    if (this.stopped) return 'STOPPED';
     await this.standing.beginBootstrap();
 
     let cursor = state?.cursor ?? null;
     for (;;) {
+      // Before each page and again once the (slow) fetch returns: after a stop no
+      // further page begins, let alone commits, during teardown.
+      if (this.stopped) return 'STOPPED';
       const page = await this.source.fetchPage(cursor, SNAPSHOT_PAGE_SIZE);
+      if (this.stopped) return 'STOPPED';
       if (page.hasMore && !page.nextCursor) {
         throw new Error('The snapshot says there is more and names no cursor');
       }
@@ -151,10 +189,13 @@ export class StandingBootstrap {
         this.logger.warn(
           `The contractor standing could not be loaded yet (${errorCode(error)}); eligibility stays closed, retrying`,
         );
+        if (this.stopped) return;
         await new Promise<void>((resolve) => {
+          this.wake = resolve;
           this.timer = setTimeout(resolve, this.env.CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS);
           this.timer.unref?.();
         });
+        this.wake = undefined;
       }
     }
   }

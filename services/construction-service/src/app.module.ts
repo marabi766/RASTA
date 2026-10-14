@@ -14,6 +14,7 @@ import {
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   OutboxRelay,
+  OutboxShutdown,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -21,6 +22,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -395,6 +397,19 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     },
 
     {
+      // D-052: the relay and the standing bootstrap stop together in the destroy
+      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, StandingBootstrap, ENV],
+      useFactory: (relay: OutboxRelay, bootstrap: StandingBootstrap, env: ConstructionEnv) =>
+        new OutboxShutdown({
+          relay,
+          workers: [bootstrap],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (
@@ -424,6 +439,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly moves: OrganizationMovedConsumer,
     private readonly standing: SupplierStandingConsumer,
     private readonly bootstrap: StandingBootstrap,
@@ -516,10 +532,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
     await this.moves.stop();
     await this.standing.stop();
-    await this.bootstrap.stop();
     await this.sweeper.stop();
     await this.tenderCloser.stop();
     await this.awardChecker.stop();
-    await this.relay.stop();
+    // The relay and the bootstrap already stopped in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop.
+    await this.outboxShutdown.stop();
   }
 }
