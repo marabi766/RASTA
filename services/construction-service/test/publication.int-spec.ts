@@ -759,9 +759,14 @@ describe('inviting bidders to a restricted tender', () => {
         ).then(
           () => undefined,
           (e: unknown) => e,
-        )) as { code?: string; message?: string } | undefined;
+        )) as { code?: string; message?: string; internalContext?: unknown } | undefined;
         expect(error?.code).toBe('BUSINESS_RULE_VIOLATION');
-        expect(error?.message).toContain('ORG_GHOST');
+        // The id is client text that matched nothing: echoed neither in the
+        // message nor in the logged context (S-09).
+        expect(error?.message).toBe(
+          'The invited organization does not exist; it cannot be invited',
+        );
+        expect(JSON.stringify(error?.internalContext)).not.toContain('ORG_GHOST');
       } finally {
         w.hierarchy.missing.delete('ORG_GHOST');
       }
