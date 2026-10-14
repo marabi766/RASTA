@@ -347,6 +347,23 @@ describe('InsuranceService', () => {
       expect(enqueueTxs).toEqual([claimTx]);
     });
 
+    it('starts no further expiry batch once told to stop (shutdown, #247 r4)', async () => {
+      // A full first batch: without the stop the loop would claim again.
+      const full = Array.from({ length: 200 }, (_, i) => lapsedPolicy(`INS_F${i}`));
+      let stopping = false;
+      const claim = jest.fn(async () => {
+        if (stopping) return [];
+        stopping = true;
+        return full;
+      });
+      const h = harness({ claimLapsedPolicies: claim });
+
+      const result = await h.service.runExpirySweep({ shouldStop: () => stopping });
+
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ expired: 200 });
+    });
+
     it('works through a backlog in batches until one comes back short', async () => {
       const full = Array.from({ length: 200 }, (_, i) => lapsedPolicy(`INS_F${i}`));
       const claim = jest

@@ -105,6 +105,10 @@ SET published_at = now(), last_error = 'MANUALLY SKIPPED — incident <شمار�
 WHERE id = $1;
 ```
 
+پیشوند `MANUALLY SKIPPED` را دقیقاً همین‌طور بنویس. Purge زمان‌بندی‌شده (D-052) ردیف‌های منتشرشده را پس از
+`OUTBOX_PURGE_RETENTION_HOURS` حذف می‌کند. ردیفی که `last_error`ش با این پیشوند شروع شود را **هرگز** حذف نمی‌کند، چون
+این رویداد هرگز تحویل نشده و شاهد حادثه است. پس از بسته‌شدن حادثه، آن را دستی پاک کن.
+
 **اگر رویداد مالی است:** ⛔ **هرگز Skip نکن.** به
 [`ledger-imbalance.md`](ledger-imbalance.md) مراجعه کن و علت ریشه‌ای را رفع کن.
 

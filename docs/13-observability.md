@@ -135,6 +135,22 @@ Logهای مالی).
 هر Restart و هر مسیر خطای ازدست‌رفته Drift می‌کرد، و **رو به پایین**: یعنی یک
 رلهٔ متوقف را بی‌کار نشان می‌داد، دقیقاً همان عددی که نباید اشتباه باشد.
 
+#### متریک‌های Purge Outbox (D-052)
+
+`OutboxPurgeScheduler` (`@rasta/nest-common`) ردیف‌های منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` پاک می‌کند. فاز ۱
+فقط این سرویس‌ها را دارد: fleet، asset، document، maintenance، organization.
+
+| متریک                                               | نوع     | برچسب            | دقیقاً چه چیزی را می‌شمارد                                                 |
+| --------------------------------------------------- | ------- | ---------------- | -------------------------------------------------------------------------- |
+| `rasta_outbox_purged_total`                         | Counter | service          | ردیف‌های منتشرشده‌ای که Purge حذف کرد (به‌ازای هر Batch)                   |
+| `rasta_outbox_purge_runs_total`                     | Counter | service, outcome | اجراها بر حسب پایان: `completed`، `truncated`، `busy`، `failed`، `stopped` |
+| `rasta_outbox_purge_last_success_timestamp_seconds` | Gauge   | service          | زمان آخرین اجرای `completed` یا `truncated` در این Replica                 |
+
+- `truncated` پیاپی یعنی Purge عقب می‌ماند و سقف اجرا پر شده است. `OUTBOX_PURGE_MAX_BATCHES_PER_RUN` یا
+  `OUTBOX_PURGE_BATCH_SIZE` را بالا ببر، یا `OUTBOX_PURGE_INTERVAL_SECONDS` را کوتاه کن.
+- `busy` عادی است: Replica دیگری همان لحظه Purge می‌کرد.
+- برای «Purge متوقف شده» بیشینهٔ Gauge را روی همهٔ Replicaها بگیر (`max by (service)`)، چون یک Replica که Purge کند کافی است.
+
 ### متریک‌های کسب‌وکاری
 
 | متریک                                            | چرا اهمیت دارد                                                                                                   |
