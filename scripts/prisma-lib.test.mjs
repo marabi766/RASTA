@@ -7,7 +7,7 @@ import {
   withMigrationStatementTimeout,
   withUtcSession,
 } from './prisma-lib.mjs';
-import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
+import { CREDENTIALS, UTC_SESSION_CORPUS, UTC_SESSION_REFUSED } from './utc-session-corpus.mjs';
 
 const pg = (user, db, schema) =>
   `postgresql://${user}:secret_value_here@127.0.0.1:5433/${db}${schema ? `?schema=${schema}` : ''}`;
@@ -99,6 +99,38 @@ test('withUtcSession is idempotent, and re-applies after a later TimeZone', () =
     assert.ok(new URL(once).searchParams.get('options').endsWith(UTC_SESSION_OPTION));
   }
   assert.equal(withUtcSession(UTC_SESSION_CORPUS[6]), UTC_SESSION_CORPUS[6]);
+});
+
+test('refuses what the services’ copy refuses: repeated options, a raw control character', () => {
+  // The r5 examples: `new URL` reads the first as two options (Prisma keeps
+  // the last, without the timeout) and drops the tab from the second.
+  assert.equal(new URL(UTC_SESSION_REFUSED[0]).searchParams.getAll('options').length, 2);
+  assert.equal(
+    new URL(UTC_SESSION_REFUSED[4]).searchParams.get('options'),
+    '-c statement_timeout=1000 -c TimeZone=UTC',
+  );
+  for (const url of UTC_SESSION_REFUSED) {
+    for (const call of [
+      () => withUtcSession(url),
+      () => withMigrationStatementTimeout(url, '15min'),
+    ]) {
+      assert.throws(
+        call,
+        (error) =>
+          /options parameters|raw control character/.test(error.message) &&
+          !error.message.includes('db.internal') &&
+          !error.message.includes(CREDENTIALS),
+        JSON.stringify(url),
+      );
+    }
+  }
+  // Percent-encoded, a tab is decoded and read as before.
+  assert.equal(
+    new URL(
+      withUtcSession('postgresql://db/rasta?options=-c%20a%3D1%09-c%20b%3D2'),
+    ).searchParams.get('options'),
+    `-c a=1\t-c b=2 ${UTC_SESSION_OPTION}`,
+  );
 });
 
 // --- withMigrationStatementTimeout (D-048) ------------------------------------

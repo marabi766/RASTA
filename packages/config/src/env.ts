@@ -267,7 +267,16 @@ function wholeNumberEnv(min: number, max: number) {
  * the pool's. The migrators never read it (D-045).
  */
 export const databaseEnvSchema = z.object({
-  DATABASE_URL: postgresUrlSchema.transform(withUtcSession),
+  DATABASE_URL: postgresUrlSchema.transform((url, ctx) => {
+    try {
+      return withUtcSession(url);
+    } catch (error) {
+      // A URL whose options the driver would read otherwise (database-session.ts).
+      if (!(error instanceof DatabaseUrlConflictError)) throw error;
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: error.message });
+      return z.NEVER;
+    }
+  }),
   DATABASE_POOL_SIZE: wholeNumberEnv(1, DATABASE_POOL_SIZE_MAX).optional(),
   DATABASE_POOL_TIMEOUT_SECONDS: wholeNumberEnv(1, DATABASE_POOL_TIMEOUT_SECONDS_MAX).optional(),
   DATABASE_STATEMENT_TIMEOUT_MS: wholeNumberEnv(

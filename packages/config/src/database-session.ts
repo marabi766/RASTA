@@ -103,16 +103,34 @@ function endsWithUtc(options: string): boolean {
 }
 
 /**
- * The `options` the URL carries (every `options` parameter, joined), and a
- * function giving the URL with them replaced. Everything but the `options`
- * parameter is kept byte for byte — the credentials, the host and every other
- * parameter — and the new value is percent-encoded, so no parser can read its
- * spaces as separators.
+ * The `options` the URL carries, and a function giving the URL with them
+ * replaced. Everything but the `options` parameter is kept byte for byte — the
+ * credentials, the host and every other parameter — and the new value is
+ * percent-encoded, so no parser can read its spaces as separators.
+ *
+ * Two URLs are refused before any option is read ({@link DatabaseUrlConflictError},
+ * naming `DATABASE_URL` and never echoing it), because the driver would read
+ * them otherwise than this does and the "already set" paths return the URL as
+ * written (Codex r5 on #268):
+ * - a raw control character (U+0000–U+001F, U+007F) anywhere in it: a URL
+ *   parser drops a tab, CR or LF wherever it stands, so `sta<TAB>tement_timeout`
+ *   reaches the server as `statement_timeout` (F2). Percent-encoded, it is
+ *   decoded and read like any other character.
+ * - more than one `options` parameter: Prisma keeps only the last, so a
+ *   `statement_timeout` checked in an earlier one would be dropped (F1).
  */
 function startupOptions(url: string): {
   existing: string;
   withOptions: (options: string) => string;
 } {
+  if ([...url].some((char) => char <= '\u001f' || char === '\u007f')) {
+    throw new DatabaseUrlConflictError(
+      'DATABASE_URL',
+      'options',
+      'DATABASE_URL contains a raw control character (U+0000–U+001F or U+007F), which a URL ' +
+        'parser would drop or read differently from this; remove it, or percent-encode it',
+    );
+  }
   const hashAt = url.indexOf('#');
   const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
   const hash = hashAt === -1 ? '' : url.slice(hashAt);
@@ -128,11 +146,20 @@ function startupOptions(url: string): {
 
   const isOptions = (pair: string): boolean =>
     decodeComponent(pair.split('=')[0] ?? '') === 'options';
-  const existing = pairs
-    .filter(isOptions)
-    .map((pair) => decodeComponent(pair.slice(pair.indexOf('=') + 1 || pair.length)))
-    .join(' ')
-    .trim();
+  const written = pairs.filter(isOptions);
+  if (written.length > 1) {
+    throw new DatabaseUrlConflictError(
+      'DATABASE_URL',
+      'options',
+      `DATABASE_URL has ${written.length} options parameters, and the driver keeps only the ` +
+        'last one; write every startup option in a single options parameter',
+    );
+  }
+  const [pair] = written;
+  const existing =
+    pair === undefined
+      ? ''
+      : decodeComponent(pair.slice(pair.indexOf('=') + 1 || pair.length)).trim();
   const kept = pairs.filter((pair) => !isOptions(pair));
   return {
     existing,

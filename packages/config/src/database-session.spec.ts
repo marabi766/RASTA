@@ -111,6 +111,34 @@ describe('withStatementTimeout', () => {
     expect(withUtcSession(once)).toBe(once);
   });
 
+  it.each([
+    [
+      'two options parameters (Codex r5 F1)',
+      'options=-c%20statement_timeout%3D15000&options=-c%20TimeZone%3DUTC',
+    ],
+    ['a raw tab (Codex r5 F2)', 'options=-c%20sta\ttement_timeout%3D1000%20-c%20TimeZone%3DUTC'],
+  ])('both, and every caller of withUtcSession (seeds, CLIs), refuse %s', (_, query) => {
+    // Assembled, as above, so no line reads as a real connection string.
+    const password = ['session', 'spec', 'pw'].join('_');
+    const url = `postgresql://rasta_x:${password}@db.internal/rasta?${query}`;
+    for (const call of [
+      () => withUtcSession(url),
+      () => withStatementTimeout(url, undefined),
+      () => withStatementTimeout(url, 15_000),
+    ]) {
+      let caught: unknown;
+      try {
+        call();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(DatabaseUrlConflictError);
+      expect(caught).toMatchObject({ variable: 'DATABASE_URL', parameter: 'options' });
+      expect((caught as Error).message).not.toContain(password);
+      expect((caught as Error).message).not.toContain('db.internal');
+    }
+  });
+
   it('refuses another value already in the options, naming the variable and not the URL', () => {
     expect.assertions(3);
     try {

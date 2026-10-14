@@ -332,6 +332,76 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
         '-c statement_timeout=15000 -c TimeZone=UTC',
       );
     });
+
+    const urlRefusal = (pool: Record<string, string>, url: string, says: string) =>
+      expect(refusal(pool, url).issues).toEqual([
+        { path: 'DATABASE_URL', message: expect.stringContaining(says) },
+      ]);
+
+    describe('more than one options parameter (Codex r5 on #268, F1)', () => {
+      // The r5 example: both read together, the timeout matched and the URL came
+      // back as written — and Prisma, keeping only the last `options`, dropped it.
+      const R5 = `${RAW_URL}&options=-c%20statement_timeout%3D15000&options=-c%20TimeZone%3DUTC`;
+
+      it('refuses the r5 example, whose last options parameter carries no timeout', () => {
+        expect(new URL(R5).searchParams.getAll('options')).toHaveLength(2);
+        urlRefusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, R5, '2 options parameters');
+      });
+
+      it.each([
+        ['unset', {}],
+        ['set', { DATABASE_STATEMENT_TIMEOUT_MS: '15000' }],
+      ])('refuses two however they are written, the timeout %s', (_, pool) => {
+        for (const url of [
+          R5,
+          `${RAW_URL}&options=-c%20TimeZone%3DUTC&options=-c%20statement_timeout%3D15000`,
+          `${RAW_URL}&options=-c%20search_path%3Dx&%6Fptions=-c%20TimeZone%3DUTC`,
+          `${RAW_URL}&options=-c%20TimeZone%3DUTC&options=`,
+        ]) {
+          urlRefusal(pool, url, 'options parameters');
+        }
+      });
+    });
+
+    describe('a raw control character in the URL (Codex r5 on #268, F2)', () => {
+      // The r5 example: a URL parser drops the tab and reads statement_timeout=1000.
+      const r5 = (char: string) =>
+        `${RAW_URL}&options=-c%20sta${char}tement_timeout%3D1000%20-c%20TimeZone%3DUTC`;
+
+      it.each([
+        ['TAB', '\t'],
+        ['CR', '\r'],
+        ['LF', '\n'],
+      ])(
+        'refuses the r5 example with a %s in the name, which the driver would not see',
+        (_, char) => {
+          expect(new URL(r5(char)).searchParams.get('options')).toBe(
+            '-c statement_timeout=1000 -c TimeZone=UTC',
+          );
+          urlRefusal({}, r5(char), 'control character');
+          urlRefusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, r5(char), 'control character');
+        },
+      );
+
+      it.each(['\u0000', '\u0001', '\u000b', '\u001f', '\u007f'])(
+        'refuses any other C0 control or DEL (%j), anywhere in the URL',
+        (char) => {
+          urlRefusal({}, r5(char), 'control character');
+          urlRefusal({}, `${RAW_URL}&application_name=a${char}b`, 'control character');
+        },
+      );
+
+      it('reads percent-encoded whitespace as before: decoded, then a word break', () => {
+        const own = `${RAW_URL}&options=-c%20search_path%3Dx%09-c%20work_mem%3D4MB`;
+        expect(options(load({}, own))).toBe('-c search_path=x\t-c work_mem=4MB -c TimeZone=UTC');
+        expect(refusal({}, `${RAW_URL}&options=-c%09statement_timeout%3D1000`).issues).toEqual([
+          {
+            path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+            message: expect.stringContaining('while DATABASE_STATEMENT_TIMEOUT_MS is unset'),
+          },
+        ]);
+      });
+    });
   });
 
   it('a schema without DATABASE_URL is left alone', () => {

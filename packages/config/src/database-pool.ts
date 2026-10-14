@@ -44,7 +44,9 @@ export const DATABASE_POOL_PARAMETERS = [
 
 /**
  * The URL already sets a pool parameter (or, `withStatementTimeout`, the
- * statement timeout) to a different value than its variable.
+ * statement timeout) to a different value than its variable — or, from
+ * `database-session.ts`, is written in a form whose `options` the driver would
+ * read differently (a raw control character, a repeated `options` parameter).
  *
  * Two places for one number, disagreeing, is refused rather than resolved: an
  * operator who changed one of them believes it is the one in effect. The
