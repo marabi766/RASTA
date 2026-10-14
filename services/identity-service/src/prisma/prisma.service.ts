@@ -119,7 +119,8 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * platform does not lose or invent events (ADR-021).
    *
    * `statementTimeoutMs` is for a transaction whose statements may wait longer
-   * than the connection's `DATABASE_STATEMENT_TIMEOUT_MS` (#268): it is set
+   * than the session's statement timeout — `DATABASE_STATEMENT_TIMEOUT_MS`, or
+   * behind PgBouncer the runtime role's own default (#268): it is set
    * with `SET LOCAL` as the transaction's first statement, so it ends with the
    * transaction and the connection goes back to the pool unchanged.
    */

@@ -8,15 +8,8 @@ import {
   NOTIFICATION_DLQ_TOPIC,
   SERVICE_NAME,
 } from './env';
-import {
-  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
-  withStatementTimeout,
-  withUtcSession,
-} from '@rasta/config';
-
-/** The runtime URL loadEnv hands the service: UTC sessions, the default statement timeout. */
-const runtimeSession = (url: string): string =>
-  withStatementTimeout(withUtcSession(url), DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS);
+import { withUtcSession } from '@rasta/config';
+import { notificationOperationBudgets } from './operation-budgets';
 
 /** The minimum a running service needs; every test builds on it. */
 const REQUIRED = {
@@ -52,11 +45,11 @@ describe('notification-service configuration', () => {
     const { DATABASE_URL_NOTIFICATION: _omitted, ...withoutDatabase } = REQUIRED;
     expect(() => loadNotificationEnv(withoutDatabase)).toThrow(/DATABASE_URL/);
     expect(loadNotificationEnv(REQUIRED).DATABASE_URL).toBe(
-      runtimeSession(REQUIRED.DATABASE_URL_NOTIFICATION),
+      withUtcSession(REQUIRED.DATABASE_URL_NOTIFICATION),
     );
     expect(
       loadNotificationEnv({ ...REQUIRED, DATABASE_URL: 'postgresql://x:y@h:1/d' }).DATABASE_URL,
-    ).toBe(runtimeSession('postgresql://x:y@h:1/d'));
+    ).toBe(withUtcSession('postgresql://x:y@h:1/d'));
   });
 
   it('requires the broker list, the identity url and the internal token secret', () => {
@@ -222,5 +215,33 @@ describe('notification-service configuration', () => {
     expect(
       brokersOf(loadNotificationEnv({ ...REQUIRED, KAFKA_BROKERS: 'a:9092, b:9092,' })),
     ).toEqual(['a:9092', 'b:9092']);
+  });
+});
+
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  const at = (statementTimeoutMs: string) => () =>
+    loadNotificationEnv({ ...REQUIRED, DATABASE_STATEMENT_TIMEOUT_MS: statementTimeoutMs });
+
+  it('unset, applies no statement timeout', () => {
+    const env = loadNotificationEnv(REQUIRED);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(
+      notificationOperationBudgets(loadNotificationEnv(REQUIRED)).map((b) => [b.name, b.budgetMs]),
+    ).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['INGEST_TRANSACTION_TIMEOUT_MS', 30_000],
+      ['DISPATCH_TRANSACTION_TIMEOUT_MS', 30_000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('set, must be above the largest: an ingest or a dispatch, 30 s; the bound is exact', () => {
+    expect(at('30000')).toThrow(/not above INGEST_TRANSACTION_TIMEOUT_MS, 30000 ms/);
+    expect(at('30000')).toThrow(/not above DISPATCH_TRANSACTION_TIMEOUT_MS, 30000 ms/);
+    expect(at('30001')).not.toThrow();
   });
 });

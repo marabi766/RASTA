@@ -1,6 +1,5 @@
 import {
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
-  assertStatementWaitsWithinTimeout,
   baseEnvSchema,
   databaseEnvSchema,
   kafkaEnvSchema,
@@ -72,22 +71,21 @@ describe('loadEnv', () => {
     'postgresql://user:pass@localhost:5432/rasta_asset?schema=public',
     'postgres://user:pass@db.internal:5432/rasta_asset',
   ])(
-    'accepts DATABASE_URL %p, and opens its sessions in UTC with the default statement timeout',
+    'accepts DATABASE_URL %p, and opens its sessions in UTC with no statement timeout',
     (value) => {
       expect(
         loadEnv(databaseEnvSchema, { DATABASE_URL: value } as NodeJS.ProcessEnv).DATABASE_URL,
-      ).toBe(
-        `${value}${value.includes('?') ? '&' : '?'}options=-c%20statement_timeout%3D15000%20-c%20TimeZone%3DUTC`,
-      );
+      ).toBe(`${value}${value.includes('?') ? '&' : '?'}options=-c%20TimeZone%3DUTC`);
     },
   );
 
-  it('applies the statement-timeout default when not specified', () => {
+  it('applies no statement timeout when DATABASE_STATEMENT_TIMEOUT_MS is unset (#268 r4: opt-in)', () => {
     const env = loadEnv(databaseEnvSchema, {
       DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
     } as NodeJS.ProcessEnv);
 
-    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBe(15_000);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
   });
 });
 
@@ -96,11 +94,18 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
   // string to a secret scanner; the tests below look for it in every message.
   const PASSWORD = ['pool', 'spec', 'pw'].join('_');
   const RAW_URL = `postgresql://rasta_x:${PASSWORD}@db.internal:5432/rasta_x?schema=public`;
-  /** The session options every runtime URL carries: the default statement timeout, then UTC. */
-  const SESSION = `options=${encodeURIComponent('-c statement_timeout=15000 -c TimeZone=UTC')}`;
+  /** The session options every runtime URL carries when no statement timeout is set: UTC. */
+  const SESSION = `options=${encodeURIComponent('-c TimeZone=UTC')}`;
+
+  /** A service whose operations all fit under a second, so any accepted timeout is above them. */
+  const NO_LONG_OPERATIONS = { operationBudgets: () => [] };
 
   const load = (pool: Record<string, string>, url = RAW_URL) =>
-    loadEnv(databaseEnvSchema, { DATABASE_URL: url, ...pool } as NodeJS.ProcessEnv);
+    loadEnv(
+      databaseEnvSchema,
+      { DATABASE_URL: url, ...pool } as NodeJS.ProcessEnv,
+      NO_LONG_OPERATIONS,
+    );
 
   /** The refusal `load` throws, checked to name the variable and carry no part of the URL. */
   const refusal = (pool: Record<string, string>, url = RAW_URL): EnvValidationError => {
@@ -232,18 +237,36 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
       '--statement-timeout=5000',
       '-c STATEMENT_TIMEOUT=15000 -c statement_timeout=5000',
     ])('refuses a URL whose options %p set another value', (written) => {
-      const issues = refusal({}, `${RAW_URL}&options=${encodeURIComponent(written)}`).issues;
+      const issues = refusal(
+        { DATABASE_STATEMENT_TIMEOUT_MS: '15000' },
+        `${RAW_URL}&options=${encodeURIComponent(written)}`,
+      ).issues;
       expect(issues).toEqual([
         {
           path: 'DATABASE_STATEMENT_TIMEOUT_MS',
-          message: expect.stringContaining('statement_timeout'),
+          message: expect.stringContaining('different value'),
         },
       ]);
     });
 
+    it.each(['-c statement_timeout=15000', '--statement-timeout=0'])(
+      'unset, refuses a URL whose options %p set a timeout of their own: it would escape the budget check',
+      (written) => {
+        const issues = refusal({}, `${RAW_URL}&options=${encodeURIComponent(written)}`).issues;
+        expect(issues).toEqual([
+          {
+            path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+            message: expect.stringContaining('while DATABASE_STATEMENT_TIMEOUT_MS is unset'),
+          },
+        ]);
+      },
+    );
+
     it('keeps a URL whose options already set the same value', () => {
       const own = `${RAW_URL}&options=${encodeURIComponent('-c statement_timeout=15000')}`;
-      expect(options(load({}, own))).toBe('-c statement_timeout=15000 -c TimeZone=UTC');
+      expect(options(load({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, own))).toBe(
+        '-c statement_timeout=15000 -c TimeZone=UTC',
+      );
     });
   });
 
@@ -258,41 +281,72 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
   });
 });
 
-describe('a wait the settings allow, against the statement timeout (#268 r3)', () => {
-  const env = { DATABASE_STATEMENT_TIMEOUT_MS: 15_000 };
-  const wait = (variable: string, worstCaseMs: number) => ({
-    variable,
-    worstCaseMs,
-    derivation: 'a test wait',
+describe('a configured statement timeout, against the operation budgets (#268 r4)', () => {
+  const URL = 'postgresql://u:p@localhost:5432/db';
+  const budget = (name: string, budgetMs: number) => ({
+    name,
+    budgetMs,
+    derivation: `the test operation ${name}`,
   });
-
-  it('accepts every wait shorter than the statement timeout, and no waits at all', () => {
-    expect(() => assertStatementWaitsWithinTimeout(env, [wait('A_MS', 14_999)])).not.toThrow();
-    expect(() => assertStatementWaitsWithinTimeout(env, [])).not.toThrow();
-  });
-
-  it('refuses a wait as long as the statement timeout: the statement would be cancelled first', () => {
-    expect(() => assertStatementWaitsWithinTimeout(env, [wait('A_MS', 15_000)])).toThrow(
-      EnvValidationError,
+  const BUDGETS = [budget('A_MS', 14_999), budget('B_MS', 1_000), budget('C_FIXED', 5_000)];
+  const load = (
+    timeout: string | undefined,
+    operationBudgets?: () => ReturnType<typeof budget>[],
+  ) =>
+    loadEnv(
+      databaseEnvSchema,
+      {
+        DATABASE_URL: URL,
+        ...(timeout === undefined ? {} : { DATABASE_STATEMENT_TIMEOUT_MS: timeout }),
+      } as NodeJS.ProcessEnv,
+      operationBudgets ? { operationBudgets } : {},
     );
-  });
-
-  it('names every setting that does not fit, with its worst case and how it is made up', () => {
+  const refusal = (timeout: string, operationBudgets?: () => ReturnType<typeof budget>[]) => {
     let thrown: unknown;
     try {
-      assertStatementWaitsWithinTimeout(env, [
-        wait('A_MS', 15_000),
-        wait('B_MS', 1_000),
-        wait('C_MS', 60_000),
-      ]);
+      load(timeout, operationBudgets);
     } catch (error) {
       thrown = error;
     }
     expect(thrown).toBeInstanceOf(EnvValidationError);
-    const issues = (thrown as EnvValidationError).issues;
-    expect(issues.map((issue) => issue.path)).toEqual(['A_MS', 'C_MS']);
-    expect(issues[1]!.message).toContain('up to 60000 ms (a test wait)');
-    expect(issues[1]!.message).toContain('DATABASE_STATEMENT_TIMEOUT_MS (15000 ms)');
+    return (thrown as EnvValidationError).issues;
+  };
+
+  it('accepts a timeout above the largest budget', () => {
+    expect(load('15000', () => BUDGETS).DATABASE_STATEMENT_TIMEOUT_MS).toBe(15_000);
+  });
+
+  it('refuses one equal to the largest budget: the two timeouts would race', () => {
+    expect(refusal('14999', () => BUDGETS).map((issue) => issue.path)).toEqual([
+      'DATABASE_STATEMENT_TIMEOUT_MS',
+    ]);
+  });
+
+  it('names every budget it would cut, with its derivation, and the value it must exceed', () => {
+    const issues = refusal('5000', () => BUDGETS);
+    expect(issues).toHaveLength(2);
+    expect(issues[0]!.message).toContain('not above A_MS, 14999 ms (the test operation A_MS)');
+    expect(issues[1]!.message).toContain('not above C_FIXED, 5000 ms (the test operation C_FIXED)');
+    for (const issue of issues) expect(issue.message).toContain('above 14999 ms');
+  });
+
+  it('refuses any timeout from a service that declares no budgets (fail closed)', () => {
+    expect(refusal('3600000')[0]!.message).toContain('declares no operation budgets');
+  });
+
+  it('checks nothing while the timeout is unset, and asks for no budgets', () => {
+    const operationBudgets = jest.fn(() => BUDGETS);
+    expect(load(undefined, operationBudgets).DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(load(undefined).DATABASE_URL).toBe(`${URL}?options=-c%20TimeZone%3DUTC`);
+    expect(operationBudgets).not.toHaveBeenCalled();
+  });
+
+  it('hands the budgets the parsed environment', () => {
+    const operationBudgets = jest.fn(() => BUDGETS);
+    load('20000', operationBudgets);
+    expect(operationBudgets).toHaveBeenCalledWith(
+      expect.objectContaining({ DATABASE_STATEMENT_TIMEOUT_MS: 20_000 }),
+    );
   });
 });
 

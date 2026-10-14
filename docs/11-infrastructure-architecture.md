@@ -70,22 +70,47 @@ URLی که همان پارامتر را با مقدار دیگری دارد، س
 PostgreSQL واقعی می‌سنجد: پیش‌فرض دست‌نخورده، سقف اتصال، `P2024` پس از انتظار، و اینکه هر سرویس Clientهایش را فقط روی
 همین URL باز می‌کند.
 
-**سقف زمان هر Statement.** `DATABASE_STATEMENT_TIMEOUT_MS` (همان `databaseEnvSchema`؛ ۱۰۰۰..۳۶۰۰۰۰۰ میلی‌ثانیه، تنظیم‌نشده
-**۱۵۰۰۰**) را `loadEnv` همیشه به‌صورت `-c statement_timeout=<ms>` در `options` همان `DATABASE_URL` می‌نویسد (پیش از
-گزینهٔ UTC؛ `withStatementTimeout`). پس هر Statement زمان اجرا — از جمله انتظار برای Lock ردیف، جدول یا Advisory Lock —
-پس از این مدت با `57014` لغو می‌شود و اتصال Pool را بیش از آن نگه نمی‌دارد. `0` (در PostgreSQL یعنی بی‌سقف) رد می‌شود؛
-مقدار غیرعددی یا خارج از بازه، و URLی که در `options` خودش `statement_timeout` دیگری دارد، سرویس را در Startup متوقف
-می‌کند (همان قاعدهٔ Pool). تراکنشی که بیشتر لازم دارد خودش `SET LOCAL statement_timeout` می‌گوید و فقط در همان تراکنش
-غلبه می‌کند (Purge صندوق خروجی، `OUTBOX_PURGE_STATEMENT_TIMEOUT_MS`؛ و در identity تراکنش Projection به Keycloak،
-ترمیم حساب یتیم و تأیید ثبت‌نام، که Lock را در طول فراخوان‌های Keycloak نگه می‌دارند: `SET LOCAL statement_timeout` برابر
-Timeout همان تراکنش، ۶۵ ثانیه). هر تنظیمی که بگذارد یک Statement دست‌کم به اندازهٔ این سقف منتظر Lock بماند، سرویسش را
-در Startup متوقف می‌کند (`assertStatementWaitsWithinTimeout` در Loader همان سرویس؛ fail closed): inventory
-`INVENTORY_LOCK_TIMEOUT_MS`، contract `CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS` + ۱۰ ثانیه، fleet
-`FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS`، maintenance دو برابر `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` + ۵ ثانیه، asset
-`ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS` + ۵ ثانیه. با پیش‌فرض‌ها همه زیر ۱۵ ثانیه‌اند. Migratorها (D-045) آن را نمی‌خوانند؛ Migrationها
-سقف خودشان را دارند (D-048). `pnpm test:db-pool-config` اثرش را روی PostgreSQL واقعی می‌سنجد. **پشت PgBouncer** همان
-حکم `TimeZone` در بند بعد برقرار است: `options` دور انداخته می‌شود، پس تضمین آنجا تنظیم سمت پایگاه داده برای Role زمان
-اجراست (`ALTER ROLE <runtime> IN DATABASE rasta_<svc> SET statement_timeout = '15s'`)، نه برای Migrator.
+**سقف زمان هر Statement (اختیاری).** `DATABASE_STATEMENT_TIMEOUT_MS` (همان `databaseEnvSchema`؛ ۱۰۰۰..۳۶۰۰۰۰۰
+میلی‌ثانیه) **Opt-in** است (#268 r4): تنظیم‌نشده، برنامه هیچ `statement_timeout`ی اعمال نمی‌کند و نشست همان مقدار خود
+پایگاه داده را دارد — رفتار پیش از این متغیر. تنظیم‌شده، `loadEnv` آن را به‌صورت `-c statement_timeout=<ms>` در `options`
+همان `DATABASE_URL` می‌نویسد (پیش از گزینهٔ UTC؛ `withStatementTimeout`)، پس هر Statement زمان اجرا — از جمله انتظار
+برای Lock ردیف، جدول یا Advisory Lock — پس از این مدت با `57014` لغو می‌شود. `0` (در PostgreSQL یعنی بی‌سقف) و مقدار
+غیرعددی یا خارج از بازه رد می‌شوند. **Fail-closed:** مقدار تنظیم‌شده باید از **بزرگ‌ترین بودجهٔ عملیاتی** که آن سرویس
+اعلام می‌کند بیشتر باشد (برابر هم رد می‌شود: دو Timeout با هم مسابقه می‌دهند)؛ وگرنه سرویس در Startup متوقف می‌شود و پیام،
+هر بودجه‌ای را که قطع می‌شد با منشأش و کفِ لازم نام می‌برد. هر سرویس دارای پایگاه داده بودجه‌هایش را در
+`src/config/operation-budgets.ts` اعلام می‌کند و به `loadEnv` می‌دهد (`operationBudgets`)؛ سرویسی که اعلام نکند هیچ
+مقداری را نمی‌پذیرد. بودجه یعنی Timeout هر تراکنش (صریح، یا ۵ ثانیهٔ پیش‌فرض Prisma)، Claim کلید Idempotency (۵ ثانیه
+انتظار Lock در تراکنشی ۲ ثانیه بلندتر)، بودجهٔ رقابت economic، Timeout باز کردن مناقصه، تراکنش‌های Keycloak در identity،
+تمدید Lease و دستهٔ Purge صندوق خروجی — حتی آنهایی که خودشان `SET LOCAL statement_timeout` می‌گویند، چون دیگران پشت
+Lockهایشان منتظر می‌مانند. ثابت‌ها همان‌جا تعریف می‌شوند و کد از همان‌جا می‌خواندشان، پس فهرست از کد عقب نمی‌ماند. کف
+هر سرویس با پیش‌فرض‌ها (مقدار باید از آن بیشتر باشد؛ بودجه‌های پیکربندی‌شده کف را با خود جابه‌جا می‌کنند):
+
+| سرویس                                         | بزرگ‌ترین بودجه (ms) | منشأ                                                               |
+| --------------------------------------------- | -------------------- | ------------------------------------------------------------------ |
+| economic                                      | ۱۲۰۰۰۰               | صفحهٔ ممیزی موجودی (`AUDIT_TX_TIMEOUT_MS`)؛ بودجهٔ رقابت ۶۰۰۰۰     |
+| identity                                      | ۶۵۰۰۰                | Projection به Keycloak، ترمیم یتیم، تأیید ثبت‌نام                  |
+| asset، maintenance                            | ۳۰۰۰۰                | تراکنش Refresh در Replay                                           |
+| inventory                                     | ۳۰۰۰۰                | تراکنش فرمان: ۴ × `INVENTORY_LOCK_TIMEOUT_MS` + ۱۰ ثانیه           |
+| construction                                  | ۳۰۰۰۰                | `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS`                              |
+| notification، audit                           | ۳۰۰۰۰                | تراکنش Ingest (و در notification، Dispatch)                        |
+| fleet                                         | ۱۴۲۰۰                | `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS`                          |
+| contract                                      | ۱۳۰۰۰                | تراکنش امضا: `CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS` + ۱۰ ثانیه |
+| marketplace، document، organization، supplier | ۱۲۵۰۰                | تمدید Lease صندوق خروجی (`OUTBOX_CLAIM_LEASE_SECONDS`)             |
+
+URLی که خودش در `options` یک `statement_timeout` دارد رد می‌شود: با متغیر تنظیم‌نشده چون از بررسی بودجه فرار می‌کرد، با
+مقدار دیگر چون یک عدد در دو جاست. در identity، تراکنش‌های Projection، ترمیم حساب یتیم و تأیید ثبت‌نام همچنان `SET LOCAL
+statement_timeout` برابر Timeout خودشان (۶۵ ثانیه) می‌گویند: پشت PgBouncer سقف نشست از Role می‌آید و `loadEnv` آن را
+نمی‌بیند. Migratorها (D-045) آن را نمی‌خوانند؛ Migrationها سقف خودشان را دارند (D-048). `pnpm test:db-pool-config` اثرش
+را روی PostgreSQL واقعی می‌سنجد (تنظیم‌نشده: همان مقدار خود پایگاه داده).
+
+**پشت PgBouncer** همان حکم `TimeZone` در بند بعد برقرار است: `options` دور انداخته می‌شود (`ignore_startup_parameters`)،
+پس آنجا `DATABASE_STATEMENT_TIMEOUT_MS` را تنظیم‌نشده بگذارید و سقف را **سمت پایگاه داده** روی Role زمان اجرا بگذارید —
+نه برای Migrator: `ALTER ROLE rasta_<svc> IN DATABASE rasta_<svc> SET statement_timeout = '<ms>ms'`. Provisioning این را
+گامی اختیاری دارد: `POSTGRES_STATEMENT_TIMEOUT_MS_<SVC>` (مثلاً `POSTGRES_STATEMENT_TIMEOUT_MS_FLEET`؛ همان بازه) که
+Bootstrap، `pnpm db:privilege-split <svc>` و `pnpm db:rotate-role-passwords` اعمال می‌کنند
+(`infrastructure/docker/postgres/lib/session-statement-timeout.bash`، `pnpm test:session-statement-timeout`)؛ تنظیم‌نشده
+هیچ کاری نمی‌کند و تنظیم موجود را دست نمی‌زند. هیچ بررسی‌ای این مقدار را با بودجه‌ها نمی‌سنجد: آن را از کف همان سرویس در
+جدول بالا بیشتر بگذارید.
 
 **منطقهٔ زمانی نشست پشت Pooler (L7-37، [D-048](23-risks-and-tradeoffs.md)).** هر نشست پایگاه داده باید در UTC باشد،
 و **تضمین آن سمت پایگاه داده است، نه سمت Client**: برای پایگاه دادهٔ هر سرویس، Role زمان اجرا و Migrator آن،

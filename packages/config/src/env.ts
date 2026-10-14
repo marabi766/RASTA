@@ -219,9 +219,6 @@ export const DATABASE_POOL_SIZE_MAX = 100;
  */
 export const DATABASE_POOL_TIMEOUT_SECONDS_MAX = 60;
 
-/** The runtime session's `statement_timeout` when `DATABASE_STATEMENT_TIMEOUT_MS` is unset. */
-export const DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS = 15_000;
-
 /** Below a second, ordinary queries under load would be cancelled. */
 export const DATABASE_STATEMENT_TIMEOUT_MS_MIN = 1000;
 
@@ -262,9 +259,12 @@ function wholeNumberEnv(min: number, max: number) {
  *
  * `DATABASE_STATEMENT_TIMEOUT_MS` goes into the same URL as the session's
  * `statement_timeout` ({@link withStatementTimeout}), so no runtime statement —
- * a lock wait included — holds a pooled connection longer. Always written,
- * default 15 s; `0` (PostgreSQL's "no limit") is refused for the same reason
- * as the pool's. The migrators never read it (D-045).
+ * a lock wait included — holds a pooled connection longer. **Opt-in** (#268
+ * r4): unset, nothing is written and the session keeps the database's own
+ * setting, as before the variable existed. Set, it must be above every
+ * operation budget the service declares ({@link OperationBudget}), or `loadEnv`
+ * refuses it; `0` (PostgreSQL's "no limit") is refused for the same reason as
+ * the pool's. The migrators never read it (D-045).
  */
 export const databaseEnvSchema = z.object({
   DATABASE_URL: postgresUrlSchema.transform(withUtcSession),
@@ -273,7 +273,7 @@ export const databaseEnvSchema = z.object({
   DATABASE_STATEMENT_TIMEOUT_MS: wholeNumberEnv(
     DATABASE_STATEMENT_TIMEOUT_MS_MIN,
     DATABASE_STATEMENT_TIMEOUT_MS_MAX,
-  ).default(String(DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS)),
+  ).optional(),
 });
 
 /** The only SASL mechanism a broker credential is issued for (ADR-061 § 3). */
@@ -547,41 +547,78 @@ export class EnvValidationError extends Error {
  */
 export const STATEMENT_WAIT_MARGIN_MS = 5_000;
 
-/** How long a service's settings let one statement wait, at worst (#268). */
-export interface StatementWait {
-  /** The setting that sizes the wait; the refusal's path. */
-  readonly variable: string;
-  /** The worst case at the configured values, in milliseconds. */
-  readonly worstCaseMs: number;
-  /** What waits on what, and how the worst case is made up. */
+/**
+ * One operation a service supports on its runtime database, and how long it
+ * is allowed to take (#268 r4): a transaction's timeout, a lock or claim wait,
+ * a contention budget, a sweep's batch. A statement inside it — a lock wait
+ * included — may legitimately run that long, so a session `statement_timeout`
+ * at or below it would cancel a supported operation (`57014`): one that is
+ * merely slow would fail, and one that answers its own timeout with 409 would
+ * answer 500.
+ */
+export interface OperationBudget {
+  /** The setting it is configured by, or the constant it is fixed at. */
+  readonly name: string;
+  /** The budget at the configured values, in milliseconds. */
+  readonly budgetMs: number;
+  /** What it bounds, and how the number is made up. */
   readonly derivation: string;
 }
 
+/** Prisma's interactive-transaction `timeout` when a call passes none (Prisma 6). */
+export const PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS = 5_000;
+
+/** The budget of every interactive transaction that sets no timeout of its own. */
+export const PRISMA_DEFAULT_TRANSACTION_BUDGET: OperationBudget = {
+  name: 'PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS',
+  budgetMs: PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  derivation:
+    'every interactive transaction that sets no timeout of its own, at Prisma’s default: a ' +
+    'statement in one may wait on a lock that long',
+};
+
+/** One outbox purge batch (D-052), as an operation budget: its transaction's timeout. */
+export function outboxPurgeOperationBudget(
+  env: Pick<OutboxPurgeEnv, 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS'>,
+): OperationBudget {
+  return {
+    name: 'OUTBOX_PURGE_STATEMENT_TIMEOUT_MS',
+    budgetMs: env.OUTBOX_PURGE_STATEMENT_TIMEOUT_MS + OUTBOX_PURGE_TRANSACTION_MARGIN_MS,
+    derivation:
+      'one outbox purge batch: its own statement timeout, this setting, + ' +
+      `${OUTBOX_PURGE_TRANSACTION_MARGIN_MS} ms`,
+  };
+}
+
 /**
- * Refuses a configuration in which a setting lets one statement wait at
- * least as long as `DATABASE_STATEMENT_TIMEOUT_MS` (#268). That statement is
- * a lock wait on a transaction that holds the lock across upstream calls, or
- * one bounded by its own `lock_timeout`; the session's `statement_timeout`
- * would cancel it first (`57014`), so an operation that is merely slow would
- * fail, and one that answers a lock timeout with 409 would answer 500. A
- * transaction that sets its own `statement_timeout` with `SET LOCAL` is not
- * listed: the session's value does not apply to it.
+ * An `Idempotency-Key` claim, as an operation budget: each of its waits runs
+ * in its own transaction whose `lock_timeout` is what is left of `waitMs`, and
+ * whose timeout is that + `slackMs`. A statement timeout under the wait would
+ * end it with `57014` instead of `55P03`, and the retryable 409 would be a 500.
  */
-export function assertStatementWaitsWithinTimeout(
-  env: { DATABASE_STATEMENT_TIMEOUT_MS: number },
-  waits: readonly StatementWait[],
-): void {
-  const limitMs = env.DATABASE_STATEMENT_TIMEOUT_MS;
-  const issues = waits
-    .filter((wait) => wait.worstCaseMs >= limitMs)
-    .map((wait) => ({
-      path: wait.variable,
-      message:
-        `lets one statement wait up to ${wait.worstCaseMs} ms (${wait.derivation}), not less ` +
-        `than DATABASE_STATEMENT_TIMEOUT_MS (${limitMs} ms), which would cancel it first. ` +
-        `Lower ${wait.variable} or raise DATABASE_STATEMENT_TIMEOUT_MS`,
-    }));
-  if (issues.length > 0) throw new EnvValidationError(issues);
+export function idempotencyClaimOperationBudget(
+  name: string,
+  waitMs: number,
+  slackMs: number,
+): OperationBudget {
+  return {
+    name,
+    budgetMs: waitMs + slackMs,
+    derivation:
+      `an Idempotency-Key claim: a lock wait of up to ${waitMs} ms in a transaction of that ` +
+      `+ ${slackMs} ms`,
+  };
+}
+
+/** What a service hands `loadEnv` besides its schema. */
+export interface LoadEnvOptions<T> {
+  /**
+   * Every operation budget the service has, at the parsed values. Required
+   * for `DATABASE_STATEMENT_TIMEOUT_MS` to be accepted at all: a service that
+   * declares none is refused one rather than trusted to have none (fail
+   * closed). Not consulted while the variable is unset.
+   */
+  readonly operationBudgets?: (env: T) => readonly OperationBudget[];
 }
 
 /**
@@ -592,6 +629,7 @@ export function assertStatementWaitsWithinTimeout(
 export function loadEnv<S extends z.ZodTypeAny>(
   schema: S,
   source: NodeJS.ProcessEnv = process.env,
+  options: LoadEnvOptions<z.infer<S>> = {},
 ): z.infer<S> {
   const result = schema.safeParse(withKafkaCredentialFallback(source));
 
@@ -607,7 +645,49 @@ export function loadEnv<S extends z.ZodTypeAny>(
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxGraceWithinShutdown(result.data);
   assertOutboxShutdownWithinTimeout(result.data);
+  assertStatementTimeoutAboveBudgets(result.data, options.operationBudgets);
   return withConfiguredDatabase(result.data);
+}
+
+/**
+ * A configured `DATABASE_STATEMENT_TIMEOUT_MS` must be above every operation
+ * budget the service declares (#268 r4), so it can never cancel an operation
+ * the service supports. Equal is refused too: the two timeouts would race.
+ * Unset, there is nothing to check — no statement timeout is applied.
+ */
+function assertStatementTimeoutAboveBudgets<T>(
+  parsed: T,
+  operationBudgets: ((env: T) => readonly OperationBudget[]) | undefined,
+): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const { DATABASE_URL: url, DATABASE_STATEMENT_TIMEOUT_MS: timeoutMs } = parsed as {
+    DATABASE_URL?: unknown;
+    DATABASE_STATEMENT_TIMEOUT_MS?: unknown;
+  };
+  if (typeof url !== 'string' || typeof timeoutMs !== 'number') return;
+  if (!operationBudgets) {
+    throw new EnvValidationError([
+      {
+        path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+        message:
+          'is set, but this service declares no operation budgets to check it against, so it ' +
+          'could cancel an operation the service supports. Leave it unset',
+      },
+    ]);
+  }
+  const budgets = operationBudgets(parsed);
+  const undercut = budgets.filter((budget) => budget.budgetMs >= timeoutMs);
+  if (undercut.length === 0) return;
+  const largest = budgets.reduce((max, budget) => Math.max(max, budget.budgetMs), 0);
+  throw new EnvValidationError(
+    undercut.map((budget) => ({
+      path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+      message:
+        `(${timeoutMs} ms) is not above ${budget.name}, ${budget.budgetMs} ms ` +
+        `(${budget.derivation}), so it would cancel that operation first. Set it above ` +
+        `${largest} ms, this service's largest operation budget, or leave it unset`,
+    })),
+  );
 }
 
 /**
@@ -635,8 +715,10 @@ function withConfiguredDatabase<T>(parsed: T): T {
     timeoutSeconds: typeof timeoutSeconds === 'number' ? timeoutSeconds : undefined,
   };
   try {
-    const timed =
-      typeof statementTimeoutMs === 'number' ? withStatementTimeout(url, statementTimeoutMs) : url;
+    const timed = withStatementTimeout(
+      url,
+      typeof statementTimeoutMs === 'number' ? statementTimeoutMs : undefined,
+    );
     const configured = withDatabasePool(timed, pool);
     return configured === url ? parsed : { ...parsed, DATABASE_URL: configured };
   } catch (error) {

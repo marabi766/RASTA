@@ -94,8 +94,8 @@ audit، fleet و maintenance در `TABLE_EXEMPTIONS` با Queryِ خواننده
 
 **اندازهٔ Pool هم از همان URL می‌آید.** `DATABASE_POOL_SIZE` و `DATABASE_POOL_TIMEOUT_SECONDS` را `loadEnv` به‌صورت
 `connection_limit` و `pool_timeout` در همان `DATABASE_URL` می‌نویسد؛ تنظیم‌نشده، پیش‌فرض Prisma می‌ماند. سقف زمان هر
-Statement هم: `DATABASE_STATEMENT_TIMEOUT_MS` (پیش‌فرض ۱۵۰۰۰) به‌صورت `-c statement_timeout=…` کنار گزینهٔ UTC در همان
-`options`. بازه‌ها و قواعد: `docs/11` § ۱۱٫۲.
+Statement هم، اختیاری: `DATABASE_STATEMENT_TIMEOUT_MS` (تنظیم‌نشده، هیچ) به‌صورت `-c statement_timeout=…` کنار گزینهٔ
+UTC در همان `options`، و فقط اگر از بزرگ‌ترین بودجهٔ عملیاتی همان سرویس بیشتر باشد. بازه‌ها و قواعد: `docs/11` § ۱۱٫۲.
 
 ---
 

@@ -9,7 +9,6 @@ export {
   databaseEnvSchema,
   DATABASE_POOL_SIZE_MAX,
   DATABASE_POOL_TIMEOUT_SECONDS_MAX,
-  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
   DATABASE_STATEMENT_TIMEOUT_MS_MIN,
   DATABASE_STATEMENT_TIMEOUT_MS_MAX,
   kafkaEnvSchema,
@@ -31,7 +30,10 @@ export {
   allowsDeveloperTooling,
   EnvValidationError,
   STATEMENT_WAIT_MARGIN_MS,
-  assertStatementWaitsWithinTimeout,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  PRISMA_DEFAULT_TRANSACTION_BUDGET,
+  outboxPurgeOperationBudget,
+  idempotencyClaimOperationBudget,
   urlWithProtocol,
   httpUrlSchema,
   postgresUrlSchema,
@@ -45,7 +47,8 @@ export type {
   KafkaEnv,
   OutboxPurgeEnv,
   EnvIssue,
-  StatementWait,
+  LoadEnvOptions,
+  OperationBudget,
 } from './env';
 
 export { UTC_SESSION_OPTION, withStatementTimeout, withUtcSession } from './database-session';

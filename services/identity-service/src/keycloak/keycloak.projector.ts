@@ -17,19 +17,14 @@ import {
   type KeycloakProjectionOutcome,
   type KeycloakProjectionTrigger,
 } from '../observability/keycloak-projection.metrics';
-
-/**
- * Above the Keycloak client's worst case: six calls — token, the attribute
- * GET and PUT, and on a first activation the account read and the activation
- * GET and PUT — each bounded at 10 s.
- */
-const PROJECTION_TRANSACTION_TIMEOUT_MS = 65_000;
+import { PROJECTION_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
 
 /**
  * A second projection or repair of the same user waits on the first one's
  * lock for as long as that one may hold it, so its statements may run as long
- * as the transaction: the connection's `DATABASE_STATEMENT_TIMEOUT_MS`
- * (15 s by default) would cancel the wait while Keycloak is merely slow
+ * as the transaction. A shorter session timeout — behind PgBouncer, the
+ * runtime role's own default, which `loadEnv` cannot check against the
+ * operation budgets — would cancel the wait while Keycloak is merely slow
  * (#268). Set with `SET LOCAL`, for these transactions only.
  */
 export const PROJECTION_TRANSACTION_OPTIONS = {

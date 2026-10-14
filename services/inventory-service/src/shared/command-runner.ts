@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { SERVICE_NAME, type InventoryEnv } from '../config/env';
+import { commandTransactionTimeoutMs } from '../config/operation-budgets';
 import { inventoryCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ExpiryBacklog, ReservationExpiry } from '../reservation/expiry';
@@ -52,7 +53,7 @@ export class CommandRunner {
         },
         // A command may wait on several items in turn, each bounded by lock_timeout; the whole
         // transaction is bounded too, and so is its wait for a pooled connection.
-        { timeoutMs: lockTimeoutMs * 4 + 10_000, maxWaitMs: lockTimeoutMs },
+        { timeoutMs: commandTransactionTimeoutMs(lockTimeoutMs), maxWaitMs: lockTimeoutMs },
       );
       this.count(command, 'applied');
       return result;

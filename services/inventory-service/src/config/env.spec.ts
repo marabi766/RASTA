@@ -1,4 +1,5 @@
 import { corsOrigins, loadInventoryEnv } from './env';
+import { inventoryOperationBudgets } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -125,17 +126,38 @@ describe('corsOrigins', () => {
   });
 });
 
-describe('INVENTORY_LOCK_TIMEOUT_MS against the statement timeout (#268 r3)', () => {
-  it('refuses a lock timeout the statement timeout would cut first (500, not 409); the bound is exact', () => {
-    expect(() => load({ INVENTORY_LOCK_TIMEOUT_MS: '15000' })).toThrow(
-      /INVENTORY_LOCK_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  it('unset, applies no statement timeout', () => {
+    const env = load();
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
+    expect(inventoryOperationBudgets(load()).map((b) => [b.name, b.budgetMs])).toEqual([
+      ['IN_FLIGHT_WAIT_MS', 7000],
+      ['INVENTORY_LOCK_TIMEOUT_MS', 30_000],
+      ['INVENTORY_LOCK_TIMEOUT_MS (expiry)', 20_000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('set, must be above the largest: a stock command, 4 × the lock timeout + 10 s; the bound is exact', () => {
+    expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '30000' })).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(30000 ms\) is not above INVENTORY_LOCK_TIMEOUT_MS, 30000 ms/,
     );
-    expect(() => load({ INVENTORY_LOCK_TIMEOUT_MS: '14999' })).not.toThrow();
+    expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).not.toThrow();
+  });
+
+  it('moves with the lock timeout: a longer one raises the floor, a shorter one leaves the renewal', () => {
     expect(() =>
-      load({ INVENTORY_LOCK_TIMEOUT_MS: '5000', DATABASE_STATEMENT_TIMEOUT_MS: '5000' }),
-    ).toThrow(/INVENTORY_LOCK_TIMEOUT_MS/);
+      load({ INVENTORY_LOCK_TIMEOUT_MS: '60000', DATABASE_STATEMENT_TIMEOUT_MS: '250000' }),
+    ).toThrow(/not above INVENTORY_LOCK_TIMEOUT_MS, 250000 ms/);
     expect(() =>
-      load({ INVENTORY_LOCK_TIMEOUT_MS: '60000', DATABASE_STATEMENT_TIMEOUT_MS: '60001' }),
+      load({ INVENTORY_LOCK_TIMEOUT_MS: '60000', DATABASE_STATEMENT_TIMEOUT_MS: '250001' }),
     ).not.toThrow();
+    expect(() =>
+      load({ INVENTORY_LOCK_TIMEOUT_MS: '100', DATABASE_STATEMENT_TIMEOUT_MS: '12500' }),
+    ).toThrow(/not above OUTBOX_CLAIM_LEASE_SECONDS, 12500 ms/);
   });
 });

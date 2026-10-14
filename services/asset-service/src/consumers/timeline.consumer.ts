@@ -20,6 +20,7 @@ import { SERVICE_NAME } from '../config/env';
 import { timelineEventsSkippedTotal } from '../observability/metrics';
 import { CONSUMED_EVENT_CATEGORY, timelineSourceSchema } from '../asset/events';
 import type { AssetStatus } from '../asset/lifecycle';
+import { REFRESH_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
 
 /**
  * Builds the electronic dossier from other services' events.
@@ -111,13 +112,6 @@ const TIMELINE_SOURCE_FIELDS = Object.keys(timelineSourceSchema.shape);
  * a factory resolves that circle without a mutable placeholder.
  */
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
-
-/**
- * A refresh holds the asset's lock across two short exchanges with the owners
- * of its work (each bounded by its own deadline), so its transaction is given
- * room. Replays are rare operator actions; other deliveries for that asset wait.
- */
-const REFRESH_TRANSACTION_TIMEOUT_MS = 30_000;
 
 @Injectable()
 export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {

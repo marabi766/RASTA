@@ -55,11 +55,10 @@ export class DatabaseUrlConflictError extends Error {
   constructor(
     public readonly variable: string,
     public readonly parameter: string,
+    message = `DATABASE_URL already sets ${parameter} to a different value than ${variable}; ` +
+      'set it in one place',
   ) {
-    super(
-      `DATABASE_URL already sets ${parameter} to a different value than ${variable}; ` +
-        'set it in one place',
-    );
+    super(message);
     this.name = 'DatabaseUrlConflictError';
   }
 }

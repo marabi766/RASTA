@@ -17,10 +17,12 @@ import { asActor, databaseUrl, newPrisma, tenants } from './helpers';
  * The Keycloak projection and registration approval keep waiting on each
  * other's locks past the connection's statement timeout (#268 round 3).
  *
- * Every runtime connection now carries `DATABASE_STATEMENT_TIMEOUT_MS`
- * (15 s by default). These transactions hold a lock across Keycloak calls of
- * up to 10 s each, inside a 65 s transaction timeout, so a second one for the
- * same user or request may legitimately wait longer than that: they set their
+ * A runtime connection may carry a statement timeout: `DATABASE_STATEMENT_TIMEOUT_MS`
+ * when it is set (`loadEnv` then holds it above these transactions' 65 s), or,
+ * behind PgBouncer, the runtime role's own default, which nothing in the
+ * service can check (#268 r4). These transactions hold a lock across Keycloak
+ * calls of up to 10 s each, inside a 65 s transaction timeout, so a second one
+ * for the same user or request may legitimately wait that long: they set their
  * own `statement_timeout` with `SET LOCAL`, for that transaction only.
  *
  * Scaled down to be fast: the service's connection here carries a 1 s

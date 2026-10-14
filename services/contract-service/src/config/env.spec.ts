@@ -1,4 +1,5 @@
 import { corsOrigins, loadContractEnv, signingTransactionTimeoutMs } from './env';
+import { contractOperationBudgets } from './operation-budgets';
 
 const base: NodeJS.ProcessEnv = {
   KAFKA_BROKERS: 'localhost:9092',
@@ -184,23 +185,36 @@ describe('corsOrigins', () => {
   });
 });
 
-describe('the signing lock hold against the statement timeout (#268 r3)', () => {
-  it('waits up to the signing transaction timeout: the organization timeout + 10 s', () => {
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)', () => {
+  it('unset, applies no statement timeout', () => {
     const env = load();
-    expect(signingTransactionTimeoutMs(env)).toBe(13_000);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
   });
 
-  it('refuses an organization timeout whose lock hold the statement timeout would cut; the bound is exact', () => {
-    expect(() => load({ CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '5000' })).toThrow(
-      /CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
+  it('declares every budget, at the defaults; signing waits up to the organization timeout + 10 s', () => {
+    const env = load();
+    expect(signingTransactionTimeoutMs(env)).toBe(13_000);
+    expect(contractOperationBudgets(env).map((b) => [b.name, b.budgetMs])).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['IN_FLIGHT_WAIT_MS', 7000],
+      ['CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS', 13_000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+    ]);
+  });
+
+  it('set, must be above the largest: the signing lock hold; the bound is exact', () => {
+    expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '13000' })).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(13000 ms\) is not above CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS, 13000 ms/,
     );
-    expect(() => load({ CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '4999' })).not.toThrow();
-    // A longer one is accepted with a statement timeout above its hold.
-    expect(() =>
-      load({
-        CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '60000',
-        DATABASE_STATEMENT_TIMEOUT_MS: '70001',
-      }),
-    ).not.toThrow();
+    expect(() => load({ DATABASE_STATEMENT_TIMEOUT_MS: '13001' })).not.toThrow();
+  });
+
+  it('a longer organization timeout raises the floor with it', () => {
+    const slow = { CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: '60000' };
+    expect(() => load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '70000' })).toThrow(
+      /not above CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS, 70000 ms/,
+    );
+    expect(() => load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '70001' })).not.toThrow();
   });
 });

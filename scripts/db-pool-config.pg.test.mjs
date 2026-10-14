@@ -17,9 +17,10 @@
 //      PrismaService is built from `env.DATABASE_URL`, and so is every other
 //      client in services/*/src (main.ts preflight, CLIs); the migration
 //      runner never goes through it;
-//   5. DATABASE_STATEMENT_TIMEOUT_MS (Codex r1 on #268) is the session's
-//      `statement_timeout` — 15 s unset — so a longer statement is cancelled,
-//      and a transaction's own `SET LOCAL` still wins inside it.
+//   5. DATABASE_STATEMENT_TIMEOUT_MS (Codex r1 on #268) is opt-in (r4): unset,
+//      the session keeps the database's own `statement_timeout`; set, it is
+//      the session's, so a longer statement is cancelled, and a
+//      transaction's own `SET LOCAL` still wins inside it.
 //
 // Reads only: it opens connections and sleeps on them, and creates nothing.
 // Needs organization-service's generated Prisma client (any service's would do).
@@ -52,9 +53,14 @@ const database = process.env.PGDATABASE ?? 'postgres';
 /** The URL as an operator writes it: nothing about the pool. */
 const RAW_URL = `postgresql://${login}:${secret}@${host}:${port}/${database}?schema=public`;
 
-/** What a service would connect with, given these pool variables. */
+/**
+ * What a service would connect with, given these pool variables: one whose
+ * operation budgets all fit under a second, so any statement timeout the
+ * schema accepts is above them (each service's own floor is unit-tested).
+ */
 const serviceUrl = (pool = {}) =>
-  loadEnv(databaseEnvSchema, { DATABASE_URL: RAW_URL, ...pool }).DATABASE_URL;
+  loadEnv(databaseEnvSchema, { DATABASE_URL: RAW_URL, ...pool }, { operationBudgets: () => [] })
+    .DATABASE_URL;
 
 /** Opens a client on `url`, runs `fn` with it, closes it whatever happens. */
 async function withClient(url, fn) {
@@ -198,12 +204,15 @@ async function outcome(run) {
   }
 }
 
-test('5. DATABASE_STATEMENT_TIMEOUT_MS is the session’s statement_timeout; SET LOCAL still overrides it', async () => {
-  // Unset: the 15 s default, whatever the server's or the role's.
-  const fallback = await withClient(serviceUrl(), (client) =>
-    client.$queryRawUnsafe(`SELECT current_setting('statement_timeout') AS value`),
-  );
-  assert.equal(fallback[0].value, '15s');
+test('5. DATABASE_STATEMENT_TIMEOUT_MS is opt-in; set, it is the session’s statement_timeout, and SET LOCAL still overrides it', async () => {
+  // Unset (#268 r4): no option is sent, and the session keeps exactly what a
+  // client with no options gets — the database's, the role's or the server's.
+  const setting = (client) =>
+    client.$queryRawUnsafe(`SELECT current_setting('statement_timeout') AS value`);
+  assert.equal(new URL(serviceUrl()).searchParams.get('options'), '-c TimeZone=UTC');
+  const unset = await withClient(serviceUrl(), setting);
+  const bare = await withClient(RAW_URL, setting);
+  assert.equal(unset[0].value, bare[0].value);
 
   await withClient(serviceUrl({ DATABASE_STATEMENT_TIMEOUT_MS: '1000' }), async (client) => {
     const [row] = await client.$queryRawUnsafe(
@@ -228,7 +237,8 @@ test('5. DATABASE_STATEMENT_TIMEOUT_MS is the session’s statement_timeout; SET
     );
   });
 
-  // The control: the same sleep under the default runs to the end.
+  // The control: the same sleep with the variable unset runs to the end
+  // (unless the database itself has a shorter default, which CI's has not).
   await withClient(serviceUrl(), async (client) => {
     assert.equal(await outcome(() => client.$queryRawUnsafe(`SELECT pg_sleep(3)::text`)), 'OK');
   });

@@ -1,5 +1,6 @@
 import { EnvValidationError } from '@rasta/config';
 import { loadMaintenanceEnv } from './env';
+import { maintenanceOperationBudgets } from './operation-budgets';
 
 /**
  * `MAINTENANCE_DUE_SCAN_ENABLED` — whether this replica runs the in-process
@@ -95,25 +96,46 @@ describe('MAINTENANCE_IDEMPOTENCY_CLAIM_LEASE_SECONDS', () => {
 });
 
 /**
- * #268 r3: a replayed asset event's refresh holds the asset's locks across two
- * calls of `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS`, and new work waits on them.
- * That wait must end before the session's statement timeout would cut it.
+ * #268 r4: DATABASE_STATEMENT_TIMEOUT_MS is opt-in, and when set it must be
+ * above every operation budget the service declares — the longest is a
+ * replayed asset event's refresh, which holds the asset's locks across calls
+ * of `ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS` while new work waits on them.
  */
-describe('ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS against the statement timeout', () => {
+describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
   const load = (overrides: NodeJS.ProcessEnv) => () =>
     loadMaintenanceEnv({ ...BASE, ...overrides });
 
-  it('holds 2 × the timeout + 5 s under it; the bound is exact', () => {
-    expect(load({})).not.toThrow();
-    expect(load({ ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '4999' })).not.toThrow();
-    expect(load({ ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '5000' })).toThrow(
-      /ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: lets one statement wait up to 15000 ms .*DATABASE_STATEMENT_TIMEOUT_MS \(15000 ms\)/,
-    );
+  it('unset, applies no statement timeout', () => {
+    const env = loadMaintenanceEnv(BASE);
+    expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBeUndefined();
+    expect(env.DATABASE_URL).not.toContain('statement_timeout');
+  });
+
+  it('declares every budget, at the defaults', () => {
     expect(
-      load({
-        ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000',
-        DATABASE_STATEMENT_TIMEOUT_MS: '65001',
-      }),
-    ).not.toThrow();
+      maintenanceOperationBudgets(loadMaintenanceEnv(BASE)).map((b) => [b.name, b.budgetMs]),
+    ).toEqual([
+      ['PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS', 5000],
+      ['IN_FLIGHT_WAIT_MS', 7000],
+      ['REFRESH_TRANSACTION_TIMEOUT_MS', 30_000],
+      ['ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS', 11_000],
+      ['OUTBOX_CLAIM_LEASE_SECONDS', 12_500],
+      ['OUTBOX_PURGE_STATEMENT_TIMEOUT_MS', 10_000],
+    ]);
+  });
+
+  it('set, must be above the largest: the replay refresh, 30 s; the bound is exact', () => {
+    expect(load({ DATABASE_STATEMENT_TIMEOUT_MS: '30000' })).toThrow(
+      /DATABASE_STATEMENT_TIMEOUT_MS: \(30000 ms\) is not above REFRESH_TRANSACTION_TIMEOUT_MS, 30000 ms/,
+    );
+    expect(load({ DATABASE_STATEMENT_TIMEOUT_MS: '30001' })).not.toThrow();
+  });
+
+  it('a configured budget raises the floor: 2 × the resolution timeout + 5 s', () => {
+    const slow = { ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: '30000' };
+    expect(load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '65000' })).toThrow(
+      /not above ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS, 65000 ms/,
+    );
+    expect(load({ ...slow, DATABASE_STATEMENT_TIMEOUT_MS: '65001' })).not.toThrow();
   });
 });

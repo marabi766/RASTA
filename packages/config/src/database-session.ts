@@ -49,15 +49,35 @@ export function withUtcSession(url: string): string {
  * default. A transaction that needs longer says so itself with `SET LOCAL`
  * (the outbox purge does), which wins inside that transaction only.
  *
+ * `undefined` — the variable unset, no statement timeout (#268 r4) — returns
+ * the URL unchanged, unless its options set `statement_timeout` themselves:
+ * that is refused ({@link DatabaseUrlConflictError}), because a timeout written
+ * only in the URL would escape the check against the service's operation
+ * budgets that the variable goes through.
+ *
  * Placed before a trailing {@link UTC_SESSION_OPTION}, so the URL still ends
  * with it and `withUtcSession` stays idempotent on the result. A URL whose
  * options already set `statement_timeout` to the same value is returned
  * unchanged; to another value, {@link DatabaseUrlConflictError} — one number
  * in two places is refused, as the pool's are.
+ *
+ * Behind PgBouncer in transaction pooling the whole `options` parameter is
+ * dropped (`ignore_startup_parameters`, docs/11 § 11.2): there the timeout has
+ * to be the runtime role's own default, set on the database side.
  */
-export function withStatementTimeout(url: string, timeoutMs: number): string {
+export function withStatementTimeout(url: string, timeoutMs: number | undefined): string {
   const { existing, withOptions } = startupOptions(url);
   const written = settingsIn(existing).filter(([name]) => name === 'statement_timeout');
+  if (timeoutMs === undefined) {
+    if (written.length === 0) return url;
+    throw new DatabaseUrlConflictError(
+      'DATABASE_STATEMENT_TIMEOUT_MS',
+      'statement_timeout',
+      'DATABASE_URL sets statement_timeout in its options while DATABASE_STATEMENT_TIMEOUT_MS is ' +
+        'unset; set it with DATABASE_STATEMENT_TIMEOUT_MS instead, which is checked against the ' +
+        'service’s operation budgets',
+    );
+  }
   if (written.some(([, value]) => value !== String(timeoutMs))) {
     throw new DatabaseUrlConflictError('DATABASE_STATEMENT_TIMEOUT_MS', 'statement_timeout');
   }
