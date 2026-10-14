@@ -292,7 +292,10 @@ Method و مسیر درخواست Forwardشده از نو نوشته می‌شو
 **شناسه و مبلغ** مجاز است — شناسهٔ رکورد و مستأجر، Endpoint، موجودی درخواستی و موجود کیف پول (`{walletId, requested,
 available}`)، گذار وضعیت — اما **هرگز**: اعتبارنامه یا کلید (توکن، گذرواژه، `Idempotency-Key` یا هر چیز مشتق از آن)، **دادهٔ
 شخصی** (نام، ایمیل، تلفن، کد ملی، نشانی) یا **متن آزاد کلاینت** (دلیل، یادداشت، بدنهٔ خام). چیزی آن را پاک‌سازی نمی‌کند؛
-همان‌طور که نوشته شده ثبت می‌شود و مسئولیتش با نویسنده است (توضیح `RastaError.internalContext`).
+همان‌طور که نوشته شده ثبت می‌شود و مسئولیتش با نویسنده است (توضیح `RastaError.internalContext`). متنی که کلاینت
+نوشته — Header ‏`X-Organization-Id` بیرون از عضویت‌ها، شناسهٔ متن آزادی که سازمانی نیافت، مقدار تکراری میدانی یکتا — نه در
+پیام می‌آید نه در `internalContext`: برای Header فقط طولش (`unmatchedHeader`، `headerLength`)، و برای برخورد یکتایی
+(`label`، `sku`، `title`) فقط نام میدان (`field`) ثبت می‌شود. پیام jose برای Token ردشده هم ثبت نمی‌شود، فقط کدش (`joseCode`).
 
 **بدنه‌ای که سرویس نمی‌خواند.** بدنهٔ بزرگ‌تر از سقف (`entity.too.large` در body-parser) `413 PAYLOAD_TOO_LARGE` و
 Charset یا Content-Encoding پشتیبانی‌نشده (`charset.unsupported`، `encoding.unsupported`) `415 UNSUPPORTED_MEDIA_TYPE`
