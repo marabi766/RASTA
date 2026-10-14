@@ -10,7 +10,11 @@ import {
 } from '../auth/token-verifier';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY, REQUIRE_PLATFORM_USER_ID_KEY } from '../decorators';
 import { platformUserIdRequired } from '../auth/separation-of-duties';
-import { upgradeContext, type RequestContext } from '../context/request-context';
+import { tryGetContext, upgradeContext, type RequestContext } from '../context/request-context';
+import {
+  CORRELATION_ID_HEADER,
+  isServiceCorrelationId,
+} from '../middleware/request-context.middleware';
 import {
   parseOrganizationRoles,
   rolesForRequest,
@@ -343,6 +347,11 @@ export class AuthGuard implements CanActivate {
       return { authType: 'ANONYMOUS', roles: [] };
     }
 
+    // A platform service, continuing its own chain. Adopted before anything
+    // below can refuse it, so a refused call is traced under the caller's id
+    // too — that is when the trail matters most.
+    adoptForwardedCorrelationId(execution, request);
+
     const allowed = this.reflector.getAllAndOverride<string[] | undefined>(ALLOW_SERVICE_KEY, [
       execution.getHandler(),
       execution.getClass(),
@@ -499,6 +508,33 @@ function headerValue(request: AuthenticatedRequest, name: string): string | unde
   const raw = request.headers[name] ?? request.headers[name.toLowerCase()];
   if (Array.isArray(raw)) return raw[0];
   return raw;
+}
+
+/**
+ * Keeps the correlation id a verified service caller forwarded, when it is one
+ * a service may keep, in the context and in the response header.
+ *
+ * The middleware runs before authentication, so it holds every caller to the
+ * strict rule and mints a fresh id otherwise. Only here is it known that the
+ * caller is a platform service continuing its own chain — an order a workflow
+ * resumes under the `corr-1` it was placed with — and re-minting that would
+ * split the chain (`isServiceCorrelationId`). A gateway-forwarded request
+ * carries the user's bearer and never reaches this; neither does a relay.
+ */
+function adoptForwardedCorrelationId(
+  execution: ExecutionContext,
+  request: AuthenticatedRequest,
+): void {
+  const incoming = headerValue(request, CORRELATION_ID_HEADER);
+  if (incoming === undefined || !isServiceCorrelationId(incoming)) return;
+  // Outside a request (a guard driven directly) there is nothing to adopt into.
+  if (tryGetContext() === undefined) return;
+
+  upgradeContext({ correlationId: incoming });
+  execution
+    .switchToHttp()
+    .getResponse<{ setHeader(name: string, value: string): void }>()
+    .setHeader(CORRELATION_ID_HEADER, incoming);
 }
 
 function extractBearer(header: string | undefined): string | undefined {

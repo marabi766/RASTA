@@ -96,6 +96,7 @@ export {
   parseTraceparent,
   requestPath,
   isWellFormedCorrelationId,
+  isServiceCorrelationId,
   CORRELATION_ID_HEADER,
   CORRELATION_ID_MAX_LENGTH,
   REQUEST_ID_HEADER,

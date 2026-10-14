@@ -2,7 +2,7 @@ import { tryGetContext, type RequestContext } from '../context/request-context';
 import {
   CORRELATION_ID_MAX_LENGTH,
   RequestContextMiddleware,
-  isWellFormedCorrelationId,
+  isServiceCorrelationId,
   requestPath,
 } from './request-context.middleware';
 
@@ -48,7 +48,9 @@ describe('RequestContextMiddleware, path', () => {
 /**
  * `X-Correlation-Id` is the caller's to set, and the adopted value reaches the
  * response header, every error body and every log line of the request (S-09).
- * Only an identifier the platform could have minted is adopted.
+ * The middleware runs before authentication, so it holds every caller to the
+ * external rule: exactly an id the platform hands out. A verified service
+ * caller's looser id is the auth guard's to adopt (auth.guard.correlation.spec).
  */
 describe('RequestContextMiddleware, correlation id', () => {
   const ULID_SHAPE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -69,15 +71,22 @@ describe('RequestContextMiddleware, correlation id', () => {
   it.each([
     ['a ULID, as this middleware mints', '01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
     ['a UUID, as the web app mints', '3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a'],
-    ['a labelled ULID', 'COR_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
-    ['a labelled UUID', 'e2e-refusal-3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a'],
-    ['a label naming a domain id', 'maintenance-due-MSC_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
-    ['a run-tagged id', 'COR_7M2N5P8R1T_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
   ])('adopts %s', (_, id) => {
     expect(correlationFor(id)).toEqual({ context: id, response: id });
   });
 
   it.each([
+    // Codex r4: a whole UUID behind a label used to be adopted.
+    [
+      'a credential labelling a UUID',
+      'access_token_secret123-3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a',
+    ],
+    ['a credential labelling a ULID', 'access_token_secret123-01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
+    ['a labelled ULID', 'COR_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
+    ['a labelled UUID', 'e2e-refusal-3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a'],
+    ['a background-work id', 'maintenance-due-MSC_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
+    ['a UUID with a trailing label', '3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a-secret'],
+    ['a UUID without its dashes', '3f2b8c1e9d4a4e6b8a7c1f0e2d3c4b5a'],
     ['a credential', 'access_token=secret123'],
     ['a bare word', 'secret123'],
     ['a phone number', '09121234567'],
@@ -89,7 +98,6 @@ describe('RequestContextMiddleware, correlation id', () => {
     ['a ULID with a line break after it', '01JBQ8Z4K7M2N5P8R1T3V6X9Y2\nforged log line'],
     ['a ULID behind a credential', 'token=abc_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
     ['an empty value', ''],
-    ['an id past the length bound', `${'A'.repeat(120)}_01JBQ8Z4K7M2N5P8R1T3V6X9Y2`],
   ])('refuses %s and mints a fresh id instead', (_, header) => {
     const { context, response } = correlationFor(header);
     expect(context).toMatch(ULID_SHAPE);
@@ -105,12 +113,34 @@ describe('RequestContextMiddleware, correlation id', () => {
     const minted = correlationFor(undefined).context;
     expect(correlationFor(minted).context).toBe(minted);
   });
+});
+
+/** What a verified service caller may keep (applied by the auth guard). */
+describe('isServiceCorrelationId', () => {
+  it.each([
+    ['a legacy id an order was placed under', 'corr-1'],
+    ['a background-work id', 'maintenance-due-MSC_01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
+    ['a scan id', 'scan-01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
+    ['a labelled UUID', 'e2e-refusal-3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a'],
+    ['a bare ULID', '01JBQ8Z4K7M2N5P8R1T3V6X9Y2'],
+  ])('keeps %s', (_, id) => {
+    expect(isServiceCorrelationId(id)).toBe(true);
+  });
+
+  it.each([
+    ['a credential with "="', 'access_token=secret123'],
+    ['free text', 'my name is Ali'],
+    ['an email address', 'someone@example.com'],
+    ['a line break', 'corr-1\nforged log line'],
+    ['an empty value', ''],
+  ])('refuses %s', (_, id) => {
+    expect(isServiceCorrelationId(id)).toBe(false);
+  });
 
   it('holds the length bound exactly', () => {
-    const tail = '_01JBQ8Z4K7M2N5P8R1T3V6X9Y2';
-    const atBound = `${'A'.repeat(CORRELATION_ID_MAX_LENGTH - tail.length)}${tail}`;
-    expect(isWellFormedCorrelationId(atBound)).toBe(true);
-    expect(isWellFormedCorrelationId(`A${atBound}`)).toBe(false);
+    const atBound = 'a'.repeat(CORRELATION_ID_MAX_LENGTH);
+    expect(isServiceCorrelationId(atBound)).toBe(true);
+    expect(isServiceCorrelationId(`${atBound}a`)).toBe(false);
   });
 });
 

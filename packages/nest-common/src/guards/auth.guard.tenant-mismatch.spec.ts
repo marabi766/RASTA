@@ -485,7 +485,8 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
     const headers = {
       ...bearer,
       'x-organization-id': ORG_FOREIGN,
-      'x-correlation-id': 'access_token=secret123',
+      // Codex r4: a whole UUID behind a label was adopted, label and all.
+      'x-correlation-id': 'access_token_secret123-3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a',
     };
     const lines: { level: string; payload: unknown; message: string }[] = [];
     const at = (level: string) => (payload: unknown, message: string) => {
