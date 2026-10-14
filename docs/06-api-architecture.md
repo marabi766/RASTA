@@ -271,10 +271,17 @@ not be read»)؛ متن Parser که بایت‌های کلاینت را نقل �
 
 **Span ردیابی هم Query ندارد.** Instrumentationهای HTTP، چه ورودی چه خروجی (`http`، undici یعنی `fetch`، NestJS)، Query را در
 `url.query` و درون `url.full` ثبت می‌کنند. Query دادهٔ کلاینت است (Cursor، عبارت جست‌وجو، توکن در URL بازگشت) و S-09 رسیدنش به
-Backend ردیابی را هم نمی‌پذیرد. `UrlQueryRedactingSpanProcessor` در `initTelemetry` (`@rasta/observability`) پیش از پایان هر
-Span، `url.full`، `http.url` و `http.target` را تا پیش از `?` یا `#` کوتاه می‌کند و `url.query` را برمی‌دارد. نام Span،
-`url.path` و `http.route` (الگوی Route) دست نمی‌خورند. تست با Instrumentationهای واقعی و Exporter درون‌حافظه:
-`packages/observability/src/url-redaction.spec.ts`.
+Backend ردیابی را هم نمی‌پذیرد. `RedactingSpanProcessor` در `initTelemetry` (`@rasta/observability`) پیش از پایان هر Span،
+`url.full`، `http.url` و `http.target` را تا پیش از `?` یا `#` کوتاه می‌کند و `url.query` را برمی‌دارد. Instrumentationها
+خطا را هم ثبت می‌کنند و متن خطا همان را تکرار می‌کند — Parser JSON در Express بدنهٔ ردشده را نقل می‌کند — پس هر رشتهٔ دیگر
+Span هم پاک‌سازی می‌شود: Attributeها، Attributeهای هر Event (`exception.message`، `exception.stacktrace`) و هر Link، و پیام
+Status. Query درون متن به `?[REDACTED]` و منبع نقل‌شده در خطای `JSON.parse` به `"[REDACTED]"` بدل می‌شود. نام Span، نام Event،
+`url.path` و `http.route` (الگوی Route) دست نمی‌خورند. انتخاب Exporter همان است که بود: پردازشگرهای صادرکننده را همان دو
+تابعی می‌سازند که `NodeSDK` خودش می‌خواند (`OTEL_TRACES_EXPORTER`، پروتکل OTLP، `OTEL_BSP_*`، `none` یعنی بی‌Tracer Provider) و
+پاک‌ساز فقط جلوی آن‌ها می‌ایستد. Log همبسته با Trace (pino ← OTel Logs) هم Query ندارد، چون `path` زمینهٔ درخواست
+(`RequestContextMiddleware`، `requestPath`) خودش بی‌Query است. تست‌ها با Instrumentationهای واقعی و Exporter درون‌حافظه:
+`packages/observability/src/url-redaction.spec.ts` (Span)، `exporter-selection.spec.ts` (مقایسه با کد پیشین در هر ترکیب
+محیط) و `packages/nest-common/src/middleware/request-path-logs.spec.ts` (Log).
 
 **دلیل بستهٔ امتناع در `details`.** امتناعی که دلیلش یکی از فهرستی بسته است، آن دلیل را در `details[].code` می‌آورد.
 `code` سطح بالا (`FORBIDDEN`، `CONFLICT`، `BUSINESS_RULE_VIOLATION` …) و `message` همان می‌مانند. کلاینت اول روی `code` و سپس روی `details[].code`
