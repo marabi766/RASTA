@@ -5,6 +5,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { INSURANCE_COVERAGES } from '../insurance/ownership';
 
@@ -14,6 +15,7 @@ import { INSURANCE_COVERAGES } from '../insurance/ownership';
 export const assetEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

@@ -6,6 +6,7 @@ import {
   httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { INSURANCE_COVERAGES } from '../fleet/dispatch-blocks';
 
@@ -15,6 +16,7 @@ import { INSURANCE_COVERAGES } from '../fleet/dispatch-blocks';
 export const fleetEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

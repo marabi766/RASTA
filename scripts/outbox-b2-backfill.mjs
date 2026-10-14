@@ -104,7 +104,11 @@
 //                  the service's runtime role (D-045: a split service's URL is
 //                  proven before the first query, so a migrator, owner or
 //                  superuser URL never writes), a B1 precondition failed,
-//                  or the ordering guard tripped. Scoped to
+//                  the ordering guard tripped, a stream's numbered history
+//                  was purged (a counter ahead of its highest surviving
+//                  `stream_seq`, D-052 — refused before any write, dry run
+//                  included), or a finalised apply's `verify` reported a
+//                  `*_mismatch` (emitted after `verify`). Scoped to
 //                  that one service — every later selected service is still
 //                  attempted and the summary is still emitted. Counted in
 //                  `summary.refused`.
@@ -113,7 +117,8 @@
 //            and `refused`.
 //   Exit:    0 only when `incomplete` and `refused` are both zero — a dry run
 //            converges by definition, and an apply converges when nothing was
-//            truncated and no unsequenced pending row is left. A bounded slice
+//            truncated, no unsequenced pending row is left and every
+//            `*_mismatch` in `verify` is zero. A bounded slice
 //            (`--apply --max-batches N`) that leaves work behind therefore
 //            exits non-zero *by design*, so an operator's script cannot
 //            mistake a partial backfill for a finished one.
@@ -124,6 +129,7 @@ import {
   parseOptions,
   resolveDatabaseUrl,
   runServiceBackfill,
+  verificationMismatches,
 } from './outbox-b2-lib.mjs';
 import { prismaPort } from './outbox-b2-prisma-port.mjs';
 import { createRequire } from 'node:module';
@@ -152,7 +158,14 @@ const emit = (event) => {
  */
 function converged(result) {
   if (!result.applied) return true;
-  return result.truncated === false && result.verified.remaining === 0;
+  return (
+    result.truncated === false &&
+    result.verified.remaining === 0 &&
+    // The backfill already refuses a finalised run whose verification
+    // mismatches; held here too, so success can never be read off fewer
+    // facts than the `verify` event reports.
+    verificationMismatches(result.verified) === 0
+  );
 }
 
 async function main() {

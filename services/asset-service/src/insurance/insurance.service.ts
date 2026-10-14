@@ -291,10 +291,11 @@ export class InsuranceService {
    * and an event is never sent for a policy whose expiry rolled back.
    *
    * `shouldStop` is asked before every transaction, the warnings' included
-   * (the shutdown): once it answers yes no further transaction starts. The
-   * warning queries are reads, so a shutdown that begins while they are
-   * pending must still stop the sweep before it writes. Each transaction
-   * commits whole, so what is not reached is simply the next sweep's.
+   * (the shutdown, #247 r4 and its Codex follow-up): once it answers yes no
+   * further transaction starts. The warning queries are reads, so a shutdown
+   * that begins while they are pending must still stop the sweep before it
+   * writes. Each transaction commits whole, so what is not reached is simply
+   * the next sweep's.
    */
   async runExpirySweep(
     options: { shouldStop?: () => boolean } = {},

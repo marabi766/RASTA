@@ -14,7 +14,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -22,6 +25,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -258,6 +262,27 @@ const CONSUMED_TOPICS = ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintena
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: FleetEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay and the purge drain together in the destroy phase,
+      // by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      provide: OutboxShutdown,
+      inject: [OutboxRelay, OutboxPurgeScheduler, ENV],
+      useFactory: (relay: OutboxRelay, purge: OutboxPurgeScheduler, env: FleetEnv) =>
+        new OutboxShutdown({ relay, purge, budgetMs: outboxShutdownBudgetMs(env) }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV],
       useFactory: (env: FleetEnv): AuthGuardOptions => ({
@@ -288,6 +313,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly repository: FleetRepository,
     private readonly idempotency: IdempotencyStore,
@@ -308,6 +335,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.prisma.assertRuntimeRole();
 
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -336,8 +364,10 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart.
-    await this.relay.stop();
+    // The relay and the purge already drained in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop
+    // and returns at once.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 }
