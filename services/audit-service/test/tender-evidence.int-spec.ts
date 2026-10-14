@@ -499,7 +499,7 @@ describe('the tender-evidence projection', () => {
       const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId), {
         priceMinor: '1250000000',
         content: { note: 'secret' },
-        ciphertext: 'AAAA',
+        ciphertext: 'ciphertext-must-not-leak',
       });
       await consumer.handle(first.event, DELIVERY);
 
@@ -507,7 +507,7 @@ describe('the tender-evidence projection', () => {
         `SELECT * FROM tender_receipt_link WHERE tender_id = $1`,
         tenderId,
       );
-      expect(JSON.stringify(rows)).not.toMatch(/1250000000|secret|AAAA/);
+      expect(JSON.stringify(rows)).not.toMatch(/1250000000|secret|ciphertext-must-not-leak/);
       expect(Object.keys(rows[0]!).sort()).toEqual(
         [
           'bid_id',
