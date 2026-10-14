@@ -78,6 +78,7 @@ describe('order API — idempotent replay across orders and tenants', () => {
   async function publishOffer(): Promise<string> {
     const product = await request(http)
       .post('/v1/products')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', `Bearer ${supplier(supplierOrg)}`)
       .send({
         sku: `RPL-SKU-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
@@ -90,6 +91,7 @@ describe('order API — idempotent replay across orders and tenants', () => {
 
     const offer = await request(http)
       .post('/v1/offers')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', `Bearer ${supplier(supplierOrg)}`)
       .send({
         productId: product.body.id,

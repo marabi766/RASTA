@@ -263,10 +263,14 @@ describe('resolveRoute', () => {
     expect(resolveRoute('/orders/ORD_1/cancel')?.requiresIdempotencyKey).toBe(true);
   });
 
-  it('does not require one on catalogue reads', () => {
-    // A search is safe and repeatable; demanding a key would be ceremony that
-    // teaches clients to send meaningless ones.
-    expect(resolveRoute('/products')?.requiresIdempotencyKey).toBeUndefined();
+  it('requires an Idempotency-Key on every unsafe catalogue route', () => {
+    // docs/06 § 6.8 lists publishing an offer among the operations that must
+    // be idempotent: without a key a double submit published two offers.
+    // marketplace-service requires it again. The flag applies to unsafe
+    // methods only (`enforceIdempotencyKey`), so a search needs no key.
+    expect(resolveRoute('/products')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/offers')?.requiresIdempotencyKey).toBe(true);
+    expect(resolveRoute('/offers/OFR_1')?.requiresIdempotencyKey).toBe(true);
   });
 
   it('gives the oversight role no marketplace prefix at all', () => {

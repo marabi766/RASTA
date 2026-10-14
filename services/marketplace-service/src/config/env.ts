@@ -91,7 +91,36 @@ export const marketplaceEnvSchema = baseEnvSchema
 
     /** Retention for stored `Idempotency-Key` responses (docs/06 § 6.8). */
     MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
-  });
+
+    /**
+     * How long a claim still **in flight** holds its key before a retry may take
+     * it over under a new token (docs/06 § 6.8, #253). Only a completed response
+     * lives `MARKETPLACE_IDEMPOTENCY_TTL_HOURS`; a claim whose release failed, or
+     * whose process died, blocks identical retries for this long and no longer.
+     *
+     * The floor keeps it well above the longest a healthy request holds its
+     * claim — the claim budget plus one interactive transaction — so a slow but
+     * live request is not taken over; a holder that is anyway can no longer
+     * complete (its token is gone) and its work rolls back. The cross-field rule
+     * below keeps it shorter than the retention. Out of range refuses to start.
+     */
+    MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(30)
+      .max(3_600)
+      .default(60),
+  })
+  .refine(
+    (env) =>
+      env.MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS <
+      env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60,
+    {
+      path: ['MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'],
+      message:
+        'MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS must be shorter than MARKETPLACE_IDEMPOTENCY_TTL_HOURS',
+    },
+  );
 
 export type MarketplaceEnv = z.infer<typeof marketplaceEnvSchema>;
 
