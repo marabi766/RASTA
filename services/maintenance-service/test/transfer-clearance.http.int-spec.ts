@@ -61,7 +61,7 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
       ASSET_SERVICE_URL: 'http://127.0.0.1:9',
     });
     const inert = { start: () => undefined, stop: async () => undefined };
-    const quiet = { onModuleInit: async () => undefined, onModuleDestroy: async () => undefined };
+    const quiet = { onModuleInit: async () => undefined, stop: async () => undefined };
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(ENV)
       .useValue(env)
