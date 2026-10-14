@@ -9,6 +9,7 @@ import { AllExceptionsFilter } from '../filters/exception.filter';
 import { InternalTokenService, type TokenVerifier, type UserClaims } from '../auth/token-verifier';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { runWithContext } from '../context/request-context';
+import { RequestContextMiddleware } from '../middleware/request-context.middleware';
 import { RastaError } from '../errors/rasta-error';
 
 /**
@@ -476,6 +477,76 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
       internalContext: { unmatchedHeader: 'X-Organization-Id', headerLength: 22 },
     });
     expect(JSON.stringify([sent.body, lines])).not.toContain('secret123');
+  });
+
+  it('never echoes a caller-chosen correlation id into the refusal or its log (S-09)', async () => {
+    // The whole pipeline, as a service runs it: the middleware establishes the
+    // context from the request's headers, the guard refuses, the filter answers.
+    const headers = {
+      ...bearer,
+      'x-organization-id': ORG_FOREIGN,
+      'x-correlation-id': 'access_token=secret123',
+    };
+    const lines: { level: string; payload: unknown; message: string }[] = [];
+    const at = (level: string) => (payload: unknown, message: string) => {
+      lines.push({ level, payload, message });
+    };
+    const logger = {
+      debug: at('debug'),
+      warn: at('warn'),
+      error: at('error'),
+    } as unknown as Logger;
+    const sent: { status?: number; body?: unknown; headers: Record<string, string> } = {
+      headers: {},
+    };
+    const response = {
+      status: (code: number) => {
+        sent.status = code;
+        return response;
+      },
+      json: (body: unknown) => {
+        sent.body = body;
+      },
+      setHeader: (name: string, value: string) => {
+        sent.headers[name] = value;
+      },
+    };
+    const guard = new AuthGuard(reflectorFor({}), {
+      serviceName: THIS_SERVICE,
+      tokenVerifier: verifierFor('user-token', memberOfA()),
+      internalTokens,
+    });
+
+    let handled: Promise<void> = Promise.resolve();
+    new RequestContextMiddleware().use(
+      { headers, method: 'GET', originalUrl: '/v1/x' },
+      response,
+      () => {
+        handled = guard.canActivate(executionFor(headers)).then(
+          () => {
+            throw new Error('the guard admitted a foreign organization');
+          },
+          (error: unknown) => {
+            new AllExceptionsFilter(logger).catch(error, {
+              switchToHttp: () => ({
+                getResponse: () => response,
+                getRequest: () => ({ method: 'GET', originalUrl: '/v1/x' }),
+              }),
+            } as unknown as ArgumentsHost);
+          },
+        );
+      },
+    );
+    await handled;
+
+    expect(sent.status).toBe(403);
+    expect(sent.body).toMatchObject({ code: 'TENANT_MISMATCH' });
+    // A fresh id, the same one the response header names.
+    const { correlationId } = sent.body as { correlationId: string };
+    expect(correlationId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(sent.headers['x-correlation-id']).toBe(correlationId);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(JSON.stringify([sent.body, sent.headers, lines])).not.toContain('secret123');
   });
 
   it('keeps the shared package free of any service-specific dependency (A-03)', () => {

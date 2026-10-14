@@ -6,6 +6,21 @@ export const CORRELATION_ID_HEADER = 'x-correlation-id';
 export const REQUEST_ID_HEADER = 'x-request-id';
 export const TRACEPARENT_HEADER = 'traceparent';
 
+/** Bounds an adopted correlation id; the longest the platform mints is well under it. */
+export const CORRELATION_ID_MAX_LENGTH = 128;
+
+/** Crockford base32, as `ULID_REGEX` in `@rasta/contracts` — what `ulid()` emits. */
+const ULID = '[0-9A-HJKMNP-TV-Z]{26}';
+/** What `randomUUID()` emits (the web app's ids). */
+const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+
+/**
+ * The shapes the platform mints: a ULID or a UUID, optionally behind labels —
+ * `COR_<ULID>`, `e2e-<UUID>`, `maintenance-due-MSC_<ULID>`. The random tail
+ * is what makes it an identifier; a header without one is not one of ours.
+ */
+const WELL_FORMED_CORRELATION_ID = new RegExp(`^(?:[A-Za-z0-9]+[-_])*(?:${ULID}|${UUID})$`);
+
 interface MinimalRequest {
   headers: Record<string, string | string[] | undefined>;
   method?: string;
@@ -33,7 +48,7 @@ interface MinimalResponse {
 @Injectable()
 export class RequestContextMiddleware implements NestMiddleware {
   use(req: MinimalRequest, res: MinimalResponse, next: () => void): void {
-    const correlationId = readHeader(req, CORRELATION_ID_HEADER) ?? ulid();
+    const correlationId = adoptedCorrelationId(readHeader(req, CORRELATION_ID_HEADER)) ?? ulid();
     const requestId = ulid();
     const { traceId, spanId } = parseTraceparent(readHeader(req, TRACEPARENT_HEADER));
     const target = req.originalUrl ?? req.url;
@@ -81,6 +96,26 @@ export class RequestContextMiddleware implements NestMiddleware {
 export function requestPath(target: string): string {
   const end = target.search(/[?#]/);
   return end === -1 ? target : target.slice(0, end);
+}
+
+/**
+ * Whether `value` has the shape of a correlation id the platform mints.
+ *
+ * The header is the caller's to set, and whatever is adopted reaches every
+ * response header, error body and log line of the request (S-09) — so only
+ * an identifier is adopted.
+ */
+export function isWellFormedCorrelationId(value: string): boolean {
+  return value.length <= CORRELATION_ID_MAX_LENGTH && WELL_FORMED_CORRELATION_ID.test(value);
+}
+
+/**
+ * The incoming correlation id, when it is one; otherwise nothing, and the
+ * request gets a fresh id. A refused value is not logged: it is exactly what
+ * must not reach a log.
+ */
+function adoptedCorrelationId(header: string | undefined): string | undefined {
+  return header !== undefined && isWellFormedCorrelationId(header) ? header : undefined;
 }
 
 function readHeader(req: MinimalRequest, name: string): string | undefined {
