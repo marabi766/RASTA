@@ -142,7 +142,9 @@ export class PreferencesService {
   async effective(query: EffectiveQuery): Promise<EffectivePreferenceView> {
     const actor = resolveActor();
     const rule = ruleForKey(query.ruleKey);
-    if (!rule) throw RastaError.notFound('NotificationRule', query.ruleKey);
+    // Not logged: an unrecognised key is whatever the client typed — the query
+    // carries it, and a token pasted there would reach the log (S-09).
+    if (!rule) throw RastaError.notFound('NotificationRule');
 
     const facts = {
       ruleKey: rule.ruleKey,
@@ -177,7 +179,8 @@ export class PreferencesService {
     if (preference.scope !== 'RULE') return;
 
     const rule = ruleForKey(preference.scopeKey as string);
-    if (!rule) throw RastaError.notFound('NotificationRule', preference.scopeKey as string);
+    // Not logged, as in `effective`: the unrecognised key is the client's text.
+    if (!rule) throw RastaError.notFound('NotificationRule');
 
     const facts = {
       ruleKey: rule.ruleKey,

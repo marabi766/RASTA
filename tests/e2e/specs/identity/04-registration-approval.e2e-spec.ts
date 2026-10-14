@@ -39,7 +39,7 @@ test.describe.serial('Self-registration approved through the gateway (#219)', ()
       headers: {
         'content-type': 'application/json',
         accept: 'application/json',
-        'x-correlation-id': `e2e-${randomUUID()}`,
+        'x-correlation-id': randomUUID(),
       },
       data: {
         username,

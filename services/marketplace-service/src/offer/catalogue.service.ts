@@ -89,7 +89,10 @@ export class CatalogueService {
       });
     } catch (error) {
       if (isUniqueViolation(error)) {
-        throw RastaError.alreadyExists('Product', dto.sku);
+        // The SKU is client text: the refusal names the field, never its value (S-09).
+        throw new RastaError('ALREADY_EXISTS', 'A product with this sku already exists', {
+          internalContext: { resourceType: 'Product', field: 'sku' },
+        });
       }
       throw error;
     }
@@ -195,7 +198,8 @@ export class CatalogueService {
       this.prisma.client.product.findUnique({ where: { id: dto.productId } }),
     );
     if (!product || product.status !== 'ACTIVE') {
-      throw RastaError.notFound('Product', dto.productId);
+      // The id is the client's text and may name nothing: not logged (S-09).
+      throw RastaError.notFound('Product');
     }
 
     const offerId = newId(ID_PREFIX.offer);

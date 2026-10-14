@@ -263,9 +263,12 @@ function mapJoseError(error: unknown): RastaError {
   }
   // Everything else — bad signature, wrong audience, wrong issuer, malformed —
   // is reported as a single "invalid" so the response cannot be used to probe
-  // which specific check failed.
+  // which specific check failed. The log keeps jose's code and not its
+  // message: some messages quote the token's own header — an unrecognised
+  // `crit` entry is checked before the signature, so it is unverified client
+  // text (S-09).
   return new RastaError('TOKEN_INVALID', 'Token is not valid', {
-    internalContext: { joseCode: code, message: (error as Error)?.message },
+    internalContext: { joseCode: code },
   });
 }
 

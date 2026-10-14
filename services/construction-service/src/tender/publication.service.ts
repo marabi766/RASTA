@@ -315,8 +315,10 @@ export class PublicationService {
       dto.organizationId !== organizationId &&
       !(await this.directory.exists(dto.organizationId))
     ) {
+      // A fixed message: the id is client text that matched no organization,
+      // so it is neither echoed nor logged (S-09) — the reason code says it all.
       throw ruleRefusal(
-        `Organization ${dto.organizationId} does not exist; it cannot be invited`,
+        'The invited organization does not exist; it cannot be invited',
         'invitation',
         ['INVITED_ORGANIZATION_NOT_FOUND'],
         { tenderId },
