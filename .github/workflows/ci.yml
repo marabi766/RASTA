@@ -901,7 +901,10 @@ jobs:
     # 21m on main run 37098128390 (40m06s less the 18m47s that moved); 35 is
     # honest headroom over that, and the long steps carry their own bounds so a
     # hang fails at the step that hung.
-    timeout-minutes: 35
+    # 50 since 10-14: the job had grown to 33–34m on main (runs 38551249544,
+    # 38557094365, 38563721428) and run 38571702875 was cancelled at 35m twice
+    # while its last suite was still passing. Splitting the job is the real fix.
+    timeout-minutes: 50
     needs: quality
 
     services:
