@@ -38,7 +38,7 @@ export class EventPublisher {
     tx: ExtendedPrismaClient,
     input: {
       eventName: N;
-      /** What the event is about: the warehouse or the stock item (`routing.ts`). */
+      /** What the event is about: the warehouse, the stock item or the shipment (`routing.ts`). */
       aggregateId: string;
       organizationId: string;
       payload: unknown;
@@ -100,8 +100,9 @@ export class EventPublisher {
 }
 
 /**
- * Identifier prefixes for this service's records. `WHS` is the platform's (`@rasta/contracts`
- * `ID_PREFIXES.warehouse`); the others are this service's own, as the shared list has none.
+ * Identifier prefixes for this service's records. `WHS` and `SHP` are the platform's
+ * (`@rasta/contracts` `ID_PREFIXES`); the others are this service's own, as the shared list has
+ * none.
  * Organization-agnostic (AGENTS.md A-05): a ULID and a type prefix, nothing that encodes a
  * province, an organization type or a tenant.
  */
@@ -110,6 +111,9 @@ export const ID_PREFIX = {
   stockItem: 'SKI',
   movement: 'SMV',
   reservation: 'SRV',
+  shipment: ID_PREFIXES.shipment,
+  shipmentLeg: 'SHL',
+  trackingEvent: 'TRK',
 } as const;
 
 /**

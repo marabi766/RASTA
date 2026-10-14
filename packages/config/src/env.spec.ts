@@ -752,8 +752,8 @@ describe('the outbox shutdown path as one worst case (relay + purge)', () => {
     ).toBe(20);
   });
 
-  it('holds the grace to the budget too, where the relay alone only needs it under the timeout', () => {
-    // 23 s fits 25 s − 2 s; 24 s passes the relay-only rule (< 25 s) but not the shared budget.
+  it('holds the grace to the budget too', () => {
+    // 23 s fits 25 s − 2 s; 24 s is under the timeout but not inside the budget.
     expect(
       load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '23', SHUTDOWN_TIMEOUT_MS: '25000' })
         .OUTBOX_SHUTDOWN_GRACE_SECONDS,
@@ -763,14 +763,27 @@ describe('the outbox shutdown path as one worst case (relay + purge)', () => {
     ).toThrow(
       /OUTBOX_SHUTDOWN_GRACE_SECONDS: \(24 s\) is more than the outbox shutdown budget of 23000 ms/,
     );
-    // A relay-only service keeps its own rule.
-    expect(
+  });
+
+  // Codex on #267 (Low): notification-service drains its relay and workers
+  // through `OutboxShutdown` without running the purge, and loadEnv held its
+  // grace only to the bare timeout — 24 s was accepted where the coordinator
+  // cut the drain at 23 s. The budget is the same with or without the purge.
+  it('holds a service with the relay but no purge to the same budget', () => {
+    const relayOnly = (overrides: Record<string, string>) =>
       loadEnv(baseEnvSchema.merge(kafkaEnvSchema), {
         ...source,
-        OUTBOX_SHUTDOWN_GRACE_SECONDS: '24',
-        SHUTDOWN_TIMEOUT_MS: '25000',
-      } as NodeJS.ProcessEnv).OUTBOX_SHUTDOWN_GRACE_SECONDS,
-    ).toBe(24);
+        ...overrides,
+      } as NodeJS.ProcessEnv);
+    expect(() =>
+      relayOnly({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '24', SHUTDOWN_TIMEOUT_MS: '25000' }),
+    ).toThrow(
+      /OUTBOX_SHUTDOWN_GRACE_SECONDS: \(24 s\) is more than the outbox shutdown budget of 23000 ms/,
+    );
+    expect(
+      relayOnly({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '23', SHUTDOWN_TIMEOUT_MS: '25000' })
+        .OUTBOX_SHUTDOWN_GRACE_SECONDS,
+    ).toBe(23);
   });
 
   it('reports both when both overrun the budget', () => {
@@ -946,9 +959,11 @@ describe('KAFKA_ALLOW_PLAINTEXT', () => {
 });
 
 /**
- * The outbox grace is a wait inside the shutdown the timeout bounds. A grace at
- * or above the timeout is a wait the process exits before finishing, so it is
- * refused at boot instead of discovered as a forced exit in production.
+ * The outbox grace is a wait inside the shutdown the timeout bounds, and the
+ * relay drains by the outbox shutdown budget: the timeout less the reserve for
+ * the rest of the close. A grace past the budget is a wait the drain is cut
+ * before finishing, so it is refused at boot instead of discovered as a
+ * forced exit in production.
  */
 describe('OUTBOX_SHUTDOWN_GRACE_SECONDS against SHUTDOWN_TIMEOUT_MS', () => {
   const schema = baseEnvSchema.merge(kafkaEnvSchema);
@@ -963,20 +978,28 @@ describe('OUTBOX_SHUTDOWN_GRACE_SECONDS against SHUTDOWN_TIMEOUT_MS', () => {
 
   it('accepts the defaults together: 20 s of grace inside a 25 s timeout', () => {
     const env = load();
-    expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS * 1000).toBeLessThan(env.SHUTDOWN_TIMEOUT_MS);
+    expect(env.OUTBOX_SHUTDOWN_GRACE_SECONDS * 1000).toBeLessThanOrEqual(
+      outboxShutdownBudgetMs(env),
+    );
   });
 
-  it('accepts a grace one second under the timeout', () => {
+  it('accepts a grace equal to the budget, and refuses it one millisecond over', () => {
+    // 10000 − 2000 = 8000 ms: exactly 8 s.
     expect(
-      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '9', SHUTDOWN_TIMEOUT_MS: '10000' })
+      load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '8', SHUTDOWN_TIMEOUT_MS: '10000' })
         .OUTBOX_SHUTDOWN_GRACE_SECONDS,
-    ).toBe(9);
+    ).toBe(8);
+    expect(() => load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '8', SHUTDOWN_TIMEOUT_MS: '9999' })).toThrow(
+      /\(8 s\) is more than the outbox shutdown budget of 7999 ms/,
+    );
   });
 
   it.each([
+    ['one second under the timeout (the old rule’s boundary)', '9', '10000'],
     ['equal to the timeout', '10', '10000'],
     ['above the timeout', '30', '25000'],
     ['the old default against the default timeout', '30', '25000'],
+    ['of 24 s under the default timeout (Codex on #267)', '24', '25000'],
   ])('refuses a grace %s', (_name, grace, timeout) => {
     expect(() =>
       load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: grace, SHUTDOWN_TIMEOUT_MS: timeout }),
@@ -996,12 +1019,30 @@ describe('OUTBOX_SHUTDOWN_GRACE_SECONDS against SHUTDOWN_TIMEOUT_MS', () => {
     expect(message).toContain('25000 ms');
   });
 
-  it('allows a zero grace whatever the timeout', () => {
-    expect(load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '0', SHUTDOWN_TIMEOUT_MS: '1000' })).toMatchObject(
+  it('allows a zero grace with any timeout that leaves a budget', () => {
+    expect(load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '0', SHUTDOWN_TIMEOUT_MS: '2001' })).toMatchObject(
       {
         OUTBOX_SHUTDOWN_GRACE_SECONDS: 0,
       },
     );
+  });
+
+  it('refuses a timeout that leaves no budget, naming the timeout', () => {
+    // `OutboxShutdown` refuses a budget below 1 ms at construction; boot says why.
+    for (const timeout of ['1000', '2000']) {
+      let issues: { path: string; message: string }[] = [];
+      try {
+        load({ OUTBOX_SHUTDOWN_GRACE_SECONDS: '0', SHUTDOWN_TIMEOUT_MS: timeout });
+      } catch (error) {
+        issues = (error as EnvValidationError).issues;
+      }
+      expect(issues).toEqual([
+        {
+          path: 'SHUTDOWN_TIMEOUT_MS',
+          message: expect.stringContaining(`(${timeout} ms) leaves no outbox shutdown budget`),
+        },
+      ]);
+    }
   });
 
   it('is not asked of a service that has only one of the two', () => {

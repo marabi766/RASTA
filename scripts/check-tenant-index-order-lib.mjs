@@ -200,6 +200,13 @@ export const EXEMPTIONS = {
         "the authority's inbox (GET /v1/approvals): an approval belongs to the project's organization, but the authority asking is another tenant, whose organization is authority_organization_id — the column this index leads with",
     },
   },
+  inventory: {
+    ix_shipment_consignee: {
+      index: 'shipment (consignee_organization_id, id)',
+      reason:
+        "the consignee's own shipments (GET /v1/shipments, /{id}, /{id}/tracking; ADR-056 § 5): a shipment belongs to the organization that owns its origin warehouse, but the consignee asking is another tenant, whose organization is consignee_organization_id — the column this index leads with, and the predicate of that read (ShipmentRepository visibleTo, raw SQL)",
+    },
+  },
   contract: {
     ix_contract_contractor: {
       index: 'contract (contractor_organization_id, id)',

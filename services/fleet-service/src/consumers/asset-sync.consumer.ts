@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope } from '@rasta/contracts';
 import {
   HANDLER_MESSAGE_MAX,
@@ -12,9 +12,11 @@ import {
   requireEnvelopeTenant,
   runWithContext,
   safeLogText,
+  withinDeadline as withinShutdownDeadline,
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
@@ -463,8 +465,13 @@ type InsuranceOutcome =
 /** Why an event is (still) parked: the source ahead, or no answer from it. */
 type ParkReason = 'NOT_CURRENT_OWNER' | 'SOURCE_AHEAD' | 'NO_ANSWER';
 
-/** What one re-verification of a parked event did. */
-export type ParkedOutcome = 'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED';
+/**
+ * What one re-verification of a parked event did. `STOPPED`: the shutdown began
+ * while the source was asked, so nothing was decided or written — the row stays
+ * as it was, due, for the next run anywhere (#270 r1).
+ */
+export type ParkedOutcome =
+  'GONE' | 'NOT_DUE' | 'APPLIED' | 'DROPPED' | 'KEPT' | 'DEAD_LETTERED' | 'STOPPED';
 
 /** Where INSURANCE_RECORDED is published (ASSET_SYNC_TOPICS); a parked event without a delivery is dead-lettered as from here. */
 const INSURANCE_TOPIC = 'rasta.insurance.v1';
@@ -507,13 +514,18 @@ function initialisedTenure(
 }
 
 @Injectable()
-export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
+export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(AssetSyncConsumer.name);
   private consumer?: EventConsumer;
   private sweepTimer?: NodeJS.Timeout;
-  private sweeping = false;
+  /** The sweep run in flight, for a stop to wait on; never two at once. */
+  private sweepRun?: Promise<void>;
   /** A run was asked for while one was running (a transfer made rows due): run again after it. */
   private sweepAgain = false;
+  /** Set when the stop begins: the sweep starts nothing further — no run, no row, no decision. */
+  private sweepStopped = false;
+  /** The one stop; later calls join it. */
+  private stopping?: Promise<void>;
 
   constructor(
     private readonly consumerFactory: EventConsumerFactory | null,
@@ -564,13 +576,63 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
     // Only with a consumer: without one nothing is parked. Every instance
     // sweeps; rows are decided under their machine's lock and re-checked there,
     // so two never decide one.
-    this.sweepTimer = setInterval(() => void this.runSweep(), this.parking.sweepIntervalMs);
+    this.sweepTimer = setInterval(() => this.runSweep(), this.parking.sweepIntervalMs);
     this.sweepTimer.unref?.();
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay and the purge, by the shutdown's one deadline. The parked sweep's
+   * timer is cleared and the consumer stops by that deadline, abandoning a
+   * message still in flight uncommitted, to be delivered again (A-09). Before,
+   * its own `onModuleDestroy` stopped the consumer with no bound, and a
+   * handler's upstream calls and transactions, retried three times, could hold
+   * the close into the forced exit.
+   *
+   * The sweep stops by the same deadline (Codex r1 on #270): before, a run
+   * waiting on asset-service's answer outlived the stop, then decided its row
+   * and went on to the next while the relay was already stopped. Now a run
+   * starts no row, no question and no decision once stopping — an answer that
+   * arrives after that is discarded, the row left due for the next run — and
+   * the stop waits for the step in flight until the deadline. Past it, the run
+   * is abandoned with a warning and still starts nothing further: a question in
+   * flight is discarded when it returns, and a decision in flight commits or
+   * rolls back whole, in one transaction. One stop per process; a later call
+   * joins it.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
+    this.sweepStopped = true;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
-    await this.consumer?.stop();
+    this.sweepTimer = undefined;
+    await Promise.all([
+      this.consumer?.stop(deadlineAt === undefined ? {} : { deadlineAt }),
+      this.drainSweep(deadlineAt),
+    ]);
+  }
+
+  private async drainSweep(deadlineAt: number | undefined): Promise<void> {
+    const run = this.sweepRun;
+    if (!run) return;
+    if (deadlineAt === undefined) {
+      await run;
+      return;
+    }
+    if ((await withinShutdownDeadline(run, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'Parked insurance sweep still running at the shutdown deadline; abandoned. It starts ' +
+          'nothing further: an answer still awaited is discarded, its row left due for the next run',
+      );
+    }
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /**
@@ -917,12 +979,15 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
       DROPPED: 0,
       KEPT: 0,
       DEAD_LETTERED: 0,
+      STOPPED: 0,
     };
     const due = await this.repository.listDueParkedInsurance(
       this.parking.minAgeSeconds,
       this.parking.batchSize,
     );
     for (const row of due) {
+      // Once stopping, no further row (#270 r1).
+      if (this.sweepStopped) break;
       try {
         counts[await this.reverifyParked(row.eventId, row.assetId)] += 1;
       } catch (error) {
@@ -942,19 +1007,26 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
    */
   private requestSweep(): void {
     if (!this.sweepTimer) return;
-    void this.runSweep();
+    this.runSweep();
   }
 
   /**
    * The timer's run, and a requested one: never two at once on one instance —
-   * one asked for meanwhile runs right after — and never a thrown error.
+   * one asked for meanwhile runs right after — never once stopping, and never a
+   * thrown error. Held in `sweepRun` while it runs, for the stop.
    */
-  private async runSweep(): Promise<void> {
-    if (this.sweeping) {
+  private runSweep(): void {
+    if (this.sweepStopped) return;
+    if (this.sweepRun) {
       this.sweepAgain = true;
       return;
     }
-    this.sweeping = true;
+    this.sweepRun = this.sweepPasses().finally(() => {
+      this.sweepRun = undefined;
+    });
+  }
+
+  private async sweepPasses(): Promise<void> {
     try {
       do {
         this.sweepAgain = false;
@@ -965,13 +1037,11 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
               `${counts.KEPT} still parked, ${counts.DEAD_LETTERED} dead-lettered`,
           );
         }
-      } while (this.sweepAgain);
+      } while (this.sweepAgain && !this.sweepStopped);
     } catch (error) {
       this.logger.warn(
         `Parked insurance sweep failed; tried again on its next run (${describe(error)})`,
       );
-    } finally {
-      this.sweeping = false;
     }
   }
 
@@ -1075,6 +1145,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnModuleDestroy {
         );
         answer = 'NO_ANSWER';
       }
+    }
+    // A shutdown that began while the source was asked: nothing is decided or
+    // written, no attempt counted; the row stays due for the next run (#270 r1).
+    if (this.sweepStopped) {
+      this.logger.log(
+        `Parked INSURANCE_RECORDED ${eventId}: the sweep is stopping; decided by a later run`,
+      );
+      return 'STOPPED';
     }
 
     let lettered: { sourceTopic: string; attempts: number; last: ParkReason } | undefined;

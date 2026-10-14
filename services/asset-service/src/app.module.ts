@@ -301,22 +301,30 @@ const CONSUMED_TOPICS = [
         new InsuranceExpirySweepScheduler(insurance, logger),
     },
     {
-      // D-052: the relay, the purge and the expiry sweep stop together in the
-      // destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweep
-      // too (Codex r3 on #247): stopped later, it could keep writing outbox
-      // rows while the relay drained.
+      // D-052: the relay, the purge, the expiry sweep and the timeline
+      // consumer stop together in the destroy phase, by one deadline inside
+      // SHUTDOWN_TIMEOUT_MS. The sweep too (Codex r3 on #247): stopped later, it
+      // could keep writing outbox rows while the relay drained. The consumer
+      // too (Codex on #267): its stop had no bound of its own.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, OutboxPurgeScheduler, InsuranceExpirySweepScheduler, ENV],
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        InsuranceExpirySweepScheduler,
+        TimelineConsumer,
+        ENV,
+      ],
       useFactory: (
         relay: OutboxRelay,
         purge: OutboxPurgeScheduler,
         expirySweep: InsuranceExpirySweepScheduler,
+        timeline: TimelineConsumer,
         env: AssetEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [expirySweep],
+          workers: [expirySweep, timeline],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -400,9 +408,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay, the purge and the expiry sweep already stopped in
-    // OutboxShutdown's onModuleDestroy, concurrently and by one deadline; this
-    // joins that stop and returns at once.
+    // The relay, the purge, the expiry sweep and the timeline consumer already
+    // stopped in OutboxShutdown's onModuleDestroy, concurrently and by one
+    // deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }

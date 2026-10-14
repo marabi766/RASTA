@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { UsageService } from '../src/fleet/usage.service';
@@ -142,11 +143,18 @@ describe('usage recording', () => {
       const first = await asActor({ organizationId: org.a }, () =>
         service.record(reading({ clientReference })),
       );
+      const lines: string[] = [];
+      const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation((message: unknown) => {
+        lines.push(String(message));
+      });
       const second = await asActor({ organizationId: org.a }, () =>
         service.record(reading({ clientReference })),
-      );
+      ).finally(() => debug.mockRestore());
 
       expect(second.id).toBe(first.id);
+      // The replay is logged by the record's id. The reference is a key the
+      // client chose and is never logged (S-09).
+      expect(lines).toEqual([`Usage submission matched existing ${first.id}`]);
 
       const events = await prisma.client.outboxMessage.findMany({
         where: { organizationId: org.a, aggregateId: first.id },

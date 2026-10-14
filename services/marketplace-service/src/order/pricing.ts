@@ -86,9 +86,10 @@ export function priceOrder(
     if (seen.has(line.offerId)) {
       // Merging them would change the quantity the buyer sees confirmed, and
       // silently passing both would violate the unique index anyway.
-      throw RastaError.businessRule('An offer may appear on an order only once', {
-        offerId: line.offerId,
-      });
+      //
+      // Until an offer is found, `line.offerId` is the client's text and is not
+      // logged (S-09) — here, and in the two 404s below.
+      throw RastaError.businessRule('An offer may appear on an order only once');
     }
     seen.add(line.offerId);
 
@@ -96,11 +97,11 @@ export function priceOrder(
     if (!offer) {
       // 404 rather than 422: an offer that is not published is, to this
       // buyer, an offer that does not exist.
-      throw RastaError.notFound('Offer', line.offerId);
+      throw RastaError.notFound('Offer');
     }
 
     if (offer.status !== 'PUBLISHED') {
-      throw RastaError.notFound('Offer', line.offerId);
+      throw RastaError.notFound('Offer');
     }
 
     if (line.quantity < offer.minimumQuantity) {

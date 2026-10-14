@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
   UnprocessableEventError,
@@ -8,6 +8,7 @@ import {
   type EventConsumer,
   type EventDelivery,
   type EventHandler,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import {
   UNCONFIGURED_WORK_STATE_SOURCE,
@@ -114,7 +115,7 @@ const TIMELINE_SOURCE_FIELDS = Object.keys(timelineSourceSchema.shape);
 export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 
 @Injectable()
-export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
+export class TimelineConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(TimelineConsumer.name);
   private consumer?: EventConsumer;
 
@@ -137,8 +138,20 @@ export class TimelineConsumer implements OnModuleInit, OnModuleDestroy {
     await this.consumer.start();
   }
 
-  async onModuleDestroy(): Promise<void> {
-    await this.consumer?.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay and the purge, by the shutdown's one deadline; a message still in
+   * flight is abandoned uncommitted and delivered again (A-09). Before, its own
+   * `onModuleDestroy` stopped the consumer with no bound, and a replay's 30 s
+   * refresh transaction could hold the close into the forced exit.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer?.stop(options) ?? Promise.resolve();
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /**

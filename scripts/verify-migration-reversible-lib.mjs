@@ -1953,6 +1953,10 @@ export const EXPECTED = {
    * trust: no balance is ever negative or over-reserved, a balance moves only with its movement
    * and the ledger is a verified, append-only chain, a reservation ends once, and a key applies a
    * command once per stock item. The generated `available_quantity` goes with its table.
+   *
+   * The second migration (COM-006 PR 2) adds shipments, their legs and tracking: a shipment moves
+   * CREATED → DISPATCHED → DELIVERED once each, its status always has its tracking event, its legs
+   * are written with it and never changed, and its history is append-only and in order.
    */
   inventory: {
     // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is
@@ -1969,6 +1973,9 @@ export const EXPECTED = {
       'idempotency_key',
       'outbox_message',
       'outbox_stream_sequence',
+      'shipment',
+      'shipment_leg',
+      'tracking_event',
     ],
     types: ['StockMovementType', 'StockReservationStatus'],
     triggers: [
@@ -1983,6 +1990,13 @@ export const EXPECTED = {
       'tg_stock_reservation_guard',
       'tg_stock_reservation_no_truncate',
       'tg_stock_reservation_ledger_check',
+      'tg_shipment_guard',
+      'tg_shipment_no_truncate',
+      'tg_shipment_history_check',
+      'tg_shipment_leg_guard',
+      'tg_shipment_leg_no_truncate',
+      'tg_tracking_event_guard',
+      'tg_tracking_event_no_truncate',
     ],
     functions: [
       'warehouse_guard',
@@ -1992,6 +2006,10 @@ export const EXPECTED = {
       'stock_movement_chain',
       'stock_reservation_guard',
       'stock_reservation_ledger_check',
+      'shipment_guard',
+      'shipment_history_check',
+      'shipment_leg_guard',
+      'tracking_event_guard',
     ],
     indexes: [
       'ux_warehouse_org_id',
@@ -2005,6 +2023,11 @@ export const EXPECTED = {
       'ux_stock_movement_reserve_once',
       'ux_stock_movement_end_once',
       'ix_stock_reservation_due',
+      'ux_shipment_org_id',
+      'ux_shipment_command',
+      'ux_tracking_event_command',
+      'ux_shipment_leg_sequence',
+      'ux_tracking_event_once',
     ],
     constraints: [
       'fk_stock_item_warehouse',
@@ -2027,6 +2050,16 @@ export const EXPECTED = {
       'ck_stock_movement_type_deltas',
       'ck_stock_movement_after_valid',
       'ck_stock_movement_source_reference',
+      'fk_shipment_origin_warehouse',
+      'fk_shipment_leg_shipment',
+      'fk_tracking_event_shipment',
+      'ck_shipment_status',
+      'ck_shipment_status_coherent',
+      'ck_shipment_version_matches_status',
+      'ck_shipment_consignee',
+      'ck_shipment_leg_carrier',
+      'ck_tracking_event_type',
+      'ck_tracking_event_occurred_before_recorded',
       'ck_idempotency_state',
       'ck_idempotency_completed_has_response',
       'ck_outbox_claim_triple',

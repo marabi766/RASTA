@@ -45,6 +45,9 @@ import { ReservationExpiry } from './reservation/expiry';
 import { ReservationRepository } from './reservation/reservation.repository';
 import { ReservationService } from './reservation/reservation.service';
 import { ReservationSweeper } from './reservation/reservation.sweeper';
+import { ShipmentController } from './shipment/shipment.controller';
+import { ShipmentRepository } from './shipment/shipment.repository';
+import { ShipmentService } from './shipment/shipment.service';
 import { CommandRunner } from './shared/command-runner';
 import { IdempotencyStore } from './shared/idempotency';
 import { inventoryReservationsOverdue } from './observability/metrics';
@@ -60,8 +63,8 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
  * Nothing here consumes another service's events (ADR-056 § 7, ADR-032: no empty consumers);
  * every command arrives over REST from a person. The one background job is the sweeper that
  * releases reservations past their `expiresAt` (Q-102); the outbox relay publishes what the
- * commands wrote. Shipments and tracking (PR 2) and the integration ports (PR 3) bring their own
- * wiring.
+ * commands wrote — stock, warehouse and, since PR 2, shipment events. The integration ports
+ * (PR 3) bring their own wiring.
  *
  * `ReservationController` is registered before `StockController`: both live under `/v1/stock`,
  * and the router must meet `stock/reservations` before `stock/:id`.
@@ -71,6 +74,7 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     WarehouseController,
     ReservationController,
     StockController,
+    ShipmentController,
     HealthController,
     MetricsController,
   ],
@@ -118,6 +122,8 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     ReservationRepository,
     ReservationExpiry,
     ReservationService,
+    ShipmentRepository,
+    ShipmentService,
 
     {
       provide: ReservationSweeper,
@@ -134,7 +140,8 @@ import { loadInventoryEnv, SERVICE_NAME, type InventoryEnv } from './config/env'
     },
 
     // Idempotent commands (docs/06 § 6.8): this service's own store for every POST — every one
-    // an operator's command, authorized before its key is claimed or replayed.
+    // an operator's command, a shipment's included (its consignee only reads), authorized before
+    // its key is claimed or replayed.
     {
       provide: IdempotencyStore,
       inject: [PrismaService, ENV, InventoryAccess],

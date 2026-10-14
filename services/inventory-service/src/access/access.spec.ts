@@ -133,3 +133,49 @@ describe('with configured roles', () => {
     );
   });
 });
+
+describe('a shipment’s two readers (ADR-056 § 5, Q-113)', () => {
+  it('opens both sides to ORGANIZATION_ADMIN by default', () => {
+    const access = new InventoryAccess(env());
+    expect(attempt(() => access.assertShipmentReader(), { roles: ['ORGANIZATION_ADMIN'] })).toEqual(
+      { organizationId: ORG, asOrigin: true, asConsignee: true },
+    );
+    expect(attempt(() => access.readsAsConsignee(), { roles: ['ORGANIZATION_ADMIN'] })).toBe(true);
+  });
+
+  it('opens each side by its own roles, and refuses a caller with neither', () => {
+    const access = new InventoryAccess(
+      env({
+        INVENTORY_OPERATOR_ROLES: 'UNION_ADMIN',
+        INVENTORY_READER_ROLES: 'UNION_ADMIN',
+        INVENTORY_CONSIGNEE_READER_ROLES: 'PROCUREMENT_USER',
+      }),
+    );
+    expect(attempt(() => access.assertShipmentReader(), { roles: ['UNION_ADMIN'] })).toEqual({
+      organizationId: ORG,
+      asOrigin: true,
+      asConsignee: false,
+    });
+    expect(attempt(() => access.assertShipmentReader(), { roles: ['PROCUREMENT_USER'] })).toEqual({
+      organizationId: ORG,
+      asOrigin: false,
+      asConsignee: true,
+    });
+    expect(attempt(() => access.readsAsConsignee(), { roles: ['UNION_ADMIN'] })).toBe(false);
+    expect(attempt(() => access.assertShipmentReader(), { roles: ['SUPPLIER'] })).toBe(
+      'INSUFFICIENT_ROLE',
+    );
+  });
+
+  it('refuses the oversight role, the platform administrator and a service token as everywhere', () => {
+    const access = new InventoryAccess(env());
+    for (const overrides of [
+      { roles: ['ORGANIZATION_ADMIN', 'AUDITOR'] },
+      { roles: ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'] },
+      { authType: 'SERVICE' as const, roles: ['ORGANIZATION_ADMIN'] },
+      { roles: ['ORGANIZATION_ADMIN'], organizationId: undefined },
+    ]) {
+      expect(attempt(() => access.assertShipmentReader(), overrides)).toBe('FORBIDDEN');
+    }
+  });
+});

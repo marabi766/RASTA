@@ -11,7 +11,15 @@ import { boundLockWaits, translateCommandError } from './command';
 import type { ClaimFence } from './idempotency';
 
 export type CommandName =
-  'create_warehouse' | 'receive' | 'adjust' | 'reserve' | 'release' | 'issue';
+  | 'create_warehouse'
+  | 'receive'
+  | 'adjust'
+  | 'reserve'
+  | 'release'
+  | 'issue'
+  | 'create_shipment'
+  | 'dispatch_shipment'
+  | 'deliver_shipment';
 
 /**
  * The one shape of a command's transaction (ADR-056 § 3):

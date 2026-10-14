@@ -73,6 +73,28 @@ describe('translateCommandError', () => {
     ).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 
+  it('answers the shipment commands’ backstops alike: one shipment or tracking event per key', () => {
+    expect(
+      codeOf(
+        translateCommandError(
+          raw(
+            '23505',
+            'duplicate key value violates unique constraint "ux_tracking_event_command"',
+          ),
+          null,
+        ),
+      ),
+    ).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(
+      codeOf(
+        translateCommandError(
+          raw('23505', 'Key (organization_id, command_key_hash)=(…) already exists.'),
+          null,
+        ),
+      ),
+    ).toBe('IDEMPOTENCY_KEY_REUSED');
+  });
+
   it('leaves any other unique violation alone', () => {
     const other = raw('23505', 'duplicate key value violates unique constraint "stock_item_pkey"');
     expect(translateCommandError(other, stockOverdrawn)).toBe(other);

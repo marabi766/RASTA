@@ -234,6 +234,74 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/settlements');
   });
 
+  describe('a realm SYSTEM_ADMIN in the access token', () => {
+    const sessionWithClaims = (claims: unknown): WebSession =>
+      ({
+        accessToken: `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`,
+      }) as WebSession;
+    const REALM_ADMIN = { realm_access: { roles: ['SYSTEM_ADMIN'] } };
+
+    it.each([
+      {
+        name: 'narrow membership + realm admin',
+        roles: ['CONTRACTOR'],
+        claims: REALM_ADMIN,
+        projects: true,
+        settlements: true,
+      },
+      {
+        name: 'no membership roles + realm admin',
+        roles: [],
+        claims: REALM_ADMIN,
+        projects: true,
+        settlements: true,
+      },
+      {
+        name: 'narrow membership, no realm role',
+        roles: ['CONTRACTOR'],
+        claims: {},
+        projects: false,
+        settlements: false,
+      },
+      {
+        name: 'non-global realm role is ignored',
+        roles: ['CONTRACTOR'],
+        claims: { realm_access: { roles: ['UNION_ADMIN'] } },
+        projects: false,
+        settlements: false,
+      },
+      {
+        name: 'AUDITOR membership + realm admin is still excluded',
+        roles: ['AUDITOR'],
+        claims: REALM_ADMIN,
+        projects: false,
+        settlements: false,
+      },
+      {
+        name: 'unreadable token adds nothing',
+        roles: ['CONTRACTOR'],
+        claims: 'SYSTEM_ADMIN',
+        projects: false,
+        settlements: false,
+      },
+    ])('$name', async ({ roles, claims, projects, settlements }) => {
+      const items = hrefs(await loadPortalNav(sessionWithClaims(claims), user(roles)));
+      expect(items.includes('/projects')).toBe(projects);
+      expect(items.includes('/settlements')).toBe(settlements);
+    });
+
+    it('is not read when identity did not answer', async () => {
+      for (const result of [
+        { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
+        { kind: 'MALFORMED', correlationId: 'c' },
+      ] as const) {
+        const items = hrefs(await loadPortalNav(sessionWithClaims(REALM_ADMIN), result));
+        expect(items).not.toContain('/projects');
+        expect(items).not.toContain('/settlements');
+      }
+    });
+  });
+
   it.each([
     { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
     { kind: 'MALFORMED', correlationId: 'c' },

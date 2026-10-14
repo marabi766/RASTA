@@ -60,6 +60,8 @@ import { atFreshWindow, newPrisma, waitForWindowClose } from './helpers';
 
 const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
+/** A correlation id a user's request keeps: a bare ULID — the middleware re-mints anything else from a caller that is not a verified service (S-09). */
+const correlation = (): string => ulid();
 const requestedOrg = (): string => `ORG-REQ-${TAG}`;
 const SITE = REFUSAL_SITES.SWITCH_ACTIVE_ORGANIZATION;
 const WINDOW_SECONDS = 60;
@@ -164,7 +166,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
     const call = request(api.app.getHttpServer())
       .post(SITE.route)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', headers['x-correlation-id'] ?? tagged('COR'));
+      .set('x-correlation-id', headers['x-correlation-id'] ?? correlation());
     for (const [name, value] of Object.entries(headers)) call.set(name, value);
     return call.send({ organizationId: requestedOrg() });
   }
@@ -191,7 +193,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
   describe('one row per identity per window', () => {
     it('counts sequential matching refusals through the real endpoint into one row, first occurrence kept', async () => {
       const caller: Caller = { userId: tagged('USR'), organizationId: tagged('ORG') };
-      const correlations = [tagged('COR'), tagged('COR'), tagged('COR')];
+      const correlations = [correlation(), correlation(), correlation()];
       await atFreshWindow(prisma, WINDOW_SECONDS, 15_000);
 
       for (const [index, correlationId] of correlations.entries()) {
@@ -269,7 +271,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
             const response = await request(base)
               .post(SITE.route)
               .set('authorization', `Bearer ${token}`)
-              .set('x-correlation-id', tagged('COR'))
+              .set('x-correlation-id', correlation())
               .send({ organizationId: requestedOrg() });
             statuses.push(response.status);
           }

@@ -65,6 +65,22 @@ describe('checking what a client says it will upload', () => {
     ).toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }) as unknown as Error);
   });
 
+  it('does not repeat a refused type into the refusal’s context (S-09)', () => {
+    // A type that is not on the list is whatever the client typed.
+    let error: unknown;
+    try {
+      assertDeclarationAllowed('CONTRACT', 'text/x;token=secret123', oneMb, SERVICE_CEILING);
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+      internalContext: { documentClass: 'CONTRACT' },
+    });
+    const { message, internalContext } = error as { message: string; internalContext: unknown };
+    expect(JSON.stringify([message, internalContext])).not.toContain('secret123');
+  });
+
   it('refuses an empty file', () => {
     // Refused at all three layers — here, at finalize, and by a CHECK
     // constraint — because an empty file passes a naive extension check and

@@ -607,7 +607,9 @@ export class TransactionService {
    */
   async get(id: string): Promise<TransactionDetail> {
     const transaction = await this.repository.findByIdForParty(id);
-    if (!transaction) throw RastaError.notFound('Transaction', id);
+    // Not logged: a settlement passes the client's body text here, and one that
+    // names nothing is just that text (S-09). A path id is in the logged path.
+    if (!transaction) throw RastaError.notFound('Transaction');
     assertTransactionVisible(transaction);
     return transaction as unknown as TransactionDetail;
   }

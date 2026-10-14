@@ -399,7 +399,8 @@ describe('the configured guard, against the bare platform guard', () => {
         code: ERROR_CODES.TENANT_MISMATCH,
         message: 'You are not a member of the requested organization',
         correlationId: context.correlationId,
-        path: context.path,
+        // The path alone: the filter never echoes the query (S-09, docs/06 § 6.7).
+        path: '/v1/users/me',
       },
     });
   });
