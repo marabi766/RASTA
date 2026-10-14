@@ -28,7 +28,7 @@ import {
   type SpanKind,
   type Link,
 } from '@opentelemetry/api';
-import { UrlQueryRedactingSpanProcessor } from './url-redaction';
+import { RedactingSpanProcessor } from './url-redaction';
 
 /**
  * OpenTelemetry bootstrap.
@@ -184,7 +184,7 @@ function spanPipeline(config: TelemetryConfig): SpanProcessor[] {
   const exporting = exporter
     ? [createBatchSpanProcessorFromEnv(exporter, selfMetrics)]
     : getSpanProcessorsFromEnv(selfMetrics);
-  return exporting.length > 0 ? [new UrlQueryRedactingSpanProcessor(), ...exporting] : [];
+  return exporting.length > 0 ? [new RedactingSpanProcessor(), ...exporting] : [];
 }
 export async function shutdownTelemetry(): Promise<void> {
   if (!sdk) return;

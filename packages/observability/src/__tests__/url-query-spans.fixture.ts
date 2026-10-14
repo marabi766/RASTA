@@ -8,20 +8,31 @@
  * finished spans from its stdout as JSON.
  *
  * The order is a service's `main.ts`: `initTelemetry` first, the framework
- * loaded after it. Every request carries `secret=abc` in its query.
+ * loaded after it. Every request carries "abc" — in its query, in a body the
+ * JSON parser refuses, in the URL an error names.
  */
+import type * as NodeHttp from 'node:http';
 import { trace, type ProxyTracerProvider } from '@opentelemetry/api';
 import { InMemorySpanExporter, type NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { initTelemetry } from '../telemetry';
 
 const QUERY = '?secret=abc';
 
+/** An origin nothing listens on: a port bound, then released. */
+async function refusingOrigin(http: typeof NodeHttp): Promise<string> {
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}`;
+}
+
 async function main(): Promise<void> {
   const exporter = new InMemorySpanExporter();
   initTelemetry({ serviceName: 'url-query-fixture', traceExporter: exporter });
 
   await import('reflect-metadata');
-  const { Controller, Get, Module } = await import('@nestjs/common');
+  const { Controller, Get, Module, Post } = await import('@nestjs/common');
   const { NestFactory } = await import('@nestjs/core');
   const http = await import('node:http');
 
@@ -30,6 +41,18 @@ async function main(): Promise<void> {
     @Get('x')
     x(): { ok: boolean } {
       return { ok: true };
+    }
+
+    @Post('x')
+    post(): { ok: boolean } {
+      return { ok: true };
+    }
+
+    // A failure whose message names the URL it was working on, query and all —
+    // the shape of an HTTP client's or an OAuth library's error.
+    @Get('fail')
+    fail(): never {
+      throw new Error(`GET https://idp.example/cb${QUERY} failed`);
     }
   }
 
@@ -53,6 +76,26 @@ async function main(): Promise<void> {
   });
   // No route: Nest's own 404 handler.
   await (await fetch(`${origin}/v1/missing${QUERY}`)).text();
+  // Bodies Express's instrumented JSON parser refuses: V8's message quotes
+  // them, and the instrumentation records it as the middleware span's exception
+  // and status. One looks like a query (Codex on #261, F1), one does not.
+  for (const body of ['/?code=abc', 'code=abc']) {
+    await (
+      await fetch(`${origin}/v1/x`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      })
+    ).text();
+  }
+  // A handler that throws with the URL in its message.
+  await (await fetch(`${origin}/v1/fail`)).text();
+  // An outgoing request that fails: the client span records the error.
+  const refused = await refusingOrigin(http);
+  await fetch(`${refused}/v1/x${QUERY}`).then(
+    () => undefined,
+    () => undefined,
+  );
 
   await app.close();
   const provider = (trace.getTracerProvider() as ProxyTracerProvider).getDelegate();
@@ -66,7 +109,7 @@ async function main(): Promise<void> {
     events: span.events.map((event) => ({ name: event.name, attributes: event.attributes })),
     status: span.status,
   }));
-  process.stdout.write(JSON.stringify({ origin, spans }));
+  process.stdout.write(JSON.stringify({ origin, refused, spans }));
 }
 
 main().then(
