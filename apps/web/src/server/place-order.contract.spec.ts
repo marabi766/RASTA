@@ -136,6 +136,7 @@ describe('the sentences the portal translates', () => {
     // An unpublished offer is `notFound`, not a business rule: a buyer is told
     // it is no longer on offer, never that it exists but is hidden.
     expect(pricing).toContain("offer.status !== 'PUBLISHED'");
-    expect(pricing).toContain("RastaError.notFound('Offer', line.offerId)");
+    // Without the requested id: it is the client's text (S-09, #259).
+    expect(pricing).toContain("RastaError.notFound('Offer');");
   });
 });
