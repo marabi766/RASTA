@@ -72,7 +72,16 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
-        "OUTBOX_PURGE_*"
+        "OUTBOX_PURGE_*",
+        "OUTBOX_CLAIM_LEASE_SECONDS",
+        "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
+        "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
+        "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
+        "INVENTORY_LOCK_TIMEOUT_MS",
+        "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "CONSTRUCTION_*",
+        "GATEWAY_*"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -97,7 +106,9 @@
       //
       // OUTBOX_PURGE_* (D-052): the integration suites build the AppModule
       // from process.env, purge scheduler included; see "dev" below. The
-      // DATABASE_* settings for the same reason (databaseEnvSchema, #268).
+      // DATABASE_* settings for the same reason (databaseEnvSchema, #268),
+      // and the settings an operation budget is computed from, and
+      // construction's and the gateway's (also "dev" below).
       "env": [
         "DATABASE_URL",
         "DATABASE_URL_*",
@@ -109,7 +120,16 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
-        "OUTBOX_PURGE_*"
+        "OUTBOX_PURGE_*",
+        "OUTBOX_CLAIM_LEASE_SECONDS",
+        "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
+        "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
+        "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
+        "INVENTORY_LOCK_TIMEOUT_MS",
+        "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "CONSTRUCTION_*",
+        "GATEWAY_*"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -125,6 +145,8 @@
         "DATABASE_URL_*",
         "DATABASE_POOL_*",
         "DATABASE_STATEMENT_TIMEOUT_MS",
+        "OUTBOX_CLAIM_LEASE_SECONDS",
+        "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "REDIS_URL",
         "KAFKA_BROKERS",
         "KAFKA_SASL_*",
@@ -172,6 +194,16 @@
     // deliberately not passed here: every service prefers it, so one exported
     // in the shell would point all of them at a single database.
     // scripts/database-turbo-env.test.mjs holds these tasks to the schema.
+    //
+    // The settings an operation budget is computed from (Codex r4 on #268):
+    // loadEnv refuses a DATABASE_STATEMENT_TIMEOUT_MS at or below the largest
+    // budget, so `FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS=20000 pnpm dev` must
+    // reach the check and the service together, not lose to `.env`. And
+    // CONSTRUCTION_* and GATEWAY_*: the tender caps and opening deadlines
+    // (#250) came in undeclared — exporting a standing-bid cap of 1 still
+    // allowed a second bidder. The same test derives both lists, from every
+    // service's operation-budgets.ts and from the two configurations. Every
+    // other service's own settings are still withheld here (a follow-up).
     "dev": {
       "cache": false,
       "persistent": true,
@@ -179,7 +211,16 @@
         "OUTBOX_PURGE_*",
         "DATABASE_URL_*",
         "DATABASE_POOL_*",
-        "DATABASE_STATEMENT_TIMEOUT_MS"
+        "DATABASE_STATEMENT_TIMEOUT_MS",
+        "OUTBOX_CLAIM_LEASE_SECONDS",
+        "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
+        "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
+        "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
+        "INVENTORY_LOCK_TIMEOUT_MS",
+        "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "CONSTRUCTION_*",
+        "GATEWAY_*"
       ]
     },
     "clean": { "cache": false }

@@ -81,7 +81,7 @@ for svc in "${RASTA_SERVICES[@]}"; do
   ensure_utc_session_defaults "${db}" "${present[@]}"
   # The optional runtime statement_timeout, where POSTGRES_STATEMENT_TIMEOUT_MS_<SVC> asks for it.
   if [[ " ${missing[*]} " != *" rasta_${svc} "* ]]; then
-    ensure_runtime_statement_timeout "${svc}" "${db}" "rasta_${svc}"
+    ensure_runtime_statement_timeout "${svc}" "${db}" "rasta_${svc}" || exit 1
   fi
   utc_databases=$((utc_databases + 1))
 done

@@ -132,8 +132,10 @@ jobs:
       - name: Database settings reach the services through turbo
         # Every task that starts a service with a database — `dev` and the
         # integration suites — passes every databaseEnvSchema variable (pool,
-        # statement timeout, the service's own URL), and the root `pnpm dev`
-        # resolves them (turbo dry run). Codex r1 on #268.
+        # statement timeout, the service's own URL), every setting its
+        # operation budgets are computed from, and construction's and the
+        # gateway's own settings; and the root `pnpm dev` resolves them (turbo
+        # dry run). Codex r1 and r4 on #268.
         run: pnpm run test:database-turbo-env
 
       - name: Optional database-side statement timeout for the runtime roles

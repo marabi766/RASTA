@@ -287,7 +287,7 @@ split_service_privileges() {
   own_migration_ledger "${db}" public "${migrator}" "${runtime}"
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
-  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}"
+  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
 
   echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
 }
@@ -341,7 +341,7 @@ split_audit_database_privileges() {
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
-  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}"
+  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
 
   echo "    - ${db}: database, public and audit owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created; sessions default to UTC"
 }
@@ -361,9 +361,9 @@ upgrade_service_split() {
   resolve_role_passwords "rasta_${svc}" "rasta_${svc}_migrator" || return 1
   echo "==> ${svc}-service privilege split"
   if [[ "${mode}" == audit ]]; then
-    split_audit_database_privileges "${db}" "${svc}"
+    split_audit_database_privileges "${db}" "${svc}" || return 1
   else
-    split_service_privileges "${svc}" "${db}" "${mode}"
+    split_service_privileges "${svc}" "${db}" "${mode}" || return 1
   fi
   rotate_and_verify_split_logins "${svc}" "${db}"
 }

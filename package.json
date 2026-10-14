@@ -97,9 +97,9 @@
     "db:migrate": "turbo run db:migrate",
     "db:generate": "turbo run db:generate",
     "db:seed": "turbo run db:seed",
-    "db:rotate-role-passwords": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/rotate-role-passwords.bash",
-    "db:supplier-privilege-split": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/supplier-privilege-split.bash",
-    "db:privilege-split": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/service-privilege-split.bash",
+    "db:rotate-role-passwords": "bash scripts/postgres-exec.bash rotate-role-passwords.bash",
+    "db:supplier-privilege-split": "bash scripts/postgres-exec.bash supplier-privilege-split.bash",
+    "db:privilege-split": "bash scripts/postgres-exec.bash service-privilege-split.bash",
     "db:mark-disposable": "docker compose exec -T postgres bash /docker-entrypoint-initdb.d/lib/disposable-marker.bash"
   },
   "devDependencies": {

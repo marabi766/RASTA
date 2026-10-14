@@ -98,7 +98,8 @@ Lockهایشان منتظر می‌مانند. ثابت‌ها همان‌جا �
 | marketplace، document، organization، supplier | ۱۲۵۰۰                | تمدید Lease صندوق خروجی (`OUTBOX_CLAIM_LEASE_SECONDS`)             |
 
 URLی که خودش در `options` یک `statement_timeout` دارد رد می‌شود: با متغیر تنظیم‌نشده چون از بررسی بودجه فرار می‌کرد، با
-مقدار دیگر چون یک عدد در دو جاست. در identity، تراکنش‌های Projection، ترمیم حساب یتیم و تأیید ثبت‌نام همچنان `SET LOCAL
+مقدار دیگر چون یک عدد در دو جاست. `options` همان‌طور خوانده می‌شود که سرور می‌خواند (Backslash-escape، `-ec …`، `--name`،
+Percent-encoding)، و نامی که به این شکل خوانده نشود باز هم رد می‌شود. در identity، تراکنش‌های Projection، ترمیم حساب یتیم و تأیید ثبت‌نام همچنان `SET LOCAL
 statement_timeout` برابر Timeout خودشان (۶۵ ثانیه) می‌گویند: پشت PgBouncer سقف نشست از Role می‌آید و `loadEnv` آن را
 نمی‌بیند. Migratorها (D-045) آن را نمی‌خوانند؛ Migrationها سقف خودشان را دارند (D-048). `pnpm test:db-pool-config` اثرش
 را روی PostgreSQL واقعی می‌سنجد (تنظیم‌نشده: همان مقدار خود پایگاه داده).
@@ -110,7 +111,11 @@ statement_timeout` برابر Timeout خودشان (۶۵ ثانیه) می‌گو
 Bootstrap، `pnpm db:privilege-split <svc>` و `pnpm db:rotate-role-passwords` اعمال می‌کنند
 (`infrastructure/docker/postgres/lib/session-statement-timeout.bash`، `pnpm test:session-statement-timeout`)؛ تنظیم‌نشده
 هیچ کاری نمی‌کند و تنظیم موجود را دست نمی‌زند. هیچ بررسی‌ای این مقدار را با بودجه‌ها نمی‌سنجد: آن را از کف همان سرویس در
-جدول بالا بیشتر بگذارید.
+جدول بالا بیشتر بگذارید. مقدار در Container پایگاه داده خوانده می‌شود: مقدارِ `.env.migrator` به همهٔ این مسیرها می‌رسد
+(به Bootstrap پس از ساختن دوبارهٔ Container)، و مقدارِ Export‌شده در Shell فقط به `pnpm db:privilege-split`،
+`db:supplier-privilege-split` و `db:rotate-role-passwords`، که آن را با `scripts/postgres-exec.bash` به
+`docker compose exec` می‌دهند. مقدار نادرست
+یا `ALTER` شکست‌خورده فرمان را با کد غیرصفر متوقف می‌کند.
 
 **منطقهٔ زمانی نشست پشت Pooler (L7-37، [D-048](23-risks-and-tradeoffs.md)).** هر نشست پایگاه داده باید در UTC باشد،
 و **تضمین آن سمت پایگاه داده است، نه سمت Client**: برای پایگاه دادهٔ هر سرویس، Role زمان اجرا و Migrator آن،

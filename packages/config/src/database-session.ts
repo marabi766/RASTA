@@ -67,7 +67,7 @@ export function withUtcSession(url: string): string {
  */
 export function withStatementTimeout(url: string, timeoutMs: number | undefined): string {
   const { existing, withOptions } = startupOptions(url);
-  const written = settingsIn(existing).filter(([name]) => name === 'statement_timeout');
+  const written = statementTimeoutsIn(existing);
   if (timeoutMs === undefined) {
     if (written.length === 0) return url;
     throw new DatabaseUrlConflictError(
@@ -78,7 +78,15 @@ export function withStatementTimeout(url: string, timeoutMs: number | undefined)
         'service’s operation budgets',
     );
   }
-  if (written.some(([, value]) => value !== String(timeoutMs))) {
+  if (written.includes(undefined)) {
+    throw new DatabaseUrlConflictError(
+      'DATABASE_STATEMENT_TIMEOUT_MS',
+      'statement_timeout',
+      'DATABASE_URL names statement_timeout in its options in a form this cannot read; set it ' +
+        'only with DATABASE_STATEMENT_TIMEOUT_MS',
+    );
+  }
+  if (written.some((value) => value !== String(timeoutMs))) {
     throw new DatabaseUrlConflictError('DATABASE_STATEMENT_TIMEOUT_MS', 'statement_timeout');
   }
   if (written.length > 0) return url;
@@ -134,25 +142,84 @@ function startupOptions(url: string): {
 }
 
 /**
- * The `name=value` settings in a startup `options` string, as PostgreSQL reads
- * them: `-c name=value`, `-cname=value` or `--name=value`, a name's dashes
- * read as underscores and its case ignored.
+ * Every value a startup `options` string gives `statement_timeout`, and
+ * `undefined` for each mention of it that is not read as one: refused like a
+ * different value, so a spelling the server accepts and this does not know
+ * still never passes (Codex r4 on #268, F1). A mention is the name anywhere in
+ * the unescaped words, case ignored and dashes read as underscores.
  */
-function settingsIn(options: string): Array<[name: string, value: string]> {
-  const words = options.split(/\s+/).filter(Boolean);
+function statementTimeoutsIn(options: string): Array<string | undefined> {
+  const words = startupWords(options);
+  const values = settingsIn(words)
+    .filter(([name]) => name === 'statement_timeout')
+    .map(([, value]) => value);
+  const mentions = normalisedName(words.join(' ')).split('statement_timeout').length - 1;
+  return mentions > values.length ? [...values, undefined] : values;
+}
+
+/**
+ * A startup `options` string split into words as the server splits it
+ * (`pg_split_opts`): at unescaped ASCII whitespace, a backslash taking the next
+ * character literally — so `-c statement\_timeout=1000` is
+ * `statement_timeout`, and `\ ` a space inside a word.
+ */
+function startupWords(options: string): string[] {
+  const words: string[] = [];
+  let word: string | undefined;
+  let escaped = false;
+  for (const char of options) {
+    if (!escaped && /[ \t\n\v\f\r]/.test(char)) {
+      if (word !== undefined) words.push(word);
+      word = undefined;
+    } else if (!escaped && char === '\\') {
+      escaped = true;
+      word ??= '';
+    } else {
+      escaped = false;
+      word = (word ?? '') + char;
+    }
+  }
+  if (word !== undefined) words.push(word);
+  return words;
+}
+
+/**
+ * The server's command-line flags that take an argument (`postgres.c`,
+ * `process_postgres_switches`: `B:bC:c:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:`).
+ */
+const FLAGS_WITH_AN_ARGUMENT = new Set('BCcDdfhkNprStvW-');
+
+/**
+ * The `name=value` settings in the words, read as the server reads them, with
+ * getopt: `-c name=value`, `-cname=value`, `--name=value`, and either after
+ * flags that take no argument (`-ec name=value`). A name's dashes are read as
+ * underscores and its case ignored.
+ */
+function settingsIn(words: string[]): Array<[name: string, value: string]> {
   const settings: Array<[string, string]> = [];
   for (let i = 0; i < words.length; i += 1) {
     const word = words[i] ?? '';
-    let setting: string | undefined;
-    if (word === '-c') setting = words[++i];
-    else if (word.startsWith('-c')) setting = word.slice(2);
-    else if (word.startsWith('--')) setting = word.slice(2);
-    if (!setting) continue;
-    const at = setting.indexOf('=');
-    const name = (at === -1 ? setting : setting.slice(0, at)).replace(/-/g, '_').toLowerCase();
-    settings.push([name, at === -1 ? '' : setting.slice(at + 1)]);
+    if (word === '--') break; // getopt: the end of the flags
+    if (!word.startsWith('-')) continue;
+    for (let at = 1; at < word.length; at += 1) {
+      const flag = word[at] ?? '';
+      if (!FLAGS_WITH_AN_ARGUMENT.has(flag)) continue;
+      const argument = at + 1 < word.length ? word.slice(at + 1) : words[++i];
+      if ((flag === 'c' || flag === '-') && argument) {
+        const eq = argument.indexOf('=');
+        settings.push([
+          normalisedName(eq === -1 ? argument : argument.slice(0, eq)),
+          eq === -1 ? '' : argument.slice(eq + 1),
+        ]);
+      }
+      break;
+    }
   }
   return settings;
+}
+
+function normalisedName(name: string): string {
+  return name.replace(/-/g, '_').toLowerCase();
 }
 
 /** A query component as `application/x-www-form-urlencoded` reads it: `+` is a space. */

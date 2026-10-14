@@ -249,7 +249,19 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
       ]);
     });
 
-    it.each(['-c statement_timeout=15000', '--statement-timeout=0'])(
+    it.each([
+      '-c statement_timeout=15000',
+      '--statement-timeout=0',
+      // Codex r4 on #268, F1: the server removes backslash escapes before it
+      // reads a word (pg_split_opts), and reads the words with getopt.
+      '-c statement\\_timeout=1000',
+      '-c st\\atement_timeout=1000',
+      '-c\\ statement_timeout=1000',
+      '-ec statement_timeout=1000',
+      '-E-statement_timeout=1000',
+      '-E- STATEMENT-TIMEOUT=1000',
+      '-c search_path=x -- statement_timeout=1000',
+    ])(
       'unset, refuses a URL whose options %p set a timeout of their own: it would escape the budget check',
       (written) => {
         const issues = refusal({}, `${RAW_URL}&options=${encodeURIComponent(written)}`).issues;
@@ -261,6 +273,58 @@ describe('the database pool and statement timeout (databaseEnvSchema)', () => {
         ]);
       },
     );
+
+    it.each([
+      ['every character percent-encoded', '%2D%63%20%73tatement%5Ftimeout%3D1000'],
+      ['the parameter name percent-encoded', null],
+      ['+ for the space', '-c+statement_timeout%3D1000'],
+    ])('unset, refuses the timeout however the URL encodes it (%s)', (_, encoded) => {
+      const url =
+        encoded === null
+          ? `${RAW_URL}&%6Fptions=${encodeURIComponent('-c statement_timeout=1000')}`
+          : `${RAW_URL}&options=${encoded}`;
+      expect(refusal({}, url).issues).toEqual([
+        {
+          path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+          message: expect.stringContaining('while DATABASE_STATEMENT_TIMEOUT_MS is unset'),
+        },
+      ]);
+    });
+
+    it('set, refuses an escaped other value, and a mention it cannot read as a value', () => {
+      const url = (written: string) => `${RAW_URL}&options=${encodeURIComponent(written)}`;
+      expect(
+        refusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-c statement\\_timeout=1000'))
+          .issues,
+      ).toEqual([
+        { path: 'DATABASE_STATEMENT_TIMEOUT_MS', message: expect.stringContaining('different') },
+      ]);
+      expect(
+        refusal({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-c\\ statement_timeout=15000'))
+          .issues,
+      ).toEqual([
+        {
+          path: 'DATABASE_STATEMENT_TIMEOUT_MS',
+          message: expect.stringContaining('in a form this cannot read'),
+        },
+      ]);
+      // The same value, escaped or after a flag cluster, is the same setting.
+      expect(
+        options(
+          load({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-c statement\\_timeout=15000')),
+        ),
+      ).toBe('-c statement\\_timeout=15000 -c TimeZone=UTC');
+      expect(
+        options(
+          load({ DATABASE_STATEMENT_TIMEOUT_MS: '15000' }, url('-ec statement_timeout=15000')),
+        ),
+      ).toBe('-ec statement_timeout=15000 -c TimeZone=UTC');
+    });
+
+    it('unset, a URL whose options set other things is kept', () => {
+      const own = `${RAW_URL}&options=${encodeURIComponent('-c search_path=x -ec work_mem=4MB')}`;
+      expect(options(load({}, own))).toBe('-c search_path=x -ec work_mem=4MB -c TimeZone=UTC');
+    });
 
     it('keeps a URL whose options already set the same value', () => {
       const own = `${RAW_URL}&options=${encodeURIComponent('-c statement_timeout=15000')}`;

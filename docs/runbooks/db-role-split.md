@@ -156,9 +156,11 @@ Repository هیچ IaC پایگاه داده ندارد؛ DBA باید همین �
 - `scripts/check-db-runtime-privileges.mjs` را پس از هر استقرار با یک نقش فقط‌خواندنیِ Catalogue اجرا کنید.
 - **سقف زمان Statement پشت PgBouncer (اختیاری، #268 r4):** آنجا `DATABASE_STATEMENT_TIMEOUT_MS` سرویس دور انداخته می‌شود،
   پس اگر سقفی می‌خواهید روی **نقش اجرا** بگذارید — `ALTER ROLE rasta_<svc> IN DATABASE rasta_<svc> SET
-statement_timeout = '<ms>ms'`، هرگز روی مهاجر. همان اسکریپت‌ها با `POSTGRES_STATEMENT_TIMEOUT_MS_<SVC>` Export‌شده آن را
-  می‌گذارند (تقسیم، Bootstrap و `db:rotate-role-passwords`؛ تنظیم‌نشده هیچ کاری نمی‌کنند). مقدار باید از بزرگ‌ترین بودجهٔ
-  عملیاتی همان سرویس بیشتر باشد (جدول `docs/11` § ۱۱٫۲) — اینجا هیچ بررسی‌ای آن را نمی‌سنجد.
+statement_timeout = '<ms>ms'`، هرگز روی مهاجر. همان اسکریپت‌ها با `POSTGRES_STATEMENT_TIMEOUT_MS_<SVC>` آن را
+  می‌گذارند (تقسیم، Bootstrap و `db:rotate-role-passwords`؛ تنظیم‌نشده هیچ کاری نمی‌کنند). در Compose محلی مقدارِ Export‌شده
+  فقط به فرمان‌های `pnpm db:*privilege-split` و `db:rotate-role-passwords` می‌رسد (`scripts/postgres-exec.bash`)؛ Bootstrap
+  فقط `.env.migrator` را می‌بیند. مقدار باید از بزرگ‌ترین بودجهٔ عملیاتی همان سرویس بیشتر باشد (جدول `docs/11` § ۱۱٫۲) —
+  اینجا هیچ بررسی‌ای آن را نمی‌سنجد.
 
 ## ۷. افزودن سرویس تازه
 
