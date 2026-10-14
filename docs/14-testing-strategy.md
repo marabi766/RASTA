@@ -141,7 +141,7 @@ URL باید صریحاً IPv4 باشد. **نشانه:** Prisma `P2028` (`Unable
 و `pnpm check:local-postgres-config` این قرارداد را فقط به‌صورت متنی روی `.env.example` می‌سنجند (نه Probe شبکه، بی خواندن
 `.env`، بی چاپ مقدار) و در `pnpm verify` و Job `quality` در CI اجرا می‌شوند؛ URLهای Service Container خودِ CI جدا و دست‌نخورده‌اند.
 این قاعده فقط پیش‌فرض محلی توسعه است؛ سیاست Production برای `connection_limit`، `pool_timeout` یا گرم کردن Pool تصمیمی جدا
-در سطح ADR است.
+در سطح ADR است (سازوکار تنظیم دو عدد نخست، بی تغییر پیش‌فرض: `DATABASE_POOL_SIZE` و `DATABASE_POOL_TIMEOUT_SECONDS`، `docs/11` § ۱۱٫۲).
 
 **اثبات فشار تجمیع رد در فاز انحصاری (2026-09-14).** `pnpm test` و `pnpm test:integration` دیگر مستقیم `turbo run` نیستند؛
 `scripts/run-test-phases.mjs` آنها را فازبندی می‌کند: (۱) **فاز Workspace** — همان `turbo run <task>` موازی برای همهٔ

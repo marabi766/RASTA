@@ -7,6 +7,8 @@ export {
   queryBoolean,
   queryBooleanDefault,
   databaseEnvSchema,
+  DATABASE_POOL_SIZE_MAX,
+  DATABASE_POOL_TIMEOUT_SECONDS_MAX,
   kafkaEnvSchema,
   KAFKA_SASL_MECHANISMS,
   kafkaSaslConfigured,
@@ -29,6 +31,13 @@ export {
 export type { NodeEnv, LogLevel, BaseEnv, KafkaEnv, EnvIssue } from './env';
 
 export { UTC_SESSION_OPTION, withUtcSession } from './database-session';
+
+export {
+  DATABASE_POOL_PARAMETERS,
+  DatabasePoolConflictError,
+  withDatabasePool,
+} from './database-pool';
+export type { DatabasePool } from './database-pool';
 
 export {
   DEMO_SEED_ENVIRONMENTS,

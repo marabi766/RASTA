@@ -71,13 +71,119 @@ describe('loadEnv', () => {
     ).toBe(`${value}${value.includes('?') ? '&' : '?'}options=-c%20TimeZone%3DUTC`);
   });
 
-  it('applies pool defaults when not specified', () => {
+  it('applies the statement-timeout default when not specified', () => {
     const env = loadEnv(databaseEnvSchema, {
       DATABASE_URL: 'postgresql://u:p@localhost:5432/db',
     } as NodeJS.ProcessEnv);
 
-    expect(env.DATABASE_POOL_SIZE).toBe(10);
     expect(env.DATABASE_STATEMENT_TIMEOUT_MS).toBe(15_000);
+  });
+});
+
+describe('the database pool (DATABASE_POOL_SIZE, DATABASE_POOL_TIMEOUT_SECONDS)', () => {
+  // Assembled rather than written out, so no line reads as a real connection
+  // string to a secret scanner; the tests below look for it in every message.
+  const PASSWORD = ['pool', 'spec', 'pw'].join('_');
+  const RAW_URL = `postgresql://rasta_x:${PASSWORD}@db.internal:5432/rasta_x?schema=public`;
+  const UTC = 'options=-c%20TimeZone%3DUTC';
+
+  const load = (pool: Record<string, string>, url = RAW_URL) =>
+    loadEnv(databaseEnvSchema, { DATABASE_URL: url, ...pool } as NodeJS.ProcessEnv);
+
+  /** The refusal `load` throws, checked to name the variable and carry no part of the URL. */
+  const refusal = (pool: Record<string, string>, url = RAW_URL): EnvValidationError => {
+    let caught: unknown;
+    try {
+      load(pool, url);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EnvValidationError);
+    const message = (caught as Error).message;
+    expect(message).not.toContain(PASSWORD);
+    expect(message).not.toContain('db.internal');
+    return caught as EnvValidationError;
+  };
+
+  it('unset, writes nothing: the URL is what it was before these settings existed', () => {
+    const env = load({});
+    expect(env.DATABASE_POOL_SIZE).toBeUndefined();
+    expect(env.DATABASE_POOL_TIMEOUT_SECONDS).toBeUndefined();
+    expect(env.DATABASE_URL).toBe(`${RAW_URL}&${UTC}`);
+  });
+
+  it('writes both into DATABASE_URL as Prisma reads them, after the UTC option', () => {
+    const env = load({ DATABASE_POOL_SIZE: '5', DATABASE_POOL_TIMEOUT_SECONDS: '3' });
+    expect(env.DATABASE_POOL_SIZE).toBe(5);
+    expect(env.DATABASE_POOL_TIMEOUT_SECONDS).toBe(3);
+    expect(env.DATABASE_URL).toBe(`${RAW_URL}&${UTC}&connection_limit=5&pool_timeout=3`);
+  });
+
+  it('writes either one alone', () => {
+    expect(load({ DATABASE_POOL_SIZE: '8' }).DATABASE_URL).toBe(
+      `${RAW_URL}&${UTC}&connection_limit=8`,
+    );
+    expect(load({ DATABASE_POOL_TIMEOUT_SECONDS: '4' }).DATABASE_URL).toBe(
+      `${RAW_URL}&${UTC}&pool_timeout=4`,
+    );
+  });
+
+  it('accepts both bounds', () => {
+    expect(load({ DATABASE_POOL_SIZE: '1', DATABASE_POOL_TIMEOUT_SECONDS: '1' }).DATABASE_URL).toBe(
+      `${RAW_URL}&${UTC}&connection_limit=1&pool_timeout=1`,
+    );
+    expect(
+      load({ DATABASE_POOL_SIZE: '100', DATABASE_POOL_TIMEOUT_SECONDS: '60' }).DATABASE_URL,
+    ).toBe(`${RAW_URL}&${UTC}&connection_limit=100&pool_timeout=60`);
+  });
+
+  it.each(['0', '101', '', ' 5', '5 ', '5.0', '1e1', '0x10', '-1', '+5', 'ten'])(
+    'refuses DATABASE_POOL_SIZE=%p rather than guessing',
+    (value) => {
+      expect(refusal({ DATABASE_POOL_SIZE: value }).issues.map((i) => i.path)).toEqual([
+        'DATABASE_POOL_SIZE',
+      ]);
+    },
+  );
+
+  it.each(['0', '61', '', '1.5', '2s', '-3'])(
+    'refuses DATABASE_POOL_TIMEOUT_SECONDS=%p (0 would be Prisma’s wait-forever)',
+    (value) => {
+      expect(refusal({ DATABASE_POOL_TIMEOUT_SECONDS: value }).issues.map((i) => i.path)).toEqual([
+        'DATABASE_POOL_TIMEOUT_SECONDS',
+      ]);
+    },
+  );
+
+  it('refuses a size the URL already sets differently, naming neither the URL nor its password', () => {
+    const issues = refusal({ DATABASE_POOL_SIZE: '5' }, `${RAW_URL}&connection_limit=16`).issues;
+    expect(issues).toEqual([
+      { path: 'DATABASE_POOL_SIZE', message: expect.stringContaining('connection_limit') },
+    ]);
+  });
+
+  it('refuses a wait the URL already sets differently', () => {
+    expect(
+      refusal({ DATABASE_POOL_TIMEOUT_SECONDS: '3' }, `${RAW_URL}&pool_timeout=10`).issues.map(
+        (i) => i.path,
+      ),
+    ).toEqual(['DATABASE_POOL_TIMEOUT_SECONDS']);
+  });
+
+  it('keeps a URL’s own connection_limit when the variable is unset or agrees', () => {
+    const own = `${RAW_URL}&connection_limit=16`;
+    expect(load({}, own).DATABASE_URL).toBe(`${own}&${UTC}`);
+    expect(load({ DATABASE_POOL_SIZE: '16' }, own).DATABASE_URL).toBe(`${own}&${UTC}`);
+  });
+
+  it('a schema without DATABASE_URL is left alone', () => {
+    const env = loadEnv(baseEnvSchema, {
+      SERVICE_NAME: 'api-gateway',
+      PORT: '3000',
+      DATABASE_POOL_SIZE: 'ten',
+    } as NodeJS.ProcessEnv);
+    expect(env).not.toHaveProperty('DATABASE_URL');
+    expect(env).not.toHaveProperty('DATABASE_POOL_SIZE');
   });
 });
 

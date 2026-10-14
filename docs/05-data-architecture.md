@@ -92,6 +92,10 @@ audit، fleet و maintenance در `TABLE_EXEMPTIONS` با Queryِ خواننده
 لحظه `TIMESTAMPTZ` است؛ بدهیِ ستون‌های موجودِ `timestamp(3)`: `docs/23` D-048 (document تبدیل شد؛ دستورالعمل
 تبدیل هر سرویس همان‌جاست).
 
+**اندازهٔ Pool هم از همان URL می‌آید.** `DATABASE_POOL_SIZE` و `DATABASE_POOL_TIMEOUT_SECONDS` را `loadEnv` به‌صورت
+`connection_limit` و `pool_timeout` در همان `DATABASE_URL` می‌نویسد؛ تنظیم‌نشده، پیش‌فرض Prisma می‌ماند. بازه‌ها و قواعد:
+`docs/11` § ۱۱٫۲.
+
 ---
 
 ## ۵٫۳ الگوهای کلیدی Schema

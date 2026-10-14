@@ -46,9 +46,29 @@ default_statistics_target  = 200
 log_min_duration_statement = 500ms      # Query کند را ثبت کن
 ```
 
-**Connection Pooling.** هر سرویس Pool خودش را دارد (Prisma، حداکثر ۱۰ اتصال در MVP).
+**Connection Pooling.** هر سرویس Pool خودش را دارد (Prisma).
 Production: **PgBouncer** در حالت Transaction Pooling جلوی Cluster — ۱۷ سرویس × چند Replica
 به‌سرعت `max_connections` را می‌بلعد.
+
+**اندازهٔ Pool از پیکربندی.** دو متغیر برای همهٔ سرویس‌های دارای پایگاه داده (`databaseEnvSchema` در `@rasta/config`):
+
+| متغیر                           | پارامتر Prisma     | بازه    | تنظیم‌نشده (پیش‌فرض)                    |
+| ------------------------------- | ------------------ | ------- | --------------------------------------- |
+| `DATABASE_POOL_SIZE`            | `connection_limit` | ۱..۱۰۰  | پیش‌فرض Prisma: `num_physical_cpus*2+1` |
+| `DATABASE_POOL_TIMEOUT_SECONDS` | `pool_timeout`     | ۱..۶۰ ث | پیش‌فرض Prisma: ۱۰ ثانیه                |
+
+`loadEnv` هر دو را در `DATABASE_URL` سرویس می‌نویسد، پس هر Clientی که سرویس روی آن URL باز می‌کند — Pool زمان اجرا،
+بررسی Role در Startup، CLI — همان Pool را دارد. تنظیم‌نشده چیزی نوشته نمی‌شود و رفتار همان پیش از این متغیرهاست؛ این
+تغییر خودش هیچ عددی را عوض نمی‌کند و اندازهٔ Production هنوز تصمیم استقرار است (`docs/14` § ۱۴٫۳). بدون آن، اندازهٔ Pool
+تابع تعداد هستهٔ Nodeی است که Pod رویش افتاده، و مسیرهایی که به Pool محدود تکیه دارند — 409ِ نبودِ اتصال آزاد،
+انتظار Lock در تراکنش — از Nodeی به Node دیگر فرق می‌کنند. زمان انتظار به **ثانیهٔ درست** است چون Prisma همین واحد را
+می‌خواند؛ `0` (در Prisma یعنی انتظار بی‌پایان) رد می‌شود. **Fail-closed:** مقدار غیرعددی، اعشاری، خارج از بازه یا خالی، و
+URLی که همان پارامتر را با مقدار دیگری دارد، سرویس را در Startup متوقف می‌کند — پیام خطا نام متغیر و پارامتر را دارد و هرگز
+خود URL (که گذرواژهٔ Role را دارد) را (S-09). URLِ Migratorها (D-045) از این مسیر نمی‌گذرد: `scripts/prisma.mjs` آنها را
+می‌خواند، نه `loadEnv`. هر Replica حداکثر `DATABASE_POOL_SIZE` اتصال باز می‌کند؛ مجموع همهٔ Replicaهای همهٔ سرویس‌ها
+باید زیر `max_connections` (یا Pool سمت PgBouncer) بماند. `pnpm test:db-pool-config` (Job `integration` در CI) این را روی
+PostgreSQL واقعی می‌سنجد: پیش‌فرض دست‌نخورده، سقف اتصال، `P2024` پس از انتظار، و اینکه هر سرویس Clientهایش را فقط روی
+همین URL باز می‌کند.
 
 **منطقهٔ زمانی نشست پشت Pooler (L7-37، [D-048](23-risks-and-tradeoffs.md)).** هر نشست پایگاه داده باید در UTC باشد،
 و **تضمین آن سمت پایگاه داده است، نه سمت Client**: برای پایگاه دادهٔ هر سرویس، Role زمان اجرا و Migrator آن،

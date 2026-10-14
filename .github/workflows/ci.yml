@@ -1641,6 +1641,19 @@ jobs:
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
 
+      - name: The runtime pool comes from configuration
+        # DATABASE_POOL_SIZE and DATABASE_POOL_TIMEOUT_SECONDS reach Prisma
+        # only through the URL every service builds (@rasta/config): unset,
+        # a burst still opens Prisma's default pool; set, a client opened on
+        # that URL keeps to the size and fails with P2024 after the wait. And
+        # every service's clients are opened on that URL and no other.
+        run: pnpm run test:db-pool-config
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
       - name: Retry replay, published as ops-replay
         # D-039: a record the operator's replay principal publishes on
         # `<topic>.retry` is consumed like the original — applied once,

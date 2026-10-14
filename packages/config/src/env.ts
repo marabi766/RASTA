@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DatabasePoolConflictError, withDatabasePool } from './database-pool';
 import { withUtcSession } from './database-session';
 
 /**
@@ -206,16 +207,54 @@ export const baseEnvSchema = z.object({
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
 
 /**
+ * The largest `DATABASE_POOL_SIZE`: one replica holding half the production
+ * cluster's `max_connections` (200, docs/11 § 11.2) is already more than any
+ * service should.
+ */
+export const DATABASE_POOL_SIZE_MAX = 100;
+
+/**
+ * The longest `DATABASE_POOL_TIMEOUT_SECONDS`. A request that has waited a
+ * minute for a connection has long been given up on by its caller.
+ */
+export const DATABASE_POOL_TIMEOUT_SECONDS_MAX = 60;
+
+/**
+ * A whole number read from an environment variable, refused unless it is
+ * written as plain digits.
+ *
+ * Stricter than `z.coerce.number()` on purpose: that reads `1e1` as 10, `0x10`
+ * as 16 and an empty value as 0. For a setting that sizes a production pool,
+ * anything but the number the operator meant fails at boot.
+ */
+function wholeNumberEnv(min: number, max: number) {
+  return z
+    .string()
+    .regex(/^[0-9]+$/, 'Expected a whole number written as digits, such as "10"')
+    .transform(Number)
+    .pipe(z.number().int().min(min).max(max));
+}
+
+/**
  * Services that own a database.
  *
  * `DATABASE_URL` comes out with `options=-c TimeZone=UTC` added
  * ({@link withUtcSession}): every client a service opens on it — the runtime
  * pool, the startup role check, a CLI — runs its sessions in UTC whatever the
  * server's or the role's default (L7-37).
+ *
+ * The pool is sized from configuration the same way: `loadEnv` writes
+ * `DATABASE_POOL_SIZE` and `DATABASE_POOL_TIMEOUT_SECONDS` into that URL as
+ * Prisma's `connection_limit` and `pool_timeout` ({@link withDatabasePool}).
+ * Both are optional, and unset means Prisma's own default (`num_physical_cpus
+ * * 2 + 1` connections, a 10-second wait) — what every service ran with before
+ * they existed. `0` is refused for the wait: to Prisma it means waiting
+ * forever, which is the unbounded queue a bounded pool exists to prevent.
  */
 export const databaseEnvSchema = z.object({
   DATABASE_URL: postgresUrlSchema.transform(withUtcSession),
-  DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+  DATABASE_POOL_SIZE: wholeNumberEnv(1, DATABASE_POOL_SIZE_MAX).optional(),
+  DATABASE_POOL_TIMEOUT_SECONDS: wholeNumberEnv(1, DATABASE_POOL_TIMEOUT_SECONDS_MAX).optional(),
   DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(15_000),
 });
 
@@ -384,7 +423,38 @@ export function loadEnv<S extends z.ZodTypeAny>(
 
   assertKafkaPlaintextOptOut(source, result.data);
   assertOutboxGraceWithinShutdown(result.data);
-  return result.data;
+  return withConfiguredDatabasePool(result.data);
+}
+
+/**
+ * `DATABASE_URL` with the configured pool written into it, for a service whose
+ * schema has `databaseEnvSchema`. Done here rather than in that schema: the
+ * URL and the two settings are siblings, and a transform over the object
+ * would stop it being `.merge`d into each service's schema.
+ */
+function withConfiguredDatabasePool<T>(parsed: T): T {
+  if (typeof parsed !== 'object' || parsed === null) return parsed;
+  const {
+    DATABASE_URL: url,
+    DATABASE_POOL_SIZE: size,
+    DATABASE_POOL_TIMEOUT_SECONDS: timeoutSeconds,
+  } = parsed as {
+    DATABASE_URL?: unknown;
+    DATABASE_POOL_SIZE?: unknown;
+    DATABASE_POOL_TIMEOUT_SECONDS?: unknown;
+  };
+  if (typeof url !== 'string') return parsed;
+  const pool = {
+    size: typeof size === 'number' ? size : undefined,
+    timeoutSeconds: typeof timeoutSeconds === 'number' ? timeoutSeconds : undefined,
+  };
+  try {
+    const pooled = withDatabasePool(url, pool);
+    return pooled === url ? parsed : { ...parsed, DATABASE_URL: pooled };
+  } catch (error) {
+    if (!(error instanceof DatabasePoolConflictError)) throw error;
+    throw new EnvValidationError([{ path: error.variable, message: error.message }]);
+  }
 }
 
 /**
