@@ -44,9 +44,13 @@ import { UTC_SESSION_CORPUS } from './utc-session-corpus.mjs';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 // The services' function, exactly as built.
-const { databaseEnvSchema, loadEnv, withUtcSession } = require(
-  join(ROOT, 'packages', 'config', 'dist', 'index.js'),
-);
+const {
+  databaseEnvSchema,
+  DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS,
+  loadEnv,
+  withStatementTimeout,
+  withUtcSession,
+} = require(join(ROOT, 'packages', 'config', 'dist', 'index.js'));
 const ORGANIZATION = join(ROOT, 'services', 'organization-service');
 const { PrismaClient } = createRequire(join(ORGANIZATION, 'package.json'))(
   join(ORGANIZATION, 'src', 'generated', 'prisma'),
@@ -244,9 +248,10 @@ test('3. every demo seed opens its database through withUtcSession', () => {
       assert.match(client, /url: resolveDatabaseUrl\(\)|\{ url \}/, `${file}: ${client}`);
     }
   }
-  // …and that function is the one proven in test 1.
+  // …and that function is the one proven in test 1: the services' URL is its
+  // result plus only their statement timeout (#268), which seeds do not take.
   assert.equal(
-    withUtcSession(RAW_URL),
+    withStatementTimeout(withUtcSession(RAW_URL), DEFAULT_DATABASE_STATEMENT_TIMEOUT_MS),
     loadEnv(databaseEnvSchema, { DATABASE_URL: RAW_URL }).DATABASE_URL,
   );
 });
