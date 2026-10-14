@@ -15,6 +15,7 @@ import {
   privateKeyFromDer,
   sealBid,
   verifyReceiptChain,
+  verifyReceipts,
   type SealedBid,
 } from '../src/tender/sealing/sealing';
 import {
@@ -33,6 +34,7 @@ import {
   untilASessionWaitsOnALock,
   wire,
   type Wiring,
+  bidKey,
 } from './helpers';
 
 /**
@@ -83,7 +85,7 @@ describe('bids', () => {
   };
 
   const submit = (bidder: string, tenderId: string, content = bidContent()) =>
-    asBidder(bidder, () => w.bids.submit(tenderId, { content }));
+    asBidder(bidder, () => w.bids.submit(tenderId, { content }, bidKey()));
 
   const refusalsOf = async (call: Promise<unknown>): Promise<string> => {
     const error = (await call.then(
@@ -213,7 +215,7 @@ describe('bids', () => {
       const { owner, tenderId } = await setup();
 
       await expect(
-        asAdmin(owner, () => w.bids.submit(tenderId, { content: bidContent() })),
+        asAdmin(owner, () => w.bids.submit(tenderId, { content: bidContent() }, bidKey())),
       ).rejects.toMatchObject({ code: 'INSUFFICIENT_ROLE' });
       // The owner's own contractor role is refused too: it cannot bid on its own tender.
       await qualify(w, owner);
@@ -721,6 +723,172 @@ describe('bids', () => {
       };
     };
 
+    it('keeps a chain audit-service can return: revisions per bid and receipts per tender are bounded, refused in the bid’s transaction (construction audit F2)', async () => {
+      // The caps, small: a bid of at most 3 revisions, a tender of at most 5 receipts.
+      const limited = wire(
+        testEnv({ CONSTRUCTION_BID_MAX_REVISIONS: '3', CONSTRUCTION_TENDER_MAX_RECEIPTS: '5' }),
+      );
+      try {
+        const { owner, bidder, tenderId } = await setup();
+        const others = [org(), org(), org()];
+        for (const other of others) await qualify(w, other);
+        const asLimited = (who: string, content = bidContent()) =>
+          asBidder(who, () => limited.bids.submit(tenderId, { content }, bidKey()));
+        const revise = (who: string, bidId: string, expectedRevision: number) =>
+          asBidder(who, () =>
+            limited.bids.revise(tenderId, bidId, { expectedRevision, content: bidContent('7') }),
+          );
+        const bidRow = (bidId: string) =>
+          runUnscoped('the suite reads the bid it wrote', () =>
+            w.prisma.client.bid.findFirst({ where: { id: bidId } }),
+          );
+
+        const { bidId } = await asLimited(bidder);
+        await revise(bidder, bidId, 1);
+        await revise(bidder, bidId, 2);
+        // The fourth revision of one bid: refused, and nothing of it is written.
+        const before = (await eventsOf(w, owner, 'BID_REVISED')).length;
+        expect(await refusalsOf(revise(bidder, bidId, 3))).toContain('BID_REVISION_LIMIT');
+        expect((await bidRow(bidId))?.revision).toBe(3);
+        expect(await linksOf(tenderId)).toHaveLength(3);
+        expect(await eventsOf(w, owner, 'BID_REVISED')).toHaveLength(before);
+
+        // Receipts 4 and 5, then the tender's chain is full: a sixth is refused, a bid and all.
+        await asLimited(others[0]!);
+        await asLimited(others[1]!);
+        expect(await refusalsOf(asLimited(others[2]!))).toContain('TENDER_RECEIPT_LIMIT');
+        const refusedBid = await runUnscoped('the suite looks for the refused bid', () =>
+          w.prisma.client.bid.findFirst({
+            where: { tenderId, bidderOrganizationId: others[2]! },
+          }),
+        );
+        expect(refusedBid).toBeNull();
+        expect(await linksOf(tenderId)).toHaveLength(5);
+        expect(await eventsOf(w, owner, 'BID_SUBMITTED')).toHaveLength(3);
+
+        // The chain that stands is whole, and is what audit-service was told.
+        const links = await linksOf(tenderId);
+        const evidence = await evidenceFromEvents(owner, tenderId);
+        expect(evidence.links.map((link) => link.receipt)).toEqual(
+          links.map((link) => link.receipt),
+        );
+        expect(verifyReceiptChain(tenderId, links, evidence.head)).toEqual({ ok: true });
+
+        // And a tender filled to its caps is opened — through the opening itself, not by checking
+        // the chain on the side (Codex r1 on #250, R2): every standing bid against one verification.
+        await runUnscoped('the suite lets the deadline pass', () =>
+          w.prisma.client.$executeRawUnsafe(
+            `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+               "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
+          ),
+        );
+        await limited.tenderClose.close({ organizationId: owner, tenderId });
+        // Four eyes: one proposes, another approves and opens.
+        await asAdmin(owner, () => limited.tenderOpen.proposeOpening(tenderId));
+        const opened = await asAdmin(owner, () => limited.tenderOpen.open(tenderId));
+        expect(opened).toMatchObject({ status: 'EVALUATING', bidCount: 3, alreadyOpened: false });
+        const standing = await runUnscoped('the suite reads the bids it opened', () =>
+          w.prisma.client.bid.findMany({ where: { tenderId }, select: { status: true } }),
+        );
+        expect(standing.map((bid) => bid.status)).toEqual(['OPENED', 'OPENED', 'OPENED']);
+        const read = await asAdmin(owner, () => limited.tenderOpen.listBids(tenderId));
+        expect(read.bids).toHaveLength(3);
+      } finally {
+        await limited.close();
+      }
+    });
+
+    it('admits at most CONSTRUCTION_TENDER_MAX_STANDING_BIDS standing bids; past it a new bid is refused with nothing written and nothing said of the count (Codex r2 on #250)', async () => {
+      const limited = wire(testEnv({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: '2' }));
+      try {
+        const { owner, bidder, tenderId } = await setup();
+        const [second, third, fourth] = [org(), org(), org()];
+        for (const other of [second, third, fourth]) await qualify(w, other);
+        const asLimited = (who: string, key = bidKey()) =>
+          asBidder(who, () => limited.bids.submit(tenderId, { content: bidContent() }, key));
+        const bidsOf = (who: string) =>
+          runUnscoped('the suite looks for a bidder’s bid', () =>
+            w.prisma.client.bid.findMany({ where: { tenderId, bidderOrganizationId: who } }),
+          );
+
+        const first = await asLimited(bidder);
+        await asLimited(second);
+
+        // The third: refused before anything is written, and the refusal is the limit alone.
+        const key = bidKey();
+        const refused = (await asLimited(third, key).then(
+          () => undefined,
+          (e: unknown) => e,
+        )) as { code?: string; message?: string; details?: unknown } | undefined;
+        expect(refused).toMatchObject({
+          code: 'BUSINESS_RULE_VIOLATION',
+          message: 'Bid refused: TENDER_BID_LIMIT',
+          details: [
+            { path: 'bid', code: 'TENDER_BID_LIMIT', message: 'Bid refused: TENDER_BID_LIMIT' },
+          ],
+        });
+        // Nothing in what the bidder is told counts anyone.
+        expect(
+          JSON.stringify({ message: refused?.message, details: refused?.details }),
+        ).not.toMatch(/\d/);
+        expect(await bidsOf(third)).toEqual([]);
+        expect(await linksOf(tenderId)).toHaveLength(2);
+        expect(await eventsOf(w, owner, 'BID_SUBMITTED')).toHaveLength(2);
+        // The key was freed: the same request is judged again — and refused again — not replayed.
+        expect(await refusalsOf(asLimited(third, key))).toContain('TENDER_BID_LIMIT');
+
+        // A revision adds no bid: a standing bidder may still replace its own at the limit.
+        await asBidder(bidder, () =>
+          limited.bids.revise(tenderId, first.bidId, {
+            expectedRevision: 1,
+            content: bidContent('7'),
+          }),
+        );
+        // A withdrawn bid no longer stands, so its place is free — once.
+        await asBidder(bidder, () =>
+          limited.bids.withdraw(tenderId, first.bidId, { expectedRevision: 2 }),
+        );
+        await asLimited(third);
+        expect(await refusalsOf(asLimited(fourth))).toContain('TENDER_BID_LIMIT');
+        expect(await bidsOf(fourth)).toEqual([]);
+      } finally {
+        await limited.close();
+      }
+    });
+
+    it('never lets concurrent submissions count past one another: exactly CONSTRUCTION_TENDER_MAX_STANDING_BIDS of them stand (Codex r2 on #250)', async () => {
+      const limited = wire(testEnv({ CONSTRUCTION_TENDER_MAX_STANDING_BIDS: '2' }));
+      try {
+        const { owner, tenderId } = await setup();
+        const bidders = [org(), org(), org(), org(), org(), org()];
+        for (const bidder of bidders) await qualify(w, bidder);
+
+        const outcomes = await Promise.allSettled(
+          bidders.map((bidder) =>
+            asBidder(bidder, () =>
+              limited.bids.submit(tenderId, { content: bidContent() }, bidKey()),
+            ),
+          ),
+        );
+
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(2);
+        const refusals = outcomes.flatMap((outcome) =>
+          outcome.status === 'rejected' ? [outcome.reason as { message?: string }] : [],
+        );
+        expect(refusals.map((reason) => reason.message)).toEqual(
+          Array(4).fill('Bid refused: TENDER_BID_LIMIT'),
+        );
+        const standing = await runUnscoped('the suite counts the bids that stand', () =>
+          w.prisma.client.bid.count({ where: { tenderId, status: 'SUBMITTED' } }),
+        );
+        expect(standing).toBe(2);
+        expect(await linksOf(tenderId)).toHaveLength(2);
+        expect(await eventsOf(w, owner, 'BID_SUBMITTED')).toHaveLength(2);
+      } finally {
+        await limited.close();
+      }
+    });
+
     it('gives concurrent submissions distinct places in one verifying chain, ending at the announced head', async () => {
       const { owner, tenderId } = await setup();
       const bidders = [org(), org(), org(), org(), org(), org()];
@@ -798,20 +966,11 @@ describe('bids', () => {
         { tenderId, keyId },
       );
       try {
-        expect(() =>
-          openBid({
-            privateKey: privateKeyFromDer(der),
-            binding: {
-              tenderId,
-              bidId: target.bidId,
-              bidderOrganizationId: bidders[1]!,
-              revision: 1,
-              keyId,
-            },
-            sealed: forged,
-            receipts: { links: rewritten, head: externalHead },
-          }),
-        ).toThrow(expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }));
+        // The rewritten links are never verified against the external head, so nothing can be
+        // opened with them.
+        expect(() => verifyReceipts(tenderId, { links: rewritten, head: externalHead })).toThrow(
+          expect.objectContaining({ code: 'RECEIPT_CHAIN_BROKEN' }),
+        );
 
         // And with the receipts themselves taken from the evidence — which is how opening
         // reads them — the substituted bid does not match what was announced for it.

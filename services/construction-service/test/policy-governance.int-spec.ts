@@ -563,5 +563,55 @@ describe('approval policy governance (Q-70 (7), decided)', () => {
       expect(byGoverned.items.map((item) => item.id)).toContain(policy.id);
       expect(byStranger.items.map((item) => item.id)).not.toContain(policy.id);
     });
+
+    it('lists only what the caller could read one by one, page after page (construction audit F3)', async () => {
+      const { union, county, dehyari } = tree();
+      // Written by the union for two organizations beneath it, and one governing the union itself.
+      const forCounty = await asSetter(union, () => w.policies.create(policyFor(county)));
+      const forDehyari = await asSetter(union, () => w.policies.create(policyFor(dehyari)));
+      const forUnion = await asSetter(union, () => w.policies.create(policyFor(union)));
+      const all = [forCounty.id, forDehyari.id, forUnion.id];
+
+      // Every page of a listing, in the caller's context.
+      const everyPage = async (as: <T>(fn: () => T) => T): Promise<string[]> => {
+        const ids: string[] = [];
+        let cursor: string | undefined;
+        for (;;) {
+          const page = await as(() => w.policies.list({ limit: 1, ...(cursor ? { cursor } : {}) }));
+          ids.push(...page.items.map((item) => item.id));
+          if (!page.hasMore) return ids;
+          cursor = page.nextCursor!;
+        }
+      };
+      const visibleOneByOne = async (as: <T>(fn: () => T) => T): Promise<string[]> => {
+        const ids: string[] = [];
+        for (const id of all) {
+          if (
+            await as(() => w.policies.get(id)).then(
+              () => true,
+              () => false,
+            )
+          )
+            ids.push(id);
+        }
+        return ids;
+      };
+
+      // The union's project reader (no UNION_ADMIN): the author side is not theirs to see — only
+      // the policy that governs their own organization.
+      const reader = <T>(fn: () => T): T => asAdmin(union, fn);
+      expect(await visibleOneByOne(reader)).toEqual([forUnion.id]);
+      expect((await everyPage(reader)).sort()).toEqual([forUnion.id]);
+
+      // The union administrator (no reader role): what the union wrote, every one of them.
+      const author = <T>(fn: () => T): T => asSetter(union, fn);
+      expect((await visibleOneByOne(author)).sort()).toEqual([...all].sort());
+      expect((await everyPage(author)).sort()).toEqual([...all].sort());
+
+      // The governed county's union administrator sees nothing it neither wrote nor reads.
+      const countySetter = <T>(fn: () => T): T => asSetter(county, fn);
+      expect(await visibleOneByOne(countySetter)).toEqual([]);
+      expect(await everyPage(countySetter)).toEqual([]);
+    });
   });
 });

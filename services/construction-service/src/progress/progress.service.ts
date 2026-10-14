@@ -13,6 +13,7 @@ import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { versionConflictsTotal } from '../observability/metrics';
 import { ProjectRepository, type LockedProject } from '../project/project.repository';
+import { ApprovalRepository } from '../approval/approval.repository';
 import { assertProgressTransition, type ProgressStateName } from './progress.state-machine';
 import type {
   CreateProgressDto,
@@ -45,7 +46,9 @@ export function latestSubmitted(
  * submitting need the project IN_PROGRESS; a submitted report may not report
  * less than the last one unless `CONSTRUCTION_PROGRESS_ALLOW_DECREASE` is on.
  * Every command locks the project row, so a report cannot be submitted while
- * the project is being completed.
+ * the project is being completed. A report submitted while a completion
+ * approval round is open supersedes that round's undecided steps: the round
+ * was asked about the report it replaces (construction audit F7).
  */
 @Injectable()
 export class ProgressService {
@@ -56,6 +59,7 @@ export class ProgressService {
     private readonly access: ProjectAccess,
     @Inject(ENV) private readonly env: ConstructionEnv,
     private readonly idempotency: IdempotencyStore,
+    private readonly approvals: ApprovalRepository,
   ) {}
 
   /**
@@ -176,6 +180,17 @@ export class ProgressService {
       });
       if (matched === 0) throw this.conflict(reportId);
 
+      // A completion round asks its authorities about the report that stood when completion was
+      // requested; this one replaces it. So the round's undecided steps end here, under the same
+      // project lock its decisions take, and completion is requested again on the new report
+      // (`complete` checks it says 100%). With CONSTRUCTION_PROGRESS_ALLOW_DECREASE a 90% report
+      // can therefore never stand behind a completion granted afterwards (construction audit F7).
+      const completion = { organizationId, projectId, workflowKey: 'project.completion' };
+      const supersededCompletionRound = await this.approvals.openRound(tx, completion);
+      if (supersededCompletionRound !== null) {
+        await this.approvals.supersedeOpen(tx, { ...completion, tenderId: null }, at);
+      }
+
       await this.events.enqueue(tx, {
         eventName: 'PROJECT_PROGRESS_UPDATED',
         aggregateId: projectId,
@@ -187,6 +202,7 @@ export class ProgressService {
           progressBasisPoints: report.progressBasisPoints,
           submittedBy: actor,
           submittedAt: at.toISOString(),
+          supersededCompletionRound,
         },
         occurredAt: at,
       });

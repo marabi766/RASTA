@@ -12,7 +12,7 @@ import {
   openBid,
   privateKeyFromDer,
   type SealedBid,
-  type TrustedReceipts,
+  type VerifiedReceipts,
 } from './sealing/sealing';
 import {
   trustedReceiptsOf,
@@ -21,10 +21,13 @@ import {
 } from './tender-evidence.client';
 import { ruleRefusal } from '../shared/refusal';
 
-/** The evidence, read and checked: the chain as audit-service holds it, and the receipts made from it. */
+/**
+ * The evidence, read and checked: the chain as audit-service holds it, and the receipts made from
+ * it — verified once, and reused for every bid opened with it.
+ */
 export interface Evidence {
   chain: TenderChain;
-  receipts: TrustedReceipts;
+  receipts: VerifiedReceipts;
 }
 
 /** The integrity refusal, as the 422 the owner's routes and the contractor's own read both answer. */
@@ -107,7 +110,7 @@ export class BidContentReader {
     keyId: string,
     tenderId: string,
     bid: Bid,
-    receipts: TrustedReceipts,
+    receipts: VerifiedReceipts,
   ): BidContent {
     const sealed: SealedBid = {
       version: bid.sealVersion,

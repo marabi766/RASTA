@@ -21,8 +21,8 @@ import {
  */
 
 const FULL = [
-  { criterionCode: 'PRICE', scoreScaled: 8_500 },
-  { criterionCode: 'LICENCE', scoreScaled: 100 },
+  { criterionCode: 'PRICE', scoreScaled: 8_500, expectedRevision: 0 },
+  { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
 ];
 
 describe('tenant isolation — evaluation', () => {

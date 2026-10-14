@@ -7,6 +7,7 @@ import {
   genesisReceipt,
   nextReceipt,
   openBid,
+  verifyReceipts,
   privateKeyFromDer,
   sealBid,
 } from '../src/tender/sealing/sealing';
@@ -214,7 +215,7 @@ describe('publishing a tender', () => {
           privateKey: privateKeyFromDer(der),
           binding,
           sealed,
-          receipts: { links: [{ ...link, receipt }], head: receipt },
+          receipts: verifyReceipts(tender.id, { links: [{ ...link, receipt }], head: receipt }),
         }),
       ).toEqual({ priceMinor: '4200000000' });
       der.fill(0);

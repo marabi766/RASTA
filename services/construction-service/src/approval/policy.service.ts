@@ -21,7 +21,12 @@ import { IdempotencyStore, type RecordCompletion } from '../shared/idempotency';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { versionConflictsTotal } from '../observability/metrics';
-import { ApprovalRepository, type PolicyWithSteps } from './approval.repository';
+import {
+  ApprovalRepository,
+  EVERY_ORGANIZATION,
+  type PolicyListScope,
+  type PolicyWithSteps,
+} from './approval.repository';
 import {
   assertPolicyTransition,
   type PolicyStateName,
@@ -430,14 +435,14 @@ export class PolicyService implements OnModuleInit {
 
   /** Policies the caller's organization is governed by or wrote. */
   async list(query: ListPoliciesQuery): Promise<CursorPage<PolicyView>> {
-    const { organizationId } = this.access.assertCanListPolicies();
-    return this.page(organizationId, query);
+    const scope = this.access.assertCanListPolicies();
+    return this.page(scope, query);
   }
 
   /** The platform administrator's queue: every organization's pending policies. */
   async platformQueue(query: ListPoliciesQuery): Promise<CursorPage<PolicyView>> {
     this.access.assertPlatformAdministrator();
-    return this.page(null, { ...query, status: 'PENDING_PLATFORM_APPROVAL' });
+    return this.page(EVERY_ORGANIZATION, { ...query, status: 'PENDING_PLATFORM_APPROVAL' });
   }
 
   // -------------------------------------------------------------------------
@@ -540,11 +545,11 @@ export class PolicyService implements OnModuleInit {
   }
 
   private async page(
-    organizationId: string | null,
+    scope: PolicyListScope,
     query: ListPoliciesQuery,
   ): Promise<CursorPage<PolicyView>> {
     const rows = await this.repository.listPolicies({
-      organizationId,
+      scope,
       ...(query.workflowKey ? { workflowKey: query.workflowKey } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),

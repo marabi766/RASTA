@@ -18,6 +18,7 @@ import {
   wire,
   type Wiring,
   publishApproved,
+  bidKey,
 } from './helpers';
 
 /**
@@ -142,7 +143,7 @@ describe('stable actor identity (#188) through the API', () => {
       const bidder = org(`${label}-bidder${i}`);
       await qualify(w, bidder);
       const view = await asBidder(bidder, () =>
-        w.bids.submit(tender.id, { content: bidContent(price) }),
+        w.bids.submit(tender.id, { content: bidContent(price) }, bidKey()),
       );
       bidIds.push(view.bidId);
     }
@@ -496,7 +497,7 @@ describe('stable actor identity (#188) through the API', () => {
         [`/v1/tenders/${tenderId}/bids/${bidId}/recusal`, { reasonCode: 'OTHER' }],
         [
           `/v1/tenders/${tenderId}/bids/${bidId}/scores`,
-          { scores: [{ criterionCode: 'PRICE', scoreScaled: 100 }] },
+          { scores: [{ criterionCode: 'PRICE', scoreScaled: 100, expectedRevision: 0 }] },
         ],
         [`/v1/tenders/${tenderId}/evaluate`, {}],
       ];
@@ -545,8 +546,8 @@ describe('stable actor identity (#188) through the API', () => {
           .set(as(heidiToken))
           .send({
             scores: [
-              { criterionCode: 'PRICE', scoreScaled: 8_000 },
-              { criterionCode: 'LICENCE', scoreScaled: 100 },
+              { criterionCode: 'PRICE', scoreScaled: 8_000, expectedRevision: 0 },
+              { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
             ],
           });
         expect(scored.status).toBe(200);
@@ -594,8 +595,8 @@ describe('stable actor identity (#188) through the API', () => {
       http().post(path).set(as(token)).send(body);
     const scores = {
       scores: [
-        { criterionCode: 'PRICE', scoreScaled: 7_000 },
-        { criterionCode: 'LICENCE', scoreScaled: 100 },
+        { criterionCode: 'PRICE', scoreScaled: 7_000, expectedRevision: 0 },
+        { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
       ],
     };
 

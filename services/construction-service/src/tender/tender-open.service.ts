@@ -35,7 +35,7 @@ import {
 import { compareChains } from './chain-agreement';
 import type { LiveAnswer, MembershipSource } from './membership.client';
 import { BidContentReader, integrityRefusal, type Evidence } from './bid-content-reader';
-import type { TrustedReceipts } from './sealing/sealing';
+import type { VerifiedReceipts } from './sealing/sealing';
 import { OwnerIdentity, type LivePrincipal, type Principal } from './owner-identity';
 import type { TenderChain } from './tender-evidence.client';
 import { assertTenderTransition } from './tender.state-machine';
@@ -63,6 +63,7 @@ export const OPENING_REFUSALS = [
   'PROPOSAL_REQUIRED',
   'SECOND_PERSON_REQUIRED',
   'NO_PROPOSAL',
+  'TENDER_OVER_LIMIT',
 ] as const;
 export type OpeningRefusal = (typeof OPENING_REFUSALS)[number];
 
@@ -78,6 +79,11 @@ interface ApprovalPeople {
   proposedBy: string;
   proposedAt: Date;
   proposerOrganizationIds: readonly string[];
+  /**
+   * Whether the proposer may still open these bids, as identity-service says now: a live
+   * membership of the owner with a role that opens bids and no excluded role (F6).
+   */
+  proposerMayOpen: boolean;
   /** identity-service's clock when it said so: the proposer's membership is known from here on. */
   proposerReadAt: Date;
   organizationIds: readonly string[];
@@ -130,6 +136,14 @@ interface Opened {
  * audit-service yet — retry), differing, forged. There is no fallback to the local head.
  * The read happens **outside** the transaction and before it takes the lock: it must not
  * hold the tender row while it waits on a network, and CLOSED is stable.
+ *
+ * The chain is verified **once** per opening, into receipts indexed by bid that every bid
+ * reuses (`VerifiedReceipts`), not once per bid: at the permitted caps that was 200 walks of
+ * 10,000 links inside the transaction (Codex r1 on #250, R2). The transaction runs under
+ * `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS`, not Prisma's 5 s default; the worst case the default
+ * caps allow is opened within it in `tender-open-scale.int-spec.ts`. A tender with more standing
+ * bids than `CONSTRUCTION_TENDER_MAX_STANDING_BIDS` (the cap lowered after they came in) is outside
+ * that bound and is refused `TENDER_OVER_LIMIT` before the evidence is read (Codex r3 on #250, F1).
  *
  * ## The key
  *
@@ -238,9 +252,13 @@ export class TenderOpenService {
       let evidence: Evidence | undefined;
       let people: ApprovalPeople | undefined;
       if (found.status === 'CLOSED') {
+        // Before anything is asked, written or decrypted: an opening the timeout cannot finish is
+        // refused at once, not rolled back after 30 s on every retry (Codex r3 on #250, F1).
+        await this.assertWithinStandingLimit(tenderId);
         people = await this.readApprovalPeople(principal, found);
-        // A proposer who now belongs to a bidder neither stands nor blocks: the proposal is cleared.
-        if (people) await this.clearProposalOfConflictedProposer(principal, tenderId, people);
+        // A proposer who now belongs to a bidder, or who may no longer open these bids, neither
+        // stands nor blocks: the proposal is cleared.
+        if (people) await this.clearProposalOfIneligibleProposer(principal, tenderId, people);
         // Nor does one who cannot be told apart from this approver (#188): cleared, then refused.
         if (people) await this.clearProposalOfUnknownProposer(principal, tenderId, people);
         evidence = await this.readEvidence(principal.organizationId, tenderId);
@@ -250,7 +268,9 @@ export class TenderOpenService {
       return withFinancialSpan(
         'construction.bid.open',
         () =>
-          this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence, people)),
+          this.prisma.transaction((tx) => this.openIn(tx, principal, tenderId, evidence, people), {
+            timeoutMs: this.env.CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS,
+          }),
         { 'rasta.tender.command': 'open-bids' },
       );
     });
@@ -330,9 +350,14 @@ export class TenderOpenService {
     // It was PUBLISHED when the evidence was to be read, and has been closed since: ask again.
     if (!evidence) throw RastaError.optimisticLockFailed('Tender', tenderId);
 
+    const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
+    // The backstop of the check before the evidence read, under the lock and before any decryption.
+    if (standing.length > this.env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS) {
+      throw this.refused('TENDER_OVER_LIMIT');
+    }
+
     await this.assertAgrees(tx, tenderId, evidence.chain, bids);
 
-    const standing = bids.filter((bid) => bid.status === 'SUBMITTED');
     // The point of the whole exercise: every standing bid is opened against the evidence
     // and what it says is checked against its commitment. Nothing is kept of the content.
     await this.withPrivateKey(tx, tenderId, standing.length > 0, (privateKey, keyId) => {
@@ -518,10 +543,13 @@ export class TenderOpenService {
         found.openedAt !== null
           ? await this.readEvidence(principal.organizationId, tenderId)
           : undefined;
-      return this.prisma.transaction((tx) =>
-        this.readIn(tx, principal, tenderId, evidence, { purpose: 'LIST_BIDS' }).then(
-          (result) => result.view,
-        ),
+      // Every opened bid is decrypted and logged, as at the opening: the same bound.
+      return this.prisma.transaction(
+        (tx) =>
+          this.readIn(tx, principal, tenderId, evidence, { purpose: 'LIST_BIDS' }).then(
+            (result) => result.view,
+          ),
+        { timeoutMs: this.env.CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS },
       );
     });
   }
@@ -545,7 +573,19 @@ export class TenderOpenService {
     });
   }
 
-  /** The tender's access log, newest first. Reading the log is not a read of a bid and is not itself logged. */
+  /**
+   * The tender's access log, newest first. Reading the log is not a read of a bid and is not itself
+   * logged.
+   *
+   * **Before the opening it names no bidder** (ADR-066 § 4: the owner learns how many bids and when
+   * they were received, not who — construction audit F1). A bidder reading its own receipt, or
+   * another organization's refused attempt, is a row naming that organization, its user and its
+   * bid; so until the opening the page holds only the owner organization's own rows (counts,
+   * proposals, its refusals), none of which names a bid. The rest is held back, not redacted: a
+   * redacted row would still say when a receipt was read, to be matched against the receipt times
+   * the owner sees. Nothing is removed from the record — every row and `BID_ACCESSED` is written as
+   * before, and the whole log is shown once the bids are opened.
+   */
   async listAccessLog(
     tenderId: string,
     query: ListBidAccessLogQuery,
@@ -557,14 +597,19 @@ export class TenderOpenService {
     // Who the caller belongs to NOW (identity-service, fail closed), as on every owner read.
     const principal = await this.livePrincipal(caller);
     const rows = await this.prisma.transaction(async (tx) => {
-      if (!(await this.opens.ownsTender(tx, tenderId)))
-        throw RastaError.notFound('Tender', tenderId);
+      const tender = await this.opens.findOpening(tx, tenderId);
+      if (!tender) throw RastaError.notFound('Tender', tenderId);
       // The log names who read which bid and when: not for a member of a bidder's organization.
       this.assertNoConflict(
         principal.organizationIds,
         await this.opens.listBidderOrganizationIds(tx, tenderId),
       );
-      return this.opens.listAccessLog(tx, tenderId, query);
+      // Not yet opened: the owner's own rows only (see above). An opening that commits after this
+      // read only makes the page show less than it could.
+      return this.opens.listAccessLog(tx, tenderId, {
+        ...query,
+        ...(tender.openedAt === null ? { accessorOrganizationId: principal.organizationId } : {}),
+      });
     });
     const hasMore = rows.length > query.limit;
     const visible = hasMore ? rows.slice(0, query.limit) : rows;
@@ -806,6 +851,23 @@ export class TenderOpenService {
     throw integrityRefusal();
   }
 
+  /**
+   * Refuses to open a tender with more standing bids than `CONSTRUCTION_TENDER_MAX_STANDING_BIDS`
+   * (Codex r3 on #250, F1). Submission never admits more, but a tender can exceed the cap if it was
+   * lowered after the bids came in; opening it would decrypt more than the timeout was sized for,
+   * roll back, and do the same on every retry. A fixed refusal with no count in it (`TENDER_OVER_LIMIT`,
+   * like `TENDER_BID_LIMIT`), before the evidence is read, a proposal cleared or a key unwrapped.
+   * What becomes of such a tender is an operator's decision (Q-117); nothing here decides it.
+   */
+  private async assertWithinStandingLimit(tenderId: string): Promise<void> {
+    const standing = await this.prisma.transaction((tx) =>
+      this.opens.countStandingBids(tx, tenderId),
+    );
+    if (standing > this.env.CONSTRUCTION_TENDER_MAX_STANDING_BIDS) {
+      throw this.refused('TENDER_OVER_LIMIT');
+    }
+  }
+
   /** The conflict check before anything is said about the tender's state: the bidders are read on their own. */
   private async assertNotConflicted(principal: Principal, tenderId: string): Promise<void> {
     const bidders = await this.prisma.transaction((tx) =>
@@ -835,10 +897,17 @@ export class TenderOpenService {
     // The approver is already read: `principal` is live (identity-service and the token together).
     const read = await this.fetchMemberships(proposedBy);
     const proposer = read.memberships.map((membership) => membership.organizationId);
+    // The proposer is judged as the approver is (`OwnerIdentity.live`): a member of the owner now,
+    // with a role that opens bids and none that is excluded. Not only where they belong.
+    const ownerMembership = read.memberships.find(
+      (membership) => membership.organizationId === principal.organizationId,
+    );
     return {
       proposedBy,
       proposedAt,
       proposerOrganizationIds: proposer,
+      proposerMayOpen:
+        ownerMembership !== undefined && this.access.liveRolesMayOpenBids(ownerMembership.roles),
       proposerReadAt: read.asOf,
       organizationIds: [...new Set([...proposer, ...principal.organizationIds])],
     };
@@ -858,12 +927,14 @@ export class TenderOpenService {
   }
 
   /**
-   * The proposer is a member of a bidding organization now: the approval is refused AND the
-   * proposal cleared (audited, with its event), so that another eligible user can propose
-   * afresh instead of every approver meeting the same refusal. The clearing commits in its
-   * own transaction, before the refusal is answered.
+   * The proposer no longer stands: a member of a bidding organization now (`PROPOSER_CONFLICTED`),
+   * or no longer someone who may open these bids — no live membership of the owner, no role that
+   * opens bids, or an excluded role (`PROPOSER_NOT_AUTHORIZED`, construction audit F6). The
+   * approval is refused AND the proposal cleared (audited, with its event), so that another
+   * eligible user can propose afresh instead of every approver meeting the same refusal. The
+   * clearing commits in its own transaction, before the refusal is answered.
    */
-  private async clearProposalOfConflictedProposer(
+  private async clearProposalOfIneligibleProposer(
     principal: Principal,
     tenderId: string,
     people: ApprovalPeople,
@@ -871,7 +942,11 @@ export class TenderOpenService {
     const bidders = new Set(
       await this.prisma.transaction((tx) => this.opens.listBidderOrganizationIds(tx, tenderId)),
     );
-    if (!people.proposerOrganizationIds.some((organization) => bidders.has(organization))) return;
+    const conflicted = people.proposerOrganizationIds.some((organization) =>
+      bidders.has(organization),
+    );
+    if (!conflicted && people.proposerMayOpen) return;
+    const reason = conflicted ? 'PROPOSER_CONFLICTED' : 'PROPOSER_NOT_AUTHORIZED';
     const replaced = await this.prisma.transaction(async (tx) => {
       const locked = await this.opens.lockForOpening(tx, principal.organizationId, tenderId);
       if (!locked) return false;
@@ -890,15 +965,21 @@ export class TenderOpenService {
         principal,
         locked,
         { by: people.proposedBy, at: people.proposedAt },
-        'PROPOSER_CONFLICTED',
+        reason,
       );
       return false;
     });
-    // Not conflicted evidence about what stands now: the approver asks again.
+    // Not evidence about what stands now: the approver asks again.
     if (replaced) throw RastaError.optimisticLockFailed('Tender', tenderId);
-    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
+    if (conflicted) {
+      bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'conflict_of_interest' });
+      throw RastaError.forbidden(
+        'The proposal to open these bids was cleared: its proposer is a member of an organization that bid. Another user may propose.',
+      );
+    }
+    bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'proposer_not_authorized' });
     throw RastaError.forbidden(
-      'The proposal to open these bids was cleared: its proposer is a member of an organization that bid. Another user may propose.',
+      'The proposal to open these bids was cleared: its proposer may no longer open them. Another user may propose.',
     );
   }
 
@@ -957,7 +1038,11 @@ export class TenderOpenService {
     principal: Principal,
     locked: TenderForOpening,
     proposal: { by: string; at: Date },
-    reason: 'WITHDRAWN_BY_PROPOSER' | 'PROPOSER_CONFLICTED' | 'PROPOSER_IDENTITY_UNKNOWN',
+    reason:
+      | 'WITHDRAWN_BY_PROPOSER'
+      | 'PROPOSER_CONFLICTED'
+      | 'PROPOSER_NOT_AUTHORIZED'
+      | 'PROPOSER_IDENTITY_UNKNOWN',
   ): Promise<void> {
     const proposedBy = proposal.by;
     const cleared = await this.opens.clearProposal(tx, {
@@ -1136,7 +1221,7 @@ export class TenderOpenService {
     keyId: string,
     tenderId: string,
     bid: Bid,
-    receipts: TrustedReceipts,
+    receipts: VerifiedReceipts,
   ): BidContent {
     return this.reader.openOne(privateKey, keyId, tenderId, bid, receipts);
   }
@@ -1162,7 +1247,8 @@ export class TenderOpenService {
       reason === 'NOT_OPENED' ||
       reason === 'PROPOSAL_REQUIRED' ||
       reason === 'SECOND_PERSON_REQUIRED' ||
-      reason === 'NO_PROPOSAL'
+      reason === 'NO_PROPOSAL' ||
+      reason === 'TENDER_OVER_LIMIT'
     ) {
       bidOpeningRefusalsTotal.inc({ service: SERVICE_NAME, reason: reason.toLowerCase() });
     }

@@ -93,6 +93,12 @@ export interface FieldMapping<F extends string> {
    * be broken by the service rewording its English (`OPEN_ASSIGNMENT`, …).
    */
   readonly byDetailCode?: Readonly<Record<string, string>>;
+  /**
+   * Said for anything the tables above do not cover. When set, the service's
+   * own sentence is never rendered: a form whose text could echo a stranger's
+   * characters (a bidi control in a detail) keeps the list closed.
+   */
+  readonly fallback?: string;
 }
 
 export function mapProblemToFields<F extends string>(
@@ -102,7 +108,7 @@ export function mapProblemToFields<F extends string>(
   const fieldErrors: FieldErrors<F> = {};
   const unplaced: string[] = [];
   const textOf = (message: string): string =>
-    mapping.messages?.[message] ?? mapping.byCode?.[problem.code] ?? message;
+    mapping.messages?.[message] ?? mapping.byCode?.[problem.code] ?? mapping.fallback ?? message;
 
   for (const detail of problem.details ?? []) {
     const field = mapping.paths[detail.path];

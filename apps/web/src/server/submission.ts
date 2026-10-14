@@ -111,4 +111,46 @@ export function isBoundSubmissionId(value: unknown, session: WebSession): value 
   return received.length === expected.length && timingSafeEqual(received, expected);
 }
 
+// ---------------------------------------------------------------------------
+// What the browser may remember about whose submission it was
+// ---------------------------------------------------------------------------
+
+/** 12 bytes → 16 base64url characters: enough to tell two logins apart, not to be a credential. */
+const BINDING_BYTES = 12;
+
+const BINDING_PURPOSE = 'rasta-web/unresolved-submission-binding/v1';
+
+/**
+ * Two one-way tags the page hands to a form that keeps an unresolved submission
+ * in `sessionStorage` (`lib/unresolved-order.ts`), so the browser can tell
+ * *whose* entry it is without the entry holding anything of the session.
+ *
+ * - `owner`: this person acting for this organization. A different owner's entry
+ *   is not shown at all.
+ * - `session`: this login. The submission id is bound to the login's CSRF token
+ *   (`mintSubmissionId`), so after a re-login the stored id is refused and the
+ *   entry can only be shown, never re-sent.
+ *
+ * Keyed MACs of the session's own values: neither tag reveals, nor can be used
+ * to derive, the subject, the CSRF token or any token.
+ */
+export interface SubmissionBinding {
+  readonly owner: string;
+  readonly session: string;
+}
+
+export function submissionBinding(session: WebSession): SubmissionBinding {
+  const key = createHmac('sha256', webServerEnv().WEB_SESSION_SECRET)
+    .update(BINDING_PURPOSE)
+    .digest();
+  const tag = (text: string): string =>
+    createHmac('sha256', key)
+      .update(text)
+      .digest()
+      .subarray(0, BINDING_BYTES)
+      .toString('base64url');
+  const owner = `${session.subject}\n${session.organizationId ?? ''}`;
+  return { owner: tag(`owner\n${owner}`), session: tag(`session\n${owner}\n${session.csrfToken}`) };
+}
+
 export { SUBMISSION_FIELD };

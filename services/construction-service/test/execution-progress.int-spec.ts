@@ -367,6 +367,105 @@ describe('execution, progress and completion', () => {
       expect((await asAdmin(a, () => w.projects.get(project.id))).status).toBe('COMPLETED');
     });
 
+    describe('a report that changes under an open completion round (construction audit F7)', () => {
+      let lenient: Wiring;
+      beforeAll(() => {
+        lenient = wire(testEnv({ CONSTRUCTION_PROGRESS_ALLOW_DECREASE: 'true' }));
+      });
+      afterAll(async () => {
+        await lenient.close();
+      });
+
+      /** A started project of `a` at 100% whose completion round, decided by `a`, is open. */
+      async function completionAsked(a: string) {
+        const project = await startedProject(a);
+        await activePolicy(w, a, [{ authorityOrganizationId: a }], 'project.completion');
+        await report(a, project.id, 10_000);
+        const current = await asAdmin(a, () => w.projects.get(project.id));
+        await asAdmin(a, () =>
+          w.execution.complete(project.id, { expectedVersion: current.version }),
+        );
+        const [step] = (await approvalsOf(w, a, project.id)).filter(
+          (candidate) => candidate.workflowKey === 'project.completion',
+        );
+        expect(step).toMatchObject({ status: 'PENDING' });
+        return { project, step: step! };
+      }
+
+      const reportOn = async (on: Wiring, a: string, projectId: string, points: number) => {
+        const draft = await asAdmin(a, () =>
+          on.progress.draft(projectId, { progressBasisPoints: points, assetsUsed: [] }),
+        );
+        return asAdmin(a, () => on.progress.submit(projectId, draft.id, { expectedVersion: 1 }));
+      };
+
+      it('supersedes the round when a new report is submitted, so a 90% report never stands behind a completion', async () => {
+        const a = org();
+        const { project, step } = await completionAsked(a);
+
+        await reportOn(lenient, a, project.id, 9_000);
+
+        const after = (await approvalsOf(w, a, project.id)).find((s) => s.id === step.id);
+        expect(after).toMatchObject({ status: 'SUPERSEDED' });
+        const [updated] = (await outboxFor(w.prisma, a))
+          .filter((row) => row.eventName === 'PROJECT_PROGRESS_UPDATED')
+          .map((row) => eventEnvelopeSchema.parse(row.payload).payload as Record<string, unknown>)
+          .filter((payload) => payload.progressBasisPoints === 9_000);
+        expect(updated).toMatchObject({ supersededCompletionRound: step.round });
+
+        // The authority's grant finds nothing to decide; the project is not completed.
+        await expect(
+          asAdmin(a, () => w.approvals.decide(step.id, { expectedVersion: 1, decision: 'GRANT' })),
+        ).rejects.toBeDefined();
+        expect((await asAdmin(a, () => w.projects.get(project.id))).status).toBe('IN_PROGRESS');
+
+        // At 90% completion cannot even be asked; back at 100%, it is asked and granted afresh.
+        const at90 = await asAdmin(a, () => w.projects.get(project.id));
+        await expect(
+          asAdmin(a, () => w.execution.complete(project.id, { expectedVersion: at90.version })),
+        ).rejects.toThrow(/100%/);
+        await reportOn(w, a, project.id, 10_000);
+        const at100 = await asAdmin(a, () => w.projects.get(project.id));
+        await asAdmin(a, () =>
+          w.execution.complete(project.id, { expectedVersion: at100.version }),
+        );
+        const fresh = (await approvalsOf(w, a, project.id)).find(
+          (s) => s.workflowKey === 'project.completion' && s.status === 'PENDING',
+        )!;
+        expect(fresh.round).toBeGreaterThan(step.round);
+        await asAdmin(a, () =>
+          w.approvals.decide(fresh.id, { expectedVersion: 1, decision: 'GRANT' }),
+        );
+        expect((await asAdmin(a, () => w.projects.get(project.id))).status).toBe('COMPLETED');
+      });
+
+      it('rechecks the latest report under the project lock on the final grant, and grants nothing below 100%', async () => {
+        const a = org();
+        const { project, step } = await completionAsked(a);
+        // A round the new rule did not reach (opened before it): the report changes under it.
+        const unseen = jest.spyOn(lenient.approvalRepository, 'openRound').mockResolvedValue(null);
+        try {
+          await reportOn(lenient, a, project.id, 9_000);
+        } finally {
+          unseen.mockRestore();
+        }
+        expect((await approvalsOf(w, a, project.id)).find((s) => s.id === step.id)).toMatchObject({
+          status: 'PENDING',
+        });
+
+        await expect(
+          asAdmin(a, () => w.approvals.decide(step.id, { expectedVersion: 1, decision: 'GRANT' })),
+        ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+        expect((await asAdmin(a, () => w.projects.get(project.id))).status).toBe('IN_PROGRESS');
+        expect((await approvalsOf(w, a, project.id)).find((s) => s.id === step.id)).toMatchObject({
+          status: 'PENDING',
+        });
+        expect(
+          (await outboxFor(w.prisma, a)).filter((row) => row.eventName === 'PROJECT_COMPLETED'),
+        ).toEqual([]);
+      });
+    });
+
     it('leaves the project executing when the final approval is rejected', async () => {
       const a = org();
       const project = await startedProject(a);

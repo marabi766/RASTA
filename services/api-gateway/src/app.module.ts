@@ -27,7 +27,7 @@ import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging
 import { metricsContentType, metricsText } from '@rasta/observability';
 import type { Response } from 'express';
 import { GatewayController } from './proxy/gateway.controller';
-import { ProxyService } from './proxy/proxy.service';
+import { ProxyService, proxyOptionsOf } from './proxy/proxy.service';
 import { RateLimiter } from './proxy/rate-limiter';
 import { loadGatewayEnv, SERVICE_NAME, type GatewayEnv } from './config/env';
 import { GATEWAY_ENV, GATEWAY_LOGGER } from './tokens';
@@ -136,11 +136,7 @@ export class GatewayMetricsController {
       provide: ProxyService,
       inject: [GATEWAY_ENV, InternalTokenService],
       useFactory: (env: GatewayEnv, tokens: InternalTokenService) =>
-        new ProxyService(env, tokens, {
-          timeoutMs: env.GATEWAY_UPSTREAM_TIMEOUT_MS,
-          failureThreshold: env.GATEWAY_CIRCUIT_FAILURE_THRESHOLD,
-          resetAfterMs: env.GATEWAY_CIRCUIT_RESET_MS,
-        }),
+        new ProxyService(env, tokens, proxyOptionsOf(env)),
     },
 
     {

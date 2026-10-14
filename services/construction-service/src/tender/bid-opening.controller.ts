@@ -51,6 +51,10 @@ export class BidOpeningController {
       'approval (`BID_OPENING_PROPOSAL_WITHDRAWN`, reason `PROPOSER_IDENTITY_UNKNOWN`) so that anyone ' +
       'eligible may propose again. A token without `rasta_uid` is 403 on this route, on proposing and on withdrawing. ' +
       'Opening again answers the same view with `alreadyOpened: true` and writes nothing. ' +
+      'A tender with more standing bids than CONSTRUCTION_TENDER_MAX_STANDING_BIDS (the limit lowered ' +
+      'after they were submitted) is 422 `TENDER_OVER_LIMIT` at once, before audit-service is asked or ' +
+      'any bid decrypted; the answer gives no count, nothing is opened, and what becomes of the tender ' +
+      'is an operator’s decision (Q-117). ' +
       `${AUDIT_NOTE} ${OWNER_NOTE}`,
   })
   async open(@Param('id') id: string) {

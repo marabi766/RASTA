@@ -17,13 +17,17 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * | same key, different body           | `409 IDEMPOTENCY_KEY_REUSED`          |
  * | key currently in flight            | `409 CONFLICT` + `Retry-After: 1`     |
  *
- * Used by the four create endpoints (`POST /v1/projects`,
- * `POST /v1/projects/{id}/needs`, `POST /v1/projects/{id}/progress` and
- * `POST /v1/approval-policies`), where a retried request would otherwise
- * create a second project, need, progress draft or policy version. The key is
- * **optional** there: the gateway does not require it for these prefixes, and
- * a request without one simply is not deduplicated. Every other command carries `expectedVersion`, and a retry of
- * one that already committed is refused by the compare-and-set instead.
+ * Used by the create endpoints (`POST /v1/projects`,
+ * `POST /v1/projects/{id}/needs`, `POST /v1/projects/{id}/progress`,
+ * `POST /v1/approval-policies`, `POST /v1/projects/{id}/tenders`,
+ * `POST /v1/criteria-templates`), where a retried request would otherwise
+ * create a second project, need, progress draft, policy version, tender or
+ * template, and by scoring a bid. The key is **optional** there: a request
+ * without one simply is not deduplicated. Submitting a bid **requires** one
+ * (docs/06 § 6.8, construction audit F4: {@link requiredIdempotencyKey}) and
+ * stores its request under a keyed hash ({@link RequestHasher}). Every other
+ * command carries `expectedVersion`, and a retry of one that already committed
+ * is refused by the compare-and-set instead.
  *
  * ## Two transactions, and why the second is the domain's own
  *
@@ -55,6 +59,48 @@ import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
  * {@link CLAIM_WAIT_MS} from the start of the claim; running out is the
  * retryable `409 CONFLICT`, never a hang (#194).
  */
+
+/**
+ * How a request is stored to be recognised again: by default the unkeyed SHA-256 of its canonical
+ * form ({@link hashRequestBody}). An endpoint whose body must say nothing to a reader of the
+ * database (a sealed bid's price) brings a keyed one; `matches` compares a stored hash with a
+ * request, so a hash made under an older key, or with a salt of its own, is still recognised. The
+ * claim — and its hash — is committed before the work judges anything, so a hash that could be
+ * guessed at must not be comparable across claims either (Codex r1 on #250, R1): the bid's is salted
+ * per claim and bound to the requester.
+ */
+export interface RequestHasher {
+  hash(body: unknown): string;
+  matches(stored: string, body: unknown): boolean;
+}
+
+const SHA256_HASHER: RequestHasher = {
+  hash: (body) => hashRequestBody(body),
+  matches: (stored, body) => stored === hashRequestBody(body),
+};
+
+/**
+ * A **required** `Idempotency-Key` (docs/06 § 6.8: «ثبت پیشنهاد» is one of the mandatory
+ * endpoints). Missing or blank is `400 VALIDATION_FAILED` with code `required`, judged by the
+ * service itself so that the protection does not depend on which door a request used (the
+ * gateway is one, a direct call another). The bounds are the header parser's
+ * (`parseIdempotencyKey`).
+ */
+export function requiredIdempotencyKey(value: string | undefined): string {
+  if (value === undefined || value.trim() === '') {
+    throw RastaError.validation(
+      [
+        {
+          path: 'Idempotency-Key',
+          code: 'required',
+          message: 'This endpoint requires an Idempotency-Key header',
+        },
+      ],
+      'Idempotency-Key is required',
+    );
+  }
+  return value.trim();
+}
 
 /** Records the completion inside the caller's domain transaction. */
 export type RecordCompletion<T> = (
@@ -111,9 +157,10 @@ export class IdempotencyStore {
     endpoint: string,
     key: string,
     body: unknown,
+    hasher: RequestHasher = SHA256_HASHER,
   ): Promise<{ kind: 'PROCEED'; claim: Claim } | { kind: 'REPLAY'; body: unknown }> {
     const organizationId = getOrganizationId();
-    const requestHash = this.hash(body);
+    const requestHash = hasher.hash(body);
     const where = { organizationId_endpoint_key: { organizationId, endpoint, key } };
     const deadline = Date.now() + CLAIM_WAIT_MS;
 
@@ -167,7 +214,7 @@ export class IdempotencyStore {
         continue;
       }
 
-      if (existing.requestHash !== requestHash) throw this.reused(endpoint);
+      if (!hasher.matches(existing.requestHash, body)) throw this.reused(endpoint);
 
       if (existing.state === 'IN_PROGRESS') throw this.inFlight(endpoint);
 
@@ -270,8 +317,9 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (record: RecordCompletion<T>) => Promise<T>,
+    hasher?: RequestHasher,
   ): Promise<T> {
-    return (await this.execute(endpoint, key, body, successStatus, work)).result;
+    return (await this.execute(endpoint, key, body, successStatus, work, hasher)).result;
   }
 
   /**
@@ -286,12 +334,13 @@ export class IdempotencyStore {
     body: unknown,
     successStatus: number,
     work: (record: RecordCompletion<T>) => Promise<T>,
+    hasher?: RequestHasher,
   ): Promise<{ result: T; executed: boolean }> {
     if (key === undefined) {
       return { result: await work(async () => undefined), executed: true };
     }
 
-    const claimed = await this.claim(endpoint, key, body);
+    const claimed = await this.claim(endpoint, key, body, hasher);
     if (claimed.kind === 'REPLAY') return { result: claimed.body as T, executed: false };
 
     let recorded = false;
@@ -401,7 +450,7 @@ export function hashRequestBody(body: unknown): string {
  * the second replaying the first's response instead of being refused as
  * `IDEMPOTENCY_KEY_REUSED` (#194).
  */
-function canonicalise(value: unknown): string {
+export function canonicalise(value: unknown): string {
   return JSON.stringify(sortKeys(value));
 }
 

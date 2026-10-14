@@ -25,6 +25,7 @@ import {
   type Wiring,
   liftApprovalGuard,
   restoreApprovalGuard,
+  bidKey,
 } from './helpers';
 
 /**
@@ -40,8 +41,8 @@ const occurredOf = (row: { payload: unknown }) =>
   new Date(eventEnvelopeSchema.parse(row.payload).occurredAt);
 
 const FULL = [
-  { criterionCode: 'PRICE', scoreScaled: 8_500 },
-  { criterionCode: 'LICENCE', scoreScaled: 100 },
+  { criterionCode: 'PRICE', scoreScaled: 8_500, expectedRevision: 0 },
+  { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
 ];
 
 describe('evaluating the opened bids of a tender', () => {
@@ -111,7 +112,7 @@ describe('evaluating the opened bids of a tender', () => {
     owner: string,
     tenderId: string,
     bidId: string,
-    scores: { criterionCode: string; scoreScaled: number }[] = FULL,
+    scores: { criterionCode: string; scoreScaled: number; expectedRevision: number }[] = FULL,
     userId?: string,
     on: Wiring = w,
   ) => as(owner, () => on.evaluation.score(tenderId, bidId, { scores }), userId);
@@ -330,10 +331,10 @@ describe('evaluating the opened bids of a tender', () => {
       await makeEligible(w, standing);
       await makeEligible(w, taken);
       const kept = await asBidder(standing, () =>
-        w.bids.submit(tenderId, { content: bidContent('1') }),
+        w.bids.submit(tenderId, { content: bidContent('1') }, bidKey()),
       );
       const back = await asBidder(taken, () =>
-        w.bids.submit(tenderId, { content: bidContent('2') }),
+        w.bids.submit(tenderId, { content: bidContent('2') }, bidKey()),
       );
       await asBidder(taken, () => w.bids.withdraw(tenderId, back.bidId, { expectedRevision: 1 }));
 
@@ -426,7 +427,7 @@ describe('evaluating the opened bids of a tender', () => {
         owner,
         tenderId,
         bid.bidId,
-        [{ criterionCode: 'PRICE', scoreScaled: 9_000 }],
+        [{ criterionCode: 'PRICE', scoreScaled: 9_000, expectedRevision: 1 }],
         user,
       );
       expect(again).toMatchObject({
@@ -453,6 +454,71 @@ describe('evaluating the opened bids of a tender', () => {
       });
     });
 
+    it('refuses a delayed retry of an older score: the cell is compared-and-set, and a key replays (construction audit F5)', async () => {
+      const { owner, tenderId, bids } = await evaluating(1);
+      const bid = bids[0]!;
+      await qualify(owner, tenderId, bid.bidId);
+      const user = newUserId();
+      const key = `score-${newUserId()}`;
+      const first = { scores: FULL };
+      const firstView = await as(
+        owner,
+        () => w.evaluation.score(tenderId, bid.bidId, first, key),
+        user,
+      );
+      // The evaluator changes their mind: PRICE 8500 → 9000, revision 2.
+      await score(
+        owner,
+        tenderId,
+        bid.bidId,
+        [{ criterionCode: 'PRICE', scoreScaled: 9_000, expectedRevision: 1 }],
+        user,
+      );
+      const totalOf = async () =>
+        (await matrix(owner, tenderId)).bids.find((b) => b.bidId === bid.bidId)!.totalScaled;
+      const standing = await totalOf();
+      const before = await counts(tenderId);
+
+      // The first request again, late and without its key: about revision 0, so refused whole.
+      const late = await codeOf(score(owner, tenderId, bid.bidId, FULL, user));
+      expect(late.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      expect(await counts(tenderId)).toEqual(before);
+      expect(await totalOf()).toBe(standing);
+      expect(standing).toBe((6000n * 9_000n + 4000n * 100n).toString());
+
+      // With its key: the first answer, and nothing written.
+      const replay = await as(
+        owner,
+        () => w.evaluation.score(tenderId, bid.bidId, first, key),
+        user,
+      );
+      expect(replay).toEqual(firstView);
+      expect(await counts(tenderId)).toEqual(before);
+      expect(await totalOf()).toBe(standing);
+
+      // The key is the evaluator's: another person with it is not answered the first one's scores.
+      const other = await codeOf(
+        as(owner, () => w.evaluation.score(tenderId, bid.bidId, first, key), newUserId()),
+      );
+      expect(other.code).toBe('IDEMPOTENCY_KEY_REUSED');
+
+      // A request is all or nothing: one stale cell beside a current one records neither.
+      const mixed = await codeOf(
+        score(
+          owner,
+          tenderId,
+          bid.bidId,
+          [
+            { criterionCode: 'LICENCE', scoreScaled: 0, expectedRevision: 1 },
+            { criterionCode: 'PRICE', scoreScaled: 1_000, expectedRevision: 1 },
+          ],
+          user,
+        ),
+      );
+      expect(mixed.code).toBe('OPTIMISTIC_LOCK_FAILED');
+      expect(await counts(tenderId)).toEqual(before);
+    });
+
     it('writes nothing, and says so, for a score equal to the one standing', async () => {
       const { owner, tenderId, bids } = await evaluating();
       const bid = bids[0]!;
@@ -461,7 +527,9 @@ describe('evaluating the opened bids of a tender', () => {
       await score(owner, tenderId, bid.bidId, FULL, user);
       const before = await counts(tenderId);
       const eventsBefore = (await eventsOf(owner, 'BID_SCORED', tenderId)).length;
-      const view = await score(owner, tenderId, bid.bidId, FULL, user);
+      // The same scores, sent about the revision they made (1).
+      const same = FULL.map((cell) => ({ ...cell, expectedRevision: 1 }));
+      const view = await score(owner, tenderId, bid.bidId, same, user);
       expect(view).toMatchObject({ recorded: [], unchanged: ['PRICE', 'LICENCE'], complete: true });
       expect(await counts(tenderId)).toEqual(before);
       expect((await eventsOf(owner, 'BID_SCORED', tenderId)).length).toBe(eventsBefore);
@@ -507,10 +575,10 @@ describe('evaluating the opened bids of a tender', () => {
         // A request is all or nothing: the good score beside the bad one is not recorded.
         const scores =
           criterionCode === 'PRICE'
-            ? [{ criterionCode, scoreScaled }]
+            ? [{ criterionCode, scoreScaled, expectedRevision: 0 }]
             : [
-                { criterionCode: 'PRICE', scoreScaled: 5_000 },
-                { criterionCode, scoreScaled },
+                { criterionCode: 'PRICE', scoreScaled: 5_000, expectedRevision: 0 },
+                { criterionCode, scoreScaled, expectedRevision: 0 },
               ];
         expect(await refusalOf(score(owner, tenderId, bid.bidId, scores))).toContain(refusal);
         expect(await counts(tenderId)).toEqual(before);
@@ -544,8 +612,8 @@ describe('evaluating the opened bids of a tender', () => {
       for (const bid of [a, b]) await qualify(owner, tenderId, bid.bidId, undefined, committee);
       const [one, two] = [newUserId(), newUserId()];
       const price = (v: number) => [
-        { criterionCode: 'PRICE', scoreScaled: v },
-        { criterionCode: 'LICENCE', scoreScaled: 100 },
+        { criterionCode: 'PRICE', scoreScaled: v, expectedRevision: 0 },
+        { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
       ];
       // a: 9000 and 7000; b: 8000 and 8000 — the same sum, so the same mean, so a tie.
       await score(owner, tenderId, a.bidId, price(9_000), one, committee);
@@ -893,8 +961,8 @@ describe('evaluating the opened bids of a tender', () => {
       }
       await score(t.owner, t.tenderId, t.bids[0]!.bidId, FULL);
       await score(t.owner, t.tenderId, t.bids[1]!.bidId, [
-        { criterionCode: 'PRICE', scoreScaled: 7_000 },
-        { criterionCode: 'LICENCE', scoreScaled: 100 },
+        { criterionCode: 'PRICE', scoreScaled: 7_000, expectedRevision: 0 },
+        { criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 },
       ]);
       return t;
     };
@@ -976,7 +1044,7 @@ describe('evaluating the opened bids of a tender', () => {
         owner,
         tenderId,
         bids[0]!.bidId,
-        [{ criterionCode: 'PRICE', scoreScaled: 5_000 }],
+        [{ criterionCode: 'PRICE', scoreScaled: 5_000, expectedRevision: 0 }],
         user,
       );
       // Not scored in full, and another bid undecided.
@@ -985,7 +1053,7 @@ describe('evaluating the opened bids of a tender', () => {
         owner,
         tenderId,
         bids[0]!.bidId,
-        [{ criterionCode: 'LICENCE', scoreScaled: 100 }],
+        [{ criterionCode: 'LICENCE', scoreScaled: 100, expectedRevision: 0 }],
         user,
       );
       expect(await refusalOf(evaluate(owner, tenderId))).toContain('EVALUATION_INCOMPLETE');
@@ -1012,7 +1080,10 @@ describe('evaluating the opened bids of a tender', () => {
       const before = await counts(tenderId);
       for (const call of [
         () => qualify(owner, tenderId, bids[0]!.bidId),
-        () => score(owner, tenderId, bids[0]!.bidId, [{ criterionCode: 'PRICE', scoreScaled: 1 }]),
+        () =>
+          score(owner, tenderId, bids[0]!.bidId, [
+            { criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 },
+          ]),
         () =>
           as(owner, () => w.evaluation.recuse(tenderId, bids[0]!.bidId, { reasonCode: 'OTHER' })),
       ]) {
@@ -1066,7 +1137,7 @@ describe('evaluating the opened bids of a tender', () => {
         owner,
         tenderId,
         bids[0]!.bidId,
-        [{ criterionCode: 'PRICE', scoreScaled: 1 }],
+        [{ criterionCode: 'PRICE', scoreScaled: 1, expectedRevision: 0 }],
         user,
       );
       await untilASessionWaitsOnALock(w.prisma);
