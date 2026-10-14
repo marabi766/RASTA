@@ -586,7 +586,7 @@ export const constructionEnvSchema = baseEnvSchema
      * How long one interactive transaction may stay open, BEGIN to COMMIT, before
      * the database client rolls it back (`PrismaService`). Every transaction of
      * this service runs on it unless its caller names its own bound (the
-     * idempotency wait does).
+     * idempotency wait; the tender opening, `CONSTRUCTION_TENDER_OPEN_TIMEOUT_MS`).
      *
      * Before it, every transaction ran on Prisma's unwritten 5 000 ms. A command
      * of a few milliseconds that the process could not run for six seconds — a
