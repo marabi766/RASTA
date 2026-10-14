@@ -6,6 +6,7 @@ import {
   kafkaEnvSchema,
   authEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 import { roleSchema, type PlatformRole } from '../identity/dto';
@@ -73,6 +74,7 @@ function roleListEnv(
 export const identityEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     KEYCLOAK_URL: z.string().url(),
