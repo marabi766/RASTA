@@ -152,8 +152,10 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
       correlationId,
       // The caller's own trace, echoed as it is on every platform error.
       traceId: '1af7651916cd43dd8448eb211c80319c',
-      path: `/v1/users/me?access_token=${QUERY_SECRET}`,
+      // The path alone: the query is never echoed (S-09, docs/06 § 6.7).
+      path: '/v1/users/me',
     });
+    expect(JSON.stringify(response.body)).not.toContain(QUERY_SECRET);
 
     const rows = await rowsFor(person.userId);
     expect(rows).toHaveLength(1);
@@ -473,8 +475,10 @@ describe('auth-guard tenant refusals → security_event_outbox (real PostgreSQL)
         message: 'This endpoint is not callable by another service',
         correlationId,
         traceId: '1af7651916cd43dd8448eb211c80319c',
-        path: `/v1/users/me?access_token=${QUERY_SECRET}`,
+        // The path alone: the query is never echoed (S-09, docs/06 § 6.7).
+        path: '/v1/users/me',
       });
+      expect(JSON.stringify(response.body)).not.toContain(QUERY_SECRET);
 
       const rows = await prisma.client.securityEventOutbox.findMany({ where: { correlationId } });
       expect(rows).toHaveLength(1);

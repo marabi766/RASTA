@@ -36,6 +36,7 @@ export class RequestContextMiddleware implements NestMiddleware {
     const correlationId = readHeader(req, CORRELATION_ID_HEADER) ?? ulid();
     const requestId = ulid();
     const { traceId, spanId } = parseTraceparent(readHeader(req, TRACEPARENT_HEADER));
+    const target = req.originalUrl ?? req.url;
 
     const context: RequestContext = {
       correlationId,
@@ -51,7 +52,9 @@ export class RequestContextMiddleware implements NestMiddleware {
       ip: req.ip ?? req.socket?.remoteAddress,
       userAgent: readHeader(req, 'user-agent'),
       method: req.method,
-      path: req.originalUrl ?? req.url,
+      // The path only: it reaches every error body and its log line, and the
+      // query is the client's data — a cursor, a search term (S-09).
+      path: target === undefined ? undefined : requestPath(target),
       startedAt: Date.now(),
     };
 
@@ -64,6 +67,20 @@ export class RequestContextMiddleware implements NestMiddleware {
 
     runWithContext(context, () => next());
   }
+}
+
+/**
+ * A request target's path, without its query or fragment: `/v1/x?q=1#f` →
+ * `/v1/x`.
+ *
+ * What a request is reported as — `path` in the error envelope, in the
+ * exception filter's log line, in Nest's `Cannot GET …` — wherever the
+ * report leaves the handler (S-09). Routing reads the request itself, never
+ * this.
+ */
+export function requestPath(target: string): string {
+  const end = target.search(/[?#]/);
+  return end === -1 ? target : target.slice(0, end);
 }
 
 function readHeader(req: MinimalRequest, name: string): string | undefined {
