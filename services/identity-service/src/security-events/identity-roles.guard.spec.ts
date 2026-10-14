@@ -7,6 +7,7 @@ import {
   RastaError,
   Roles,
   RolesGuard,
+  requestPath,
   runWithContext,
   type RequestContext,
 } from '@rasta/nest-common';
@@ -739,7 +740,8 @@ describe('marking changes nothing observable — the comparator once every route
           code: ERROR_CODES.INSUFFICIENT_ROLE,
           message: 'You do not have permission to perform this action',
           correlationId: denied.correlationId,
-          path: request.url,
+          // The path alone: the filter never echoes the query (S-09, docs/06 § 6.7).
+          path: requestPath(request.url ?? ''),
         },
       });
     },

@@ -45,6 +45,8 @@ import { startAuditStub, type AuditStub } from './audit-stub';
 
 const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
+/** A correlation id a user's request keeps: a bare ULID — the middleware re-mints anything else from a caller that is not a verified service (S-09). */
+const correlation = (): string => ulid();
 const auditId = (): string => `01AUD${TAG}${ulid().slice(-11)}`;
 const ROUTE = '/v1/audit-corrections';
 const REASON = 'Recorded as SUCCESS; the operation actually failed (INC-4471)';
@@ -112,7 +114,7 @@ describe('audit correction command (real PostgreSQL)', () => {
   ) {
     const call = request(harness.app.getHttpServer())
       .post(ROUTE)
-      .set('x-correlation-id', tagged('COR'))
+      .set('x-correlation-id', correlation())
       .set('traceparent', TRACEPARENT);
     if (options.token !== undefined) call.set('authorization', `Bearer ${options.token}`);
     else call.set('authorization', `Bearer ${userToken(options.caller ?? admin)}`);

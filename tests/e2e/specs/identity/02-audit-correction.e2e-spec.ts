@@ -97,7 +97,7 @@ test.describe('AUD-003 — an audit record is corrected by a linked record, neve
     test.setTimeout(windowMs * 2 + 300_000);
 
     // ---- a known record to correct ----------------------------------------
-    const refusalCorrelation = `e2e-correction-target-${randomUUID()}`;
+    const refusalCorrelation = randomUUID();
     const refused = await auditor.get('/v1/users', { correlationId: refusalCorrelation });
     expect(refused.status).toBe(403);
 
@@ -120,7 +120,7 @@ test.describe('AUD-003 — an audit record is corrected by a linked record, neve
     // ---- the command ------------------------------------------------------
     const secret = `e2e-correction-secret-${randomUUID()}`;
     const key = idempotencyKey('audit-correction');
-    const commandCorrelation = `e2e-correction-${randomUUID()}`;
+    const commandCorrelation = randomUUID();
     const body = {
       auditEventId: target.id,
       occurredAt: target.occurredAt,

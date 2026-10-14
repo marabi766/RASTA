@@ -67,7 +67,7 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
       .overrideProvider(OutboxRelay)
       .useValue(inert)
       .overrideProvider(AssetSyncConsumer)
-      .useValue({ onModuleInit: async () => undefined, onModuleDestroy: async () => undefined })
+      .useValue({ onModuleInit: async () => undefined, stop: async () => undefined })
       .overrideProvider(CLEARANCE_CLOCK)
       .useValue(() => now)
       .overrideProvider(AUTH_OPTIONS)

@@ -146,4 +146,38 @@ describe('PreferencesService — the refusal that answers Q-38', () => {
     }
     expect(repository.replaceOwn).not.toHaveBeenCalled();
   });
+
+  describe('an unrecognised key is not repeated into the log (S-09)', () => {
+    // What a client may put where a rule key goes: a token pasted into a link.
+    const PASTED = 'access_token=secret123';
+
+    /** The refusal's message and `internalContext` — what the exception filter logs. */
+    const refusalOf = async (call: () => Promise<unknown>): Promise<RastaError> => {
+      const error = await runWithContext(context(), call).catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(RastaError);
+      return error as RastaError;
+    };
+
+    it('GET /v1/preferences/effective?ruleKey=…: 404, the key in neither message nor context', async () => {
+      const error = await refusalOf(() =>
+        service.effective({ ruleKey: PASTED, channel: 'IN_APP' }),
+      );
+
+      expect(error.code).toBe('NOT_FOUND');
+      expect(error.internalContext).toEqual({ resourceType: 'NotificationRule' });
+      expect(JSON.stringify([error.message, error.internalContext])).not.toContain('secret123');
+    });
+
+    it('a RULE-scoped opt-out in the body: the same', async () => {
+      const error = await refusalOf(() =>
+        service.replaceOwn([
+          { scope: 'RULE', scopeKey: PASTED, channel: 'IN_APP', enabled: false },
+        ]),
+      );
+
+      expect(error.code).toBe('NOT_FOUND');
+      expect(error.internalContext).toEqual({ resourceType: 'NotificationRule' });
+      expect(JSON.stringify([error.message, error.internalContext])).not.toContain('secret123');
+    });
+  });
 });

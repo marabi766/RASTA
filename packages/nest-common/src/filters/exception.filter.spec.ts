@@ -1,5 +1,12 @@
-import { BadRequestException, HttpException, HttpStatus, type ArgumentsHost } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  NotFoundException,
+  type ArgumentsHost,
+} from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
+import { runWithContext, type RequestContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 import { LOG_TEXT_MAX } from '../errors/safe-log-text';
 import { AllExceptionsFilter, loggableError, type LoggedError } from './exception.filter';
@@ -25,7 +32,10 @@ interface Captured {
   message: string;
 }
 
-function run(exception: unknown): {
+function run(
+  exception: unknown,
+  request?: { method?: string; originalUrl?: string; url?: string },
+): {
   status: number;
   body: unknown;
   headers: Record<string, string>;
@@ -54,7 +64,7 @@ function run(exception: unknown): {
     },
   };
   new AllExceptionsFilter(logger).catch(exception, {
-    switchToHttp: () => ({ getResponse: () => response }),
+    switchToHttp: () => ({ getResponse: () => response, getRequest: () => request }),
   } as unknown as ArgumentsHost);
   return { ...sent, lines };
 }
@@ -355,6 +365,108 @@ describe('AllExceptionsFilter, Retry-After (docs/06 § 6.8)', () => {
     expect(inFlight(1).retryAfterSeconds).toBe(1);
     expect(inFlight().retryAfterSeconds).toBeUndefined();
     expect(RastaError.internal('x').retryAfterSeconds).toBeUndefined();
+  });
+});
+
+describe('AllExceptionsFilter, the request is reported by its path alone (S-09)', () => {
+  const context = (path: string, method: string): RequestContext => ({
+    correlationId: 'corr-path-spec',
+    requestId: 'req-path-spec',
+    roles: [],
+    organizationIds: [],
+    authType: 'ANONYMOUS',
+    method,
+    path,
+    startedAt: 0,
+  });
+  /** The request as Express hands it over, and its context as the middleware records it. */
+  const within = (target: string, exception: unknown, method = 'GET') =>
+    runWithContext(context(target, method), () =>
+      run(exception, { method, originalUrl: target, url: target }),
+    );
+
+  it.each([
+    ['a 4xx', RastaError.notFound('Asset', 'AST_1'), 'debug'],
+    ['a 403', RastaError.forbidden('No'), 'warn'],
+    ['a 5xx', new Error('boom'), 'error'],
+  ])('%s: `path` in the body and in the log line carries no query', (_, exception, level) => {
+    const { body, lines } = within('/v1/x?secret=abc', exception);
+
+    expect(body).toMatchObject({ path: '/v1/x' });
+    expect(JSON.stringify(body)).not.toContain('abc');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.level).toBe(level);
+    expect(lines[0]?.payload).toMatchObject({ method: 'GET', path: '/v1/x' });
+    expect(JSON.stringify(lines)).not.toContain('abc');
+  });
+
+  it('nor a fragment', () => {
+    const { body, lines } = within('/v1/x#secret=abc', RastaError.notFound('Asset'));
+    expect(body).toMatchObject({ path: '/v1/x' });
+    expect(JSON.stringify([body, lines])).not.toContain('abc');
+  });
+
+  it('Nest’s route-not-found text keeps its path and loses the query', () => {
+    // What Nest's RoutesResolver throws: `Cannot ${method} ${originalUrl}`.
+    const { status, body, lines } = within(
+      '/v1/nowhere?secret=abc',
+      new NotFoundException('Cannot GET /v1/nowhere?secret=abc'),
+    );
+
+    expect(status).toBe(404);
+    expect(body).toMatchObject({
+      code: 'NOT_FOUND',
+      message: 'Cannot GET /v1/nowhere',
+      path: '/v1/nowhere',
+    });
+    expect(lines[0]?.payload.err).toMatchObject({
+      type: 'NotFoundException',
+      message: 'Cannot GET /v1/nowhere',
+    });
+    expect(lines[0]?.payload.err.stack).toMatch(/^\s+at /);
+    expect(JSON.stringify([body, lines])).not.toContain('abc');
+  });
+
+  it.each([
+    ['M-SEARCH', '/nowhere?access_token=secret123'],
+    ['GET', '/nowhere/?access_token=secret123#frag'],
+    ['PROPFIND', '/nowhere?a=1&access_token=secret123'],
+  ])(
+    'Nest’s text for %s %s is written again from the request: no query, however it is spelt',
+    (method, target) => {
+      const { body, lines } = within(
+        target,
+        new NotFoundException(`Cannot ${method} ${target}`),
+        method,
+      );
+
+      const path = target.slice(0, target.search(/[?#]/));
+      expect(body).toMatchObject({ code: 'NOT_FOUND', message: `Cannot ${method} ${path}`, path });
+      expect(lines[0]?.payload.err).toMatchObject({ message: `Cannot ${method} ${path}` });
+      expect(JSON.stringify([body, lines])).not.toContain('secret123');
+    },
+  );
+
+  it('the route text names only the request’s own method and path, never Nest’s words', () => {
+    // A route-not-found text whose target is not the request's: nothing of it is kept.
+    const { body } = within(
+      '/v1/x',
+      new NotFoundException('Cannot GET /elsewhere?token=t0k'),
+      'GET',
+    );
+    expect(body).toMatchObject({ message: 'Cannot GET /v1/x' });
+    expect(JSON.stringify(body)).not.toContain('t0k');
+  });
+
+  it('with no request to read, a fixed route text', () => {
+    const { body } = run(new NotFoundException('Cannot GET /x?token=t0k'));
+    expect(body).toMatchObject({ code: 'NOT_FOUND', message: 'No route matches the request' });
+    expect(JSON.stringify(body)).not.toContain('t0k');
+  });
+
+  it('any other 404 text stays as it was', () => {
+    const { body } = within('/v1/x', new NotFoundException('Asset not found'));
+    expect(body).toMatchObject({ message: 'Asset not found' });
   });
 });
 
