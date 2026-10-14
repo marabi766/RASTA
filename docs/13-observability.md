@@ -137,8 +137,9 @@ Logهای مالی).
 
 #### متریک‌های Purge Outbox (D-052)
 
-`OutboxPurgeScheduler` (`@rasta/nest-common`) ردیف‌های منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` پاک می‌کند. فاز ۱
-فقط این سرویس‌ها را دارد: fleet، asset، document، maintenance، organization.
+`OutboxPurgeScheduler` (`@rasta/nest-common`) ردیف‌های منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` پاک می‌کند. فقط
+این سرویس‌ها آن را دارند: fleet، asset، document، maintenance، organization (فاز ۱)؛ construction، contract، economic،
+marketplace (فاز ۲ب).
 
 | متریک                                               | نوع     | برچسب            | دقیقاً چه چیزی را می‌شمارد                                                 |
 | --------------------------------------------------- | ------- | ---------------- | -------------------------------------------------------------------------- |
