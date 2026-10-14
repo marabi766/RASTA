@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { test, expect, idempotencyKey, minor } from '../../src/api';
 import { ORG } from '../../src/env';
 import { EconomicEventTap } from '../../src/events';
@@ -43,7 +44,7 @@ test.describe.serial('Correlation across the request and event path', () => {
   test('a funded hold carries that identifier into every event it produces', async ({
     tenantA,
   }) => {
-    const correlationId = `e2e-corr-${Date.now()}-${Math.trunc(Math.random() * 1e9)}`;
+    const correlationId = `e2e-corr-${randomUUID()}`;
 
     const wallet = await tenantA.get('/v1/wallets/me', { correlationId });
     const walletId = (wallet.body as { id: string }).id;
@@ -116,7 +117,7 @@ test.describe.serial('Correlation across the request and event path', () => {
   });
 
   test('a settlement continues the same chain', async ({ tenantA }) => {
-    const correlationId = `e2e-corr-settle-${Date.now()}-${Math.trunc(Math.random() * 1e9)}`;
+    const correlationId = `e2e-corr-settle-${randomUUID()}`;
 
     const key = idempotencyKey('corr-settle-create');
     const created = await tenantA.post('/v1/transactions', {

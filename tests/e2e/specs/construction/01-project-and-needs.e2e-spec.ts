@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { test, expect, errorCode, idempotencyKey } from '../../src/api';
 import { ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
@@ -61,7 +62,7 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
     tenantA,
   }) => {
     const key = idempotencyKey('con-create');
-    createdCorrelationId = `e2e-con-${Date.now()}-${Math.trunc(Math.random() * 1e9)}`;
+    createdCorrelationId = `e2e-con-${randomUUID()}`;
 
     const first = await tenantA.post('/v1/projects', {
       idempotencyKey: key,

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { test, expect, errorCode, idempotencyKey, type Actor } from '../../src/api';
 import { ORG } from '../../src/env';
 import { waitFor } from '../../src/events';
@@ -79,7 +80,7 @@ test.describe('AUD-002 — the audit read API over the real stack', () => {
     expect(wallet.status).toBe(200);
     walletId = (wallet.body as { id: string }).id;
 
-    correlationId = `e2e-audit-${Date.now()}`;
+    correlationId = `e2e-audit-${randomUUID()}`;
     const topUp = await tenantA.post(`/v1/wallets/${walletId}/top-up`, {
       idempotencyKey: idempotencyKey('audit-topup'),
       correlationId,

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { test, expect, errorCode, type Actor } from '../../src/api';
 import { ORG, e2eConfig } from '../../src/env';
 import { EconomicEventTap } from '../../src/events';
@@ -341,7 +342,7 @@ test.describe.serial('the construction project lifecycle', () => {
     const step = await pendingStep(systemAdmin, projectId, 'project.completion');
     expect(step.round).toBe(2);
 
-    const correlationId = `e2e-con-${Date.now()}-${Math.trunc(Math.random() * 1e9)}`;
+    const correlationId = `e2e-con-${randomUUID()}`;
     const granted = await tenantA.post(`/v1/approvals/${step.id}/decision`, {
       correlationId,
       body: { expectedVersion: step.version, decision: 'GRANT' },
