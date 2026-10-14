@@ -4,7 +4,7 @@
 import { portalNavFor } from '@/app/nav';
 
 import type { CurrentUserResult } from './identity';
-import { canReadProjects, loadPortalNav } from './portal-nav';
+import { canReadInventory, canReadProjects, loadPortalNav } from './portal-nav';
 import type { WebSession } from './session';
 
 /**
@@ -46,6 +46,51 @@ describe('canReadProjects', () => {
         WEB_PROJECT_READER_ROLES: ['AUDITOR'],
       }),
     ).toBe(false);
+  });
+});
+
+const INVENTORY_DEFAULTS = {
+  WEB_INVENTORY_ROLES: ['ORGANIZATION_ADMIN'],
+  WEB_INVENTORY_READER_ROLES: ['ORGANIZATION_ADMIN'],
+};
+
+describe('canReadInventory', () => {
+  it('shows the link to the configured operator and reader roles', () => {
+    expect(canReadInventory(['ORGANIZATION_ADMIN'], INVENTORY_DEFAULTS)).toBe(true);
+    const settings = {
+      WEB_INVENTORY_ROLES: ['ORGANIZATION_ADMIN'],
+      WEB_INVENTORY_READER_ROLES: ['PROCUREMENT_USER'],
+    };
+    expect(canReadInventory(['PROCUREMENT_USER'], settings)).toBe(true);
+    expect(canReadInventory(['DRIVER'], settings)).toBe(false);
+  });
+
+  it('hides it from every other role under the defaults', () => {
+    for (const role of ['FLEET_MANAGER', 'DRIVER', 'CONTRACTOR', 'SUPPLIER']) {
+      expect(canReadInventory([role], INVENTORY_DEFAULTS)).toBe(false);
+    }
+    expect(canReadInventory([], INVENTORY_DEFAULTS)).toBe(false);
+  });
+
+  it('never shows it to AUDITOR or SYSTEM_ADMIN, which the service refuses even beside an admin role', () => {
+    expect(canReadInventory(['SYSTEM_ADMIN'], INVENTORY_DEFAULTS)).toBe(false);
+    expect(canReadInventory(['AUDITOR'], INVENTORY_DEFAULTS)).toBe(false);
+    expect(canReadInventory(['AUDITOR', 'ORGANIZATION_ADMIN'], INVENTORY_DEFAULTS)).toBe(false);
+    expect(canReadInventory(['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN'], INVENTORY_DEFAULTS)).toBe(
+      false,
+    );
+  });
+});
+
+describe('the Inventory link in the navigation', () => {
+  it('sits after Projects and before the wallet, and only when allowed', () => {
+    const shown = hrefs(portalNavFor({ canReadProjects: true, canReadInventory: true }));
+    const hidden = hrefs(portalNavFor({ canReadProjects: true, canReadInventory: false }));
+
+    expect(shown.indexOf('/inventory')).toBe(shown.indexOf('/projects') + 1);
+    expect(shown.indexOf('/wallet')).toBe(shown.indexOf('/inventory') + 1);
+    expect(hidden).not.toContain('/inventory');
+    expect(hrefs(portalNavFor({ canReadProjects: false }))).not.toContain('/inventory');
   });
 });
 
@@ -108,6 +153,17 @@ describe('loadPortalNav', () => {
     expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/settlements');
   });
 
+  it('offers Inventory to the roles inventory-service reads for, never to AUDITOR or SYSTEM_ADMIN', async () => {
+    delete process.env.WEB_INVENTORY_ROLES;
+    delete process.env.WEB_INVENTORY_READER_ROLES;
+    expect(hrefs(await loadPortalNav(SESSION, user(['ORGANIZATION_ADMIN'])))).toContain(
+      '/inventory',
+    );
+    expect(hrefs(await loadPortalNav(SESSION, user(['DRIVER'])))).not.toContain('/inventory');
+    expect(hrefs(await loadPortalNav(SESSION, user(['AUDITOR'])))).not.toContain('/inventory');
+    expect(hrefs(await loadPortalNav(SESSION, user(['SYSTEM_ADMIN'])))).not.toContain('/inventory');
+  });
+
   it.each([
     { kind: 'UNAVAILABLE', status: 503, correlationId: 'c' },
     { kind: 'MALFORMED', correlationId: 'c' },
@@ -117,6 +173,7 @@ describe('loadPortalNav', () => {
       const items = hrefs(await loadPortalNav(SESSION, result));
       expect(items).not.toContain('/projects');
       expect(items).not.toContain('/settlements');
+      expect(items).not.toContain('/inventory');
       expect(items).toContain('/assets');
       expect(items).toContain('/organizations');
     },

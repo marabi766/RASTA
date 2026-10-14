@@ -46,14 +46,19 @@ export const PORTAL_NAV: readonly SidebarItem[] = [...NAV_BEFORE_PROJECTS, ...NA
  */
 export const SETTLEMENTS_NAV_ITEM: SidebarItem = { href: '/settlements', label: 'تسویه‌ها' };
 
+/** Shown only to a role that may read warehouses (`server/portal-nav.ts`). */
+export const INVENTORY_NAV_ITEM: SidebarItem = { href: '/inventory', label: 'انبار' };
+
 /** The navigation for a caller, with role-gated entries only when they apply. */
 export function portalNavFor(options: {
   readonly canReadProjects: boolean;
   readonly canReadSettlements?: boolean;
+  readonly canReadInventory?: boolean;
 }): readonly SidebarItem[] {
   const items = [
     ...NAV_BEFORE_PROJECTS,
     ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
+    ...(options.canReadInventory ? [INVENTORY_NAV_ITEM] : []),
     ...NAV_AFTER_PROJECTS,
   ];
   if (!options.canReadSettlements) return items;
