@@ -72,7 +72,11 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
       .overrideProvider(UsageConsumer)
       .useValue(quiet)
       .overrideProvider(DueScanner)
-      .useValue({ onModuleInit: () => undefined, onApplicationShutdown: () => undefined })
+      .useValue({
+        onModuleInit: () => undefined,
+        onApplicationShutdown: () => undefined,
+        stop: async () => undefined,
+      })
       .overrideProvider(CLEARANCE_CLOCK)
       .useValue(() => now)
       .overrideProvider(AUTH_OPTIONS)

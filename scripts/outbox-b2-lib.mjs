@@ -41,8 +41,10 @@
 //   3. Assign `base_seq + row_number() OVER (PARTITION BY topic, partition_key
 //      ORDER BY created_at, id)`. The window is computed by PostgreSQL from
 //      column values; no JavaScript clock or array order decides a sequence.
+//   4. Move each touched stream's counter (`next_seq`) past the positions just
+//      assigned, in the same statement — the watermark (see «Purged history»).
 //
-// Counters (once, after the last batch):
+// Counters (once, after the last batch; `next_seq` also per batch, step 4):
 //
 //   `next_seq`      = max(stream_seq) + 1 — the position B3 will hand out next,
 //                     matching D-2's `RETURNING next_seq - 1 AS allocated`.
@@ -84,6 +86,32 @@
 // it. B2 does not claim to be safe against live producers; it detects the one
 // state in which it would not be, and refuses. See the runbook for the
 // quiescence this implies.
+//
+// ## Purged history (D-052)
+//
+// The anchor is the highest `stream_seq` *still in the table*. The scheduled
+// purge deletes published rows, sequenced ones included, and leaves the
+// counter where it was; on a stream whose numbered rows are gone B2 would
+// number its surviving unsequenced rows from 1 again. So a stream whose
+// counter is ahead of its highest surviving row is refused — before the first
+// write (`planSql`), and again per batch (`assignBatchSql`) in case the purge
+// runs during the backfill. B2 does not seed from the counter instead: the
+// anchor's `(created_at, id)` went with the purged rows, so the ordering guard
+// could no longer prove the surviving rows sort after the positions already
+// handed out, and B2 numbers nothing it cannot check. Run it before the purge
+// is enabled on a service (runbook).
+//
+// The check needs the counter to exist, and B2 used to create it only once,
+// after the last batch: a truncated run committed positions with no counter
+// at all, and once the relay had published those rows and the purge deleted
+// them, nothing recorded that the positions were ever handed out — a resumed
+// run numbered the stream from 1 again and verified clean (Codex r2 on #247).
+// So each batch now writes its streams' `next_seq` in the statement that
+// assigns the positions (step 4): one transaction, never one without the
+// other. The counter row is the durable per-stream watermark — the purge
+// deletes outbox rows only, never a counter — and it is the same `next_seq`
+// B3 continues from, so a truncated run also leaves B3 a counter that no
+// longer hands out a position already on a row.
 // -----------------------------------------------------------------------------
 
 import { assertB1Definitions } from './verify-outbox-b1-lib.mjs';
@@ -342,7 +370,35 @@ SELECT
   (SELECT count(*) FROM "${OUTBOX_TABLE}"
     WHERE "published_at" IS NOT NULL AND "stream_seq" IS NULL)::bigint        AS published_untouched,
   (SELECT count(*) FROM "${OUTBOX_TABLE}" WHERE "is_stream_head")::bigint     AS heads,
-  (SELECT count(*) FROM "${SEQUENCE_TABLE}")::bigint                          AS counter_rows`;
+  (SELECT count(*) FROM "${SEQUENCE_TABLE}")::bigint                          AS counter_rows,
+  (${historyPurgedCountSql('s')})::bigint                                     AS streams_history_purged`;
+}
+
+/**
+ * Streams whose numbered history is no longer in the table: the counter says
+ * positions up to `next_seq - 1` were handed out, but the highest
+ * `stream_seq` still present is lower — or no sequenced row is left at all.
+ *
+ * Only a deletion makes that true. B3 allocates and inserts in one
+ * transaction, and so does each B2 batch (its watermark, `assignBatchSql`),
+ * so a committed counter always has its rows; the D-052 purge (or
+ * an operator's DELETE) removes published, sequenced rows and leaves the
+ * counter where it was. B2 numbers a stream from its highest *surviving*
+ * row, so on such a stream it would hand out positions consumers already
+ * received — and the anchor that the ordering guard compares against is gone
+ * too. B2 refuses these streams; it does not seed from the counter (runbook,
+ * § «Purge زمان‌بندی‌شده»).
+ *
+ * `alias` is the counter table's alias; `extra` narrows the streams counted.
+ */
+function historyPurgedCountSql(alias, extra = 'TRUE') {
+  return `SELECT count(*) FROM "${SEQUENCE_TABLE}" ${alias}
+    WHERE ${extra}
+      AND ${alias}."next_seq" > 1 + COALESCE((
+            SELECT max(h."stream_seq") FROM "${OUTBOX_TABLE}" h
+             WHERE h."topic" = ${alias}."topic"
+               AND h."partition_key" = ${alias}."partition_key"
+               AND h."stream_seq" IS NOT NULL), 0)`;
 }
 
 /**
@@ -402,8 +458,21 @@ guard AS (
    WHERE a.anchor_id IS NOT NULL
      AND (b."created_at", b."id") < (a.anchor_created_at, a.anchor_id)
 ),
+-- A stream whose counter is ahead of its highest surviving row lost its
+-- numbered history to a purge (D-052): base_seq would re-issue positions
+-- already handed out. The run refuses such streams before its first batch
+-- (planSql); this catches one purged while the run was going.
+purged AS (
+  SELECT count(*)::bigint AS streams
+    FROM anchor a
+    JOIN "${SEQUENCE_TABLE}" s
+      ON s."topic" = a."topic" AND s."partition_key" = a."partition_key"
+   WHERE s."next_seq" > a.base_seq + 1
+),
 numbered AS (
   SELECT b."id",
+         b."topic",
+         b."partition_key",
          a.base_seq + row_number() OVER (
            PARTITION BY b."topic", b."partition_key"
            ORDER BY b."created_at", b."id"
@@ -412,6 +481,7 @@ numbered AS (
     JOIN anchor a
       ON a."topic" = b."topic" AND a."partition_key" = b."partition_key"
    WHERE (SELECT violations FROM guard) = 0
+     AND (SELECT streams FROM purged) = 0
 ),
 updated AS (
   UPDATE "${OUTBOX_TABLE}" o
@@ -419,11 +489,31 @@ updated AS (
     FROM numbered n
    WHERE o."id" = n."id"
   RETURNING o."id"
+),
+-- The watermark (D-052, Codex r2 on #247): the stream's counter moves past
+-- every position this batch hands out, in this statement and so in this
+-- batch's transaction. Positions are never committed without it, a truncated
+-- run included, and the purge never deletes a counter row — so once the rows
+-- holding those positions are published and purged, the counter stays ahead
+-- of what survives and the history check refuses the stream. A fresh row
+-- takes the column default for published_seq (0, as B3's own insert does);
+-- finalisation raises it.
+watermark AS (
+  INSERT INTO "${SEQUENCE_TABLE}" AS s ("topic", "partition_key", "next_seq")
+  SELECT n."topic", n."partition_key", max(n.seq) + 1
+    FROM numbered n
+   GROUP BY n."topic", n."partition_key"
+  ON CONFLICT ("topic", "partition_key") DO UPDATE
+     SET "next_seq" = GREATEST(s."next_seq", EXCLUDED."next_seq")
+   WHERE s."next_seq" < EXCLUDED."next_seq"
+  RETURNING 1
 )
 SELECT (SELECT violations FROM guard)   AS violations,
+       (SELECT streams FROM purged)     AS history_purged,
        (SELECT count(*) FROM batch)::bigint   AS selected,
        (SELECT count(*) FROM updated)::bigint AS updated,
-       (SELECT count(*) FROM streams)::bigint AS streams`;
+       (SELECT count(*) FROM streams)::bigint AS streams,
+       (SELECT count(*) FROM watermark)::bigint AS watermarks`;
 }
 
 /**
@@ -659,6 +749,14 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
     batchesRequired: Math.ceil(plan.pending_unsequenced / options.batchSize),
   });
 
+  // Before any write, and in a dry run too, so the plan an operator reads is
+  // never one the apply would refuse.
+  if (plan.streams_history_purged > 0) {
+    throw new B2RefusalError(
+      `${historyPurgedMessage(service, plan.streams_history_purged)} Nothing was written.`,
+    );
+  }
+
   if (!options.apply) {
     event('done', {
       mode: 'dry-run',
@@ -693,6 +791,12 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
             'and re-run; see the ADR-051 B2 runbook.',
         );
       }
+      if (row.history_purged > 0) {
+        throw new B2RefusalError(
+          `${historyPurgedMessage(service, row.history_purged)} Found in batch ${batchNumber}, ` +
+            'so the purge ran during the backfill: nothing in this batch was assigned, earlier batches are committed.',
+        );
+      }
       return row;
     });
 
@@ -704,6 +808,7 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
       selected: result.selected,
       updated: result.updated,
       streams: result.streams,
+      watermarks: result.watermarks,
       remaining,
       elapsedMs: now() - batchStartedAt,
     });
@@ -723,8 +828,9 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
   const truncated = remaining > 0;
 
   // Counters and heads describe the state the assignment produced, so they run
-  // once at the end. A truncated run leaves them for the next invocation:
-  // both fields are still inert in B2, so the intermediate state is safe.
+  // once at the end. A truncated run leaves `published_seq` and the heads for
+  // the next invocation (nothing reads either before B4); its `next_seq` is
+  // already written, batch by batch, with the positions it covers.
   if (!truncated) {
     const [counters] = (await db.query(counterUpsertSql())).map(mapRow);
     counterWrites = counters.written;
@@ -761,15 +867,49 @@ export async function runServiceBackfill({ service, db, options, emit, now = () 
 
   const [verified] = (await db.query(verifySql())).map(mapRow);
   event('verify', verified);
+
+  // A truncated run has not written counters or heads yet, so its mismatches
+  // are expected (runbook § 3). After finalisation they are not: the run did
+  // not produce the state it exists to produce, and calling it done is what
+  // let a renumbered, purged stream pass as a success.
+  const mismatches = verificationMismatches(verified);
+  if (!truncated && mismatches > 0) {
+    throw new B2RefusalError(
+      `${service}: verification failed after the backfill finalised — ` +
+        `counter_next_mismatch=${verified.counter_next_mismatch}, ` +
+        `counter_published_mismatch=${verified.counter_published_mismatch}, ` +
+        `head_mismatch=${verified.head_mismatch}. Sequences already assigned are committed. ` +
+        'A relay publishing between finalisation and verification can cause this once: ' +
+        're-run, and if it persists, stop and investigate (see the ADR-051 B2 runbook).',
+    );
+  }
+
   event('done', {
     mode: 'apply',
     mutated,
     vacuum,
     batches: batchNumber,
     truncated,
-    converged: !truncated && verified.remaining === 0,
+    converged: !truncated && verified.remaining === 0 && mismatches === 0,
     elapsedMs: now() - startedAt,
   });
 
   return { plan, batches, verified, applied: true, truncated, mutated, vacuum };
+}
+
+/** The three post-condition counts `verifySql` reports that must be zero. */
+export function verificationMismatches(verified) {
+  return (
+    verified.counter_next_mismatch + verified.counter_published_mismatch + verified.head_mismatch
+  );
+}
+
+function historyPurgedMessage(service, streams) {
+  return (
+    `${service}: ${streams} stream(s) have an outbox_stream_sequence.next_seq ahead of their ` +
+    'highest surviving stream_seq — sequenced rows were deleted, by the D-052 purge or by ' +
+    'hand. B2 numbers a stream from its highest surviving row, so it would re-issue ' +
+    'positions consumers already received. Run B2 before the purge ' +
+    'is enabled on a service; see «Purge زمان‌بندی‌شده» in the ADR-051 B2 runbook.'
+  );
 }

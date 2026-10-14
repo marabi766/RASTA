@@ -7,6 +7,7 @@ import {
   raiseDisputeSchema,
   resolveDisputeSchema,
   submitReviewSchema,
+  ORDER_NOTE_NOT_STORED,
 } from './dto';
 import { createOfferSchema, searchProductsQuerySchema, updateOfferSchema } from '../offer/dto';
 
@@ -55,6 +56,30 @@ describe('an order request cannot carry a price', () => {
 
   it('refuses a status the client would like the order to be in', () => {
     expect(createOrderSchema.safeParse({ ...valid, status: 'COMPLETED' }).success).toBe(false);
+  });
+});
+
+describe('an order note (Q-110, temporary decision)', () => {
+  const valid = { lines: [{ offerId: 'OFR_1', quantity: 2 }] };
+
+  it('refuses a non-empty note with a message that names the gap, never the text', () => {
+    // An order has nowhere to keep a note. Accepted, the buyer's text was
+    // dropped without a word; refused, the buyer learns it was not sent.
+    const result = createOrderSchema.safeParse({ ...valid, note: 'please deliver before noon' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ path: ['note'], message: ORDER_NOTE_NOT_STORED }),
+    ]);
+    expect(JSON.stringify(result.error?.issues)).not.toContain('noon');
+  });
+
+  it.each([
+    ['absent', {}],
+    ['empty', { note: '' }],
+    ['whitespace only, which trims to empty', { note: '   ' }],
+  ])('accepts a note that is %s: there is nothing to drop', (_name, extra) => {
+    expect(createOrderSchema.safeParse({ ...valid, ...extra }).success).toBe(true);
   });
 });
 

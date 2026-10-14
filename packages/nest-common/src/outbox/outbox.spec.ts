@@ -171,6 +171,36 @@ class FakeStore implements OutboxStore {
 // two ways a caller can get it wrong.
 // ---------------------------------------------------------------------------
 
+describe('buildOutboxRow eventId', () => {
+  const input = {
+    aggregateType: 'InsurancePolicy',
+    aggregateId: 'INS_1',
+    eventName: 'INSURANCE_RECORDED',
+    topic: 'rasta.asset.v1',
+    payload: { policyId: 'INS_1' },
+  };
+  const options = { producer: 'asset-service' };
+
+  it('uses a supplied ULID as the envelope id, the row id and the header, and a fresh one otherwise', () => {
+    const eventId = '01J9ZZZZZZZZZZZZZZZZZZZZZZ';
+    const row = buildOutboxRow({ ...input, eventId }, options);
+    expect(row.id).toBe(eventId);
+    expect((row.payload as { eventId: string }).eventId).toBe(eventId);
+    expect(buildOutboxRow(input, options).id).not.toBe(buildOutboxRow(input, options).id);
+  });
+
+  it('refuses an id that is not a ULID', () => {
+    for (const eventId of [
+      'EVT-1',
+      '',
+      '01J9ZZZZZZZZZZZZZZZZZZZZZ',
+      '81J9ZZZZZZZZZZZZZZZZZZZZZZ',
+    ]) {
+      expect(() => buildOutboxRow({ ...input, eventId }, options)).toThrow('ULID');
+    }
+  });
+});
+
 describe('buildOutboxRow stream metadata', () => {
   const input = {
     aggregateType: 'Order',

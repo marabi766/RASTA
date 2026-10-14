@@ -65,6 +65,7 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
     const asSupplier = `Bearer ${supplier(supplierOrg)}`;
     const product = await request(http)
       .post('/v1/products')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', asSupplier)
       .send({
         sku: `INFLIGHT-SKU-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
@@ -77,6 +78,7 @@ describe('an Idempotency-Key in flight: 409 with Retry-After (real HTTP)', () =>
 
     const offer = await request(http)
       .post('/v1/offers')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', asSupplier)
       .send({
         productId: product.body.id,

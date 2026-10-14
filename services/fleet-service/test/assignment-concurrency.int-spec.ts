@@ -6,7 +6,7 @@ import {
 } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import { identifyExclusivityConstraint } from '../src/fleet/constraints';
-import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { asActor, cleanup, id, newPrisma, tenants, LAPSE_RULES_ONLY } from './helpers';
 
 /**
  * The exclusivity invariants, under genuine concurrency.
@@ -43,7 +43,7 @@ describe('assignment exclusivity', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    service = new AssignmentService(repository);
+    service = new AssignmentService(repository, LAPSE_RULES_ONLY);
     await cleanup(prisma, [org.a, org.b]);
 
     await asActor({ organizationId: org.a }, async () => {

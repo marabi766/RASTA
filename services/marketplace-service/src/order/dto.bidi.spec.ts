@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import {
   cancelOrderSchema,
-  createOrderSchema,
   fulfillOrderSchema,
   raiseDisputeSchema,
   resolveDisputeSchema,
@@ -39,7 +38,7 @@ function fieldOf(schema: z.ZodTypeAny, path: string): z.ZodTypeAny {
 }
 
 const FIELDS: [z.ZodTypeAny, string][] = [
-  [createOrderSchema, 'note'],
+  // createOrderSchema.note is refused whenever it is not empty (Q-110): dto.spec.ts.
   [fulfillOrderSchema, 'trackingReference'],
   [fulfillOrderSchema, 'note'],
   // confirmReceiptSchema.note is refused whenever it is not empty (Q-110): dto.spec.ts.

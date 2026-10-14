@@ -5,7 +5,15 @@ import { AssignmentService } from '../src/fleet/assignment.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { ASSET_CREATED_FIELDS, asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import {
+  ASSET_CREATED_FIELDS,
+  asActor,
+  cleanup,
+  id,
+  newPrisma,
+  tenants,
+  LAPSE_RULES_ONLY,
+} from './helpers';
 
 /**
  * The internal read asset-service derives an `ASSIGNED` status from when
@@ -44,7 +52,7 @@ describe('assignment state (internal)', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    assignments = new AssignmentService(repository);
+    assignments = new AssignmentService(repository, LAPSE_RULES_ONLY);
     state = new AssetWorkStateService(repository);
     await cleanup(prisma, [org.a, org.b]);
   });

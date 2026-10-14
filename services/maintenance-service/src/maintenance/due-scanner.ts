@@ -5,6 +5,7 @@ import {
   type OnApplicationShutdown,
   type OnModuleInit,
 } from '@nestjs/common';
+import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import { MaintenanceRepository } from './maintenance.repository';
 import { DueAnnouncerService } from './due-announcer.service';
 import { ENV } from '../tokens';
@@ -58,6 +59,10 @@ export class DueScanner implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(DueScanner.name);
   private timer?: NodeJS.Timeout;
   private running = false;
+  /** The pass in flight, for a stop to wait on. */
+  private inFlight?: Promise<number>;
+  private stopping?: Promise<void>;
+  private stopped = false;
 
   constructor(
     private readonly repository: MaintenanceRepository,
@@ -83,8 +88,46 @@ export class DueScanner implements OnModuleInit, OnApplicationShutdown {
     );
   }
 
-  onApplicationShutdown(): void {
+  /**
+   * Stops the timer at once, lets a pass in flight start no further schedule,
+   * and waits for the one being announced — at most until `deadlineAt`, the
+   * shutdown's shared deadline (`OutboxShutdown` calls this in Nest's destroy
+   * phase, beside the relay and the purge; Codex r3 on #247). Stopped only in
+   * `onApplicationShutdown`, the timer kept firing passes that wrote outbox
+   * rows while the relay drained.
+   *
+   * Past the deadline the pass is abandoned with a warning: each schedule's
+   * claim and event commit in one transaction, so an exit rolls back the one
+   * in flight and the next pass, anywhere, finds it again. Without a deadline
+   * it waits for the pass. One stop per process.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= this.halt(options.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+
+    const current = this.inFlight;
+    if (!current) return;
+    if (deadlineAt === undefined) {
+      await current;
+      return;
+    }
+    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.warn(
+        'Due scan still running at the shutdown deadline; abandoned. The schedule in flight ' +
+          'rolls back and is found again by the next pass',
+      );
+    }
+  }
+
+  /** The `onApplicationShutdown` of a module that runs without `OutboxShutdown`: joins the stop. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   /**
@@ -99,9 +142,20 @@ export class DueScanner implements OnModuleInit, OnApplicationShutdown {
    * the announcement guard makes that harmless it also makes it invisible.
    */
   async scan(now: Date = new Date()): Promise<number> {
-    if (this.running) return 0;
+    if (this.running || this.stopped) return 0;
     this.running = true;
 
+    const pass = this.pass(now);
+    this.inFlight = pass;
+    try {
+      return await pass;
+    } finally {
+      this.running = false;
+      this.inFlight = undefined;
+    }
+  }
+
+  private async pass(now: Date): Promise<number> {
     try {
       // Only schedules that have not announced their current cycle. A stable
       // fleet therefore costs one bounded, indexed query per pass rather than
@@ -112,6 +166,8 @@ export class DueScanner implements OnModuleInit, OnApplicationShutdown {
 
       let announced = 0;
       for (const schedule of candidates) {
+        // Stopping: the rest were never claimed, so the next pass finds them.
+        if (this.stopped) break;
         try {
           const published = await this.announcer.announceIfDue(
             schedule as ScheduleRow & { organizationId: string },
@@ -139,8 +195,6 @@ export class DueScanner implements OnModuleInit, OnApplicationShutdown {
       // due state correctly, because they derive it.
       this.logger.error(`Due scan failed: ${describe(error)}`);
       return 0;
-    } finally {
-      this.running = false;
     }
   }
 }

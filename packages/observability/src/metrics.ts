@@ -137,6 +137,40 @@ export const outboxLeasesActive = new Gauge({
   registers: [registry],
 });
 
+// ---- Outbox purge (D-052) -------------------------------------------------
+
+/** Published outbox rows deleted by the scheduled purge. */
+export const outboxPurgedTotal = new Counter({
+  name: 'rasta_outbox_purged_total',
+  help: 'Published outbox rows deleted by the scheduled purge',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
+/**
+ * Purge runs by how they ended: `completed` (nothing due is left),
+ * `truncated` (the per-run batch cap was reached; the next run continues),
+ * `busy` (another replica held the purge lock), `failed`, `stopped`.
+ * A steady stream of `truncated` means the purge is falling behind.
+ */
+export const outboxPurgeRunsTotal = new Counter({
+  name: 'rasta_outbox_purge_runs_total',
+  help: 'Outbox purge runs by outcome',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});
+
+/**
+ * When this replica last finished a run that was not `busy` or `failed`.
+ * Take the max across replicas: one replica purging is enough.
+ */
+export const outboxPurgeLastSuccessSeconds = new Gauge({
+  name: 'rasta_outbox_purge_last_success_timestamp_seconds',
+  help: 'Unix time of the last completed or truncated outbox purge run',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+
 export const eventsPublishedTotal = new Counter({
   name: 'rasta_events_published_total',
   help: 'Domain events published',

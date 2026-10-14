@@ -55,6 +55,7 @@ describe('available actions, along a real order lifecycle', () => {
   async function publishOffer(): Promise<string> {
     const product = await request(http)
       .post('/v1/products')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', asSupplier())
       .send({
         sku: `AVA-SKU-${Date.now()}-${Math.trunc(Math.random() * 1e6)}`,
@@ -67,6 +68,7 @@ describe('available actions, along a real order lifecycle', () => {
 
     const offer = await request(http)
       .post('/v1/offers')
+      .set('idempotency-key', apiKey('catalogue'))
       .set('authorization', asSupplier())
       .send({
         productId: product.body.id,

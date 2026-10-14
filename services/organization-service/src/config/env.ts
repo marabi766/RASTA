@@ -5,6 +5,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 
@@ -17,6 +18,7 @@ import { PLATFORM_ROLES } from '@rasta/nest-common';
 export const organizationEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

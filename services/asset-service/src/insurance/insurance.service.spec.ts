@@ -74,7 +74,7 @@ function harness(overrides: Record<string, unknown> = {}): Harness {
     findInspectionsExpiringWithin: jest.fn(async () => []),
     claimLapsedPolicies: jest.fn(async () => []),
     findLapsedPoliciesWithInvalidAmount: jest.fn(async () => ({ total: 0, sample: [] })),
-    lockAsset: jest.fn(async () => ({ status: 'ACTIVE' })),
+    lockAsset: jest.fn(async () => ({ status: 'ACTIVE', ownershipGeneration: 2 })),
     ...overrides,
   } as unknown as AssetRepository;
 
@@ -130,7 +130,7 @@ describe('InsuranceService', () => {
       const h = harness({
         lockAsset: jest.fn(async () => {
           order.push('lock');
-          return { status: 'ACTIVE' };
+          return { status: 'ACTIVE', ownershipGeneration: 2 };
         }),
       });
       const original = h.enqueued.push.bind(h.enqueued);
@@ -165,6 +165,14 @@ describe('InsuranceService', () => {
       expect(policy.status).toBe('ACTIVE');
       expect(h.enqueued.map((e) => e.eventName)).toEqual([INSURANCE_EVENTS.INSURANCE_RECORDED]);
       expect(h.appended[0]).toMatchObject({ category: 'INSURANCE' });
+    });
+
+    it('stamps the event with the ownership generation read under the lock', async () => {
+      // #240 round 2: additive on INSURANCE_RECORDED (docs/07 § 7.8).
+      const h = harness();
+      await run(() => h.service.recordPolicy(ASSET_ID, POLICY));
+
+      expect(h.enqueued[0]?.payload).toMatchObject({ ownershipGeneration: 2 });
     });
 
     it('refuses a policy that has already expired', async () => {
@@ -345,6 +353,23 @@ describe('InsuranceService', () => {
 
       const claimTx = (claim.mock.calls[0] as unknown[])[0];
       expect(enqueueTxs).toEqual([claimTx]);
+    });
+
+    it('starts no further expiry batch once told to stop (shutdown, #247 r4)', async () => {
+      // A full first batch: without the stop the loop would claim again.
+      const full = Array.from({ length: 200 }, (_, i) => lapsedPolicy(`INS_F${i}`));
+      let stopping = false;
+      const claim = jest.fn(async () => {
+        if (stopping) return [];
+        stopping = true;
+        return full;
+      });
+      const h = harness({ claimLapsedPolicies: claim });
+
+      const result = await h.service.runExpirySweep({ shouldStop: () => stopping });
+
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ expired: 200 });
     });
 
     it('works through a backlog in batches until one comes back short', async () => {
