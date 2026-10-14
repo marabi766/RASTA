@@ -244,22 +244,54 @@ SELECT id, window_ends_at, occurrence_count, published_at, attempts, next_attemp
 - `published_at IS NULL` ⇒ هنوز منتشر نشده؛ [security-event-outbox](security-event-outbox.md). `last_error` را فقط به‌صورت
   کلاس خطا در پرونده بنویس.
 - `published_at` پر است ⇒ به Kafka رسیده؛ برگرد به گام ۳ و ۴ (رد در Consumer یا Lag).
+- `security_event_outbox` جدولی جدا از `outbox_message` است و **Purge نمی‌شود** (D-052 فقط `outbox_message` را پاک
+  می‌کند): ردیف منتشرشدهٔ آن در جدول می‌ماند، پس نبودنش هرگز «Purge شده» نیست.
 
 **اصلاح identity:**
 
+`:retention_hours` و `:purge_interval_seconds` را با مقدار **مستقرِ** `OUTBOX_PURGE_RETENTION_HOURS` و
+`OUTBOX_PURGE_INTERVAL_SECONDS` در `identity-service` پر کن (پیش‌فرض ۱۶۸ و ۳۰۰):
+
 ```sql
-SELECT c.event_id, c.created_at, o.published_at, o.attempts, o.next_attempt_at
+SELECT c.event_id, c.created_at, o.id IS NOT NULL AS outbox_row,
+       o.published_at, o.attempts, o.next_attempt_at,
+       c.created_at < (now() AT TIME ZONE 'UTC')
+                      - make_interval(hours => :retention_hours, secs => :purge_interval_seconds)
+         AS past_purge_window
   FROM audit_correction_command c
   LEFT JOIN outbox_message o ON o.id = c.event_id
  WHERE c.event_id = :'event_id';
 ```
 
-`published_at IS NULL` ⇒ [outbox-stuck](outbox-stuck.md) برای `identity-service`. اصلاحی که پاسخ `202` گرفته ولی ردیفی در
-`audit_correction_command` ندارد وجود ندارد: فرمان و ردیف Outbox در یک تراکنش‌اند. اگر `o.id` تهی است، ردیف Outbox دیگر نیست
-— identity هنوز Purge زمان‌بندی‌شده ندارد (D-052 فاز ۱ آن را شامل نمی‌شود)، پس این حالت را **توضیح‌نداده** بدان و تشدید کن.
+اصلاحی که پاسخ `202` گرفته ولی ردیفی در `audit_correction_command` ندارد وجود ندارد: فرمان و ردیف Outbox در یک تراکنش‌اند،
+و `audit_correction_command` هرگز پاک نمی‌شود.
+
+- `outbox_row` درست و `published_at IS NULL` ⇒ [outbox-stuck](outbox-stuck.md) برای `identity-service`.
+- `outbox_row` درست و `published_at` پر ⇒ به Kafka رسیده؛ برگرد به گام ۳ و ۴.
+- `outbox_row` نادرست و `past_purge_window` درست ⇒ ردیف **پس از انتشار Purge شده** (D-052): identity ردیف منتشرشدهٔ
+  `outbox_message` را پس از Retention پاک می‌کند. نبودِ ردیف به‌خودی‌خود شکاف نیست؛ شاهد در `audit-service` است که فقط
+  افزودنی است. Retention از `published_at` شمرده می‌شود که هرگز پیش از `created_at` فرمان نیست، پس ردیف فرمانی جوان‌تر
+  از Retention نمی‌تواند Purge شده باشد. Interval Purge حاشیه است: فقط فرمانی «Purge‌شده» شمرده می‌شود که دست‌کم یک
+  اجرای Purge پس از گذشتن Retention دیده. بررسی را از سمت `audit-service` با همان `event_id` ادامه بده
+  (`:'from'` و `:'to'` بازه‌ای دور `c.created_at`، مثلاً یک روز پیش و پس از آن؛ جدول گام ۶ معنای نتیجه را می‌گوید):
+
+  ```sql
+  SET search_path TO audit;
+
+  SELECT event_id, consumer_name FROM processed_event
+   WHERE event_id = :'event_id' AND consumer_name = 'audit-service.trail';
+
+  SELECT id, source_topic, source_service, occurred_at, recorded_at, correction_of
+    FROM audit_event
+   WHERE source_event_id = :'event_id'
+     AND occurred_at BETWEEN :'from' AND :'to';
+  ```
+
+- `outbox_row` نادرست و `past_purge_window` نادرست ⇒ ردیف هنوز نباید Purge شده باشد، پس این حالت را **توضیح‌نداده** بدان و
+  تشدید کن. همین‌طور اگر Purge در این استقرار خاموش است (`OUTBOX_PURGE_ENABLED=false`).
 
 **مسیر A:** همان پرسش را روی `outbox_message` سرویس مبدأ (`sourceService` مورد انتظار) با [outbox-stuck](outbox-stuck.md) بپرس.
-fleet، asset، document، maintenance و organization ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
+fleet، asset، document، maintenance، organization و identity ردیف منتشرشده را پس از `OUTBOX_PURGE_RETENTION_HOURS` (پیش‌فرض ۱۶۸
 ساعت) پاک می‌کنند (D-052). اگر در این سرویس‌ها ردیفی نیست و `occurredAt` از این بازه قدیمی‌تر است، نبودِ ردیف به‌خودی‌خود
 شکاف نیست. ردیف Purge شده و فقط می‌گوید «زمانی منتشر شده بود». ادامهٔ بررسی از گام ۳ و ۴ و سمت `audit-service` است. در
 سرویس‌های دیگر هنوز Purge اجرا نمی‌شود.

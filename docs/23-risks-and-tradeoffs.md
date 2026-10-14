@@ -1404,7 +1404,8 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هر Migration بازنویسی (D-048، گام ۲) همهٔ ردیف‌های منتشرشده را حساب می‌کند.
 - **رفع:** Job زمان‌بندی‌شده در هر سرویس که `purgePublished` را با Retention از پیکربندی (اعتبارسنجی‌شده در env سرویس)
   صدا بزند، با Metric و آزمون یکپارچگی. پیاده‌سازی کار جداگانه است، نه #242.
-- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization.** زمان‌بند مشترک
+- **پیشرفت:** **فاز ۱ انجام شد (#247): fleet، asset، document، maintenance، organization. identity انجام شد
+  (#280)** — همان الگو، همان تنظیم‌ها و همان پیش‌فرض‌ها (پایین، «identity»). زمان‌بند مشترک
   `OutboxPurgeScheduler` و دستور `purgePublishedSql` در `@rasta/nest-common`، env در `outboxPurgeEnvSchema`
   (`@rasta/config`):
   - `OUTBOX_PURGE_ENABLED` پیش‌فرض روشن است، و خاموش‌بودنش در شروع سرویس هشدار Log می‌کند.
@@ -1462,14 +1463,27 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
     در nest-common با Producer وفادار به kafkajs (`__tests__/fake-kafka.ts`)، و در fleet: `test/outbox-shutdown.int-spec.ts`
     (Handler بی‌پایان کنار Publish و Batch بی‌پایان؛ Send بی‌پایان DLQ که پس از بستن می‌رسد؛ Handler واقعی که پس از بستن
     Commit می‌کند و تحویل دوباره‌اش بی‌اثر است) و `test/insurance-parked.int-spec.ts` (جاروی منتظر asset-service در
-    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. سرویس‌های دیگر (contract، construction، economic،
-    marketplace، notification، identity، audit، supplier، inventory) هنوز Coordinator ندارند و در فاز بعد می‌آیند.
+    توقف) ⇐ خروج ۰ زیر مهلت، پیام Commit‌نشده، اثر یک‌بار. Consumer ـِ identity با Purge آن آمد (پایین). سرویس‌های دیگر
+    (contract، construction، economic، marketplace، notification، audit، supplier، inventory) هنوز Coordinator ندارند و در
+    فاز بعد می‌آیند.
   - **بودجه برای هر سرویسِ دارای رله (Codex روی #267، Low):** `loadEnv` Grace رله را فقط در سرویسی که Purge هم داشت با
     بودجه می‌سنجید و در بقیه با کل `SHUTDOWN_TIMEOUT_MS`؛ notification (رله و کارگرها با `OutboxShutdown`، بی Purge) Grace
     ۲۴ ثانیه را زیر مهلت ۲۵ ثانیه می‌پذیرفت در حالی که Coordinator تخلیه را در ۲۳ ثانیه قطع می‌کرد. حالا هر سرویسِ دارای
     رله باید Grace را در `outboxShutdownBudgetMs` جا دهد (رله‌ای که هنوز در `onApplicationShutdown` می‌ایستد هم به همان ذخیره
     برای بقیهٔ بستن نیاز دارد)، و `SHUTDOWN_TIMEOUT_MS` ≤ ۲۰۰۰ در چنین سرویسی با نام خودش رد می‌شود. پیش‌فرض‌ها (۲۰ در ۲۳)
     تغییری نمی‌کنند.
+  - **identity (#280، تصمیم مدیر پروژه — گزینهٔ a):** identity هم Purge می‌شود، فقط `outbox_message`؛
+    `security_event_outbox` جدولی جداست و Purge نمی‌شود، و `audit_correction_command` هم نه. `audit-gap-detected.md`
+    گام ۵ («اصلاح identity») نبودِ ردیف Outbox را دیگر یکسره «توضیح‌نداده» نمی‌داند: اگر `created_at` فرمان از Retention به‌اضافهٔ
+    Interval Purge قدیمی‌تر است، ردیف پس از انتشار Purge شده و بررسی از سمت `audit-service` با همان `event_id` ادامه
+    می‌یابد؛ جوان‌تر از آن همچنان تشدید می‌شود. چرا: همان قاعده‌ای که فاز ۱ برای مسیر A گذاشت؛ `audit-service` فقط
+    افزودنی است، پس شاهد بیش از ردیف Outbox می‌ماند؛ و جدول کران‌دار پیش‌نیاز Production است.
+    کارگرها: رلهٔ رد (`security_event_outbox`)، `MembershipExpiryScanner` (هر Lapse ردیف Outbox می‌نویسد؛ حالا مانند جاروی
+    asset توقف با مهلت دارد) و `KeycloakProjectionConsumer` (`stop({ deadlineAt })` ـِ #270؛ `onModuleDestroy` بی‌کرانش
+    حذف شد) `workers`ِ `OutboxShutdown`اند، و `AppModule.onApplicationShutdown` فقط به همان توقف می‌پیوندد. آزمون:
+    `test/outbox-purge.int-spec.ts` (مال fleet، به‌اضافهٔ دو جدول دست‌نخورده و پرسش گام ۵ روی ردیف Purge‌شده)،
+    `test/outbox-shutdown.int-spec.ts` (Publish، Claim رد، Batch Purge، Lapse و Projection بی‌پایان ⇐ خروج ۰ زیر مهلت،
+    پیام Commit‌نشده) و `src/app.module.shutdown.spec.ts`.
   - **پیامد:** رله حالا پیش از بسته شدن سرور HTTP می‌ایستد، نه پس از آن. ردیفی که درخواستی در همین فاصله بنویسد در
     شروع بعدی (یا Replica دیگر) منتشر می‌شود — همان چیزی که پیش‌تر برای ردیف‌های لحظهٔ آخر هم بود.
 
@@ -1484,7 +1498,7 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   هزارتایی ۱۱ ms، اجرای بی‌کار ۰٫۱ ms.
 
   `stream_seq` و تشخیص Gap دست نمی‌خورند، چون تخصیص از `outbox_stream_sequence` است، نه از ردیف‌ها. آزمون
-  `test/outbox-purge.int-spec.ts` در هر پنج سرویس این را نشان می‌دهد.
+  `test/outbox-purge.int-spec.ts` در هر سرویسِ دارای Purge این را نشان می‌دهد.
 
   **B2 پیش از Purge:** B2 (`outbox-b2-backfill.md`) شماره‌گذاری را از بیشینهٔ `stream_seq` باقی‌مانده در جدول می‌گیرد،
   نه از شمارنده. پس B2 هر سرویس را **پیش از روشن شدن Purge آن** اجرا کن. اگر Purge ردیف‌های شماره‌دار یک Stream را
@@ -1502,9 +1516,8 @@ PR هر سرویس همین گام‌ها را برمی‌دارد و نمونه
   که **پیش از** این تغییر رخ داده و ردیف‌هایش پیش از اجرای بعدی Purge شده‌اند ردی نگذاشته و تشخیص‌پذیر نیست؛ قاعدهٔ
   «B2 پیش از Purge» برای آن همچنان لازم است.
 
-  **مانده (فازهای بعد، با مالک هر سرویس):**
-  - identity: `outbox_message`، و `security_event_outbox` که جدولی جداست؛
-  - economic، marketplace، supplier، construction، contract، notification.
+  **مانده (فازهای بعد، با مالک هر سرویس):** economic، marketplace، supplier، construction، contract، notification.
+  `security_event_outbox` ـِ identity عمداً بیرون است (بالا).
 
 - **اولویت:** متوسط (پیش‌نیاز Production)
 - **ثبت‌شده:** 2026-10-13 (#242 r1)
