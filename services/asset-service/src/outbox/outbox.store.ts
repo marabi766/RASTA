@@ -6,11 +6,15 @@ import {
   markFailedSql,
   markPublishedSql,
   oldestPendingAgeSecondsSql,
+  purgePublishedSql,
   releaseSql,
   renewSql,
   type ClaimRequest,
   type OutboxClaim,
+  type OutboxPurgeStore,
   type OutboxStore,
+  type PurgePublishedBatch,
+  type PurgePublishedOptions,
   type RetryBackoff,
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -29,7 +33,7 @@ import { PrismaService } from '../prisma/prisma.service';
  * proposed both and was wrong on both counts.
  */
 @Injectable()
-export class PrismaOutboxStore implements OutboxStore {
+export class PrismaOutboxStore implements OutboxStore, OutboxPurgeStore {
   constructor(private readonly prisma: PrismaService) {}
 
   async claimPending(request: ClaimRequest): Promise<OutboxClaim> {
@@ -91,18 +95,24 @@ export class PrismaOutboxStore implements OutboxStore {
   }
 
   /**
-   * Deletes published rows older than `retentionDays`.
+   * Deletes one bounded batch of published rows older than the retention, for
+   * `OutboxPurgeScheduler` (D-052).
    *
    * Only published rows, and only old ones: an unpublished row is an event
    * that has not reached anybody yet, and deleting it would lose it silently.
    * `ck_outbox_published_is_clean` guarantees a published row holds no live
-   * claim, so this can never delete a row somebody is still publishing.
+   * claim, so this can never delete a row somebody is still publishing. The
+   * limit, the timeouts and the replica lock are in `purgePublishedSql`.
+   *
+   * The wait for a connection and the transaction are bounded separately
+   * (`OUTBOX_PURGE_MAX_WAIT_MS`, then the statement timeout plus its margin),
+   * and their sum is what `loadEnv` holds under SHUTDOWN_TIMEOUT_MS.
    */
-  async purgePublished(retentionDays = 7): Promise<number> {
-    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-    const result = await this.prisma.client.outboxMessage.deleteMany({
-      where: { publishedAt: { not: null, lt: cutoff } },
-    });
-    return result.count;
+  async purgePublished(options: PurgePublishedOptions): Promise<PurgePublishedBatch> {
+    return purgePublishedSql(
+      (fn, { timeoutMs, maxWaitMs }) =>
+        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: maxWaitMs }),
+      options,
+    );
   }
 }

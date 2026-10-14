@@ -160,6 +160,7 @@ export {
   renewalDeadlineMs,
   RENEWAL_INTERVAL_DIVISOR,
   RENEWAL_DEADLINE_CEILING_MS,
+  withinDeadline,
 } from './outbox/outbox';
 export type {
   OutboxMessageInput,
@@ -167,6 +168,7 @@ export type {
   OutboxStore,
   EventPublisher,
   OutboxRelayOptions,
+  OutboxStopOptions,
   BuildOutboxOptions,
   OutboxClaim,
   ClaimRequest,
@@ -183,6 +185,8 @@ export {
   toOutboxRow,
   allocateStreamSeqSql,
   STREAM_SEQUENCE_TABLE,
+  purgePublishedSql,
+  MANUALLY_SKIPPED_PREFIX,
 } from './outbox/outbox-sql';
 export type {
   OutboxSqlClient,
@@ -190,7 +194,21 @@ export type {
   OutboxClaimResult,
   ClaimOptions,
   OutboxTxRunner,
+  OutboxPurgeTxRunner,
+  PurgePublishedOptions,
+  PurgePublishedBatch,
 } from './outbox/outbox-sql';
+export { OutboxPurgeScheduler, outboxPurgeSettings } from './outbox/outbox-purge';
+export type {
+  OutboxPurgeStore,
+  OutboxPurgeSettings,
+  OutboxPurgeLogger,
+  OutboxPurgeSchedulerOptions,
+  OutboxPurgeOutcome,
+  OutboxPurgeRun,
+} from './outbox/outbox-purge';
+export { OutboxShutdown } from './outbox/outbox-shutdown';
+export type { OutboxShutdownOptions, OutboxStoppable } from './outbox/outbox-shutdown';
 
 // Lifecycle ------------------------------------------------------------------
 export {

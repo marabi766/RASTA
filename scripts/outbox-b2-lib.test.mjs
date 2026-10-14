@@ -33,6 +33,7 @@ import {
   runServiceBackfill,
   vacuumFactsSql,
   vacuumSql,
+  verificationMismatches,
   verifySql,
 } from './outbox-b2-lib.mjs';
 
@@ -264,6 +265,22 @@ test('the assignment is gated on the ordering guard, so a tripped batch writes n
   assert.match(sql.slice(numbered, update), /WHERE \(SELECT violations FROM guard\) = 0/);
 });
 
+test('the assignment is gated on purged history too, so such a batch writes nothing (D-052)', () => {
+  const sql = assignBatchSql();
+  const numbered = sql.indexOf('numbered AS (');
+  const update = sql.indexOf('UPDATE "outbox_message" o');
+  assert.match(sql.slice(numbered, update), /AND \(SELECT streams FROM purged\) = 0/);
+  // Purged = the counter is ahead of the highest surviving sequence.
+  assert.match(sql, /JOIN "outbox_stream_sequence" s[\s\S]*WHERE s\."next_seq" > a\.base_seq \+ 1/);
+  assert.match(sql, /AS history_purged/);
+});
+
+test('the plan counts streams whose counter is ahead of their highest surviving row (D-052)', () => {
+  const sql = planSql();
+  assert.match(sql, /AS streams_history_purged/);
+  assert.match(sql, /s\."next_seq" > 1 \+ COALESCE\(\(\s*SELECT max\(h\."stream_seq"\)/);
+});
+
 test('the counter upsert never moves a counter backwards', () => {
   const sql = counterUpsertSql();
   assert.match(sql, /"next_seq"\s*= GREATEST\(s\."next_seq", EXCLUDED\."next_seq"\)/);
@@ -311,21 +328,31 @@ test('the vacuum facts are read-only and name the outbox table only', () => {
  * every statement. One stream of two rows: one batch assigns both, the next
  * selects none.
  */
-function scriptedPort() {
+function scriptedPort({ plan = {}, batches: scripted, verify = {} } = {}) {
   const executed = [];
   const queried = [];
-  const batches = [
-    { selected: 2, updated: 2, streams: 1, violations: 0 },
-    { selected: 0, updated: 0, streams: 0, violations: 0 },
+  const batches = scripted ?? [
+    { selected: 2, updated: 2, streams: 1, violations: 0, history_purged: 0 },
+    { selected: 0, updated: 0, streams: 0, violations: 0, history_purged: 0 },
   ];
   const answer = (sql) => {
     queried.push(sql);
     if (sql === b1PreconditionSql()) return [];
-    if (sql === planSql()) return [{ pending_unsequenced: 2 }];
+    if (sql === planSql()) return [{ pending_unsequenced: 2, streams_history_purged: 0, ...plan }];
     if (sql === assignBatchSql()) return [batches.shift()];
     if (sql === counterUpsertSql()) return [{ written: 1 }];
     if (sql === headMaintenanceSql()) return [{ changed: 1 }];
-    if (sql === verifySql()) return [{ remaining: 0 }];
+    if (sql === verifySql()) {
+      return [
+        {
+          remaining: 0,
+          counter_next_mismatch: 0,
+          counter_published_mismatch: 0,
+          head_mismatch: 0,
+          ...verify,
+        },
+      ];
+    }
     throw new Error(`unexpected query: ${sql.slice(0, 60)}`);
   };
   const port = {
@@ -380,6 +407,92 @@ test('a plan owes no vacuum and reports none', async () => {
   assert.deepEqual(
     events.filter((event) => event.type === 'vacuum'),
     [],
+  );
+});
+
+const run = (port, argv) => {
+  const events = [];
+  const result = runServiceBackfill({
+    service: 'document',
+    db: port,
+    options: parseOptions(['--service', 'document', ...argv], {}),
+    emit: (event) => events.push(event),
+  });
+  return { events, result };
+};
+
+for (const argv of [[], ['--apply']]) {
+  test(`purged history is refused before the first batch (${argv.length ? 'apply' : 'dry run'})`, async () => {
+    const { port, executed, queried } = scriptedPort({ plan: { streams_history_purged: 2 } });
+    const { events, result } = run(port, argv);
+    await assert.rejects(result, (error) => {
+      assert.ok(error instanceof B2RefusalError);
+      assert.match(
+        error.message,
+        /document: 2 stream\(s\) have an outbox_stream_sequence\.next_seq ahead/,
+      );
+      assert.match(error.message, /Nothing was written/);
+      return true;
+    });
+    assert.deepEqual(executed, []);
+    assert.ok(!queried.includes(assignBatchSql()), 'a batch ran after the refusal');
+    assert.deepEqual(
+      events.map((event) => event.type),
+      ['plan'],
+    );
+    assert.equal(events[0].streams_history_purged, 2);
+  });
+}
+
+test('a batch that finds purged history is refused, and nothing after it runs', async () => {
+  const { port, queried } = scriptedPort({
+    batches: [{ selected: 2, updated: 0, streams: 1, violations: 0, history_purged: 1 }],
+  });
+  const { events, result } = run(port, ['--apply']);
+  await assert.rejects(result, /purge ran during the backfill: nothing in this batch was assigned/);
+  assert.ok(!queried.includes(counterUpsertSql()));
+  assert.ok(!events.some((event) => event.type === 'done'));
+});
+
+test('a finalised apply whose verification mismatches is refused, not done', async () => {
+  for (const field of ['counter_next_mismatch', 'counter_published_mismatch', 'head_mismatch']) {
+    const { port } = scriptedPort({ verify: { [field]: 1 } });
+    const { events, result } = run(port, ['--apply']);
+    await assert.rejects(result, new RegExp(`verification failed[\\s\\S]*${field}=1`));
+    assert.equal(events.at(-1).type, 'verify');
+    assert.ok(!events.some((event) => event.type === 'done'), `${field}: done was emitted`);
+  }
+});
+
+test('a truncated apply is not refused for the mismatches it is expected to show', async () => {
+  const { port } = scriptedPort({
+    plan: { pending_unsequenced: 4 },
+    batches: [{ selected: 2, updated: 2, streams: 1, violations: 0, history_purged: 0 }],
+    verify: { remaining: 2, counter_next_mismatch: 1, counter_published_mismatch: 1 },
+  });
+  const { events, result } = run(port, ['--apply', '--max-batches', '1']);
+  const outcome = await result;
+  assert.equal(outcome.truncated, true);
+  assert.equal(events.at(-1).type, 'done');
+  assert.equal(events.at(-1).converged, false);
+});
+
+test('verificationMismatches adds the three post-condition counts', () => {
+  assert.equal(
+    verificationMismatches({
+      counter_next_mismatch: 1,
+      counter_published_mismatch: 2,
+      head_mismatch: 3,
+    }),
+    6,
+  );
+  assert.equal(
+    verificationMismatches({
+      counter_next_mismatch: 0,
+      counter_published_mismatch: 0,
+      head_mismatch: 0,
+    }),
+    0,
   );
 });
 

@@ -7,6 +7,7 @@ import {
   httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 
 /**
@@ -15,6 +16,7 @@ import {
 export const maintenanceEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),

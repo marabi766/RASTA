@@ -289,8 +289,14 @@ export class InsuranceService {
    * policies is marked EXPIRED and announced in the same transaction (audit
    * L3-04), so a policy is never expired without its INSURANCE_EXPIRED event,
    * and an event is never sent for a policy whose expiry rolled back.
+   *
+   * `shouldStop` is asked between transactions (the shutdown, #247 r4): once
+   * it answers yes no further batch starts. Each batch commits whole, so the
+   * policies not reached are simply the next sweep's.
    */
-  async runExpirySweep(): Promise<{ warned: number; expired: number; held: number }> {
+  async runExpirySweep(
+    options: { shouldStop?: () => boolean } = {},
+  ): Promise<{ warned: number; expired: number; held: number }> {
     const [expiringPolicies, expiringInspections] = await Promise.all([
       runUnscoped('scheduled platform-wide expiry sweep', () =>
         this.repository.findPoliciesExpiringWithin(this.expiryWarningDays),
@@ -346,6 +352,7 @@ export class InsuranceService {
     // limit means nothing is left.
     let expired = 0;
     for (;;) {
+      if (options.shouldStop?.()) return { warned, expired, held: 0 };
       const batch = await this.repository.transaction(async (tx) => {
         const lapsed = await this.repository.claimLapsedPolicies(tx, EXPIRY_BATCH_SIZE);
         for (const policy of lapsed) {
