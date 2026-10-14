@@ -14,8 +14,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
   OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -347,22 +349,42 @@ import {
     },
 
     {
-      // The relay and both workers stop together in the destroy phase, by one
-      // deadline inside SHUTDOWN_TIMEOUT_MS. Nothing stopped the relay before:
-      // it kept claiming rows through the close that the closed publisher
-      // could not send, and they waited out their leases. #247's coordinator
-      // (D-052): the relay bounds its own grace and release by the deadline,
-      // and the workers abandon a batch still running at it.
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (
+        store: PrismaOutboxStore,
+        env: NotificationEnv,
+        logger: Logger,
+      ): OutboxPurgeScheduler =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+
+    {
+      // The relay, the purge and both workers stop together in the destroy
+      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. Nothing stopped the
+      // relay before: it kept claiming rows through the close that the closed
+      // publisher could not send, and they waited out their leases. #247's
+      // coordinator (D-052): the relay bounds its own grace and release by the
+      // deadline, the purge its batch, and the workers abandon a batch still
+      // running at it.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, ResolutionWorker, MailWorker, ENV],
+      inject: [OutboxRelay, OutboxPurgeScheduler, ResolutionWorker, MailWorker, ENV],
       useFactory: (
         relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
         resolution: ResolutionWorker,
         mail: MailWorker,
         env: NotificationEnv,
       ): OutboxShutdown =>
         new OutboxShutdown({
           relay,
+          purge,
           workers: [resolution, mail],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
@@ -380,6 +402,7 @@ export class AppModule implements NestModule, OnModuleInit {
     private readonly dispatcher: DispatcherConsumer,
     private readonly worker: ResolutionWorker,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
     private readonly mailWorker: MailWorker,
     private readonly prisma: PrismaService,
     @Inject(SCRUBBED_LOGGER) private readonly bootLogger: ScrubbedLogger,
@@ -412,5 +435,6 @@ export class AppModule implements NestModule, OnModuleInit {
     // rows stay in the table and are picked up by the next process — which is
     // the property an outbox exists for.
     this.relay.start();
+    this.purge.start();
   }
 }

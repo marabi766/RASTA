@@ -4,12 +4,14 @@ import { Test } from '@nestjs/testing';
 import {
   AUTH_OPTIONS,
   installGracefulShutdown,
+  OutboxPurgeScheduler,
   OutboxRelay,
   OutboxShutdown,
   type AuthGuardOptions,
   type InternalTokenService,
   type OutboxClaim,
   type OutboxRow,
+  type PurgePublishedBatch,
   type TokenVerifier,
 } from '@rasta/nest-common';
 import { AppModule } from '../src/app.module';
@@ -34,6 +36,8 @@ import { databaseUrl } from './helpers';
  * Here the real `installGracefulShutdown` closes the real module — its
  * providers, `OutboxShutdown`, Prisma — under the real process deadline:
  * timeout 9 s, relay grace 6 s, shared budget 7 s (9 s less the 2 s reserve).
+ * The purge (D-052) stops in the same phase by the same deadline: its batch
+ * bound is 5.2 s (100 ms wait + 100 ms statement + 5 s margin).
  *
  * Only the outbox store, the broker and the consumer are stand-ins, and the
  * workers' `tick` is replaced before the timers start: both claim across the
@@ -75,6 +79,8 @@ interface Probe {
   /** Epoch ms of every worker tick, per worker. */
   ticks: { resolution: number[]; mail: number[] };
   publishes: number;
+  /** Purge batches begun; each one never ends. */
+  purges: number;
 }
 
 interface Behaviour {
@@ -105,11 +111,20 @@ async function boot(behaviour: Behaviour): Promise<{
     SHUTDOWN_TIMEOUT_MS: String(SHUTDOWN_TIMEOUT_MS),
     OUTBOX_SHUTDOWN_GRACE_SECONDS: String(GRACE_SECONDS),
     OUTBOX_POLL_INTERVAL_MS: '50',
+    OUTBOX_PURGE_MAX_WAIT_MS: '100',
+    OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: '100',
+    // No scheduled run: a test puts the one batch in flight itself.
+    OUTBOX_PURGE_INTERVAL_SECONDS: '86400',
     NOTIFICATION_RESOLUTION_POLL_INTERVAL_MS: '100',
     NOTIFICATION_MAIL_POLL_INTERVAL_MS: '100',
   });
 
-  const probe: Probe = { claims: [], ticks: { resolution: [], mail: [] }, publishes: 0 };
+  const probe: Probe = {
+    claims: [],
+    ticks: { resolution: [], mail: [] },
+    publishes: 0,
+    purges: 0,
+  };
   let claimedOnce = false;
   const store: Partial<Record<keyof PrismaOutboxStore, unknown>> = {
     claimPending: async (): Promise<OutboxClaim> => {
@@ -125,6 +140,10 @@ async function boot(behaviour: Behaviour): Promise<{
     oldestPendingAgeSeconds: async () => 0,
     pendingCount: async () => 0,
     activeLeaseCount: async () => 0,
+    purgePublished: (): Promise<PurgePublishedBatch> => {
+      probe.purges += 1;
+      return never();
+    },
   };
 
   // Like the real publisher: refuses once the destroy phase has closed it.
@@ -205,7 +224,7 @@ async function closeLikeMain(app: INestApplication, env: NotificationEnv) {
 
 const after = (stamps: readonly number[], at: number) => stamps.filter((t) => t > at);
 
-describe('notification-service shutdown: relay and workers by one deadline', () => {
+describe('notification-service shutdown: relay, purge and workers by one deadline', () => {
   let app: INestApplication | undefined;
 
   afterEach(async () => {
@@ -248,12 +267,18 @@ describe('notification-service shutdown: relay and workers by one deadline', () 
     expect(after(booted.probe.ticks.mail, closed.endedAt)).toEqual([]);
   }, 30_000);
 
-  it('ends a slow relay and a mail batch that never ends by the shared budget, under the timeout', async () => {
+  it('ends a slow relay, a purge batch and a mail batch that never end by the shared budget, under the timeout', async () => {
     const booted = await boot({ endlessRows: false, publishHangs: true, mailHangs: true });
     app = booted.app;
+    const purge = app.get(OutboxPurgeScheduler);
+    expect(purge.stopBoundMs).toBe(5200);
+    void purge.runOnce();
     await waitFor(
-      () => booted.probe.publishes === 1 && booted.probe.ticks.mail.length === 1,
-      'the publish and the mail batch to start',
+      () =>
+        booted.probe.publishes === 1 &&
+        booted.probe.ticks.mail.length === 1 &&
+        booted.probe.purges === 1,
+      'the publish, the mail batch and the purge batch to start',
     );
 
     const closed = await closeLikeMain(app, booted.env);
@@ -263,12 +288,14 @@ describe('notification-service shutdown: relay and workers by one deadline', () 
     expect(closed.exits).toEqual([0]);
     expect(closed.errors).toEqual([]);
     // The mail batch has no bound of its own, so the budget ended it: the
-    // longest wait, beside the relay's grace rather than after it.
+    // longest wait, beside the relay's grace and the purge's bound rather than
+    // after them.
     expect(closed.tookMs).toBeGreaterThanOrEqual(BUDGET_MS - 100);
     expect(closed.tookMs).toBeLessThan(SHUTDOWN_TIMEOUT_MS);
     // And started nothing new while closing.
     expect(booted.probe.publishes).toBe(1);
     expect(booted.probe.ticks.mail).toHaveLength(1);
     expect(booted.probe.claims).toHaveLength(1);
+    expect(booted.probe.purges).toBe(1);
   }, 30_000);
 });
