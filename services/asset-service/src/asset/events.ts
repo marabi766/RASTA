@@ -97,6 +97,17 @@ export const assetTransferredPayload = z.object({
   reason: z.string(),
   referenceNo: z.string().nullable(),
   transferredAt: z.string(),
+  /**
+   * The asset's ownership generation after this transfer (additive, #240
+   * round 2): a policy event stamped with a lower one is the previous owner's.
+   */
+  ownershipGeneration: z.number().int().nonnegative(),
+  /**
+   * The insurance coverages that follow the vehicle to the new owner, as
+   * `INSURANCE_COVERAGES_FOLLOWING_VEHICLE` stood at transfer time (additive,
+   * #240 round 2). A consumer keeps only these coverages' policy windows.
+   */
+  retainedCoverages: z.array(z.string()),
 });
 
 export const assetDecommissionedPayload = z.object({
@@ -134,6 +145,8 @@ export const insuranceRecordedPayload = z.object({
   coverage: z.string(),
   validFrom: z.string(),
   validTo: z.string(),
+  /** The asset's ownership generation at emission (additive, #240 round 2). */
+  ownershipGeneration: z.number().int().nonnegative(),
 });
 
 /**

@@ -124,6 +124,45 @@ export type HandlerOutcome = void | 'SKIPPED';
 export interface EventDelivery {
   readonly topic: string;
   readonly partition: number;
+  /**
+   * The record's key and offset, when the broker reported them. A handler that
+   * holds an event back to dead-letter it later (fleet's parked insurance
+   * events, #240 r8) needs both to write a dead letter the replay tool accepts:
+   * the replay goes out under the kept key, and the offset finds the original.
+   */
+  readonly key?: string | null;
+  readonly offset?: string;
+  /**
+   * Keeps this member in its group while a long handler runs (fleet's
+   * asset-sync, #240 r12): kafkajs heartbeats between messages, not during one,
+   * so a handler that waits on other services calls this before and after each
+   * question. It starts kafkajs's heartbeat — sent only once its interval has
+   * passed, and shared with any already in flight — and returns at once; it
+   * never throws (a failure is logged). The consumer also calls it between a
+   * message's attempts. Absent when no broker delivered the message (a test).
+   */
+  readonly heartbeat?: () => void;
+}
+
+/**
+ * Why and from where a message is dead-lettered: what {@link deadLetterHeaders}
+ * writes beside the original's platform headers.
+ */
+export interface DeadLetterDescription {
+  readonly reason: DlqReason;
+  readonly originalTopic: string;
+  /** Omitted when unknown (a dead letter written later, from what was kept). */
+  readonly originalPartition?: number;
+  readonly originalOffset?: string;
+  readonly attempts: number;
+  /**
+   * Fixed text and identifiers only (S-09), like an {@link UnprocessableEventError}'s
+   * message; cut to 1000 characters, never otherwise rewritten.
+   */
+  readonly detail: string;
+  /** Who writes the dead letter: the consumer's client id, never the original producer. */
+  readonly producer: string;
+  readonly failedAt: Date;
 }
 
 /**
@@ -202,8 +241,18 @@ export function subscribedTopics(topics: readonly string[]): string[] {
   return [...new Set(all)];
 }
 
-const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_BACKOFF_MS = 500;
+/** In-process attempts before dead-lettering, unless the consumer's options say otherwise. */
+export const DEFAULT_MAX_RETRIES = 3;
+/** The pause after failed attempt `n` is `n ×` this, unless the options say otherwise. */
+export const DEFAULT_BACKOFF_MS = 500;
+/**
+ * The group session timeout. kafkajs heartbeats between messages, not while a
+ * handler runs, so one message's attempts, their pauses and its dead letter
+ * must finish within it or the broker evicts the member and rebalances — unless
+ * the handler heartbeats itself ({@link EventDelivery.heartbeat}); the consumer
+ * does between attempts.
+ */
+export const CONSUMER_SESSION_TIMEOUT_MS = 60_000;
 
 export class EventConsumer {
   private readonly kafka: Kafka;
@@ -291,7 +340,7 @@ export class EventConsumer {
       // A projector doing database writes per message can exceed the default
       // 30s heartbeat window on a cold cache; 60s avoids a rebalance storm
       // that would only make the backlog worse.
-      sessionTimeout: 60_000,
+      sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
       allowAutoTopicCreation: false,
     });
 
@@ -316,7 +365,7 @@ export class EventConsumer {
         // Sequential per partition. Ordering within an aggregate is the whole
         // reason the producer sets a partition key; processing concurrently
         // inside a partition would throw it away.
-        eachMessage: async ({ topic, partition, message }) => {
+        eachMessage: async ({ topic, partition, message, heartbeat }) => {
           await this.handleMessage(
             topic,
             partition,
@@ -324,6 +373,7 @@ export class EventConsumer {
             message.headers,
             message.offset,
             message.key,
+            heartbeat,
           );
         },
       });
@@ -367,7 +417,9 @@ export class EventConsumer {
     headers: IHeaders | undefined,
     offset?: string,
     key?: Buffer | null,
+    heartbeat?: () => Promise<void>,
   ): Promise<void> {
+    const beat = heartbeat === undefined ? undefined : () => this.beat(heartbeat);
     let envelope: EventEnvelope;
 
     try {
@@ -448,7 +500,17 @@ export class EventConsumer {
           }),
           // Frozen so a handler cannot mutate what the broker reported and pass
           // it on as fact.
-          () => this.handler(envelope, Object.freeze({ topic, partition })),
+          () =>
+            this.handler(
+              envelope,
+              Object.freeze({
+                topic,
+                partition,
+                ...(key === undefined ? {} : { key: key === null ? null : key.toString('utf8') }),
+                ...(offset === undefined ? {} : { offset }),
+                ...(beat === undefined ? {} : { heartbeat: beat }),
+              }),
+            ),
         );
         return;
       } catch (error) {
@@ -485,9 +547,25 @@ export class EventConsumer {
         }
 
         this.logger.warn(`Attempt ${attempt}/${maxRetries} failed for ${event}: ${message}`);
+        // The member stays in its group across the pause (#240 r12).
+        beat?.();
         await sleep(backoff * attempt);
+        beat?.();
       }
     }
+  }
+
+  /**
+   * Starts kafkajs's heartbeat and returns at once: it is sent only when its
+   * interval has passed, and one in flight is shared. A failure — a rebalance
+   * under way, a broker that does not answer — is logged, never thrown into the
+   * handler: the message's own outcome decides its fate, and the runner sees the
+   * rebalance after it.
+   */
+  private beat(heartbeat: () => Promise<void>): void {
+    void heartbeat().catch((error: unknown) => {
+      this.logger.warn(`Heartbeat of ${this.options.groupId} failed: ${describe(error)}`);
+    });
   }
 
   /**
@@ -542,19 +620,16 @@ export class EventConsumer {
           // ordering, and a replay cannot always rebuild it from the body.
           key: original.key ?? null,
           value,
-          headers: {
-            ...forwardedHeaders(headers),
-            [DLQ_HEADERS.reason]: reason,
-            [DLQ_HEADERS.originalTopic]: originalTopic,
-            [DLQ_HEADERS.originalPartition]: String(original.partition),
-            ...(original.offset === undefined
-              ? {}
-              : { [DLQ_HEADERS.originalOffset]: original.offset }),
-            [DLQ_HEADERS.attempts]: String(attempts),
-            [DLQ_HEADERS.error]: detail.slice(0, 1000),
-            [DLQ_HEADERS.firstFailedAt]: new Date().toISOString(),
-            [EVENT_HEADERS.producer]: this.options.clientId,
-          },
+          headers: deadLetterHeaders(headers, {
+            reason,
+            originalTopic,
+            originalPartition: original.partition,
+            ...(original.offset === undefined ? {} : { originalOffset: original.offset }),
+            attempts,
+            detail,
+            producer: this.options.clientId,
+            failedAt: new Date(),
+          }),
         },
       ],
     });
@@ -627,6 +702,35 @@ export function forwardedHeaders(headers: IHeaders | undefined): IHeaders {
     if (FORWARDED_HEADERS.has(name) && value !== undefined) kept[name] = value;
   }
   return kept;
+}
+
+/**
+ * The headers of a dead letter: the original's platform headers
+ * ({@link forwardedHeaders}; any other is dropped), then why and from where
+ * (`DLQ_HEADERS`) and who wrote it. The consumer's own dead letters use it, and
+ * so does a service that dead-letters through its outbox an event it held back
+ * (fleet's parked insurance events, #240 r9), so the replay tool and the
+ * runbook read both alike.
+ */
+export function deadLetterHeaders(
+  original: IHeaders | undefined,
+  letter: DeadLetterDescription,
+): IHeaders {
+  return {
+    ...forwardedHeaders(original),
+    [DLQ_HEADERS.reason]: letter.reason,
+    [DLQ_HEADERS.originalTopic]: letter.originalTopic,
+    ...(letter.originalPartition === undefined
+      ? {}
+      : { [DLQ_HEADERS.originalPartition]: String(letter.originalPartition) }),
+    ...(letter.originalOffset === undefined
+      ? {}
+      : { [DLQ_HEADERS.originalOffset]: letter.originalOffset }),
+    [DLQ_HEADERS.attempts]: String(letter.attempts),
+    [DLQ_HEADERS.error]: letter.detail.slice(0, 1000),
+    [DLQ_HEADERS.firstFailedAt]: letter.failedAt.toISOString(),
+    [EVENT_HEADERS.producer]: letter.producer,
+  };
 }
 
 /** The longest handler message a log line or `x-dlq-error` repeats, in characters. */

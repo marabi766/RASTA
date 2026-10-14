@@ -1,0 +1,16 @@
+-- Reverses 20261013180000_insurance_epoch (#240 round 11).
+--
+-- Run `insurance:clear-transferred` BEFORE this, with this round's code: it
+-- writes the column (#240 r13). Then roll the code back, then this file. Dropping
+-- it loses nothing stored. Like any rollback of these migrations it is done with
+-- every asset-service replica stopped (runbook insurance-reprojection.md,
+-- "rollback", fixed order).
+BEGIN;
+
+SET LOCAL lock_timeout = '3s';
+
+ALTER TABLE "asset_ref" DROP COLUMN IF EXISTS "insurance_epoch";
+
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261013180000_insurance_epoch';
+
+COMMIT;

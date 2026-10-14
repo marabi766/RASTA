@@ -1,4 +1,5 @@
-import { describeBlockers } from './availability.service';
+import { describeBlockers as describeWithPolicy } from './availability.service';
+import { INSURANCE_COVERAGES } from './dispatch-blocks';
 
 /**
  * Availability is the one answer on the platform assembled from facts four
@@ -7,18 +8,43 @@ import { describeBlockers } from './availability.service';
  * service that can clear it (ADR-026).
  */
 describe('availability blockers', () => {
+  // The lapse rules on their own; the required-coverage rule (Q-101) is pinned
+  // in dispatch-blocks.spec.ts and, through the service, in the integration tests.
+  const describeBlockers = (
+    asset: Parameters<typeof describeWithPolicy>[0],
+    assignment: Parameters<typeof describeWithPolicy>[1],
+    window: Parameters<typeof describeWithPolicy>[2],
+  ) =>
+    describeWithPolicy(asset, assignment, window, {
+      blockingCoverages: INSURANCE_COVERAGES,
+      requiredCoverages: [],
+    });
   const free = {
     status: 'ACTIVE',
     inMaintenance: false,
     inspectionBlockedReason: null,
     insuranceLapsedCoverages: [] as string[],
     insuranceCover: {},
+    ownershipGeneration: 0,
   };
   const lapsedThirdParty = { insuranceLapsedCoverages: ['THIRD_PARTY'] };
   const insuranceDetail = 'The insurance policy has expired (THIRD_PARTY)';
 
   it('reports a dispatchable machine with no blockers', () => {
     expect(describeBlockers(free, undefined, undefined)).toEqual([]);
+  });
+
+  it('names a pending transfer as a blocker owned by asset-service (ADR-062 § 3b)', () => {
+    const blockers = describeWithPolicy(
+      free,
+      undefined,
+      undefined,
+      { blockingCoverages: INSURANCE_COVERAGES, requiredCoverages: [] },
+      true,
+    );
+    expect(blockers).toEqual([
+      expect.objectContaining({ code: 'ASSET_STATUS', owner: 'asset-service' }),
+    ]);
   });
 
   describe('attribution', () => {
@@ -106,6 +132,7 @@ describe('availability blockers', () => {
           inspectionBlockedReason: null,
           insuranceLapsedCoverages: ['THIRD_PARTY'],
           insuranceCover: {},
+          ownershipGeneration: 0,
         },
         { id: 'ASG_1', driverId: 'DRV_1' },
         { available: false, reason: 'رزرو' },

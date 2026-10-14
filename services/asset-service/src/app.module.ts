@@ -56,6 +56,7 @@ import {
 import { AssetController } from './asset/asset.controller';
 import { AssetInternalController, TransferRecordService } from './asset/transfer-record';
 import { AssetSnapshotService } from './asset/asset-snapshot';
+import { InsurancePolicyStandingService } from './insurance/policy-standing';
 import { InsuranceService } from './insurance/insurance.service';
 import { InsuranceExpirySweepScheduler } from './insurance/expiry-sweep.scheduler';
 import { ClaimService } from './insurance/claim.service';
@@ -184,6 +185,7 @@ const CONSUMED_TOPICS = [
     },
     TransferRecordService,
     AssetSnapshotService,
+    InsurancePolicyStandingService,
 
     {
       provide: InsuranceService,
