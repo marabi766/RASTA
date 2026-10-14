@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist .turbo",
-    "dev": "node --import @swc-node/register/esm-register --watch --env-file=../../.env src/main.ts",
+    "dev": "node -r @swc-node/register --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
     "lint": "eslint src",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",

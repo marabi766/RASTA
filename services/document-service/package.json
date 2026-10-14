@@ -7,7 +7,7 @@
   "scripts": {
     "build": "prisma generate && tsc -p tsconfig.json && node ../../scripts/copy-prisma-client.mjs",
     "clean": "rimraf dist .turbo",
-    "dev": "prisma generate && node --import @swc-node/register/esm-register --watch --env-file=../../.env src/main.ts",
+    "dev": "prisma generate && node -r @swc-node/register --watch --env-file=../../.env src/main.ts",
     "start": "node --env-file=../../.env dist/main.js",
     "lint": "eslint src test",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",

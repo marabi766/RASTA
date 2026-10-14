@@ -75,6 +75,7 @@ PRهای باز را `CONFLICTING` می‌کرد و CI آن‌ها را از ن�
 | `fix/marketplace-idempotency-gaps`      | سرور (کارگر ۱)                    | server-worker   | [#253](https://github.com/marabi766/RASTA/pull/253) | —              | شکاف‌های Idempotency در marketplace؛ Q-110 و Q-116                           |
 | `fix/economic-scoped-cursor`            | سرور (کارگر ۲)                    | server-worker-2 | [#256](https://github.com/marabi766/RASTA/pull/256) | —              | مکان‌نمای فهرست‌های economic در دامنهٔ خود فهرست؛ در صف ادغام                |
 | `feat/inventory-shipments`              | سرور (کارگر ۴)                    | server-worker-4 | [#257](https://github.com/marabi766/RASTA/pull/257) | —              | COM-006 PR 2: محموله و رهگیری (پایه: #246)؛ Q-113 … Q-115                    |
+| `fix/fleet-dev-start`                   | سرور (کارگر ۱)                    | server-worker   | [#281](https://github.com/marabi766/RASTA/pull/281) | —              | `pnpm dev` سرویس‌ها با بارگذار CommonJS (TASK 144)                           |
 
 ## شاخه‌های بازنشسته
 

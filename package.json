@@ -78,6 +78,7 @@
     "test:db-runtime-privileges-lib": "node --test scripts/check-db-runtime-privileges-lib.test.mjs scripts/prisma-lib.test.mjs scripts/prisma-turbo-env.test.mjs",
     "test:outbox-purge-turbo-env": "node --test scripts/outbox-purge-turbo-env.test.mjs",
     "test:boot-guard": "node --test scripts/service-boot-guard.test.mjs",
+    "test:dev-loader": "node --test scripts/service-dev-loader.test.mjs",
     "check:db-runtime-privileges": "node --env-file-if-exists=.env scripts/check-db-runtime-privileges.mjs",
     "ci:image-matrix": "node scripts/ci-image-matrix.mjs",
     "progress:validate": "node scripts/progress.mjs validate",

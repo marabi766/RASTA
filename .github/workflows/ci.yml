@@ -129,6 +129,14 @@ jobs:
         # root `pnpm dev` resolves them (turbo dry run). Codex r1 on #247.
         run: pnpm run test:outbox-purge-turbo-env
 
+      - name: Service dev scripts load TypeScript as CommonJS
+        # `pnpm dev` ran the services through swc-node's ES-module loader,
+        # under which main.ts could not import AppModule from its CommonJS
+        # sibling: every service refused at link time. Runs each service's
+        # own dev loader flags on a two-file entry; services with a Prisma
+        # schema generate the client first.
+        run: pnpm run test:dev-loader
+
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
         # (L7-35). A wrong rule would quietly skip a changed image.
