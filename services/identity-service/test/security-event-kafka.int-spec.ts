@@ -165,7 +165,9 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
   /** A real refusal through the real endpoint; returns the identity row it was counted into. */
   async function refuse(caller: Caller = newCaller()): Promise<Refusal> {
     const requested = `ORG-REQ-${RUN_TAG}-${ulid()}`;
-    const correlationId = id('COR');
+    // Bare: a user's request keeps nothing else (only a verified service's
+    // tagged id is kept, as `callAsService` below shows).
+    const correlationId = ulid();
     const token = userToken(caller);
 
     const response = await request(identity.app.getHttpServer())
@@ -413,7 +415,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
 
       const correlations: string[] = [];
       for (let i = 0; i < 3; i += 1) {
-        const correlationId = id('COR');
+        const correlationId = ulid();
         correlations.push(correlationId);
         const { path, body } = build(requestSecret, i);
         const call = request(identity.app.getHttpServer())
@@ -534,7 +536,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       const paths = ['/v1/users/me', '/v1/users', `/v1/users/USR-${probeSecret}`];
       for (let i = 0; i < 3; i += 1) {
         const requested = `ORG-REJECTED-${RUN_TAG}-${ulid()}`;
-        const correlationId = id('COR');
+        const correlationId = ulid();
         rejected.push(requested);
         correlations.push(correlationId);
 
@@ -696,7 +698,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
       await callAsService(otherService, tenant);
       await callAsService(callerService, undefined);
 
-      const userCorrelation = id('COR');
+      const userCorrelation = ulid();
       const userRefusal = await request(identity.app.getHttpServer())
         .get('/v1/users/me')
         .set('authorization', `Bearer ${userToken(person)}`)
@@ -850,7 +852,7 @@ describeWithKafka('security_event_outbox → rasta.audit.trail.v1 (real Kafka)',
         organizationId: id('ORGADMIN'),
         roles: ['SYSTEM_ADMIN'],
       };
-      const correlationId = id('COR');
+      const correlationId = ulid();
       const key = id('KEY');
       const secret = `kafka-correction-secret-${RUN_TAG}`;
       const body = {

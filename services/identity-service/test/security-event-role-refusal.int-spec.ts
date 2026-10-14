@@ -44,6 +44,8 @@ import { atFreshWindow, waitForWindowClose } from './helpers';
 
 const TAG = ulid().slice(-10);
 const tagged = (prefix: string): string => `${prefix}_${TAG}_${ulid()}`;
+/** A correlation id a user's request keeps: a bare ULID — the middleware re-mints anything else from a caller that is not a verified service (S-09). */
+const correlation = (): string => ulid();
 const LIST = REFUSAL_SITES.LIST_USERS;
 const CREATE = REFUSAL_SITES.CREATE_USER;
 const MEMBERSHIP = REFUSAL_SITES.ADD_MEMBERSHIP;
@@ -129,7 +131,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .get(`${LIST.route}${options.query ?? ''}`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call;
   }
@@ -141,7 +143,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .post(CREATE.route)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call.send(options.body ?? createBody());
   }
@@ -157,7 +159,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .post(`/v1/users/${options.target ?? `USR-${PATH_SECRET}`}/memberships`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call.send(options.body ?? membershipBody());
   }
@@ -173,7 +175,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .post(`/v1/memberships/${options.target ?? `MBR-${PATH_SECRET}`}/roles`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call.send(options.body ?? rolesBody());
   }
@@ -189,7 +191,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .post(`/v1/memberships/${options.target ?? `MBR-${PATH_SECRET}`}/revoke`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call.send(options.body ?? revokeBody());
   }
@@ -205,7 +207,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .post(`/v1/registration-requests/${options.target ?? `REG-${PATH_SECRET}`}/approve`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call.send(options.body ?? approveBody());
   }
@@ -221,7 +223,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     const call = request(harness.app.getHttpServer())
       .post(`/v1/registration-requests/${options.target ?? `REG-${PATH_SECRET}`}/reject`)
       .set('authorization', `Bearer ${userToken(caller)}`)
-      .set('x-correlation-id', tagged('COR'));
+      .set('x-correlation-id', correlation());
     for (const [name, value] of Object.entries(options.headers ?? {})) call.set(name, value);
     return call.send(options.body ?? rejectBody());
   }
@@ -270,7 +272,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal with trusted attribution and no role policy, query, token or error text', async () => {
       const refused = caller();
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
 
       const response = await request(harness.app.getHttpServer())
         .get(`${LIST.route}?q=${QUERY_SECRET}&role=UNION_ADMIN`)
@@ -366,7 +368,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal with trusted attribution and nothing from the body, role policy, token, cookie or error text', async () => {
       const refused = caller(['AUDITOR']);
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
 
       const response = await request(harness.app.getHttpServer())
         .post(`${CREATE.route}?role=UNION_ADMIN&note=${QUERY_SECRET}`)
@@ -474,7 +476,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, body, role policy, token, cookie or error text', async () => {
       const refused = caller(['AUDITOR']);
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
       const target = `USR-${PATH_SECRET}`;
 
       const response = await request(harness.app.getHttpServer())
@@ -597,7 +599,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, body, role policy, token, cookie or error text', async () => {
       const refused = caller(['AUDITOR']);
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
       const target = `MBR-${PATH_SECRET}`;
 
       const response = await request(harness.app.getHttpServer())
@@ -718,7 +720,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, body reason, role policy, token, cookie or error text', async () => {
       const refused = caller(['AUDITOR']);
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
       const target = `MBR-${PATH_SECRET}`;
 
       const response = await request(harness.app.getHttpServer())
@@ -839,7 +841,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, approval body, role policy, token, cookie or error text', async () => {
       const refused = caller(['AUDITOR']);
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
       const target = `REG-${PATH_SECRET}`;
 
       const response = await request(harness.app.getHttpServer())
@@ -998,7 +1000,7 @@ describe('roles-guard refusals → security_event_outbox (real PostgreSQL)', () 
     it('captures a real INSUFFICIENT_ROLE refusal attributed to the verified caller, with nothing from the path, rejection reason, role policy, token, cookie or error text', async () => {
       const refused = caller(['AUDITOR']);
       const token = userToken(refused);
-      const correlationId = tagged('COR');
+      const correlationId = correlation();
       const target = `REG-${PATH_SECRET}`;
 
       const response = await request(harness.app.getHttpServer())

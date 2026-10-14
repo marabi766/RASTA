@@ -10,6 +10,8 @@ export const RETRY_AFTER_MIN_SECONDS = 1;
  */
 export const RETRY_AFTER_MAX_SECONDS = 3600;
 
+const TENANT_MISMATCH_MESSAGE = 'You are not a member of the requested organization';
+
 /**
  * The one error type domain code throws.
  *
@@ -192,13 +194,27 @@ export class RastaError extends Error {
    * The caller authenticated, but asked to act for an organization they are
    * not a member of. Distinct from `forbidden` because it is the signal worth
    * alerting on — repeated occurrences suggest tenant-boundary probing.
+   *
+   * `requested` is logged, so it must be an identifier the platform vouches
+   * for — a signed token's claim, a schema-checked id. Client text that matched
+   * no membership is {@link tenantHeaderMismatch} (S-09).
    */
   static tenantMismatch(requested: string, allowed: readonly string[]): RastaError {
-    return new RastaError(
-      ERROR_CODES.TENANT_MISMATCH,
-      'You are not a member of the requested organization',
-      { internalContext: { requested, allowed } },
-    );
+    return new RastaError(ERROR_CODES.TENANT_MISMATCH, TENANT_MISMATCH_MESSAGE, {
+      internalContext: { requested, allowed },
+    });
+  }
+
+  /**
+   * {@link tenantMismatch} for an `X-Organization-Id` header that names none
+   * of the caller's memberships. The header is unvalidated client text that
+   * matched nothing, so the log says only that the header did not match, and
+   * how long it was — never its value (S-09, docs/06 § 6.7).
+   */
+  static tenantHeaderMismatch(headerLength: number, allowed: readonly string[]): RastaError {
+    return new RastaError(ERROR_CODES.TENANT_MISMATCH, TENANT_MISMATCH_MESSAGE, {
+      internalContext: { unmatchedHeader: 'X-Organization-Id', headerLength, allowed },
+    });
   }
 
   /**

@@ -99,10 +99,11 @@ export class CriteriaService {
       } catch (error) {
         if (isUniqueViolation(error)) {
           // Two versions of one label drew the same number. Nothing was written.
+          // The label is client text: the log names the field, never its value (S-09).
           throw new RastaError(
             'CONFLICT',
             'Another version of this template was created at the same time; retry',
-            { internalContext: { label: dto.label } },
+            { internalContext: { field: 'label' } },
           );
         }
         throw error;
@@ -166,7 +167,8 @@ export class CriteriaService {
             let templateId: string | null = null;
             if (dto.templateId !== undefined) {
               const template = await this.repository.findTemplate(dto.templateId, tx);
-              if (!template) throw RastaError.notFound('CriteriaTemplate', dto.templateId);
+              // The unrecognised id is the client's text: not logged (S-09).
+              if (!template) throw RastaError.notFound('CriteriaTemplate');
               this.assertOwnTemplate(template, organizationId);
               // Re-checked on the way out: a template is data, and data is not trusted
               // just because this service once wrote it.
