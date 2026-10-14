@@ -17,6 +17,11 @@ describe('globalRealmRoles', () => {
       want: ['SYSTEM_ADMIN'],
     },
     {
+      name: 'the global role once when repeated',
+      jwt: token({ realm_access: { roles: ['SYSTEM_ADMIN', 'SYSTEM_ADMIN'] } }),
+      want: ['SYSTEM_ADMIN'],
+    },
+    {
       name: 'a non-global role only',
       jwt: token({ realm_access: { roles: ['UNION_ADMIN'] } }),
       want: [],
@@ -40,6 +45,7 @@ describe('requestRoles', () => {
     const jwt = token({ realm_access: { roles: ['SYSTEM_ADMIN'] } });
     expect(requestRoles(['CONTRACTOR'], jwt)).toEqual(['CONTRACTOR', 'SYSTEM_ADMIN']);
     expect(requestRoles(['SYSTEM_ADMIN'], jwt)).toEqual(['SYSTEM_ADMIN']);
+    expect(requestRoles(['CONTRACTOR'], 'opaque')).toEqual(['CONTRACTOR']);
   });
 
   it('gives a realm SYSTEM_ADMIN with a CONTRACTOR membership the owner’s door only', () => {

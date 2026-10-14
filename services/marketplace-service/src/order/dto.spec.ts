@@ -1,7 +1,9 @@
 import {
   cancelOrderSchema,
+  confirmReceiptSchema,
   createOrderSchema,
   listOrdersQuerySchema,
+  RECEIPT_NOTE_NOT_STORED,
   raiseDisputeSchema,
   resolveDisputeSchema,
   submitReviewSchema,
@@ -97,6 +99,32 @@ describe('order quantities', () => {
   it('caps the number of lines, so one request cannot lock a thousand offers', () => {
     const lines = Array.from({ length: 51 }, (_, i) => ({ offerId: `OFR_${i}`, quantity: 1 }));
     expect(createOrderSchema.safeParse({ lines }).success).toBe(false);
+  });
+});
+
+describe('a receipt confirmation note (Q-110, temporary decision)', () => {
+  it('refuses a non-empty note with a message that names the gap, never the text', () => {
+    // Confirming receipt has nowhere to keep a note. Accepted, the buyer's
+    // text was dropped without a word; refused, the buyer learns it was not sent.
+    const result = confirmReceiptSchema.safeParse({ note: 'arrived with a dented casing' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ path: ['note'], message: RECEIPT_NOTE_NOT_STORED }),
+    ]);
+    expect(JSON.stringify(result.error?.issues)).not.toContain('dented');
+  });
+
+  it.each([
+    ['absent', {}],
+    ['empty', { note: '' }],
+    ['whitespace only, which trims to empty', { note: '   ' }],
+  ])('accepts a note that is %s: there is nothing to drop', (_name, body) => {
+    expect(confirmReceiptSchema.safeParse(body).success).toBe(true);
+  });
+
+  it('still refuses a field it does not know', () => {
+    expect(confirmReceiptSchema.safeParse({ comment: 'x' }).success).toBe(false);
   });
 });
 
